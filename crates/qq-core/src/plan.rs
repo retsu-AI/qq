@@ -120,7 +120,6 @@ pub struct AgentProfile {
     process_producer: Arc<crate::ProcessProducer>,
     network: crate::tools::network::NetworkPolicy,
     turn_recovery: crate::TurnRecoveryPolicy,
-    approval_delegate: crate::approval::ApprovalDelegate,
     output_ceiling: Option<crate::OutputCeiling>,
     adapter_build: String,
     provenance: Vec<String>,
@@ -166,7 +165,6 @@ impl AgentProfile {
             process_producer: Arc::default(),
             network: crate::tools::network::NetworkPolicy::default(),
             turn_recovery: crate::TurnRecoveryPolicy::default(),
-            approval_delegate: crate::approval::ApprovalDelegate::default(),
             output_ceiling: None,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
@@ -185,17 +183,6 @@ impl AgentProfile {
     #[must_use]
     pub const fn with_turn_recovery(mut self, policy: crate::TurnRecoveryPolicy) -> Self {
         self.turn_recovery = policy;
-        self
-    }
-
-    /// Who settles the calls the session's approval mode holds. Not part of
-    /// the plan digest: it changes who is asked, never what the model may do.
-    #[must_use]
-    pub const fn with_approval_delegate(
-        mut self,
-        delegate: crate::approval::ApprovalDelegate,
-    ) -> Self {
-        self.approval_delegate = delegate;
         self
     }
 
@@ -238,7 +225,6 @@ impl AgentProfile {
             process_producer: Arc::clone(&runtime.process_producer),
             network: runtime.network.as_ref().clone(),
             turn_recovery: runtime.turn_recovery,
-            approval_delegate: runtime.approval_delegate,
             output_ceiling: runtime.output_ceiling,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
@@ -317,7 +303,6 @@ impl AgentProfile {
         self.context_sources.clear();
         self.delegation = DelegationRoster::default();
         self.audit = AuditPolicy::default();
-        self.approval_delegate = crate::approval::ApprovalDelegate::default();
         self.pack = None;
         self
     }
@@ -672,7 +657,6 @@ impl CompiledAgentPlan {
             process_producer,
             network,
             turn_recovery,
-            approval_delegate,
             output_ceiling,
             adapter_build,
             provenance,
@@ -705,8 +689,7 @@ impl CompiledAgentPlan {
         .with_approved_read_images(approved_read_images)
         .with_process_producer(process_producer)
         .with_network_policy(network)
-        .with_turn_recovery(turn_recovery)
-        .with_approval_delegate(approval_delegate);
+        .with_turn_recovery(turn_recovery);
         if let Some(effort) = reasoning_effort {
             runtime = runtime.with_reasoning_effort(effort);
         }
@@ -875,10 +858,6 @@ impl CompiledAgentPlan {
             ToolHost::UpdateGoal,
             EffectClass::ReadOnly,
         ));
-        static_tools.extend(
-            tools::task_git::specs()
-                .map(|spec| StaticTool::new(spec, ToolHost::TaskGit, EffectClass::Mutating)),
-        );
         static_tools.push(StaticTool::new(
             read_tool_result_spec(),
             ToolHost::ReadToolResult,
@@ -1090,7 +1069,6 @@ impl CompiledAgentPlan {
                 spawn_agent: true,
                 search_history: true,
                 update_goal: false,
-                task_git: false,
                 read_tool_result: true,
                 load_skill: true,
                 read_only: false,
@@ -1178,14 +1156,6 @@ impl CompiledAgentPlan {
         self.workspace.path()
     }
 
-    /// Identity of the directory this plan actually holds, independent of
-    /// replacements at its pathname. Performs blocking filesystem metadata I/O.
-    pub fn workspace_identity(
-        &self,
-    ) -> std::io::Result<crate::command_owner::NativeWorkspaceIdentity> {
-        crate::command_owner::NativeWorkspaceIdentity::held(self.workspace.root())
-    }
-
     /// The opened workspace capability, for resolving input attachments.
     /// The network policy the plan's `fetch` calls are judged by.
     pub(crate) fn network_policy(&self) -> Arc<crate::tools::network::NetworkPolicy> {
@@ -1194,13 +1164,6 @@ impl CompiledAgentPlan {
 
     pub(crate) fn shell_policy(&self) -> Arc<crate::ShellPolicy> {
         Arc::clone(&self.runtime.shell)
-    }
-
-    /// Who settles the approvals this plan's sessions hold. Not part of the
-    /// digest: it changes who is asked, never what the model may do.
-    #[must_use]
-    pub const fn approval_delegate(&self) -> crate::approval::ApprovalDelegate {
-        self.runtime.approval_delegate
     }
 
     /// The highest cap the empty-truncation recovery may raise a turn to.
@@ -1575,7 +1538,6 @@ mod tests {
                     spawn_agent: true,
                     search_history: true,
                     update_goal: false,
-                    task_git: false,
                     read_tool_result: true,
                     load_skill: true,
                     read_only: false,
@@ -1794,7 +1756,7 @@ mod tests {
         // changing the encoding (descriptor 16: configured pack mutation authority).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "0f0d96d0747b4f9eb5ebecde7c357751c684aeb1a789624151662afc01efee4a"
+            "84d7d72464c75e81d568860c37c86a6edacc34f045e3b53ed262582a01476e63"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v16\0".len()..]).unwrap();
@@ -2585,7 +2547,7 @@ mod configured_pack_mutation_tests {
         let plan = CompiledAgentPlan::compile_blocking(profile).unwrap();
         let gate = Arc::new(crate::StaticPolicyGate {
             mode: qq_protocol::ApprovalMode::Auto,
-            grants: crate::approval::SessionGrants::default(),
+            tools: Default::default(),
             network: Arc::clone(&plan.runtime.network),
         });
         let messages = vec![qq_provider::Message::user("attempt the edits")];

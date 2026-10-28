@@ -32,21 +32,13 @@ impl Provider for Model {
             assert!(
                 request_texts(&request)
                     .iter()
-                    .any(|text| text.contains(if cfg!(unix) {
-                        "exit 7"
-                    } else {
-                        "check execution failed"
-                    })),
+                    .any(|text| text.contains("exit 7")),
                 "failed check exit status must reach the next goal run"
             );
             assert_eq!(
                 request_texts(&request)
                     .join("\n")
-                    .matches(if cfg!(unix) {
-                        "check-output-unique"
-                    } else {
-                        "completion-check process supervision is unavailable on this platform"
-                    })
+                    .matches("check-output-unique")
                     .count(),
                 1,
                 "check-only result messages must not leak into model context alongside the goal notice"
@@ -104,57 +96,39 @@ impl RuntimeLoader for Loader {
     }
 }
 struct Authority(&'static str);
-impl WorkspaceGrantAuthority for Authority {
+impl WorkspacePolicyAuthority for Authority {
     fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
         Box::pin(std::future::ready(Ok(GoalPolicy::default())))
     }
 
-    fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
-        Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
-    }
-    fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
-        panic!("exact goal-check authority must not promote ordinary grants")
-    }
     fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
         assert_eq!(command, self.0);
         Box::pin(std::future::ready(Ok(())))
     }
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn goal_check_once_executes_without_a_model_and_achieves_durably() {
-    once_check(true, false).await;
+    once_check(true).await;
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn goal_check_consumed_once_failure_requires_new_authority_without_requeue_loop() {
-    once_check(false, false).await;
+    once_check(false).await;
 }
 
-#[cfg(not(unix))]
-#[tokio::test]
-async fn goal_check_unavailable_supervision_consumes_once_and_fails_closed_durably() {
-    once_check(false, false).await;
-}
-
-#[tokio::test]
-async fn scoped_goal_check_uses_durable_service_and_typed_success() {
-    once_check(true, true).await;
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn scoped_goal_check_uses_typed_failure_even_when_output_claims_success() {
-    once_check(false, true).await;
-}
-
-async fn once_check(success: bool, native: bool) {
-    let command = if success {
-        "printf checked >> goal-check-marker"
-    } else {
-        "printf checked >> goal-check-marker; printf '%s%s' check-output- unique; exit 7"
+async fn once_check(success: bool) {
+    // `cmd /C` on Windows, `sh -c` elsewhere; the output names are split so
+    // the command text itself never contains the expected tail.
+    let command = match (success, cfg!(windows)) {
+        (true, false) => "printf checked >> goal-check-marker",
+        (false, false) => {
+            "printf checked >> goal-check-marker; printf '%s%s' check-output- unique; exit 7"
+        }
+        (true, true) => "(echo|set /p=checked)>>goal-check-marker",
+        (false, true) => {
+            "(echo|set /p=checked)>>goal-check-marker& set a=check-output-& call echo %a%unique& exit 7"
+        }
     };
     let directory = TempDir::new().unwrap();
     let database = directory
@@ -166,26 +140,6 @@ async fn once_check(success: bool, native: bool) {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut options = SessionRuntimeOptions::new(database.clone());
     options.grant_authority = Some(Arc::new(Authority(command)));
-    if native {
-        use crate::command_owner::*;
-        let workspace = directory.path().canonicalize().unwrap();
-        options.native_scopes.push(NativeCommandScope {
-            read_access: Default::default(),
-            workspace: NativeDirectoryGrant::capture(&workspace).unwrap(),
-            read_only: vec![],
-            network: NativeNetwork::Isolated,
-            resources: NativeResources::Limited {
-                limits: NativeResourceLimits {
-                    memory_bytes: 64 * 1024 * 1024,
-                    max_processes: 16,
-                    cpu_millicores: 500,
-                },
-            },
-        });
-        options.native_commands = Some(Arc::new(CheckService {
-            code: if success { 0 } else { 7 },
-        }));
-    }
     let runtime = SessionRuntime::open(
         options,
         Arc::new(Loader {
@@ -271,16 +225,10 @@ async fn once_check(success: bool, native: bool) {
     })
     .await
     .expect("authorized exit-zero check must execute and achieve the goal");
-    if native || !cfg!(unix) {
-        assert!(!directory.path().join("goal-check-marker").exists());
-    }
-    #[cfg(unix)]
-    if !native {
-        assert_eq!(
-            std::fs::read_to_string(directory.path().join("goal-check-marker")).unwrap(),
-            "checked"
-        );
-    }
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("goal-check-marker")).unwrap(),
+        "checked"
+    );
     assert_eq!(
         achieved.check_authorization,
         Some(qq_protocol::GoalCheckAuthorization::Consumed)
@@ -431,7 +379,6 @@ async fn goal_check_process_keeps_exit_status_and_only_a_four_kib_tail() {
     assert!(result.tail.ends_with("end"));
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn goal_check_process_expired_or_cancelled_before_start_never_spawns() {
     use super::super::goal_check::{ProcessOutcome, run_process};
@@ -702,17 +649,11 @@ async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
         checks: AtomicUsize,
         barrier: Arc<tokio::sync::Barrier>,
     }
-    impl WorkspaceGrantAuthority for CoordinatedAuthority {
+    impl WorkspacePolicyAuthority for CoordinatedAuthority {
         fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
             Box::pin(std::future::ready(Ok(GoalPolicy::default())))
         }
 
-        fn seed_grants(&self, path: &Path) -> GrantSeedFuture {
-            Authority("printf checked >> goal-check-marker").seed_grants(path)
-        }
-        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
-            panic!("not an ordinary grant")
-        }
         fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
             assert_eq!(command, "printf checked >> goal-check-marker");
             let call = self.checks.fetch_add(1, Ordering::SeqCst);
@@ -835,17 +776,11 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
     }
-    impl WorkspaceGrantAuthority for HeldAuthority {
+    impl WorkspacePolicyAuthority for HeldAuthority {
         fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
             Box::pin(std::future::ready(Ok(GoalPolicy::default())))
         }
 
-        fn seed_grants(&self, path: &Path) -> GrantSeedFuture {
-            Authority("printf checked >> goal-check-marker").seed_grants(path)
-        }
-        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
-            panic!("not an ordinary grant")
-        }
         fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
             assert_eq!(command, "printf checked >> goal-check-marker");
             let hold = self.calls.fetch_add(1, Ordering::SeqCst) == 1;
@@ -1434,7 +1369,7 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
     }
-    impl WorkspaceGrantAuthority for HeldPolicy {
+    impl WorkspacePolicyAuthority for HeldPolicy {
         fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
             let ceiling = self.ceiling.load(Ordering::SeqCst);
             Box::pin(std::future::ready(if ceiling == 0 {
@@ -1447,12 +1382,6 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
             }))
         }
 
-        fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
-            Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
-        }
-        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
-            panic!("not an ordinary grant")
-        }
         fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
             assert_eq!(command, COMMAND);
             let execution = self.calls.fetch_add(1, Ordering::SeqCst) == 1;
@@ -1691,15 +1620,9 @@ async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions()
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
     }
-    impl WorkspaceGrantAuthority for HeldPolicy {
+    impl WorkspacePolicyAuthority for HeldPolicy {
         fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
             Authority(COMMAND).goal_policy(Path::new("."))
-        }
-        fn seed_grants(&self, path: &Path) -> GrantSeedFuture {
-            Authority(COMMAND).seed_grants(path)
-        }
-        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
-            panic!("not a tool grant")
         }
         fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
             assert_eq!(command, COMMAND);
@@ -1854,196 +1777,4 @@ async fn portable_check_group_confirmation_waits_until_the_group_is_absent() {
         "a kill signal is not confirmation that a live group exited"
     );
     waiting.await.unwrap();
-}
-
-pub(super) struct CheckService {
-    pub(super) code: i32,
-}
-impl crate::command_owner::NativeCommandService for CheckService {
-    fn identity(&self) -> crate::command_owner::NativeCommandFuture<StoreId> {
-        Box::pin(async { Ok(StoreId::from_bytes([73; 16])) })
-    }
-    fn acknowledge(&self, _: Vec<ToolCallId>) -> crate::command_owner::NativeCommandFuture<()> {
-        Box::pin(async { Ok(()) })
-    }
-    fn cancel(&self, _: ToolCallId) -> crate::command_owner::NativeCommandFuture<()> {
-        Box::pin(async { Ok(()) })
-    }
-    fn submit(
-        &self,
-        command: crate::command_owner::NativeCommand,
-    ) -> crate::command_owner::NativeCommandFuture<()> {
-        use crate::command_owner::*;
-        assert!(
-            matches!(command.filesystem, NativeFilesystem::Restricted { read_write, .. } if read_write.len() == 1 && read_write[0].path == command.workspace)
-        );
-        assert!(matches!(command.network, NativeNetwork::Isolated));
-        assert!(matches!(command.resources, NativeResources::Limited { .. }));
-        assert!(command.not_after_ms.is_some());
-        Box::pin(async { Ok(()) })
-    }
-    fn wait(
-        &self,
-        id: ToolCallId,
-        _: u64,
-    ) -> crate::command_owner::NativeCommandFuture<crate::command_owner::CommandSnapshot> {
-        let code = self.code;
-        Box::pin(async move {
-            use crate::command_owner::*;
-            let text = if code == 0 {
-                "shell exit=7".to_owned()
-            } else {
-                format!("shell exit=0 {}check-output-unique", "界\n".repeat(2000))
-            };
-            let mut output = crate::tools::dispatch::bounded_result(text, code != 0);
-            output.native_outcome = Some(NativeCommandOutcome::Exited { code: Some(code) });
-            let result = serde_json::from_value(serde_json::to_value(output).unwrap()).unwrap();
-            Ok(CommandSnapshot {
-                id,
-                version: 1,
-                status: CommandStatus::Finished,
-                process: None,
-                output: String::new(),
-                result: Some(result),
-            })
-        })
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn scoped_goal_check_real_owner_blocks_outside_writes_and_verifies_task() {
-    use crate::command_owner::*;
-    const COMMAND: &str = "printf checked > goal-check-marker; if printf escaped > ../outside; then exit 99; fi; exit 0";
-    let directory = TempDir::new().unwrap();
-    let root = directory.path().canonicalize().unwrap();
-    let workspace = root.join("task");
-    std::fs::create_dir(&workspace).unwrap();
-    let owner = CommandOwner::open(
-        root.join("commands"),
-        "unknown",
-        crate::command_owner::tests::launcher(),
-    )
-    .await
-    .unwrap();
-    let mut scope = NativeCommandScope {
-        read_access: Default::default(),
-        workspace: NativeDirectoryGrant::capture(&workspace).unwrap(),
-        read_only: vec![],
-        network: NativeNetwork::Isolated,
-        // Resource qualification has a separate delegated-cgroup fixture.
-        resources: NativeResources::Host,
-    };
-    for path in ["/bin", "/usr", "/lib", "/lib64", "/nix/store"] {
-        if let Ok(path) = Path::new(path).canonicalize()
-            && !scope.read_only.iter().any(|grant| grant.path == path)
-        {
-            scope
-                .read_only
-                .push(NativeDirectoryGrant::capture(&path).unwrap());
-        }
-    }
-    let loads = Arc::new(AtomicUsize::new(0));
-    let mut options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
-    options.grant_authority = Some(Arc::new(Authority(COMMAND)));
-    options.native_scopes.push(scope);
-    options.native_commands = Some(Arc::new(owner.clone()));
-    let runtime = SessionRuntime::open(
-        options,
-        Arc::new(Loader {
-            failure_tail: false,
-            loads: loads.clone(),
-            calls: Arc::new(AtomicUsize::new(0)),
-        }),
-    )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, &workspace).await;
-    let receipt = explicit_check_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = receipt.outcome else {
-        panic!("missing session")
-    };
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id": session_id, "objective":"verify isolated task",
-                "check":{"command":COMMAND,"timeout_ms":5000},
-                "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
-        panic!("missing goal")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: receipt.committed_through,
-        })
-        .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::GoalControl {
-                session_id,
-                expected: qq_protocol::GoalIdentity {
-                    goal_id: goal.goal_id,
-                    revision: goal.revision,
-                },
-                action: qq_protocol::GoalControl::ApproveCheck {
-                    scope: qq_protocol::GoalCheckScope::Once,
-                    command: COMMAND.into(),
-                },
-            },
-        )
-        .await
-        .unwrap();
-    let (status, output) = tokio::time::timeout(Duration::from_secs(15), async {
-        let mut status = None;
-        let mut output = None;
-        loop {
-            let event = events.next().await.unwrap().unwrap();
-            match event.event {
-                SessionEvent::ToolCallFinished { tool_call, .. } if tool_call.name == "shell" => {
-                    output = tool_call.result;
-                }
-                SessionEvent::GoalUpdated { goal } if goal.counters.audits == 1 => {
-                    status = Some(goal.status);
-                }
-                SessionEvent::RunFinished {
-                    origin: Some(qq_protocol::RunOrigin::GoalCheck { .. }),
-                    ..
-                } => break (status.unwrap(), output.unwrap()),
-                _ => {}
-            }
-        }
-    })
-    .await
-    .expect("scoped check completes without another model request");
-    assert!(
-        !root.join("outside").exists(),
-        "check escaped its task workspace"
-    );
-    if output.contains("required Linux filesystem enforcement is unavailable")
-        || output.contains("required Linux network enforcement is unavailable")
-    {
-        assert_ne!(status, qq_protocol::GoalStatus::Achieved);
-        assert!(!workspace.join("goal-check-marker").exists());
-    } else {
-        assert_eq!(status, qq_protocol::GoalStatus::Achieved, "{output}");
-        assert_eq!(
-            std::fs::read_to_string(workspace.join("goal-check-marker")).unwrap(),
-            "checked"
-        );
-    }
-    assert_eq!(
-        loads.load(Ordering::SeqCst),
-        1,
-        "completion check must not load a model"
-    );
-    runtime.shutdown().await.unwrap();
-    owner.shutdown().await.unwrap();
 }

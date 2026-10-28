@@ -637,11 +637,13 @@ mod tests {
         let mut pages = guide_pages();
         pages.push(("README.md".to_owned(), readme));
         let current = env!("CARGO_PKG_VERSION");
-        // Release headings are `## X.Y.Z — date`, newest first. The previous
-        // release is the first one that is not this build's version.
+        // Release headings are `## X.Y.Z — date`, newest first, possibly under
+        // an `## Unreleased` upgrading block. The previous release is the
+        // first version that is not this build's.
         let previous = changelog
             .lines()
             .filter_map(|line| line.strip_prefix("## ")?.split(' ').next())
+            .filter(|version| version.starts_with(|c: char| c.is_ascii_digit()))
             .find(|version| *version != current);
         let allowed: Vec<&str> = [Some(current), previous].into_iter().flatten().collect();
         let mut found = BTreeSet::new();
@@ -1058,9 +1060,8 @@ mod tests {
             };
             let mut routes = vec![snapshot.model().as_str().to_owned()];
             routes.extend(
-                [snapshot.worker_model(), snapshot.reviewer_model()]
-                    .into_iter()
-                    .flatten()
+                snapshot
+                    .worker_model()
                     .map(|route| route.as_str().to_owned()),
             );
             routes.extend(
@@ -1415,16 +1416,13 @@ mod tests {
         let mut wrong = Vec::new();
         let rows = table_after(text, "## `policy`");
         for row in &rows {
-            const NOT_ORGANIZATION: &str = "any layer except an organization manifest";
             let managed_only = row[1] == "managed layers only";
-            let not_organization = row[1] == NOT_ORGANIZATION;
-            let host_only = row[1] == "host config only";
             // A key every layer may set says so: `any layer`, or `any; …`
             // qualifying how layers combine. Anything else is wrong guidance.
             let any_layer = row[1] == "any layer" || row[1].starts_with("any; ");
-            if !managed_only && !not_organization && !host_only && !any_layer {
+            if !managed_only && !any_layer {
                 wrong.push(format!(
-                    "  \"{}\" is not `managed layers only`, `{NOT_ORGANIZATION}`, `host config only`, `any layer` or `any; …`",
+                    "  \"{}\" is not `managed layers only`, `any layer` or `any; …`",
                     row[1]
                 ));
                 continue;
@@ -1439,23 +1437,11 @@ mod tests {
                     continue;
                 }
                 let is_managed_only = qq_config::MANAGED_ONLY_POLICY_FIELD_NAMES.contains(&key);
-                let is_not_organization =
-                    qq_config::ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES.contains(&key);
-                let is_host_only = qq_config::HOST_ONLY_POLICY_FIELD_NAMES.contains(&key);
-                if (
-                    is_managed_only,
-                    is_not_organization && !is_host_only,
-                    is_host_only,
-                ) != (managed_only, not_organization, host_only)
-                {
+                if is_managed_only != managed_only {
                     let truth = if is_managed_only {
-                        "managed layers only".to_owned()
-                    } else if is_host_only {
-                        "host config only".to_owned()
-                    } else if is_not_organization {
-                        NOT_ORGANIZATION.to_owned()
+                        "managed layers only"
                     } else {
-                        "any layer".to_owned()
+                        "any layer"
                     };
                     wrong.push(format!("  `{key}` says \"{}\" but is {truth}", row[1]));
                 }
@@ -1809,11 +1795,8 @@ mod tests {
             "Pack",
             "Roster",
             "Role",
-            "Grant",
             "Approval mode",
             "Held call",
-            "Delegate",
-            "Reviewer",
             "Trust",
         ] {
             if !headings.contains(&term) {

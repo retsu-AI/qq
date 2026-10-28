@@ -122,7 +122,6 @@ async fn t20_strict_refuses_only_unprefixed_contained_reads_and_keeps_hints() {
         )
         .unwrap()
         .with_shell_policy(runtime::ShellPolicy {
-            env_allowlist: Arc::from([]),
             builtin_preference: runtime::BuiltinPreference::Strict,
             ..Default::default()
         });

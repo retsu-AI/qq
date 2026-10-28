@@ -200,12 +200,7 @@ impl SessionRuntime {
             let applied = match runtime
                 .inner
                 .store
-                .command_with_admission(
-                    command_id,
-                    command,
-                    CommandAdmission::default(),
-                    Some(runtime.inner.grant_promotions.clone()),
-                )
+                .command_with_admission(command_id, command, CommandAdmission::default())
                 .await
             {
                 Ok(applied) => applied,
@@ -442,7 +437,7 @@ impl SessionRuntime {
             session,
             id,
             question,
-            mut request,
+            request,
             mut messages,
         } = launch;
         if question.trim().is_empty() || question.len() > 8192 {
@@ -464,8 +459,7 @@ impl SessionRuntime {
             id,
         };
         let deadline = started + limits.duration();
-        let tool_tasks =
-            crate::tools::ToolTasks::default().with_native_scopes(self.inner.native_scopes.clone());
+        let tool_tasks = crate::tools::ToolTasks::default();
         // Whether a provider request may have been sent and not committed:
         // its spend is then unknown rather than the last committed total.
         let in_flight = AtomicBool::new(false);
@@ -511,28 +505,7 @@ impl SessionRuntime {
                         if *self.inner.shutdown.borrow() {
                             return Err(SessionRuntimeError::SideQuestionCancelled);
                         }
-                        let task_scope = super::task_workspaces::side_scope(
-                            &self.inner,
-                            session,
-                            &request.workspace,
-                        )
-                        .await?;
-                        let scopes = match task_scope {
-                            Some(scope) => {
-                                request.execution_workspace = Some(scope.workspace.clone());
-                                Some(super::native_scope::NativeScopes::single(scope)?)
-                            }
-                            None => self.inner.native_scopes.clone(),
-                        };
-                        let workspace = request.execution_workspace.as_ref().map_or_else(
-                            || PathBuf::from(&request.workspace),
-                            |grant| grant.path.clone(),
-                        );
-                        if let Some(scopes) = &scopes {
-                            scopes.admit(&workspace).await.map_err(|reason| {
-                                SessionRuntimeError::InvalidNativeScope { reason }
-                            })?;
-                        }
+                        let workspace = PathBuf::from(&request.workspace);
                         let loaded = self
                             .inner
                             .loader
@@ -541,14 +514,6 @@ impl SessionRuntime {
                             .map_err(|_| SessionRuntimeError::Unavailable)?;
                         if loaded.plan.workspace_path() != workspace {
                             return Err(SessionRuntimeError::CONSTRAINT);
-                        }
-                        if let Some(scopes) = &scopes {
-                            scopes
-                                .validate_opened(loaded.plan.workspace_handle())
-                                .await
-                                .map_err(|reason| SessionRuntimeError::InvalidNativeScope {
-                                    reason,
-                                })?;
                         }
                         let plan = loaded
                             .plan
@@ -571,7 +536,7 @@ impl SessionRuntime {
                                 },
                                 pricing.clone(),
                             )
-                            .with_tool_tasks(tool_tasks.with_native_scopes(scopes))
+                            .with_tool_tasks(tool_tasks.clone())
                             .with_execution_started(started);
                         let mut events = plan.execute(
                             messages,
@@ -941,7 +906,6 @@ pub(super) fn admit_side_question(
         .optional()?
         .ok_or(SessionRuntimeError::SessionNotFound)?;
     let request = RuntimeLoadRequest {
-        execution_workspace: None,
         workspace: row.0,
         model: ModelSelection {
             model: row.1,

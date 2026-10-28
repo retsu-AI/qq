@@ -15,10 +15,10 @@ use std::{
 };
 
 use qq_protocol::{
-    AgentProfileId, ApprovalResolution, DelegateIdentity, MessageId, MessageRole, MessageSnapshot,
-    MessageState, ModelDescriptor, PendingHold, RunActivity, RunId, RunOutcome, RunPlanIdentity,
-    SessionId, SessionSnapshot, SessionStatus, SessionSummary, SnapshotRequest, TokenUsage,
-    ToolCallId, ToolCallSnapshot, ToolCallState, WorkspaceId,
+    AgentProfileId, ApprovalResolution, MessageId, MessageRole, MessageSnapshot, MessageState,
+    ModelDescriptor, PendingHold, RunActivity, RunId, RunOutcome, RunPlanIdentity, SessionId,
+    SessionSnapshot, SessionStatus, SessionSummary, SnapshotRequest, TokenUsage, ToolCallId,
+    ToolCallSnapshot, ToolCallState, WorkspaceId,
 };
 
 mod reduce;
@@ -308,8 +308,7 @@ impl SessionStore {
 
     /// One state for everything this store follows, most urgent wins: any
     /// hold waiting for a human, else any session running, queued, or
-    /// answering a side question, else idle. Holds an approval delegate is
-    /// still deciding count as work. Reads only summary-level state, which
+    /// answering a side question, else idle. Reads only summary-level state, which
     /// the server projects for every session, and every stored session,
     /// including children whose parent is not loaded. A block names the most
     /// recently updated blocked session, so the message is deterministic.
@@ -319,8 +318,7 @@ impl SessionStore {
         let mut blocked: Option<&SessionView> = None;
         for view in self.sessions.values() {
             let live = &view.live;
-            // `with_delegate` is a subset of `awaiting_approval`.
-            if live.awaiting_approval.len() > live.with_delegate.len() {
+            if !live.awaiting_approval.is_empty() {
                 if blocked.is_none_or(|current| {
                     (view.summary.updated_at_ms, view.summary.id)
                         > (current.summary.updated_at_ms, current.summary.id)
@@ -329,8 +327,7 @@ impl SessionStore {
                 }
                 continue;
             }
-            working |= !live.awaiting_approval.is_empty()
-                || view.summary.running_side_question.is_some()
+            working |= view.summary.running_side_question.is_some()
                 || matches!(
                     view.summary.status,
                     SessionStatus::Running | SessionStatus::Queued
@@ -830,37 +827,23 @@ pub struct ToolCallTiming {
     pub settled: Option<ApprovalSettlement>,
 }
 
-/// Who settled a held call and how, so a surface can say "approved by
-/// reviewer" rather than only "approved".
+/// How a held call was settled, so a surface can say "denied by timeout"
+/// rather than only "denied".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApprovalSettlement {
     pub resolution: ApprovalResolution,
-    /// The delegate that wrote a reviewer resolution; `None` for a human,
-    /// timeout, or answer, and for a reviewer resolution from a server that
-    /// predates protocol 28.
-    pub delegate: Option<DelegateIdentity>,
 }
 
 impl ApprovalSettlement {
-    /// A short label for the row: `approved by reviewer`, `denied by reviewer`,
-    /// `approved for session`, `denied by timeout`. `None` for resolutions
-    /// that need no remark (a once-approval by the human, an answer).
+    /// A short label for the row: `denied by you`, `denied by timeout`.
+    /// `None` for resolutions that need no remark (a once-approval by the
+    /// human, an answer).
     #[must_use]
     pub fn label(self) -> Option<String> {
         match self.resolution {
             ApprovalResolution::ApprovedOnce | ApprovalResolution::Answered => None,
-            ApprovalResolution::ApprovedForSession => Some("approved for session".to_owned()),
-            ApprovalResolution::ApprovedForWorkspace => Some("approved for workspace".to_owned()),
-            ApprovalResolution::ApprovedByReviewer => Some(format!(
-                "approved by {}",
-                self.delegate.unwrap_or_default().as_str()
-            )),
             ApprovalResolution::Denied => Some("denied by you".to_owned()),
             ApprovalResolution::DeniedTimeout => Some("denied by timeout".to_owned()),
-            ApprovalResolution::DeniedByReviewer => Some(format!(
-                "denied by {}",
-                self.delegate.unwrap_or_default().as_str()
-            )),
         }
     }
 }
@@ -880,12 +863,9 @@ pub struct LiveStatus {
     /// Tool calls awaiting an approval answer. A set rather than a count so
     /// replayed or repeated events cannot drift it.
     pub awaiting_approval: BTreeSet<ToolCallId>,
-    /// The subset of `awaiting_approval` an approval delegate is deciding;
-    /// a hold leaves it when the delegate escalates to the human.
-    pub with_delegate: BTreeSet<ToolCallId>,
 }
 
-pub use qq_protocol::{ApprovalEscalation, ApprovalPreview};
+pub use qq_protocol::ApprovalPreview;
 
 /// One session as the client sees it: the summary every surface lists, and
 /// the warm body, live status, and per-run detail a transcript shows.
@@ -1183,11 +1163,6 @@ impl LiveStatus {
     /// the summary's cursor; events after it move the sets on.
     pub fn set_holds(&mut self, holds: &[PendingHold]) {
         self.awaiting_approval = holds.iter().map(|hold| hold.tool_call_id).collect();
-        self.with_delegate = holds
-            .iter()
-            .filter(|hold| hold.delegated)
-            .map(|hold| hold.tool_call_id)
-            .collect();
     }
 
     pub fn note_tool_call(&mut self, call: &ToolCallSnapshot) {
@@ -1198,7 +1173,6 @@ impl LiveStatus {
             }
             ToolCallState::Running | ToolCallState::Requested => {
                 self.awaiting_approval.remove(&call.id);
-                self.with_delegate.remove(&call.id);
                 self.active_tool = Some(call.name.clone());
             }
             ToolCallState::Completed
@@ -1206,7 +1180,6 @@ impl LiveStatus {
             | ToolCallState::Denied
             | ToolCallState::Interrupted => {
                 self.awaiting_approval.remove(&call.id);
-                self.with_delegate.remove(&call.id);
                 if self.active_tool.as_deref() == Some(call.name.as_str()) {
                     self.active_tool = None;
                 }

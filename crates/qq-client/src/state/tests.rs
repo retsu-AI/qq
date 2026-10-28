@@ -72,7 +72,6 @@ fn summary(id: SessionId) -> SessionSummary {
         profile: qq_protocol::AgentProfileId::default(),
         reasoning_effort: None,
         approval_mode: qq_protocol::ApprovalMode::default(),
-        approval_delegate: None,
         correlation: qq_protocol::Correlation::default(),
         last_outcome: None,
         pending_holds: Vec::new(),
@@ -295,8 +294,8 @@ fn the_live_tail_is_sanitized_by_the_surface_supplied_function() {
 }
 
 #[test]
-fn a_reviewer_resolution_records_who_settled_the_call_and_evicts_with_it() {
-    // DA6: the row can say "approved by jev" because the reducer keeps the
+fn a_denial_records_who_settled_the_call_and_evicts_with_it() {
+    // The row can say "denied by you" because the reducer keeps the
     // settlement beside the call's timing; a human once-approval says nothing;
     // the settlement leaves with the body like every other per-call datum.
     let session_id = SessionId::from_bytes([3; 16]);
@@ -323,9 +322,8 @@ fn a_reviewer_resolution_records_who_settled_the_call_and_evicts_with_it() {
             1,
             session_id,
             SessionEvent::ToolApprovalResolved {
-                tool_call: call(7, ToolCallState::Requested),
-                resolution: qq_protocol::ApprovalResolution::ApprovedByReviewer,
-                delegate: Some(qq_protocol::DelegateIdentity::Jev),
+                tool_call: call(7, ToolCallState::Denied),
+                resolution: qq_protocol::ApprovalResolution::Denied,
             },
         ),
         context(&[]),
@@ -337,135 +335,24 @@ fn a_reviewer_resolution_records_who_settled_the_call_and_evicts_with_it() {
             SessionEvent::ToolApprovalResolved {
                 tool_call: call(8, ToolCallState::Requested),
                 resolution: qq_protocol::ApprovalResolution::ApprovedOnce,
-                delegate: None,
             },
         ),
         context(&[]),
     );
     let timing = &store[&session_id].tool_timing;
-    let by_jev = timing[&ToolCallId::from_bytes([7; 16])].settled.unwrap();
-    assert_eq!(by_jev.label().as_deref(), Some("approved by jev"));
-    assert_eq!(by_jev.delegate, Some(qq_protocol::DelegateIdentity::Jev));
+    let denied = timing[&ToolCallId::from_bytes([7; 16])].settled.unwrap();
+    assert_eq!(denied.label().as_deref(), Some("denied by you"));
     let by_human = timing[&ToolCallId::from_bytes([8; 16])].settled.unwrap();
     assert_eq!(by_human.label(), None, "a once-approval needs no remark");
-    // A reviewer resolution from a pre-28 server (no `delegate`) still reads
-    // as the reviewer model's.
-    let legacy = ApprovalSettlement {
-        resolution: qq_protocol::ApprovalResolution::DeniedByReviewer,
-        delegate: None,
-    };
-    assert_eq!(legacy.label().as_deref(), Some("denied by reviewer"));
 
     store.body_mut(&session_id).unwrap().evict_body();
     assert!(store[&session_id].tool_timing.is_empty());
 }
 
 #[test]
-fn an_escalation_lands_on_the_pending_holds_preview_and_nowhere_else() {
-    // DA6: the prompt says why a delegate passed. The reason is kept beside
-    // the hold's preview only while the call is awaiting approval; an
-    // escalation for a call that is not pending (a client already answered)
-    // is ignored, and the preview leaves with the hold.
-    let session_id = SessionId::from_bytes([3; 16]);
-    let run_id = RunId::from_bytes([4; 16]);
-    let mut store = SessionStore::default();
-    store.upsert_summary(summary(session_id), &[], 0);
-    store.warm_empty(session_id);
-    let call = |state: ToolCallState| ToolCallSnapshot {
-        id: ToolCallId::from_bytes([7; 16]),
-        session_id,
-        run_id,
-        turn_ordinal: 0,
-        call_ordinal: 0,
-        provider_call_id: "call_0".to_owned(),
-        name: "shell".to_owned(),
-        arguments: String::new(),
-        state,
-        result: None,
-        is_error: false,
-        display: None,
-    };
-    store.reduce_event(
-        &envelope(
-            1,
-            session_id,
-            SessionEvent::ToolApprovalRequested {
-                tool_call: call(ToolCallState::AwaitingApproval),
-                shell: Some(Box::new(qq_protocol::ShellCommandPreview {
-                    command: "git push".to_owned(),
-                    cwd: None,
-                    verdict: None,
-                    reasons: Vec::new(),
-                })),
-                edit: None,
-                question: None,
-                fetch: None,
-                delegated: false,
-            },
-        ),
-        context(&[]),
-    );
-    store.reduce_event(
-        &envelope(
-            2,
-            session_id,
-            SessionEvent::ToolApprovalEscalated {
-                tool_call_id: ToolCallId::from_bytes([7; 16]),
-                delegate: Some(qq_protocol::DelegateIdentity::Jev),
-                reason: "unsure".to_owned(),
-            },
-        ),
-        context(&[]),
-    );
-    let preview = &store[&session_id].approval_previews[&ToolCallId::from_bytes([7; 16])];
-    assert_eq!(
-        preview.escalated,
-        Some(ApprovalEscalation {
-            delegate: Some(qq_protocol::DelegateIdentity::Jev),
-            reason: "unsure".to_owned(),
-        })
-    );
-    assert_eq!(
-        preview.shell.as_ref().map(|shell| shell.command.as_str()),
-        Some("git push"),
-        "the escalation joins the preview rather than replacing it"
-    );
-
-    // The human answers; the hold and its preview are gone, and a late
-    // escalation (the delegate's clock firing after the race was lost)
-    // creates nothing.
-    store.reduce_event(
-        &envelope(
-            3,
-            session_id,
-            SessionEvent::ToolApprovalResolved {
-                tool_call: call(ToolCallState::Requested),
-                resolution: qq_protocol::ApprovalResolution::ApprovedOnce,
-                delegate: None,
-            },
-        ),
-        context(&[]),
-    );
-    store.reduce_event(
-        &envelope(
-            4,
-            session_id,
-            SessionEvent::ToolApprovalEscalated {
-                tool_call_id: ToolCallId::from_bytes([7; 16]),
-                delegate: None,
-                reason: "late".to_owned(),
-            },
-        ),
-        context(&[]),
-    );
-    assert!(store[&session_id].approval_previews.is_empty());
-}
-
-#[test]
-fn store_activity_is_blocked_only_when_a_human_is_asked_and_the_worst_session_wins() {
-    // ENG-1034: one state for a whole store. A hold the delegate is still
-    // deciding is work; it becomes a block when the delegate escalates, and
-    // a block in any session outranks work or idleness elsewhere.
+fn store_activity_is_blocked_while_a_human_is_asked_and_the_worst_session_wins() {
+    // ENG-1034: one state for a whole store. A pending hold blocks, and a
+    // block in any session outranks work or idleness elsewhere.
     let quiet = SessionId::from_bytes([3; 16]);
     let busy = SessionId::from_bytes([5; 16]);
     let run_id = RunId::from_bytes([4; 16]);
@@ -499,40 +386,31 @@ fn store_activity_is_blocked_only_when_a_human_is_asked_and_the_worst_session_wi
         is_error: false,
         display: None,
     };
-    let requested = |delegated| SessionEvent::ToolApprovalRequested {
+    let requested = SessionEvent::ToolApprovalRequested {
         tool_call: call(ToolCallState::AwaitingApproval),
         shell: None,
         edit: None,
         question: None,
         fetch: None,
-        delegated,
     };
-    let effects = store.reduce_event(&envelope(1, busy, requested(true)), context(&[]));
-    assert!(
-        !effects.iter().any(|effect| matches!(
-            effect,
-            StateEffect::Attention(Attention::ApprovalRequested { .. })
-        )),
-        "internal supervision must not notify the human to approve"
-    );
-    assert_eq!(
-        store.activity(),
-        StoreActivity::Working,
-        "the delegate is deciding"
-    );
+    let effects = store.reduce_event(&envelope(1, busy, requested), context(&[]));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        StateEffect::Attention(Attention::ApprovalRequested { .. })
+    )));
+    let blocked = StoreActivity::Blocked {
+        session_title: running.title.clone(),
+    };
+    assert_eq!(store.activity(), blocked);
 
     // A snapshot reload rebuilds live status from the summary's holds, which
     // the server projects exactly; the body's tool calls do not decide it.
-    let hold = |delegated| qq_protocol::PendingHold {
-        tool_call_id: held,
-        delegated,
-    };
-    let mut snapshot = SessionSnapshot {
+    let snapshot = SessionSnapshot {
         approval_previews: Vec::new(),
         goal: None,
         side_questions: Vec::new(),
         summary: SessionSummary {
-            pending_holds: vec![hold(true)],
+            pending_holds: vec![qq_protocol::PendingHold { tool_call_id: held }],
             ..running.clone()
         },
         messages: Vec::new(),
@@ -541,26 +419,6 @@ fn store_activity_is_blocked_only_when_a_human_is_asked_and_the_worst_session_wi
         has_older_tool_calls: false,
         has_older_messages: false,
     };
-    store.install_session_snapshot(snapshot.clone(), &[], 1);
-    assert_eq!(store.activity(), StoreActivity::Working);
-
-    store.reduce_event(
-        &envelope(
-            2,
-            busy,
-            SessionEvent::ToolApprovalEscalated {
-                tool_call_id: held,
-                delegate: Some(qq_protocol::DelegateIdentity::Reviewer),
-                reason: "unsure".to_owned(),
-            },
-        ),
-        context(&[]),
-    );
-    let blocked = StoreActivity::Blocked {
-        session_title: running.title.clone(),
-    };
-    assert_eq!(store.activity(), blocked, "escalated to the human");
-    snapshot.summary.pending_holds = vec![hold(false)];
     store.install_session_snapshot(snapshot.clone(), &[], 2);
     assert_eq!(store.activity(), blocked, "and still after a reload");
 
@@ -572,7 +430,6 @@ fn store_activity_is_blocked_only_when_a_human_is_asked_and_the_worst_session_wi
             SessionEvent::ToolApprovalResolved {
                 tool_call: call(ToolCallState::Requested),
                 resolution: qq_protocol::ApprovalResolution::ApprovedOnce,
-                delegate: None,
             },
         ),
         context(&[]),
@@ -581,23 +438,10 @@ fn store_activity_is_blocked_only_when_a_human_is_asked_and_the_worst_session_wi
     store.upsert_summary(summary(busy), &[], 0);
     assert_eq!(store.activity(), StoreActivity::Idle);
 
-    // A hold asked of the human directly blocks at once, even while another
-    // session is idle.
-    let effects = store.reduce_event(&envelope(4, busy, requested(false)), context(&[]));
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        StateEffect::Attention(Attention::ApprovalRequested { .. })
-    )));
-    assert!(matches!(store.activity(), StoreActivity::Blocked { .. }));
-
-    // A client that attaches mid-hold knows who decides from the summary
-    // alone: a delegate's hold is work, a human's is a block.
+    // A client that attaches mid-hold knows it is blocked from the summary
+    // alone.
     let mut fresh = SessionStore::default();
-    snapshot.summary.pending_holds = vec![hold(true)];
-    fresh.install_session_snapshot(snapshot.clone(), &[], 5);
-    assert_eq!(fresh.activity(), StoreActivity::Working);
-    snapshot.summary.pending_holds = vec![hold(false)];
-    fresh.install_session_snapshot(snapshot, &[], 6);
+    fresh.install_session_snapshot(snapshot, &[], 5);
     assert!(matches!(fresh.activity(), StoreActivity::Blocked { .. }));
 }
 
@@ -615,10 +459,7 @@ fn store_activity_counts_sessions_whose_bodies_were_never_loaded() {
         SessionSummary {
             status: SessionStatus::Running,
             active_run_id: Some(run_id),
-            pending_holds: vec![qq_protocol::PendingHold {
-                tool_call_id: held,
-                delegated: false,
-            }],
+            pending_holds: vec![qq_protocol::PendingHold { tool_call_id: held }],
             ..summary(cold)
         },
         &[],
@@ -647,7 +488,6 @@ fn store_activity_counts_sessions_whose_bodies_were_never_loaded() {
                     display: None,
                 },
                 resolution: qq_protocol::ApprovalResolution::Denied,
-                delegate: None,
             },
         ),
         context(&[]),
@@ -735,7 +575,6 @@ fn store_activity_counts_a_child_whose_parent_is_not_loaded() {
             active_run_id: Some(RunId::from_bytes([4; 16])),
             pending_holds: vec![qq_protocol::PendingHold {
                 tool_call_id: ToolCallId::from_bytes([7; 16]),
-                delegated: false,
             }],
             ..summary(orphan)
         },
@@ -1362,7 +1201,6 @@ fn measured_internal_summary_turns_replay_without_taking_over_the_prompt() {
     running.active_run_id = Some(prompt);
     running.pending_holds = vec![qq_protocol::PendingHold {
         tool_call_id: ToolCallId::from_bytes([7; 16]),
-        delegated: true,
     }];
     let mut live = SessionStore::default();
     let mut replay = SessionStore::default();
@@ -1441,7 +1279,6 @@ fn measured_internal_summary_turns_replay_without_taking_over_the_prompt() {
         );
         assert_eq!(view.live.active_tool.as_deref(), Some("shell"));
         assert_eq!(view.live.awaiting_approval.len(), 1);
-        assert_eq!(view.live.with_delegate.len(), 1);
         assert_eq!(view.unread, 0);
         assert!(!view.finished_unread);
         assert!(!view.runs.contains_key(&prompt));
@@ -1467,7 +1304,6 @@ fn a_failed_in_run_compaction_step_is_not_reported_as_the_end_of_the_work() {
     running.active_run_id = Some(prompt);
     running.pending_holds = vec![qq_protocol::PendingHold {
         tool_call_id: ToolCallId::from_bytes([7; 16]),
-        delegated: true,
     }];
     store.upsert_summary(running.clone(), &[], 0);
     store.warm_empty(session_id);
@@ -1507,7 +1343,6 @@ fn a_failed_in_run_compaction_step_is_not_reported_as_the_end_of_the_work() {
         Some("shell")
     );
     assert_eq!(store[&session_id].live.awaiting_approval.len(), 1);
-    assert_eq!(store[&session_id].live.with_delegate.len(), 1);
 
     // The prompt run's own pause still notifies and clears live state.
     let mut idle = summary(session_id);
@@ -1609,7 +1444,6 @@ fn cancelling_a_queued_prompt_leaves_the_active_runs_live_state() {
     running.active_run_id = Some(active);
     running.pending_holds = vec![qq_protocol::PendingHold {
         tool_call_id: ToolCallId::from_bytes([7; 16]),
-        delegated: false,
     }];
     store.upsert_summary(running.clone(), &[], 0);
     store.warm_empty(session_id);
@@ -2206,20 +2040,13 @@ fn cold_and_refreshed_snapshots_replace_pending_approval_details() {
                 free_text: true,
             }],
         }),
-        escalated: Some(ApprovalEscalation {
-            delegate: None,
-            reason: "Reviewer unavailable".to_owned(),
-        }),
         ..ApprovalPreview::default()
     };
     let mut body: SessionSnapshot = serde_json::from_value(json!({
         "summary":summary(session_id), "messages":[], "runs":[], "tool_calls":[], "has_older_messages":false,
         "approval_previews":[{"tool_call_id":call,"preview":expected}]
     })).unwrap();
-    body.summary.pending_holds = vec![qq_protocol::PendingHold {
-        tool_call_id: call,
-        delegated: false,
-    }];
+    body.summary.pending_holds = vec![qq_protocol::PendingHold { tool_call_id: call }];
     let mut store = SessionStore::default();
     store.install_isolated_session_snapshot(body.clone(), &[], 17);
     assert_eq!(store[&session_id].approval_previews[&call], expected);

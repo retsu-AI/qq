@@ -16,9 +16,8 @@ use qq_core::{
     ToolHints,
 };
 use qq_protocol::{
-    ApprovalDecision, ApprovalGrant, ApprovalMode, CommandId, CommandOutcome, ModelSelection,
-    RunFailureKind, RunId, RunOutcome, SessionCommand, SessionEvent, SubscribeRequest,
-    ToolCallState,
+    ApprovalDecision, ApprovalMode, CommandId, CommandOutcome, ModelSelection, RunFailureKind,
+    RunId, RunOutcome, SessionCommand, SessionEvent, SubscribeRequest, ToolCallState,
 };
 use qq_provider::{ModelRequest, Provider, ProviderEvent, ProviderStream, ToolSpec};
 
@@ -247,8 +246,8 @@ async fn ask_mode_requires_fresh_human_approval_for_each_mcp_call() {
         })
         .unwrap();
 
-    // First run: ask mode must hold the MCP call for approval, and
-    // even a session approval choice applies only once in Ask mode.
+    // First run: ask mode must hold the MCP call for approval, and the
+    // approval applies only to that call.
     let first_run = submit_prompt(&runtime, session_id).await;
     let requested = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -276,11 +275,7 @@ async fn ask_mode_requires_fresh_human_approval_for_each_mcp_call() {
         SessionCommand::RespondToolApproval {
             run_id: first_run,
             tool_call_id: requested.id,
-            decision: ApprovalDecision::ApproveForSession {
-                grant: ApprovalGrant::Tool {
-                    name: MCP_TOOL.to_owned(),
-                },
-            },
+            decision: ApprovalDecision::ApproveOnce,
         },
     )
     .await;

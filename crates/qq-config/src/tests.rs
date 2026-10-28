@@ -605,111 +605,6 @@ fn approval_timeout_is_absent_by_default_and_bounded_when_set() {
 }
 
 #[test]
-fn approval_delegate_is_absent_by_default_and_reads_on_off_from_every_layer() {
-    // DA3: absent means the mode's own default; the snapshot reports `None`
-    // so the composition root can tell "never said" from "said off".
-    let tree = TempTree::new();
-    let bare = tree.loader().load(&tree.request()).unwrap();
-    assert_eq!(bare.approval_delegate(), None);
-    assert!(bare.provenance().approval_delegate().is_none());
-
-    let on = tree
-        .loader()
-        .load(
-            &tree
-                .request()
-                .with_explicit_content(r#"(version: 1, approval_delegate: on)"#),
-        )
-        .unwrap();
-    assert_eq!(on.approval_delegate(), Some(ApprovalDelegateSetting::On));
-    assert_eq!(
-        on.provenance().approval_delegate().unwrap().kind(),
-        SourceKind::Inline
-    );
-
-    // A runtime override wins over the document and is reported as such.
-    let off = tree
-        .loader()
-        .load(
-            &tree
-                .request()
-                .with_explicit_content(r#"(version: 1, approval_delegate: on)"#)
-                .with_overrides(
-                    RuntimeOverrides::new()
-                        .with_model("openai/test-model")
-                        .with_approval_delegate(ApprovalDelegateSetting::Off),
-                ),
-        )
-        .unwrap();
-    assert_eq!(off.approval_delegate(), Some(ApprovalDelegateSetting::Off));
-    assert_eq!(
-        off.provenance().approval_delegate().unwrap().kind(),
-        SourceKind::Runtime
-    );
-
-    // Only `on` and `off` parse, in the document and in the environment form.
-    assert!(matches!(
-        tree.loader().load(
-            &tree
-                .request()
-                .with_explicit_content("(version: 1, approval_delegate: maybe)")
-        ),
-        Err(ConfigError::Parse { .. })
-    ));
-    assert!(matches!(
-        "maybe".parse::<ApprovalDelegateSetting>(),
-        Err(ConfigError::InvalidSetting { .. })
-    ));
-    assert_eq!(
-        "on".parse::<ApprovalDelegateSetting>().unwrap(),
-        ApprovalDelegateSetting::On
-    );
-}
-
-#[test]
-fn approval_delegate_in_a_workspace_file_or_profile_requires_trust() {
-    // DA3: the delegate choice widens who may settle a hold, so a project
-    // file that sets it is a sensitive declaration.
-    let tree = TempTree::new();
-    tree.write(
-        "work/qq.ron",
-        r#"(version: 1, approval_delegate: on,
-        profiles: { "ask": Profile(approval_mode: ask, approval_delegate: off) })"#,
-    );
-    let request = tree.request();
-    assert!(matches!(
-        tree.loader().load(&request),
-        Err(ConfigError::TrustRequired { .. })
-    ));
-    tree.loader().grant_pending_trust(&request).unwrap();
-    let trusted = tree.loader().load(&request).unwrap();
-    assert_eq!(
-        trusted.approval_delegate(),
-        Some(ApprovalDelegateSetting::On)
-    );
-    assert_eq!(
-        trusted.profile("ask").unwrap().approval_delegate(),
-        Some(ApprovalDelegateSetting::Off)
-    );
-    assert_eq!(
-        trusted.profile("default").unwrap().approval_delegate(),
-        None
-    );
-    assert!(
-        trusted
-            .source_reports()
-            .iter()
-            .any(|report| report.touched().contains(&ConfigKey::ApprovalDelegate))
-    );
-    // Changing the value invalidates the trust the same way.
-    tree.write("work/qq.ron", r#"(version: 1, approval_delegate: off)"#);
-    assert!(matches!(
-        tree.loader().load(&request),
-        Err(ConfigError::TrustRequired { .. })
-    ));
-}
-
-#[test]
 fn audit_settings_default_to_off_and_validate_revisions() {
     let tree = TempTree::new();
     let bare = tree.loader().load(&tree.request()).unwrap();
@@ -776,8 +671,7 @@ fn every_experiment_arm_overlay_parses_and_validates() {
             .unwrap()
             .replace("PROVIDER/PRIMARY", "openai/test-model")
             .replace("PROVIDER/FAST", "openai/fast")
-            .replace("PROVIDER/STRONG", "anthropic/strong")
-            .replace("PROVIDER/REVIEWER", "anthropic/reviewer");
+            .replace("PROVIDER/STRONG", "anthropic/strong");
         let snapshot = tree
             .loader()
             .load(&tree.request().with_explicit_content(&content))
@@ -793,10 +687,7 @@ fn every_experiment_arm_overlay_parses_and_validates() {
                 assert_eq!(snapshot.audit().mode(), AuditMode::Heuristic);
                 assert_eq!(snapshot.delegation().max_depth(), 0);
             }
-            "c1-write-children" => {
-                assert!(snapshot.delegation().write_children());
-                assert!(snapshot.reviewer_model().is_some());
-            }
+            "c1-write-children" => assert!(snapshot.delegation().write_children()),
             _ => assert_eq!(snapshot.audit().mode(), AuditMode::Off),
         }
     }
@@ -836,56 +727,6 @@ fn worker_model_uses_primary_model_route_validation_and_policy() {
             rule: "allowed_providers",
             ..
         })
-    ));
-}
-
-#[test]
-fn reviewer_model_layers_validates_and_tracks_provenance_like_worker_model() {
-    let tree = TempTree::new();
-    tree.write(
-        "global/config.ron",
-        r#"(version: 1, reviewer_model: "anthropic/global-reviewer")"#,
-    );
-
-    let inherited = tree.loader().load(&tree.request()).unwrap();
-    assert_eq!(
-        inherited.reviewer_model().map(ModelRoute::as_str),
-        Some("anthropic/global-reviewer")
-    );
-    assert_eq!(
-        inherited.provenance().reviewer_model().unwrap().kind(),
-        SourceKind::Global
-    );
-    assert_eq!(
-        inherited.model().as_str(),
-        "openai/test-model",
-        "reviewer selection must not replace the primary model"
-    );
-
-    let cleared = tree
-        .loader()
-        .load(
-            &tree
-                .request()
-                .with_explicit_content(r#"(version: 1, reviewer_model: Clear)"#),
-        )
-        .unwrap();
-    assert_eq!(cleared.reviewer_model(), None);
-
-    let malformed = tree
-        .request()
-        .with_explicit_content(r#"(version: 1, reviewer_model: "missing-provider-separator")"#);
-    assert!(matches!(
-        tree.loader().load(&malformed),
-        Err(ConfigError::InvalidModelRoute(route)) if route == "missing-provider-separator"
-    ));
-
-    let unknown = tree
-        .request()
-        .with_explicit_content(r#"(version: 1, reviewer_model: "unknown/reviewer")"#);
-    assert!(matches!(
-        tree.loader().load(&unknown),
-        Err(ConfigError::UnknownProvider(provider)) if provider == "unknown"
     ));
 }
 
@@ -1419,7 +1260,7 @@ fn trust_required_names_every_pending_file_and_the_command_that_accepts_it() {
     let tree = TempTree::new();
     let root_config = tree.write(
         "work/.qq/config.ron",
-        r#"(version: 1, model: "openai/gpt-5.6", policy: (allow_shell_prefixes: ["cargo test"]))"#,
+        r#"(version: 1, model: "openai/gpt-5.6", reasoning_effort: high)"#,
     );
     let nested_config = tree.write(
         "work/sub/.qq/config.ron",
@@ -1447,10 +1288,7 @@ fn trust_required_names_every_pending_file_and_the_command_that_accepts_it() {
         panic!("expected TrustRequired, got {error}");
     };
     let sections: Vec<&[&str]> = pending.iter().map(PendingTrust::sections).collect();
-    assert_eq!(
-        sections,
-        [&["model", "policy.allow_shell_prefixes"][..], &["mcp"][..]]
-    );
+    assert_eq!(sections, [&["model", "reasoning_effort"][..], &["mcp"][..]]);
     let granted = tree.loader().grant_pending_trust(&request).unwrap();
     assert_eq!(granted, pending);
 }
@@ -1525,7 +1363,6 @@ fn pending_trust_scans_without_writing_and_names_the_sensitive_sections() {
                 "executor": Stdio(command: "executor", args: ["mcp", "--token", "not-shown"]),
             },
             packs: {"reviewer": Pack(path: "packs/reviewer")},
-            policy: (allow_tools: ["read_file", "list_files"], allow_shell_prefixes: ["cargo test", "cargo fmt", Remove("rm")], allow_hosts: ["docs.rs"]),
         )"#,
     );
     let request = LoadRequest::new(tree.path("work"));
@@ -1536,15 +1373,7 @@ fn pending_trust_scans_without_writing_and_names_the_sensitive_sections() {
     assert_eq!(pending[0].source().path(), Some(config.as_path()));
     assert_eq!(
         pending[0].sections(),
-        [
-            "model",
-            "providers",
-            "mcp",
-            "packs",
-            "policy.allow_tools",
-            "policy.allow_shell_prefixes",
-            "policy.allow_hosts",
-        ]
+        ["model", "providers", "mcp", "packs",]
     );
 
     // Read-only: the same files are pending on the next scan and the load
@@ -2322,12 +2151,12 @@ fn rejects_invalid_mcp_declarations() {
 }
 
 #[test]
-fn tool_exposure_is_accepted_without_changing_approval_grants() {
+fn tool_exposure_intersects_across_layers() {
     let tree = TempTree::new();
     tree.write(
         "global/config.ron",
         r#"(version: 1, policy: (
-        exposed_tools: ["read_file", "search", "tree", "shell", "spawn_agent"], allow_tools: ["edit_file"]
+        exposed_tools: ["read_file", "search", "tree", "shell", "spawn_agent"]
     ))"#,
     );
     tree.write(
@@ -2340,13 +2169,6 @@ fn tool_exposure_is_accepted_without_changing_approval_grants() {
     assert_eq!(
         snapshot.policy().exposed_tools().unwrap(),
         ["read_file", "search"]
-    );
-    assert!(
-        snapshot
-            .grants()
-            .tools()
-            .iter()
-            .any(|name| name == "edit_file")
     );
 }
 
@@ -2409,7 +2231,7 @@ fn exposure_only_edits_preserve_trust_without_widening_the_catalog() {
         r#"(version: 1, policy: (exposed_tools: ["read_file", "search"]))"#,
     );
     let project = |names: &str| {
-        format!(r#"(version: 1, policy: (exposed_tools: [{names}], allow_tools: ["edit_file"]))"#)
+        format!(r#"(version: 1, model: "openai/gpt-5.6", policy: (exposed_tools: [{names}]))"#)
     };
     tree.write("work/.qq/config.ron", &project(r#""read_file""#));
     let request = tree.request();
@@ -2420,7 +2242,6 @@ fn exposure_only_edits_preserve_trust_without_widening_the_catalog() {
     tree.loader().grant_pending_trust(&request).unwrap();
     let snapshot = tree.loader().load(&request).unwrap();
     assert_eq!(snapshot.policy().exposed_tools().unwrap(), ["read_file"]);
-    assert_eq!(snapshot.grants().tools(), ["edit_file"]);
     tree.write(
         "work/.qq/config.ron",
         &project(r#""read_file", "search", "edit_file""#),
@@ -2430,7 +2251,6 @@ fn exposure_only_edits_preserve_trust_without_widening_the_catalog() {
         snapshot.policy().exposed_tools().unwrap(),
         ["read_file", "search"]
     );
-    assert_eq!(snapshot.grants().tools(), ["edit_file"]);
 }
 
 #[test]
@@ -2469,174 +2289,8 @@ fn absent_empty_and_external_tool_exposure_remain_distinct() {
 }
 
 #[test]
-fn policy_grants_layer_extend_remove_deny_and_fold_mcp_allowlists() {
-    let tree = TempTree::new();
-    tree.write(
-        "global/config.ron",
-        r#"(
-            version: 1,
-            mcp: {"executor": Stdio(command: "./executor.sh", allow: ["execute"])},
-            policy: (
-                allow_tools: ["web_fetch"],
-                allow_shell_prefixes: ["git status", "cargo build"],
-            ),
-        )"#,
-    );
-    tree.write(
-        "work/.qq/config.ron",
-        r#"(
-            version: 1,
-            policy: (
-                allow_tools: ["edit_file", Remove("web_fetch")],
-                allow_shell_prefixes: ["cargo test"],
-            ),
-        )"#,
-    );
-    tree.write(
-        "managed/managed.ron",
-        r#"(
-            version: 1,
-            policy: (deny_tools: ["edit_file"], deny_shell_prefixes: ["cargo"]),
-        )"#,
-    );
-    let request = tree.request();
-    assert!(
-        matches!(
-            tree.loader().load(&request),
-            Err(ConfigError::TrustRequired { .. })
-        ),
-        "workspace grant declarations must require trust"
-    );
-    tree.loader().grant_pending_trust(&request).unwrap();
-
-    let snapshot = tree.loader().load(&request).unwrap();
-    // Raw merged policy: later layers extend, Remove deletes, denies record.
-    assert_eq!(snapshot.policy().allow_tools(), ["edit_file"]);
-    assert_eq!(
-        snapshot.policy().allow_shell_prefixes(),
-        [
-            "cargo build",
-            "cargo test",
-            "git blame",
-            "git diff",
-            "git log",
-            "git show",
-            "git status",
-            "jj diff",
-            "jj log",
-            "jj op log",
-            "jj show",
-            "jj status",
-        ]
-    );
-    assert_eq!(snapshot.policy().deny_tools(), ["edit_file"]);
-    assert_eq!(snapshot.policy().deny_shell_prefixes(), ["cargo"]);
-    // Resolved grants: MCP allowlists fold in as exact names, managed denies
-    // filter both exact tools and word-granularity shell overlaps. The VCS
-    // read-only presets from the compiled defaults survive alongside the
-    // globally declared "git status".
-    assert_eq!(snapshot.grants().tools(), ["mcp__executor__execute"]);
-    assert_eq!(
-        snapshot.grants().shell_prefixes(),
-        [
-            "git blame",
-            "git diff",
-            "git log",
-            "git show",
-            "git status",
-            "jj diff",
-            "jj log",
-            "jj op log",
-            "jj show",
-            "jj status",
-        ]
-    );
-    // Provenance follows the layer that declared each surviving grant.
-    assert_eq!(
-        snapshot
-            .provenance()
-            .grant_tool("edit_file")
-            .unwrap()
-            .kind(),
-        SourceKind::Project
-    );
-    assert!(snapshot.provenance().grant_tool("web_fetch").is_none());
-    assert_eq!(
-        snapshot
-            .provenance()
-            .grant_shell_prefix("git status")
-            .unwrap()
-            .kind(),
-        SourceKind::Global
-    );
-}
-
-#[test]
-fn vcs_read_only_presets_ship_in_compiled_defaults_and_stay_removable() {
-    let tree = TempTree::new();
-    // No user configuration beyond a model: the presets alone are effective.
-    tree.write("global/config.ron", r#"(version: 1, model: "test/model")"#);
-    let snapshot = tree.loader().load(&tree.request()).unwrap();
-    assert_eq!(
-        snapshot.grants().shell_prefixes(),
-        [
-            "git blame",
-            "git diff",
-            "git log",
-            "git show",
-            "git status",
-            "jj diff",
-            "jj log",
-            "jj op log",
-            "jj show",
-            "jj status",
-        ]
-    );
-    assert_eq!(
-        snapshot
-            .provenance()
-            .grant_shell_prefix("git blame")
-            .unwrap()
-            .kind(),
-        SourceKind::Compiled
-    );
-
-    // Presets are ordinary grants: a workspace layer removes one, a managed
-    // deny filters a whole family.
-    let tree = TempTree::new();
-    tree.write("global/config.ron", r#"(version: 1, model: "test/model")"#);
-    tree.write(
-        "work/.qq/config.ron",
-        r#"(version: 1, policy: (allow_shell_prefixes: [Remove("git diff")]))"#,
-    );
-    tree.write(
-        "managed/managed.ron",
-        r#"(version: 1, policy: (deny_shell_prefixes: ["jj"]))"#,
-    );
-    let request = tree.request();
-    tree.loader().grant_pending_trust(&request).unwrap();
-    let snapshot = tree.loader().load(&request).unwrap();
-    assert_eq!(
-        snapshot.grants().shell_prefixes(),
-        ["git blame", "git log", "git show", "git status"]
-    );
-}
-
-#[test]
-fn policy_grant_declarations_are_scoped_by_source_kind() {
-    let grants = r#"(version: 1, policy: (allow_tools: ["edit_file"]))"#;
-
-    // Remote configuration may never plant approval grants.
-    let remote = SourceIdentity::virtual_source(SourceKind::Remote, "remote test");
-    assert!(matches!(
-        document::Document::parse(grants, &remote),
-        Err(ConfigError::RemotePolicyGrantsForbidden { .. })
-    ));
-
-    // Grants are ordinary workspace configuration behind the trust flow.
+fn managed_only_policy_fields_are_scoped_by_source_kind() {
     let project = SourceIdentity::virtual_source(SourceKind::Project, "project test");
-    assert!(document::Document::parse(grants, &project).is_ok());
-
     // The managed-only constraint fields stay managed-only.
     let deny = r#"(version: 1, policy: (deny_tools: ["edit_file"]))"#;
     assert!(matches!(
@@ -2648,34 +2302,23 @@ fn policy_grant_declarations_are_scoped_by_source_kind() {
 }
 
 #[test]
-fn shell_env_layers_like_a_grant_and_builtin_preference_only_tightens() {
+fn builtin_preference_only_tightens() {
     let tree = TempTree::new();
     tree.write(
         "global/config.ron",
         r#"(
             version: 1,
-            policy: (shell_env: ["CARGO_HOME", "RUSTUP_HOME"], builtin_preference: off),
+            policy: (builtin_preference: off),
         )"#,
     );
     tree.write(
         "work/.qq/config.ron",
         r#"(
             version: 1,
-            policy: (shell_env: ["DATABASE_URL", Remove("RUSTUP_HOME")], builtin_preference: hint),
+            policy: (builtin_preference: hint),
         )"#,
     );
-    let request = tree.request();
-    // An env allowlist is authority: the workspace layer needs trust.
-    assert!(matches!(
-        tree.loader().load(&request),
-        Err(ConfigError::TrustRequired { .. })
-    ));
-    tree.loader().grant_pending_trust(&request).unwrap();
-    let snapshot = tree.loader().load(&request).unwrap();
-    assert_eq!(
-        snapshot.policy().shell_env(),
-        ["CARGO_HOME", "DATABASE_URL"]
-    );
+    let snapshot = tree.loader().load(&tree.request()).unwrap();
     // off (global) then hint (workspace): hint wins; a later `off` could not
     // loosen it back.
     assert_eq!(
@@ -2699,7 +2342,78 @@ fn shell_env_layers_like_a_grant_and_builtin_preference_only_tightens() {
 }
 
 #[test]
-fn rejects_invalid_policy_grant_declarations() {
+fn removed_keys_fail_to_load_naming_their_replacement() {
+    let origin = SourceIdentity::virtual_source(SourceKind::Global, "global test");
+    let message = |content: &str| match document::Document::parse(content, &origin) {
+        Err(ConfigError::Parse { message, .. }) => message,
+        other => panic!("expected a parse error for {content:?}, got {other:?}"),
+    };
+
+    let policy = message(r#"(version: 1, policy: (allow_shell_prefixes: ["cargo test"]))"#);
+    assert!(
+        policy.ends_with(
+            "; `allow_shell_prefixes` was removed in v0.1.10: Auto runs commands without \
+             grants and Ask asks every time; restrict commands with `deny_shell_prefixes` \
+             instead; delete the key"
+        ),
+        "{policy}"
+    );
+
+    let top_level = message(r#"(version: 1, reviewer_model: "openai/gpt-5.6")"#);
+    assert!(
+        top_level.ends_with(
+            "; `reviewer_model` was removed in v0.1.10 with the approval reviewer: Auto runs \
+             without one and Ask asks a human every call; delete the key"
+        ),
+        "{top_level}"
+    );
+
+    let profile = message(r#"(version: 1, profiles: {"fast": Profile(approval_delegate: on)})"#);
+    assert!(
+        profile.ends_with(
+            "; `approval_delegate` was removed in v0.1.10 with the approval reviewer: choose \
+             `approval_mode` auto or full to skip prompts, or ask to approve every call; \
+             delete the key"
+        ),
+        "{profile}"
+    );
+
+    for (key, document) in [
+        (
+            "allow_tools",
+            r#"(version: 1, policy: (allow_tools: ["edit_file"]))"#,
+        ),
+        (
+            "allow_hosts",
+            r#"(version: 1, policy: (allow_hosts: ["docs.rs"]))"#,
+        ),
+        (
+            "shell_env",
+            r#"(version: 1, policy: (shell_env: ["HOME"]))"#,
+        ),
+        (
+            "task_hosting",
+            r#"(version: 1, policy: (task_hosting: []))"#,
+        ),
+        (
+            "approval_delegate",
+            r#"(version: 1, approval_delegate: on)"#,
+        ),
+    ] {
+        let message = message(document);
+        let advice = REMOVED_KEYS
+            .iter()
+            .find_map(|(removed, advice)| (*removed == key).then_some(*advice))
+            .unwrap();
+        assert!(
+            message.ends_with(&format!("; `{key}` {advice}")),
+            "{key}: {message}"
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_policy_deny_declarations() {
     let origin = SourceIdentity::virtual_source(SourceKind::Managed, "managed test");
     let parse = |policy: &str| {
         document::Document::parse(&format!("(version: 1, policy: ({policy}))"), &origin)
@@ -2714,403 +2428,31 @@ fn rejects_invalid_policy_grant_declarations() {
         other => panic!("expected a parse error for {policy:?}, got {other:?}"),
     };
 
-    expect_message(r#"allow_tools: ["bad name"]"#, "ASCII");
-    expect_message(r#"shell_env: ["1BAD"]"#, "environment variable name");
-    expect_message(r#"shell_env: ["A-B"]"#, "environment variable name");
-    expect_message(r#"shell_env: ["A", "A"]"#, "duplicate");
     expect_message(r#"builtin_preference: loud"#, "loud");
-    expect_message(r#"allow_tools: [""]"#, "1-128");
-    expect_message(r#"allow_tools: ["mcp__executor"]"#, "mcp__<server>__<tool>");
+    expect_message(r#"deny_tools: [""]"#, "1-128");
+    expect_message(r#"deny_tools: ["mcp__executor"]"#, "mcp__<server>__<tool>");
     expect_message(
-        r#"allow_tools: ["mcp__executor__"]"#,
+        r#"deny_tools: ["mcp__executor__"]"#,
         "mcp__<server>__<tool>",
     );
-    expect_message(r#"allow_tools: ["edit_file", "edit_file"]"#, "duplicate");
-    expect_message(
-        r#"allow_tools: ["edit_file", Remove("edit_file")]"#,
-        "duplicate",
-    );
-    expect_message(r#"allow_shell_prefixes: [""]"#, "empty");
-    expect_message(r#"allow_shell_prefixes: [" cargo test"]"#, "whitespace");
-    expect_message(r#"allow_shell_prefixes: ["git\tstatus"]"#, "control");
+    expect_message(r#"deny_tools: ["edit_file", "edit_file"]"#, "duplicate");
+    expect_message(r#"deny_shell_prefixes: [""]"#, "empty");
+    expect_message(r#"deny_shell_prefixes: [" cargo test"]"#, "whitespace");
+    expect_message(r#"deny_shell_prefixes: ["git\tstatus"]"#, "control");
     expect_message(r#"deny_tools: ["bad name"]"#, "ASCII");
     expect_message(r#"deny_shell_prefixes: ["cargo", "cargo"]"#, "duplicate");
-    expect_message(r#"allow_hosts: ["Docs.rs"]"#, "lowercase");
-    expect_message(r#"allow_hosts: ["https://docs.rs"]"#, "lowercase");
-    expect_message(r#"allow_hosts: ["docs.rs:443"]"#, "lowercase");
-    expect_message(r#"allow_hosts: ["*.*.rs"]"#, "wildcard");
-    expect_message(r#"allow_hosts: ["a.*.rs"]"#, "wildcard");
-    expect_message(r#"allow_hosts: ["10.0.0.1"]"#, "IP address");
-    expect_message(r#"allow_hosts: [""]"#, "1-253");
+    expect_message(r#"deny_hosts: ["Docs.rs"]"#, "lowercase");
+    expect_message(r#"deny_hosts: ["https://docs.rs"]"#, "lowercase");
+    expect_message(r#"deny_hosts: ["docs.rs:443"]"#, "lowercase");
+    expect_message(r#"deny_hosts: ["*.*.rs"]"#, "wildcard");
+    expect_message(r#"deny_hosts: ["a.*.rs"]"#, "wildcard");
+    expect_message(r#"deny_hosts: ["10.0.0.1"]"#, "IP address");
+    expect_message(r#"deny_hosts: [""]"#, "1-253");
     expect_message(r#"deny_hosts: ["docs.rs", "docs.rs"]"#, "duplicate");
 
-    assert!(parse(r#"allow_tools: ["mcp__executor__execute", "edit_file"]"#).is_ok());
-    assert!(parse(r#"allow_shell_prefixes: ["cargo test -p qq"]"#).is_ok());
-    assert!(parse(r#"allow_hosts: ["docs.rs", "*.github.com", "localhost"]"#).is_ok());
-    assert!(parse(r#"deny_hosts: ["*.example.com"]"#).is_ok());
-}
-
-#[test]
-fn host_grants_layer_like_shell_prefixes_and_managed_denies_filter_overlaps() {
-    let tree = TempTree::new();
-    tree.write(
-        "global/config.ron",
-        r#"(version: 1, policy: (allow_hosts: ["docs.rs", "*.example.com", "crates.io"]))"#,
-    );
-    tree.write(
-        "work/.qq/config.ron",
-        r#"(version: 1, policy: (allow_hosts: ["*.github.com", Remove("crates.io")]))"#,
-    );
-    tree.write(
-        "managed/managed.ron",
-        r#"(version: 1, policy: (deny_hosts: ["api.example.com"]))"#,
-    );
-    let request = tree.request();
-    assert!(matches!(
-        tree.loader().load(&request),
-        Err(ConfigError::TrustRequired { .. })
-    ));
-    tree.loader().grant_pending_trust(&request).unwrap();
-    let snapshot = tree.loader().load(&request).unwrap();
-    assert_eq!(
-        snapshot.policy().allow_hosts(),
-        ["*.example.com", "*.github.com", "docs.rs"]
-    );
-    assert_eq!(snapshot.policy().deny_hosts(), ["api.example.com"]);
-    // The deny of one subdomain removes the wildcard grant that would cover
-    // it (the layer cannot subtract part of a wildcard); the runtime still
-    // refuses api.example.com itself whatever the grants say.
-    assert_eq!(snapshot.grants().hosts(), ["*.github.com", "docs.rs"]);
-    assert!(!snapshot.grants().is_empty());
-}
-
-#[test]
-fn promotes_grants_into_a_fresh_workspace_config() {
-    let tree = TempTree::new();
-    let loader = tree.loader();
-    let workspace = tree.path("work");
-
-    let first = loader
-        .promote_workspace_grant(&workspace, &WorkspaceGrant::Tool("edit_file".to_owned()))
-        .unwrap();
-    assert_eq!(first.outcome(), PromotionOutcome::Added);
-    assert!(first.path().ends_with(".qq/config.ron"));
-
-    let second = loader
-        .promote_workspace_grant(
-            &workspace,
-            &WorkspaceGrant::ShellPrefix("cargo test".to_owned()),
-        )
-        .unwrap();
-    assert_eq!(second.outcome(), PromotionOutcome::Added);
-
-    // Repeated promotion is idempotent and writes nothing.
-    let written = fs::read_to_string(tree.path("work/.qq/config.ron")).unwrap();
-    let repeat = loader
-        .promote_workspace_grant(&workspace, &WorkspaceGrant::Tool("edit_file".to_owned()))
-        .unwrap();
-    assert_eq!(repeat.outcome(), PromotionOutcome::AlreadyPresent);
-    assert_eq!(
-        fs::read_to_string(tree.path("work/.qq/config.ron")).unwrap(),
-        written
-    );
-
-    // Each write round-trips through the loader without needing `qq trust`:
-    // the promotion is the user's own decision, so its digest is trusted.
-    let snapshot = loader.load(&tree.request()).unwrap();
-    assert_eq!(snapshot.grants().tools(), ["edit_file"]);
-    assert_eq!(
-        snapshot.grants().shell_prefixes(),
-        [
-            "cargo test",
-            "git blame",
-            "git diff",
-            "git log",
-            "git show",
-            "git status",
-            "jj diff",
-            "jj log",
-            "jj op log",
-            "jj show",
-            "jj status",
-        ]
-    );
-}
-
-#[test]
-fn concurrent_loader_instances_preserve_distinct_workspace_promotions() {
-    let tree = TempTree::new();
-    let workspace = tree.path("work");
-    let start = Arc::new(std::sync::Barrier::new(3));
-
-    let tool_loader = tree.loader();
-    let tool_workspace = workspace.clone();
-    let tool_start = Arc::clone(&start);
-    let tool = std::thread::spawn(move || {
-        tool_start.wait();
-        tool_loader.promote_workspace_grant(
-            &tool_workspace,
-            &WorkspaceGrant::Tool("edit_file".to_owned()),
-        )
-    });
-    let shell_loader = tree.loader();
-    let shell_workspace = workspace.clone();
-    let shell_start = Arc::clone(&start);
-    let shell = std::thread::spawn(move || {
-        shell_start.wait();
-        shell_loader.promote_workspace_grant(
-            &shell_workspace,
-            &WorkspaceGrant::ShellPrefix("cargo test".to_owned()),
-        )
-    });
-    start.wait();
-
-    assert_eq!(
-        tool.join().unwrap().unwrap().outcome(),
-        PromotionOutcome::Added
-    );
-    assert_eq!(
-        shell.join().unwrap().unwrap().outcome(),
-        PromotionOutcome::Added
-    );
-    let content = fs::read_to_string(workspace.join(".qq/config.ron")).unwrap();
-    assert!(content.contains("edit_file"), "{content}");
-    assert!(content.contains("cargo test"), "{content}");
-}
-
-#[cfg(unix)]
-#[test]
-fn workspace_promotion_rejects_a_symlinked_lock_file() {
-    use sha2::Digest as _;
-
-    let tree = TempTree::new();
-    let workspace = fs::canonicalize(tree.path("work")).unwrap();
-    let digest = sha2::Sha256::digest(workspace.as_os_str().to_string_lossy().as_bytes());
-    let lock = tree
-        .path("data")
-        .join(format!("workspace-grant-{digest:x}.lock"));
-    let outside = tree.write("outside-lock", "do not follow");
-    std::os::unix::fs::symlink(outside, &lock).unwrap();
-
-    assert!(matches!(
-        tree.loader().promote_workspace_grant(
-            &workspace,
-            &WorkspaceGrant::Tool("edit_file".to_owned())
-        ),
-        Err(ConfigError::SymlinkSource { path }) if path == lock
-    ));
-    assert!(!workspace.join(".qq/config.ron").exists());
-}
-
-#[test]
-fn promotion_preserves_unrelated_content_and_existing_policy() {
-    let tree = TempTree::new();
-    let loader = tree.loader();
-    let workspace = tree.path("work");
-    tree.write(
-        "work/.qq/config.ron",
-        r#"(
-    // Keep this comment.
-    version: 1,
-    max_output_tokens: 9,
-    policy: (
-        allow_shell_prefixes: [
-            "git status",
-        ],
-    ),
-)"#,
-    );
-    let request = tree.request();
-    loader.grant_pending_trust(&request).unwrap();
-
-    loader
-        .promote_workspace_grant(
-            &workspace,
-            &WorkspaceGrant::ShellPrefix("cargo test".to_owned()),
-        )
-        .unwrap();
-    loader
-        .promote_workspace_grant(
-            &workspace,
-            &WorkspaceGrant::Tool("mcp__executor__execute".to_owned()),
-        )
-        .unwrap();
-
-    let content = fs::read_to_string(tree.path("work/.qq/config.ron")).unwrap();
-    assert!(content.contains("// Keep this comment."), "{content}");
-    assert!(content.contains("max_output_tokens: 9"), "{content}");
-    assert!(content.contains("\"git status\""), "{content}");
-
-    let snapshot = loader.load(&request).unwrap();
-    assert_eq!(snapshot.max_output_tokens(), 9);
-    assert_eq!(snapshot.grants().tools(), ["mcp__executor__execute"]);
-    assert_eq!(
-        snapshot.grants().shell_prefixes(),
-        [
-            "cargo test",
-            "git blame",
-            "git diff",
-            "git log",
-            "git show",
-            "git status",
-            "jj diff",
-            "jj log",
-            "jj op log",
-            "jj show",
-            "jj status",
-        ]
-    );
-}
-
-#[test]
-fn promotion_appends_to_single_line_lists() {
-    let tree = TempTree::new();
-    let loader = tree.loader();
-    tree.write(
-        "work/.qq/config.ron",
-        r#"(version: 1, policy: (allow_tools: ["write_file"]))"#,
-    );
-    let request = tree.request();
-    loader.grant_pending_trust(&request).unwrap();
-
-    loader
-        .promote_workspace_grant(
-            &tree.path("work"),
-            &WorkspaceGrant::Tool("edit_file".to_owned()),
-        )
-        .unwrap();
-
-    let content = fs::read_to_string(tree.path("work/.qq/config.ron")).unwrap();
-    assert!(
-        content.contains(r#"allow_tools: ["edit_file", "write_file"]"#),
-        "{content}"
-    );
-    let snapshot = loader.load(&request).unwrap();
-    assert_eq!(snapshot.grants().tools(), ["edit_file", "write_file"]);
-}
-
-#[test]
-fn promotion_is_refused_when_managed_policy_denies_the_grant() {
-    let tree = TempTree::new();
-    tree.write(
-        "managed/managed.ron",
-        r#"(version: 1, policy: (deny_tools: ["edit_file"], deny_shell_prefixes: ["cargo"]))"#,
-    );
-    let loader = tree.loader();
-    let workspace = tree.path("work");
-
-    assert!(matches!(
-        loader.promote_workspace_grant(&workspace, &WorkspaceGrant::Tool("edit_file".to_owned())),
-        Err(ConfigError::GrantDeniedByManaged {
-            rule: "deny_tools",
-            ..
-        })
-    ));
-    // Word-granularity overlap: the denied "cargo" covers "cargo test".
-    assert!(matches!(
-        loader.promote_workspace_grant(
-            &workspace,
-            &WorkspaceGrant::ShellPrefix("cargo test".to_owned()),
-        ),
-        Err(ConfigError::GrantDeniedByManaged {
-            rule: "deny_shell_prefixes",
-            ..
-        })
-    ));
-    assert!(
-        !tree.path("work/.qq/config.ron").exists(),
-        "a refused promotion must not write"
-    );
-
-    // Unrelated prefixes stay grantable under the same managed policy.
-    assert!(
-        loader
-            .promote_workspace_grant(
-                &workspace,
-                &WorkspaceGrant::ShellPrefix("git status".to_owned()),
-            )
-            .is_ok()
-    );
-
-    // Hosts: a managed wildcard deny refuses the apex's subdomains and any
-    // wildcard that overlaps it; the apex itself and other sites promote.
-    let tree = TempTree::new();
-    tree.write(
-        "managed/managed.ron",
-        r#"(version: 1, policy: (deny_hosts: ["*.example.com"]))"#,
-    );
-    let loader = tree.loader();
-    let workspace = tree.path("work");
-    for host in ["api.example.com", "*.example.com", "*.api.example.com"] {
-        assert!(
-            matches!(
-                loader.promote_workspace_grant(&workspace, &WorkspaceGrant::Host(host.to_owned())),
-                Err(ConfigError::GrantDeniedByManaged {
-                    rule: "deny_hosts",
-                    ..
-                })
-            ),
-            "{host}"
-        );
-    }
-    for host in ["example.com", "docs.rs"] {
-        assert!(
-            loader
-                .promote_workspace_grant(&workspace, &WorkspaceGrant::Host(host.to_owned()))
-                .is_ok(),
-            "{host}"
-        );
-    }
-    let written = fs::read_to_string(tree.path("work/.qq/config.ron")).unwrap();
-    assert!(written.contains("allow_hosts"), "{written}");
-    let snapshot = loader.load(&tree.request()).unwrap();
-    assert_eq!(snapshot.grants().hosts(), ["docs.rs", "example.com"]);
-}
-
-#[test]
-fn promotion_rejects_invalid_grants() {
-    let tree = TempTree::new();
-    let loader = tree.loader();
-    let workspace = tree.path("work");
-    for grant in [
-        WorkspaceGrant::Tool("bad name".to_owned()),
-        WorkspaceGrant::Tool("mcp__executor".to_owned()),
-        WorkspaceGrant::ShellPrefix(String::new()),
-        WorkspaceGrant::ShellPrefix("git\nstatus".to_owned()),
-    ] {
-        assert!(
-            matches!(
-                loader.promote_workspace_grant(&workspace, &grant),
-                Err(ConfigError::InvalidGrant { .. })
-            ),
-            "accepted {grant:?}"
-        );
-    }
-    assert!(!tree.path("work/.qq/config.ron").exists());
-}
-
-#[test]
-fn promotion_does_not_launder_pending_trust() {
-    let tree = TempTree::new();
-    let loader = tree.loader();
-    tree.write(
-        "work/.qq/config.ron",
-        r#"(version: 1, mcp: {"executor": Stdio(command: "./executor.sh")})"#,
-    );
-
-    // The untrusted MCP declaration stays pending: promotion writes the grant
-    // but must not grant trust for content the user never reviewed.
-    let promotion = loader
-        .promote_workspace_grant(
-            &tree.path("work"),
-            &WorkspaceGrant::Tool("edit_file".to_owned()),
-        )
-        .unwrap();
-    assert_eq!(promotion.outcome(), PromotionOutcome::Added);
-    assert!(matches!(
-        loader.load(&tree.request()),
-        Err(ConfigError::TrustRequired { .. })
-    ));
+    assert!(parse(r#"deny_tools: ["mcp__executor__execute", "edit_file"]"#).is_ok());
+    assert!(parse(r#"deny_shell_prefixes: ["cargo test -p qq"]"#).is_ok());
+    assert!(parse(r#"deny_hosts: ["docs.rs", "*.github.com", "localhost"]"#).is_ok());
 }
 
 #[test]
@@ -4384,18 +3726,15 @@ fn published_policy_key_lists_are_exactly_what_each_layer_rejects() {
     let mdm = SourceIdentity::virtual_source(SourceKind::Mdm, "docs-truth MDM layer");
     let remote = SourceIdentity::virtual_source(SourceKind::Remote, "docs-truth organization");
     let mut rejected = Vec::new();
-    let mut rejected_remotely = Vec::new();
     for name in POLICY_FIELD_NAMES {
         let value = match name {
             "max_output_tokens" => "1000",
             "goals" => "(max_runs: 1000)",
             "require_https" | "allow_custom_providers" | "allow_literal_secrets" => "true",
             "builtin_preference" => "hint",
-            "exposed_tools" | "allow_tools" | "deny_tools" => r#"["read_file"]"#,
-            "allow_shell_prefixes" | "deny_shell_prefixes" => r#"["cargo test"]"#,
-            "allow_hosts" | "deny_hosts" => r#"["docs.rs"]"#,
-            "shell_env" => r#"["CARGO_HOME"]"#,
-            "task_hosting" => "[]",
+            "exposed_tools" | "deny_tools" => r#"["read_file"]"#,
+            "deny_shell_prefixes" => r#"["cargo test"]"#,
+            "deny_hosts" => r#"["docs.rs"]"#,
             _ => r#"["openai"]"#,
         };
         let content = format!("(version: 1, policy: ({name}: {value}))");
@@ -4412,12 +3751,10 @@ fn published_policy_key_lists_are_exactly_what_each_layer_rejects() {
         match document::Document::parse(&content, &remote) {
             Ok(_) => {}
             Err(ConfigError::PolicyOutsideManaged { .. }) => {}
-            Err(ConfigError::RemotePolicyGrantsForbidden { .. }) => rejected_remotely.push(name),
             Err(other) => panic!("{name} from an organization: unexpected {other}"),
         }
     }
     assert_eq!(rejected, MANAGED_ONLY_POLICY_FIELD_NAMES);
-    assert_eq!(rejected_remotely, ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES);
 }
 
 #[test]
@@ -4431,7 +3768,6 @@ fn environment_variables_are_the_ones_from_process_env_reads() {
         "(version: 1)",
         "openai/gpt-5.6",
         "acme",
-        "off",
     ];
     let mut child = std::process::Command::new(std::env::current_exe().unwrap());
     child.args([
@@ -4453,10 +3789,11 @@ fn environment_variables_are_the_ones_from_process_env_reads() {
 }
 
 #[test]
-fn removed_jev_environment_variables_fail_by_name() {
+fn removed_environment_variables_fail_by_name() {
     // A deployment still launched with `QQ_JEV_CHECKPOINTS=enforce` (what
-    // `qq jev setup` used to print) must not silently lose its review.
-    for name in REMOVED_ENVIRONMENT_VARIABLES {
+    // `qq jev setup` used to print) or `QQ_APPROVAL_DELEGATE=on` must not
+    // silently lose the feature it asked for.
+    for (name, _) in REMOVED_ENVIRONMENT_VARIABLES {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -4483,10 +3820,20 @@ fn removed_environment_variable_child() {
     };
     let error = LoadRequest::from_process_env("/tmp", None).unwrap_err();
     assert!(
-        matches!(error, ConfigError::RemovedSetting(removed) if removed == name),
+        matches!(error, ConfigError::RemovedSetting { name: removed, .. } if removed == name),
         "{error}"
     );
-    assert!(error.to_string().contains(&name), "{error}");
+    let message = error.to_string();
+    assert!(message.contains(&name), "{message}");
+    if name == "QQ_APPROVAL_DELEGATE" {
+        assert_eq!(
+            message,
+            "QQ_APPROVAL_DELEGATE was removed in v0.1.10 with the approval reviewer: Auto runs \
+             without one and Ask asks a human every call; unset it"
+        );
+    } else {
+        assert_eq!(message, format!("{name} was removed with Jev; unset it"));
+    }
 }
 
 #[test]
@@ -4502,10 +3849,6 @@ fn environment_variables_child() {
     assert_eq!(request.explicit_content(), Some("(version: 1)"));
     assert_eq!(request.overrides().model(), Some("openai/gpt-5.6"));
     assert_eq!(request.overrides().organization(), Some("acme"));
-    assert_eq!(
-        request.overrides().approval_delegate(),
-        Some(ApprovalDelegateSetting::Off)
-    );
 }
 
 #[test]
@@ -4890,27 +4233,16 @@ fn unattended_load_ignores_untrusted_authority_without_recording_trust() {
     let tree = TempTree::new();
     tree.write(
         "global/config.ron",
-        r#"(version: 1, model: "openai/gpt-5.6", policy: (allow_shell_prefixes: ["cargo test"]))"#,
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
     );
     let strict = LoadRequest::new(tree.path("work"));
     let baseline = tree.loader().load(&strict).unwrap();
-    tree.write("work/.qq/config.ron", r#"(version: 1, model: "openai/untrusted", mcp: {"untrusted": Stdio(command: "never-start")}, policy: (allow_shell_prefixes: ["git push"], shell_env: ["SSH_AUTH_SOCK"]), max_output_tokens: 512)"#);
+    tree.write("work/.qq/config.ron", r#"(version: 1, model: "openai/untrusted", mcp: {"untrusted": Stdio(command: "never-start")}, max_output_tokens: 512)"#);
     let request = strict.clone().with_untrusted_project_config_ignored();
     let loader = tree.loader();
     let snapshot = loader.load(&request).unwrap();
     assert_eq!(snapshot.model(), baseline.model());
     assert!(snapshot.mcp_servers().is_empty());
-    assert_eq!(
-        snapshot.grants().shell_prefixes(),
-        baseline.grants().shell_prefixes()
-    );
-    assert!(
-        !snapshot
-            .policy()
-            .shell_env()
-            .iter()
-            .any(|name| name == "SSH_AUTH_SOCK")
-    );
     assert_eq!(snapshot.max_output_tokens(), 512);
     assert!(
         snapshot
@@ -4925,192 +4257,6 @@ fn unattended_load_ignores_untrusted_authority_without_recording_trust() {
         loader.load(&strict),
         Err(ConfigError::TrustRequired { .. })
     ));
-}
-
-fn task_hosting_document(workspace: &Path, owner: &str, credential: &str) -> String {
-    format!(
-        r#"(version:1, policy:(task_hosting:[(workspace:{:?}, owner:{owner:?}, repository:"qq", base_branch:"main", credential:{credential})]))"#,
-        workspace.to_string_lossy()
-    )
-}
-
-#[test]
-fn task_hosting_is_host_only_even_for_trusted_project_configuration() {
-    let tree = TempTree::new();
-    let content = task_hosting_document(&tree.path("work"), "owner", r#"Stored("github/work")"#);
-    for kind in [
-        SourceKind::Global,
-        SourceKind::Explicit,
-        SourceKind::Inline,
-        SourceKind::Managed,
-        SourceKind::Mdm,
-    ] {
-        let origin = SourceIdentity::virtual_source(kind, "host");
-        assert!(
-            document::Document::parse(&content, &origin).is_ok(),
-            "{kind:?}"
-        );
-    }
-    for kind in [
-        SourceKind::Project,
-        SourceKind::Compiled,
-        SourceKind::Runtime,
-        SourceKind::TrustState,
-    ] {
-        let origin = SourceIdentity::virtual_source(kind, "not host");
-        assert!(
-            matches!(
-                document::Document::parse(&content, &origin),
-                Err(ConfigError::TaskHostingOutsideHost { .. })
-            ),
-            "{kind:?}"
-        );
-    }
-    assert!(matches!(
-        document::Document::parse(
-            &content,
-            &SourceIdentity::virtual_source(SourceKind::Remote, "organization")
-        ),
-        Err(ConfigError::RemotePolicyGrantsForbidden { .. })
-    ));
-    tree.write("work/.qq/config.ron", &content);
-    assert!(matches!(
-        tree.loader().load(&tree.request()),
-        Err(ConfigError::TaskHostingOutsideHost { .. })
-    ));
-    assert!(matches!(
-        tree.loader().grant_pending_trust(&tree.request()),
-        Err(ConfigError::TaskHostingOutsideHost { .. })
-    ));
-}
-
-#[test]
-fn task_hosting_layers_replace_revoke_and_preserve_workspace_provenance() {
-    let tree = TempTree::new();
-    // Other machines' or offline workspaces must not block this config load.
-    let workspace = tree.path("offline/project");
-    assert!(!workspace.exists());
-    tree.write(
-        "global/config.ron",
-        &task_hosting_document(&workspace, "first", r#"Stored("github/work")"#),
-    );
-    let snapshot = tree.loader().load(&tree.request()).unwrap();
-    let grants = snapshot.policy().task_hosting();
-    assert_eq!(grants.len(), 1);
-    assert_eq!(grants[0].workspace(), workspace);
-    assert_eq!(grants[0].owner(), "first");
-    assert_eq!(grants[0].repository(), "qq");
-    assert_eq!(grants[0].base_branch(), "main");
-    assert_eq!(
-        grants[0].credential(),
-        SecretRef::Stored("github/work".into())
-    );
-    assert_eq!(
-        snapshot
-            .provenance()
-            .task_hosting(&workspace)
-            .unwrap()
-            .kind(),
-        SourceKind::Global
-    );
-    tree.write(
-        "override.ron",
-        &task_hosting_document(&workspace, "second", r#"Stored("github/other")"#),
-    );
-    let request = tree.request().with_explicit_path(tree.path("override.ron"));
-    let snapshot = tree.loader().load(&request).unwrap();
-    assert_eq!(snapshot.policy().task_hosting().len(), 1);
-    assert_eq!(snapshot.policy().task_hosting()[0].owner(), "second");
-    assert_eq!(
-        snapshot
-            .provenance()
-            .task_hosting(&workspace)
-            .unwrap()
-            .kind(),
-        SourceKind::Explicit
-    );
-    tree.write(
-        "managed/managed.ron",
-        "(version:1, policy:(task_hosting:[]))",
-    );
-    let snapshot = tree.loader().load(&request).unwrap();
-    assert!(snapshot.policy().task_hosting().is_empty());
-    assert!(snapshot.provenance().task_hosting(&workspace).is_none());
-}
-
-#[test]
-fn task_hosting_rejects_unsafe_destinations_branches_and_credential_sources() {
-    let tree = TempTree::new();
-    let origin = SourceIdentity::virtual_source(SourceKind::Global, "host");
-    let valid = task_hosting_document(&tree.path("work"), "owner", r#"Stored("github/work")"#);
-    for credential in [
-        r#"Env("GITHUB_TOKEN")"#,
-        r#"Value("private-token-material")"#,
-        r#"Stored("")"#,
-        r#"Stored("Uppercase")"#,
-        r#"Stored("github/work secret")"#,
-        r#"Stored("github//work")"#,
-        r#"Stored("github/../work")"#,
-    ] {
-        let content = task_hosting_document(&tree.path("work"), "owner", credential);
-        let error = document::Document::parse(&content, &origin).unwrap_err();
-        assert!(!error.to_string().contains("private-token-material"));
-    }
-    for (from, to) in [
-        (r#"owner:"owner""#, r#"owner:"owner/other""#),
-        (r#"repository:"qq""#, r#"repository:"../qq""#),
-        (r#"base_branch:"main""#, r#"base_branch:"--all""#),
-        (r#"base_branch:"main""#, r#"base_branch:"refs/heads/main""#),
-        (r#"base_branch:"main""#, r#"base_branch:"a..b""#),
-        (r#"base_branch:"main""#, r#"base_branch:"a.lock""#),
-        (r#"base_branch:"main""#, r#"base_branch:"HEAD""#),
-    ] {
-        assert!(
-            document::Document::parse(&valid.replace(from, to), &origin).is_err(),
-            "{to}"
-        );
-    }
-    for workspace in [PathBuf::from("relative"), tree.path("work/../other")] {
-        assert!(
-            document::Document::parse(
-                &task_hosting_document(&workspace, "owner", r#"Stored("github/work")"#),
-                &origin
-            )
-            .is_err()
-        );
-    }
-    let grant = format!(
-        r#"(workspace:{:?},owner:"owner",repository:"qq",base_branch:"main",credential:Stored("github/work"))"#,
-        tree.path("work").to_string_lossy()
-    );
-    for count in [2, 257] {
-        let repeated = std::iter::repeat_n(grant.as_str(), count)
-            .collect::<Vec<_>>()
-            .join(",");
-        assert!(
-            document::Document::parse(
-                &format!("(version:1,policy:(task_hosting:[{repeated}]))"),
-                &origin
-            )
-            .is_err()
-        );
-    }
-}
-
-#[test]
-fn task_hosting_destination_changes_are_part_of_authority_digest() {
-    let tree = TempTree::new();
-    let origin = SourceIdentity::virtual_source(SourceKind::Global, "host");
-    let first = task_hosting_document(&tree.path("work"), "first", r#"Stored("github/work")"#);
-    let second = task_hosting_document(&tree.path("work"), "second", r#"Stored("github/work")"#);
-    let first = document::Document::parse(&first, &origin).unwrap();
-    let second = document::Document::parse(&second, &origin).unwrap();
-    assert_ne!(
-        first.sensitive_digest().unwrap(),
-        second.sensitive_digest().unwrap()
-    );
-    let encoded = ron::to_string(&first).unwrap();
-    assert_eq!(document::Document::parse(&encoded, &origin).unwrap(), first);
 }
 
 #[test]

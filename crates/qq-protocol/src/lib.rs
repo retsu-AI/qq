@@ -56,25 +56,24 @@ pub use plan::{
 };
 pub use qq_reasoning::{ReasoningEffort, ReasoningEvent, ReasoningKind};
 pub use sessions::{
-    AccountingTotal, ApprovalDecision, ApprovalDelegate, ApprovalEscalation, ApprovalGrant,
-    ApprovalMode, ApprovalPreview, ApprovalResolution, AuditOutcome, AuditRecord, BudgetExhaustion,
-    BudgetLimitKind, COMMAND_ROUTES, CapabilitySupport, ChildAuthority, CommandOutcome,
-    CommandReceipt, CommandRequest, ContentHash, ContentHashError, ContextSourceOutcome,
-    ContextSourceRecord, CursorError, DEFAULT_OUTPUT_REPAIR_TURNS, DelegateIdentity, EditPreview,
-    EventCursor, FetchPreview, FinalOutput, GenerationCapabilities, GuidanceIdentity, GuidanceKind,
-    InstructionHash, InstructionHashError, MAX_INCLUDED_SESSIONS, MAX_OUTPUT_ERROR_BYTES,
-    MAX_OUTPUT_REPAIR_TURNS, MAX_OUTPUT_SCHEMA_BYTES, MAX_OUTPUT_SCHEMA_DEPTH,
-    MAX_OUTPUT_SCHEMA_VALUES, MAX_PENDING_HOLDS, MessageRole, MessageSnapshot, MessageState,
-    ModelCatalogRequest, ModelDescriptor, ModelPricing, ModelPricingTier, ModelSelection,
-    OutputContract, PendingApprovalPreview, PendingHold, PromptCacheCapabilities, PromptVersion,
-    ProviderRequestShapeIdentity, ProviderRequestShapeVersion, Question, QuestionPreview,
-    ResolvedModel, ResolvedModelVersion, RunActivity, RunFailure, RunLimits, RunOrigin, RunOutcome,
-    RunPause, RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting, SessionCommand,
-    SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionPurpose, SessionSnapshot,
-    SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict, SideQuestionSnapshot,
-    SideQuestionState, SnapshotRequest, SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage,
-    ToolCallDisplay, ToolCallSnapshot, ToolCallState, ToolErrorKind, ToolExposure,
-    WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
+    AccountingTotal, ApprovalDecision, ApprovalMode, ApprovalPreview, ApprovalResolution,
+    AuditOutcome, AuditRecord, BudgetExhaustion, BudgetLimitKind, COMMAND_ROUTES,
+    CapabilitySupport, ChildAuthority, CommandOutcome, CommandReceipt, CommandRequest, ContentHash,
+    ContentHashError, ContextSourceOutcome, ContextSourceRecord, CursorError,
+    DEFAULT_OUTPUT_REPAIR_TURNS, EditPreview, EventCursor, FetchPreview, FinalOutput,
+    GenerationCapabilities, GuidanceIdentity, GuidanceKind, InstructionHash, InstructionHashError,
+    MAX_INCLUDED_SESSIONS, MAX_OUTPUT_ERROR_BYTES, MAX_OUTPUT_REPAIR_TURNS,
+    MAX_OUTPUT_SCHEMA_BYTES, MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MAX_PENDING_HOLDS,
+    MessageRole, MessageSnapshot, MessageState, ModelCatalogRequest, ModelDescriptor, ModelPricing,
+    ModelPricingTier, ModelSelection, OutputContract, PendingApprovalPreview, PendingHold,
+    PromptCacheCapabilities, PromptVersion, ProviderRequestShapeIdentity,
+    ProviderRequestShapeVersion, Question, QuestionPreview, ResolvedModel, ResolvedModelVersion,
+    RunActivity, RunFailure, RunLimits, RunOrigin, RunOutcome, RunPause, RunPromptIdentity,
+    RunSnapshot, RunStatus, SessionAccounting, SessionCommand, SessionCommandKind, SessionEvent,
+    SessionEventEnvelope, SessionPurpose, SessionSnapshot, SessionStatus, SessionSummary,
+    ShellCommandPreview, ShellVerdict, SideQuestionSnapshot, SideQuestionState, SnapshotRequest,
+    SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallSnapshot,
+    ToolCallState, ToolErrorKind, ToolExposure, WorkspaceSnapshot, WorkspaceSummary,
 };
 
 mod workspaces;
@@ -82,7 +81,7 @@ pub use workspaces::{
     MAX_WORKSPACE_PAGE, WorkspaceCatalog, WorkspaceCatalogCursor, WorkspaceCatalogRequest,
 };
 
-pub const PROTOCOL_VERSION: u16 = 40;
+pub const PROTOCOL_VERSION: u16 = 41;
 
 /// SSE control frame requesting a fresh snapshot after journal expiry.
 pub const SNAPSHOT_REQUIRED_SSE_EVENT: &str = "snapshot_required";
@@ -96,7 +95,7 @@ pub const MAX_TURN_RETRIES: u16 = 5;
 /// Slash commands owned by interactive clients rather than the shared
 /// runtime. Keeping this vocabulary in the transport-neutral protocol avoids
 /// a client/runtime drift where one side forwards a name the other reserves.
-pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 28] = [
+pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 27] = [
     "/goal",
     "/btw",
     "/ask",
@@ -107,7 +106,6 @@ pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 28] = [
     "/models",
     "/profile",
     "/approval",
-    "/delegate",
     "/effort",
     "/skills",
     "/sessions",

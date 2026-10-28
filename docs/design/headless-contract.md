@@ -73,7 +73,6 @@ Line references are approximate anchors, not stable identifiers.
 ```sh
 qq run [--workspace PATH] [--session ID]
        [--approval read-only|ask|auto|full] [--profile NAME]
-       [--allow-tool NAME]... [--allow-shell PREFIX]... [--allow-host HOST]...
        [--steer-stdin]
        [--timeout-seconds N] [--max-turns N] [--max-cost-usd VALUE]
        [--correlation KEY=VALUE]... [--output-schema PATH] [--output-repair-turns N]
@@ -242,19 +241,17 @@ a gateway that meters spend treats the gateway's record as authoritative.
 Approval classification uses the catalog effect class (`crates/qq-core/src/approval.rs`):
 
 - `read-only`: read-only tools execute; every mutating, shell, or external
-  call is **denied** before a request exists. `--allow-*` never fires.
+  call is **denied** before a request exists.
 - `ask`: reads execute; every call requiring explicit human approval is
-  denied immediately. Allowlists and reviewer models cannot authorize it.
+  denied immediately.
 - `auto` (default): everything executes except the fixed stops (force-push,
   `sudo`, `rm -r` of `/` or home, credential files, and similar), which are
-  denied. No grant lifts a stop.
-- `full`: everything executes; grants are redundant.
+  denied.
+- `full`: everything executes.
 
-`fetch` follows the ladder with a host grant: `--allow-host docs.rs` (or
-`*.suffix`) answers a held `fetch` to that host with a session `host`
-grant; `read-only` denies it and `full` runs it. Private, link-local,
-metadata, and managed-denied hosts are refused under every mode, including
-`full`.
+Managed `deny_shell_prefixes` are denied under every mode.
+`fetch` follows the ladder; private, link-local, metadata, and
+managed-denied hosts are refused under every mode, including `full`.
 
 `ask_user` is outside this ladder: it executes nothing and is held under
 every mode for an answer. Headless has no answerer, so the run ends
@@ -263,19 +260,12 @@ approval timeout or fabricating an answer; a supervisor resumes the session
 with the answer as the next prompt. A spawned child's question is declined
 on the spot so the child proceeds on its own judgement.
 
-`--allow-tool` and `--allow-shell` therefore **widen** what a held call may
-do; they are not an allowlist that narrows the catalog. Configuration
-`policy.allow_tools` and `policy.allow_shell_prefixes` also declare grants.
-Managed `policy.deny_tools` and `policy.deny_shell_prefixes` filter those
-grants; they do not remove tools from the catalog or prohibit an otherwise
-approved call (`crates/qq-config/src/document.rs`, `resolve_policy_grants`).
 Choose `qq run --profile <name>` to select a pre-compiled profile/pack catalog.
 Optional `policy.exposed_tools` narrows that catalog further: absent means no
 additional restriction, `[]` exposes no tools, and lists intersect across
 configuration layers. For example, `exposed_tools: ["read_file", "search"]`
-exposes only those tools even under `--approval full`. A grant cannot restore
-a hidden tool. Restricting exposure requires no workspace trust; grants in
-the same document still require their ordinary trust approval.
+exposes only those tools even under `--approval full`. Restricting exposure
+requires no workspace trust.
 
 `config check` validates exact built-in names and MCP name syntax without
 discovering tools. Compilation checks MCP membership among the servers
@@ -291,7 +281,8 @@ peers remain available.
 
 Built-in file tools are
 contained to the workspace through capability-scoped file handles; the `shell`
-tool is **not** contained. Isolation is the supervisor's job.
+tool is **not** contained: it runs in the checkout as the invoking user, with
+that user's environment and network. Isolation is the supervisor's job.
 
 ### Run Limits
 

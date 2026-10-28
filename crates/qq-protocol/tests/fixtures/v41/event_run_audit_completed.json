@@ -1,0 +1,29 @@
+{
+  "cursor": {
+    "store_id": "01010101010101010101010101010101",
+    "workspace_id": "02020202020202020202020202020202",
+    "sequence": 24
+  },
+  "session_id": "03030303030303030303030303030303",
+  "run_id": "04040404040404040404040404040404",
+  "caused_by": "07070707070707070707070707070707",
+  "occurred_at_ms": 1700000000000,
+  "event": {
+    "type": "run_audit_completed",
+    "run_id": "04040404040404040404040404040404",
+    "audit": {
+      "outcome": "revised",
+      "findings": [
+        "src/auth.rs still redirects to /login"
+      ],
+      "revisions": 0,
+      "usage": {
+        "input_tokens": 900,
+        "cache_read_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 40
+      },
+      "estimated_cost_usd_nanos": 1200
+    }
+  }
+}

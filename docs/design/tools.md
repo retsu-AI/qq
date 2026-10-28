@@ -12,325 +12,28 @@ tool layer that corrupts a checkout or loses history is a failure regardless
 of latency, but every safety mechanism here is chosen to avoid long-held
 locks, avoidable round trips, and interactive ceremony.
 
-## Scoped task Git operations
+## Where Commands Run
 
-Auto root tasks can commit through a fixed QQ helper owned by the independent
-command worker. The model supplies the commit message. The coordinator selects
-changed files, a private Git repository and `qq/task/<task-run>` branch. It
-captures the source commit before importing task bytes, retains an immutable
-import baseline across publication, and excludes unchanged user edits. An
-unborn or unresolved source HEAD leaves local file work available without
-commit authority. Source Git refs, configuration and index are not modified.
+`shell` and `exec` run in the session's working directory, which is the
+user's checkout, as the user, with the server process's full environment, the
+host network and the real HOME. QQ does not copy the workspace, publish edits
+back, isolate the network, or apply an operating-system sandbox; built-in
+edits and shell commands see the same files, and edits land immediately.
+Safety comes from the approval mode, the fixed stops (§ Fixed Stops), managed
+denies, and a snapshot before each run's first change (`qq undo`). Stronger
+isolation means running QQ inside a container, VM or dedicated account.
 
-The helper runs from a private pinned copy of QQ, with fixed Git plumbing,
-no hooks, filters, signing, credential helpers or transport. Per-call intent
-binds the source base, files and resulting commit before ref installation.
-Recovery observes that intent and installed ref before proceeding. A confirmed
-finished helper can recover its typed result from the matching private receipt
-when stdout was lost. Unconfirmed or lost worker execution remains fenced.
-
-This helper is trusted host code, rather than an arbitrary task command. It
-uses host filesystem/resource authority with a durable deadline and native
-process cleanup. Manifest, file and pack sizes are bounded, but these are not
-an operating-system peak-memory quota on Git. Sandboxed task commands retain
-their native filesystem and resource enforcement.
-
-## Native filesystem restriction primitive
-
-Trusted embedding hosts can attach `NativeFilesystem` to a `NativeCommand`.
-Its explicit read-only and read-write directory grants include captured native
-identities; grant replacement is refused. The request identity includes these
-grants, so retrying a call cannot widen its authority. Linux pins the granted
-directories and builds a private mount tree in the existing trusted
-PID-namespace helper. It reopens inputs in that namespace and checks them
-against the held descriptors, mounts read-only inputs read-only, then detaches
-the old host root. Landlock additionally limits file-content access. Scripts
-and children inherit both boundaries. The coordinator and independent worker
-retain their own authority.
-
-The runtime skeleton is a private 4 MiB tmpfs with 4,096 inodes. It contains
-only explicit directory mounts, runtime aliases into that tree, private procfs
-for helper startup, a verified Linux discard device at `/dev/null`, and a
-message-queue filesystem belonging to this execution's private IPC namespace.
-Metadata changes outside writable roots are denied. Nested mounts are not
-implicitly imported; their roots need explicit grants. The held working
-directory's identity must survive reconstruction. Frozen PATH values remain
-unchanged; aliases provide access only to the already mapped tree.
-
-Only the trusted setup helper retains user-namespace capabilities while
-constructing this tree. Before payload execution it drops capabilities and
-sets no-new-privileges. The payload root sits below the detached namespace
-root, which makes Linux reject further user-namespace creation and prevents
-regaining mount authority to undo read-only mounts. Setup failures return a
-bounded refusal before the payload starts.
-
-Linux startup retains namespace identity capture through cancellation or deadline
-expiry, with at most two seconds of extra identity-handshake time for cleanup.
-The grace never authorizes payload execution: an expired request is refused
-before releasing the gate. Once identity is pinned, setup and refusal reporting
-remain interruptible. A helper that never supplies
-its identity leaves cleanup unconfirmed and stops further worker admission.
-
-This path requires fully enforced Landlock ABI 6. Where pathname Unix socket
-restrictions are available, an additional Landlock rule denies host socket
-connections. Otherwise a seccomp filter denies creation of addressable Unix
-sockets and datagram pairs, while preserving connected stream and
-sequence-packet pairs (including close-on-exec and nonblocking variants).
-These connected pairs cannot be retargeted to host services. The filter also denies io_uring entry points,
-which could otherwise create sockets outside socket(2). On this older-kernel
-path, local abstract Unix listeners are unavailable; subprocess stream-pair
-communication still works, including Rust's fork/exec startup channel.
-Unsupported required enforcement and unimplemented platform backends refuse
-execution. The safe Rust `landlock` and `seccompiler`
-dependencies supply the kernel interfaces.
-
-On Linux, macOS and Windows, the binary creates detached task scopes for ordinary Auto
-runs and their children. Built-ins use the private task tree; native commands receive its
-filesystem, network and resource scope. Configuration is loaded from the
-source project. Completed root runs publish checked file changes after their
-commands and children drain; failed or interrupted work stays private.
-Unsupported requested native restrictions fail closed. Default Auto uses the native workspace-write backend, with broad host reads.
-No fixed per-command resource quota or cgroup delegation is required by
-default. Windows uses a restricted caller token and owned jobs. Authorized network egress, credential
-brokering, per-task aggregate resource budgets and concurrent source writers still require further work.
-Broad reads include the existing home and installed toolchains; they do not
-provide credential-file privacy. Explicit narrow embeddings retain granted-only reads.
-
-Trusted embedding hosts can import an explicit file selection with
-`TaskWorkspace::import` with a `TaskWorkspaceSource` captured from the compiled
-source plan before compiling the task runtime. The task record retains that plan’s configured pack protections and
-restores them when publishing outputs. The importer copies current
-bytes into fresh files in a new detached directory, bounds total logical bytes
-and entries (including generated parent directories), and refuses symlinks,
-reparse points, multiply linked files, special files and QQ/Git trust
-configuration. Parent traversal uses directory handles without following links.
-It checks held file identity, size and timestamps before and after each copy,
-and rejects observed source changes; this is not an atomic multi-file snapshot.
-Import does not execute Git, hooks or filters. Failed imports remove their new
-directory; an existing destination is never overwritten.
-
-The host compiles built-in tools against this detached path and uses its
-captured directory grant for native commands. Both paths then see the same task
-files. Task files persist after the import handle is dropped. After all task
-processes and children stop, `TaskWorkspace::publish` can return selected outputs
-to the source. It checks every output and expected source version before
-installing changes, rejects links and trust paths, and preserves unrelated
-source edits. Installs are atomic per file; later failures report earlier
-applies, and a saved baseline recognizes already-installed bytes on retry.
-The shared writer rechecks source bytes after staging and creates Unix temporary
-files with mode `0600`. On Windows, staging denies shared opens until it installs
-the destination access list (or a user-only list for a new file); the replacement
-protects that list from broader parent inheritance.
-A kernel lock at `.qq/task-publication.lock` serializes QQ publishers across
-server processes. Other editors need not honor that lock, so apply-time checks
-detect observed races rather than providing a filesystem-wide transaction.
-Serialized task records contain source authority and belong in trusted storage
-outside the writable task tree. The embedding example exercises the import,
-session edit and publication path.
-
-The binary supplies `SessionRuntimeOptions.task_workspaces` when it uses the
-independent worker. Auto runs import regular project files into a private task
-tree, respecting project ignore files and excluding trust configuration. Built-in
-tools and native commands share that tree; configuration still comes from the
-logical source project. Explicit file attachments are resolved through the source
-project capability with their normal size and hash checks. Editable attachments
-are copied even when ignored; protected configuration is attached as context
-without becoming writable task configuration. Task preparation observes
-cancellation and deadlines while waiting for filesystem capacity, enumerating
-directories and copying each bounded file chunk. Interrupted imports remove
-their partial private tree before settlement. Restored goal trees adopt the
-current host's file/byte ceilings; a tighter ceiling can refuse publication
-while retaining the private edits.
-Commands preserve HOME and normal installed-tool configuration and put temporary
-files in the task directory. Credential-like environment names require an
-explicit environment grant. The default filesystem policy reads host-readable
-files and confines writes to the task tree, with protected read-only carveouts.
-Linux/macOS request isolated shell networking; Windows uses host networking.
-Unsupported explicitly requested restrictions refuse execution. Native Auto
-commands and write children need neither command-name approval nor a reviewer.
-Ask and Read-only retain their own rules.
-
-Task traversal reads bounded regular ignore files through directory capabilities;
-special files and symlinks cannot block ignore loading. New ignored output files
-are included in publication. New generated directories (`target`, `node_modules`,
-`dist`, `build`, `.venv`, `__pycache__`, `.git`) and the private task home remain
-excluded from automatic publication, while imported source paths remain selected.
-
-Completed runs publish after tools and children drain. Publication reloads trusted
-source configuration and retains both imported and current configured-pack
-protections; a newly protected output refuses publication. Waiting for filesystem
-capacity remains cancellable until publication is authorized. After preflight, a
-short store transaction checks committed cancellation and current session and
-ancestor permissions, then records publication authorization. Cancellation before
-that decision preserves the private edits. After authorization, installation
-finishes and settlement retains its actual outcome rather than relabeling it as
-cancelled. File installation remains atomic per file; an I/O failure can report
-partially applied outputs. A coordinator restart during publication does not
-attest task completion. Failed work retains the private task tree.
-Completion checks acquire the source workspace exclusion before importing
-the published artifact, including ignored paths from the validated publication
-record. They copy current source bytes, preserve source deletions and current
-protections, and do not require or reuse the old private tree. They execute
-through the same durable worker; their file
-changes are not published. Successive goal-origin runs reuse the same persisted
-private tree, retaining caches and unpublished files; ordinary prompts do not
-revive that goal tree. Compaction does not create task copies. Full retains host
-authority.
-
-Recovery of a running completion check restores its persisted run-bound scope
-and validates both source and task directory identities before accepting the
-worker result. A missing or replaced bound task never falls back to broader
-source authority; cancellation, budgets and unknown-execution holds still apply.
-Unbound Full and Ask checks recover the original worker's terminal result without
-requiring a restricted scope; recovery never submits replacement execution.
-
-Goal work retains its private tree across server restart without replaying the
-original command or resetting its goal budget. Task output disk usage remains
-unbounded and ordinary non-goal task continuation is unfinished. Source symlinks
-are omitted and hardlinked regular inputs are refused. Authenticated external
-operations require explicit credential authority; broad filesystem reads must
-not be advertised as secret isolation.
-
-Embedding hosts register immutable task authority through
-`SessionRuntimeOptions.native_scopes`. A scope names the captured task workspace,
-explicit read-only roots, native network authority and resource limits. Approved
-shell/exec calls attach those limits to their durable command request; the
-workspace is their only writable filesystem root. Built-in mutation still uses
-the same opened workspace. Missing command services never cause scoped shell
-calls to use the local host fallback. Other workspaces and replaced task roots
-are refused before loading project configuration, then the opened workspace is
-validated again afterward. Side questions resolve an active run's trusted task
-record and inspect its private edits using the same identity checks, while
-configuration still comes from the source project. Missing task records and
-replaced roots are refused; an Auto run still preparing its task returns busy
-instead of inspecting the source project. Scoped goal
-completion checks use the durable native command service with the same registered
-filesystem, network and resource limits. Their invocation and owner identity are
-persisted before submission, and their result before goal settlement. Exact check
-authorization remains separate from ordinary shell grants. Exit, timeout and
-cancellation are typed worker evidence; output text cannot attest success. Missing
-services refuse the check instead of using the legacy host launcher. On restart,
-QQ observes the original worker journal without resubmitting the command or
-renewing check consent. Live checks retain workspace exclusion and wake the goal
-when their worker finishes. Worker observations remain retained until goal/run
-settlement commits. Recovery saves the terminal tool result and its original goal
-in one transaction before acknowledging the worker. Cancellation, expired
-budgets and edited goals still take precedence. Unavailable or replaced workers,
-changed task roots, and missing terminal evidence retain the explicit interrupted
-check hold; legacy host checks still require manual recovery.
-
-Registrations persist in session-store metadata before recovery or scheduling.
-An empty registration list restores them on restart. Additional task roots may
-be registered; an existing root's authority cannot be silently changed. Every
-child session uses the same store-owned restrictions regardless of its model
-profile or approval grants. Corrupt or empty stored scope records refuse startup.
-The metadata has a byte bound and the registry has a capacity bound. Store
-schema 60 prevents older runtimes from ignoring these restrictions. Scope
-retirement and reconfiguration are not implemented. Static registration
-remains an opt-in host API; the binary's default Auto instead prepares a
-task workspace per run through `SessionRuntimeOptions.task_workspaces`
-(below).
-
-`NativeNetwork::Isolated` separately requests a Linux network namespace with
-no host interfaces, plus Landlock restrictions on pathname and abstract Unix
-sockets. It works with host filesystem access or explicit file-content grants.
-The trusted helper enables loopback inside the new namespace before dropping
-its setup capabilities, so a command and its descendants can run local test
-servers. Host loopback services remain unreachable; authorized external egress
-still needs implementation. Pipe and unnamed socket-pair IPC remain usable.
-The helper closes ambient inherited descriptors before
-spawning any payload, including unrestricted payloads; only standard streams
-and the helper's owned launch descriptors survive the cleanup, with helper
-handles closed on payload exec. Network authority is part of the persisted
-request identity. Unsupported backends refuse isolation explicitly.
-
-
-A private root also gets a new IPC namespace. Host System V shared memory,
-semaphores and message queues are outside that namespace. The helper mounts
-only the new namespace's message-queue filesystem at `/dev/mqueue` and grants
-its private operations in Landlock. Host message-queue mounts are refused,
-including read-only grants: receiving a message mutates a queue independently
-of mount write permissions.
-
-Before spawning the payload, the single-threaded helper installs an inherited
-seccomp filter through the safe `seccompiler` interface. Direct kernel-keyring
-calls, BPF and io_uring are denied. Socket creation permits only Unix, IPv4,
-IPv6 and netlink families, still subject to the separate network policy; this
-excludes kernel crypto/key consumers and other host transports. Ioctls permit
-only terminal queries, descriptor settings and file cloning, preventing filesystem-key
-commands through ordinary file descriptors. x32 syscalls are denied; other
-ABI mismatches terminate the payload. Filter installation failure refuses
-execution before model-controlled code runs. The native filter supports
-little-endian x86_64, aarch64 and riscv64; other Linux architectures explicitly
-refuse private execution.
-
-These restrictions block host kernel credential interfaces. They do not broker
-authenticated Git/hosting operations or sanitize credentials in explicitly
-readable files and supplied environment values; those remain required before
-Auto enablement.
-
-`NativeResources::Limited` carries explicit memory, native-task and CPU-bandwidth
-limits. Linux uses one cgroup v2 per invocation beneath
-`CommandLauncher.cgroup_root`. The binary obtains a delegated scope from the
-existing systemd user manager, using trusted system executables and the host
-user bus. It moves the worker into a supervisor leaf and enables cpu, memory
-and pids controllers in a separate tasks subtree. Embedding hosts may supply
-their own delegated root. QQ does not modify service-manager configuration or
-seek elevated privileges. Root identities are checked before use; a limited
-request without usable delegation is refused.
-
-Linux default Auto does not request these cgroup quotas. They remain available
-for explicitly limited commands on hosts with usable delegation; ordinary Auto
-startup and execution do not depend on resource delegation succeeding.
-
-All limits are installed and read back before launch. The trusted PID-1 helper
-joins by writing zero to a held membership descriptor before spawning the
-payload, then closes that descriptor. Descendants inherit the group. Swap is
-disabled for the group, OOM kills the whole group, and real-time scheduling
-privileges are removed. Limited execution requires the private filesystem root
-and cannot expose writable cgroup mounts. Cleanup is awaited after namespace
-exit; empty groups left by a dead owner are reclaimed on subsequent admission.
-
-Resource scope is required in the persisted command identity, so a retry cannot
-raise limits or remove them. Other native adapters explicitly refuse limited
-execution until implemented. Linux applies both invocation and worker-fleet
-ceilings; per-task aggregate budgets and hard writable disk quotas remain unfinished.
-The native resource test uses the production delegation bootstrap and exercises
-thread exhaustion, memory OOM, controller values, stale-group reclamation and
-cleanup after exit and cancellation. Positive qualification requires a supported
-kernel and working user-manager delegation. Refusal tests cover unavailable
-delegation separately; they do not prove successful containment.
-
-On Windows, budgeted commands also share a per-owner kernel job envelope. It
-uses 75% of the smaller available physical-memory/commit budget at first use,
-4,096 active processes and a 90% CPU hard cap. The worker itself and Host-resource
-commands stay outside it. Every suspended helper joins this shared job before
-its independent command job, so cancelling one command preserves its peers.
-Per-command CPU rates account for the parent's allocation and never round above
-the requested machine share. Each budgeted command keeps one native exit wait,
-bounded by the worker's active-command limit, outside Tokio's blocking I/O pool.
-Native memory/process tests exercise independent commands sharing the envelope,
-capacity reuse and cleanup; exit-wait coverage includes dropped observation.
-
-### Disk-space safeguard
-
-Restricted native commands check available space on every declared writable
-root and the worker journal before launch and once per second while running.
-Checks also include the native helper's temporary storage on macOS/Windows and Windows' AppContainer
-profile storage, which can be on a different disk from task files. Each sampling
-pass batches its filesystem queries outside Tokio workers. Copying a trusted
-helper requires the reserve plus the image size; the macOS copy is bounded even
-if its source changes during preparation. Below a 512 MiB free-space reserve, the independent
-worker cancels the command, waits for native cleanup, and retains its captured
-output and stop reason. This continues while the coordinator is disconnected.
-The session runtime also stops private task work under disk pressure. Import
-and publication require the reserve plus their configured copy-size ceiling;
-failed publication retains the private edits.
-
-This requires no volumes, administrator access or filesystem setup. It is a
-best-effort safeguard, not a quota: concurrent writers and writes between
-checks can overshoot the reserve. Host-authority native commands do not use
-this runtime reserve monitor.
+A command does not outlive the process that started it. On Unix each
+command's process group also holds a small watcher that reads a pipe only
+the QQ process holds open; when QQ exits for any reason, SIGKILL included,
+the watcher kills the group. On Windows each command's job is killed when
+its handle closes. On Unix a command that leaves its process group (`setsid`, a
+double fork into a new group) escapes this, as it escapes timeouts; Windows
+jobs follow every descendant. Commands share the user's terminal, so a
+command that prompts there waits until its timeout or a cancel. There is no
+disk-space reserve for commands. On
+restart, runs and commands that were in flight are settled as interrupted;
+nothing is reattached or run again.
 
 ## The Tool Loop
 
@@ -820,7 +523,7 @@ and keeps the schema for each tool in one place:
   to six options or free text; the run waits for the answers (§ Asking The
   User).
 - `fetch` — one bounded GET or HEAD of a public http(s) URL, HTML converted
-  to markdown and JSON formatted, gated by host grants and SSRF rules
+  to markdown and JSON formatted, gated by host and SSRF rules
   (§ Network Tools).
 
 Progress and heuristic audits share a bounded read recognizer distinct from
@@ -837,10 +540,7 @@ never grant execution authority. A final semicolon after validated reads is
 accepted; incomplete conjunctions/pipelines are work. Literal sed scripts use
 only supported addresses, printing and pattern-space substitutions with safe
 flags; delimiter escapes and embedded semicolons are parsed before separators.
-Any nonempty requested shell/exec environment counts as work, including benign
-names conservatively. An additional environment view only disqualifies read
-candidates, preserving command/cwd parsing and approval previews even when the
-environment field is malformed or duplicated. JJ repository loading counts as work because
+JJ repository loading counts as work because
 operation reconciliation may persist state. File timestamp-restoring modes
 count as work; Unix sed supports a literal last-line print address.
 
@@ -873,7 +573,7 @@ Read-only tools (`read_file`, `tree`, `search`) never require approval
 inside the workspace and may execute concurrently. `ask_user` is
 `Interactive`: it executes nothing, so every mode allows it, and it is held
 like an approval until answered. `fetch` is `Network`: authority over the
-outside, granted per host. Everything else is a mutating or externally
+outside, judged per host. Everything else is a mutating or externally
 visible tool and goes through policy.
 
 ### Asking The User
@@ -894,12 +594,9 @@ one string per question in order; the store settles the call `completed`
 with the rendered questions and answers as its result and resolves the hold
 `answered`. An empty answer set declines: the result tells the model to
 proceed on its own judgement. An unanswered question follows the approval
-clocks (§ Approval Policy, "Two clocks"): no server deadline unless
+clocks (§ Approval Policy): no server deadline unless
 `approval_timeout_seconds` is set, in which case it settles `denied_timeout`
-and the run continues. Under
-write-child supervision the reviewer is not consulted — there is nothing to adjudicate —
-but it sees the question and the answer in the transcript like any other
-call. Malformed arguments never hold: they fall through to dispatch and the
+and the run continues. Malformed arguments never hold: they fall through to dispatch and the
 contract error names the failing question and bound.
 
 Headless runs have no human. `qq run` cancels the run at the first question
@@ -1222,9 +919,8 @@ canonicalized inside the capability: `..` traversal that escapes the root
 fails there, and a resolved path that still carries a parent component is
 rejected as a belt-and-suspenders check. Content search never follows symlinks;
 names search resolves only matching file links within the capability and never
-traverses directory links. Paths outside the workspace remain not an error class the agent
-can approve its way through by default — wider access is an explicit
-per-session grant, off by default.
+traverses directory links. Paths outside the workspace are not an error class
+the agent can approve its way through.
 
 Mutation tools retain the admitted parent directory for reads, stale checks,
 temporary-file creation and rename. They revalidate that the workspace path
@@ -1232,9 +928,8 @@ still names that directory before writing and immediately before rename;
 completed directory moves or replacements are refused rather than redirected.
 Protected directory identities are refreshed during this validation. This is
 not namespace isolation: another process can rename a directory after the
-final validation, and the in-process apply lock cannot prevent it. Immutable
-pathnames across arbitrary outside filesystem mutations require an execution
-boundary beyond these built-in checks.
+final validation, and the in-process apply lock cannot prevent it. Shell
+commands are not subject to these checks at all.
 
 ### Edit Semantics
 
@@ -1378,151 +1073,26 @@ Deferred).
 
 ## Shell Execution
 
-Session execution persists the native process receipt as soon as spawn is
+Session execution persists the process receipt as soon as spawn is
 observed, before forwarding live output. The execution task owns this write;
 cancellation drains it even when the event observer has been discarded. A
-failed write prevents settlement. The receipt is private recovery
-evidence bound to the tool call and its arguments; it is not authorization or
-proof of completion. Completion must retain the same process identity, and
-an interrupted result cannot erase it. A receipt alone does not support
-reattachment or justify signalling a persisted PID after a server restart.
-
-The Linux custody helper and the selected `unshare` bootstrap are sealed native
-executables. Scripts are refused before namespace creation. Dynamic GNU helpers
-start through a protected root-owned glibc loader with an explicitly resolved
-root-owned dependency closure; mutable search directories cannot substitute
-libraries on subsequent starts. Bootstrap loader auditing/filter modules and
-system preload modules are refused. Static ELF helpers remain supported.
-The backend requires an unprivileged owner and refuses unsupported loader or
-dependency configurations. These checks protect process custody; they do not
-provide filesystem or network containment.
-
-On Linux, macOS and Windows, the CLI, TUI and server submit approved `shell`/`exec`
-calls to a lazily started independent command worker. The persisted tool-call
-ID is also the worker's idempotency key. Transport reconnects reuse that ID;
-a replacement journal is rejected within a connected runtime. Worker failure
-or unavailable native custody returns an error without executing on the host
-through another path. Approval checks still happen before submission. The request carries the
-native identity of the session's held workspace directory. The worker compares
-its reopened directory before execution and refuses a replacement at the same
-path.
-
-The session waits for journal changes and persists the process receipt before
-forwarding output. Explicit cancellation reaches the worker and waits for
-confirmed completion. Losing the coordinator leaves the worker and its
-command running; reopening reconciles its original journal and retains its
-terminal result before the session continues. An active durable goal can then
-schedule its successor within its remaining shared budget.
-
-Worker journal I/O has its own bounded capacity, independent of project
-filesystem operations. Pre-launch workspace validation and the free-space probe
-share one cancellable, deadline-bound filesystem admission. A command waiting
-for that capacity can settle cancellation or expiry and release its execution
-slot without acquiring a filesystem permit.
-
-The macOS adapter captures a private executable copy when the owner starts,
-so replacing the original helper, its ancestors or existing hardlinks cannot
-replace trusted startup code. Restricted writable grants that include the copy
-are refused. The adapter starts that trusted helper before the payload. It closes ambient
-file descriptors and keeps an owner-liveness channel which payloads do not
-inherit. `/usr/bin/sandbox-exec` applies explicit directory grants and denies
-network operations when isolation is requested. Its loader baseline permits
-listing `/`; descendant file access and executable launches use the explicit
-directory grants.
-The profile denies direct `setsid` and `setpgid` syscalls. Darwin spawn
-attributes can still create a new process group or session; those descendants
-retain the same Seatbelt file and network restrictions. The trusted guardian
-stays outside the payload's group, so payload signals cannot kill it. It retains
-the exited leader without reaping it, repeatedly terminates remaining group
-members, and checks their exited process identities before reaping. Cancellation,
-deadlines and worker loss trigger this owned-group cleanup. The private terminal
-receipt confirms that cleanup and the guardian's exit, not the exit of detached
-descendants. Missing or partial receipts do not confirm owned-group cleanup.
-Exited zombies may await collection by the OS, but live group members keep cleanup
-unconfirmed. A deliberately detached process can survive command completion or
-cancellation while remaining sandboxed; QQ does not claim complete descendant
-custody on macOS. Loader-injection environment variables are refused before
-helper startup. macOS does not create Linux-style mount or PID namespaces.
-The payload inherits the launching process's per-process OS limits; QQ does not
-supply kernel aggregate resource quotas on this backend.
-
-An explicit `NativeResources::Guarded` request starts the payload with
-`taskpolicy -b` and samples the pinned process group's physical footprint and
-thread count every 250 ms using Darwin process accounting. The same check reads
-XNU's system-wide memory-pressure level and stops guarded work at warning or
-critical pressure; query failures and unrecognized levels also refuse execution. The existing owner
-liveness thread performs these checks; no extra per-command thread is created.
-Excess use or unavailable accounting stops the owned group and retains captured
-output. These safeguards can overshoot, exclude charged file cache and omit
-processes that detached from the group. They are not per-task aggregate quotas.
-Guarded commands require restricted filesystem authority. They are an explicit
-host option rather than a default Auto requirement.
-Requests for kernel aggregate quotas fail closed on macOS.
-
-The Windows adapter launches restricted requests in LPAC with `registryRead`
-for ordinary child-process creation and a directory-identity capability for each
-non-system read-only root, inside
-QQ's existing owned command job. Its trusted helper obtains the user's local
-application-data directory from Windows for its startup environment. The payload
-keeps its frozen environment, including Windows' required `SYSTEMROOT` and
-`LOCALAPPDATA`. These profile-path values do not grant file access: the LPAC token
-still denies the user's unrelated profile files. The trusted helper starts the payload suspended,
-with only its explicit stdin/stdout/stderr handles, then awaits the worker's
-release byte. Cancellation or a deadline during preparation drains the command
-job before returning. Captured user stdin begins after the exact unbuffered
-protocol prefix. Full exit codes and output remain observable through the
-existing durable worker.
-
-Windows object ACL grants are prepared through held, non-reparse handles with
-bounded traversal. Shared read-only roots receive one read/execute capability
-entry, reused across tasks, rather than one package entry per task. Writable
-roots retain task-specific package authority. A root listed as both readable and
-writable uses only its private package authority; both supplied root identities
-are still validated. Writable grants are applied before overlapping read-only
-grants. Non-system hardlinks and reparse points are refused. Directory grants
-are inherited by newly created objects. Grants update the held kernel object
-without requesting a recursive file-object ACL update; each existing object
-must pass the held-handle checks independently. Handles request only metadata
-and ACL rights, preserving the workspace's existing no-delete pins. Windows loader access uses the LPAC
-OS baseline and its per-package profile storage remain available. ACL authority follows objects rather than current pathnames, so
-callers must supply private task inputs and publish by copying files. This
-adapter requires isolated networking and accepts Host or Committed resource
-policy. Committed policy installs a nested job before creating the payload,
-checks the kernel-retained memory/process limits, and includes the trusted
-helper in that budget. Memory ceilings are rounded down to whole native pages
-before setting and verifying them; budgets smaller than one page are refused.
-It limits committed private memory and processes, not
-threads or Linux charged file cache. The payload job applies a hard CPU cap as
-a percentage of all logical processors; the trusted helper is excluded from
-that CPU cap. No new VM, administrator setup or volume is needed. Default
-Default Windows Auto uses `WorkspaceWrite` and a legacy restricted caller token
-rather than LPAC. It preserves installed-tool reads and grants workspace writes,
-but also retains writes to objects allowed by Everyone or the logon SID. It is
-not account isolation, credential privacy, or network containment. Explicit
-`Restricted` requests continue to use the narrower LPAC adapter described above.
-Native cmd shells receive a DOS-compatible working-directory spelling only
-when it names the same pinned directory. UNC and extended-only shell directories
-are refused before launch instead of allowing cmd to fall back to a host directory.
-Exec programs retain their original directory spelling.
-Native containment does not itself grant credential access.
+failed write prevents settlement. The receipt is private evidence bound to
+the tool call and its arguments; it is not authorization or proof of
+completion, and it never supports reattaching to or signalling a process
+after a restart.
 
 `shell` runs one command via `tokio::process::Command` with:
 
-- Working directory pinned to the workspace (or a contained subdirectory).
-- The task's remaining time governs running commands. An explicit positive
+- `/bin/sh -c` on Unix and `cmd /C` on Windows, with the working directory
+  set to the workspace (or a contained subdirectory).
+- The run's remaining time governs running commands. An explicit positive
   `timeout_seconds` can impose an earlier deadline; omitting it adds no command
-  runtime cap. Native admission freezes the earlier deadline before preparation
-  and transport, so retries cannot renew it. Preparation without an explicit
-  timeout remains bounded at 120 seconds. Command timeout and task cancellation
-  terminate the owned Unix process group or Windows job.
+  runtime cap. Preparation without an explicit timeout is bounded at 120
+  seconds. Command timeout and run cancellation kill the command's Unix
+  process group or Windows job.
 - Windows starts commands suspended, assigns a job that forbids breakaway,
   then resumes them. Completion, cancellation and timeout terminate the job
   and confirm that it has no remaining processes before settling the tool.
-  An inherited outer job owns even suspended children during startup; its
-  handle closes on host exit. Trusted independent worker launchers must
-  establish QQ's breakaway-enabled host job before launch, then explicitly
-  break away from it into a separate console process group. Enclosing job
-  restrictions still apply.
 - Combined stdout+stderr captured head+tail within 128 KiB (a capture cap,
   marked `bytes not captured` when exceeded) and streamed to clients as
   `ToolCallOutputDelta` events through the existing batching path so long
@@ -1533,15 +1103,11 @@ Native containment does not itself grant credential access.
   long build log is what the model should page into deliberately, not read
   by default. `exit` is `signal:<n>` or `timeout` when there is no code.
 - No login/profile shell initialization on the hot path.
-- A **cleared environment**: the child starts with `PATH HOME LANG TERM
-  TMPDIR` (also `SYSTEMROOT LOCALAPPDATA` on Windows), plus variables the call names in `env` (≤ 16) that
-  `policy.shell_env` allows. A name outside the allowlist fails the call
-  (`env_not_allowed`) before anything runs. Secrets the server holds never
-  reach a child by accident. Native command-owner submissions carry a snapshot
-  captured by the caller; a long-lived worker never substitutes its own values
-  for missing names. The journal stores an environment digest for retry identity,
-  rather than the values themselves. Command output can still contain values
-  the command prints. This request format uses private command-owner API v3.
+- The **inherited environment**: the child gets the server process's whole
+  environment, credentials included. The tools take no `env` argument. The
+  one exception is an attested read image (`--approve-self-contained-read-image`),
+  which runs with only `PATH HOME LANG TERM TMPDIR` (also `SYSTEMROOT
+  LOCALAPPDATA` on Windows) so no variable can point it at helpers.
 - A **built-in preference nudge** (`policy.builtin_preference`): when the
   command's first program has a bounded built-in (`grep|rg` → `search`,
   `cat|head|tail|sed -n` → `read_file`, `find|fd` → `search mode=names`,
@@ -1561,68 +1127,14 @@ Native containment does not itself grant credential access.
   limitation can require the model to recover using the shell form.
 
 **`exec`** runs one program with an argument list (`program`, `args` ≤ 64 ×
-4 KiB, optional `stdin` ≤ 64 KiB, `cwd`, `timeout_seconds`, `env`) with no
+4 KiB, optional `stdin` ≤ 64 KiB, `cwd`, `timeout_seconds`) with no
 shell in between: no quoting, globbing, `$`, or pipes. For policy it is
 rendered as the equivalent command line — each argument single-quoted when
-it holds metacharacters — so the fixed stops, prefix grants (`cargo test`
-covers `exec cargo [test, -p, x]`), and the approval preview see one shape
+it holds metacharacters — so the fixed stops, managed deny prefixes
+(`cargo test` covers `exec cargo [test, -p, x]`), and the approval preview see one shape
 for both tools, and an argument like `rm -rf /` is a literal word, never a
 command. The system prompt steers the model to `exec` for single programs
 and `shell` for pipelines. Its header is `exec exit=<code> …`.
-
-Trusted native-command SDK consumers retain terminal results until they have
-saved them or deliberately discarded them, then call `CommandOwner::acknowledge`
-(or the authenticated private `/acknowledge` endpoint) with 1–128 call IDs.
-Acknowledgement atomically removes terminal output, receipts and results while
-retaining compact command IDs and request hashes that prevent re-execution.
-`Lost` means the journal no longer owns a live invocation; it does not attest
-that its original process group finished cleanup. Sessions retain that binding
-without acknowledging it or releasing its workspace for reuse. A live observer
-also keeps its teardown unconfirmed.
-Worker journals retain at most 10,000 unacknowledged commands. The session store
-also bounds unresolved native bindings to 10,000 across worker generations;
-new admission refuses capacity exhaustion before submission, and recovery
-reports overflow rather than silently omitting obligations. Compact
-retired identities continue to grow with history. Running commands cannot be
-acknowledged, repeated acknowledgements are harmless, and an acknowledged
-command returns `Retired` rather than becoming eligible for admission again.
-Sessions bind the original worker journal before submission and commit an
-acknowledgement intent with the actual terminal result. Only then can worker
-observations be reclaimed. Reopening captures pending native invocation IDs and
-observes their original journal in the background, retaining the original run
-until those invocations drain. Server startup does not wait for a worker.
-An unavailable or mismatched worker interrupts model execution while its unsaved
-native obligations remain durable. Those obligations block conflicting workspace
-admission, including goal continuation and completion checks, across restarts.
-Other workspaces can continue. Observation retries the same owner with bounded
-backoff; bounded wait quanta prevent long commands from starving other retained
-observations. Shutdown stops and joins observation before closing session storage.
-Authenticated late results retain receipts and output without reopening the
-settled model run, changing its accounting, republishing artifacts, or clearing
-a completion-check acknowledgment hold. The workspace remains blocked until all
-original invocations have confirmed terminal results. A journal `Lost` entry
-cannot supply that confirmation. The observer acknowledges only saved results
-and handles explicit cancellation through the original worker.
-An invocation bound before admission is fenced with durable cancellation if
-its journal entry is absent, preventing a delayed admission from starting it.
-No command is submitted again and its original deadline remains in force.
-Explicit CLI resume waits for inherited commands; queued prompts start only
-after their results are saved. If the inherited run remains active,
-interrupting that wait cancels and drains it and pauses its owning live goal. Observation-only recovered runs
-reject steering; queued pre-crash steering is published as superseded when the
-run settles. The interrupted model run settles; the durable goal driver can
-then queue a successor for the same active goal within its remaining shared
-budget. Ordinary prompt runs require explicit resume.
-Unavailable or replaced workers leave their observations unacknowledged.
-A native result that exceeds remaining context capacity
-is still saved; that run ends with a context-policy failure before another
-model turn. Pending intents survive interruption and session
-pruning; reopening and later tool results retry a bounded batch. A generic
-interrupted result does not acknowledge an unobserved worker result. Cancellation
-teardown saves the actual terminal worker result even when its event waiter was
-dropped. A bounded background task coalesces acknowledgements so reclamation
-does not delay agent execution. The SDK
-example exercises the explicit save/discard-and-acknowledge lifecycle.
 
 Both tools accept an optional workspace-relative `cwd`. Launch validation
 rejects empty, NUL-containing, absolute or prefixed paths and parent traversal
@@ -1630,16 +1142,16 @@ above the lexical workspace root. Within-root normalization such as `sub/..`
 is allowed. Process preparation also resolves and holds a contained directory,
 including checking symlink resolution.
 
-Shell path checks alone do not contain arbitrary programs. Native Auto enforces
-its filesystem and network policy at the OS boundary. The fixed stops below are
-an accident net over literal commands, not containment.
+The `cwd` check only picks where a command starts; it does not contain the
+program. The fixed stops below are an accident net over literal commands, not
+containment.
 
 ### Fixed Stops
 
 A few shell actions can't be undone and are almost never intended. They are
 denied in every approval mode except `full`, before any hold, as a tool error
-(`permission_denied: fixed_stop: <reason>; <what to do instead>`). No grant
-lifts one. Everything else follows the mode: `auto` runs it, `ask` holds it,
+(`permission_denied: fixed_stop: <reason>; <what to do instead>`).
+Everything else follows the mode: `auto` runs it, `ask` holds it,
 `read_only` denies it.
 
 | Stop | Matches |
@@ -1677,21 +1189,10 @@ worse-documented spelling of the same operation carrying its own approval
 surface. First-class VCS support means the harness understands version
 control, not that the model needs new verbs.
 
-- **Read-only presets.** The default configuration layer's `policy`
-  section ships shell grant prefixes for the interrogative subcommands:
-  `git status`, `git diff`, `git log`, `git show`, `git blame`, and the
-  jj equivalents (`jj status`, `jj diff`, `jj log`, `jj op log`,
-  `jj show`). Auto can reuse these grants without prompting; Ask still
-  requires fresh human approval for each shell call. They are ordinary
-  config grants: visible in the same reviewable file, removable by a
-  managed layer, matched at word granularity like every shell prefix.
-- **Mutating commands follow ordinary shell policy.** `commit`,
-  `checkout`, `rebase`, `restore` prompt under Ask; Auto may use grants
-  like any other prefix; nothing special-cases them.
-- **Outward-facing commands are never preset.** `git push`, `jj git
-  push`, and anything else that publishes stays prompt-always unless a
-  user writes the grant themselves. QQ does not make publishing a
-  default.
+- **Git commands follow ordinary shell policy.** `status`, `commit`,
+  `rebase` and `push` run under Auto and Full and ask under Ask, like any
+  other command. Force-pushes and remote ref deletion are fixed stops; a
+  managed `deny_shell_prefixes` (for example `git push`) refuses more.
 - **jj is a policy entry, not a dependency.** jj users overwhelmingly
   run colocated repos, so git-shaped harness features work for them
   unchanged. QQ takes no jj-lib
@@ -1702,8 +1203,7 @@ control, not that the model needs new verbs.
 `fetch` exists so the model stops reaching for `curl` through the shell
 classifier when it wants documentation or an API response. It is the one
 built-in whose authority is over the outside world rather than the
-workspace, and it has its own effect class, grant shape, and refusal rules
-(ADR-0021).
+workspace, and it has its own effect class and refusal rules (ADR-0021).
 
 **Request.** `{url, method?: GET|HEAD}`; URL ≤ 2 KiB (`MAX_URL_BYTES`),
 `http`/`https` only. The whole request — resolution, redirects, body — has a
@@ -1721,10 +1221,9 @@ private-name set (`localhost`, single-label names, `.local`, `.internal`,
 here is `PolicyDecision::Deny { HostBlocked }` under **every** mode, `full`
 included: unrestricted authority over the workspace is not authority over
 the local network. A public name then follows the `Network` row of the
-decision table; under `auto` a public host executes without a per-host grant.
-Managed host denies and address validation still apply. The
-approval request carries a `fetch` preview (`url`, `host`, `method`) so a
-client offers the judged host as the grant without parsing arguments.
+decision table. The approval request carries a `fetch` preview (`url`,
+`host`, `method`) so a client shows the judged host without parsing
+arguments.
 
 **Addresses.** After the gate, the name is resolved once, *every* address
 is judged (unspecified, loopback, RFC 1918, shared 100.64/10, link-local
@@ -1749,9 +1248,9 @@ statuses are tool errors with the same framing. The result is bounded at
 32 KiB / 4000 lines (`FETCH_BOUNDS`) through the ordinary path, so long
 pages spill and secrets are masked inline (§ Output Bounding).
 
-**Configuration.** `policy.allow_hosts` declares workspace-lifetime host
-grants and `policy.deny_hosts` (managed-only) names hosts refused under every
-mode; both use the grant grammar (§ Workspace Grant Configuration). The
+**Configuration.** `policy.deny_hosts` (managed-only) names hosts refused
+under every mode: lowercase DNS names (≤ 253 bytes) or one leading `*.`
+wildcard label that covers subdomains and never the apex. The
 `html2text`/`htmd` bake-off chose `htmd`: fenced code blocks with language
 tags, pipe tables, inline links, and half the bytes on a navigation-heavy
 page; `html2text` renders box-drawing tables and reference-style links the
@@ -1856,8 +1355,8 @@ embedded host above.
   and that the digest grants nothing. A pin attests to the advertised
   metadata only, never to the server's implementation.
 
-MCP tools execute outside the workspace containment model, so they are
-externally visible by default and require approval unless allowlisted.
+MCP tools execute outside the workspace, so Ask asks before each call and
+Read-only denies them.
 Within a turn they execute in the sequential (mutating) path, never the
 concurrent read-only path: an external call's side effects must not
 interleave with other calls in the same turn.
@@ -1884,7 +1383,7 @@ declare servers at all.
             // otherwise starts from a cleared environment plus PATH/HOME.
             env: ["EXECUTOR_API_KEY"],
             eager: true,                  // connect at startup, not first use
-            allow: ["execute", "skills"], // per-server tool allowlist
+            allow: ["execute", "skills"], // tools `qq ask` may call
         ),
         "linear": Http(
             url: "https://mcp.linear.app/mcp",
@@ -1909,18 +1408,16 @@ and an unpinned declaration of the same server compile to distinct plan
 digests and a run's durable identity names the tool set it was admitted
 against.
 
-One deliberate convenience: the per-MCP-server tool allowlist lives on
-the server's own `mcp` entry, next to the declaration it scopes, even
-though the `policy` section also accepts workspace grants. The entries
-are folded into the resolved grant set as exact names
-(`mcp__<server>__<tool>`) — the same set the approval flow consults, and
-the same set a managed `deny_tools` list can filter.
+A server's `allow` list names the tools a direct, unattended run (`qq ask`,
+which has no approval channel) may offer and call. The entries become exact
+names (`mcp__<server>__<tool>`). Session runs ignore it: their approval mode
+decides.
 
 An HTTP server's `bearer` is resolved by the composition root when the
 registry is built, not by `qq-mcp`. A reference that does not resolve on
 this machine (`Stored` not registered, `Env` unset, an endpoint binding
 that does not match) becomes `McpBearer::Unavailable { reason }`: the
-server stays declared with its grants, never connects, and reports as
+server stays declared with its `allow` list, never connects, and reports as
 `unavailable MCP servers: NAME (reason)` alongside connection failures,
 so one missing credential degrades one server rather than failing plan
 compilation for the workspace. The registry cache key includes the
@@ -1943,200 +1440,81 @@ flow.
 Each session has an approval mode:
 
 - `read-only`: reads execute; mutations, shell, network and external tools deny.
-- `ask`: every non-read action requires fresh human approval. An unattended
-  Ask call denies immediately. Stored grants and reviewers cannot approve it.
-- `auto` (default): workspace edits, native task-scoped shell, MCP tools and
-  public fetches execute without human or model approval. Denied actions return
-  tool errors, allowing the agent to choose another permitted action.
-- `full`: calls execute without Auto's task containment, subject to explicit
-  managed policy, protected built-in paths and fetch host/address checks.
+- `ask`: every non-read action requires human approval for that one call. An
+  unattended Ask call denies immediately.
+- `auto` (default): edits, shell, MCP tools and public fetches execute without
+  asking. Fixed stops are denied as tool errors, so the agent can choose
+  another action.
+- `full`: everything executes, fixed stops included.
 
-Write children inherit the parent's authority ceiling and revocation. They do
-not require per-action review. `approval_delegate` and retained reviewer event
-formats do not add a review step to native Auto or substitute for Ask approval.
-An unscoped embedding's shell call still needs conservative admission or an
-explicit grant; it is not the binary's native Auto path.
+Write children inherit the parent's authority ceiling and revocation.
 
 | class | read-only | ask | auto | full |
 | --- | --- | --- | --- | --- |
 | `ReadOnly` | Execute | Execute | Execute | Execute |
 | `Mutating` | Deny | Human each call | Execute | Execute |
-| `Shell` | Deny | Human each call | Execute within native scope | Execute |
+| `Shell` | Deny | Human each call | Execute unless a fixed stop | Execute |
 | `External` | Deny | Human each call | Execute | Execute |
 | `Interactive` (`ask_user`) | Answer if attended | Answer if attended | Decide without human input | Answer if attended |
 | `Network` (`fetch`) | Deny | Human each call | Public hosts execute | Public hosts execute |
 
-Blocked fetch hosts and explicit managed denies are checked before mode.
-Command-prefix controls match literal commands, including compound command
-components. They cannot enforce equivalent behavior through Python, libraries
-or dynamically constructed commands; the OS boundary must enforce that scope.
+Blocked fetch hosts and managed `deny_shell_prefixes` apply before the mode,
+in every mode. Prefix denies match literal commands at
+word granularity, including compound command components. They cannot catch
+equivalent behavior through Python, libraries or dynamically constructed
+commands.
 
 Human Ask holds have no server-side timeout by default. They end when answered,
 cancelled, or the run deadline expires. A configured `approval_timeout_seconds`
-adds a bound. Native Auto has no human or reviewer wait; headless questions
-return a result telling the agent to decide without human input.
+adds a bound. Auto has no human wait; headless questions return a result
+telling the agent to decide without human input.
 
-The allowlist is deliberately simple: exact commands or command prefixes
-(`cargo test`, `git status`), plus per-tool grants for MCP. No pattern DSL
-until real use demands one.
+Flow: when policy requires approval, the runtime persists and publishes
+`ToolApprovalRequested` and the run stays active but waiting — it holds its
+run permit, other sessions are unaffected, and cancellation still works. A
+client responds with an idempotent `RespondToolApproval` command (approve
+once, or deny). Denials are returned to the model as tool errors, not run
+failures, so the agent can take another path. Headless runs choose their
+mode up front with `--approval`; headless Ask denies at once.
 
-### Grant Lifetimes
+Approval requests carry enough to decide without leaving the client: the
+resolved path and a diff preview for edits, the exact command and cwd for
+shell, the server, tool, and arguments for MCP.
 
-A grant answers "may this run without asking", and the same grant shapes
-carry three lifetimes:
+### Policy Configuration
 
-- **Once** — approve a single call; nothing is recorded.
-- **Session** — approve-for-session records a grant consulted by every
-  later policy check in that session. Shell grants are command prefixes
-  matched at word granularity (`cargo test` covers `cargo test -p x`,
-  never `cargo testify`); other tools are granted by exact name. A
-  prefix never extends over shell control characters — a command
-  containing `|`, `;`, `&`, redirection, or substitution is more than
-  one program, so it matches only a grant equal to the exact string.
-  The check is quote-blind on purpose: it errs toward prompting. A
-  grant value is at most 256 bytes, and a session holds at most 256
-  grants. A session or workspace choice whose value is empty, longer
-  than that, or past the session cap still approves the call, but as a
-  once-approval: nothing is recorded and nothing is promoted. The
-  approval command never fails because a grant cannot be stored.
-- **Delegate** — when the configured delegate (`reviewer_model`) approves a held call, it records a session grant of its
-  own in the same transaction as the approval: the exact command string for
-  shell, the exact host for `fetch`, nothing for other tool classes. Every
-  `session_grants` row carries `source` (`human` or `delegate` for the
-  reviewer model; a historical `jev` still decodes) and, for a delegate, the `run_id` that
-  recorded it. A delegate grant is deliberately narrower
-  than a human one. It matches only the byte-exact command or host,
-  never a prefix and never a `*.suffix`; no grant lifts a fixed stop; it
-  is never promoted to workspace configuration; and one run may record at
-  most 64 of them. The storage rule above applies unchanged: a value
-  that does not fit approves the call once and records nothing. If a
-  human grant already covers the same string, the human row is kept and
-  the delegate row is not written.
-- **Workspace** — the grants a user always wants live in the `policy`
-  section of configuration, in the same layered documents as everything
-  else. Same shapes, longer lifetime: exact tool names, shell command
-  prefixes, and per-MCP-server tool allowlists. Config grants merge into
-  the session's grant set at session creation, with the existing config
-  layer precedence, so a managed source can constrain what a workspace
-  may allowlist.
-
-Workspace grants are written, not invented: the approval prompt grows an
-"always allow in this workspace" choice that promotes the grant into the
-workspace config document. Trust decisions land in the same reviewable
-file users already edit — no hidden allowlist store, no second syntax.
-
-### Workspace Grant Configuration
-
-Catalog exposure is configured separately with optional
+Catalog exposure is configured with optional
 `policy.exposed_tools: ["read_file", "search"]`. Lists intersect across
 layers and with the selected profile/pack policy; absent adds no restriction
 and `[]` removes all tools. At most 1024 distinct exact names may appear in
 one declaration. Built-in names and MCP syntax are checked during config
 loading, and admitted MCP tool membership is checked during compilation.
-Restricting exposure grants no authority and needs no trust approval.
-Neither approval grants nor `--approval full` restore an excluded tool.
-Supervisors select the profile using `qq run --profile <name>`.
+Restricting exposure grants no authority and needs no trust approval;
+`--approval full` does not restore an excluded tool.
 
-Grants live in the `policy` section of the ordinary layered documents.
-Any non-remote source may declare the two grant shapes; the constraint
-fields stay managed-only:
+`builtin_preference` is a scalar that may only tighten across layers
+(`off < hint < strict`), so a managed `strict` cannot be undone.
 
-```ron
-// Workspace or user configuration.
-(
-    version: 1,
-    policy: (
-        allow_tools: ["edit_file", "mcp__executor__execute"],
-        allow_shell_prefixes: ["cargo test", "git status"],
-        // Hosts `fetch` reaches without prompting under `auto`.
-        allow_hosts: ["docs.rs", "*.github.com"],
-        // Variables a `shell` call may request into its cleared environment.
-        shell_env: ["CARGO_HOME", "DATABASE_URL"],
-        // off | hint (default) | strict; later layers may only tighten.
-        builtin_preference: hint,
-    ),
-)
+`deny_tools`, `deny_shell_prefixes` and `deny_hosts` are managed/MDM-only and
+accumulate across administrator layers. Tool denies match exact names
+(built-ins or `mcp__<server>__<tool>`) and today apply to side questions and,
+for `shell`, to goal checks; shell prefixes are non-empty, without control
+characters or surrounding whitespace.
 
-// Managed configuration constrains what lower layers may grant.
-(
-    version: 1,
-    policy: (
-        deny_tools: ["mcp__executor__execute"],
-        deny_shell_prefixes: ["git push"],
-        // Refused under every approval mode, grants notwithstanding.
-        deny_hosts: ["*.internal-corp.example"],
-    ),
-)
-```
+Workspace-declared providers, models, MCP servers, profiles and packs are
+sensitive. Task startup uses
+`LoadRequest::with_untrusted_project_config_ignored`: the loader withholds
+sensitive content before merging, applies non-sensitive settings, and
+continues without recording trust or opening a human prompt. Explicit
+configuration inspection retains `TrustRequired`; `qq trust` records the
+reviewed content on the server host. Runtime and strict inspection use
+separate plan-cache keys, so a plan compiled without project authority
+cannot serve a trusted request, or vice versa.
 
-- **Shapes and grammar.** `allow_tools` entries are exact tool names
-  (built-in names, or `mcp__<server>__<tool>` with the server segment
-  obeying the MCP name rules). `allow_shell_prefixes` entries are word-
-  granularity command prefixes: non-empty, no control characters, no
-  surrounding whitespace. `allow_hosts` entries are lowercase DNS names
-  (≤ 253 bytes) or one leading `*.` wildcard label that covers subdomains
-  and never the apex; no scheme, port, path, or IP literal — a grant names
-  a site, and the SSRF rules judge addresses at fetch time. `shell_env`
-  entries are variable names
-  (`[A-Za-z_][A-Za-z0-9_]*`, ≤ 128 bytes, ≤ 64 names); it is
-  authority-bearing and trust-gated like the grants. Duplicates within
-  one list are rejected; across layers the sets dedupe naturally.
-  `builtin_preference` is a scalar that may only tighten across layers
-  (`off < hint < strict`), so a managed `strict` cannot be undone.
-- **Layering.** Later layers extend the accumulated set, and
-  `Remove("name")` deletes a grant declared by an earlier layer — the
-  same removal-marker idiom `mcp` and `providers` use.
-- **Managed constraint.** `deny_tools`, `deny_shell_prefixes`, and
-  `deny_hosts` are managed/MDM-only and filter lower-layer grants out of
-  the effective set rather than erroring. A denied host also refuses the
-  request itself at fetch time; a deny and a grant that admit a common host
-  (`*.example.com` against `api.example.com` or `*.api.example.com`) remove
-  the grant, because the layer cannot subtract part of a wildcard. Tool denies match exact names, including
-  folded MCP allowlist entries. A denied shell prefix removes every
-  grant it covers at word granularity *and* every broader grant that
-  would cover the denied commands (`cargo` denied removes `cargo test`;
-  `cargo test` denied also removes a bare `cargo` grant, because a
-  config-layer filter cannot partially subtract a broader grant).
-- **Trust.** Workspace-declared grants, providers, models, MCP servers,
-  and packs remain sensitive. Task startup uses
-  `LoadRequest::with_untrusted_project_config_ignored`: the loader withholds
-  sensitive content before merging, applies non-sensitive settings, and
-  continues without recording trust or opening a human prompt. Explicit
-  configuration inspection retains `TrustRequired`; `qq trust` records the
-  reviewed authority on the server host. Runtime and strict inspection use
-  separate plan-cache keys, so a plan compiled without project authority
-  cannot serve a trusted request, or vice versa.
-- **Promotion.** The approval prompt's workspace-lifetime choice appends
-  the grant to `.qq/config.ron` by targeted text insertion — comments
-  and formatting survive — with an atomic temp-and-rename write that
-  must reparse before it lands. The complete read-modify-write and trust
-  update are serialized across processes by a workspace-keyed file lock in
-  QQ's private data directory. Promotion refuses grants the managed
-  layer denies. Because the write is the user's own decision, the file's
-  new trust digest is recorded immediately — but only when the file was
-  already trusted (or had no sensitive content) beforehand, so promotion
-  never launders trust for unreviewed declarations.
-- **Resolution.** The effective configuration exposes the resolved grant
-  set (declared grants plus folded MCP allowlists, minus denies), which
-  seeds each session's grant set at creation with the existing config
-  layer precedence.
-
-Flow: when policy requires approval, the runtime persists and publishes
-`ToolApprovalRequested` and the run stays active but waiting — it holds its
-run permit, other sessions are unaffected, and cancellation still works. A
-client responds with an idempotent `RespondToolApproval` command
-(approve once, approve-and-allowlist for the session, approve-and-promote
-for the workspace, or deny). Denials are
-returned to the model as tool errors, not run failures, so the agent can take
-another path. Non-interactive automation chooses its policy up front via
-flags (`--approval`, plus `--allow-tool` and `--allow-shell` allowlists that
-answer a held call with a session grant); a headless run with `ask` semantics
-and no attached client fails the approval after a bounded wait rather than
-hanging forever.
-
-Approval requests carry enough to decide without leaving the client: the
-resolved path and a diff preview for edits, the exact command and cwd for
-shell, the server, tool, and arguments for MCP.
+Settings removed in v0.1.10 (`allow_tools`, `allow_shell_prefixes`,
+`allow_hosts`, `shell_env`, `task_hosting`,
+`reviewer_model`, `approval_delegate`) fail to load with a message naming the
+replacement (`REMOVED_KEYS` in `qq-config`).
 
 ## Parallelism
 
@@ -2165,12 +1543,11 @@ dispatch overhead has a benchmark.
 
 ## Intentionally Deferred
 
-- Per-child isolation for editing subagents (Auto children share their
-  root's private task tree).
+- Per-child isolation for editing subagents (children share the checkout;
+  separate trees would use `git worktree`).
 - User-home, administrator-managed, and bundled skill roots.
 - Approval pattern languages or per-path ACLs.
 - A plugin API beyond MCP.
-- Cross-workspace tool access as anything but an explicit grant.
 
 A read continuation never suggests a start offset above 100,000. If the next
 unread line exceeds that bound, the result carries a terminal start-offset

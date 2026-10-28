@@ -15,17 +15,17 @@ use sha2::{Digest, Sha256};
 use crate::goals::GoalsPatch;
 
 use super::{
-    AgentProfileConfig, ApprovalDelegateSetting, AuditConfig, AuditMode, AwsAuth, BedrockAuth,
-    BuiltinPreference, BuiltinProvider, ClientSnapshot, ConfigError, ConfigKey, ConfigProvenance,
-    ConfigSnapshot, ConfigSources, Connection, DEFAULT_MAX_OUTPUT_TOKENS,
-    DEFAULT_MCP_CALL_TIMEOUT_SECONDS, DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig,
-    DelegationEntry, DelegationRole, EffectivePolicy, GithubTaskHostingGrant, GoalCeilings,
-    GoalsConfig, HttpAccess, InputModality, MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS,
-    MAX_DELEGATION_DEPTH, MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER,
-    MAX_MCP_CALL_TIMEOUT_SECONDS, MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES,
-    McpServerConfig, McpTransport, ModelMetadata, ModelPricing, ModelRoute, PolicyGrants,
-    ProfileApprovalMode, ProviderAccess, ProviderApi, ProviderConfig, ProviderKind,
-    RuntimeOverrides, SecretRef, SourceIdentity, SourceKind, SourceReport, WorkspaceGrant,
+    AgentProfileConfig, AuditConfig, AuditMode, AwsAuth, BedrockAuth, BuiltinPreference,
+    BuiltinProvider, ClientSnapshot, ConfigError, ConfigKey, ConfigProvenance, ConfigSnapshot,
+    ConfigSources, Connection, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MCP_CALL_TIMEOUT_SECONDS,
+    DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig, DelegationEntry, DelegationRole,
+    EffectivePolicy, GoalCeilings, GoalsConfig, HttpAccess, InputModality,
+    MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH,
+    MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER, MAX_MCP_CALL_TIMEOUT_SECONDS,
+    MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, McpServerConfig, McpTransport,
+    ModelMetadata, ModelPricing, ModelRoute, ProfileApprovalMode, ProviderAccess, ProviderApi,
+    ProviderConfig, ProviderKind, RuntimeOverrides, SecretRef, SourceIdentity, SourceKind,
+    SourceReport,
 };
 
 pub(super) fn deserialize_unique_btree_map<'de, D, K, V>(
@@ -609,35 +609,11 @@ impl McpServerPatch {
     }
 }
 
-/// Marks one grant removed from the set accumulated by earlier layers, the
-/// same idiom `mcp`/`providers` use, spelled `Remove("name")` in RON.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-enum GrantRemoval {
-    Remove(String),
-}
-
-/// One entry in a `policy` grant list: a plain string adds the grant, and
-/// `Remove("name")` deletes a grant declared by an earlier layer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-enum GrantEntry {
-    Remove(GrantRemoval),
-    Allow(String),
-}
-
-impl GrantEntry {
-    fn name(&self) -> &str {
-        match self {
-            Self::Allow(name) | Self::Remove(GrantRemoval::Remove(name)) => name,
-        }
-    }
-}
-
 /// Every key a `policy` section accepts, as spelled in RON, in declaration
 /// order. The user guide must name each; the docs-truth test in the root
 /// crate reads this list, and a unit test here holds it equal to the field
 /// list the `Deserialize` derive reports.
-pub const POLICY_FIELD_NAMES: [&str; 17] = [
+pub const POLICY_FIELD_NAMES: [&str; 12] = [
     "allowed_providers",
     "exposed_tools",
     "denied_providers",
@@ -645,11 +621,6 @@ pub const POLICY_FIELD_NAMES: [&str; 17] = [
     "require_https",
     "allow_custom_providers",
     "allow_literal_secrets",
-    "allow_tools",
-    "allow_shell_prefixes",
-    "allow_hosts",
-    "shell_env",
-    "task_hosting",
     "builtin_preference",
     "deny_tools",
     "deny_shell_prefixes",
@@ -673,32 +644,16 @@ pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 10] = [
     "goals",
 ];
 
-/// The `policy` approval grants an organization manifest may not set;
-/// there they are [`ConfigError::RemotePolicyGrantsForbidden`](crate::ConfigError).
-/// Task hosting additionally requires a host-controlled source.
-pub const ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES: [&str; 5] = [
-    "allow_tools",
-    "allow_shell_prefixes",
-    "allow_hosts",
-    "shell_env",
-    "task_hosting",
-];
-
-/// Policy fields forbidden in project and organization sources even when trusted.
-pub const HOST_ONLY_POLICY_FIELD_NAMES: [&str; 1] = ["task_hosting"];
-
 /// Every top-level key a configuration document accepts, as spelled in RON,
 /// in declaration order. See [`POLICY_FIELD_NAMES`].
-pub const DOCUMENT_FIELD_NAMES: [&str; 17] = [
+pub const DOCUMENT_FIELD_NAMES: [&str; 15] = [
     "version",
     "organization",
     "model",
     "worker_model",
-    "reviewer_model",
     "delegation",
     "audit",
     "goals",
-    "approval_delegate",
     "approval_timeout_seconds",
     "reasoning_effort",
     "max_output_tokens",
@@ -708,6 +663,75 @@ pub const DOCUMENT_FIELD_NAMES: [&str; 17] = [
     "packs",
     "policy",
 ];
+
+/// Keys earlier releases accepted, each with the advice that names its
+/// replacement. A document that still sets one fails to load with that
+/// advice instead of a bare unknown-field error, so a configuration that
+/// relied on the key is never silently reinterpreted.
+pub const REMOVED_KEYS: [(&str, &str); 7] = [
+    (
+        "allow_tools",
+        "was removed in v0.1.10: Auto and Full run tools without grants and Ask asks every \
+         time; hide a tool from the model with `policy.exposed_tools` instead; delete the key",
+    ),
+    (
+        "allow_shell_prefixes",
+        "was removed in v0.1.10: Auto runs commands without grants and Ask asks every time; \
+         restrict commands with `deny_shell_prefixes` instead; delete the key",
+    ),
+    (
+        "allow_hosts",
+        "was removed in v0.1.10: Auto and Full fetch without grants and Ask asks every time; \
+         restrict hosts with `deny_hosts` instead; delete the key",
+    ),
+    (
+        "shell_env",
+        "was removed in v0.1.10: commands inherit the full environment of the qq process; \
+         delete the key",
+    ),
+    (
+        "task_hosting",
+        "was removed in v0.1.10 with task publication: run `git push` from the shell in Auto \
+         or Full instead; delete the key",
+    ),
+    (
+        "reviewer_model",
+        "was removed in v0.1.10 with the approval reviewer: Auto runs without one and Ask asks \
+         a human every call; delete the key",
+    ),
+    (
+        "approval_delegate",
+        "was removed in v0.1.10 with the approval reviewer: choose `approval_mode` auto or \
+         full to skip prompts, or ask to approve every call; delete the key",
+    ),
+];
+
+/// Appends the [`REMOVED_KEYS`] advice to a parse error when the document
+/// sets a removed key at the top level, in `policy`, or in a profile. The
+/// document is rescanned untyped because a profile's unknown field surfaces
+/// only as an untagged-enum mismatch.
+fn explain_removed_key(options: &Options, content: &str, message: String) -> String {
+    let Ok(ron::Value::Map(document)) = options.from_str::<ron::Value>(content) else {
+        return message;
+    };
+    let field = |map: &ron::Map, name: &str| map.get(&ron::Value::String(name.to_owned())).cloned();
+    let mut maps = vec![document.clone()];
+    if let Some(ron::Value::Map(policy)) = field(&document, "policy") {
+        maps.push(policy);
+    }
+    if let Some(ron::Value::Map(profiles)) = field(&document, "profiles") {
+        maps.extend(profiles.values().filter_map(|profile| match profile {
+            ron::Value::Map(profile) => Some(profile.clone()),
+            _ => None,
+        }));
+    }
+    for (key, advice) in REMOVED_KEYS {
+        if maps.iter().any(|map| field(map, key).is_some()) {
+            return format!("{message}; `{key}` {advice}");
+        }
+    }
+    message
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -719,32 +743,16 @@ pub(super) struct PolicyPatch {
     require_https: Option<bool>,
     allow_custom_providers: Option<bool>,
     allow_literal_secrets: Option<bool>,
-    /// Approval grants: exact tool names that run without prompting.
-    /// Declarable by ordinary (workspace/user) sources.
-    allow_tools: Option<Vec<GrantEntry>>,
-    /// Approval grants: shell command prefixes matched at word granularity.
-    /// Declarable by ordinary (workspace/user) sources.
-    allow_shell_prefixes: Option<Vec<GrantEntry>>,
-    /// Approval grants: hosts `fetch` may reach without prompting under
-    /// `auto`. Exact lowercase host names or `*.suffix` wildcards.
-    /// Declarable by ordinary (workspace/user) sources.
-    allow_hosts: Option<Vec<GrantEntry>>,
-    /// Environment variable names a `shell` call may pass through to its
-    /// child (beyond PATH HOME LANG TERM TMPDIR). Authority-bearing like a
-    /// grant: gated by workspace trust, layered with `Remove(...)`.
-    shell_env: Option<Vec<GrantEntry>>,
-    task_hosting: Option<Vec<GithubTaskHostingGrant>>,
     /// How hard the runtime steers the model from shell habits to built-ins:
     /// `off`, `hint` (default), or `strict` (refuse before execution).
     builtin_preference: Option<BuiltinPreference>,
-    /// Managed-only: exact tool names filtered out of the effective grant set
-    /// no matter which lower layer declared them.
+    /// Managed-only: exact tool names refused under every approval mode.
     deny_tools: Option<Vec<String>>,
-    /// Managed-only: shell prefixes whose word-granularity overlap filters
-    /// lower-layer shell grants out of the effective grant set.
+    /// Managed-only: shell command prefixes refused under every approval
+    /// mode, matched at word granularity.
     deny_shell_prefixes: Option<Vec<String>>,
-    /// Managed-only: hosts `fetch` is refused under every approval mode;
-    /// also filters matching lower-layer host grants. Same host grammar.
+    /// Managed-only: hosts `fetch` is refused under every approval mode.
+    /// Exact lowercase host names or `*.suffix` wildcards.
     deny_hosts: Option<Vec<String>>,
     goals: Option<GoalCeilings>,
 }
@@ -765,15 +773,6 @@ impl PolicyPatch {
             || self.deny_hosts.is_some()
             || self.goals.is_some()
     }
-
-    /// Authority-bearing declarations; task hosting additionally requires a host source.
-    fn has_grants(&self) -> bool {
-        self.allow_tools.is_some()
-            || self.allow_shell_prefixes.is_some()
-            || self.allow_hosts.is_some()
-            || self.shell_env.is_some()
-            || self.task_hosting.is_some()
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -786,8 +785,6 @@ pub(super) struct Document {
     model: StringField,
     #[serde(default, skip_serializing_if = "StringField::is_missing")]
     worker_model: StringField,
-    #[serde(default, skip_serializing_if = "StringField::is_missing")]
-    reviewer_model: StringField,
     /// Delegation roster and bounds. Replaces the whole section when set;
     /// `Clear` drops what an earlier layer declared.
     #[serde(default, skip_serializing_if = "Field::is_missing")]
@@ -797,11 +794,6 @@ pub(super) struct Document {
     audit: Field<AuditPatch>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     goals: Field<GoalsPatch>,
-    /// Who settles held Auto approvals: `on` consults the configured
-    /// reviewer, `off` sends holds to a human. Missing uses the reviewer.
-    /// Ask always asks the human regardless of this setting.
-    #[serde(default, skip_serializing_if = "Field::is_missing")]
-    approval_delegate: Field<ApprovalDelegateSetting>,
     /// Seconds a held call may wait for a client before the server denies it.
     /// Missing is no server deadline: interactive holds wait for the client,
     /// the run deadline, or cancellation. Not trust-gated: it can only make
@@ -885,8 +877,6 @@ enum ProfilePatch {
         #[serde(default)]
         approval_mode: Option<ProfileApprovalMode>,
         #[serde(default)]
-        approval_delegate: Option<ApprovalDelegateSetting>,
-        #[serde(default)]
         reasoning_effort: Option<qq_provider::ReasoningEffort>,
     },
     Remove,
@@ -899,7 +889,7 @@ impl Document {
             .from_str(content)
             .map_err(|error| ConfigError::Parse {
                 origin: origin.clone(),
-                message: error.to_string(),
+                message: explain_removed_key(&options, content, error.to_string()),
             })?;
         if document.version != 1 {
             return Err(ConfigError::UnsupportedVersion {
@@ -912,37 +902,13 @@ impl Document {
     }
 
     fn validate(&self, origin: &SourceIdentity) -> Result<(), ConfigError> {
-        if let Some(policy) = &self.policy {
-            if policy.has_managed_only_fields()
-                && !matches!(origin.kind(), SourceKind::Managed | SourceKind::Mdm)
-            {
-                return Err(ConfigError::PolicyOutsideManaged {
-                    origin: origin.clone(),
-                });
-            }
-            if policy.task_hosting.is_some()
-                && !matches!(
-                    origin.kind(),
-                    SourceKind::Global
-                        | SourceKind::Explicit
-                        | SourceKind::Inline
-                        | SourceKind::Managed
-                        | SourceKind::Mdm
-                        | SourceKind::Remote
-                )
-            {
-                return Err(ConfigError::TaskHostingOutsideHost {
-                    origin: origin.clone(),
-                });
-            }
-            // Approval grants name commands and tools that run without
-            // prompting; remote configuration may never plant them, exactly
-            // like MCP declarations.
-            if origin.kind() == SourceKind::Remote && policy.has_grants() {
-                return Err(ConfigError::RemotePolicyGrantsForbidden {
-                    origin: origin.clone(),
-                });
-            }
+        if let Some(policy) = &self.policy
+            && policy.has_managed_only_fields()
+            && !matches!(origin.kind(), SourceKind::Managed | SourceKind::Mdm)
+        {
+            return Err(ConfigError::PolicyOutsideManaged {
+                origin: origin.clone(),
+            });
         }
         if self.contains_literal_secret()
             && !matches!(
@@ -982,17 +948,14 @@ impl Document {
         self.organization.is_present()
             || self.model.is_present()
             || self.worker_model.is_present()
-            || self.reviewer_model.is_present()
             || self.delegation.is_present()
             || self.audit.is_present()
             || self.goals.is_present()
-            || self.approval_delegate.is_present()
             || self.reasoning_effort.is_present()
             || self.profiles.is_present()
             || self.providers.is_present()
             || self.mcp.is_present()
             || self.packs.is_present()
-            || self.policy.as_ref().is_some_and(PolicyPatch::has_grants)
     }
 
     /// The sensitive sections this document declares, by configuration key,
@@ -1008,9 +971,6 @@ impl Document {
         if self.worker_model.is_present() {
             sections.push("worker_model");
         }
-        if self.reviewer_model.is_present() {
-            sections.push("reviewer_model");
-        }
         if self.delegation.is_present() {
             sections.push("delegation");
         }
@@ -1019,9 +979,6 @@ impl Document {
         }
         if self.goals.is_present() {
             sections.push("goals");
-        }
-        if self.approval_delegate.is_present() {
-            sections.push("approval_delegate");
         }
         if self.reasoning_effort.is_present() {
             sections.push("reasoning_effort");
@@ -1038,23 +995,6 @@ impl Document {
         if self.packs.is_present() {
             sections.push("packs");
         }
-        if let Some(policy) = &self.policy {
-            if policy.allow_tools.is_some() {
-                sections.push("policy.allow_tools");
-            }
-            if policy.allow_shell_prefixes.is_some() {
-                sections.push("policy.allow_shell_prefixes");
-            }
-            if policy.allow_hosts.is_some() {
-                sections.push("policy.allow_hosts");
-            }
-            if policy.shell_env.is_some() {
-                sections.push("policy.shell_env");
-            }
-            if policy.task_hosting.is_some() {
-                sections.push("policy.task_hosting");
-            }
-        }
         sections
     }
 
@@ -1070,20 +1010,6 @@ impl Document {
         }
 
         #[derive(Serialize)]
-        struct GrantsProjection<'a> {
-            #[serde(skip_serializing_if = "Option::is_none")]
-            allow_tools: Option<&'a Vec<GrantEntry>>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            allow_shell_prefixes: Option<&'a Vec<GrantEntry>>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            allow_hosts: Option<&'a Vec<GrantEntry>>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            shell_env: Option<&'a Vec<GrantEntry>>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            task_hosting: Option<&'a Vec<GithubTaskHostingGrant>>,
-        }
-
-        #[derive(Serialize)]
         struct SensitiveProjection<'a> {
             #[serde(skip_serializing_if = "Option::is_none")]
             organization: Option<&'a StringField>,
@@ -1092,15 +1018,11 @@ impl Document {
             #[serde(skip_serializing_if = "Option::is_none")]
             worker_model: Option<&'a StringField>,
             #[serde(skip_serializing_if = "Option::is_none")]
-            reviewer_model: Option<&'a StringField>,
-            #[serde(skip_serializing_if = "Option::is_none")]
             delegation: Option<&'a Field<DelegationPatch>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             audit: Option<&'a Field<AuditPatch>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             goals: Option<&'a Field<GoalsPatch>>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            approval_delegate: Option<&'a Field<ApprovalDelegateSetting>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             reasoning_effort: Option<&'a Field<qq_provider::ReasoningEffort>>,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -1111,8 +1033,6 @@ impl Document {
             mcp: Option<&'a Field<UniqueMap<String, McpServerPatch>>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             packs: Option<&'a Field<UniqueMap<String, PackPatch>>>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            policy_grants: Option<GrantsProjection<'a>>,
         }
 
         fn present<T>(field: &Field<T>) -> Option<&Field<T>> {
@@ -1123,30 +1043,14 @@ impl Document {
             organization: self.organization.is_present().then_some(&self.organization),
             model: self.model.is_present().then_some(&self.model),
             worker_model: self.worker_model.is_present().then_some(&self.worker_model),
-            reviewer_model: self
-                .reviewer_model
-                .is_present()
-                .then_some(&self.reviewer_model),
             delegation: present(&self.delegation),
             audit: present(&self.audit),
             goals: present(&self.goals),
-            approval_delegate: present(&self.approval_delegate),
             reasoning_effort: present(&self.reasoning_effort),
             profiles: present(&self.profiles),
             providers: present(&self.providers),
             mcp: present(&self.mcp),
             packs: present(&self.packs),
-            policy_grants: self
-                .policy
-                .as_ref()
-                .filter(|policy| policy.has_grants())
-                .map(|policy| GrantsProjection {
-                    allow_tools: policy.allow_tools.as_ref(),
-                    allow_shell_prefixes: policy.allow_shell_prefixes.as_ref(),
-                    allow_hosts: policy.allow_hosts.as_ref(),
-                    shell_env: policy.shell_env.as_ref(),
-                    task_hosting: policy.task_hosting.as_ref(),
-                }),
         };
         let canonical =
             serde_json::to_vec(&projection).map_err(|error| ConfigError::StateSerialization {
@@ -1172,17 +1076,11 @@ impl Document {
         if self.worker_model.is_present() {
             touched.push(ConfigKey::WorkerModel);
         }
-        if self.reviewer_model.is_present() {
-            touched.push(ConfigKey::ReviewerModel);
-        }
         if self.delegation.is_present() {
             touched.push(ConfigKey::Delegation);
         }
         if self.reasoning_effort.is_present() {
             touched.push(ConfigKey::ReasoningEffort);
-        }
-        if self.approval_delegate.is_present() {
-            touched.push(ConfigKey::ApprovalDelegate);
         }
         if self.audit.is_present() {
             touched.push(ConfigKey::Audit);
@@ -1260,53 +1158,6 @@ impl Document {
 
     pub(super) fn matches_organization(&self, name: &str) -> bool {
         matches!(&self.organization, StringField::Set(value) if value == name)
-    }
-
-    /// Whether this document's own `policy` entries net out to declaring the
-    /// grant: an `Allow` not undone by a later `Remove` in the same list.
-    pub(super) fn declares_policy_grant(&self, grant: &WorkspaceGrant) -> bool {
-        let Some(policy) = &self.policy else {
-            return false;
-        };
-        let (entries, value) = match grant {
-            WorkspaceGrant::Tool(name) => (policy.allow_tools.as_ref(), name),
-            WorkspaceGrant::ShellPrefix(prefix) => (policy.allow_shell_prefixes.as_ref(), prefix),
-            WorkspaceGrant::Host(host) => (policy.allow_hosts.as_ref(), host),
-        };
-        let Some(entries) = entries else {
-            return false;
-        };
-        let mut present = false;
-        for entry in entries {
-            match entry {
-                GrantEntry::Allow(name) if name == value => present = true,
-                GrantEntry::Remove(GrantRemoval::Remove(name)) if name == value => present = false,
-                _ => {}
-            }
-        }
-        present
-    }
-
-    /// Accumulates this document's managed deny lists for the promotion
-    /// writer's refusal check.
-    pub(super) fn collect_policy_denies(
-        &self,
-        deny_tools: &mut Vec<String>,
-        deny_shell_prefixes: &mut Vec<String>,
-        deny_hosts: &mut Vec<String>,
-    ) {
-        let Some(policy) = &self.policy else {
-            return;
-        };
-        if let Some(tools) = &policy.deny_tools {
-            deny_tools.extend(tools.iter().cloned());
-        }
-        if let Some(prefixes) = &policy.deny_shell_prefixes {
-            deny_shell_prefixes.extend(prefixes.iter().cloned());
-        }
-        if let Some(hosts) = &policy.deny_hosts {
-            deny_hosts.extend(hosts.iter().cloned());
-        }
     }
 }
 
@@ -1443,7 +1294,7 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
         }
         let mut unique = BTreeSet::new();
         for name in names {
-            if let Err(message) = validate_tool_grant_name(name) {
+            if let Err(message) = validate_tool_name(name) {
                 return Err(invalid(format!("policy field exposed_tools: {message}")));
             }
             // Configuration cannot depend on the runtime. A root contract
@@ -1457,9 +1308,6 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
                     | "write_file"
                     | "shell"
                     | "exec"
-                    | "task_commit"
-                    | "task_push"
-                    | "task_pr"
                     | "ask_user"
                     | "fetch"
                     | "spawn_agent"
@@ -1502,77 +1350,21 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
             }
         }
     }
-    for (field, entries, shape) in [
-        (
-            "allow_tools",
-            policy.allow_tools.as_deref(),
-            GrantShape::Tool,
-        ),
-        (
-            "allow_shell_prefixes",
-            policy.allow_shell_prefixes.as_deref(),
-            GrantShape::ShellPrefix,
-        ),
-        (
-            "allow_hosts",
-            policy.allow_hosts.as_deref(),
-            GrantShape::Host,
-        ),
-    ] {
-        let Some(entries) = entries else {
-            continue;
-        };
-        let mut unique = BTreeSet::new();
-        for entry in entries {
-            let name = entry.name();
-            validate_grant_value(name, shape)
-                .map_err(|message| invalid(format!("policy field {field}: {message}")))?;
-            if !unique.insert(name) {
-                return Err(invalid(format!(
-                    "policy field {field} contains duplicate value {name:?}"
-                )));
-            }
-        }
-    }
-    if let Some(entries) = &policy.shell_env {
-        if entries.len() > MAX_SHELL_ENV_ENTRIES {
-            return Err(invalid(format!(
-                "policy field shell_env lists more than {MAX_SHELL_ENV_ENTRIES} names"
-            )));
-        }
-        let mut unique = BTreeSet::new();
-        for entry in entries {
-            let name = entry.name();
-            if !valid_env_name(name) {
-                return Err(invalid(format!(
-                    "policy field shell_env: {name:?} is not an environment variable name ([A-Za-z_][A-Za-z0-9_]*, at most 128 bytes)"
-                )));
-            }
-            if !unique.insert(name) {
-                return Err(invalid(format!(
-                    "policy field shell_env contains duplicate value {name:?}"
-                )));
-            }
-        }
-    }
-    if let Some(grants) = &policy.task_hosting {
-        crate::task_hosting::validate(grants, origin)?;
-    }
     for (field, values, shape) in [
-        ("deny_tools", policy.deny_tools.as_deref(), GrantShape::Tool),
+        ("deny_tools", policy.deny_tools.as_deref(), RuleShape::Tool),
         (
             "deny_shell_prefixes",
             policy.deny_shell_prefixes.as_deref(),
-            GrantShape::ShellPrefix,
+            RuleShape::ShellPrefix,
         ),
-        ("deny_hosts", policy.deny_hosts.as_deref(), GrantShape::Host),
+        ("deny_hosts", policy.deny_hosts.as_deref(), RuleShape::Host),
     ] {
         let Some(values) = values else {
             continue;
         };
         let mut unique = BTreeSet::new();
         for value in values {
-            validate_grant_value(value, shape)
+            validate_rule_value(value, shape)
                 .map_err(|message| invalid(format!("policy field {field}: {message}")))?;
             if !unique.insert(value) {
                 return Err(invalid(format!(
@@ -1584,34 +1376,32 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
     Ok(())
 }
 
-const MAX_TOOL_GRANT_NAME_BYTES: usize = 128;
-const MAX_SHELL_PREFIX_GRANT_BYTES: usize = 512;
-const MAX_HOST_GRANT_BYTES: usize = 253;
+const MAX_TOOL_NAME_BYTES: usize = 128;
+const MAX_SHELL_PREFIX_BYTES: usize = 512;
+const MAX_HOST_BYTES: usize = 253;
 
 #[derive(Clone, Copy)]
-enum GrantShape {
+enum RuleShape {
     Tool,
     ShellPrefix,
     Host,
 }
 
-fn validate_grant_value(value: &str, shape: GrantShape) -> Result<(), String> {
+fn validate_rule_value(value: &str, shape: RuleShape) -> Result<(), String> {
     match shape {
-        GrantShape::Tool => validate_tool_grant_name(value),
-        GrantShape::ShellPrefix => validate_shell_prefix_grant(value),
-        GrantShape::Host => validate_host_grant(value),
+        RuleShape::Tool => validate_tool_name(value),
+        RuleShape::ShellPrefix => validate_shell_prefix(value),
+        RuleShape::Host => validate_host(value),
     }
 }
 
-/// Host grants are lowercase DNS names (`docs.rs`) or one leading wildcard
+/// Host rules are lowercase DNS names (`docs.rs`) or one leading wildcard
 /// label (`*.github.com`) matching any subdomain but not the apex. No
-/// scheme, port, path, or IP literal: a grant names a site, and the SSRF
+/// scheme, port, path, or IP literal: a rule names a site, and the SSRF
 /// rules judge addresses at fetch time.
-pub(super) fn validate_host_grant(host: &str) -> Result<(), String> {
-    if host.is_empty() || host.len() > MAX_HOST_GRANT_BYTES {
-        return Err(format!(
-            "host {host:?} must be 1-{MAX_HOST_GRANT_BYTES} bytes"
-        ));
+fn validate_host(host: &str) -> Result<(), String> {
+    if host.is_empty() || host.len() > MAX_HOST_BYTES {
+        return Err(format!("host {host:?} must be 1-{MAX_HOST_BYTES} bytes"));
     }
     let name = host.strip_prefix("*.").unwrap_or(host);
     if name.is_empty() || name.contains('*') {
@@ -1643,27 +1433,14 @@ pub(super) fn validate_host_grant(host: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Tool grants follow tool declaration names: 1-128 bytes of ASCII letters,
+/// Tool names follow tool declaration names: 1-128 bytes of ASCII letters,
 /// digits, hyphens, or underscores. Names starting with `mcp__` must complete
 /// the `mcp__<server>__<tool>` grammar, with the server segment obeying the
 /// MCP server-name rules.
-/// Names the shell env allowlist may hold.
-const MAX_SHELL_ENV_ENTRIES: usize = 64;
-
-/// `[A-Za-z_][A-Za-z0-9_]*`, at most 128 bytes.
-fn valid_env_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 128
-        && !name.as_bytes()[0].is_ascii_digit()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-}
-
-pub(super) fn validate_tool_grant_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || name.len() > MAX_TOOL_GRANT_NAME_BYTES {
+fn validate_tool_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > MAX_TOOL_NAME_BYTES {
         return Err(format!(
-            "tool name {name:?} must be 1-{MAX_TOOL_GRANT_NAME_BYTES} bytes"
+            "tool name {name:?} must be 1-{MAX_TOOL_NAME_BYTES} bytes"
         ));
     }
     if !name
@@ -1687,16 +1464,16 @@ pub(super) fn validate_tool_grant_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Shell prefix grants are matched at word granularity, so they must be
+/// Shell prefixes are matched at word granularity, so they must be
 /// non-empty, contain no control characters, and carry no surrounding
 /// whitespace.
-pub(super) fn validate_shell_prefix_grant(prefix: &str) -> Result<(), String> {
+fn validate_shell_prefix(prefix: &str) -> Result<(), String> {
     if prefix.trim().is_empty() {
         return Err("shell prefix must not be empty".to_owned());
     }
-    if prefix.len() > MAX_SHELL_PREFIX_GRANT_BYTES {
+    if prefix.len() > MAX_SHELL_PREFIX_BYTES {
         return Err(format!(
-            "shell prefix {prefix:?} must be at most {MAX_SHELL_PREFIX_GRANT_BYTES} bytes"
+            "shell prefix {prefix:?} must be at most {MAX_SHELL_PREFIX_BYTES} bytes"
         ));
     }
     if prefix != prefix.trim() {
@@ -1712,48 +1489,13 @@ pub(super) fn validate_shell_prefix_grant(prefix: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Word-granularity overlap between a denied prefix and a granted prefix. A
-/// deny removes both narrower grants it covers (`cargo` denies `cargo test`)
-/// and broader grants that would cover the denied commands (`cargo test`
-/// denied removes a bare `cargo` grant), because a config-layer filter cannot
-/// partially subtract a broader grant.
-pub(super) fn shell_prefixes_overlap(denied: &str, granted: &str) -> bool {
-    word_prefix_covers(denied, granted) || word_prefix_covers(granted, denied)
-}
-
-fn word_prefix_covers(prefix: &str, candidate: &str) -> bool {
-    candidate == prefix
-        || candidate
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
-}
-
-/// Read-only version-control commands granted by the compiled defaults, per
-/// the Version Control section of docs/design/tools.md. Ordinary grants: a
-/// later layer can `Remove(...)` any of them and a managed deny filters them.
-/// Interrogative subcommands only — nothing here mutates or publishes.
-const VCS_READ_ONLY_PRESETS: &[&str] = &[
-    "git blame",
-    "git diff",
-    "git log",
-    "git show",
-    "git status",
-    "jj diff",
-    "jj log",
-    "jj op log",
-    "jj show",
-    "jj status",
-];
-
 pub(super) struct MergeState {
     organization: Option<String>,
     model: Option<String>,
     worker_model: Option<String>,
-    reviewer_model: Option<String>,
     delegation: Option<DelegationPatch>,
     audit: Option<AuditPatch>,
     goals: GoalsConfig,
-    approval_delegate: Option<ApprovalDelegateSetting>,
     approval_timeout_seconds: Option<u64>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
@@ -1795,10 +1537,6 @@ impl MergeState {
                 .cloned()
                 .map(|name| (name, source.clone()))
                 .collect(),
-            grant_shell_prefixes: VCS_READ_ONLY_PRESETS
-                .iter()
-                .map(|prefix| ((*prefix).to_owned(), source.clone()))
-                .collect(),
             ..ConfigProvenance::default()
         };
         let report = SourceReport::new(
@@ -1815,11 +1553,9 @@ impl MergeState {
                 organization: None,
                 model: None,
                 worker_model: None,
-                reviewer_model: None,
                 delegation: None,
                 audit: None,
                 goals: GoalsConfig::default(),
-                approval_delegate: None,
                 approval_timeout_seconds: None,
                 reasoning_effort: None,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -1827,13 +1563,7 @@ impl MergeState {
                 mcp: BTreeMap::new(),
                 profiles: BTreeMap::new(),
                 packs: BTreeMap::new(),
-                policy: EffectivePolicy {
-                    allow_shell_prefixes: VCS_READ_ONLY_PRESETS
-                        .iter()
-                        .map(|prefix| (*prefix).to_owned())
-                        .collect(),
-                    ..EffectivePolicy::default()
-                },
+                policy: EffectivePolicy::default(),
                 provenance,
             },
             report,
@@ -1903,9 +1633,6 @@ impl MergeState {
         if apply_optional_string(&document.worker_model, &mut self.worker_model) {
             self.provenance.worker_model = Some(source.clone());
         }
-        if apply_optional_string(&document.reviewer_model, &mut self.reviewer_model) {
-            self.provenance.reviewer_model = Some(source.clone());
-        }
         match &document.goals {
             Field::Missing => {}
             Field::Set(patch) => self.goals.apply(patch, source, &mut self.provenance.goals),
@@ -1926,14 +1653,6 @@ impl MergeState {
                 self.delegation = None;
                 self.provenance.delegation = Some(source.clone());
             }
-        }
-        match document.approval_delegate {
-            Field::Missing => {}
-            Field::Set(setting) => self.approval_delegate = Some(setting),
-            Field::Clear => self.approval_delegate = None,
-        }
-        if document.approval_delegate.is_present() {
-            self.provenance.approval_delegate = Some(source.clone());
         }
         match document.reasoning_effort {
             Field::Missing => {}
@@ -2003,7 +1722,6 @@ impl MergeState {
                             organization,
                             max_output_tokens,
                             approval_mode,
-                            approval_delegate,
                             reasoning_effort,
                         } => {
                             self.profiles.insert(
@@ -2013,7 +1731,6 @@ impl MergeState {
                                     organization: organization.clone(),
                                     max_output_tokens: *max_output_tokens,
                                     approval_mode: *approval_mode,
-                                    approval_delegate: *approval_delegate,
                                     reasoning_effort: *reasoning_effort,
                                     pack: None,
                                 },
@@ -2038,11 +1755,6 @@ impl MergeState {
             self.reasoning_effort = Some(effort);
             self.provenance.reasoning_effort = Some(source.clone());
             touched.push(ConfigKey::ReasoningEffort);
-        }
-        if let Some(setting) = overrides.approval_delegate {
-            self.approval_delegate = Some(setting);
-            self.provenance.approval_delegate = Some(source.clone());
-            touched.push(ConfigKey::ApprovalDelegate);
         }
         if let Some(organization) = &overrides.organization {
             self.organization = Some(organization.clone());
@@ -2292,37 +2004,6 @@ impl MergeState {
         if let Some(incoming) = patch.allow_literal_secrets {
             self.policy.allow_literal_secrets &= incoming;
         }
-        apply_grant_entries(
-            patch.allow_tools.as_deref(),
-            &mut self.policy.allow_tools,
-            &mut self.provenance.grant_tools,
-            source,
-        );
-        apply_grant_entries(
-            patch.allow_shell_prefixes.as_deref(),
-            &mut self.policy.allow_shell_prefixes,
-            &mut self.provenance.grant_shell_prefixes,
-            source,
-        );
-        apply_grant_entries(
-            patch.allow_hosts.as_deref(),
-            &mut self.policy.allow_hosts,
-            &mut self.provenance.grant_hosts,
-            source,
-        );
-        apply_grant_entries(
-            patch.shell_env.as_deref(),
-            &mut self.policy.shell_env,
-            &mut self.provenance.shell_env,
-            source,
-        );
-        if let Some(grants) = &patch.task_hosting {
-            self.policy.task_hosting = grants.clone();
-            self.provenance.task_hosting = grants
-                .iter()
-                .map(|grant| (grant.workspace().to_owned(), source.clone()))
-                .collect();
-        }
         // Later layers may only tighten the preference: `hint` over `off`,
         // `strict` over either. A managed source that says strict wins.
         if let Some(incoming) = patch.builtin_preference {
@@ -2396,7 +2077,6 @@ impl MergeState {
                             organization: profile.organization().map(str::to_owned),
                             max_output_tokens: profile.max_output_tokens(),
                             approval_mode: profile.approval_mode(),
-                            approval_delegate: None,
                             reasoning_effort: None,
                             pack: Some(crate::PackProfileRef::new(pack, profile.clone())),
                         },
@@ -2414,12 +2094,7 @@ impl MergeState {
         // relies on `ModelRequired` meaning "valid apart from the selection".
         let model = self.model.map(ModelRoute::parse).transpose()?;
         let worker_model = self.worker_model.map(ModelRoute::parse).transpose()?;
-        let reviewer_model = self.reviewer_model.map(ModelRoute::parse).transpose()?;
-        for route in model
-            .iter()
-            .chain(worker_model.as_ref())
-            .chain(reviewer_model.as_ref())
-        {
+        for route in model.iter().chain(worker_model.as_ref()) {
             if !self.providers.contains_key(route.provider()) {
                 return Err(ConfigError::UnknownProvider(route.provider().to_owned()));
             }
@@ -2589,7 +2264,6 @@ impl MergeState {
             }
             None => AuditConfig::default(),
         };
-        let grants = resolve_policy_grants(&self.policy, &self.mcp);
         // Every other rule has passed by this point, so `ModelRequired` is the
         // only error a model-less but otherwise valid document can produce
         // from `require_model`.
@@ -2614,10 +2288,8 @@ impl MergeState {
             goals,
             model,
             worker_model,
-            reviewer_model,
             delegation,
             audit,
-            approval_delegate: self.approval_delegate,
             approval_timeout,
             reasoning_effort: self.reasoning_effort,
             max_output_tokens: self.max_output_tokens,
@@ -2626,7 +2298,6 @@ impl MergeState {
             profiles: self.profiles,
             packs: self.packs,
             policy: self.policy,
-            grants,
             reports,
             provenance: self.provenance,
             sources,
@@ -2647,11 +2318,9 @@ impl ClientSnapshot {
             organization: self.organization,
             model,
             worker_model: self.worker_model,
-            reviewer_model: self.reviewer_model,
             delegation: self.delegation,
             audit: self.audit,
             goals: self.goals,
-            approval_delegate: self.approval_delegate,
             approval_timeout: self.approval_timeout,
             reasoning_effort: self.reasoning_effort,
             max_output_tokens: self.max_output_tokens,
@@ -2660,104 +2329,11 @@ impl ClientSnapshot {
             profiles: self.profiles,
             packs: self.packs,
             policy: self.policy,
-            grants: self.grants,
             reports: self.reports,
             provenance: self.provenance,
             sources: self.sources,
         })
     }
-}
-
-fn apply_grant_entries(
-    entries: Option<&[GrantEntry]>,
-    current: &mut Vec<String>,
-    provenance: &mut BTreeMap<String, SourceIdentity>,
-    source: &SourceIdentity,
-) {
-    let Some(entries) = entries else {
-        return;
-    };
-    let mut combined: BTreeSet<String> = current.drain(..).collect();
-    for entry in entries {
-        match entry {
-            GrantEntry::Allow(name) => {
-                combined.insert(name.clone());
-                provenance.insert(name.clone(), source.clone());
-            }
-            GrantEntry::Remove(GrantRemoval::Remove(name)) => {
-                combined.remove(name);
-                provenance.remove(name);
-            }
-        }
-    }
-    *current = combined.into_iter().collect();
-}
-
-/// Resolves the effective grant set: declared tool and shell-prefix grants
-/// plus every per-MCP-server allowlist entry folded in as an exact
-/// `mcp__<server>__<tool>` name, minus everything the managed deny lists
-/// filter out.
-fn resolve_policy_grants(
-    policy: &EffectivePolicy,
-    mcp: &BTreeMap<String, McpServerConfig>,
-) -> PolicyGrants {
-    let mut tools: BTreeSet<String> = policy.allow_tools.iter().cloned().collect();
-    for (server, config) in mcp {
-        for tool in config.allow() {
-            tools.insert(format!("mcp__{server}__{tool}"));
-        }
-    }
-    let tools = tools
-        .into_iter()
-        .filter(|name| !policy.deny_tools.iter().any(|denied| denied == name))
-        .collect();
-    let shell_prefixes = policy
-        .allow_shell_prefixes
-        .iter()
-        .filter(|granted| {
-            !policy
-                .deny_shell_prefixes
-                .iter()
-                .any(|denied| shell_prefixes_overlap(denied, granted))
-        })
-        .cloned()
-        .collect();
-    // Like shell prefixes, a host deny removes both the narrower grants it
-    // covers and the broader grants that would cover it: the config layer
-    // cannot partially subtract a wildcard. The runtime still refuses the
-    // denied hosts themselves at fetch time whatever grants remain.
-    let hosts = policy
-        .allow_hosts
-        .iter()
-        .filter(|granted| {
-            !policy
-                .deny_hosts
-                .iter()
-                .any(|denied| hosts_overlap(denied, granted))
-        })
-        .cloned()
-        .collect();
-    PolicyGrants::new(tools, shell_prefixes, hosts)
-}
-
-/// Whether two host patterns (exact or `*.suffix`) admit a common host.
-pub(super) fn hosts_overlap(a: &str, b: &str) -> bool {
-    host_pattern_covers(a, b) || host_pattern_covers(b, a)
-}
-
-/// Whether every host `candidate` admits is also admitted by `pattern`.
-fn host_pattern_covers(pattern: &str, candidate: &str) -> bool {
-    if pattern == candidate {
-        return true;
-    }
-    let Some(suffix) = pattern.strip_prefix("*.") else {
-        return false;
-    };
-    let candidate_name = candidate.strip_prefix("*.").unwrap_or(candidate);
-    // `*.corp` covers `*.a.corp` and `x.corp`, never the apex `corp`.
-    candidate_name
-        .strip_suffix(suffix)
-        .is_some_and(|head| head.ends_with('.'))
 }
 
 fn apply_optional<T: Clone>(field: &Field<T>, current: &mut Option<T>) -> bool {

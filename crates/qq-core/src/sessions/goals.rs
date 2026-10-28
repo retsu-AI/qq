@@ -329,7 +329,7 @@ pub(super) fn auto_check_authority(
         && authority
             .ancestors
             .iter()
-            .all(|(mode, _)| matches!(mode, ApprovalMode::Auto | ApprovalMode::Full)))
+            .all(|mode| matches!(mode, ApprovalMode::Auto | ApprovalMode::Full)))
 }
 
 pub(super) fn validate_check_authority(

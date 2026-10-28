@@ -65,7 +65,6 @@ pub fn session_summary(id: SessionId) -> SessionSummary {
         model: Some("openai/gpt-test".to_owned()),
         profile: qq_protocol::AgentProfileId::default(),
         approval_mode: ApprovalMode::Auto,
-        approval_delegate: None,
         reasoning_effort: None,
         correlation: Correlation::default(),
         context_tokens: None,
@@ -214,15 +213,9 @@ pub fn capabilities(steering: SteeringCapabilities) -> ServerCapabilities {
             max_output_repair_turns: 8,
             max_correlation_entries: 8,
         },
-        approvals: [
-            "approve_once",
-            "approve_for_session",
-            "approve_for_workspace",
-            "deny",
-            "answer",
-        ]
-        .map(str::to_owned)
-        .to_vec(),
+        approvals: ["approve_once", "deny", "answer"]
+            .map(str::to_owned)
+            .to_vec(),
         approval_modes: vec![
             ApprovalMode::ReadOnly,
             ApprovalMode::Ask,

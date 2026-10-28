@@ -18,11 +18,8 @@ mod loader;
 mod managed;
 mod models;
 pub mod pack;
-mod promote;
 mod providers;
 mod remote;
-mod task_hosting;
-pub use task_hosting::GithubTaskHostingGrant;
 mod theme;
 mod tui;
 
@@ -63,23 +60,29 @@ pub const MAX_APPROVAL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 /// that captures or clears process inputs must cover both lists. Provider
 /// credential variables are not here: they are resolved at request time and
 /// listed by [`provider_credential_variables`].
-pub const ENVIRONMENT_VARIABLES: [&str; 5] = [
+pub const ENVIRONMENT_VARIABLES: [&str; 4] = [
     "QQ_CONFIG",
     "QQ_CONFIG_CONTENT",
     "QQ_MODEL",
     "QQ_ORGANIZATION",
-    "QQ_APPROVAL_DELEGATE",
 ];
 
-/// Environment variables of removed features. Setting one is an error naming
-/// it, so a deployment that asked for Jev review does not silently run
-/// without it.
-pub const REMOVED_ENVIRONMENT_VARIABLES: [&str; 3] =
-    ["QQ_JEV_CHECKPOINTS", "QQ_JEV_ROUTING", "QQ_JEV_APPROVAL"];
+/// Environment variables of removed features, each with what replaced it.
+/// Setting one is an error naming it, so a deployment that relied on the
+/// feature does not silently run without it.
+pub const REMOVED_ENVIRONMENT_VARIABLES: [(&str, &str); 4] = [
+    ("QQ_JEV_CHECKPOINTS", "with Jev"),
+    ("QQ_JEV_ROUTING", "with Jev"),
+    ("QQ_JEV_APPROVAL", "with Jev"),
+    (
+        "QQ_APPROVAL_DELEGATE",
+        "in v0.1.10 with the approval reviewer: Auto runs without one and Ask asks a human \
+         every call",
+    ),
+];
 
 pub use document::{
-    DOCUMENT_FIELD_NAMES, HOST_ONLY_POLICY_FIELD_NAMES, MANAGED_ONLY_POLICY_FIELD_NAMES,
-    ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES, POLICY_FIELD_NAMES,
+    DOCUMENT_FIELD_NAMES, MANAGED_ONLY_POLICY_FIELD_NAMES, POLICY_FIELD_NAMES, REMOVED_KEYS,
 };
 pub use providers::{
     BuiltinAudience, BuiltinProvider, LoginMethod, ModelDiscoveryShape, builtin_provider,
@@ -113,16 +116,10 @@ impl LoadRequest {
     ) -> Result<Self, ConfigError> {
         // Every name is taken from `ENVIRONMENT_VARIABLES` by position so the
         // published list and what is actually read cannot drift apart.
-        let [
-            config,
-            config_content,
-            model,
-            organization,
-            approval_delegate,
-        ] = ENVIRONMENT_VARIABLES;
-        for name in REMOVED_ENVIRONMENT_VARIABLES {
+        let [config, config_content, model, organization] = ENVIRONMENT_VARIABLES;
+        for (name, removed) in REMOVED_ENVIRONMENT_VARIABLES {
             if env::var_os(name).is_some() {
-                return Err(ConfigError::RemovedSetting(name));
+                return Err(ConfigError::RemovedSetting { name, removed });
             }
         }
         let mut request = Self::new(cwd);
@@ -131,9 +128,6 @@ impl LoadRequest {
         request.overrides.model = optional_environment(model)?;
         request.overrides.organization = optional_environment(organization)?;
         request.overrides.max_output_tokens = max_output_tokens;
-        if let Some(value) = optional_environment(approval_delegate)? {
-            request.overrides.approval_delegate = Some(value.parse()?);
-        }
         Ok(request)
     }
 
@@ -234,7 +228,6 @@ pub struct RuntimeOverrides {
     organization: Option<String>,
     model: Option<String>,
     max_output_tokens: Option<u32>,
-    approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
 }
 
@@ -288,22 +281,10 @@ impl RuntimeOverrides {
         self.max_output_tokens
     }
 
-    #[must_use]
-    pub const fn with_approval_delegate(mut self, setting: ApprovalDelegateSetting) -> Self {
-        self.approval_delegate = Some(setting);
-        self
-    }
-
-    #[must_use]
-    pub const fn approval_delegate(&self) -> Option<ApprovalDelegateSetting> {
-        self.approval_delegate
-    }
-
     fn is_empty(&self) -> bool {
         self.organization.is_none()
             && self.model.is_none()
             && self.max_output_tokens.is_none()
-            && self.approval_delegate.is_none()
             && self.reasoning_effort.is_none()
     }
 }
@@ -518,19 +499,6 @@ impl ConfigLoader {
 
     pub fn organizations(&self) -> Result<Vec<OrganizationEnrollment>, ConfigError> {
         remote::list(&self.paths)
-    }
-
-    /// Durably records an approval grant in the workspace's
-    /// `.qq/config.ron` policy section, creating the file or section when
-    /// absent and preserving unrelated user content otherwise. The write is
-    /// atomic (temp file + rename), idempotent for a grant the document
-    /// already declares, and refused when the managed layer denies the grant.
-    pub fn promote_workspace_grant(
-        &self,
-        workspace_dir: &Path,
-        grant: &WorkspaceGrant,
-    ) -> Result<GrantPromotion, ConfigError> {
-        promote::promote_workspace_grant(self, workspace_dir, grant)
     }
 
     #[cfg(test)]
@@ -1200,11 +1168,6 @@ pub struct EffectivePolicy {
     require_https: bool,
     allow_custom_providers: bool,
     allow_literal_secrets: bool,
-    allow_tools: Vec<String>,
-    allow_shell_prefixes: Vec<String>,
-    allow_hosts: Vec<String>,
-    shell_env: Vec<String>,
-    task_hosting: Vec<GithubTaskHostingGrant>,
     builtin_preference: BuiltinPreference,
     deny_tools: Vec<String>,
     deny_shell_prefixes: Vec<String>,
@@ -1222,11 +1185,6 @@ impl Default for EffectivePolicy {
             require_https: false,
             allow_custom_providers: true,
             allow_literal_secrets: true,
-            allow_tools: Vec::new(),
-            allow_shell_prefixes: Vec::new(),
-            allow_hosts: Vec::new(),
-            shell_env: Vec::new(),
-            task_hosting: Vec::new(),
             builtin_preference: BuiltinPreference::default(),
             deny_tools: Vec::new(),
             deny_shell_prefixes: Vec::new(),
@@ -1290,166 +1248,30 @@ impl EffectivePolicy {
         self.allow_literal_secrets
     }
 
-    /// Exact tool names granted across layers, before deny filtering and
-    /// before per-MCP-server allowlists are folded in. Prefer
-    /// [`ConfigSnapshot::grants`] for the resolved set.
-    #[must_use]
-    pub fn allow_tools(&self) -> &[String] {
-        &self.allow_tools
-    }
-
-    /// Shell command prefixes granted across layers, before deny filtering.
-    /// Prefer [`ConfigSnapshot::grants`] for the resolved set.
-    #[must_use]
-    pub fn allow_shell_prefixes(&self) -> &[String] {
-        &self.allow_shell_prefixes
-    }
-
-    /// Hosts granted to `fetch` across layers, before deny filtering.
-    /// Prefer [`ConfigSnapshot::grants`] for the resolved set.
-    #[must_use]
-    pub fn allow_hosts(&self) -> &[String] {
-        &self.allow_hosts
-    }
-
-    /// Environment variable names a `shell` call may pass through to its
-    /// child, beyond the base set the runtime always provides.
-    #[must_use]
-    pub fn shell_env(&self) -> &[String] {
-        &self.shell_env
-    }
-
-    /// Host-only, workspace-scoped GitHub publication destinations.
-    #[must_use]
-    pub fn task_hosting(&self) -> &[GithubTaskHostingGrant] {
-        &self.task_hosting
-    }
-
     /// How hard the runtime steers shell habits toward built-ins.
     #[must_use]
     pub const fn builtin_preference(&self) -> BuiltinPreference {
         self.builtin_preference
     }
 
-    /// Managed-only: exact tool names filtered out of the effective grants.
+    /// Managed-only: exact tool names refused under every approval mode.
     #[must_use]
     pub fn deny_tools(&self) -> &[String] {
         &self.deny_tools
     }
 
-    /// Managed-only: shell prefixes whose word-granularity overlap filters
-    /// lower-layer shell grants.
+    /// Managed-only: shell command prefixes refused under every approval
+    /// mode, matched at word granularity.
     #[must_use]
     pub fn deny_shell_prefixes(&self) -> &[String] {
         &self.deny_shell_prefixes
     }
 
     /// Managed-only: hosts `fetch` refuses under every approval mode. Exact
-    /// names or `*.suffix` wildcards; also filters matching host grants.
+    /// names or `*.suffix` wildcards.
     #[must_use]
     pub fn deny_hosts(&self) -> &[String] {
         &self.deny_hosts
-    }
-}
-
-/// The resolved workspace grant set: exact tool names (with per-MCP-server
-/// allowlists folded in as `mcp__<server>__<tool>`) and shell command
-/// prefixes, after managed deny filtering. Grants are not secrets; the values
-/// render unredacted. Session creation seeds its grant set from this.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PolicyGrants {
-    tools: Vec<String>,
-    shell_prefixes: Vec<String>,
-    hosts: Vec<String>,
-}
-
-impl PolicyGrants {
-    pub(crate) const fn new(
-        tools: Vec<String>,
-        shell_prefixes: Vec<String>,
-        hosts: Vec<String>,
-    ) -> Self {
-        Self {
-            tools,
-            shell_prefixes,
-            hosts,
-        }
-    }
-
-    /// Exact tool names allowed to run without prompting, sorted and deduped.
-    #[must_use]
-    pub fn tools(&self) -> &[String] {
-        &self.tools
-    }
-
-    /// Shell command prefixes matched at word granularity, sorted and deduped.
-    #[must_use]
-    pub fn shell_prefixes(&self) -> &[String] {
-        &self.shell_prefixes
-    }
-
-    /// Hosts `fetch` may reach without prompting under `auto`: exact names
-    /// or `*.suffix` wildcards, sorted and deduped.
-    #[must_use]
-    pub fn hosts(&self) -> &[String] {
-        &self.hosts
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.tools.is_empty() && self.shell_prefixes.is_empty() && self.hosts.is_empty()
-    }
-}
-
-/// One approval grant with workspace lifetime: an exact tool name (built-in
-/// or `mcp__<server>__<tool>`) or a shell command prefix matched at word
-/// granularity.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WorkspaceGrant {
-    Tool(String),
-    ShellPrefix(String),
-    /// A host `fetch` may reach without prompting (exact or `*.suffix`).
-    Host(String),
-}
-
-impl WorkspaceGrant {
-    #[must_use]
-    pub fn value(&self) -> &str {
-        match self {
-            Self::Tool(value) | Self::ShellPrefix(value) | Self::Host(value) => value,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PromotionOutcome {
-    /// The grant was appended and durably written.
-    Added,
-    /// The document already declared the grant; nothing was written.
-    AlreadyPresent,
-}
-
-/// Result of promoting a grant into workspace configuration.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GrantPromotion {
-    path: PathBuf,
-    outcome: PromotionOutcome,
-}
-
-impl GrantPromotion {
-    pub(crate) const fn new(path: PathBuf, outcome: PromotionOutcome) -> Self {
-        Self { path, outcome }
-    }
-
-    /// The workspace configuration file that carries the grant.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    #[must_use]
-    pub const fn outcome(&self) -> PromotionOutcome {
-        self.outcome
     }
 }
 
@@ -1525,11 +1347,9 @@ pub enum ConfigKey {
     Organization,
     Model,
     WorkerModel,
-    ReviewerModel,
     Delegation,
     Audit,
     Goals,
-    ApprovalDelegate,
     ApprovalTimeout,
     ReasoningEffort,
     MaxOutputTokens,
@@ -1582,29 +1402,17 @@ pub struct ConfigProvenance {
     organization: Option<SourceIdentity>,
     model: Option<SourceIdentity>,
     worker_model: Option<SourceIdentity>,
-    reviewer_model: Option<SourceIdentity>,
     delegation: Option<SourceIdentity>,
     audit: Option<SourceIdentity>,
-    approval_delegate: Option<SourceIdentity>,
     approval_timeout: Option<SourceIdentity>,
     reasoning_effort: Option<SourceIdentity>,
     max_output_tokens: Option<SourceIdentity>,
     providers: BTreeMap<String, SourceIdentity>,
     profiles: BTreeMap<String, SourceIdentity>,
     packs: BTreeMap<String, SourceIdentity>,
-    grant_tools: BTreeMap<String, SourceIdentity>,
-    grant_shell_prefixes: BTreeMap<String, SourceIdentity>,
-    grant_hosts: BTreeMap<String, SourceIdentity>,
-    shell_env: BTreeMap<String, SourceIdentity>,
-    task_hosting: BTreeMap<PathBuf, SourceIdentity>,
 }
 
 impl ConfigProvenance {
-    #[must_use]
-    pub fn task_hosting(&self, workspace: &Path) -> Option<&SourceIdentity> {
-        self.task_hosting.get(workspace)
-    }
-
     /// Sources of chosen goal defaults and monotonic managed ceilings.
     #[must_use]
     pub const fn goals(&self) -> &BTreeMap<String, SourceIdentity> {
@@ -1644,18 +1452,8 @@ impl ConfigProvenance {
     }
 
     #[must_use]
-    pub const fn reviewer_model(&self) -> Option<&SourceIdentity> {
-        self.reviewer_model.as_ref()
-    }
-
-    #[must_use]
     pub const fn delegation(&self) -> Option<&SourceIdentity> {
         self.delegation.as_ref()
-    }
-
-    #[must_use]
-    pub const fn approval_delegate(&self) -> Option<&SourceIdentity> {
-        self.approval_delegate.as_ref()
     }
 
     #[must_use]
@@ -1681,28 +1479,6 @@ impl ConfigProvenance {
     #[must_use]
     pub const fn providers(&self) -> &BTreeMap<String, SourceIdentity> {
         &self.providers
-    }
-
-    /// The layer that last declared the tool grant still in effect.
-    #[must_use]
-    pub fn grant_tool(&self, name: &str) -> Option<&SourceIdentity> {
-        self.grant_tools.get(name)
-    }
-
-    /// The layer that last declared the shell-prefix grant still in effect.
-    #[must_use]
-    pub fn grant_shell_prefix(&self, prefix: &str) -> Option<&SourceIdentity> {
-        self.grant_shell_prefixes.get(prefix)
-    }
-
-    #[must_use]
-    pub const fn grant_tools(&self) -> &BTreeMap<String, SourceIdentity> {
-        &self.grant_tools
-    }
-
-    #[must_use]
-    pub const fn grant_shell_prefixes(&self) -> &BTreeMap<String, SourceIdentity> {
-        &self.grant_shell_prefixes
     }
 }
 
@@ -1733,7 +1509,7 @@ impl PendingTrust {
     }
 
     /// The sensitive configuration keys the file declares (`model`,
-    /// `providers`, `mcp`, `policy.allow_shell_prefixes`, …), which `qq
+    /// `providers`, `mcp`, `profiles`, …), which `qq
     /// trust`, `qq config sources`, and `qq doctor` print so a user can see
     /// what trusting it admits.
     #[must_use]
@@ -1748,11 +1524,9 @@ pub struct ConfigSnapshot {
     organization: Option<String>,
     model: ModelRoute,
     worker_model: Option<ModelRoute>,
-    reviewer_model: Option<ModelRoute>,
     delegation: DelegationConfig,
     audit: AuditConfig,
     goals: GoalsConfig,
-    approval_delegate: Option<ApprovalDelegateSetting>,
     approval_timeout: Option<std::time::Duration>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
@@ -1761,7 +1535,6 @@ pub struct ConfigSnapshot {
     profiles: BTreeMap<String, AgentProfileConfig>,
     packs: BTreeMap<String, AgentPack>,
     policy: EffectivePolicy,
-    grants: PolicyGrants,
     reports: Vec<SourceReport>,
     provenance: ConfigProvenance,
     sources: ConfigSources,
@@ -1777,11 +1550,9 @@ pub struct ClientSnapshot {
     organization: Option<String>,
     model: Option<ModelRoute>,
     worker_model: Option<ModelRoute>,
-    reviewer_model: Option<ModelRoute>,
     delegation: DelegationConfig,
     audit: AuditConfig,
     goals: GoalsConfig,
-    approval_delegate: Option<ApprovalDelegateSetting>,
     approval_timeout: Option<std::time::Duration>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
@@ -1790,7 +1561,6 @@ pub struct ClientSnapshot {
     profiles: BTreeMap<String, AgentProfileConfig>,
     packs: BTreeMap<String, AgentPack>,
     policy: EffectivePolicy,
-    grants: PolicyGrants,
     reports: Vec<SourceReport>,
     provenance: ConfigProvenance,
     sources: ConfigSources,
@@ -2064,44 +1834,6 @@ impl Default for AuditConfig {
     }
 }
 
-/// Who settles the approvals a session's mode holds. The mode stays the
-/// ceiling; this only chooses whether the configured `reviewer_model` is
-/// consulted before a human for held Auto calls. Ask always requires
-/// explicit human approval, regardless of this setting.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalDelegateSetting {
-    /// Consult the reviewer for held Auto calls.
-    On,
-    /// Never consult the reviewer; every held call waits for a human.
-    Off,
-}
-
-impl ApprovalDelegateSetting {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::On => "on",
-            Self::Off => "off",
-        }
-    }
-}
-
-impl std::str::FromStr for ApprovalDelegateSetting {
-    type Err = ConfigError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "on" => Ok(Self::On),
-            "off" => Ok(Self::Off),
-            _ => Err(ConfigError::InvalidSetting {
-                setting: "QQ_APPROVAL_DELEGATE (on, off)",
-                value: value.to_owned(),
-            }),
-        }
-    }
-}
-
 /// Per-session approval policy a profile may preselect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2121,7 +1853,6 @@ pub struct AgentProfileConfig {
     organization: Option<String>,
     max_output_tokens: Option<u32>,
     approval_mode: Option<ProfileApprovalMode>,
-    approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     /// Set when this profile came from an agent pack rather than `profiles`.
     pack: Option<PackProfileRef>,
@@ -2180,11 +1911,6 @@ impl AgentProfileConfig {
         self.reasoning_effort
     }
 
-    #[must_use]
-    pub const fn approval_delegate(&self) -> Option<ApprovalDelegateSetting> {
-        self.approval_delegate
-    }
-
     /// The pack resources this profile carries, when it came from a pack.
     #[must_use]
     pub const fn pack(&self) -> Option<&PackProfileRef> {
@@ -2223,13 +1949,6 @@ impl ConfigSnapshot {
     #[must_use]
     pub const fn reasoning_effort(&self) -> Option<qq_provider::ReasoningEffort> {
         self.reasoning_effort
-    }
-
-    /// The explicit delegate choice, or `None` when the mode's own default
-    /// applies (reviewer under Auto; Ask always asks the human).
-    #[must_use]
-    pub const fn approval_delegate(&self) -> Option<ApprovalDelegateSetting> {
-        self.approval_delegate
     }
 
     /// How long a held call may wait for a client before the server denies
@@ -2280,12 +1999,6 @@ impl ConfigSnapshot {
         self.worker_model.as_ref()
     }
 
-    /// The model route that adjudicates held tool approvals, when configured.
-    #[must_use]
-    pub const fn reviewer_model(&self) -> Option<&ModelRoute> {
-        self.reviewer_model.as_ref()
-    }
-
     /// The validated delegation roster and bounds.
     #[must_use]
     pub const fn delegation(&self) -> &DelegationConfig {
@@ -2317,14 +2030,6 @@ impl ConfigSnapshot {
     #[must_use]
     pub const fn policy(&self) -> &EffectivePolicy {
         &self.policy
-    }
-
-    /// The resolved workspace grant set consulted at session creation:
-    /// declared tool and shell-prefix grants plus folded per-MCP-server
-    /// allowlists, after managed deny filtering.
-    #[must_use]
-    pub const fn grants(&self) -> &PolicyGrants {
-        &self.grants
     }
 
     #[must_use]
@@ -2365,7 +2070,7 @@ fn trust_required_message(pending: &[PendingTrust]) -> String {
     }
     message.push_str(
         "\nReview the file, then run `qq trust` in this directory to accept it. \
-         Sensitive sections (providers, MCP servers, grants, model) load only after that.",
+         Sensitive sections (providers, MCP servers, profiles, model) load only after that.",
     );
     message
 }
@@ -2383,8 +2088,11 @@ pub enum ConfigError {
     },
     #[error("environment variable {0} is not valid Unicode")]
     NonUnicodeEnvironment(&'static str),
-    #[error("{0} was removed with Jev; unset it")]
-    RemovedSetting(&'static str),
+    #[error("{name} was removed {removed}; unset it")]
+    RemovedSetting {
+        name: &'static str,
+        removed: &'static str,
+    },
     #[error("invalid {setting} value {value:?}")]
     InvalidSetting {
         setting: &'static str,
@@ -2463,14 +2171,6 @@ pub enum ConfigError {
     },
     #[error("managed-only policy settings are only allowed in managed configuration: {origin}")]
     PolicyOutsideManaged { origin: SourceIdentity },
-    #[error("remote configuration cannot declare approval grants: {origin}")]
-    RemotePolicyGrantsForbidden { origin: SourceIdentity },
-    #[error("task hosting grants may only be declared in host configuration: {origin}")]
-    TaskHostingOutsideHost { origin: SourceIdentity },
-    #[error("workspace grant is invalid: {message}")]
-    InvalidGrant { message: String },
-    #[error("workspace grant {grant:?} is denied by managed policy {rule}")]
-    GrantDeniedByManaged { grant: String, rule: &'static str },
     #[error("literal secret values are forbidden in {origin}")]
     LiteralSecretForbidden { origin: SourceIdentity },
     #[error("remote configuration cannot select local credential references: {origin}")]

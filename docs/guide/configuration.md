@@ -8,9 +8,7 @@ typo cannot silently do nothing. Files are limited to 1 MiB.
 (
     version: 1,
     model: "anthropic/claude-sonnet-5",
-    policy: (
-        allow_shell_prefixes: ["cargo test", "cargo fmt"],
-    ),
+    reasoning_effort: medium,
 )
 ```
 
@@ -38,7 +36,7 @@ restores compiled defaults under managed ceilings.
 | 5 | project layers, repository root first, current directory last | per directory: `.qq/packs/<id>/pack.ron` (each manifest trusted on its own), `qq.ron`, `.qq/config.ron`, `.qq/config.d/*.ron` |
 | 6 | explicit file | `QQ_CONFIG=/path/to/file.ron` |
 | 7 | inline document | `QQ_CONFIG_CONTENT='(version: 1, …)'` |
-| 8 | overrides | `--model` / `QQ_MODEL`, `--organization` / `QQ_ORGANIZATION`, `--max-output-tokens`, `QQ_APPROVAL_DELEGATE` |
+| 8 | overrides | `--model` / `QQ_MODEL`, `--organization` / `QQ_ORGANIZATION`, `--max-output-tokens` |
 | 9 | managed | `/etc/qq/managed.ron` + `managed.d/` (Linux), `/Library/Application Support/qq/` (macOS), `%ProgramData%\qq\` (Windows); must be root-owned |
 | 10 | MDM | macOS forced preference `dev.qq` / `ManagedConfig`; Windows policy `HKLM\Software\Policies\dev.qq\ManagedConfig` (`REG_SZ`); none on Linux |
 
@@ -55,13 +53,14 @@ credential metadata in `<QQ_HOME>/data`. Diagnostic logs also use
 `<QQ_HOME>/data/logs`; server discovery and coordination use
 `<QQ_HOME>/data/runtime`, so separate homes do not attach to each other's server.
 This is useful for isolated instances and testing; it
-does not change the workspace, managed policy, OS keyring or shell permissions.
+does not change the workspace, managed policy, OS keyring or what shell
+commands can reach.
 An empty or relative `QQ_HOME` is an error. Without it, platform paths stay
 unchanged.
 
 Project layers that declare anything sensitive — `model`, `providers`,
 `mcp`, `packs`, `profiles`, `delegation`, `audit`, `goals`,
-`reasoning_effort`, or any policy grant — are loaded only after `qq trust`
+`reasoning_effort`, `organization`, or `worker_model` — are loaded only after `qq trust`
 has accepted that exact file content. See
 [Permissions and trust](permissions.md#project-trust).
 
@@ -75,12 +74,10 @@ repository should not commit; this repository's `.gitignore` excludes
 | --- | --- | --- | --- |
 | `version` | `1` | required | document schema |
 | `model` | `"PROVIDER/MODEL"` | none; required to run | the route sessions start with |
-| `reviewer_model` | `"PROVIDER/MODEL"` | none | model for an explicitly supervised reviewer; Auto and Ask never consult it. The final-answer audit uses `audit.role` from the delegation roster |
 | `worker_model` | `"PROVIDER/MODEL"` | none | deprecated; use `delegation.roster` |
 | `organization` | string | none | which enrolled organization manifest applies (`qq org`) |
 | `max_output_tokens` | integer | `16384` | cap on generated tokens per model turn; a model's own limit applies if lower. One exception: when a turn is cut at this cap with nothing visible (all hidden reasoning) or right after a complete tool call, that one retry is sent with the cap doubled, up to the model's limit and never past a managed `policy.max_output_tokens`, at most once per run. Use `policy.max_output_tokens` for a hard ceiling; run budgets still bound spend |
 | `reasoning_effort` | `none` `minimal` `low` `medium` `high` `xhigh` `max` `default` | provider default | effort hint for reasoning models that accept one. `default` lets the provider choose. Any other value outside the model's known accepted set (catalog or discovery) fails at plan time naming the accepted ones; with no known set, a rejected value fails at the provider ([providers](providers.md)) |
-| `approval_delegate` | `on` `off` | absent | Controls explicit supervision of a `full` session. It has no effect in Auto or Ask: Auto denies out-of-scope actions and Ask always asks you. See [permissions](permissions.md#approval-modes) |
 | `approval_timeout_seconds` | `1`–`86400` | absent | server-side bound on how long a held call waits for you before it is denied. Absent is **no deadline**: the prompt waits for you, the run's own deadline, or cancellation. Not trust-gated: it can only shorten a wait. `qq serve` and `qq daemon` read it from global and managed configuration only; `qq run` and the TUI also read the project's |
 | `providers` | map | built-ins | provider declarations; [below](#providers) |
 | `mcp` | map | empty | MCP servers; [MCP servers](mcp.md) |
@@ -89,7 +86,7 @@ repository should not commit; this repository's `.gitignore` excludes
 | `delegation` | section | empty | sub-agent roster and bounds; [below](#delegation) |
 | `audit` | section | `off` | final-answer audit; [below](#audit) |
 | `goals` | section | finite defaults | defaults and bounds for durable goals; [below](#goals) |
-| `policy` | section | see below | what runs without asking, and what may never run; [below](#policy) |
+| `policy` | section | see below | the tool catalog, and what may never run; [below](#policy) |
 
 ### Model routes
 
@@ -175,49 +172,16 @@ Per model under a provider (all optional):
 
 ## `policy`
 
-What the agent may do without asking, and what it may never do.
+Which tools the model sees, and what may never run.
 
 Any layer (your config, a trusted project):
 
 ```ron
 policy: (
-    // Grants: run without a prompt under `auto`.
-    allow_tools: ["edit_file", "write_file"],
-    allow_shell_prefixes: ["cargo test", "cargo fmt --all", "git status"],
-    allow_hosts: ["docs.rs", "*.github.com"],
-    shell_env: ["CARGO_HOME"],            // extra env vars shell may pass through
     builtin_preference: hint,             // off | hint | strict
     exposed_tools: ["read_file", "search", "edit_file", "shell"],
 )
 ```
-
-Task GitHub destinations belong in host configuration: your global config,
-an explicitly supplied config, or managed/MDM configuration. A project cannot
-add these grants, even after `qq trust`.
-
-```ron
-policy: (
-    task_hosting: [(
-        workspace: "/home/me/projects/qq",
-        owner: "retsu-AI",
-        repository: "qq",
-        base_branch: "main",
-        credential: Stored("github/work"),
-    )],
-)
-```
-
-Each grant selects one absolute, normalized workspace path and one GitHub
-repository/base branch. The workspace may be offline when configuration loads;
-the task host must resolve its canonical identity before use. Credentials use
-an existing stored name; `Env(...)` and literal tokens are rejected here. The
-runtime derives the task branch. Store the token with
-`qq auth set github/work --endpoint https://github.com`; credential entry is
-separate from task execution. Auto never opens an approval request for these
-operations: without a matching host grant it refuses the remote action.
-This grants no shell credentials or arbitrary remote/ref access. The list replaces an earlier host layer's list; `[]` revokes
-it. These declarations supply authority to the scoped hosting implementation;
-they do not configure ordinary `git push` commands.
 
 Administrators only, in `managed.ron` or MDM (anywhere else is an error):
 
@@ -237,11 +201,6 @@ policy: (
 
 | Key | Who may set it | Meaning |
 | --- | --- | --- |
-| `allow_tools` | any layer except an organization manifest | tool names approved for the workspace. Grants layer: `"name"` adds, `Remove("name")` drops one a lower layer added |
-| `allow_shell_prefixes` | any layer except an organization manifest | shell commands approved by word-boundary prefix: `"cargo test"` covers `cargo test -p x`, never `cargo test \| sh` |
-| `allow_hosts` | any layer except an organization manifest | hosts `fetch` may reach under `auto`; exact or `*.suffix` |
-| `shell_env` | any layer except an organization manifest | variable names passed to shell children beyond `PATH HOME LANG TERM TMPDIR` (also `SYSTEMROOT LOCALAPPDATA` on Windows) |
-| `task_hosting` | host config only | workspace-scoped GitHub destination and stored credential reference; project and organization sources cannot declare it |
 | `builtin_preference` | any; only tightens | how hard the model is steered from shell habits to built-in tools |
 | `exposed_tools` | any; intersects | the tool catalog; empty list exposes nothing |
 | `allowed_providers` / `denied_providers` | managed layers only | which providers a model route may use; denies accumulate |
@@ -249,20 +208,14 @@ policy: (
 | `require_https` | managed layers only | reject `http://` custom endpoints (loopback exempt); default `true` |
 | `allow_custom_providers` | managed layers only | allow `Custom`/`LiteLlm` declarations; default `true` |
 | `allow_literal_secrets` | managed layers only | allow `Value(...)`; default `false` |
-| `deny_tools`, `deny_shell_prefixes`, `deny_hosts` | managed layers only | remove grants no matter who declared them |
+| `deny_tools`, `deny_shell_prefixes`, `deny_hosts` | managed layers only | `deny_shell_prefixes` (word-boundary prefixes) and `deny_hosts` (exact names or `*.suffix`, for `fetch`) are refused in every approval mode, Full included. `deny_tools` removes tools from side questions, and `shell` in it refuses goal checks |
 | `goals` | managed layers only | goal ceilings; fieldwise minimum across administrators, retained by `goals: Clear` |
 
 "Managed layers" are `managed.ron`, `managed.d/`, and MDM (rows 9 and 10
 above). Setting a `managed layers only` key anywhere else fails with
 `managed-only policy settings are only allowed in managed configuration`;
 to cap output tokens for yourself, set the top-level `max_output_tokens`
-instead. An organization manifest may not plant approval grants: `qq org
-enroll` and `qq org refresh` reject one that sets `allow_tools`,
-`allow_shell_prefixes`, `allow_hosts`, or `shell_env`.
-
-The approval prompt's `w` key appends to `allow_tools` /
-`allow_shell_prefixes` / `allow_hosts` in the project's `.qq/config.ron`.
-How grants interact with approval modes is in
+instead. How approval modes work is in
 [Permissions and trust](permissions.md).
 
 ## `profiles`
@@ -281,8 +234,7 @@ profiles: {
 ```
 
 Keys: `model`, `organization`, `max_output_tokens`, `approval_mode`
-(`read_only` `ask` `auto` `full`), `approval_delegate` (`on` `off`),
-`reasoning_effort`. Pack
+(`read_only` `ask` `auto` `full`), `reasoning_effort`. Pack
 profiles (below) add prompts, skills, and tool filters.
 
 ## `packs`
@@ -351,14 +303,14 @@ Sub-agents are read-only by default. To let the spawning agent choose write
 access, set `delegation.write_children: true`.
 The `spawn_agent` tool then offers `authority: "read" | "write"`; omitting it
 still chooses read-only. Write children use Auto to edit files and run commands
-within the parent's authority; they do not require `reviewer_model`. Only a
+within the parent's authority. Only a
 top-level run may spawn a write child, and only one write child runs at a time.
 The parent's approval policy still gates the write spawn.
 
 A run that may spawn sub-agents also gets `wait_agents` (wait for its
 background sub-agents) and `cancel_agent` (stop one). They come and go with
-`spawn_agent`: allowing, denying, or exposing `spawn_agent` in policy or a
-pack applies to all three, and the two are not tool names of their own there.
+`spawn_agent`: denying or exposing `spawn_agent` in policy, or allowing or
+denying it in a pack, applies to all three, and the two are not tool names of their own there.
 
 Up to 8 roster entries. Each route must resolve like `model`. An entry may pin
 the reasoning effort its children run at with `effort: low` (any effort value);
@@ -408,9 +360,8 @@ Goal-bound work rechecks current workspace ceilings before starting model work
 or a completion check. A lower ceiling or unavailable configuration pauses the
 goal for configuration review; resume validates it again. Provider retries use
 the accepted backoff cap, retaining any later model-requested wait. Unanswered
-tool approvals pause the goal after `approval_wait_seconds`, including time
-spent with a reviewer, or sooner at the goal deadline or an ordinary approval
-timeout. Review escalation does not restart that goal wait.
+tool approvals pause the goal after `approval_wait_seconds`, or sooner at the
+goal deadline or an ordinary approval timeout.
 
 ## `audit`
 
@@ -461,7 +412,6 @@ Themes are `.ron` files in `<global>/themes/` or `.qq/themes/`; shape in
 | `QQ_ORGANIZATION` | override `organization` |
 | `QQ_CONFIG` | an extra config file applied after project layers |
 | `QQ_CONFIG_CONTENT` | an inline RON document applied after `QQ_CONFIG` |
-| `QQ_APPROVAL_DELEGATE` | `on` `off`; overrides `approval_delegate` for this process |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, `XAI_API_KEY` | built-in provider credentials when nothing is stored (`GEMINI_API_KEY` wins over `GOOGLE_API_KEY`) |
 | `AWS_PROFILE`, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`, `AWS_CONTAINER_CREDENTIALS_*` | Bedrock default credential chain |
 | `COLORTERM` | `truecolor` / `24bit` selects the `ink` default theme |
@@ -483,13 +433,10 @@ Not configuration keys, but files QQ discovers:
 (
     version: 1,
     model: "anthropic/claude-sonnet-5",
-    reviewer_model: "openai/gpt-5.6",
     max_output_tokens: 16384,
     reasoning_effort: medium,
     policy: (
-        allow_tools: ["edit_file", "write_file"],
-        allow_shell_prefixes: ["cargo build", "cargo test", "cargo fmt --all", "git status", "git diff"],
-        allow_hosts: ["docs.rs"],
+        builtin_preference: hint,
     ),
     profiles: {
         "quick": Profile(model: "anthropic/claude-haiku-4-5", reasoning_effort: low),

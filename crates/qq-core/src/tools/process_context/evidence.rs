@@ -54,7 +54,6 @@ mod tests {
         let call = ToolCallId::generate().unwrap();
         let arguments = r#"{"program":"true","args":[]}"#;
         let result = crate::tools::dispatch::execute_with_images(
-            None,
             plan.workspace.clone(),
             Arc::default(),
             "exec".to_owned(),
@@ -108,7 +107,6 @@ mod tests {
         )
         .unwrap();
         let receipt = ExecutionContextReceipt::V2(ExecutionContextProof {
-            task_git: None,
             facts: ExecutionContextFacts {
                 context_id: ToolCallId::generate().unwrap(),
                 arguments_sha256: ContentHash::from_bytes([1; 32]),
@@ -180,7 +178,6 @@ mod tests {
             executable_sha256: ContentHash::from_bytes([8; 32]),
         };
         let mut proof = ExecutionContextProof {
-            task_git: None,
             facts: ExecutionContextFacts {
                 context_id: id,
                 arguments_sha256: arguments_digest("exec", arguments).unwrap(),
@@ -266,10 +263,10 @@ mod tests {
             ),
             ProcessEvidenceStatus::UnsupportedV1
         );
+        // `env` is no longer an exec argument: such arguments bind no receipt.
         let contradictory_args = r#"{"program":"/usr/bin/grep","args":["x","f"],"env":["LANG"]}"#;
-        let mut contradictory = proof.clone();
-        contradictory.facts.arguments_sha256 =
-            arguments_digest("exec", contradictory_args).unwrap();
+        assert_eq!(arguments_digest("exec", contradictory_args), None);
+        let contradictory = proof.clone();
         assert_eq!(
             validate_process_evidence(
                 id,
@@ -281,7 +278,7 @@ mod tests {
                 Some(&identity),
                 Some(&pin)
             ),
-            ProcessEvidenceStatus::InvalidReceipt
+            ProcessEvidenceStatus::InvalidArguments
         );
         let original = proof.clone();
         proof.facts.arguments_sha256 = ContentHash::from_bytes([9; 32]);
@@ -378,9 +375,7 @@ pub fn validate_process_evidence(
     let Some(arguments) = arguments.filter(|value| value.len() <= 256 * 1024) else {
         return Status::MissingArguments;
     };
-    if (arguments.len() > 64 * 1024 && !super::super::task_git::is_tool(tool))
-        || arguments_digest(tool, arguments).is_none()
-    {
+    if arguments.len() > 64 * 1024 || arguments_digest(tool, arguments).is_none() {
         return Status::InvalidArguments;
     }
     let Some(receipt) = receipt else {
@@ -457,8 +452,7 @@ pub fn validate_process_evidence(
             for (slot, arg) in argv.iter_mut().zip(&args.args) {
                 *slot = arg;
             }
-            if !args.env.is_empty()
-                || name != Some(family.program())
+            if name != Some(family.program())
                 || args.args.iter().map(String::len).sum::<usize>() > 16 * 1024
                 || !crate::approval::read_only_argv(family.program(), &argv[..args.args.len()])
             {

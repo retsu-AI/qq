@@ -676,7 +676,6 @@ fn question_holds_render_numbered_options_and_the_answered_questions() {
                     ],
                 })),
                 fetch: None,
-                delegated: false,
             },
         )
     }));
@@ -736,7 +735,7 @@ fn question_holds_render_numbered_options_and_the_answered_questions() {
 }
 
 #[test]
-fn ask_approval_prompt_offers_only_once_and_deny() {
+fn ask_approval_prompt_offers_only_approve_and_deny() {
     let mut app = app_with_messages(1);
     let session_id = app.focused().unwrap();
     app.sessions
@@ -752,12 +751,16 @@ fn ask_approval_prompt_offers_only_once_and_deny() {
         None,
         false,
     ));
-    let text = frame_text(&FrameRenderer::default().frame_and_commit(&mut app, 120, 24));
-    assert!(text.contains("ask: approval applies once"), "{text}");
-    assert!(text.contains("once") && text.contains("deny"), "{text}");
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 24));
+    let choices = rows
+        .iter()
+        .map(|row| squash(row))
+        .find(|row| row.contains("y approve"))
+        .unwrap_or_else(|| panic!("{rows:?}"));
+    assert!(choices.contains("n deny"), "{choices}");
     assert!(
-        !text.contains("a session") && !text.contains("w workspace"),
-        "{text}"
+        !choices.contains("session") && !choices.contains("workspace"),
+        "{choices}"
     );
 }
 
@@ -788,7 +791,6 @@ fn approval_prompts_render_edit_previews_as_colored_diffs() {
                 }),
                 question: None,
                 fetch: None,
-                delegated: false,
             },
         )
     }));
@@ -797,7 +799,7 @@ fn approval_prompts_render_edit_previews_as_colored_diffs() {
     let rows = frame_rows(&frame);
 
     // The approval is inline under the tool row: the transcript stays
-    // visible, the file and diff head follow, then the four choices.
+    // visible, the file and diff head follow, then the two choices.
     assert!(
         rows.iter().any(|row| row.contains("row 0")),
         "transcript stays: {rows:?}"
@@ -826,13 +828,10 @@ fn approval_prompts_render_edit_previews_as_colored_diffs() {
     assert_eq!(style_of("@@ -1 +1 @@"), Some(muted()));
     assert_eq!(style_of("-old"), Some(diff_line_style("-")));
     assert_eq!(style_of("+new"), Some(diff_line_style("+")));
-    // The block offers all four decisions, including workspace lifetime.
+    // The block offers both decisions.
     assert!(rows.iter().any(|row| {
         let row = squash(row);
-        row.contains("y once")
-            && row.contains("a session")
-            && row.contains("w workspace")
-            && row.contains("n deny")
+        row.contains("y approve") && row.contains("n deny")
     }));
     // The composer is disabled while the approval owns input.
     assert!(rows.iter().any(|row| row.starts_with(" ✎ ")), "{rows:?}");
@@ -2968,7 +2967,6 @@ fn background_approvals_surface_a_banner_that_ctrl_g_jumps_to() {
             edit: None,
             question: None,
             fetch: None,
-            delegated: false,
         },
     ));
 
@@ -4340,7 +4338,6 @@ fn app_with_child_awaiting_approval() -> (App, SessionId, SessionId, RunId, Tool
                 edit: None,
                 question: None,
                 fetch: None,
-                delegated: false,
             },
         )
     }));
@@ -5094,7 +5091,7 @@ fn approval_mode_picker_and_badge_name_the_mode_in_effect() {
     assert!(read_only.contains("active"), "{read_only}");
     let auto = rows
         .iter()
-        .find(|row| row.contains("auto") && row.contains("task sandbox"))
+        .find(|row| row.contains("auto") && row.contains("in the workspace"))
         .unwrap();
     assert!(auto.contains("without asking"), "{auto}");
     assert!(!text.contains("held for approval"), "{text}");
@@ -5102,7 +5099,7 @@ fn approval_mode_picker_and_badge_name_the_mode_in_effect() {
         .iter()
         .find(|row| row.contains("full") && row.contains("without asking"))
         .unwrap();
-    assert!(full.contains("containment"), "{full}");
+    assert!(full.contains("fixed stops included"), "{full}");
 }
 
 #[test]
@@ -5238,7 +5235,6 @@ fn shell_approvals_show_the_server_preview_not_the_arguments() {
                 edit: None,
                 question: None,
                 fetch: None,
-                delegated: false,
             },
         )
     }));

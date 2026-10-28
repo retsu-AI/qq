@@ -60,7 +60,6 @@ pub(crate) enum ToolHost {
     WaitAgents,
     CancelAgent,
     UpdateGoal,
-    TaskGit,
     SearchHistory,
     ReadToolResult,
     SelectTools,
@@ -236,8 +235,6 @@ pub struct ToolCatalog {
     full_specs: Option<Arc<[ToolSpec]>>,
     goal_less_specs: Arc<[ToolSpec]>,
     goal_less_measurement: ToolSchemaMeasurement,
-    task_git_less_specs: Arc<[ToolSpec]>,
-    task_git_less_measurement: ToolSchemaMeasurement,
     full_measurement: Option<ToolSchemaMeasurement>,
     /// Rendered once for the system prompt under progressive exposure.
     index_text: Option<Arc<str>>,
@@ -492,16 +489,9 @@ impl ToolCatalog {
             }
         });
 
-        let task_git_less_specs: Arc<[ToolSpec]> = full_specs
+        let goal_less_specs: Arc<[ToolSpec]> = full_specs
             .as_ref()
             .unwrap_or(&static_specs)
-            .iter()
-            .filter(|spec| !crate::tools::task_git::is_tool(spec.name()))
-            .cloned()
-            .collect();
-        let task_git_less_measurement =
-            crate::runtime::tool_schema_measurement(&task_git_less_specs);
-        let goal_less_specs: Arc<[ToolSpec]> = task_git_less_specs
             .iter()
             .filter(|spec| spec.name() != "update_goal")
             .cloned()
@@ -542,8 +532,6 @@ impl ToolCatalog {
             full_specs,
             goal_less_specs,
             goal_less_measurement,
-            task_git_less_specs,
-            task_git_less_measurement,
             full_measurement,
             index_text,
             unattended_index_text,
@@ -641,9 +629,6 @@ impl ToolCatalog {
         if Arc::ptr_eq(&self.goal_less_specs, specs) {
             return self.goal_less_measurement;
         }
-        if Arc::ptr_eq(&self.task_git_less_specs, specs) {
-            return self.task_git_less_measurement;
-        }
         if let Some(full) = &self.full_specs
             && Arc::ptr_eq(full, specs)
         {
@@ -675,10 +660,9 @@ impl ToolCatalog {
             && include.load_skill
             && !include.read_only
             && !include.unattended
-            && !include.task_git
         {
             return Arc::clone(if include.update_goal {
-                &self.task_git_less_specs
+                source
             } else {
                 &self.goal_less_specs
             });
@@ -768,8 +752,6 @@ pub(crate) struct StaticFilter {
     pub(crate) spawn_agent: bool,
     pub(crate) search_history: bool,
     pub(crate) update_goal: bool,
-    /// Set only when this run owns a live, authorized task Git capability.
-    pub(crate) task_git: bool,
     pub(crate) read_tool_result: bool,
     pub(crate) load_skill: bool,
     /// Strict policy denies mutating, shell, network and all External calls.
@@ -787,11 +769,6 @@ impl StaticFilter {
         {
             return false;
         }
-        // The capability supplies bounded task authority under Auto too.
-        // The session bridge revalidates it before each operation executes.
-        if entry.host == ToolHost::TaskGit {
-            return self.task_git;
-        }
         if self.unattended
             && match entry.effect {
                 EffectClass::ReadOnly => false,
@@ -808,7 +785,6 @@ impl StaticFilter {
             ToolHost::SpawnAgent | ToolHost::WaitAgents | ToolHost::CancelAgent => self.spawn_agent,
             ToolHost::SearchHistory => self.search_history,
             ToolHost::UpdateGoal => self.update_goal,
-            ToolHost::TaskGit => self.task_git,
             ToolHost::ReadToolResult => self.read_tool_result,
             ToolHost::LoadSkill => self.load_skill,
             ToolHost::BuiltIn | ToolHost::SelectTools | ToolHost::External { .. } => true,
@@ -996,7 +972,6 @@ mod tests {
             spawn_agent: true,
             search_history: true,
             update_goal: false,
-            task_git: false,
             read_tool_result: true,
             load_skill: true,
             read_only: false,
@@ -1088,7 +1063,6 @@ mod tests {
             spawn_agent: true,
             search_history: true,
             update_goal: false,
-            task_git: false,
             read_tool_result: true,
             load_skill: true,
             read_only: false,
@@ -1167,7 +1141,6 @@ mod tests {
             spawn_agent: false,
             search_history: true,
             update_goal: false,
-            task_git: false,
             read_tool_result: true,
             load_skill: true,
             read_only: false,
@@ -1178,7 +1151,6 @@ mod tests {
             spawn_agent: true,
             search_history: true,
             update_goal: false,
-            task_git: false,
             read_tool_result: true,
             load_skill: true,
             read_only: false,
@@ -1210,7 +1182,6 @@ mod tests {
             load_skill: true,
             read_tool_result: false,
             update_goal: false,
-            task_git: false,
             read_only: false,
             unattended: false,
         });
@@ -1305,7 +1276,6 @@ mod tests {
             spawn_agent: true,
             search_history: true,
             update_goal: false,
-            task_git: false,
             read_tool_result: true,
             load_skill: true,
             read_only: false,
@@ -1326,7 +1296,6 @@ mod tests {
             spawn_agent: true,
             search_history: true,
             update_goal: false,
-            task_git: false,
             read_tool_result: true,
             load_skill: true,
             read_only: true,
@@ -1335,86 +1304,6 @@ mod tests {
         let names: Vec<&str> = read_only.iter().map(ToolSpec::name).collect();
         // Host hints grant nothing under strict ReadOnly.
         assert_eq!(names, ["read_file"]);
-    }
-
-    #[test]
-    fn task_git_exposure_requires_a_capability_and_write_mode() {
-        for external_count in [0, 40] {
-            let mut static_tools = statics();
-            static_tools.push(StaticTool::new(
-                crate::tools::goal::spec(),
-                ToolHost::UpdateGoal,
-                EffectClass::ReadOnly,
-            ));
-            static_tools.extend(
-                crate::tools::task_git::specs()
-                    .map(|spec| StaticTool::new(spec, ToolHost::TaskGit, EffectClass::Mutating)),
-            );
-            let hosts = if external_count == 0 {
-                Vec::new()
-            } else {
-                vec![host(
-                    "srv",
-                    (0..external_count)
-                        .map(|index| {
-                            external(&format!("mcp__srv__tool{index}"), "External operation")
-                        })
-                        .collect(),
-                )]
-            };
-            let catalog = ToolCatalog::compile(static_tools, hosts);
-            for update_goal in [false, true] {
-                for task_git in [false, true] {
-                    for read_only in [false, true] {
-                        for unattended in [false, true] {
-                            let filter = StaticFilter {
-                                spawn_agent: true,
-                                search_history: true,
-                                update_goal,
-                                task_git,
-                                read_tool_result: true,
-                                load_skill: true,
-                                read_only,
-                                unattended,
-                            };
-                            let specs = catalog.base_specs(&filter);
-                            for name in ["task_commit", "task_push", "task_pr"] {
-                                let entry = catalog.lookup(name).unwrap();
-                                let expected = task_git && !read_only;
-                                assert_eq!(entry.effect, EffectClass::Mutating);
-                                assert_eq!(entry.host, ToolHost::TaskGit);
-                                assert_eq!(filter.allows(entry), expected);
-                                assert_eq!(
-                                    specs.iter().any(|spec| spec.name() == name),
-                                    expected,
-                                    "{filter:?}: {name}"
-                                );
-                            }
-                            assert_eq!(
-                                specs.iter().any(|spec| spec.name() == "update_goal"),
-                                update_goal
-                            );
-                            let measured = catalog.schema_measurement(&specs);
-                            let fresh = crate::runtime::tool_schema_measurement(&specs);
-                            assert_eq!(measured.hash, fresh.hash);
-                            assert_eq!(measured.bytes, fresh.bytes);
-                            if !task_git && !read_only && !unattended {
-                                assert!(
-                                    Arc::ptr_eq(&specs, &catalog.base_specs(&filter)),
-                                    "the ordinary no-capability list remains shared"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            let default = catalog.base_specs(&StaticFilter::default());
-            assert!(
-                default
-                    .iter()
-                    .all(|spec| !crate::tools::task_git::is_tool(spec.name()))
-            );
-        }
     }
 }
 
@@ -1482,7 +1371,6 @@ mod measurement_tests {
             spawn_agent: true,
             search_history: true,
             update_goal: false,
-            task_git: false,
             read_tool_result: true,
             load_skill: true,
             read_only: false,

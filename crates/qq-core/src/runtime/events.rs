@@ -225,7 +225,6 @@ pub(crate) enum RuntimeEvent {
         projection: Arc<ProjectedToolTurn>,
     },
     ToolCallFinished {
-        native_owner: Option<qq_protocol::StoreId>,
         id: ToolCallId,
         result: String,
         is_error: bool,
@@ -251,13 +250,6 @@ pub(crate) enum RuntimeEvent {
         usage: Option<TokenUsage>,
         cost_usd_nanos: Option<u64>,
         audit_session: Option<qq_protocol::SessionId>,
-    },
-    /// The approval reviewer answered for one of this run's held calls; its
-    /// provider spend is the run's to account for. Emitted before the call
-    /// executes or settles as denied.
-    ReviewCharged {
-        usage: Option<TokenUsage>,
-        cost_usd_nanos: Option<u64>,
     },
     /// The run stubbed stale read-only results in its live messages before
     /// preparing `turn_ordinal`: a prune seam. The session layer moves the

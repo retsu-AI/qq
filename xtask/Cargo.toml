@@ -17,7 +17,6 @@ qq-core.workspace = true
 qq-protocol.workspace = true
 qq-provider = { workspace = true, features = ["provider-bedrock"] }
 qq-server.workspace = true
-rusqlite.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true

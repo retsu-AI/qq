@@ -152,64 +152,12 @@ macOS may quarantine a binary downloaded by a browser. If `qq` is blocked,
 run `xattr -d com.apple.quarantine qq` once; `curl`-based routes are not
 affected.
 
-<a id="system-requirements"></a>
-## What the shell sandbox needs
+## System requirements
 
-Agents run `shell` and `exec` commands through a separate command worker
-that confines them with the operating system's own isolation. QQ has no
-unsandboxed fallback: when that isolation is unavailable, commands do not
-run in any approval mode. Reading, searching, and editing files do not need
-it, and `read_only` never runs commands.
-
-### Linux
-
-| Requirement | Needed by | Check |
-| --- | --- | --- |
-| Run as an ordinary user, not root or setuid | every mode | `id -u` is not `0` |
-| Unprivileged user namespaces | `ask`, `auto`, `full` | the `unshare` command below succeeds |
-| A root-owned util-linux `unshare` on `PATH`, in root-owned directories that only root can write, not a script | `ask`, `auto`, `full` | `ls -l "$(command -v unshare)"` shows `root root` and no group/other write bit |
-| The `qq` binary not group- or world-writable | `ask`, `auto`, `full` | `ls -l "$(command -v qq)"` |
-| Landlock ABI 6 (Linux 6.12 or newer, with `landlock` in the active LSM list) | `auto` | `uname -r`; `cat /sys/kernel/security/lsm` lists `landlock` |
-| seccomp, on x86_64 or aarch64 | `auto` | `uname -m` |
-| About 768 MiB free on the data directory's disk for task copies | `auto` | `df -h` on the `data:` path from `qq config paths` |
-
-Check namespaces as the user that runs QQ:
-
-```sh
-unshare --user --map-current-user --pid --fork --kill-child=KILL --mount-proc -- true
-```
-
-If that prints `unshare failed: Operation not permitted`, the host blocks
-unprivileged user namespaces. Fix this before using QQ there; see
-[Troubleshooting](troubleshooting.md#the-first-shell-command-ends-the-run-session-runtime-is-unavailable).
-Common causes:
-
-- **Ubuntu 23.10 and later (including 24.04)** restrict them with AppArmor.
-  Allow them with
-  `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, and make
-  that persistent in `/etc/sysctl.d/`, or add an AppArmor profile for
-  `unshare` that permits `userns`.
-- **Docker and other container runtimes** block `unshare` with their default
-  seccomp and AppArmor profiles and often run as root. Run QQ as a non-root
-  user, with a seccomp/AppArmor profile that allows user namespaces and
-  mounting `proc`.
-- **Hardened kernels** may set `kernel.unprivileged_userns_clone=0` or
-  `user.max_user_namespaces=0`.
-
-QQ does not need cgroups, systemd, or D-Bus for ordinary commands.
-
-### macOS
-
-Run as an ordinary user. Commands run under the built-in
-`/usr/bin/sandbox-exec`. The `qq` binary must not be group- or
-world-writable.
-
-### Windows
-
-No setup is needed. Auto uses a restricted token and job objects. This is
-weaker than Linux and macOS: it also permits writes wherever Everyone or
-your logon session can already write, and commands use the host network.
-See [Permissions › Native Auto execution](permissions.md#native-auto-execution).
+`shell` runs commands with `/bin/sh` on Linux and macOS and with `cmd` on
+Windows. Nothing else needs setting up: commands run in your checkout, as
+you, with your environment and network. See
+[Permissions › Where commands run](permissions.md#where-commands-run).
 
 ## Check the install
 

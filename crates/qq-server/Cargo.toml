@@ -23,8 +23,3 @@ tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-
-# Build the real embedding example for native command transport tests.
-[[example]]
-name = "command_owner_launcher"
-path = "../qq-core/examples/command_owner.rs"

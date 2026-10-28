@@ -17,16 +17,15 @@ workspace                    the directory QQ works in
 
 A session runs one run at a time; the agent loops through turns, executing
 the tool calls each turn asks for, until the model answers without asking
-for more. Its [approval mode](#approval-mode) and [grants](#grant) decide
-which tool calls run straight away and which are [held](#held-call) for a
-[delegate](#delegate) or for you.
+for more. Its [approval mode](#approval-mode) decides which tool calls run
+straight away and which are [held](#held-call) for you.
 
 ## What is saved, and where
 
 | What | Kept in | Survives quitting QQ |
 | --- | --- | --- |
-| workspaces, sessions, runs, turns, messages, tool calls and their output, session grants, compaction summaries | the sessions database, `sessions.sqlite3` in your data directory | yes |
-| profiles, packs, the roster, `policy` grants, `w` approvals | your config files and the project's `.qq/config.ron` | yes |
+| workspaces, sessions, runs, turns, messages, tool calls and their output, compaction summaries | the sessions database, `sessions.sqlite3` in your data directory | yes |
+| profiles, packs, the roster, `policy` | your config files and the project's `.qq/config.ron` | yes |
 | which project files you trusted | `trust.ron` in your data directory | yes |
 | credentials | the OS keyring (details in [Providers](providers.md#where-credentials-go)) | yes |
 | drafts queued with `Ctrl-Enter` | the TUI's memory | no |
@@ -41,12 +40,13 @@ in [Where things live](README.md#where-things-live).
 
 The directory QQ works in: the current directory for `qq`, or
 `--workspace PATH` for `qq run`. Every session belongs to one workspace, and
-the file tools refuse paths outside it. See [`qq run`](headless.md#qq-run--the-agent-unattended).
+the file tools refuse paths outside it. Shell commands start there but are not
+confined to it. See [`qq run`](headless.md#qq-run--the-agent-unattended).
 
 ### Session
 
 One conversation with an agent: its history, [approval mode](#approval-mode),
-[profile](#profile), model, and grants. Sessions are saved, so you can quit
+[profile](#profile), and model. Sessions are saved, so you can quit
 and resume one with `qq --session ID` or `/sessions`. Its id is 32
 hexadecimal characters. See [Sessions](tui.md#sessions).
 
@@ -74,7 +74,7 @@ none. `--max-turns` caps them. See [Limits](headless.md#limits).
 
 One action the model asked for in a turn: read a file, edit, run a shell
 command, fetch a URL, call an MCP tool. The session's
-[approval mode](#approval-mode) and [grants](#grant) decide whether it runs,
+[approval mode](#approval-mode) decides whether it runs,
 is held for an answer, or is refused. See [Permissions and trust](permissions.md#approval-modes).
 
 ### Steer
@@ -128,24 +128,14 @@ The label on a [roster](#roster) entry: `fast`, `balanced`, or `strong`. The
 model picks a sub-agent's model by role; the child keeps its parent's
 [profile](#profile). See [`delegation`](configuration.md#delegation).
 
-### Grant
-
-A standing approval: a tool name, a shell command prefix (`cargo test`), or
-a host. `policy.allow_*` in configuration and `qq run --allow-tool`,
-`--allow-shell`, and `--allow-host` grant them;
-`a` and `w` at a supervised (non-Ask) prompt grant for the session or the
-workspace. Native Auto does not need grants for ordinary work. See
-[Grants in configuration](permissions.md#grants-in-configuration).
-
 ### Approval mode
 
 How much a session may do without asking: `read_only`, `ask`,
 `auto` (the TUI default), or `full`. Ask requires fresh human approval for each
-non-read action.
-Auto executes within the native task policy without human or model approval;
-denied actions return tool errors so the agent can choose another permitted
-approach. Full bypasses Auto containment. Children retain the parent's authority
-ceiling. Change modes with `/approval` or `qq run --approval`.
+non-read action. Auto runs everything except the fixed stops without
+asking, in your checkout and as you; denied actions return tool errors so the
+agent can choose another approach. Full also runs the fixed stops. Children
+retain the parent's authority ceiling. Change modes with `/approval` or `qq run --approval`.
 See [Approval modes](permissions.md#approval-modes).
 
 ### Held call
@@ -154,19 +144,6 @@ A [tool call](#tool-call) waiting for a human answer under Ask. It waits until
 answered, cancelled, or its run deadline or configured approval timeout expires.
 Auto does not create this approval wait.
 See [the approval prompt](permissions.md#the-approval-prompt).
-
-### Delegate
-
-An optional [reviewer](#reviewer) for explicitly supervised delegation outside
-Auto. `approval_delegate`, `QQ_APPROVAL_DELEGATE`, and `/delegate` control that
-retained supervision path. They do not add review to Auto or replace Ask's
-human approval. See [Approval modes](permissions.md#approval-modes).
-
-### Reviewer
-
-The model named by `reviewer_model`, used for explicitly supervised delegation.
-Default Auto and its write children do not require one.
-See [Approval modes](permissions.md#approval-modes).
 
 ### Trust
 

@@ -79,7 +79,6 @@ async fn runtime_options_survive_both_embedding_paths() {
     let runtime = Runtime::new(Reply, "test-model", 256)
         .unwrap()
         .with_shell_policy(ShellPolicy {
-            env_allowlist: std::sync::Arc::from(["BUILD_MODE".to_owned()]),
             builtin_preference: BuiltinPreference::Strict,
             ..Default::default()
         })

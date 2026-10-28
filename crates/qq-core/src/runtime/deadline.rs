@@ -73,7 +73,7 @@ impl RunDeadline {
             let signal = cancelled.clone();
             let mut alarm = DeadlineAlarm(tokio::spawn(async move {
                 tokio::time::sleep_until(self.expires).await;
-                signal.cancel();
+                signal.expire();
             }));
             let alarm_error = loop {
                 if self.expired() {
@@ -99,7 +99,7 @@ impl RunDeadline {
                     },
                 }
             };
-            cancelled.cancel();
+            cancelled.expire();
             // Dropping dispatch cancels per-call waiters. Draining before that
             // drop could wait forever on work still owned by the stream.
             drop(events);

@@ -1169,28 +1169,11 @@ pub(super) fn cascade_in_run_compaction_cancel(
     Ok(Some((compaction_run, event)))
 }
 
-#[cfg(test)]
 pub(super) fn recover_interrupted_runs(
     connection: &mut Connection,
     store_id: StoreId,
 ) -> Result<Vec<EventCursor>, SessionRuntimeError> {
-    recover_interrupted_runs_except(connection, store_id, &[])
-}
-
-pub(super) fn recover_interrupted_runs_except(
-    connection: &mut Connection,
-    store_id: StoreId,
-    observed: &[RunId],
-) -> Result<Vec<EventCursor>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    // This connection owns admission as well as recovery. The transient owner
-    // set lets steering distinguish observation from a live model executor.
-    for run in observed {
-        transaction.execute(
-            "INSERT OR IGNORE INTO temp.native_observation_runs(run_id) VALUES (?1)",
-            [run.to_string()],
-        )?;
-    }
 
     // Routing may already have billed while the main model was unstarted.
     // Interrupt these reservations instead of silently dispatching twice.
@@ -1292,9 +1275,6 @@ pub(super) fn recover_interrupted_runs_except(
         let run_id = parse_id(&run)?;
         let session_id = parse_id(&session)?;
         let workspace_id = parse_id(&workspace)?;
-        if observed.contains(&run_id) {
-            continue;
-        }
         let events = recover_running_run(
             &transaction,
             store_id,
@@ -1313,8 +1293,7 @@ pub(super) fn recover_interrupted_runs_except(
         )?;
         cursors.extend(events.into_iter().map(|event| event.cursor));
     }
-    // Runs settle above in no particular order. Deliver the settled portion;
-    // independently observed native invocations retain their original owner.
+    // Runs settle above in no particular order. Deliver the settled portion.
     deliveries::deliver_orphaned_answers(&transaction, now_ms())?;
     transaction.commit()?;
     Ok(cursors)
@@ -1362,7 +1341,7 @@ pub(super) fn recovery_claim(identity: RunIdentity) -> ClaimedRun {
     }
 }
 
-/// Settle only the original run whose independently owned commands drained.
+/// Settle a run the previous process left running as interrupted.
 pub(super) fn recover_running_run(
     transaction: &Connection,
     store_id: StoreId,
@@ -1370,14 +1349,10 @@ pub(super) fn recover_running_run(
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let claimed = recovery_claim(identity);
     if run_is_settled(transaction, identity.run_id)? {
-        transaction.execute(
-            "DELETE FROM temp.native_observation_runs WHERE run_id=?1",
-            [identity.run_id.to_string()],
-        )?;
         return Ok(Vec::new());
     }
     let mut events = if identity.kind == RunKind::GoalCheck {
-        super::goal_check::interrupt_native(transaction, store_id, identity.run_id)?
+        super::goal_check::interrupt(transaction, store_id, identity.run_id)?
     } else {
         Vec::new()
     };
@@ -1393,10 +1368,6 @@ pub(super) fn recover_running_run(
         )?
         .unwrap_or_default(),
     );
-    transaction.execute(
-        "DELETE FROM temp.native_observation_runs WHERE run_id=?1",
-        [identity.run_id.to_string()],
-    )?;
     Ok(events)
 }
 
@@ -1413,13 +1384,11 @@ pub(super) fn cancellation_wins(
         [run_id.to_string()],
         |row| row.get::<_, bool>(0),
     )?;
-    Ok(
-        if requested && !super::task_workspaces::publication_authorized(transaction, run_id)? {
-            RunOutcome::Cancelled
-        } else {
-            outcome
-        },
-    )
+    Ok(if requested {
+        RunOutcome::Cancelled
+    } else {
+        outcome
+    })
 }
 
 pub(super) fn outcome_states(outcome: &RunOutcome) -> (&'static str, &'static str) {

@@ -227,16 +227,6 @@ pub(crate) fn hold_tool_apply(
 }
 
 #[cfg(test)]
-pub(crate) fn hold_tool_create(
-    workspace: &std::path::Path,
-) -> (
-    tokio::sync::oneshot::Receiver<()>,
-    std::sync::mpsc::SyncSender<()>,
-) {
-    hold_stage(workspace, true)
-}
-
-#[cfg(test)]
 fn hold_stage(
     workspace: &std::path::Path,
     created: bool,

@@ -121,13 +121,6 @@ pub enum Command {
         command: DaemonCommand,
     },
 
-    /// Private native command worker, launched by the trusted host.
-    #[command(name = "_command-owner", hide = true)]
-    NativeWorker {
-        #[arg(long)]
-        state_dir: PathBuf,
-    },
-
     /// Inspect and validate effective configuration.
     Config {
         #[command(subcommand)]
@@ -279,24 +272,14 @@ pub struct RunArgs {
     #[arg(long, value_name = "NAME")]
     pub profile: Option<String>,
 
-    /// Grant this tool for the session (repeatable). Under `auto` and `full`
-    /// the grant is stored before the prompt runs; it is useful for sessions
-    /// and children whose policy would otherwise deny the call. Ignored under
-    /// `ask` and `read-only`.
-    #[arg(long = "allow-tool", value_name = "NAME")]
-    pub allow_tools: Vec<String>,
-
-    /// Grant shell commands starting with this word-boundary prefix for the
-    /// session (repeatable), e.g. `--allow-shell "cargo test"`. Stored like
-    /// `--allow-tool`.
-    #[arg(long = "allow-shell", value_name = "PREFIX")]
-    pub allow_shell_prefixes: Vec<String>,
-
-    /// Grant `fetch` to this host for the session (repeatable): an exact
-    /// name or `*.suffix`, e.g. `--allow-host docs.rs`. Stored like
-    /// `--allow-tool`.
-    #[arg(long = "allow-host", value_name = "HOST")]
-    pub allow_hosts: Vec<String>,
+    /// Removed grant flags, kept hidden so using one fails naming its
+    /// replacement instead of as an unknown argument.
+    #[arg(long = "allow-tool", hide = true, value_parser = removed_allow_tool)]
+    _allow_tool: Vec<std::convert::Infallible>,
+    #[arg(long = "allow-shell", hide = true, value_parser = removed_allow_shell)]
+    _allow_shell: Vec<std::convert::Infallible>,
+    #[arg(long = "allow-host", hide = true, value_parser = removed_allow_host)]
+    _allow_host: Vec<std::convert::Infallible>,
 
     /// Read steering messages from stdin, one per line, and inject each at
     /// the run's next model/tool boundary. Without it stdin is not read.
@@ -536,16 +519,15 @@ pub fn parse_goal_cost(value: &str) -> Result<u64, String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RunApproval {
     /// Require fresh human approval for every non-read call. With no human
-    /// present, those calls are denied, even when an allowlist matches.
+    /// present, those calls are denied.
     Ask,
     /// Deny every edit, shell, MCP, and network call.
     ReadOnly,
-    /// Run edits, shell, MCP, and public fetches without asking, inside a
-    /// private task copy of the workspace and the native sandbox. Calls
-    /// outside that boundary are denied and reported to the model.
+    /// Run edits, shell, MCP, and public fetches in the workspace without
+    /// asking. Fixed stops are denied and reported to the model.
     Auto,
-    /// Run every tool without asking and without the task sandbox. Shell
-    /// still runs through the command worker; managed policy still applies.
+    /// Run every tool without asking, fixed stops included; managed policy
+    /// still applies.
     Full,
 }
 
@@ -555,6 +537,30 @@ pub enum RunFormat {
     Text,
     /// Emit ordered protocol events plus trial metadata as JSON lines.
     Jsonl,
+}
+
+fn removed_allow_tool(_: &str) -> Result<std::convert::Infallible, String> {
+    Err(
+        "--allow-tool was removed in v0.1.10: Auto and Full run tools without grants; \
+         use --approval auto or full"
+            .to_owned(),
+    )
+}
+
+fn removed_allow_shell(_: &str) -> Result<std::convert::Infallible, String> {
+    Err(
+        "--allow-shell was removed in v0.1.10: Auto runs commands without grants; \
+         use --approval auto or full"
+            .to_owned(),
+    )
+}
+
+fn removed_allow_host(_: &str) -> Result<std::convert::Infallible, String> {
+    Err(
+        "--allow-host was removed in v0.1.10: Auto and Full fetch public hosts without \
+         grants; use --approval auto or full"
+            .to_owned(),
+    )
 }
 
 /// Splits one `--correlation KEY=VALUE` argument on its first `=`. Per-entry
@@ -607,9 +613,8 @@ pub enum ConfigCommand {
     /// Explain the source of one effective field.
     Explain {
         /// Field name: model, worker_model, organization, delegation, audit,
-        /// approval_delegate, approval_timeout, reasoning_effort, max_output_tokens, pack.ID,
-        /// profile.NAME, provider.NAME, grant.tool.NAME, grant.shell.PREFIX,
-        /// tui.theme, or tui.bindings.ACTION.
+        /// approval_timeout, reasoning_effort, max_output_tokens, pack.ID,
+        /// profile.NAME, provider.NAME, tui.theme, or tui.bindings.ACTION.
         field: String,
     },
 }
@@ -1002,6 +1007,35 @@ mod tests {
             panic!("expected run")
         };
         assert_eq!(args.approval, Some(RunApproval::Ask));
+    }
+
+    #[test]
+    fn removed_grant_flags_fail_naming_their_replacement() {
+        for (flag, value, message) in [
+            (
+                "--allow-tool",
+                "edit_file",
+                "--allow-tool was removed in v0.1.10: Auto and Full run tools without grants; \
+                 use --approval auto or full",
+            ),
+            (
+                "--allow-shell",
+                "cargo test",
+                "--allow-shell was removed in v0.1.10: Auto runs commands without grants; \
+                 use --approval auto or full",
+            ),
+            (
+                "--allow-host",
+                "docs.rs",
+                "--allow-host was removed in v0.1.10: Auto and Full fetch public hosts \
+                 without grants; use --approval auto or full",
+            ),
+        ] {
+            let error = Cli::try_parse_from(["qq", "run", "task", flag, value]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+            let rendered = error.to_string();
+            assert!(rendered.contains(message), "{flag}: {rendered}");
+        }
     }
 
     #[test]
@@ -1398,16 +1432,4 @@ mod foreground_goal_cli_tests {
             assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
         }
     }
-}
-
-/// Private durable-worker entry, parsed before logging or application startup.
-pub fn task_git_request() -> Option<Result<PathBuf, &'static str>> {
-    let mut arguments = std::env::args_os().skip(1);
-    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("_task-git")) {
-        return None;
-    }
-    Some(match (arguments.next(), arguments.next()) {
-        (Some(path), None) => Ok(PathBuf::from(path)),
-        _ => Err("expected one protected task Git request path"),
-    })
 }

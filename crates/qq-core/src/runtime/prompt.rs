@@ -12,12 +12,12 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(25) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(26) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// The base agent prompt, now at version 25. History: 10 → 11 covers the tool-layer
+/// The base agent prompt, now at version 26. History: 10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
@@ -41,6 +41,8 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// prompt (the head of each provider's cached prefix) unique.
 /// 24 → 25 describes write children as Auto within parent authority, without
 /// requiring a reviewer for their authorized edits and commands.
+/// 25 → 26 says commands run in the workspace as the user with the inherited
+/// environment and host network, and drops the credential-grant sentence.
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -219,7 +221,7 @@ fn agent_prompt_prefix(
         String::new()
     } else {
         format!(
-            "{command_names} run commands under the host filesystem, network and environment policy, using the task deadline or an earlier explicit timeout. Native Auto preserves normal installed-tool configuration; explicit credential environment names require a policy grant. Auto never waits for human approval: a denied call is a tool error, so choose another permitted approach without bypassing the boundary. Ask may require human approval; "
+            "{command_names} run commands in the workspace as the user, with the inherited environment and host network, using the task deadline or an earlier explicit timeout. Auto never waits for human approval: a denied call is a tool error, so choose another permitted approach without bypassing the boundary. Ask may require human approval; "
         )
     };
     let ask_description = if has("ask_user") {
@@ -633,7 +635,7 @@ mod ab2_contract {
         ] {
             assert!(prompt.contains(bullet), "missing contract: {bullet}");
         }
-        assert_eq!(AGENT_PROMPT_VERSION.get(), 25);
+        assert_eq!(AGENT_PROMPT_VERSION.get(), 26);
     }
 
     #[test]

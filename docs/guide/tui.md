@@ -116,8 +116,7 @@ y once   n deny   ask: approval applies once
 
 `y` / `n`; `Shift-Y` / `Shift-N` decide and steer with a note.
 `Esc` denies, like `n`, except while a note is being typed, when it drops the
-note and leaves the prompt open. A held call outside Ask also offers `a`
-(session) and `w` (workspace) grants.
+note and leaves the prompt open.
 `Alt-A` / `Alt-D` answer the oldest waiting call in *another* session.
 `/attention` lists everything waiting across the workspace. Details in
 [Permissions and trust](permissions.md#the-approval-prompt).
@@ -132,7 +131,6 @@ press `Enter`, press a number to pick an option, or `Esc` to decline.
 | model | `/models` | the focused session, or the default for the next `/new`; `Ctrl-N` inside the picker creates a session with the highlighted model |
 | agent profile | `/profile` | the focused idle session, or the default for new sessions; top row shows `as NAME` |
 | approval mode | `/approval` | the focused session from its next held call, or the default for new sessions |
-| approval delegate | `/delegate` | the focused session from its next held call, running or not: `configured` (the workspace's `approval_delegate`), `by_mode`, `on`, or `off` — the "stop delegating" switch. Nothing is written to config; children spawned afterwards inherit it. Top row shows `MODE · delegate off` while an override is set |
 | reasoning effort | `/effort` | the focused idle session's next run, or the default for new sessions; rows are the levels the model's catalog entry advertises (plus `default` and `none`), or every level when it advertises none; a pin outside an advertised ladder fails the run at plan time naming the accepted levels |
 | theme | `/theme` | live preview; `Enter` keeps it for the session, `Esc` restores; the notice shows the `tui.ron` line to make it permanent |
 
@@ -164,7 +162,7 @@ run` refuse to start.
 ## Trust
 
 The TUI starts without a project-trust prompt. Sensitive project models,
-providers, MCP servers, grants, and packs stay disabled until you explicitly
+providers, MCP servers, profiles, and packs stay disabled until you explicitly
 review and accept them with `qq trust` on the server host. Configure your model
 and connections globally to make them available before project trust.
 
@@ -291,7 +289,6 @@ searchable palette that runs the highlighted command on `Enter`.
 | choose an agent profile | `/profile` |  |
 | choose an approval mode | `/approval` |  |
 | choose reasoning effort | `/effort` |  |
-| choose who settles held approvals | `/delegate` |  |
 | list workspace commands and skills | `/skills` |  |
 | choose a theme | `/theme` |  |
 | toggle tool call detail |  | `Ctrl-O` |
@@ -342,7 +339,7 @@ show the pane as `qq` with one state for every session the window follows:
 | herdr state | When |
 | --- | --- |
 | `blocked` | any session has an approval or question waiting for you (the message names it) |
-| `working` | otherwise, any session is running, queued, or answering a side question, including while an approval delegate decides a held call |
+| `working` | otherwise, any session is running, queued, or answering a side question |
 | `idle` | nothing is running |
 
 herdr's notifications and `herdr agent wait` follow these states. The

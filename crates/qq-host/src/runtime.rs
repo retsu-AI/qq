@@ -1,10 +1,7 @@
 //! Application configuration to model-runtime composition.
 
-#[path = "runtime/task_hosting.rs"]
-mod task_hosting;
-
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,26 +10,24 @@ use std::{
 use qq_auth::{AuthError, CredentialStore, Secret};
 use qq_config::{
     AwsAuth, BedrockAuth, ClientSnapshot, ConfigError, ConfigLoader, ConfigSnapshot, EndpointMode,
-    HttpAccess, HttpCredential, LoadRequest, PromotionOutcome, ProviderAccess, ProviderApi,
-    ProviderAuth, ProviderConfig, RuntimeOverrides, WorkspaceGrant,
+    HttpAccess, HttpCredential, LoadRequest, ProviderAccess, ProviderApi, ProviderAuth,
+    ProviderConfig, RuntimeOverrides,
 };
 use qq_core::{
-    ApprovalReviewer, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, PublishedEventStream,
-    ReviewDecision, ReviewFuture, ReviewRequest, ReviewVerdict, RuntimeConfigError,
-    RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadRequest, RuntimeLoader, SessionRuntime,
-    SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
-    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
+    LoadedRuntime, PublishedEventStream, RuntimeConfigError, RuntimeLoadError, RuntimeLoadFuture,
+    RuntimeLoadRequest, RuntimeLoader, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions,
+    SpawnModelValidationFuture, WorkerRuntimeLoadFuture, WorkspacePolicyAuthority,
     plan::{
         AgentProfile, CompiledAgentPlan, CredentialReference, HostSnapshot, PackSelection,
         PlanCompileError, ProviderDescriptor, SourceFingerprint,
     },
 };
 use qq_protocol::{
-    AgentProfileId, AgentProfileSummary, ApprovalGrant, ApprovalMode, CapabilitySupport,
-    CommandRequest, GenerationCapabilities, ModelCatalogRequest, ModelDescriptor, ModelSelection,
+    AgentProfileId, AgentProfileSummary, ApprovalMode, CapabilitySupport, CommandRequest,
+    GenerationCapabilities, ModelCatalogRequest, ModelDescriptor, ModelSelection,
     PromptCacheCapabilities, ProviderRequestShapeIdentity, ProviderRequestShapeVersion,
     ResolvedModel, ResolvedModelVersion, RunFailureKind, SnapshotRequest, SubscribeRequest,
-    WorkspaceGrantOutcome, WorkspaceId,
+    WorkspaceId,
 };
 use qq_provider::{
     BedrockAuth as ProviderBedrockAuth, CacheRouting, EndpointSpec, HttpAuth, HttpProtocol,
@@ -153,7 +148,6 @@ pub struct RuntimeFactory {
 }
 
 struct RuntimeFactoryInner {
-    build: HostBuild,
     config: ConfigLoader,
     credentials: CredentialStore,
     mode: RuntimeMode,
@@ -309,7 +303,6 @@ impl RuntimeFactory {
     ) -> Result<Self, RuntimeBuildError> {
         Ok(Self {
             inner: Arc::new(RuntimeFactoryInner {
-                build,
                 config,
                 credentials,
                 mode,
@@ -905,14 +898,13 @@ impl RuntimeFactory {
         if snapshot.organization().is_some()
             || !snapshot.mcp_servers().is_empty()
             || snapshot.worker_model().is_some()
-            || snapshot.reviewer_model().is_some()
             || !snapshot.delegation().roster().is_empty()
             || snapshot.audit().mode() != qq_config::AuditMode::Off
             || !snapshot.profiles().is_empty()
             || !snapshot.packs().is_empty()
         {
             return Err(invalid(
-                "organizations, MCP, worker/reviewer routes, delegation, audit, profiles, and packs are not allowed",
+                "organizations, MCP, worker routes, delegation, audit, profiles, and packs are not allowed",
             ));
         }
         Ok(())
@@ -1218,7 +1210,7 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
     ) -> Result<Arc<CompiledAgentPlan>, RuntimeBuildError> {
-        self.plan_with_lookup_progress(request, profile, None, None)
+        self.plan_with_lookup_progress(request, profile, None)
             .map(|(plan, _)| plan)
     }
 
@@ -1227,9 +1219,8 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
         progress: &qq_core::RuntimeLoadProgress,
-        execution_workspace: Option<&qq_core::command_owner::NativeDirectoryGrant>,
     ) -> Result<Arc<CompiledAgentPlan>, RuntimeBuildError> {
-        self.plan_with_lookup_progress(request, profile, Some(progress), execution_workspace)
+        self.plan_with_lookup_progress(request, profile, Some(progress))
             .map(|(plan, _)| plan)
     }
 
@@ -1240,7 +1231,7 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
-        self.plan_with_lookup_progress(request, profile, None, None)
+        self.plan_with_lookup_progress(request, profile, None)
     }
 
     fn plan_with_lookup_progress(
@@ -1248,37 +1239,15 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
         progress: Option<&qq_core::RuntimeLoadProgress>,
-        execution_workspace: Option<&qq_core::command_owner::NativeDirectoryGrant>,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
         preparation_phase(progress, qq_core::RuntimeLoadStage::CanonicalizingWorkspace)?;
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(request.cwd())?;
         let configuration_workspace = qq_config::canonical_working_directory(request.cwd())?;
-        let workspace = if let Some(grant) = execution_workspace {
-            let validate = || {
-                let canonical = std::fs::canonicalize(&grant.path)?;
-                if canonical != grant.path
-                    || qq_core::command_owner::NativeWorkspaceIdentity::capture(&canonical)?
-                        != grant.identity
-                {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "task execution workspace changed",
-                    ));
-                }
-                Ok(canonical)
-            };
-            validate().map_err(|source| RuntimeBuildError::ExecutionWorkspace {
-                path: grant.path.clone(),
-                source,
-            })?
-        } else {
-            configuration_workspace.clone()
-        };
+        let workspace = configuration_workspace.clone();
         let key = PlanKey {
             configuration_workspace,
             workspace: workspace.clone(),
-            execution_workspace_identity: execution_workspace.map(|grant| grant.identity),
             model: ModelSelection {
                 model_is_fallback: false,
                 model: request.overrides().model().map(str::to_owned),
@@ -1288,7 +1257,6 @@ impl RuntimeFactory {
             profile: profile.clone(),
             explicit_config_path: request.explicit_path().map(Path::to_owned),
             explicit_config_content: request.explicit_content().map(str::to_owned),
-            approval_delegate: request.overrides().approval_delegate(),
             reasoning_effort: request.overrides().reasoning_effort(),
             ignore_untrusted_project_config: request.ignores_untrusted_project_config(),
         };
@@ -1296,26 +1264,7 @@ impl RuntimeFactory {
             self.compile_generation(request, profile, &workspace, progress)
         });
         match lookup {
-            Ok((plan, lookup)) => {
-                if let Some(grant) = execution_workspace {
-                    let held = plan.workspace_identity().map_err(|source| {
-                        RuntimeBuildError::ExecutionWorkspace {
-                            path: grant.path.clone(),
-                            source,
-                        }
-                    })?;
-                    if plan.workspace_path() != grant.path || held != grant.identity {
-                        return Err(RuntimeBuildError::ExecutionWorkspace {
-                            path: grant.path.clone(),
-                            source: std::io::Error::new(
-                                std::io::ErrorKind::PermissionDenied,
-                                "compiled plan does not hold the admitted task workspace",
-                            ),
-                        });
-                    }
-                }
-                Ok((plan, lookup))
-            }
+            Ok((plan, lookup)) => Ok((plan, lookup)),
             Err(PlanCacheError::Compile(error)) => Err(error),
             Err(PlanCacheError::Capacity { .. }) => Err(RuntimeBuildError::PlanCacheFull),
             Err(PlanCacheError::ShutDown) => Err(RuntimeBuildError::PlanCacheShutDown),
@@ -1422,11 +1371,6 @@ impl RuntimeFactory {
                     && let Some(effort) = profile.reasoning_effort()
                 {
                     overrides = overrides.with_reasoning_effort(effort);
-                }
-                if request.overrides().approval_delegate().is_none()
-                    && let Some(setting) = profile.approval_delegate()
-                {
-                    overrides = overrides.with_approval_delegate(setting);
                 }
                 preparation_phase(progress, qq_core::RuntimeLoadStage::LoadingConfiguration)?;
                 let snapshot = self.load(&request.clone().with_overrides(overrides))?;
@@ -1568,7 +1512,6 @@ impl RuntimeFactory {
         let audit = audit_policy(snapshot.audit());
         let shell = shell_policy(snapshot.policy());
         let network = network_policy(snapshot.policy());
-        let approval_delegate = approval_delegate(snapshot.approval_delegate());
         let mut profile =
             AgentProfile::new(provider, descriptor, resolved_model, workspace.to_owned())
                 .with_spawn_model_routes(spawn_model_routes)
@@ -1578,7 +1521,6 @@ impl RuntimeFactory {
                 .with_approved_read_images(self.inner.approved_read_images.clone())
                 .with_process_producer(Arc::clone(&self.inner.process_producer))
                 .with_network_policy(network)
-                .with_approval_delegate(approval_delegate)
                 .with_output_ceiling(output_ceiling)
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
@@ -2241,13 +2183,6 @@ pub fn aws_profile_configured(profile: &str) -> bool {
 }
 
 impl RuntimeLoader for RuntimeFactory {
-    fn authorize_task_hosting(
-        &self,
-        workspace: qq_core::command_owner::NativeDirectoryGrant,
-    ) -> qq_core::TaskHostingLoadFuture {
-        self.load_task_hosting(workspace)
-    }
-
     fn resolve_worker_model(
         &self,
         workspace: String,
@@ -2361,12 +2296,8 @@ impl RuntimeLoader for RuntimeFactory {
                     overrides = overrides.with_organization(organization);
                 }
                 load = load.with_overrides(overrides);
-                let plan = factory.plan_for_profile_with_progress(
-                    &load,
-                    &request.profile,
-                    &progress,
-                    request.execution_workspace.as_ref(),
-                )?;
+                let plan =
+                    factory.plan_for_profile_with_progress(&load, &request.profile, &progress)?;
                 Ok::<_, RuntimeBuildError>(LoadedRuntime::new(plan))
             })
             .await;
@@ -2386,7 +2317,7 @@ impl RuntimeLoader for RuntimeFactory {
     }
 }
 
-impl WorkspaceGrantAuthority for RuntimeFactory {
+impl WorkspacePolicyAuthority for RuntimeFactory {
     fn goal_policy(&self, workspace: &Path) -> qq_core::GoalPolicyFuture {
         let factory = self.clone();
         let workspace = workspace.to_owned();
@@ -2517,391 +2448,6 @@ impl WorkspaceGrantAuthority for RuntimeFactory {
             }
         })
     }
-
-    fn seed_grants(&self, workspace: &Path) -> GrantSeedFuture {
-        let factory = self.clone();
-        let workspace = workspace.to_owned();
-        Box::pin(async move {
-            let seed = tokio::task::spawn_blocking(move || {
-                let load = factory.request_for_workspace(&workspace, None).ok()?;
-                let snapshot = factory.load(&load).ok()?;
-                let grants = snapshot.grants();
-                Some(WorkspaceGrantSeed {
-                    tools: grants.tools().to_vec(),
-                    shell_prefixes: grants.shell_prefixes().to_vec(),
-                    hosts: grants.hosts().to_vec(),
-                })
-            })
-            .await;
-            // A configuration that fails to load seeds nothing: the session
-            // is still created, and the next run surfaces the configuration
-            // error through the ordinary run-failure path.
-            seed.ok().flatten().unwrap_or_default()
-        })
-    }
-
-    fn promote_grant(&self, workspace: &Path, grant: &ApprovalGrant) -> GrantPromotionFuture {
-        let factory = self.clone();
-        let workspace = workspace.to_owned();
-        let grant = match grant {
-            ApprovalGrant::Tool { name } => WorkspaceGrant::Tool(name.clone()),
-            ApprovalGrant::ShellPrefix { prefix } => WorkspaceGrant::ShellPrefix(prefix.clone()),
-            ApprovalGrant::Host { host } => WorkspaceGrant::Host(host.clone()),
-        };
-        Box::pin(async move {
-            if let Err(error) = factory
-                .validate_isolated_tui_qa_state()
-                .and_then(|()| factory.validate_tui_qa_workspace(&workspace))
-            {
-                return WorkspaceGrantOutcome::Failed {
-                    message: error.to_string(),
-                };
-            }
-            let config = factory.inner.config.clone();
-            let written = tokio::task::spawn_blocking(move || {
-                config.promote_workspace_grant(&workspace, &grant)
-            })
-            .await;
-            match written {
-                Ok(Ok(promotion)) => {
-                    let path = promotion.path().display().to_string();
-                    match promotion.outcome() {
-                        PromotionOutcome::Added => WorkspaceGrantOutcome::Written { path },
-                        PromotionOutcome::AlreadyPresent => {
-                            WorkspaceGrantOutcome::AlreadyPresent { path }
-                        }
-                    }
-                }
-                Ok(Err(error)) => WorkspaceGrantOutcome::Failed {
-                    message: error.to_string(),
-                },
-                Err(_) => WorkspaceGrantOutcome::Failed {
-                    message: "the workspace grant write stopped unexpectedly".to_owned(),
-                },
-            }
-        })
-    }
-}
-
-/// One-shot reviewer verdict budget: a bounded read of a small model's single
-/// JSON line. Raised from 512 when requests gained arguments and briefs.
-const REVIEWER_MAX_OUTPUT_TOKENS: u32 = 1_024;
-const REVIEWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-/// Bytes of one section (arguments, brief, diff) quoted to the reviewer.
-const REVIEWER_SECTION_BYTES: usize = 8 * 1024;
-
-/// Adjudicates held tool approvals with the workspace-configured
-/// `reviewer_model`, through the same provider compilation path as ordinary
-/// runs. Every failure — no reviewer configured, config or provider errors,
-/// timeout, unparseable verdict — resolves as `Escalate`, leaving the human
-/// approval path untouched.
-///
-/// The compiled provider is cached per workspace and revalidated by
-/// credential epoch, so a held call does not pay a configuration load.
-pub struct ModelApprovalReviewer {
-    factory: RuntimeFactory,
-    cache: Arc<std::sync::Mutex<HashMap<PathBuf, CachedReviewer>>>,
-}
-
-#[derive(Clone)]
-struct CachedReviewer {
-    epoch: qq_protocol::CredentialEpoch,
-    route: qq_config::ModelRoute,
-    provider: Arc<dyn qq_provider::Provider>,
-    pricing: Option<qq_protocol::ModelPricing>,
-}
-
-impl ModelApprovalReviewer {
-    pub fn new(factory: RuntimeFactory) -> Self {
-        Self {
-            factory,
-            cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        }
-    }
-
-    fn escalate(reason: &str) -> ReviewVerdict {
-        ReviewVerdict::free(ReviewDecision::Escalate {
-            reason: reason.to_owned(),
-        })
-    }
-
-    /// Blocking: the cached reviewer for `workspace` when its credential epoch
-    /// still matches, else a fresh compile. A rotated credential or changed
-    /// reviewer route is observed on the next epoch.
-    fn prepare(&self, workspace: &Path) -> Result<CachedReviewer, String> {
-        let epoch = self
-            .factory
-            .inner
-            .credentials
-            .epoch()
-            .map_err(|error| error.to_string())?;
-        if let Ok(cache) = self.cache.lock()
-            && let Some(cached) = cache.get(workspace)
-            && cached.epoch == epoch
-        {
-            return Ok(cached.clone());
-        }
-        let load = self
-            .factory
-            .request_for_workspace(workspace, None)
-            .map_err(|error| error.to_string())?;
-        let snapshot = self
-            .factory
-            .load(&load)
-            .map_err(|error| error.to_string())?;
-        let Some(route) = snapshot.reviewer_model() else {
-            return Err("no reviewer model is configured".to_owned());
-        };
-        let provider_config = snapshot
-            .providers()
-            .get(route.provider())
-            .ok_or_else(|| format!("unknown reviewer provider {}", route.provider()))?;
-        let (recipe, _) = self
-            .factory
-            .prepare_provider(route.provider(), route.model(), provider_config)
-            .map_err(|error| error.to_string())?;
-        let provider = self
-            .factory
-            .inner
-            .providers
-            .compile(recipe)
-            .map_err(|error| error.to_string())?;
-        let pricing = provider_config
-            .models()
-            .get(route.model())
-            .and_then(qq_config::ModelMetadata::pricing)
-            .cloned()
-            .map(protocol_model_pricing);
-        let cached = CachedReviewer {
-            epoch,
-            route: route.clone(),
-            provider,
-            pricing,
-        };
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(workspace.to_owned(), cached.clone());
-        }
-        Ok(cached)
-    }
-}
-
-impl ApprovalReviewer for ModelApprovalReviewer {
-    fn review(&self, request: ReviewRequest) -> ReviewFuture {
-        let reviewer = Self {
-            factory: self.factory.clone(),
-            cache: Arc::clone(&self.cache),
-        };
-        Box::pin(async move {
-            let workspace = PathBuf::from(&request.workspace);
-            let prepared = tokio::task::spawn_blocking(move || reviewer.prepare(&workspace)).await;
-            let cached = match prepared {
-                Ok(Ok(prepared)) => prepared,
-                Ok(Err(_)) | Err(_) => return Self::escalate("reviewer unavailable"),
-            };
-            let verdict = tokio::time::timeout(
-                REVIEWER_TIMEOUT,
-                collect_reviewer_verdict(
-                    cached.provider,
-                    cached.route.model(),
-                    cached.pricing.as_ref(),
-                    &request,
-                ),
-            )
-            .await;
-            match verdict {
-                Ok(verdict) => verdict,
-                Err(_) => Self::escalate("reviewer timed out"),
-            }
-        })
-    }
-}
-
-/// The reviewer's contract: one strict JSON line. Anything else escalates.
-const REVIEWER_SYSTEM_PROMPT: &str = "You are a tool-call reviewer for a coding agent. \
-The agent proposed one action that policy held for review. Judge only the action shown; \
-you have no transcript and must not assume intent beyond the stated task. \
-Two criteria, both required to approve: (1) safety — the worst plausible outcome is \
-recoverable within the workspace (for example: deleting build artifacts, killing a process \
-the workspace owns, reinstalling dependencies, editing source files); escalate anything \
-externally visible, credential-touching, system-level, or ambiguous (force-pushing shared \
-branches, sudo, piped installers, writes outside the workspace). (2) necessity — when a task \
-brief is given, the action must be plausibly necessary for that task; deny actions clearly \
-outside it. Your deny is final: the agent receives it as a tool error. \
-Escalate when you are unsure; a human decides escalations. \
-Reply with exactly one JSON object on one line and nothing else: \
-{\"verdict\":\"approve\"} or {\"verdict\":\"escalate\",\"reason\":\"...\"} \
-or {\"verdict\":\"deny\",\"reason\":\"...\"}.";
-
-async fn collect_reviewer_verdict(
-    provider: Arc<dyn qq_provider::Provider>,
-    model: &str,
-    pricing: Option<&qq_protocol::ModelPricing>,
-    request: &ReviewRequest,
-) -> ReviewVerdict {
-    use futures_util::StreamExt as _;
-    use qq_provider::{ContentBlock, Message, ModelRequest, ProviderEvent, Role};
-
-    let mut description = format!(
-        "Tool: {}\nWorkspace: {}\nSession mode: {}\n",
-        request.tool_name,
-        request.workspace,
-        match request.mode {
-            qq_protocol::ApprovalMode::Auto =>
-                "auto: execute within policy; return denied actions as tool errors",
-            qq_protocol::ApprovalMode::Ask => "ask: only the human can approve this action",
-            qq_protocol::ApprovalMode::ReadOnly => "read-only session",
-            qq_protocol::ApprovalMode::Full => "full autonomy session",
-        }
-    );
-    match request.origin {
-        qq_core::ReviewOrigin::Root => {}
-        qq_core::ReviewOrigin::Child { depth, .. } => {
-            description.push_str(&format!("Origin: sub-agent at depth {depth}\n"));
-        }
-    }
-    if let Some(brief) = &request.task_brief {
-        description.push_str("Task brief given to the sub-agent:\n");
-        description.push_str(&bounded(brief, REVIEWER_SECTION_BYTES));
-        description.push('\n');
-    }
-    if let Some(shell) = &request.shell {
-        description.push_str("Shell command: ");
-        description.push_str(&shell.command);
-        description.push('\n');
-        if let Some(cwd) = &shell.cwd {
-            description.push_str("Working directory: ");
-            description.push_str(cwd);
-            description.push('\n');
-        }
-    }
-    if let Some(edit) = &request.edit {
-        description.push_str("Edit path: ");
-        description.push_str(&edit.path);
-        description.push_str("\nDiff preview:\n");
-        description.push_str(&bounded(&edit.diff, REVIEWER_SECTION_BYTES));
-        description.push('\n');
-    }
-    if request.shell.is_none() && request.edit.is_none() {
-        description.push_str("Arguments: ");
-        description.push_str(&bounded(&request.arguments, REVIEWER_SECTION_BYTES));
-        description.push('\n');
-    }
-    if !request.recent_actions.is_empty() {
-        description.push_str("Recent tool calls of this run (oldest first): ");
-        let listed = request
-            .recent_actions
-            .iter()
-            .map(|action| match &action.path {
-                Some(path) => format!("{}({})", action.tool, bounded(path, 120)),
-                None => action.tool.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        description.push_str(&listed);
-        description.push('\n');
-    }
-    if !request.granted_tools.is_empty() || !request.granted_shell_prefixes.is_empty() {
-        description.push_str(&format!(
-            "Session grants: tools {:?}; shell prefixes {:?}\n",
-            request.granted_tools, request.granted_shell_prefixes
-        ));
-    }
-    let model_request = ModelRequest::new(
-        model.to_owned(),
-        vec![Message::new(
-            Role::User,
-            vec![ContentBlock::Text { text: description }],
-        )],
-        REVIEWER_MAX_OUTPUT_TOKENS,
-    )
-    .with_system(REVIEWER_SYSTEM_PROMPT);
-    let mut stream = provider.stream(model_request);
-    let mut text = String::new();
-    let mut spend = qq_core::ReviewSpend::default();
-    loop {
-        match stream.next().await {
-            Some(Ok(ProviderEvent::OutputTextDelta { text: delta })) => text.push_str(&delta),
-            Some(Ok(
-                ProviderEvent::Completed { usage } | ProviderEvent::Incomplete { usage, .. },
-            )) => {
-                let usage = usage.map(|usage| qq_protocol::TokenUsage {
-                    input_tokens: usage.input_tokens,
-                    cache_read_input_tokens: usage.cache_read_input_tokens,
-                    cache_write_input_tokens: usage.cache_write_input_tokens,
-                    output_tokens: usage.output_tokens,
-                    reasoning_tokens: usage.reasoning_tokens,
-                });
-                spend = qq_core::ReviewSpend {
-                    usage,
-                    cost_usd_nanos: match (usage, pricing) {
-                        (Some(usage), Some(pricing)) => qq_core::run_cost(usage, pricing),
-                        _ => None,
-                    },
-                };
-                break;
-            }
-            Some(Ok(_)) => {}
-            Some(Err(_)) => {
-                return ReviewVerdict {
-                    decision: ReviewDecision::Escalate {
-                        reason: "reviewer request failed".to_owned(),
-                    },
-                    // The request was sent; its spend is unknown, not zero.
-                    spend: qq_core::ReviewSpend {
-                        usage: None,
-                        cost_usd_nanos: None,
-                    },
-                };
-            }
-            None => break,
-        }
-    }
-    ReviewVerdict {
-        decision: parse_reviewer_decision(&text),
-        spend,
-    }
-}
-
-fn bounded(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_owned();
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…[truncated]", &text[..end])
-}
-
-/// Parses the reviewer's reply. The verdict must be the only JSON object in
-/// the reply and `approve` carries no qualifier; everything else escalates.
-fn parse_reviewer_decision(text: &str) -> ReviewDecision {
-    #[derive(serde::Deserialize)]
-    struct Reply {
-        verdict: String,
-        #[serde(default)]
-        reason: Option<String>,
-    }
-    let trimmed = text.trim();
-    let Ok(reply) = serde_json::from_str::<Reply>(trimmed) else {
-        return ReviewDecision::Escalate {
-            reason: "reviewer reply was not a valid verdict".to_owned(),
-        };
-    };
-    let reason = |reply: Reply| {
-        reply
-            .reason
-            .unwrap_or_else(|| "reviewer verdict".to_owned())
-    };
-    match reply.verdict.as_str() {
-        "approve" => ReviewDecision::Approve,
-        "deny" => ReviewDecision::Deny {
-            reason: reason(reply),
-        },
-        _ => ReviewDecision::Escalate {
-            reason: reason(reply),
-        },
-    }
 }
 
 enum ResolvedAuth {
@@ -2959,21 +2505,15 @@ impl RuntimeHandler {
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
     ) -> Result<Self, RuntimeHandlerError> {
-        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-        let commands: Option<Arc<dyn qq_core::command_owner::NativeCommandService>> =
-            Some(Arc::new(crate::command_worker::CommandWorker::new(
-                factory
-                    .inner
-                    .config
-                    .paths()
-                    .data_dir()
-                    .join("command-owner-v3"),
-                std::env::current_exe().map_err(qq_core::command_owner::CommandOwnerError::Io)?,
-                factory.inner.build.version,
-            )?));
-        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-        let commands = None;
-        Self::open_with_commands(factory, approval_timeout, commands).await
+        factory.validate_isolated_tui_qa_state()?;
+        let database_path = factory.inner.config.session_database_path()?;
+        // The factory is both the runtime loader and the workspace policy
+        // authority that resolves goal settings and managed check denies.
+        let options = SessionRuntimeOptions::new(database_path)
+            .with_approval_timeout(approval_timeout)
+            .with_grant_authority(Arc::new(factory.clone()));
+        let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
+        Ok(Self { durable, factory })
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -2981,58 +2521,7 @@ impl RuntimeHandler {
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
     ) -> Result<Self, RuntimeHandlerError> {
-        Self::open_with_commands(factory, approval_timeout, None).await
-    }
-
-    async fn open_with_commands(
-        factory: RuntimeFactory,
-        approval_timeout: Option<std::time::Duration>,
-        native_commands: Option<Arc<dyn qq_core::command_owner::NativeCommandService>>,
-    ) -> Result<Self, RuntimeHandlerError> {
-        factory.validate_isolated_tui_qa_state()?;
-        let database_path = factory.inner.config.session_database_path()?;
-        // The factory is both the runtime loader and the workspace grant
-        // authority: config grants seed each new session's grant set, and
-        // approve-for-workspace promotions write back through the loader's
-        // configuration layer.
-        // Held calls go to the held workspace's `reviewer_model`, then the
-        // human. The reviewer speaks `ReviewDecision`; qq-core learns nothing
-        // about it.
-        let reviewer: Arc<dyn ApprovalReviewer> =
-            Arc::new(ModelApprovalReviewer::new(factory.clone()));
-        let mut options = SessionRuntimeOptions::new(database_path)
-            .with_approval_timeout(approval_timeout)
-            .with_grant_authority(Arc::new(factory.clone()))
-            .with_approval_reviewer(reviewer);
-        // Native backends share task ownership and publication. Resource policy
-        // names the actual backend guarantee: kernel limits or sampled safeguards.
-        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-        if native_commands.is_some() {
-            let directory = factory
-                .inner
-                .config
-                .paths()
-                .data_dir()
-                .join("task-workspaces");
-            options.task_workspaces = Some(
-                tokio::task::spawn_blocking(move || task_workspace_policy(&directory))
-                    .await
-                    .map_err(RuntimeHandlerError::TaskPreparation)??,
-            );
-        }
-        if let Some(policy) = options.task_workspaces.as_ref()
-            && native_commands.is_some()
-        {
-            let control = policy.directory.clone();
-            options.task_git = tokio::task::spawn_blocking(move || {
-                qq_core::TaskGitPolicy::from_process_env(control)
-            })
-            .await
-            .map_err(RuntimeHandlerError::TaskPreparation)??;
-        }
-        options.native_commands = native_commands;
-        let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
-        Ok(Self { durable, factory })
+        Self::open_owned(factory, approval_timeout).await
     }
 
     /// The durable session runtime this handler serves. Headless `qq run`
@@ -3296,7 +2785,6 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         )
         | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Unavailable)
         | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Overloaded)
-        | SessionRuntimeError::NativeCommandCapacity
         | SessionRuntimeError::QueueFull
         | SessionRuntimeError::SteeringQueueFull
         | SessionRuntimeError::WorkspaceLimitReached
@@ -3304,7 +2792,6 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::CommandLimitReached
         | SessionRuntimeError::Overloaded => ServerHandlerError::Unavailable,
         SessionRuntimeError::InvalidRunLimit
-        | SessionRuntimeError::InvalidNativeScope { .. }
         | SessionRuntimeError::SnapshotTooLarge
         | SessionRuntimeError::OutputTooLarge
         | SessionRuntimeError::AccountingUnavailable
@@ -3318,65 +2805,11 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 #[derive(Debug, Error)]
 pub enum RuntimeHandlerError {
     #[error(transparent)]
-    TaskGitHelper(#[from] qq_core::task_git_job::HelperImageError),
-    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-    #[error("task workspace preparation stopped: {0}")]
-    TaskPreparation(#[source] tokio::task::JoinError),
-    #[error("native command service failed: {0}")]
-    NativeCommands(#[from] qq_core::command_owner::CommandOwnerError),
-    #[error(transparent)]
     Build(#[from] RuntimeBuildError),
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
     Sessions(#[from] SessionRuntimeError),
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
-fn task_workspace_policy(
-    directory: &Path,
-) -> Result<qq_core::TaskWorkspacePolicy, RuntimeBuildError> {
-    let prepare = || -> std::io::Result<_> {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt as _;
-            builder.mode(0o700);
-        }
-        builder.create(directory)?;
-        let directory = directory.canonicalize()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            let metadata = std::fs::metadata(&directory)?;
-            if metadata.mode() & 0o077 != 0 || metadata.uid() != rustix::process::getuid().as_raw()
-            {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "task control directory must be private and owned by this user",
-                ));
-            }
-        }
-        Ok(qq_core::TaskWorkspacePolicy {
-            directory: qq_core::command_owner::NativeDirectoryGrant::capture(&directory)?,
-            read_access: qq_core::command_owner::NativeReadAccess::Host,
-            read_only: Vec::new(),
-            #[cfg(windows)]
-            network: qq_core::command_owner::NativeNetwork::Host,
-            #[cfg(not(windows))]
-            network: qq_core::command_owner::NativeNetwork::Isolated,
-            resources: qq_core::command_owner::NativeResources::Host,
-            limits: qq_core::task_workspace::TaskWorkspaceLimits {
-                max_entries: 16_384,
-                max_bytes: 256 * 1024 * 1024,
-            },
-        })
-    };
-    prepare().map_err(|source| RuntimeBuildError::ExecutionWorkspace {
-        path: directory.to_owned(),
-        source,
-    })
 }
 
 /// Translates the configured roster into the protocol shape, decorating each
@@ -3475,8 +2908,6 @@ fn delegation_roster(
     }
 }
 
-/// Translates the configured shell policy: the environment allowlist and
-/// the built-in preference.
 /// Translates the managed host denies into the runtime's network policy.
 fn network_policy(policy: &qq_config::EffectivePolicy) -> qq_core::NetworkPolicy {
     qq_core::NetworkPolicy {
@@ -3488,7 +2919,6 @@ fn network_policy(policy: &qq_config::EffectivePolicy) -> qq_core::NetworkPolicy
 fn shell_policy(policy: &qq_config::EffectivePolicy) -> qq_core::ShellPolicy {
     qq_core::ShellPolicy {
         deny_prefixes: policy.deny_shell_prefixes().to_vec().into(),
-        env_allowlist: policy.shell_env().to_vec().into(),
         builtin_preference: match policy.builtin_preference() {
             qq_config::BuiltinPreference::Off => qq_core::BuiltinPreference::Off,
             qq_config::BuiltinPreference::Hint => qq_core::BuiltinPreference::Hint,
@@ -3515,18 +2945,6 @@ const fn delegation_role(role: qq_config::DelegationRole) -> qq_protocol::Delega
         qq_config::DelegationRole::Fast => qq_protocol::DelegationRole::Fast,
         qq_config::DelegationRole::Balanced => qq_protocol::DelegationRole::Balanced,
         qq_config::DelegationRole::Strong => qq_protocol::DelegationRole::Strong,
-    }
-}
-
-/// Translates the configured delegate choice: absent means the mode's own
-/// default, so a configuration that never mentions it behaves as before.
-const fn approval_delegate(
-    setting: Option<qq_config::ApprovalDelegateSetting>,
-) -> qq_core::ApprovalDelegate {
-    match setting {
-        None => qq_core::ApprovalDelegate::ByMode,
-        Some(qq_config::ApprovalDelegateSetting::On) => qq_core::ApprovalDelegate::On,
-        Some(qq_config::ApprovalDelegateSetting::Off) => qq_core::ApprovalDelegate::Off,
     }
 }
 
@@ -3748,12 +3166,6 @@ fn preparation_phase(
 
 #[derive(Debug, Error)]
 pub enum RuntimeBuildError {
-    #[error("could not admit task execution workspace {path}: {source}")]
-    ExecutionWorkspace {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("runtime preparation was cancelled")]
     PreparationCancelled,
     #[error(transparent)]
@@ -3828,7 +3240,7 @@ impl RuntimeBuildError {
     fn failure_kind(&self) -> RunFailureKind {
         match self {
             Self::Config(ConfigError::PolicyViolation { .. }) => RunFailureKind::Policy,
-            Self::Config(_) | Self::ExecutionWorkspace { .. } => RunFailureKind::Configuration,
+            Self::Config(_) => RunFailureKind::Configuration,
             Self::Auth(_) => RunFailureKind::Authentication,
             Self::Provider(error) => match error.kind() {
                 qq_provider::ProviderErrorKind::Configuration => {
@@ -5974,152 +5386,6 @@ mod tests {
         assert_eq!(fallback, parent);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn task_runtime_works_below_a_symlinked_temporary_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let real = root.path().join("real");
-        let alias = root.path().join("alias");
-        fs::create_dir(&real).unwrap();
-        std::os::unix::fs::symlink(&real, &alias).unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "runtime::tests::task_runtime_uses_detached_files_and_source_configuration",
-                "--nocapture",
-            ])
-            .env("TMPDIR", &alias)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
-    }
-
-    #[tokio::test]
-    async fn task_runtime_uses_detached_files_and_source_configuration() {
-        let fixture = RuntimeFixture::new();
-        let source = fixture.path("work").canonicalize().unwrap();
-        let task = fixture.path("task");
-        fs::create_dir(&task).unwrap();
-        let task = task.canonicalize().unwrap();
-        fs::create_dir(task.join(".qq")).unwrap();
-        fs::write(
-            task.join(".qq/config.ron"),
-            "invalid task-controlled configuration",
-        )
-        .unwrap();
-        fs::write(fixture.path("global/config.ron"), r#"(version:1, model:"custom/host", providers:{"custom": Custom(connection:(base_url:"http://127.0.0.1:1/v1",api:OpenAiResponses,auth:NoAuth))})"#).unwrap();
-        let factory = fixture.factory();
-        let grant = qq_core::command_owner::NativeDirectoryGrant::capture(&task).unwrap();
-        let request = RuntimeLoadRequest {
-            execution_workspace: Some(grant),
-            workspace: source.to_string_lossy().into_owned(),
-            model: ModelSelection::default(),
-            profile: AgentProfileId::default(),
-            reasoning_effort: None,
-        };
-        let loaded = RuntimeLoader::load(&factory, request.clone())
-            .await
-            .unwrap();
-        assert_eq!(loaded.plan.workspace_path(), task);
-        assert_eq!(loaded.resolved_model().route, "custom/host");
-        let other_source = fixture.path("other-source");
-        fs::create_dir_all(other_source.join(".qq")).unwrap();
-        fs::write(
-            other_source.join(".qq/config.ron"),
-            r#"(version:1,model:"custom/other")"#,
-        )
-        .unwrap();
-        factory
-            .inner
-            .config
-            .grant_pending_trust(&LoadRequest::new(other_source.canonicalize().unwrap()))
-            .unwrap();
-        let mut other_request = request.clone();
-        other_request.workspace = other_source
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let other = RuntimeLoader::load(&factory, other_request).await.unwrap();
-        assert_eq!(other.plan.workspace_path(), task);
-        assert_eq!(
-            other.resolved_model().route,
-            "custom/other",
-            "a shared physical root must not reuse another project's configuration"
-        );
-        #[cfg(windows)]
-        let factory = {
-            // Windows directory capabilities pin their names while cached.
-            // First prove replacement is refused, then release those handles
-            // to exercise admission against the saved identity after replacement.
-            let error = fs::rename(&task, fixture.path("held-task")).unwrap_err();
-            assert!(!fixture.path("held-task").exists(), "{error:?}");
-            assert_eq!(
-                &qq_core::command_owner::NativeWorkspaceIdentity::capture(&task).unwrap(),
-                &request.execution_workspace.as_ref().unwrap().identity,
-                "a refused rename must retain the admitted directory identity"
-            );
-            drop(loaded);
-            drop(other);
-            factory.shutdown_plans();
-            drop(factory);
-            fixture.factory()
-        };
-        fs::rename(&task, fixture.path("held-task")).unwrap();
-        fs::create_dir(&task).unwrap();
-        let result = RuntimeLoader::load(&factory, request).await;
-        assert!(
-            matches!(
-                result,
-                Err(RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    ..
-                })
-            ),
-            "replaced task roots must not use cached authority"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn task_plan_cache_admits_a_fresh_grant_for_a_recreated_directory() {
-        let fixture = RuntimeFixture::new();
-        let source = fixture.path("work").canonicalize().unwrap();
-        let task = fixture.path("task");
-        fs::create_dir(&task).unwrap();
-        let task = task.canonicalize().unwrap();
-        fs::write(fixture.path("global/config.ron"), r#"(version:1, model:"custom/host", providers:{"custom": Custom(connection:(base_url:"http://127.0.0.1:1/v1",api:OpenAiResponses,auth:NoAuth))})"#).unwrap();
-        let factory = fixture.factory();
-        let grant = qq_core::command_owner::NativeDirectoryGrant::capture(&task).unwrap();
-        let mut request = RuntimeLoadRequest {
-            execution_workspace: Some(grant.clone()),
-            workspace: source.to_string_lossy().into_owned(),
-            model: ModelSelection::default(),
-            profile: AgentProfileId::default(),
-            reasoning_effort: None,
-        };
-        let original = RuntimeLoader::load(&factory, request.clone())
-            .await
-            .unwrap();
-        fs::rename(&task, fixture.path("original-task")).unwrap();
-        fs::create_dir(&task).unwrap();
-        let replacement = qq_core::command_owner::NativeDirectoryGrant::capture(&task).unwrap();
-        assert_ne!(grant.identity, replacement.identity);
-        request.execution_workspace = Some(replacement.clone());
-        let loaded = RuntimeLoader::load(&factory, request).await.unwrap();
-        assert_eq!(
-            loaded.plan.workspace_identity().unwrap(),
-            replacement.identity
-        );
-        assert_eq!(original.plan.workspace_identity().unwrap(), grant.identity);
-    }
-
     #[tokio::test]
     async fn session_model_fallback_resolves_config_but_explicit_pin_wins() {
         let fixture = RuntimeFixture::new();
@@ -6142,7 +5408,6 @@ mod tests {
             let loaded = RuntimeLoader::load(
                 &factory,
                 RuntimeLoadRequest {
-                    execution_workspace: None,
                     reasoning_effort: None,
                     workspace: workspace.display().to_string(),
                     model: ModelSelection {
@@ -6693,7 +5958,7 @@ mod tests {
         let factory = fixture.factory();
         let workspace = fixture.path("work");
         assert!(factory.inner.check_policy_slots.get().is_none());
-        let policy = WorkspaceGrantAuthority::goal_policy(&factory, &workspace)
+        let policy = WorkspacePolicyAuthority::goal_policy(&factory, &workspace)
             .await
             .unwrap();
         assert_eq!(policy, qq_core::GoalPolicy::default());
@@ -6706,7 +5971,7 @@ mod tests {
         )"#,
         )
         .unwrap();
-        let policy = WorkspaceGrantAuthority::goal_policy(&factory, &workspace)
+        let policy = WorkspacePolicyAuthority::goal_policy(&factory, &workspace)
             .await
             .unwrap();
         assert_eq!(policy.max_goal_runs, 20);
@@ -6717,11 +5982,11 @@ mod tests {
         assert_eq!(policy.approval_wait_ms, 40_000);
         let slots = factory.inner.check_policy_slots.get().unwrap();
         let held = Arc::clone(slots).acquire_many_owned(4).await.unwrap();
-        let mut waiting = WorkspaceGrantAuthority::goal_policy(&factory, &workspace);
+        let mut waiting = WorkspacePolicyAuthority::goal_policy(&factory, &workspace);
         assert!(futures_util::poll!(waiting.as_mut()).is_pending());
         // Dropping a waiter must not leak a pool slot.
         drop(waiting);
-        let mut waiting = WorkspaceGrantAuthority::goal_policy(&factory, &workspace);
+        let mut waiting = WorkspacePolicyAuthority::goal_policy(&factory, &workspace);
         assert!(futures_util::poll!(waiting.as_mut()).is_pending());
         drop(held);
         assert_eq!(waiting.await.unwrap(), policy);
@@ -6731,7 +5996,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            WorkspaceGrantAuthority::goal_policy(&factory, &workspace).await,
+            WorkspacePolicyAuthority::goal_policy(&factory, &workspace).await,
             Err(qq_core::GoalPolicyError::Configuration(_))
         ));
     }
@@ -6748,7 +6013,7 @@ mod tests {
         let workspace = fixture.path("work");
         assert!(factory.inner.check_policy_slots.get().is_none());
         assert_eq!(
-            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, &"x".repeat(1025))
+            WorkspacePolicyAuthority::validate_goal_check(&factory, &workspace, &"x".repeat(1025))
                 .await,
             Err(qq_core::GoalCheckPolicyError::ManagedDenied)
         );
@@ -6759,11 +6024,11 @@ mod tests {
             .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
         let held = Arc::clone(slots).acquire_many_owned(4).await.unwrap();
         let mut waiting =
-            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true");
+            WorkspacePolicyAuthority::validate_goal_check(&factory, &workspace, "true");
         assert!(futures_util::poll!(waiting.as_mut()).is_pending());
         drop(waiting);
         let mut waiting =
-            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true");
+            WorkspacePolicyAuthority::validate_goal_check(&factory, &workspace, "true");
         assert!(futures_util::poll!(waiting.as_mut()).is_pending());
         drop(held);
         assert_eq!(waiting.await, Ok(()));
@@ -6776,7 +6041,7 @@ mod tests {
         let factory = fixture.factory();
         let workspace = fixture.path("work");
         assert!(
-            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "cargo test")
+            WorkspacePolicyAuthority::validate_goal_check(&factory, &workspace, "cargo test")
                 .await
                 .is_ok()
         );
@@ -6790,7 +6055,7 @@ mod tests {
             )
             .unwrap();
             assert!(matches!(
-                WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "cargo test")
+                WorkspacePolicyAuthority::validate_goal_check(&factory, &workspace, "cargo test")
                     .await,
                 Err(qq_core::GoalCheckPolicyError::ManagedDenied)
             ));
@@ -6801,7 +6066,7 @@ mod tests {
                 "busybox sh -c 'cargo test'",
             ] {
                 assert_eq!(
-                    WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, command)
+                    WorkspacePolicyAuthority::validate_goal_check(&factory, &workspace, command)
                         .await,
                     Err(qq_core::GoalCheckPolicyError::ManagedDenied),
                     "{command}"
@@ -6810,138 +6075,15 @@ mod tests {
         }
         fs::write(fixture.path("managed/managed.ron"), "(version: 1)").unwrap();
         assert!(
-            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "cargo test")
+            WorkspacePolicyAuthority::validate_goal_check(&factory, &workspace, "cargo test")
                 .await
                 .is_ok()
         );
         fs::write(fixture.path("managed/managed.ron"), "invalid RON").unwrap();
         assert!(matches!(
-            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "cargo test").await,
+            WorkspacePolicyAuthority::validate_goal_check(&factory, &workspace, "cargo test").await,
             Err(qq_core::GoalCheckPolicyError::Configuration(_))
         ));
-    }
-
-    #[tokio::test]
-    async fn grant_authority_seeds_effective_grants_and_promotes_new_ones() {
-        let fixture = RuntimeFixture::new();
-        let factory = fixture.factory();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            // Trust state lives under the data directory, which the loader
-            // requires to be private.
-            fs::set_permissions(fixture.path("data"), fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        fs::create_dir_all(fixture.path("work/.qq")).unwrap();
-        fs::write(
-            fixture.path("work/.qq/config.ron"),
-            "(\n    version: 1,\n    model: \"openai/gpt-5.6\",\n    policy: (\n        allow_shell_prefixes: [\"cargo test\"],\n    ),\n)\n",
-        )
-        .unwrap();
-        let workspace = fs::canonicalize(fixture.path("work")).unwrap();
-
-        // Untrusted workspace grant declarations seed nothing: the trust
-        // flow gates them exactly as it gates every sensitive declaration.
-        let seed = WorkspaceGrantAuthority::seed_grants(&factory, &workspace).await;
-        assert!(seed.is_empty());
-
-        let request = LoadRequest::from_process_env(&workspace, None).unwrap();
-        factory.inner.config.grant_pending_trust(&request).unwrap();
-        let seed = WorkspaceGrantAuthority::seed_grants(&factory, &workspace).await;
-        assert!(seed.shell_prefixes.contains(&"cargo test".to_owned()));
-        // The compiled VCS read-only presets ride along with declared grants.
-        assert!(seed.shell_prefixes.contains(&"git status".to_owned()));
-
-        // Promotion writes the grant durably and reports the file; repeating
-        // it is idempotent, and the next seed carries the promoted grant.
-        let grant = qq_protocol::ApprovalGrant::Tool {
-            name: "edit_file".to_owned(),
-        };
-        let outcome = WorkspaceGrantAuthority::promote_grant(&factory, &workspace, &grant).await;
-        let WorkspaceGrantOutcome::Written { path } = outcome else {
-            panic!("expected a written promotion, got {outcome:?}")
-        };
-        assert!(path.ends_with("config.ron"), "{path}");
-        assert!(
-            fs::read_to_string(fixture.path("work/.qq/config.ron"))
-                .unwrap()
-                .contains("edit_file")
-        );
-        let outcome = WorkspaceGrantAuthority::promote_grant(&factory, &workspace, &grant).await;
-        assert!(matches!(
-            outcome,
-            WorkspaceGrantOutcome::AlreadyPresent { .. }
-        ));
-        let seed = WorkspaceGrantAuthority::seed_grants(&factory, &workspace).await;
-        assert_eq!(seed.tools, ["edit_file"]);
-        assert!(seed.shell_prefixes.contains(&"cargo test".to_owned()));
-
-        // A managed deny refuses the promotion; the failure is data.
-        fs::write(
-            fixture.path("managed/managed.ron"),
-            r#"(version: 1, policy: (deny_tools: ["mcp__executor__execute"]))"#,
-        )
-        .unwrap();
-        let denied = qq_protocol::ApprovalGrant::Tool {
-            name: "mcp__executor__execute".to_owned(),
-        };
-        let outcome = WorkspaceGrantAuthority::promote_grant(&factory, &workspace, &denied).await;
-        assert!(matches!(outcome, WorkspaceGrantOutcome::Failed { .. }));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn independent_factories_preserve_concurrent_workspace_grant_updates() {
-        let fixture = RuntimeFixture::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(fixture.path("data"), fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        fs::create_dir_all(fixture.path("work")).unwrap();
-        let workspace = fs::canonicalize(fixture.path("work")).unwrap();
-        let start = Arc::new(tokio::sync::Barrier::new(3));
-
-        let tool_factory = fixture.factory();
-        let tool_workspace = workspace.clone();
-        let tool_start = Arc::clone(&start);
-        let tool = tokio::spawn(async move {
-            tool_start.wait().await;
-            WorkspaceGrantAuthority::promote_grant(
-                &tool_factory,
-                &tool_workspace,
-                &ApprovalGrant::Tool {
-                    name: "edit_file".to_owned(),
-                },
-            )
-            .await
-        });
-        let shell_factory = fixture.factory();
-        let shell_workspace = workspace.clone();
-        let shell_start = Arc::clone(&start);
-        let shell = tokio::spawn(async move {
-            shell_start.wait().await;
-            WorkspaceGrantAuthority::promote_grant(
-                &shell_factory,
-                &shell_workspace,
-                &ApprovalGrant::ShellPrefix {
-                    prefix: "cargo test".to_owned(),
-                },
-            )
-            .await
-        });
-        start.wait().await;
-
-        assert!(matches!(
-            tool.await.unwrap(),
-            WorkspaceGrantOutcome::Written { .. }
-        ));
-        assert!(matches!(
-            shell.await.unwrap(),
-            WorkspaceGrantOutcome::Written { .. }
-        ));
-        let content = fs::read_to_string(workspace.join(".qq/config.ron")).unwrap();
-        assert!(content.contains("edit_file"), "{content}");
-        assert!(content.contains("cargo test"), "{content}");
     }
 
     #[tokio::test]
@@ -7049,26 +6191,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(worker.model.as_deref(), Some("custom/test-model"));
-        let grants = WorkspaceGrantAuthority::seed_grants(&factory, &workspace).await;
-        assert_eq!(grants.tools, snapshot.grants().tools());
-        assert_eq!(grants.shell_prefixes, snapshot.grants().shell_prefixes());
-        assert_eq!(grants.hosts, snapshot.grants().hosts());
-        let outside = canonical_root.join("outside");
-        fs::create_dir(&outside).unwrap();
-        let outcome = WorkspaceGrantAuthority::promote_grant(
-            &factory,
-            &outside,
-            &ApprovalGrant::Tool {
-                name: "edit_file".to_owned(),
-            },
-        )
-        .await;
-        assert!(matches!(outcome, WorkspaceGrantOutcome::Failed { .. }));
-        assert!(!outside.join(".qq").exists());
         RuntimeLoader::load(
             &factory,
             RuntimeLoadRequest {
-                execution_workspace: None,
                 reasoning_effort: None,
                 workspace: workspace.display().to_string(),
                 model: ModelSelection::default(),
@@ -7077,12 +6202,6 @@ mod tests {
         )
         .await
         .unwrap();
-        let reviewer = ModelApprovalReviewer::new(factory.clone());
-        let Err(error) = reviewer.prepare(&workspace) else {
-            panic!("isolated QA unexpectedly configured an approval reviewer");
-        };
-        assert!(error.contains("no reviewer model"), "{error}");
-
         let handler = RuntimeHandler::open(factory).await.unwrap();
         let reconnect_models = ServerHandler::models(&handler, catalog).await.unwrap();
         assert_eq!(reconnect_models.len(), 1);
@@ -7255,7 +6374,7 @@ mod tests {
 
     #[test]
     fn durable_trust_recompiles_a_plan_that_withheld_untrusted_authority() {
-        // Runtime loads withhold the untrusted route and grant; once `qq
+        // Runtime loads withhold the untrusted route; once `qq
         // trust` records the file, the cached plan from before must not be
         // served again.
         let fixture = RuntimeFixture::new();
@@ -7271,7 +6390,7 @@ mod tests {
         fs::create_dir_all(fixture.path("work/.qq")).unwrap();
         fs::write(
             fixture.path("work/.qq/config.ron"),
-            r#"(version: 1, model: "custom/other-model", max_output_tokens: 64, policy: (allow_tools: ["read_file"]))"#,
+            r#"(version: 1, model: "custom/other-model", max_output_tokens: 64)"#,
         )
         .unwrap();
         let workspace = fs::canonicalize(fixture.path("work")).unwrap();
@@ -7283,7 +6402,6 @@ mod tests {
         // Non-sensitive settings apply even while authority is withheld.
         assert_eq!(untrusted_plan.resolved_model().max_output_tokens, 64);
         assert_eq!(untrusted_plan.resolved_model().route, "custom/test-model");
-        assert!(factory.load(&before).unwrap().grants().tools().is_empty());
         let request = LoadRequest::new(&workspace);
         assert!(matches!(
             factory.plan_for(&request),
@@ -7302,10 +6420,6 @@ mod tests {
         assert!(!Arc::ptr_eq(&untrusted_plan, &plan));
         assert_eq!(plan.resolved_model().route, "custom/other-model");
         assert_eq!(plan.resolved_model().max_output_tokens, 64);
-        assert_eq!(
-            factory.load(&after).unwrap().grants().tools(),
-            ["read_file"]
-        );
         assert_eq!(
             factory
                 .plan_with_lookup(&after, &AgentProfileId::default())
@@ -8237,12 +7351,10 @@ mod tests {
         let key = PlanKey {
             configuration_workspace: workspace.clone(),
             workspace: workspace.clone(),
-            execution_workspace_identity: None,
             model: ModelSelection::default(),
             profile: profile.clone(),
             explicit_config_path: None,
             explicit_config_content: None,
-            approval_delegate: None,
             reasoning_effort: None,
             ignore_untrusted_project_config: false,
         };
@@ -8971,12 +8083,8 @@ mod tests {
         });
         let factory = factory_with_stored_credential_providers(&fixture, keyring.clone(), 1);
         let request = fixture.request(r#"(version: 1, model: "p0/m")"#);
-        let result = factory.plan_for_profile_with_progress(
-            &request,
-            &AgentProfileId::default(),
-            &progress,
-            None,
-        );
+        let result =
+            factory.plan_for_profile_with_progress(&request, &AgentProfileId::default(), &progress);
         assert!(
             matches!(result, Err(RuntimeBuildError::PreparationCancelled)),
             "{result:?}"
@@ -9010,7 +8118,6 @@ mod tests {
             &fixture.request("invalid"),
             &AgentProfileId::default(),
             &progress,
-            None,
         );
         assert!(matches!(
             result,
@@ -9028,7 +8135,6 @@ mod tests {
             .factory()
             .load_with_progress(
                 RuntimeLoadRequest {
-                    execution_workspace: None,
                     reasoning_effort: None,
                     workspace: fixture.path("missing").to_string_lossy().into_owned(),
                     model: ModelSelection::default(),
@@ -9172,44 +8278,6 @@ mod tests {
                 keyring.reads.load(Ordering::Relaxed)
             );
         }
-    }
-
-    #[test]
-    fn reviewer_verdict_parses_strictly_and_escalates_everything_else() {
-        assert!(matches!(
-            parse_reviewer_decision(r#"{"verdict":"approve"}"#),
-            ReviewDecision::Approve
-        ));
-        assert!(matches!(
-            parse_reviewer_decision("  {\"verdict\":\"approve\"}\n"),
-            ReviewDecision::Approve
-        ));
-        assert!(matches!(
-            parse_reviewer_decision(r#"{"verdict":"deny","reason":"wipes home"}"#),
-            ReviewDecision::Deny { reason } if reason == "wipes home"
-        ));
-        assert!(matches!(
-            parse_reviewer_decision(r#"{"verdict":"escalate","reason":"unsure"}"#),
-            ReviewDecision::Escalate { reason } if reason == "unsure"
-        ));
-        // Unknown verdicts, prose-wrapped JSON, and non-JSON all escalate:
-        // the reviewer can only ever expedite, never widen, an approval.
-        assert!(matches!(
-            parse_reviewer_decision(r#"{"verdict":"allow"}"#),
-            ReviewDecision::Escalate { .. }
-        ));
-        assert!(matches!(
-            parse_reviewer_decision(r#"Sure! {"verdict":"approve"}"#),
-            ReviewDecision::Escalate { .. }
-        ));
-        assert!(matches!(
-            parse_reviewer_decision("approve"),
-            ReviewDecision::Escalate { .. }
-        ));
-        assert!(matches!(
-            parse_reviewer_decision(""),
-            ReviewDecision::Escalate { .. }
-        ));
     }
 
     #[test]
@@ -9384,67 +8452,6 @@ mod tests {
                 .descriptor()
                 .reasoning_effort,
             Some(qq_provider::ReasoningEffort::Default)
-        );
-    }
-
-    #[test]
-    fn approval_delegate_reaches_the_plan_from_config_profile_and_override() {
-        // DA3: the composition root translates the setting and nothing else
-        // does. Absent is `ByMode` (unchanged behavior); a profile may say
-        // otherwise; an explicit override wins over both; and none of it
-        // enters the plan digest, because who is asked is not what the model
-        // may do.
-        let fixture = RuntimeFixture::new();
-        let factory = fixture.factory();
-        let request = fixture.request(r#"(
-            version: 1, model: "custom/test",
-            profiles: {
-                "strict": Profile(approval_mode: ask, approval_delegate: off),
-                "hands-off": Profile(approval_mode: ask, approval_delegate: on),
-            },
-            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test": (name: "test") }) },
-        )"#);
-        let default = factory.plan_for(&request).unwrap();
-        assert_eq!(
-            default.approval_delegate(),
-            qq_core::ApprovalDelegate::ByMode
-        );
-        let strict = factory
-            .plan_for_profile(&request, &AgentProfileId::new("strict").unwrap())
-            .unwrap();
-        assert_eq!(strict.approval_delegate(), qq_core::ApprovalDelegate::Off);
-        let hands_off = factory
-            .plan_for_profile(&request, &AgentProfileId::new("hands-off").unwrap())
-            .unwrap();
-        assert_eq!(hands_off.approval_delegate(), qq_core::ApprovalDelegate::On);
-        let overridden = request.clone().with_overrides(
-            request
-                .overrides()
-                .clone()
-                .with_approval_delegate(qq_config::ApprovalDelegateSetting::Off),
-        );
-        let overridden_plan = factory
-            .plan_for_profile(&overridden, &AgentProfileId::new("hands-off").unwrap())
-            .unwrap();
-        assert_eq!(
-            overridden_plan.approval_delegate(),
-            qq_core::ApprovalDelegate::Off
-        );
-        // Same profile, different delegate: the digest is unchanged because
-        // who is asked is not plan identity.
-        assert_eq!(
-            hands_off.digest(),
-            overridden_plan.digest(),
-            "the delegate choice is not plan identity"
-        );
-        // The cache keys on the override, so the profile's plan is not
-        // returned for the overridden request.
-        assert_eq!(
-            factory
-                .plan_for_profile(&request, &AgentProfileId::new("hands-off").unwrap())
-                .unwrap()
-                .approval_delegate(),
-            qq_core::ApprovalDelegate::On
         );
     }
 

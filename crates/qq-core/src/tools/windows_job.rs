@@ -10,7 +10,6 @@ use std::{
 
 use subc_jobobject::JobObject;
 mod process;
-use super::windows_owner::fleet::Fleet;
 
 use super::dispatch::{ToolCancellation, ToolTaskLease};
 
@@ -35,10 +34,8 @@ pub(crate) struct Child {
     // Closing the job precedes closing stdio/process handles on unwinding.
     job: Arc<Mutex<JobObject>>,
     inner: process::Process,
-    _fleet: Option<Arc<Fleet>>,
     _directory: cap_std::fs::Dir,
     lease: ToolTaskLease,
-    pub(super) _native_image: Option<Arc<super::windows_owner::HelperImage>>,
 }
 
 impl Deref for Child {
@@ -85,18 +82,8 @@ pub(super) async fn spawn(
     process: &ToolTaskLease,
     cancelled: &ToolCancellation,
     deadline: Instant,
-    fleet: Option<Arc<Fleet>>,
 ) -> io::Result<Child> {
-    spawn_prepared(
-        command,
-        directory,
-        process,
-        cancelled,
-        deadline,
-        fleet,
-        |_| {},
-    )
-    .await
+    spawn_prepared(command, directory, process, cancelled, deadline, |_| {}).await
 }
 
 async fn spawn_prepared(
@@ -105,7 +92,6 @@ async fn spawn_prepared(
     process: &ToolTaskLease,
     cancelled: &ToolCancellation,
     mut deadline: Instant,
-    fleet: Option<Arc<Fleet>>,
     before_resume: impl FnOnce(&mut Instant) + Send + 'static,
 ) -> io::Result<Child> {
     let permit = tokio::select! {
@@ -134,34 +120,20 @@ async fn spawn_prepared(
         let job = JobObject::new()?;
         command.kill_on_drop(true);
         subc_jobobject::suspend_on_create_async(&mut command);
-        let (inner, assigned) = if let Some(fleet) = &fleet {
-            // Assign the shared fleet before the independent command job.
-            // Preparation returns suspended; both paths share final admission.
-            (
-                process::Process::budgeted(&mut command, &job, fleet, &mut lease)?,
-                true,
-            )
-        } else {
-            let child = command.spawn()?;
-            lease.process_started();
-            (process::Process::from_tokio(child), false)
-        };
+        let spawned = command.spawn()?;
+        lease.process_started();
         let child = Child {
             job: Arc::new(Mutex::new(job)),
-            inner,
-            _fleet: fleet,
+            inner: process::Process::from_tokio(spawned),
             _directory: directory,
             lease,
-            _native_image: None,
         };
         let admitted = (|| {
-            if !assigned {
-                child
-                    .job
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .assign(&child.inner)?;
-            }
+            child
+                .job
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .assign(&child.inner)?;
             before_resume(&mut deadline);
             // CreateProcess and job setup may outlive the admission checked
             // above. The payload is still suspended: reject it before resume.
@@ -228,19 +200,10 @@ mod tests {
 
     #[tokio::test]
     async fn suspended_startup_rechecks_cancellation_and_deadline_before_resume() {
-        assert_startup_rejected(None).await;
+        assert_startup_rejected().await;
     }
 
-    #[tokio::test]
-    async fn budgeted_startup_rechecks_cancellation_and_deadline_before_resume() {
-        let fleet = tokio::task::spawn_blocking(super::Fleet::startup_test_scope)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_startup_rejected(Some(std::sync::Arc::new(fleet))).await;
-    }
-
-    async fn assert_startup_rejected(fleet: Option<std::sync::Arc<super::Fleet>>) {
+    async fn assert_startup_rejected() {
         use crate::{cancellation::RunCancellation, tools::dispatch::ToolTasks};
         use std::time::Duration;
 
@@ -263,7 +226,6 @@ mod tests {
                 &lease,
                 &cancelled,
                 super::Instant::now() + Duration::from_secs(30),
-                fleet.clone(),
                 move |deadline| match ending {
                     "cancellation" => run.cancel(),
                     "deadline" => *deadline = super::Instant::now(),

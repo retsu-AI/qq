@@ -323,11 +323,7 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
         &harness.runtime,
         harness.run_id,
         tool_call.id,
-        ApprovalDecision::ApproveForSession {
-            grant: ApprovalGrant::ShellPrefix {
-                prefix: "git push".to_owned(),
-            },
-        },
+        ApprovalDecision::ApproveOnce,
     )
     .await
     .unwrap();
@@ -503,11 +499,7 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
         &harness.runtime,
         harness.run_id,
         tool_call.id,
-        ApprovalDecision::ApproveForSession {
-            grant: ApprovalGrant::ShellPrefix {
-                prefix: "git push".to_owned(),
-            },
-        },
+        ApprovalDecision::ApproveOnce,
     )
     .await
     .unwrap();
@@ -2601,24 +2593,6 @@ async fn set_session_effort_pins_and_clears_on_the_published_summary() {
 #[tokio::test]
 async fn delete_session_is_refused_while_running_then_cascades_completely() {
     let mut harness = session_management_harness().await;
-    // Ask deliberately ignores existing grants. Seed one so deletion must
-    // actually cascade a grant row while the mutation still waits for us.
-    let session_id = harness.session_id;
-    harness
-        .runtime
-        .inner
-        .store
-        .call(Priority::Control, move |connection| {
-            let inserted = connection.execute(
-                "INSERT INTO session_grants(session_id, kind, value, created_at_ms, source)
-             VALUES (?1, 'tool', '__test_mutate', 0, 'human')",
-                [session_id.to_string()],
-            )?;
-            assert_eq!(inserted, 1);
-            Ok(())
-        })
-        .await
-        .unwrap();
     let queued = harness
         .runtime
         .command(
@@ -2653,7 +2627,6 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
         SessionRuntimeError::SessionActive
     );
 
-    // Approve this call once; the preexisting grant remains to cascade.
     respond_approval(
         &harness.runtime,
         run_id,
@@ -2664,17 +2637,6 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
     .unwrap();
     collect_through_finished(&mut harness.events).await;
     let connection = Connection::open(harness.directory.path().join("sessions.sqlite3")).unwrap();
-    let grant_count: u32 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM session_grants WHERE session_id = ?1",
-            [harness.session_id.to_string()],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        grant_count, 1,
-        "the deletion must cascade an existing grant"
-    );
 
     let command_id = CommandId::generate().unwrap();
     let command = SessionCommand::DeleteSession {
@@ -2704,7 +2666,6 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
         "message_chunks",
         "tool_calls",
         "model_turns",
-        "session_grants",
         "session_files",
         "session_compactions",
         "tool_spills",
@@ -3014,107 +2975,4 @@ async fn model_fallback_provenance_survives_commands_and_run_reservation() {
             .unwrap();
     }
     store.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn session_deletion_preserves_unresolved_native_custody_and_ownership() {
-    for relation in ["self", "ancestor", "descendant"] {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let store = Store::open(root.join("sessions.sqlite3")).await.unwrap();
-        let (native, id, _) = execution_context::process_call_fixture(&store, &root).await;
-        let owner = StoreId::from_bytes([7; 16]);
-        store
-            .set_native_owner(native.identity, id, Some(owner))
-            .await
-            .unwrap();
-        let mut other = None;
-        let mut ownership = None;
-        let target = if relation == "self" {
-            native.identity.session_id
-        } else {
-            let (_, session, claimed) = create_claimed_parent(&store, &root).await;
-            let native_run = native.identity.run_id;
-            let native_session = native.identity.session_id;
-            let other_run = claimed.identity.run_id;
-            ownership = Some((session, native_session, native_run, other_run));
-            other = Some(claimed);
-            session
-        };
-        for run in std::iter::once(&native).chain(other.iter()) {
-            store
-                .finish_run(
-                    run,
-                    RunOutcome::Interrupted,
-                    None,
-                    TeardownComplete::nothing_ran(),
-                )
-                .await
-                .unwrap();
-        }
-        // Establish the deletion topology after ordinary settlement; changing
-        // paid ancestry on a live fixture would require unrelated goal billing.
-        if let Some((session, native_session, native_run, other_run)) = ownership {
-            store
-                .call(Priority::Control, move |connection| {
-                    if relation == "ancestor" {
-                        connection.execute(
-                            "UPDATE sessions SET parent_id=?2,owner_run_id=?3,depth=1 WHERE id=?1",
-                            params![
-                                session.to_string(),
-                                native_session.to_string(),
-                                native_run.to_string()
-                            ],
-                        )?;
-                    } else {
-                        connection.execute(
-                            "UPDATE runs SET goal_paid_owner_run_id=?2 WHERE id=?1",
-                            params![native_run.to_string(), other_run.to_string()],
-                        )?;
-                    }
-                    Ok(())
-                })
-                .await
-                .unwrap();
-        }
-        assert_eq!(
-            store
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::DeleteSession { session_id: target }
-                )
-                .await
-                .err()
-                .unwrap(),
-            SessionRuntimeError::SessionActive,
-            "deletion must retain {relation} native obligations after model interruption",
-        );
-        let retained: bool = store.call(Priority::Control, move |connection| {
-            Ok(connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM native_command_owners native JOIN tool_calls call ON call.id=native.tool_call_id JOIN runs run ON run.id=call.run_id WHERE native.tool_call_id=?1 AND native.result_saved=0)",
-                [id.to_string()], |row| row.get(0),
-            )?)
-        }).await.unwrap();
-        assert!(
-            retained,
-            "refused deletion must preserve recoverable provenance"
-        );
-        // The deletion boundary consumes the durable completion flag; native
-        // recovery tests separately establish who may commit that evidence.
-        store.call(Priority::Control, move |connection| {
-            connection.execute("UPDATE native_command_owners SET result_saved=1 WHERE tool_call_id=?1 AND owner_id=?2", params![id.to_string(),owner.to_string()])?;
-            Ok(())
-        }).await.unwrap();
-        let deleted = store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::DeleteSession { session_id: target },
-            )
-            .await
-            .unwrap();
-        assert!(
-            matches!(deleted.receipt.outcome, CommandOutcome::SessionDeleted { session_id } if session_id==target)
-        );
-        store.close().await.unwrap();
-    }
 }

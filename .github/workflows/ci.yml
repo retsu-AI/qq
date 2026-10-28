@@ -52,23 +52,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: Native Linux namespace support
-        run: |
-          if ! command -v patchelf >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install --no-install-recommends -y patchelf
-          fi
-          # The disposable runner must exercise the native backend. Production
-          # hosts refuse execution when their kernel policy forbids namespaces.
-          if test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != 0; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-          unshare --version
-          unshare --user --map-current-user --pid --fork --kill-child=KILL --mount-proc -- /bin/true
-          # Hosted runners do not necessarily have an interactive login. Start
-          # their existing user manager so native tests exercise delegation.
-          sudo systemctl start "user@$(id -u).service"
-          test -S "/run/user/$(id -u)/bus"
       - name: Exact-test coverage guard
         run: bash .github/scripts/test-exact-test.sh
       - name: Turn recorder CLI regressions
@@ -171,8 +154,8 @@ jobs:
       - name: Failed child cancellation blocks continuation
         run: bash .github/scripts/test-exact.sh sessions::tests::delegation::child_cancellation_persistence_failure_prevents_parent_continuation
 
-  native-command-owner:
-    name: native command owner (${{ matrix.os }})
+  native-run-in-place:
+    name: run in place (${{ matrix.os }})
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     strategy:
       fail-fast: false
@@ -184,17 +167,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
         with:
-          key: command-owner-${{ matrix.os }}
-          # Retain compiled dependencies when a native regression fails.
+          key: run-in-place-${{ matrix.os }}
           cache-on-failure: true
-      - name: Task files retain source configuration and directory identity
+      - name: Commands run in the checkout as the user
         shell: bash
-        run: |
-          cargo test --locked -p qq-host --no-default-features --lib -- --list | tr -d '\r' | grep -Fx 'runtime::tests::task_runtime_uses_detached_files_and_source_configuration: test'
-          cargo test --locked -p qq-host --no-default-features --lib runtime::tests::task_runtime_uses_detached_files_and_source_configuration -- --exact
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            cargo test --locked -p qq-host --no-default-features --lib runtime::tests::task_plan_cache_admits_a_fresh_grant_for_a_recreated_directory -- --exact
-          fi
+        run: cargo xtask smoke --only run-in-place --only run-then-undo --only run-command-deadlines --only permission-dispatch
       - name: Isolated application paths
         if: ${{ !cancelled() }}
         shell: bash
@@ -212,290 +189,25 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: cargo clippy --locked -p qq-core --all-targets -- -D warnings
-      - name: Native client Clippy
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: cargo clippy --locked -p qq --no-default-features --bin qq --test command_worker_client -- -D warnings
-      - name: macOS group quiescence
-        if: runner.os == 'macOS'
+      - name: Unix process-group exit
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
         shell: bash
         run: |
-          bash .github/scripts/test-exact.sh command_owner::environment::tests::automatic_macos_capture_omits_loader_overrides_without_normalizing_explicit_values
-          bash .github/scripts/test-exact.sh tools::macos_owner::tests::workspace_write_reads_host_files_but_preserves_write_carveouts
-          bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_grant_anchors_survive_content_edits_and_replacement_attempts
-          bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::a_live_group_is_not_reported_quiescent
-          bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::an_exited_group_is_quiescent_while_its_zombie_waits_to_be_reaped
-      - name: Windows restricted token API
+          bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
+      - name: Windows command jobs
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: bash
         run: |
-          bash .github/scripts/test-exact.sh tools::windows_owner::legacy::tests::restricted_token_api_accepts_the_production_sid_and_flag_combination
-      - name: Windows restricted payload boundary
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        shell: bash
-        run: |
-          bash .github/scripts/test-exact.sh tools::windows_owner::legacy::tests::workspace_write_runs_generic_tools_with_host_reads_and_best_effort_writes
-          bash .github/scripts/test-exact.sh tools::windows_owner::directory::tests::shell_directory_preserves_identity_or_refuses_extended_only_paths
-          bash .github/scripts/test-exact.sh tools::windows_owner::resources::tests::sampled_safeguards_are_refused_before_creating_a_job
-          cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
-      - name: Windows detached daemon leaves its starter's job
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        shell: bash
-        run: cargo test --locked -p qq --no-default-features --test daemon_windows -- --exact a_detached_daemon_leaves_a_job_that_permits_it_and_starts_in_one_that_does_not --nocapture
-      - name: Windows command and fleet resource bounds
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        shell: bash
-        run: |
-          # Exercise every independent kernel bound even if another one fails.
-          # Keep the failing job status: this is diagnostic coverage, not a pass.
-          status=0
-          for selector in \
-            tools::windows_owner::fleet::tests::memory_budget_is_rounded_down_and_retained_by_the_kernel \
-            tools::windows_owner::fleet::tests::aggregate_memory_limit_applies_across_independent_command_jobs \
-            tools::windows_owner::fleet::tests::aggregate_process_limit_refuses_new_commands_without_killing_peers \
-            tools::windows_owner::fleet::tests::budgeted_exit_notification_survives_a_dropped_wait \
-            tools::windows_owner::resources::tests::nested_cpu_rates_never_exceed_the_requested_machine_share; do
-            bash .github/scripts/test-exact.sh "$selector" || status=1
-          done
-          exit "$status"
-      - name: Native ownership, cancellation and durable observations
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          cargo build --locked -p qq-core --example command_owner
-          cargo build --locked -p qq-server --example command_owner_launcher
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            bash .github/scripts/test-exact.sh tools::macos_owner::tests::resource_admission_requires_restricted_filesystem_authority
-            bash .github/scripts/test-exact.sh tools::macos_owner::resources::tests::pressure_warning_and_critical_stop_guarded_work_unknown_levels_fail_closed
-            bash .github/scripts/test-exact.sh tools::macos_owner::tests::guarded_preparation_checks_pressure_before_authorizing_payloads
-            bash .github/scripts/test-exact.sh tools::macos_owner::tests::post_authorization_pressure_refusal_confirms_no_payload_before_settlement
-            bash .github/scripts/test-exact.sh tools::macos_owner::tests::confirmed_launch_failure_releases_custody_without_reporting_an_exit
-            bash .github/scripts/test-exact.sh tools::macos_owner::resources::tests::native_memory_pressure_query_is_available_without_setup
-            cargo test --locked -p qq --no-default-features --test command_worker_client macos:: -- --test-threads=1
-            cargo test --locked -p qq --no-default-features --test command_worker_client runtime::default_auto -- --test-threads=1
-            bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
-            bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_launcher_cannot_replace_the_trusted_helper
-            bash .github/scripts/test-exact.sh tools::macos_owner::tests::interrupted_result_reads_retain_bytes_and_require_the_cleanup_frame
-            bash .github/scripts/test-exact.sh tools::macos_owner::tests::helper_preparation_waits_for_readiness_and_remains_cancellable
-            bash .github/scripts/test-exact.sh tools::macos_owner::tests::unreleased_exited_helper_is_reaped_when_group_kill_would_be_denied
-          fi
-          bash .github/scripts/test-exact.sh command_owner::tests::scoped_command_refuses_low_disk_space_before_launch
-          bash .github/scripts/test-exact.sh command_owner::tests::scoped_command_checks_disk_space_on_every_writable_root
-          bash .github/scripts/test-exact.sh command_owner::tests::scoped_command_checks_disk_space_on_the_worker_journal
-          bash .github/scripts/test-exact.sh command_owner::tests::native_restrictions_never_fall_back_to_an_unrestricted_platform_launcher
-          bash .github/scripts/test-exact.sh command_owner::tests::the_journal_has_one_owner_and_rejects_id_reuse
-          bash .github/scripts/test-exact.sh command_owner::tests::dropping_admission_waiter_does_not_abandon_a_committed_command
-          bash .github/scripts/test-exact.sh command_owner::tests::admission_wait_cannot_renew_the_task_deadline
-          bash .github/scripts/test-exact.sh command_owner::tests::journal_read_failure_stops_admission_without_poisoning_expected_misses
-          bash .github/scripts/test-exact.sh command_owner::tests::explicit_cancellation_reaps_before_publishing_completion
-          bash .github/scripts/test-exact.sh command_owner::tests::cancellation_stops_live_work_before_a_stalled_journal_is_released
-          bash .github/scripts/test-exact.sh command_owner::tests::recovery_marks_an_unconfirmed_command_lost_and_never_replays_it
-          bash .github/scripts/test-exact.sh command_owner::tests::owner_enforces_the_task_deadline_without_a_live_observer
-          bash .github/scripts/test-exact.sh command_owner::tests::cancellation_before_admission_prevents_a_late_launch
-          bash .github/scripts/test-exact.sh command_owner::tests::cancellation_and_deadline_settle_without_workspace_validation_capacity
-          bash .github/scripts/test-exact.sh command_owner::tests::cancellation_and_deadline_settle_without_storage_admission_capacity
-          bash .github/scripts/test-exact.sh command_owner::tests::a_missing_workspace_refuses_that_command_without_stopping_other_work
-          bash .github/scripts/test-exact.sh command_owner::tests::unsupported_journal_version_is_preserved_and_refused
-          bash .github/scripts/test-exact.sh command_owner::tests::acknowledged_results_release_capacity_without_replaying_retired_commands
-          bash .github/scripts/test-exact.sh command_owner::tests::refused_duplicate_cannot_remove_an_admitted_commands_cancellation
-          bash .github/scripts/test-exact.sh command_owner::tests::acknowledgement_migration_preserves_the_journal_identity_and_results
-          bash .github/scripts/test-exact.sh command_owner::tests::accepted_acknowledgement_survives_caller_loss_and_drains_before_shutdown
-          bash .github/scripts/test-exact.sh command_owner::tests::exhausted_execution_slots_refuse_admission_without_poisoning_the_owner
-          bash .github/scripts/test-exact.sh command_owner::tests::unconfirmed_process_exit_blocks_owner_continuation
-          bash .github/scripts/test-exact.sh command_owner::tests::losing_the_cancel_response_does_not_abandon_committed_cancellation
-          bash .github/scripts/test-exact.sh command_owner::tests::shutdown_releases_the_journal_even_while_observer_handles_remain
-          bash .github/scripts/test-exact.sh command_owner::tests::dropping_the_shutdown_waiter_does_not_abandon_authority_release
-          bash .github/scripts/test-exact.sh command_owner::tests::an_expired_task_deadline_refuses_launch_before_any_process_exists
-          bash .github/scripts/test-exact.sh command_owner::tests::small_output_chunks_reach_the_durable_journal_without_omissions
-          bash .github/scripts/test-exact.sh command_owner::tests::a_stalled_output_write_cannot_extend_the_task_execution_deadline
-          bash .github/scripts/test-exact.sh tools::tests::dropped_durable_output_recording_is_not_a_clean_drain
-          bash .github/scripts/test-exact.sh tools::tests::stalled_process_receipt_cannot_delay_cancellation_or_timeout
-          bash .github/scripts/test-exact.sh command_owner::tests::a_stalled_journal_does_not_starve_other_workspace_operations
-          bash .github/scripts/test-exact.sh command_owner::tests::extreme_task_deadlines_never_stop_the_owner
-          bash .github/scripts/test-exact.sh command_owner::tests::implicit_owner_cleanup_closes_sqlite_off_the_async_worker
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_children_are_owned_before_command_job_assignment
-            bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_startup_rechecks_cancellation_and_deadline_before_resume
-            bash .github/scripts/test-exact.sh command_owner::tests::windows_processes::descendants_stop_on_completion_cancellation_and_deadline
-            bash .github/scripts/test-exact.sh command_owner::tests::windows_shared_state_is_refused_before_recovery_or_admission
-            bash .github/scripts/test-exact.sh command_owner::tests::windows_hardlinked_journal_files_are_refused
-            bash .github/scripts/test-exact.sh command_owner::tests::windows_junction_state_directories_are_refused
-          fi
-      - name: Windows environment bounds and cross-process ACL grants
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        shell: bash
-        run: |
-          bash .github/scripts/test-exact.sh command_owner::environment::tests::invalid_wire_environments_are_rejected_before_execution
-          bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::duplicate_read_grants_keep_writable_roots_private_and_validate_aliases
-          bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::native_grant_validates_the_opened_object_before_acl_changes
-          bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::acl_walk_cannot_follow_a_retargeted_ancestor_junction
-          bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::acl_updates_serialize_across_helper_processes
-          bash .github/scripts/test-exact.sh tools::windows_owner::tests::helper_image_retries_after_storage_pressure_and_reuses_only_success
-          bash .github/scripts/test-exact.sh tools::windows_owner::tests::helper_image_concurrent_initialization_keeps_one_complete_copy
-      - name: macOS sandbox failure diagnostics
-        if: failure() && runner.os == 'macOS'
-        shell: bash
-        run: |
-          /bin/ps -axo pid=,ppid=,pgid=,stat=,uid=
-          /usr/bin/log show --last 5m --style compact --predicate 'subsystem == "com.apple.sandbox.reporting" OR process == "sandboxd"' | tail -n 150
-          python3 - <<'PYTHON'
-          import json
-          from pathlib import Path
-          roots = [Path.home() / "Library/Logs/DiagnosticReports", Path("/Library/Logs/DiagnosticReports")]
-          reports = [p for root in roots for pattern in ("sh-*.ips", "sandbox-exec-*.ips") for p in root.glob(pattern)]
-          for path in sorted(reports, key=lambda p: p.stat().st_mtime)[-5:]:
-              print(path.name)
-              try:
-                  report = json.loads(path.read_text().split("\n", 1)[1])
-                  for key in ("exception", "termination", "asi", "ktriageinfo", "asiSignatures"):
-                      print(key, report.get(key))
-                  thread = report.get("threads", [])[report.get("faultingThread", 0)]
-                  images = report.get("usedImages", [])
-                  for frame in thread.get("frames", [])[:20]:
-                      print(images[frame["imageIndex"]].get("name"), frame.get("symbol"), frame.get("imageOffset"))
-              except (ValueError, KeyError, IndexError, OSError) as error:
-                  print(type(error).__name__, str(error))
-          PYTHON
-      - name: Unix output and observer regressions
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          bash .github/scripts/test-exact.sh command_owner::tests::dropping_an_observer_does_not_cancel_or_repeat_a_command
-          bash .github/scripts/test-exact.sh command_owner::tests::completion_waits_for_descendants_that_closed_their_pipes
-          bash .github/scripts/test-exact.sh command_owner::tests::concurrent_retries_execute_once_and_conflict_does_not_stop_the_owner
-          bash .github/scripts/test-exact.sh command_owner::tests::owner_state_rejects_symlinked_directories_and_hardlinked_lock_files
-          bash .github/scripts/test-exact.sh command_owner::tests::journal_rejects_untrusted_ancestors_before_creating_state
-          bash .github/scripts/test-exact.sh command_owner::tests::control_dense_native_output_fits_the_durable_result_bound
-          bash .github/scripts/test-exact.sh command_owner::tests::live_output_is_durable_before_command_completion
-          bash .github/scripts/test-exact.sh command_owner::tests::acknowledgement_is_bounded_atomic_and_never_discards_running_work
-          bash .github/scripts/test-exact.sh command_owner::tests::escaped_valid_arguments_fit_the_owner_transport_bound
-          bash .github/scripts/test-exact.sh command_owner::tests::utf8_split_across_native_reads_is_preserved_in_durable_output
-      - name: Native session recovery custody
-        shell: bash
-        run: |
-          if [[ "$RUNNER_OS" != "Windows" ]]; then
-            bash .github/scripts/test-exact.sh sessions::tests::shared_session_harnesses_accept_an_aliased_temporary_base
-          fi
-          bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_recovery_preserves_cancellation_budgets_and_unknown_execution_holds
-          bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_reopen_observes_live_execution_and_wakes_on_completion
-          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::unavailable_or_replaced_native_workers_do_not_block_startup_or_replay_effects
-          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_native_evidence_releases_only_fully_drained_workspaces_without_reaccounting
-          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::transient_native_outage_recovers_same_owner_without_another_restart
-          bash .github/scripts/test-exact.sh sessions::tests::execution_context::lost_native_commands_retain_unconfirmed_custody_without_acknowledgment
-          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::reopening_retains_lost_uncertainty_but_reclaims_unadmitted_invocations
-          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::newly_unknown_native_work_refuses_an_already_reserved_prompt_start
-          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::newly_unknown_native_work_refuses_an_already_reserved_check_start
-          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_interrupted_check_result_preserves_goal_and_human_acknowledgment
-          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_failed_check_result_preserves_goal_and_human_acknowledgment
-          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_native_evidence_removes_failed_placeholder_spill_when_original_has_no_spill
-          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_native_evidence_replaces_failed_unobserved_placeholder_without_reaccounting
-          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::unresolved_native_capacity_preserves_existing_bindings_and_reopens_after_saved_evidence
-          bash .github/scripts/test-exact.sh sessions::tests::commands::session_deletion_preserves_unresolved_native_custody_and_ownership
-      - name: Exercise the embedding caller
-        run: cargo run --locked -p qq-core --example command_owner
-      - name: Detached task workspace import and shared tool files
-        shell: bash
-        run: |
-          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_preserves_selected_bytes_without_host_aliases
-          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_rejects_filesystem_ancestor_aliases
-          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_rejects_hardlinks_and_cleans_partial_import
-          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_bounds_bytes_files_and_keeps_existing_destination
-          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_stopped_import_creates_no_destination
-          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_stops_during_copy_and_removes_partial_destination
-          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::task_selection_stops_inside_a_directory_listing
-          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::restored_goal_task_respects_tightened_publication_byte_limit
-          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::restored_goal_task_respects_tightened_publication_entry_limit
-          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::goal_check_imports_published_ignored_outputs_from_current_source
-          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::goal_check_filters_current_pack_protections_and_refuses_invalid_publication_provenance
-          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_rejects_escaping_paths_trust_inputs_and_replaced_roots
-          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_is_shared_by_builtin_tools_and_native_commands
-          bash .github/scripts/test-exact.sh task_workspace::tests::publication_preserves_other_source_edits_and_can_resume_from_a_saved_record
-          bash .github/scripts/test-exact.sh task_workspace::tests::publication_preserves_a_human_edit_made_while_staging
-          bash .github/scripts/test-exact.sh tools::tests::file_tools_preserve_human_changes_during_staging
-          bash .github/scripts/test-exact.sh task_workspace::tests::publication_preflights_conflicts_before_installing_any_output
-          bash .github/scripts/test-exact.sh task_workspace::tests::publication_handles_deletion_without_deleting_changed_source_bytes
-          bash .github/scripts/test-exact.sh task_workspace::tests::publication_refuses_task_and_source_aliases_before_changing_files
-          bash .github/scripts/test-exact.sh task_workspace::tests::publication_reports_partial_failure_and_retries_the_saved_baseline
-          bash .github/scripts/test-exact.sh task_workspace::tests::task_workspace_preserves_configured_pack_protections_after_restore
-          bash .github/scripts/test-exact.sh task_workspace::tests::publication_cannot_install_policy_or_git_trust_files
-          bash .github/scripts/test-exact.sh task_workspace::tests::publication_bounds_output_bytes_and_retained_entries_before_applying
-          bash .github/scripts/test-exact.sh task_workspace::tests::publication_refuses_replaced_source_and_task_roots
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_refuses_links_special_files_and_preserves_executable_bits
-            bash .github/scripts/test-exact.sh task_workspace::tests::publication_preserves_a_human_permission_change_while_staging
-            bash .github/scripts/test-exact.sh task_workspace::tests::publication_stages_private_bytes_in_a_private_file
-            bash .github/scripts/test-exact.sh task_workspace::tests::publication_refuses_aliased_or_special_lock_files
-          else
-            bash .github/scripts/test-exact.sh task_workspace::tests::publication_preserves_windows_access_change_while_staging
-            bash .github/scripts/test-exact.sh task_workspace::tests::publication_preserves_windows_private_access
-            bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_refuses_junctions_and_ambiguous_windows_names
-          fi
-          cargo run --locked -p qq-core --example embed
-      - name: Persisted native task authority
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::publication_delivers_new_ignored_files_without_generated_directories
-          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::task_import_selection_keeps_dotfiles_and_nested_ignore_rules_with_bounds
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::task_selection_never_blocks_reading_special_ignore_files
-          fi
-          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_survives_restart_and_applies_to_child_sessions
-          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_never_falls_back_without_a_command_service
-          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_rejects_unregistered_workspaces_before_provider_execution
-          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_replaced_task_directory_is_refused_before_provider_execution
-          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_conflicting_registration_does_not_replace_stored_authority
-          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_corrupt_or_empty_persisted_policy_never_restores_host_authority
-          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_goal_check_never_falls_back_to_host_execution
-          bash .github/scripts/test-exact.sh sessions::tests::goal_check::scoped_goal_check_uses_durable_service_and_typed_success
-          bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_result_is_not_reclaimable_before_goal_settlement
-          bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_reopen_settles_the_same_goal_without_replay_or_new_consent
-          bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_recovery_preserves_cancellation_budgets_and_unknown_execution_holds
-          bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_reopen_observes_live_execution_and_wakes_on_completion
-          bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_recovery_bounds_stalled_workspace_validation
-          bash .github/scripts/test-exact.sh sessions::goal_check::native::tests::scoped_check_preparation_cancellation_does_not_wait_for_blocking_capacity
-          bash .github/scripts/test-exact.sh sessions::goal_check::native::tests::scoped_check_preparation_deadline_does_not_wait_for_blocking_capacity
+          cargo test --locked -p qq --no-default-features --test daemon_windows -- --exact a_detached_daemon_leaves_a_job_that_permits_it_and_starts_in_one_that_does_not
+          bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_children_are_owned_before_command_job_assignment
+          bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_startup_rechecks_cancellation_and_deadline_before_resume
       - name: Goal approval recovery
         if: ${{ !cancelled() }}
         shell: bash
         run: bash .github/scripts/test-exact.sh sessions::tests::approvals::goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied_actions
-      - name: Live goal client reconnect
+      - name: Exercise the embedding caller
         if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          cargo test --locked -p qq-host --no-default-features --lib -- --list |
-            tr -d '\r' | grep -Fx 'runtime::tests::continuation::live_goal_reconnect_applies_steering_without_restarting_work: test'
-          cargo test --locked -p qq-host --no-default-features --lib runtime::tests::continuation::live_goal_reconnect_applies_steering_without_restarting_work -- --exact --nocapture
-      - name: Private command transport and worker process
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          bash .github/scripts/test-exact.sh command_owner::tests::an_authorized_native_command_is_observed_by_a_new_connection qq-server
-          bash .github/scripts/test-exact.sh command_owner::tests::an_unavailable_owner_is_not_advertised_as_healthy qq-server
-          bash .github/scripts/test-exact.sh command_owner::tests::private_command_routes_authenticate_before_parsing_or_cancelling qq-server
-          bash .github/scripts/test-exact.sh command_owner::tests::saturated_completion_waits_do_not_block_command_cancellation qq-server
-          cargo test --locked -p qq --no-default-features --test command_owner_process
-          # Platform payload suites have their own steps above. Exercise the
-          # common durable worker path without repeating those same probes.
-          cargo test --locked -p qq --no-default-features --test command_worker_client -- --list |
-            tr -d '\r' | grep -Fx 'default_auto::real_cli_default_auto_publishes_detached_native_shell_work_without_approvals: test'
-          cargo test --locked -p qq --no-default-features --test command_worker_client -- --list |
-            tr -d '\r' | grep -Fx 'default_auto::real_cli_explicit_goal_resume_keeps_identity_budget_and_artifact: test'
-          cargo test --locked -p qq --no-default-features --test command_worker_client -- --skip windows:: --skip macos::
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            cargo test --locked -p qq --no-default-features --test command_worker_client -- --list | tr -d '\r' > "$RUNNER_TEMP/qq-windows-tests.txt"
-            for name in restricted_payload_can_start_an_equally_restricted_descendant restricted_files_are_enforced_by_the_real_worker restricted_network_is_enforced_by_the_real_worker native_arguments_survive_worker_transport native_stdin_follows_the_authorization_prefix overlapping_grants_retain_writable_task_authority native_shell_retains_its_task_working_directory native_profile_does_not_expose_host_local_appdata cancelling_a_restricted_command_drains_its_job_and_keeps_output linked_files_are_refused_before_the_payload_runs; do
-              grep -Fx "windows::$name: test" "$RUNNER_TEMP/qq-windows-tests.txt"
-            done
-          fi
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            cargo test --locked -p qq --no-default-features --test command_worker_client -- --list |
-              grep -Fx 'runtime::real_cli_persists_native_ownership_and_releases_worker_results: test'
-            cargo test --locked -p qq --no-default-features --test command_worker_client -- --list > "$RUNNER_TEMP/qq-macos-tests.txt"
-            for name in spawn_attributes_preserve_seatbelt_outside_the_owned_group isolated_network_denies_tcp_and_host_unix_sockets inherited_file_authority_is_closed_before_payload_execution restricted_filesystem_allows_task_writes_and_denies_outside_reads_and_writes guarded_commands_complete_and_resource_pressure_stops_the_owned_group; do
-              grep -Fx "macos::$name: test" "$RUNNER_TEMP/qq-macos-tests.txt"
-            done
-          fi
+        run: cargo run --locked -p qq-core --example embed
 
   release-size:
     name: release build size

@@ -506,7 +506,7 @@ pub(super) fn goal_body(app: &App, session_id: SessionId, width: usize) -> Vec<L
                     Some(GoalCheckAuthorization::Once) => "one check only",
                     Some(GoalCheckAuthorization::Consumed) => "used; new consent required",
                     Some(GoalCheckAuthorization::ForGoal) => "repeated checks for this goal",
-                    Some(GoalCheckAuthorization::TaskScoped) => "automatic checks within this task",
+                    Some(GoalCheckAuthorization::TaskScoped) => "automatic checks in Auto",
                 },
                 warning(),
             ));

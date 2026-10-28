@@ -6,15 +6,11 @@ mod child_exit;
 
 #[cfg(windows)]
 pub(crate) type NativeChild = super::windows_job::Child;
-#[cfg(target_os = "linux")]
-pub(crate) type NativeChild = super::linux_owner::Child;
-#[cfg(target_os = "macos")]
-pub(crate) type NativeChild = super::macos_owner::Child;
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+#[cfg(not(windows))]
 pub(crate) type NativeChild = tokio::process::Child;
 
 use crate::{
-    runtime::{BASE_ENV, BuiltinPreference, MAX_SHELL_ENV_NAMES, ShellPolicy, builtin_alternative},
+    runtime::{BuiltinPreference, ShellPolicy, builtin_alternative},
     workspace::Workspace,
 };
 
@@ -25,7 +21,7 @@ use super::{
 
 /// Combined output captured (head+tail) and streamed per command. The full
 /// capture is what a spill store keeps; the model sees [`SHELL_BOUNDS`].
-pub(crate) const MAX_SHELL_OUTPUT_BYTES: usize = 128 * 1024;
+const MAX_SHELL_OUTPUT_BYTES: usize = 128 * 1024;
 /// Model-facing bound: the head of a command's output and its tail, where the
 /// verdict lives, are what the model reads; the middle of a long build log
 /// is noise it should page into deliberately.
@@ -91,20 +87,8 @@ static READ_FAULTS: std::sync::Mutex<Vec<(std::path::PathBuf, bool)>> =
     std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
-static READ_CHUNK_LIMITS: std::sync::Mutex<Vec<(std::path::PathBuf, usize)>> =
-    std::sync::Mutex::new(Vec::new());
-#[cfg(test)]
 static STOP_OBSERVERS: std::sync::Mutex<Vec<(u32, tokio::sync::oneshot::Sender<()>)>> =
     std::sync::Mutex::new(Vec::new());
-
-#[cfg(test)]
-pub(crate) fn limit_shell_read_chunks(workspace: &std::path::Path, bytes: usize) {
-    assert!(bytes > 0 && bytes <= SHELL_READ_CHUNK_BYTES);
-    READ_CHUNK_LIMITS
-        .lock()
-        .unwrap()
-        .push((workspace.to_owned(), bytes));
-}
 
 #[cfg(test)]
 pub(crate) fn observe_shell_termination(pid: u32) -> tokio::sync::oneshot::Receiver<()> {
@@ -121,10 +105,6 @@ pub(super) struct ShellArgs {
     pub(super) cwd: Option<String>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
-    /// Environment variable names to pass through from the server's
-    /// environment. The child otherwise starts from [`BASE_ENV`] only.
-    #[serde(default)]
-    pub(super) env: Vec<String>,
 }
 
 /// `exec`: one program with an argument list and no shell between the model
@@ -142,8 +122,6 @@ pub(super) struct ExecArgs {
     stdin: Option<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
-    #[serde(default)]
-    pub(super) env: Vec<String>,
 }
 
 pub(super) const MAX_EXEC_ARGS: usize = 64;
@@ -198,14 +176,6 @@ impl Launch<'_> {
         {
             return Err(InvalidLaunch::Timeout);
         }
-        if self.env().len() > MAX_SHELL_ENV_NAMES
-            || self
-                .env()
-                .iter()
-                .any(|name| !crate::runtime::valid_env_name(name))
-        {
-            return Err(InvalidLaunch::Env);
-        }
         let cwd = match self {
             Self::Shell(args) => args.cwd.as_deref(),
             Self::Exec(args) => args.cwd.as_deref(),
@@ -233,13 +203,6 @@ impl Launch<'_> {
         match self {
             Self::Shell(args) => args.timeout_seconds,
             Self::Exec(args) => args.timeout_seconds,
-        }
-    }
-
-    fn env(&self) -> &[String] {
-        match self {
-            Self::Shell(args) => &args.env,
-            Self::Exec(args) => &args.env,
         }
     }
 
@@ -279,8 +242,6 @@ pub(super) enum InvalidLaunch {
     Stdin,
     #[error("timeout_seconds must be positive and fit a monotonic deadline")]
     Timeout,
-    #[error("invalid_env: at most 16 valid environment names per call")]
-    Env,
     #[error("cwd must be a nonempty relative workspace path without NUL")]
     Cwd,
 }
@@ -294,7 +255,6 @@ enum ShellOutcome {
     },
     TimedOut,
     Cancelled,
-    OutputFailed(Box<crate::sessions::SessionRuntimeError>),
 }
 
 /// Executes one bounded shell command on the async runtime: `sh -c` in its own
@@ -308,7 +268,6 @@ enum ShellOutcome {
     reason = "process identity, producer, image approvals and supervision are distinct capabilities"
 )]
 pub(super) async fn run_shell(
-    native: Option<std::sync::Arc<super::process_context::NativeExecution>>,
     workspace: &Workspace,
     policy: &ShellPolicy,
     approved_read_images: std::sync::Arc<crate::runtime::ApprovedReadImages>,
@@ -324,15 +283,6 @@ pub(super) async fn run_shell(
     }
     if let Err(error) = launch.validate() {
         return ToolOutput::refused(error.to_string());
-    }
-    let env_names = launch.env();
-    for name in env_names {
-        if !policy.permits_env(name) {
-            return ToolOutput::refused(format!(
-                "env_not_allowed: {name} is not in policy.shell_env; the child sees only {} plus allowlisted names",
-                BASE_ENV.join(" ")
-            ));
-        }
     }
     // The prefer-built-in nudge: strict mode is refused before the gate
     // (see approval); here it can only be a hint appended to the result.
@@ -377,66 +327,29 @@ pub(super) async fn run_shell(
     };
     let preparation_cancelled = cancelled.clone();
     let preparation_workspace = workspace.clone();
-    #[cfg(target_os = "linux")]
-    let linux_owner = process.linux_owner().cloned();
-    #[cfg(target_os = "macos")]
-    let macos_owner = process.macos_owner().cloned();
-    #[cfg(windows)]
-    let windows_owner = process.windows_owner().cloned();
     use tracing::Instrument as _;
-    let mut prepared =
-        match tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let prepared = super::process_context::prepare(
-                native.as_ref().map(|native| &native.environment),
-                preparation_workspace,
-                owned,
-                approved_read_images,
-                process_producer,
-                call_id,
-                &preparation_cancelled,
-                preparation_deadline,
-            )?;
-            #[cfg(target_os = "linux")]
-            if let Some(owner) = &linux_owner {
-                return prepared.owned_linux(owner, native.as_deref());
-            }
-            #[cfg(target_os = "macos")]
-            if let Some(owner) = &macos_owner {
-                return prepared.owned_macos(owner, native.as_deref(), preparation_deadline);
-            }
-            #[cfg(windows)]
-            if let Some(owner) = &windows_owner {
-                return prepared.owned_windows(owner, native.as_deref(), preparation_deadline);
-            }
-            if native.as_ref().is_some_and(|native| {
-                native.resources != crate::command_owner::NativeResources::Host
-            }) {
-                return Err(super::process_context::PreparationError::ResourcesUnavailable);
-            }
-            if native.as_ref().is_some_and(|native| {
-                native.network == crate::command_owner::NativeNetwork::Isolated
-            }) {
-                return Err(super::process_context::PreparationError::NetworkUnavailable);
-            }
-            if native
-                .as_ref()
-                .is_some_and(|native| native.filesystem.is_restricted())
-            {
-                return Err(super::process_context::PreparationError::FilesystemUnavailable);
-            }
-            Ok::<_, super::process_context::PreparationError>(prepared)
-        })
-        .instrument(tracing::info_span!(target: "qq::diagnostic", "native_prepare"))
-        .await
-        {
-            Ok(Ok(prepared)) => prepared,
-            Ok(Err(error)) if cancelled.is_cancelled() => {
-                return ToolOutput::interrupted(error.to_string());
-            }
-            Ok(Err(error)) => return ToolOutput::refused(error.to_string()),
-            Err(_) => return ToolOutput::unobserved("process preparation stopped unexpectedly"),
-        };
+    let mut prepared = match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        super::process_context::prepare(
+            preparation_workspace,
+            owned,
+            approved_read_images,
+            process_producer,
+            call_id,
+            &preparation_cancelled,
+            preparation_deadline,
+        )
+    })
+    .instrument(tracing::info_span!(target: "qq::diagnostic", "native_prepare"))
+    .await
+    {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(error)) if cancelled.is_cancelled() => {
+            return ToolOutput::interrupted(error.to_string());
+        }
+        Ok(Err(error)) => return ToolOutput::refused(error.to_string()),
+        Err(_) => return ToolOutput::unobserved("process preparation stopped unexpectedly"),
+    };
     if cancelled.is_cancelled() {
         return ToolOutput::interrupted("tool execution was cancelled before spawn");
     }
@@ -454,7 +367,7 @@ pub(super) async fn run_shell(
             return ToolOutput::refused(format!("could not observe command exits: {error}"));
         }
     };
-    let (mut child, receipt) = match prepared
+    let (mut child, mut guard, receipt) = match prepared
         .spawn(
             stdin_text.is_some(),
             process,
@@ -471,15 +384,9 @@ pub(super) async fn run_shell(
         Err(error) => return ToolOutput::refused(format!("could not start the command: {error}")),
     };
     process.process_started();
-    // Unix commands lead their own process group. Windows children own a
-    // kernel job which follows descendants across process-group changes.
-    let mut guard = ProcessGroupGuard::new(child.id());
-    #[cfg(target_os = "macos")]
-    if child.owns_payload_group() {
-        // The guardian has its own group. Its private exit receipt proves
-        // owned payload-group cleanup; killing this group destroys the guardian.
-        guard.disarm();
-    }
+    // Unix commands lead their own process group, watched for this process's
+    // death. Windows children own a kernel job which follows descendants
+    // across process-group changes and dies with this process.
     #[cfg(all(test, unix))]
     {
         let hook = {
@@ -562,21 +469,9 @@ pub(super) async fn run_shell(
     let started = tokio::time::Instant::now();
     let mut capture = BoundedCapture::new(MAX_SHELL_OUTPUT_BYTES);
     let mut identity = ShellResultIdentity::default();
-    let mut streamed = 0_usize;
-    let mut recorded = 0_usize;
+    let mut streamed = LiveOutput::default();
     let mut buffered_output = Vec::with_capacity(SHELL_READ_CHUNK_BYTES);
     let mut output_flush = std::pin::pin!(tokio::time::sleep(OUTPUT_FLUSH_INTERVAL));
-    let mut pending_output = None;
-    #[cfg(test)]
-    let read_chunk_bytes = {
-        let mut limits = READ_CHUNK_LIMITS.lock().unwrap();
-        limits
-            .iter()
-            .position(|(path, _)| path == workspace.path())
-            .map(|index| limits.remove(index).1)
-            .unwrap_or(SHELL_READ_CHUNK_BYTES)
-    };
-    #[cfg(not(test))]
     let read_chunk_bytes = SHELL_READ_CHUNK_BYTES;
     let mut stdout_buffer = vec![0_u8; read_chunk_bytes];
     let mut stderr_buffer = vec![0_u8; read_chunk_bytes];
@@ -588,41 +483,20 @@ pub(super) async fn run_shell(
     let mut cancelled = std::pin::pin!(cancelled.cancelled());
 
     let outcome = loop {
-        // Bound both memory and durable-write frequency. Flush the final tail
-        // before observing completion, while the journal still accepts output.
+        // Bound memory and delta frequency. Flush the final tail before
+        // observing completion.
         if !buffered_output.is_empty()
             && (buffered_output.len() >= SHELL_READ_CHUNK_BYTES
                 || (stdout.is_none() && stderr.is_none()))
         {
-            if let Err(stop) = persist_shell_chunk(
-                process,
-                call_id,
-                &buffered_output,
-                &mut recorded,
-                cancelled.as_mut(),
-                timeout.as_mut(),
-            )
-            .await
-            {
-                buffered_output.clear(); // The pending write owns these bytes.
-                pending_output = stop.pending;
-                break stop.outcome;
-            }
-            forward_shell_chunk(output, &mut streamed, &buffered_output);
-            buffered_output.clear();
+            streamed.forward(output, &mut buffered_output, false);
         }
         tokio::select! {
             biased;
             () = &mut cancelled => break ShellOutcome::Cancelled,
             () = &mut timeout => break ShellOutcome::TimedOut,
             () = &mut output_flush, if !buffered_output.is_empty() => {
-                if let Err(stop) = persist_shell_chunk(process, call_id, &buffered_output, &mut recorded, cancelled.as_mut(), timeout.as_mut()).await {
-                    buffered_output.clear();
-                    pending_output = stop.pending;
-                    break stop.outcome;
-                }
-                forward_shell_chunk(output, &mut streamed, &buffered_output);
-                buffered_output.clear();
+                streamed.forward(output, &mut buffered_output, false);
             }
             read = read_from(&mut stdout, &mut stdout_buffer), if stdout.is_some() => {
                 #[cfg(test)]
@@ -640,7 +514,7 @@ pub(super) async fn run_shell(
                         if buffered_output.is_empty() {
                             output_flush.as_mut().reset(tokio::time::Instant::now() + OUTPUT_FLUSH_INTERVAL);
                         }
-                        let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(recorded + buffered_output.len());
+                        let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(streamed.sent + buffered_output.len());
                         buffered_output.extend_from_slice(&stdout_buffer[..read.min(remaining)]);
                     }
                 }
@@ -661,7 +535,7 @@ pub(super) async fn run_shell(
                         if buffered_output.is_empty() {
                             output_flush.as_mut().reset(tokio::time::Instant::now() + OUTPUT_FLUSH_INTERVAL);
                         }
-                        let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(recorded + buffered_output.len());
+                        let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(streamed.sent + buffered_output.len());
                         buffered_output.extend_from_slice(&stderr_buffer[..read.min(remaining)]);
                     }
                 }
@@ -678,18 +552,14 @@ pub(super) async fn run_shell(
         }
     };
 
+    // The run's own time limit stops the command as a timeout, not a cancel.
+    let run_expired = cancellation.timed_out();
     let outcome = match outcome {
-        ShellOutcome::Cancelled if cancellation.timed_out() => ShellOutcome::TimedOut,
+        ShellOutcome::Cancelled if run_expired => ShellOutcome::TimedOut,
         outcome => outcome,
     };
-    #[cfg(target_os = "macos")]
-    let hint = if child.resource_stopped() {
-        Some("native resource safeguard stopped the command group".to_owned())
-    } else {
-        hint
-    };
     let elapsed = started.elapsed();
-    let mut result = async {
+    let result = async {
         match outcome {
             ShellOutcome::Exited(Ok(status)) => shell_result(
                 launch.header_tool(),
@@ -700,11 +570,7 @@ pub(super) async fn run_shell(
                 hint.as_deref(),
             ),
             ShellOutcome::Exited(Err(error)) => {
-                if super::native_exit::confirmed_launch_failure(&error) {
-                    ToolOutput::refused(error.to_string())
-                } else {
-                    ToolOutput::unobserved(format!("could not observe the command exit: {error}"))
-                }
+                ToolOutput::unobserved(format!("could not observe the command exit: {error}"))
             }
             ShellOutcome::ReadFailed { stream, source } => {
                 if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
@@ -732,7 +598,7 @@ pub(super) async fn run_shell(
                 if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
                     return ToolOutput::unobserved(message);
                 }
-                let reason = match timeout_seconds.filter(|_| !cancellation.timed_out()) {
+                let reason = match timeout_seconds.filter(|_| !run_expired) {
                     Some(seconds) => format!(
                         "command timed out after {seconds} s; its process group was killed"
                     ),
@@ -744,16 +610,8 @@ pub(super) async fn run_shell(
                     true,
                 );
                 result.result_digest = identity.finish(None, None, true);
-                result.native_outcome = Some(crate::command_owner::NativeCommandOutcome::TimedOut);
+                result.native_outcome = Some(super::dispatch::CommandOutcome::TimedOut);
                 result
-            }
-            ShellOutcome::OutputFailed(error) => {
-                if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
-                    return ToolOutput::unobserved(format!(
-                        "could not persist command output: {error}; {message}"
-                    ));
-                }
-                ToolOutput::unobserved(format!("could not persist command output: {error}"))
             }
             ShellOutcome::Cancelled => {
                 if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
@@ -772,34 +630,16 @@ pub(super) async fn run_shell(
                 );
                 result.disposition = ResultDisposition::Interrupted;
                 result.result_digest = identity.finish(None, None, false);
-                result.native_outcome = Some(crate::command_owner::NativeCommandOutcome::Cancelled);
+                result.native_outcome = Some(super::dispatch::CommandOutcome::Cancelled);
                 result
             }
         }
     }
     .await;
-    // Stop execution before waiting for a stalled durable write. The owned
-    // task retains that write through acknowledgement, so neither output nor
-    // termination proof depends on the result observer staying attached.
-    if let Some(write) = pending_output
-        && let Err(error) = write.await
-    {
-        result = ToolOutput::unobserved(format!("could not persist command output: {error}"));
-    }
-    // Cancellation and read failures also retain the bounded tail, after the
-    // process has stopped. No cancelled/deadline wait can discard this write.
-    if !buffered_output.is_empty() {
-        if let Some(write) = call_id.and_then(|id| process.output_record(id, &buffered_output)) {
-            if let Err(error) = write.await {
-                result =
-                    ToolOutput::unobserved(format!("could not persist command output: {error}"));
-            } else {
-                forward_shell_chunk(output, &mut streamed, &buffered_output);
-            }
-        } else {
-            forward_shell_chunk(output, &mut streamed, &buffered_output);
-        }
-    }
+    // Cancellation and read failures also keep the bounded tail, after the
+    // process has stopped.
+    streamed.forward(output, &mut buffered_output, true);
+    let mut result = result;
     result.execution_context = receipt;
     drop(prepared);
     result
@@ -810,11 +650,7 @@ pub(super) async fn confirm_child_exit(
     guard: &mut ProcessGroupGuard,
     process: &mut super::ToolTaskLease,
 ) -> std::io::Result<std::process::ExitStatus> {
-    if status.is_ok()
-        || status
-            .as_ref()
-            .is_err_and(super::native_exit::confirmed_launch_failure)
-    {
+    if status.is_ok() {
         guard.confirm_stopped().await?;
         process.process_reaped();
     }
@@ -855,7 +691,6 @@ async fn stop_shell(
             }
             Ok(())
         }
-        Err(error) if super::native_exit::confirmed_launch_failure(&error) => Ok(()),
         Err(error) => Err(format!("could not confirm the command exit: {error}")),
     }
 }
@@ -867,7 +702,23 @@ pub(super) fn shell_command(command: &str) -> tokio::process::Command {
     shell
 }
 
-#[cfg(not(unix))]
+/// `cmd /D /S /C "<text>"`, passed raw: `/S` strips exactly the outer pair
+/// of quotes and cmd parses the text unchanged, where the C runtime's
+/// backslash escaping would turn its quotes into literals. `/D` skips the
+/// user's registry AutoRun commands.
+#[cfg(windows)]
+pub(super) fn shell_command(command: &str) -> tokio::process::Command {
+    let mut shell = tokio::process::Command::new("cmd");
+    shell.raw_arg(cmd_arguments(command));
+    shell
+}
+
+#[cfg(any(windows, test))]
+fn cmd_arguments(command: &str) -> String {
+    format!("/D /S /C \"{command}\"")
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(super) fn shell_command(command: &str) -> tokio::process::Command {
     let mut shell = tokio::process::Command::new("cmd");
     shell.arg("/C").arg(command);
@@ -893,44 +744,37 @@ where
     }
 }
 
-struct OutputWriteInterrupted {
-    outcome: ShellOutcome,
-    pending: Option<super::dispatch::RecordFuture>,
+/// Live output already sent, and an incomplete UTF-8 sequence held back so
+/// a character split across reads is not shown as two replacement
+/// characters. The held bytes stay out of the flush buffer: a buffer that
+/// never empties would keep an expired flush timer ready forever.
+#[derive(Default)]
+struct LiveOutput {
+    sent: usize,
+    carry: Vec<u8>,
 }
 
-async fn persist_shell_chunk(
-    process: &super::ToolTaskLease,
-    call_id: Option<qq_protocol::ToolCallId>,
-    bytes: &[u8],
-    recorded: &mut usize,
-    mut cancelled: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
-    mut timeout: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
-) -> Result<(), OutputWriteInterrupted> {
-    let Some(id) = call_id else {
-        return Ok(());
-    };
-    let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(*recorded);
-    if remaining == 0 {
-        return Ok(());
-    }
-    let bytes = &bytes[..bytes.len().min(remaining)];
-    let Some(mut write) = process.output_record(id, bytes) else {
-        return Ok(());
-    };
-    tokio::select! {
-        biased;
-        () = &mut cancelled => Err(OutputWriteInterrupted { outcome: ShellOutcome::Cancelled, pending: Some(write) }),
-        () = &mut timeout => Err(OutputWriteInterrupted { outcome: ShellOutcome::TimedOut, pending: Some(write) }),
-        result = &mut write => match result {
-            Ok(()) => { *recorded += bytes.len(); Ok(()) }
-            Err(error) => Err(OutputWriteInterrupted { outcome: ShellOutcome::OutputFailed(Box::new(error)), pending: None }),
-        },
+impl LiveOutput {
+    /// Sends and drains `buffered`, keeping an incomplete trailing UTF-8
+    /// sequence for the next call. `last` sends everything.
+    fn forward(
+        &mut self,
+        output: Option<&mpsc::Sender<String>>,
+        buffered: &mut Vec<u8>,
+        last: bool,
+    ) {
+        let mut bytes = std::mem::take(&mut self.carry);
+        bytes.append(buffered);
+        if !last {
+            self.carry = bytes.split_off(incomplete_utf8_start(&bytes));
+        }
+        forward_shell_chunk(output, &mut self.sent, &bytes);
     }
 }
 
 /// Forwards one raw output chunk as a lossy UTF-8 delta, bounded by the same
 /// budget as the captured result so a runaway command cannot flood clients.
-pub(crate) fn forward_shell_chunk(
+pub(super) fn forward_shell_chunk(
     output: Option<&mpsc::Sender<String>>,
     streamed: &mut usize,
     bytes: &[u8],
@@ -938,7 +782,7 @@ pub(crate) fn forward_shell_chunk(
     let Some(sender) = output else {
         return;
     };
-    if *streamed >= MAX_SHELL_OUTPUT_BYTES {
+    if *streamed >= MAX_SHELL_OUTPUT_BYTES || bytes.is_empty() {
         return;
     }
     let remaining = MAX_SHELL_OUTPUT_BYTES - *streamed;
@@ -952,6 +796,29 @@ pub(crate) fn forward_shell_chunk(
         Err(mpsc::error::TrySendError::Full(_)) => *streamed += bytes.len(),
         Err(mpsc::error::TrySendError::Closed(_)) => *streamed = MAX_SHELL_OUTPUT_BYTES,
     }
+}
+
+/// Where a UTF-8 sequence that the next read may complete begins: the start
+/// of an unfinished multibyte character in the last three bytes, else the end.
+fn incomplete_utf8_start(bytes: &[u8]) -> usize {
+    for back in 1..=bytes.len().min(3) {
+        let byte = bytes[bytes.len() - back];
+        if byte & 0b1100_0000 == 0b1000_0000 {
+            continue;
+        }
+        let width = match byte {
+            0b1100_0000..=0b1101_1111 => 2,
+            0b1110_0000..=0b1110_1111 => 3,
+            0b1111_0000..=0b1111_0111 => 4,
+            _ => 1,
+        };
+        return if width > back {
+            bytes.len() - back
+        } else {
+            bytes.len()
+        };
+    }
+    bytes.len()
 }
 
 /// `<tool> exit=<why> elapsed=<s> bytes=<n>`, the captured output, then the
@@ -1027,7 +894,7 @@ fn shell_result(
         }
     };
     result.result_digest = identity.finish(status.code(), signal, false);
-    result.native_outcome = Some(crate::command_owner::NativeCommandOutcome::Exited {
+    result.native_outcome = Some(super::dispatch::CommandOutcome::Exited {
         code: status.code(),
     });
     result
@@ -1041,6 +908,41 @@ pub(crate) struct ProcessGroupGuard {
     pgid: Option<rustix::process::Pid>,
     #[cfg(unix)]
     killed_pgid: Option<rustix::process::Pid>,
+    /// Lives in the group and kills it once this process is gone; reaped
+    /// before termination is confirmed.
+    #[cfg(unix)]
+    watcher: Option<tokio::process::Child>,
+}
+
+/// Every Unix command's process group gets one of these. It blocks reading
+/// a pipe whose write end only this process holds; when this process exits
+/// for any reason, SIGKILL included, the read ends and the watcher kills its
+/// group. It ignores the catchable signals a script may send its own group.
+#[cfg(unix)]
+pub(crate) fn spawn_watcher(leader: Option<u32>) -> std::io::Result<tokio::process::Child> {
+    static PIPE: std::sync::OnceLock<
+        Result<(std::io::PipeReader, std::io::PipeWriter), std::io::ErrorKind>,
+    > = std::sync::OnceLock::new();
+    let (reader, _) = PIPE
+        .get_or_init(|| std::io::pipe().map_err(|error| error.kind()))
+        .as_ref()
+        .map_err(|kind| std::io::Error::from(*kind))?;
+    let leader = leader
+        .and_then(|pid| i32::try_from(pid).ok())
+        .ok_or_else(|| std::io::Error::other("command leader has no process id"))?;
+    let mut watcher = tokio::process::Command::new("/bin/sh");
+    watcher
+        .args([
+            "-c",
+            "trap '' HUP INT QUIT TERM; while read -r _; do :; done; kill -s KILL 0",
+        ])
+        .env_clear()
+        .current_dir("/")
+        .stdin(std::process::Stdio::from(reader.try_clone()?))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(leader);
+    watcher.spawn()
 }
 
 impl ProcessGroupGuard {
@@ -1052,6 +954,7 @@ impl ProcessGroupGuard {
                     .and_then(|id| i32::try_from(id).ok())
                     .and_then(rustix::process::Pid::from_raw),
                 killed_pgid: None,
+                watcher: None,
             }
         }
         #[cfg(not(unix))]
@@ -1059,6 +962,24 @@ impl ProcessGroupGuard {
             let _ = child_id;
             Self {}
         }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn watch(&mut self, watcher: tokio::process::Child) {
+        self.watcher = Some(watcher);
+    }
+
+    /// Reaps the watcher after its group was killed. Darwin reports a group
+    /// of zombies as EPERM, so confirmation needs the watcher gone first.
+    #[cfg(unix)]
+    pub(crate) async fn reap_watcher(&mut self) -> std::io::Result<()> {
+        if let Some(mut watcher) = self.watcher.take() {
+            let _ = watcher.start_kill();
+            tokio::time::timeout(std::time::Duration::from_secs(2), watcher.wait())
+                .await
+                .map_err(|_| std::io::Error::other("command watcher did not exit"))??;
+        }
+        Ok(())
     }
 
     /// Forgets the group after a normal exit; the reaped leader's pid may be
@@ -1103,8 +1024,23 @@ impl ProcessGroupGuard {
         result
     }
 
-    async fn confirm_stopped(&self) -> std::io::Result<()> {
+    async fn confirm_stopped(&mut self) -> std::io::Result<()> {
         #[cfg(unix)]
+        if self.killed_pgid.is_some() {
+            self.reap_watcher().await?;
+        }
+        // Zombie descendants count as stopped: a container's PID 1 may never
+        // reap them, and signal zero would keep finding the group.
+        #[cfg(target_os = "linux")]
+        if let Some(pgid) = self.killed_pgid {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            return tokio::task::spawn_blocking(move || {
+                super::process_group::confirm_linux_group_exit(pgid, deadline)
+            })
+            .await
+            .map_err(std::io::Error::other)?;
+        }
+        #[cfg(all(unix, not(target_os = "linux")))]
         if let Some(pgid) = self.killed_pgid {
             let result =
                 super::native_exit::confirm(
@@ -1257,7 +1193,6 @@ mod identity_tests {
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     run_shell(
-                        None,
                         &workspace,
                         &ShellPolicy::default(),
                         std::sync::Arc::default(),
@@ -1382,5 +1317,197 @@ mod identity_tests {
                 format!("{:x}", sha2::Sha256::digest(spill.text.as_bytes()))
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod orphan_tests {
+    /// A command's process group dies with the process that started it, even
+    /// when that process is SIGKILLed and runs no cleanup.
+    #[test]
+    fn a_killed_server_takes_its_commands_with_it() {
+        if let Some(report) = std::env::var_os("QQ_COMMAND_ORPHAN_WORKER") {
+            let directory = tempfile::tempdir().unwrap();
+            let workspace = crate::workspace::Workspace::open(directory.path()).unwrap();
+            // The background child and the trap prove the watcher kills the
+            // whole group and survives the group signals a script may send.
+            let command = format!(
+                // Output goes nowhere QQ reads, so the server's death closes
+                // no pipe a payload would notice: only the watcher stops it.
+                "exec >/dev/null 2>&1; trap '' TERM; kill -s TERM 0; tail -f /dev/null & echo $$ $! > '{}'; exec tail -f /dev/null",
+                std::path::Path::new(&report).display()
+            );
+            let arguments = super::ShellArgs {
+                command,
+                cwd: None,
+                timeout_seconds: None,
+            };
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let tasks = crate::tools::ToolTasks::default();
+                    let mut lease = tasks.enter();
+                    super::run_shell(
+                        &workspace,
+                        &crate::runtime::ShellPolicy::default(),
+                        std::sync::Arc::default(),
+                        std::sync::Arc::default(),
+                        None,
+                        super::Launch::Shell(&arguments),
+                        &super::ToolCancellation::new(crate::RunCancellation::new()),
+                        None,
+                        &mut lease,
+                    )
+                    .await
+                });
+            unreachable!("the command never ends; the parent kills this process");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let report = directory.path().join("pids");
+        let mut server = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tools::shell::orphan_tests::a_killed_server_takes_its_commands_with_it",
+                "--nocapture",
+            ])
+            .env("QQ_COMMAND_ORPHAN_WORKER", &report)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let pids = loop {
+            if let Ok(text) = std::fs::read_to_string(&report)
+                && text.ends_with('\n')
+            {
+                break text;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "command never started"
+            );
+            std::thread::park_timeout(std::time::Duration::from_millis(10));
+        };
+        let mut pids = pids
+            .split_whitespace()
+            .map(|pid| pid.parse::<i32>().unwrap());
+        let leader = rustix::process::Pid::from_raw(pids.next().unwrap()).unwrap();
+        let background = rustix::process::Pid::from_raw(pids.next().unwrap()).unwrap();
+        server.kill().unwrap();
+        server.wait().unwrap();
+        // Orphans reparent to init, which reaps them; until then a zombie
+        // still answers signal zero, so wait for both to be gone.
+        let stopped = std::time::Instant::now();
+        for pid in [leader, background] {
+            while rustix::process::test_kill_process(pid).is_ok() {
+                assert!(
+                    stopped.elapsed() < std::time::Duration::from_secs(10),
+                    "the command outlived the process that started it"
+                );
+                std::thread::park_timeout(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cmd_text_tests {
+    #[test]
+    fn cmd_gets_the_shell_text_unescaped_without_autorun() {
+        assert_eq!(
+            super::cmd_arguments(r#"echo "a b" > "out file.txt""#),
+            r#"/D /S /C "echo "a b" > "out file.txt"""#
+        );
+    }
+
+    /// Quoted paths reach cmd unchanged; the C runtime's `\"` escaping
+    /// would make cmd write a file named with literal backslashes.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn quoted_redirection_reaches_cmd_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let status = super::shell_command(r#"echo quoted> "out file.txt""#)
+            .current_dir(directory.path())
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("out file.txt")).unwrap(),
+            "quoted\r\n"
+        );
+    }
+}
+
+#[cfg(test)]
+mod live_output_tests {
+    #[test]
+    fn a_character_split_across_reads_arrives_whole() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let mut live = super::LiveOutput::default();
+        let mut buffered = "a é".as_bytes()[..3].to_vec();
+        live.forward(Some(&sender), &mut buffered, false);
+        assert_eq!(receiver.try_recv().unwrap(), "a ");
+        // The held byte leaves the flush buffer, so an expired flush timer
+        // never sees a buffer it cannot drain.
+        assert!(buffered.is_empty());
+        buffered.extend_from_slice(&[0xa9, b'!']);
+        live.forward(Some(&sender), &mut buffered, false);
+        assert_eq!(receiver.try_recv().unwrap(), "é!");
+        // At the end nothing more can complete it.
+        buffered.push(0xe2);
+        live.forward(Some(&sender), &mut buffered, false);
+        assert!(receiver.try_recv().is_err());
+        live.forward(Some(&sender), &mut buffered, true);
+        assert_eq!(receiver.try_recv().unwrap(), "\u{fffd}");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod split_character_tests {
+    /// Half a character, a pause longer than the flush interval, then the
+    /// rest: the command still completes and its output is whole.
+    #[tokio::test]
+    async fn a_paused_partial_character_does_not_stall_the_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = crate::workspace::Workspace::open(directory.path()).unwrap();
+        let arguments = super::ShellArgs {
+            command: r"printf '\303'; sleep 0.2; printf '\251done'".to_owned(),
+            cwd: None,
+            timeout_seconds: Some(30),
+        };
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        let tasks = crate::tools::ToolTasks::default();
+        let mut lease = tasks.enter();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            super::run_shell(
+                &workspace,
+                &crate::runtime::ShellPolicy::default(),
+                std::sync::Arc::default(),
+                std::sync::Arc::default(),
+                None,
+                super::Launch::Shell(&arguments),
+                &super::ToolCancellation::new(crate::RunCancellation::new()),
+                Some(&sender),
+                &mut lease,
+            ),
+        )
+        .await
+        .expect("a held partial character must not stall the command");
+        drop(lease);
+        assert!(
+            result.model_text.starts_with("shell exit=0 "),
+            "{}",
+            result.model_text
+        );
+        assert!(result.model_text.contains("édone"), "{}", result.model_text);
+        let mut live = String::new();
+        while let Ok(chunk) = receiver.try_recv() {
+            live.push_str(&chunk);
+        }
+        assert_eq!(live, "édone");
+        tasks.drain().await.unwrap();
     }
 }

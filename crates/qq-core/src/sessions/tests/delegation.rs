@@ -1987,8 +1987,6 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
 
 #[tokio::test]
 async fn an_auto_child_denies_writes_beneath_an_ask_parent_without_prompting() {
-    let (reviewer, consulted) =
-        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::new(StdMutex::new(Vec::new())),
         script: vec![(
@@ -2003,7 +2001,6 @@ async fn an_auto_child_denies_writes_beneath_an_ask_parent_without_prompting() {
             "spawn_agent",
             r#"{"task":"write child.txt","model":"test/child","authority":"write"}"#.to_owned(),
         )],
-        Some(reviewer),
         ApprovalMode::Ask,
     )
     .await;
@@ -2025,10 +2022,9 @@ async fn an_auto_child_denies_writes_beneath_an_ask_parent_without_prompting() {
                 && session.approval_mode == ApprovalMode::Auto
     )));
     assert!(
-        !observed.iter().any(|event| matches!(
-            &event.event,
-            SessionEvent::ToolApprovalRequested { .. } | SessionEvent::ToolApprovalEscalated { .. }
-        )),
+        !observed
+            .iter()
+            .any(|event| matches!(&event.event, SessionEvent::ToolApprovalRequested { .. })),
         "Auto child must not inherit a human approval wait"
     );
     assert!(observed.iter().any(|event| matches!(&event.event,
@@ -2040,14 +2036,11 @@ async fn an_auto_child_denies_writes_beneath_an_ask_parent_without_prompting() {
         SessionEvent::ToolCallStarted { tool_call } if tool_call.name == "write_file"
     )));
     assert!(!harness._directory.path().join("child.txt").exists());
-    assert!(consulted.lock().unwrap().is_empty());
     harness.runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn a_child_reviewer_cannot_release_a_fixed_stop() {
-    let (reviewer, consulted) =
-        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+async fn a_write_child_cannot_run_a_fixed_stop() {
     let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::new(StdMutex::new(Vec::new())),
         script: vec![(
@@ -2062,16 +2055,11 @@ async fn a_child_reviewer_cannot_release_a_fixed_stop() {
             "spawn_agent",
             r#"{"task":"publish work","model":"test/child","authority":"write"}"#.to_owned(),
         )],
-        Some(reviewer),
         ApprovalMode::Auto,
     )
     .await;
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
-    assert!(
-        consulted.lock().unwrap().is_empty(),
-        "a child reviewer cannot release a fixed stop"
-    );
     assert!(
         observed.iter().any(|event| matches!(
             &event.event, SessionEvent::ToolCallFinished { tool_call }
@@ -2088,9 +2076,7 @@ async fn a_child_reviewer_cannot_release_a_fixed_stop() {
 }
 
 #[tokio::test]
-async fn a_write_child_executes_authorized_edits_without_consulting_the_reviewer() {
-    let (reviewer, consulted) =
-        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+async fn a_write_child_executes_authorized_edits() {
     let child_requests = Arc::new(StdMutex::new(Vec::new()));
     let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::clone(&child_requests),
@@ -2106,7 +2092,6 @@ async fn a_write_child_executes_authorized_edits_without_consulting_the_reviewer
             "spawn_agent",
             r#"{"task":"Create child.txt with a greeting","model":"test/child","authority":"write"}"#.to_owned(),
         )],
-        Some(reviewer),
         ApprovalMode::Auto,
     )
     .await;
@@ -2133,7 +2118,6 @@ async fn a_write_child_executes_authorized_edits_without_consulting_the_reviewer
         std::fs::read_to_string(harness._directory.path().join("child.txt")).unwrap(),
         "written by the child"
     );
-    assert!(consulted.lock().unwrap().is_empty());
     // Child retains mutating schemas and executes within parent authority.
     let child_reqs = child_requests.lock().unwrap().clone();
     assert!(
@@ -2165,46 +2149,9 @@ async fn a_write_child_executes_authorized_edits_without_consulting_the_reviewer
     ));
 }
 
-#[test]
-fn reviewer_spend_joins_run_accounting_and_unknown_spend_poisons_it() {
-    let mut accounting = RunAccountingAccumulator::new(
-        Some(ModelPricing {
-            input_usd_nanos_per_token: 10,
-            output_usd_nanos_per_token: 20,
-            cache_read_usd_nanos_per_token: None,
-            cache_write_usd_nanos_per_token: None,
-            context_tier: None,
-            provenance: "test".to_owned(),
-        }),
-        ContextOccupancyBasis {
-            version: 1,
-            shape: ContentHash::from_bytes([0; 32]),
-            static_prefix: PreparedStaticPrefix::new(ContentHash::from_bytes([0; 32]), None),
-            request_bytes: 0,
-        },
-    );
-    accounting.record_turn(Some(usage(100, 10)));
-    accounting.record_review(Some(usage(40, 8)), Some(560));
-    let snapshot = accounting.snapshot();
-    assert_eq!(snapshot.usage, Some(usage(140, 18)));
-    assert_eq!(
-        snapshot.estimated_cost_usd_nanos,
-        Some(100 * 10 + 10 * 20 + 560)
-    );
-    // Occupancy is untouched: the reviewer's request is not this run's.
-    assert_eq!(snapshot.context_tokens, Some(100));
-    accounting.record_review(None, None);
-    let snapshot = accounting.snapshot();
-    assert_eq!(snapshot.usage, None);
-    assert_eq!(snapshot.estimated_cost_usd_nanos, None);
-}
-
 #[tokio::test]
-async fn write_children_require_the_roster_flag_but_not_a_reviewer() {
-    // Reviewer present but the roster forbids writers: QueueLoader plans
-    // carry the default roster.
-    let (reviewer, consulted) =
-        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+async fn write_children_require_the_roster_flag() {
+    // The roster forbids writers: QueueLoader plans carry the default roster.
     let child: Arc<dyn Provider> = Arc::new(StaticTextProvider);
     let parent_requests = Arc::new(StdMutex::new(Vec::new()));
     let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
@@ -2216,8 +2163,7 @@ async fn write_children_require_the_roster_flag_but_not_a_reviewer() {
         turn: StdMutex::new(0),
     });
     let directory = tempfile::tempdir().unwrap();
-    let options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"))
-        .with_approval_reviewer(reviewer);
+    let options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     let runtime = SessionRuntime::open(
         options,
         Arc::new(QueueLoader {
@@ -2250,10 +2196,9 @@ async fn write_children_require_the_roster_flag_but_not_a_reviewer() {
         [ContentBlock::ToolResult { content, is_error: true, .. }]
             if content.contains("write sub-agents are not enabled")
     ));
-    assert!(consulted.lock().unwrap().is_empty());
     runtime.shutdown().await.unwrap();
 
-    // Roster permits writers but no reviewer is installed.
+    // The roster permits writers.
     let child: Arc<dyn Provider> = Arc::new(StaticTextProvider);
     let (mut harness, parent_requests) = write_child_harness(
         child,
@@ -2261,7 +2206,6 @@ async fn write_children_require_the_roster_flag_but_not_a_reviewer() {
             "spawn_agent",
             r#"{"task":"t","model":"test/child","authority":"write"}"#.to_owned(),
         )],
-        None,
         ApprovalMode::Auto,
     )
     .await;
@@ -2283,7 +2227,6 @@ async fn write_children_require_the_roster_flag_but_not_a_reviewer() {
 #[tokio::test]
 async fn a_write_spawn_is_a_mutating_call_under_the_parents_policy() {
     // Under ReadOnly the delegation itself is denied without a prompt.
-    let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let child: Arc<dyn Provider> = Arc::new(StaticTextProvider);
     let (mut harness, parent_requests) = write_child_harness(
         child,
@@ -2291,7 +2234,6 @@ async fn a_write_spawn_is_a_mutating_call_under_the_parents_policy() {
             "spawn_agent",
             r#"{"task":"t","model":"test/child","authority":"write"}"#.to_owned(),
         )],
-        Some(reviewer),
         ApprovalMode::ReadOnly,
     )
     .await;
@@ -2311,7 +2253,6 @@ async fn a_write_spawn_is_a_mutating_call_under_the_parents_policy() {
     ));
 
     // Under Ask the human approves the delegation itself.
-    let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let child: Arc<dyn Provider> = Arc::new(StaticTextProvider);
     let (mut harness, _) = write_child_harness(
         child,
@@ -2319,7 +2260,6 @@ async fn a_write_spawn_is_a_mutating_call_under_the_parents_policy() {
             "spawn_agent",
             r#"{"task":"t","model":"test/child","authority":"write"}"#.to_owned(),
         )],
-        Some(reviewer),
         ApprovalMode::Ask,
     )
     .await;
@@ -2463,7 +2403,6 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
         let shutting_down = interruption == 3;
         let deadline = interruption == 4;
         let cancel_parent = interruption != 0;
-        let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
         let child = Arc::new(ScriptedRunProvider {
             requests: Arc::new(StdMutex::new(Vec::new())),
             script: vec![(
@@ -2484,7 +2423,6 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
                     r#"{"path":"parent.txt","content":"parent"}"#.to_owned(),
                 ),
             ],
-            Some(reviewer),
             ApprovalMode::Full,
         )
         .await;
@@ -2676,7 +2614,6 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
 
 #[tokio::test]
 async fn interrupting_steering_owns_a_child_whose_creation_reply_is_pending() {
-    let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let (mut harness, _) = write_child_harness(
         Arc::new(HangingProvider),
         vec![
@@ -2689,7 +2626,6 @@ async fn interrupting_steering_owns_a_child_whose_creation_reply_is_pending() {
                 r#"{"path":"parent.txt","content":"resumed"}"#.to_owned(),
             ),
         ],
-        Some(reviewer),
         ApprovalMode::Full,
     )
     .await;
@@ -2755,7 +2691,6 @@ async fn store_saturation_does_not_release_a_running_write_child() {
     }
     let entered = Arc::new(tokio::sync::Notify::new());
     let release_child = Arc::new(tokio::sync::Notify::new());
-    let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let (mut harness, parent_requests) = write_child_harness(
         Arc::new(HeldChild {
             entered: Arc::clone(&entered),
@@ -2772,7 +2707,6 @@ async fn store_saturation_does_not_release_a_running_write_child() {
                 r#"{"path":"parent.txt","content":"parent resumed"}"#.to_owned(),
             ),
         ],
-        Some(reviewer),
         ApprovalMode::Full,
     )
     .await;
@@ -2879,14 +2813,12 @@ async fn store_saturation_does_not_release_a_running_write_child() {
 
 #[tokio::test]
 async fn child_cancellation_persistence_failure_prevents_parent_continuation() {
-    let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let (mut harness, requests) = write_child_harness(
         Arc::new(HangingProvider),
         vec![(
             "spawn_agent",
             r#"{"task":"wait","model":"test/child","authority":"write"}"#.to_owned(),
         )],
-        Some(reviewer),
         ApprovalMode::Full,
     )
     .await;
@@ -2955,7 +2887,6 @@ async fn unconfirmed_shell_exit_prevents_session_continuation() {
     let (mut harness, requests) = write_child_harness(
         Arc::new(StaticTextProvider),
         vec![("shell", crate::tools::PANIC_SHELL_ARGUMENTS.to_owned())],
-        None,
         ApprovalMode::Full,
     )
     .await;
@@ -2994,14 +2925,12 @@ async fn unconfirmed_shell_exit_prevents_session_continuation() {
 
 #[tokio::test]
 async fn unreadable_child_outcome_fails_the_runtime_before_parent_continuation() {
-    let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let (mut harness, parent_requests) = write_child_harness(
         Arc::new(HangingProvider),
         vec![(
             "spawn_agent",
             r#"{"task":"hold the checkout","model":"test/child","authority":"write"}"#.to_owned(),
         )],
-        Some(reviewer),
         ApprovalMode::Full,
     )
     .await;
@@ -3098,7 +3027,6 @@ async fn unreadable_child_outcome_fails_the_runtime_before_parent_continuation()
 
 #[tokio::test]
 async fn write_children_serialize_on_the_per_run_write_permit() {
-    let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let child: Arc<dyn Provider> = Arc::new(GaugedTextProvider {
@@ -3115,8 +3043,7 @@ async fn write_children_serialize_on_the_per_run_write_permit() {
         turn: StdMutex::new(0),
     });
     let directory = tempfile::tempdir().unwrap();
-    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"))
-        .with_approval_reviewer(reviewer);
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.max_active_runs = 8;
     let runtime = SessionRuntime::open(
         options,
@@ -5510,8 +5437,6 @@ async fn a_text_only_slice_report_is_never_audited_or_treated_as_the_answer() {
 
 #[tokio::test]
 async fn an_ask_parent_cannot_widen_its_read_child_to_human_approved_writes() {
-    let (reviewer, consulted) =
-        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::new(StdMutex::new(Vec::new())),
         script: vec![(
@@ -5526,7 +5451,6 @@ async fn an_ask_parent_cannot_widen_its_read_child_to_human_approved_writes() {
             "spawn_agent",
             r#"{"task":"inspect only","model":"test/child","authority":"read"}"#.to_owned(),
         )],
-        Some(reviewer),
         ApprovalMode::Ask,
     )
     .await;
@@ -5545,15 +5469,12 @@ async fn an_ask_parent_cannot_widen_its_read_child_to_human_approved_writes() {
             .any(|event| matches!(&event.event, SessionEvent::ToolApprovalRequested { .. })),
         "the child's denied write must never become approvable"
     );
-    assert!(consulted.lock().unwrap().is_empty());
     assert!(!harness._directory.path().join("read-child.txt").exists());
     harness.runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn parent_readonly_revocation_denies_a_late_client_child_approval() {
-    let (reviewer, _review_release) =
-        StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
     let (release_child, pending_child) = oneshot::channel();
     let child: Arc<dyn Provider> = Arc::new(approvals::GatedApprovalProvider {
         inner: ApprovalProvider {
@@ -5573,7 +5494,6 @@ async fn parent_readonly_revocation_denies_a_late_client_child_approval() {
             r#"{"task":"write human-revoked.txt","model":"test/child","authority":"write"}"#
                 .to_owned(),
         )],
-        Some(reviewer),
         ApprovalMode::Full,
     )
     .await;
@@ -5640,8 +5560,6 @@ async fn parent_readonly_revocation_denies_a_late_client_child_approval() {
 
 #[tokio::test]
 async fn nested_write_requests_preserve_the_root_only_write_boundary() {
-    let (reviewer, consulted) =
-        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let grandchild: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::new(StdMutex::new(Vec::new())),
         script: vec![(
@@ -5670,7 +5588,6 @@ async fn nested_write_requests_preserve_the_root_only_write_boundary() {
     let directory = tempfile::tempdir().unwrap();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.max_active_runs = 8;
-    options = options.with_approval_reviewer(reviewer);
     let runtime = SessionRuntime::open(
         options,
         Arc::new(DepthLoader {
@@ -5700,11 +5617,6 @@ async fn nested_write_requests_preserve_the_root_only_write_boundary() {
     let observed = collect_until_run_finished(&mut events, run).await;
     assert!(!directory.path().join("nested.txt").exists());
     assert_eq!(
-        consulted.lock().unwrap().len(),
-        0,
-        "the child cannot grant write authority onward, without a reviewer round trip"
-    );
-    assert_eq!(
         observed
             .iter()
             .filter(|event| matches!(&event.event,
@@ -5726,19 +5638,7 @@ async fn nested_write_requests_preserve_the_root_only_write_boundary() {
 #[tokio::test]
 async fn a_late_child_approval_runs_once_after_the_parent_switches_to_auto() {
     {
-        for decision in [
-            ApprovalDecision::ApproveOnce,
-            ApprovalDecision::ApproveForSession {
-                grant: ApprovalGrant::ShellPrefix {
-                    prefix: "rm -r".into(),
-                },
-            },
-            ApprovalDecision::ApproveForWorkspace {
-                grant: ApprovalGrant::ShellPrefix {
-                    prefix: "rm -r".into(),
-                },
-            },
-        ] {
+        for decision in [ApprovalDecision::ApproveOnce] {
             let (release_child, pending_child) = oneshot::channel();
             let child: Arc<dyn Provider> = Arc::new(approvals::GatedApprovalProvider {
                 inner: ApprovalProvider {
@@ -5751,13 +5651,10 @@ async fn a_late_child_approval_runs_once_after_the_parent_switches_to_auto() {
                 },
                 release: StdMutex::new(Some(pending_child)),
             });
-            let (reviewer, _review_release) =
-                StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
             let spawn = serde_json::json!({"task": "remove approval-scratch", "model": "test/child", "authority": "write"});
             let (mut harness, _) = write_child_harness(
                 child,
                 vec![("spawn_agent", spawn.to_string())],
-                Some(reviewer),
                 ApprovalMode::Full,
             )
             .await;
@@ -5787,20 +5684,6 @@ async fn a_late_child_approval_runs_once_after_the_parent_switches_to_auto() {
                 .await
                 .unwrap();
             // A late Ask response must respect a subsequent parent change.
-            harness
-                .runtime
-                .inner
-                .store
-                .call(Priority::Control, move |connection| {
-                    connection.execute(
-                        "INSERT INTO session_grants(session_id, kind, value, created_at_ms, source)
-                     VALUES (?1, 'shell_prefix', 'rm -r approval-scratch', 0, 'human')",
-                        [child_id.to_string()],
-                    )?;
-                    Ok(())
-                })
-                .await
-                .unwrap();
             release_child.send(()).unwrap();
             let (_, call) = collect_until_approval_requested(&mut harness.events).await;
             assert_eq!(call.name, "shell");
@@ -5815,8 +5698,7 @@ async fn a_late_child_approval_runs_once_after_the_parent_switches_to_auto() {
                 )
                 .await
                 .unwrap();
-            // The child explicitly selected Ask: even a workspace grant
-            // approves only this call and never records lasting authority.
+            // The child explicitly selected Ask: the approval covers only this call.
             let expected = ApprovalResolution::ApprovedOnce;
             let receipt = respond_approval(&harness.runtime, call.run_id, call.id, decision)
                 .await
@@ -5828,14 +5710,6 @@ async fn a_late_child_approval_runs_once_after_the_parent_switches_to_auto() {
             );
             collect_until_run_finished(&mut harness.events, run_id).await;
             assert!(!harness._directory.path().join("approval-scratch").exists());
-            let (_, grants, _) = harness
-                .runtime
-                .inner
-                .store
-                .approval_policy(call.session_id)
-                .await
-                .unwrap();
-            assert_eq!(grants.shell_prefixes, ["rm -r approval-scratch"]);
             harness.runtime.shutdown().await.unwrap();
         }
     }

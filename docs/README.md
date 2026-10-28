@@ -24,7 +24,7 @@ below is for people changing QQ.
   contract and the supervisor boundary.
 - [`providers.md`](design/providers.md) — provider validation standard.
 - [`tools.md`](design/tools.md) — tool loop, built-in tools and their
-  bounding/spill boundary, containment, edit semantics, shell classification,
+  bounding/spill boundary, where commands run, edit semantics, fixed stops,
   `@` mentions, [approvals](design/tools.md#approval-policy), MCP and
   embedded hosts.
 - [`side-questions.md`](design/side-questions.md) — `/btw` side questions:
@@ -62,8 +62,6 @@ progress ledger or reservation document is required.
 - [`run-output-queries.md`](runbooks/run-output-queries.md) — read-only
   session-store queries: do long runs and sub-agents produce output, or only
   activity.
-- [`action-bias-qualification.md`](runbooks/action-bias-qualification.md) —
-  bounded snapshot export, pinned classifier recount and cohort provenance.
 - [`tui-qa.md`](runbooks/tui-qa.md) — credential-free, loopback-only TUI
   diagnostic fixture and cleanup.
 - [`release.md`](runbooks/release.md) — `cargo xtask release`, the tag-driven

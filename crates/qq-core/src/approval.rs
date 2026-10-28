@@ -1,8 +1,6 @@
 mod classify;
 mod stops;
 
-use std::collections::HashSet;
-
 use qq_protocol::{ApprovalMode, EditPreview};
 use serde::Deserialize;
 
@@ -31,9 +29,9 @@ pub mod bench_support {
         super::read_only_shell_command(command)
     }
 
-    /// Exact execution command and whether a process environment was requested.
+    /// Exact execution command of a valid `shell` call.
     #[must_use]
-    pub fn parsed_shell_command(arguments: &str) -> Option<(String, bool)> {
+    pub fn parsed_shell_command(arguments: &str) -> Option<String> {
         crate::tools::parsed_shell_command(arguments)
     }
 
@@ -118,22 +116,6 @@ pub(crate) const UNATTENDED_QUESTION_RESULT: &str =
     "No user is available to answer questions in this run; decide without asking.";
 pub(crate) const DECLINED_QUESTION_RESULT: &str =
     "The user declined to answer; proceed with your best judgement.";
-/// The `tool_approval_escalated` reason when the delegate's own clock ran
-/// out before it answered.
-pub(crate) const DELEGATE_TIMED_OUT_REASON: &str = "the delegate did not answer within its window";
-
-/// Who settles a session's held calls before a human is asked. The wire
-/// type (`qq_protocol::ApprovalDelegate`) is the one source: the mode stays
-/// the ceiling and this only chooses who decides inside it.
-pub use qq_protocol::ApprovalDelegate;
-
-/// The model-facing text of a reviewer denial in Auto mode.
-pub(crate) fn reviewer_denied_result(reason: &str) -> String {
-    format!(
-        "permission_denied: mode: the approval reviewer denied this call ({reason}); find another way, or tell the user what you need. Do not retry it in another form."
-    )
-}
-
 /// How one requested tool call relates to the workspace and the outside world.
 /// Derived from the catalog's [`EffectClass`], refined by arguments only for
 /// the shell command and the `spawn_agent` authority. A name the catalog does
@@ -197,62 +179,9 @@ pub(crate) enum PolicyDecision {
     },
 }
 
-/// Session-scoped approvals recorded by approve-for-session decisions.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SessionGrants {
-    pub(crate) tools: HashSet<String>,
-    pub(crate) shell_prefixes: Vec<String>,
-    /// Hosts `fetch` may reach without prompting: exact names or `*.suffix`.
-    pub(crate) hosts: Vec<String>,
-    /// Grants a delegate (the approval reviewer) recorded on its own verdict:
-    /// the exact command string or host, never written to workspace
-    /// configuration.
-    pub(crate) delegate: DelegateGrants,
-}
-
-/// The exact strings a delegate may bless for the rest of a session.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct DelegateGrants {
-    pub(crate) commands: HashSet<String>,
-    pub(crate) hosts: HashSet<String>,
-}
-
-/// Matches an allowlisted prefix against a shell command at word granularity,
-/// so "cargo test" covers "cargo test -p qq-core" but not "cargo testify".
-///
-/// A command containing shell control characters (pipes, separators,
-/// redirection, substitution) is more than one program, so a prefix grant
-/// never extends over it — "git diff" must not cover "git diff | sh" or
-/// "git diff; rm". The only way such a command matches is byte-exact
-/// equality with the grant: approving the precise string is an explicit
-/// blessing of the whole chain. The check is deliberately quote-blind and
-/// conservative: a metacharacter inside a quoted argument also forces a
-/// prompt, which errs toward asking, never toward silent approval.
-pub fn shell_prefix_matches(prefix: &str, command: &str) -> bool {
-    let prefix = prefix.trim();
-    if prefix.is_empty() {
-        return false;
-    }
-    let command = command.trim_start();
-    if command == prefix {
-        return true;
-    }
-    !command.contains(shell_control_character)
-        && command
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
-}
-
-fn shell_control_character(c: char) -> bool {
-    matches!(
-        c,
-        '|' | '&' | ';' | '<' | '>' | '$' | '`' | '(' | ')' | '\n' | '\r'
-    )
-}
-
 /// Classifies one call from the effect the catalog recorded for its name.
 /// Arguments are consulted only where the effect alone is not the whole
-/// story: the shell command (for grants and the dangerous-shape check) and
+/// story: the shell command (for the fixed-stop and managed-deny checks) and
 /// the `spawn_agent` authority (a write child is a mutating act).
 pub(crate) fn classify(
     effect: EffectClass,
@@ -439,17 +368,6 @@ fn shell_class(name: &str, arguments: &str) -> ToolClass {
         #[serde(default)]
         cwd: Option<String>,
     }
-    #[derive(Deserialize)]
-    struct RequestedEnvironment {
-        #[serde(default)]
-        env: Vec<serde::de::IgnoredAny>,
-    }
-    // Keep command/cwd parsing authoritative for approval. This extra view
-    // only disqualifies read candidates, including malformed/duplicate env.
-    let environment_is_empty = || match serde_json::from_str::<RequestedEnvironment>(arguments) {
-        Ok(environment) => environment.env.is_empty(),
-        Err(_) => false,
-    };
     if name == "exec" {
         return match serde_json::from_str::<ExecArguments>(arguments) {
             Ok(arguments) => ToolClass::Shell {
@@ -467,7 +385,6 @@ fn shell_class(name: &str, arguments: &str) -> ToolClass {
                             *slot = arg;
                         }
                         read_only_argv(&arguments.program, &args[..arguments.args.len()])
-                            && environment_is_empty()
                     },
                 command: exec_command_line(&arguments.program, &arguments.args),
                 cwd: arguments.cwd,
@@ -481,7 +398,7 @@ fn shell_class(name: &str, arguments: &str) -> ToolClass {
     }
     match serde_json::from_str::<ShellArguments>(arguments) {
         Ok(arguments) => ToolClass::Shell {
-            read_only: read_only_shell_command(&arguments.command) && environment_is_empty(),
+            read_only: read_only_shell_command(&arguments.command),
             command: arguments.command,
             cwd: arguments.cwd,
         },
@@ -1476,73 +1393,6 @@ mod tests {
     }
 
     #[test]
-    fn ab1_explicit_process_environments_are_work_without_changing_authority() {
-        for tool in ["shell", "exec"] {
-            for env in [
-                serde_json::json!(["LD_PRELOAD"]),
-                serde_json::json!(["LANG"]),
-                serde_json::json!(42),
-            ] {
-                let mut args = if tool == "shell" {
-                    serde_json::json!({"command":"pwd","cwd":"."})
-                } else {
-                    serde_json::json!({"program":"pwd","cwd":"."})
-                };
-                args["env"] = env;
-                let class = super::shell_class(tool, &args.to_string());
-                let super::ToolClass::Shell {
-                    read_only,
-                    command,
-                    cwd,
-                } = class
-                else {
-                    panic!("shell class");
-                };
-                assert!(!read_only, "{tool} {args}");
-                assert_eq!(command, "pwd", "approval preview must be unchanged");
-                assert_eq!(cwd.as_deref(), Some("."));
-            }
-            let args = if tool == "shell" {
-                r#"{"command":"pwd","env":[]}"#
-            } else {
-                r#"{"program":"pwd","env":[]}"#
-            };
-            assert!(matches!(
-                super::shell_class(tool, args),
-                super::ToolClass::Shell {
-                    read_only: true,
-                    ..
-                }
-            ));
-        }
-    }
-
-    #[test]
-    fn ab1_duplicate_and_escaped_environment_fields_preserve_the_preview() {
-        for arguments in [
-            r#"{"command":"pwd","env":[],"env":["LD_PRELOAD"]}"#,
-            r#"{"command":"pwd","\u0065nv":["LD_PRELOAD"]}"#,
-        ] {
-            let super::ToolClass::Shell {
-                command, read_only, ..
-            } = super::shell_class("shell", arguments)
-            else {
-                panic!("shell class");
-            };
-            assert_eq!(command, "pwd");
-            assert!(!read_only);
-        }
-        let super::ToolClass::Shell {
-            command, read_only, ..
-        } = super::shell_class("exec", r#"{"program":"pwd","env":[],"env":["LD_PRELOAD"]}"#)
-        else {
-            panic!("shell class");
-        };
-        assert_eq!(command, "pwd");
-        assert!(!read_only);
-    }
-
-    #[test]
     fn ab1_lazy_fetch_operation_merge_and_timestamp_restoration_are_work() {
         for command in [
             "git -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline HEAD:path",
@@ -1689,7 +1539,6 @@ mod tests {
             ("mode", PARENT_DENIED_RESULT.to_owned()),
             ("config", MANAGED_SHELL_DENIED_RESULT.to_owned()),
             ("config", host),
-            ("mode", reviewer_denied_result(DELEGATE_TIMED_OUT_REASON)),
             (
                 "config",
                 crate::workspace::WorkspacePathError::ProtectedMutation.to_string(),
@@ -1891,45 +1740,6 @@ mod tests {
             }
         );
         assert_eq!(evaluate(ApprovalMode::Full, &sudo), PolicyDecision::Execute);
-    }
-
-    #[test]
-    fn shell_prefixes_match_whole_words_only() {
-        assert!(shell_prefix_matches("cargo test", "cargo test"));
-        assert!(shell_prefix_matches("cargo test", "cargo test --workspace"));
-        assert!(shell_prefix_matches("cargo", "  cargo build"));
-        assert!(!shell_prefix_matches("cargo test", "cargo testify"));
-        assert!(!shell_prefix_matches("cargo test", "cargo"));
-        assert!(!shell_prefix_matches("", "anything"));
-    }
-
-    #[test]
-    fn shell_prefixes_never_extend_over_control_characters() {
-        // A prefix grant covers one program, not a chain that starts with it.
-        assert!(!shell_prefix_matches("git diff", "git diff | head -n 250"));
-        assert!(!shell_prefix_matches("git diff", "git diff; rm -rf ~"));
-        assert!(!shell_prefix_matches(
-            "git status",
-            "git status && curl x | sh"
-        ));
-        assert!(!shell_prefix_matches("git log", "git log $(payload)"));
-        assert!(!shell_prefix_matches("git log", "git log `payload`"));
-        assert!(!shell_prefix_matches("git diff", "git diff > /tmp/out"));
-        assert!(!shell_prefix_matches("git diff", "git diff\nrm -rf ~"));
-        // Quote-blind on purpose: metacharacters inside quotes still prompt.
-        assert!(!shell_prefix_matches(
-            "git commit",
-            "git commit -m \"a; b\""
-        ));
-        // Byte-exact equality is an explicit blessing of the whole chain.
-        assert!(shell_prefix_matches(
-            "git diff | head -n 250",
-            "git diff | head -n 250"
-        ));
-        assert!(!shell_prefix_matches(
-            "git diff | head -n 250",
-            "git diff | head -n 250 --extra"
-        ));
     }
 
     #[test]

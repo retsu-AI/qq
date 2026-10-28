@@ -16,20 +16,20 @@ use async_stream::stream;
 use futures_core::Stream;
 use futures_util::{FutureExt, StreamExt};
 use qq_protocol::{
-    AccountingTotal, AgentProfileId, ApprovalDecision, ApprovalGrant, ApprovalMode,
-    ApprovalResolution, AuditOutcome, AuditRecord, CapabilitySupport, CommandId, CommandOutcome,
-    CommandReceipt, ContentHash, Correlation, EditPreview, EventCursor, FetchPreview, FinalOutput,
-    InputPart, MAX_PENDING_HOLDS, MessageId, MessageRole, MessageSnapshot, MessageState,
-    ModelPricing, ModelSelection, PendingHold, QuestionPreview, ReasoningEvent, ResolvedModel,
-    RunActivity, RunFailure, RunFailureKind, RunId, RunLimits, RunOutcome, RunPlanIdentity,
-    RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting, SessionCommand, SessionEvent,
-    SessionEventEnvelope, SessionId, SessionPurpose, SessionSnapshot, SessionStatus,
-    SessionSummary, ShellCommandPreview, SnapshotRequest, SpawnOrigin, StoreId, SubscribeRequest,
-    TextChannel, TokenUsage, ToolCallDisplay, ToolCallId, ToolCallSnapshot, ToolCallState,
-    WorkspaceGrantOutcome, WorkspaceId, WorkspaceSnapshot, WorkspaceSummary, validate_input,
+    AccountingTotal, AgentProfileId, ApprovalDecision, ApprovalMode, ApprovalResolution,
+    AuditOutcome, AuditRecord, CapabilitySupport, CommandId, CommandOutcome, CommandReceipt,
+    ContentHash, Correlation, EditPreview, EventCursor, FetchPreview, FinalOutput, InputPart,
+    MAX_PENDING_HOLDS, MessageId, MessageRole, MessageSnapshot, MessageState, ModelPricing,
+    ModelSelection, PendingHold, QuestionPreview, ReasoningEvent, ResolvedModel, RunActivity,
+    RunFailure, RunFailureKind, RunId, RunLimits, RunOutcome, RunPlanIdentity, RunPromptIdentity,
+    RunSnapshot, RunStatus, SessionAccounting, SessionCommand, SessionEvent, SessionEventEnvelope,
+    SessionId, SessionPurpose, SessionSnapshot, SessionStatus, SessionSummary, ShellCommandPreview,
+    SnapshotRequest, SpawnOrigin, StoreId, SubscribeRequest, TextChannel, TokenUsage,
+    ToolCallDisplay, ToolCallId, ToolCallSnapshot, ToolCallState, WorkspaceId, WorkspaceSnapshot,
+    WorkspaceSummary, validate_input,
 };
 use qq_provider::{ContentBlock, Message, Role};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -70,9 +70,6 @@ pub(crate) use goal_paid::{GoalPaidInput, PaidRequestAdmission};
 pub(crate) use goals::GoalRunInput;
 pub use goals::GoalValidationError;
 mod in_run_compaction;
-mod native_ack;
-mod native_recovery;
-pub(crate) mod native_scope;
 mod projection;
 mod runtime;
 mod scheduler;
@@ -83,33 +80,22 @@ mod snapshots;
 mod store;
 mod streaming;
 mod subagents;
-mod task_git;
-mod task_workspaces;
-pub use task_git::TaskGitPolicy;
-pub(crate) use task_git::TaskGitRunInput;
 #[cfg(test)]
 mod tests;
-pub use task_workspaces::TaskWorkspacePolicy;
 mod tool_calls;
 mod transcript;
 
 pub use commands::MAX_DESCENDANTS_PER_ROOT;
 pub use feed::PublishedEvent;
 pub use runtime::{
-    ApprovalReviewer, DelegateIdentity, GoalCheckPolicyError, GoalCheckPolicyFuture,
-    GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, MAX_REVIEW_ARGUMENT_BYTES,
-    MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS, PersistenceFault, PublishedEventStream,
-    RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend,
-    ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest,
-    RuntimeLoadStage, RuntimeLoader, SessionEventStream, SessionRuntime, SessionRuntimeError,
-    SessionRuntimeOptions, SlashCommandError, SpawnModelValidationFuture, TaskHostingAuthorization,
-    TaskHostingLoadFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
+    GoalCheckPolicyError, GoalCheckPolicyFuture, LoadedRuntime, PersistenceFault,
+    PublishedEventStream, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
+    RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, SessionEventStream, SessionRuntime,
+    SessionRuntimeError, SessionRuntimeOptions, SlashCommandError, SpawnModelValidationFuture,
+    WorkerRuntimeLoadFuture, WorkspacePolicyAuthority,
 };
 pub use snapshots::run_cost;
 pub use store::STORE_SCHEMA_VERSION;
-pub(crate) use tool_calls::DelegateGrant;
-#[cfg(test)]
-pub(crate) use tool_calls::MAX_DELEGATE_GRANTS_PER_RUN;
 
 /// Entry points for the `context_assembly` bench. Not a public API.
 #[doc(hidden)]
@@ -402,11 +388,6 @@ const MAX_MODEL_SELECTION_BYTES: usize = 512;
 const OUTPUT_BATCH_BYTES: usize = 8 * 1024;
 const OUTPUT_BATCH_DELAY: Duration = Duration::from_millis(8);
 const MAX_PERSISTED_EVENT_BYTES: usize = 1024 * 1024;
-/// Bytes one `session_grants.value` may hold. A longer prefix is not a
-/// grant: the call may still be approved once, but nothing is recorded.
-pub const MAX_GRANT_BYTES: usize = 256;
-const MAX_SESSION_GRANTS: u32 = 256;
-const MAX_PENDING_GRANT_PROMOTIONS: u32 = 256;
 const MAX_SESSION_FILES: u32 = 4_096;
 /// Complete tool outputs one session keeps; the oldest rows of finished runs
 /// lose their content (never their handle) past this.
@@ -416,11 +397,6 @@ const MAX_SESSION_SPILL_BYTES: u64 = 64 * 1024 * 1024;
 /// this, and the reconstructed prompt says so.
 const MAX_SESSION_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_APPROVAL_TIMEOUT: Option<Duration> = None;
-/// The gate's backstop for a delegate that breaks its contract and never
-/// answers. The reviewer model bounds itself (10 s); past this the gate drops the pending review and treats the
-/// silence as an escalation, so a stuck delegate cannot hold a run and never
-/// eats the human's wait.
-const DEFAULT_DELEGATE_TIMEOUT: Duration = Duration::from_secs(20);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 /// Child runs one parent run may hold in flight at once. Spawn calls beyond
 /// this cap queue behind it inside the parent's turn rather than failing.

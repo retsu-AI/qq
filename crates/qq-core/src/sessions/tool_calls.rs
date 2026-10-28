@@ -1,5 +1,5 @@
-//! Tool-call rows and their approval state: start/output/finish, spills, seeded
-//! grants, policy load, denial, reviewer resolution, and grant promotion.
+//! Tool-call rows and their approval state: start/output/finish, spills,
+//! policy load, denial, and approval conclusion.
 
 use super::*;
 
@@ -62,45 +62,6 @@ pub(super) fn append_tool_call_output(
     Ok(event)
 }
 
-/// Binds an invocation to its stable worker journal before admission can have effects.
-pub(super) fn set_native_owner(
-    connection: &mut Connection,
-    identity: RunIdentity,
-    id: ToolCallId,
-    owner: Option<StoreId>,
-) -> Result<(), SessionRuntimeError> {
-    let transaction = store::begin_unit(connection)?;
-    let Some(owner) = owner else {
-        transaction.execute(
-            "DELETE FROM native_command_owners WHERE tool_call_id=?1 AND result_saved=0
-             AND EXISTS(SELECT 1 FROM tool_calls WHERE id=?1 AND run_id=?2 AND state='running')",
-            params![id.to_string(), identity.run_id.to_string()],
-        )?;
-        transaction.commit()?;
-        return Ok(());
-    };
-    let full: bool = transaction.query_row(
-        "SELECT (SELECT COUNT(*) FROM native_command_owners WHERE result_saved=0)>=?2
-         AND NOT EXISTS(SELECT 1 FROM native_command_owners WHERE tool_call_id=?1)",
-        params![id.to_string(), super::native_recovery::MAX_PENDING],
-        |row| row.get(0),
-    )?;
-    if full {
-        return Err(SessionRuntimeError::NativeCommandCapacity);
-    }
-    let written = transaction.execute(
-        "INSERT INTO native_command_owners(tool_call_id, owner_id)
-         SELECT id, ?3 FROM tool_calls WHERE id=?1 AND run_id=?2 AND state='running' AND name IN ('shell','exec','task_commit','task_push','task_pr')
-         ON CONFLICT(tool_call_id) DO UPDATE SET owner_id=excluded.owner_id WHERE native_command_owners.owner_id=excluded.owner_id",
-        params![id.to_string(),identity.run_id.to_string(),owner.to_string()],
-    )?;
-    if written != 1 {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    }
-    transaction.commit()?;
-    Ok(())
-}
-
 /// Records native process evidence, including an unresolved invocation whose
 /// model run was interrupted. This grants no new execution authority.
 pub(super) fn record_tool_process(
@@ -113,9 +74,7 @@ pub(super) fn record_tool_process(
     let (name, arguments, previous): (String, String, Option<String>) = transaction
         .query_row(
             "SELECT name,arguments_json,execution_context_json FROM tool_calls
-         WHERE id=?1 AND run_id=?2 AND (state='running' OR (state IN ('interrupted','failed')
-             AND EXISTS(SELECT 1 FROM native_command_owners n JOIN runs r ON r.id=?2
-                 WHERE n.tool_call_id=?1 AND n.result_saved=0 AND r.outcome_json IS NOT NULL)))",
+         WHERE id=?1 AND run_id=?2 AND state='running'",
             params![id.to_string(), identity.run_id.to_string()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -140,14 +99,6 @@ pub(super) fn record_tool_process(
     Ok(())
 }
 
-/// Native results remain durable even when they cannot enter model context.
-/// An exhausted completion requires run settlement before another model turn.
-#[derive(Debug)]
-pub(super) struct ToolCallCommit {
-    pub(super) event: SessionEventEnvelope,
-    pub(super) context_exhausted: bool,
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "one persisted row update; bundling the columns adds nothing"
@@ -163,7 +114,6 @@ pub(super) fn finish_tool_call(
     display: Option<ToolCallDisplay>,
     spill: Option<crate::tools::SpillRecord>,
     execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
-    native_owner: Option<StoreId>,
 ) -> Result<ToolCallCommit, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let commit = finish_tool_call_in_transaction(
@@ -177,10 +127,16 @@ pub(super) fn finish_tool_call(
         display,
         spill,
         execution_context,
-        native_owner,
     )?;
     transaction.commit()?;
     Ok(commit)
+}
+
+/// A settled tool result. `context_exhausted` means the result is durable
+/// but cannot enter model context, so the run must stop before another turn.
+#[derive(Debug)]
+pub(super) struct ToolCallCommit {
+    pub(super) context_exhausted: bool,
 }
 
 #[expect(
@@ -198,50 +154,40 @@ pub(super) fn finish_tool_call_in_transaction(
     display: Option<ToolCallDisplay>,
     spill: Option<crate::tools::SpillRecord>,
     execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
-    native_owner: Option<StoreId>,
 ) -> Result<ToolCallCommit, SessionRuntimeError> {
-    let (provider_call_id, tool_name, first_result_in_turn, recorded_context, settled) =
-        transaction
-            .query_row(
-                "SELECT current.provider_call_id, current.name,
+    let (provider_call_id, tool_name, first_result_in_turn, recorded_context) = transaction
+        .query_row(
+            "SELECT current.provider_call_id, current.name,
                     NOT EXISTS(
                         SELECT 1 FROM tool_calls previous
                         WHERE previous.run_id = current.run_id
                           AND previous.turn_ordinal = current.turn_ordinal
                           AND previous.result IS NOT NULL
-                    ), current.execution_context_json, r.outcome_json IS NOT NULL
-             FROM tool_calls current JOIN runs r ON r.id=current.run_id
-             WHERE current.id = ?1 AND current.run_id = ?2
-               AND (current.state='running' OR (current.state IN ('interrupted','failed')
-                   AND r.outcome_json IS NOT NULL AND EXISTS(
-                       SELECT 1 FROM native_command_owners n WHERE n.tool_call_id=current.id
-                           AND n.owner_id=?3 AND n.result_saved=0)))",
-                params![
-                    tool_call_id.to_string(),
-                    identity.run_id.to_string(),
-                    native_owner.map(|owner| owner.to_string())
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, bool>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, bool>(4)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or(SessionRuntimeError::ToolCallNotFound)?;
+                    ), current.execution_context_json
+             FROM tool_calls current
+             WHERE current.id = ?1 AND current.run_id = ?2 AND current.state='running'",
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(SessionRuntimeError::ToolCallNotFound)?;
     // The display payload is deliberately absent from the capacity check: it
     // never enters model context, so it cannot crowd the context budget. The
     // provider call id does enter the next ToolResult block and is counted.
     // Completion checks have no provider turn. Their bounded result is audit
     // evidence; only the goal notice may enter a later model context.
-    let context_exhausted = if settled || identity.kind == RunKind::GoalCheck {
-        false
-    } else {
-        match reserve_tool_result_capacity(
+    // A result that ran is durable even when it cannot enter model context:
+    // the call settles with its real outcome, and the caller then stops the
+    // run for context exhaustion instead of another model turn.
+    let context_exhausted = identity.kind != RunKind::GoalCheck
+        && match reserve_tool_result_capacity(
             transaction,
             identity.run_id,
             &provider_call_id,
@@ -249,10 +195,9 @@ pub(super) fn finish_tool_call_in_transaction(
             first_result_in_turn,
         ) {
             Ok(()) => false,
-            Err(SessionRuntimeError::OutputTooLarge) if native_owner.is_some() => true,
+            Err(SessionRuntimeError::OutputTooLarge) => true,
             Err(error) => return Err(error),
-        }
-    };
+        };
     let now = now_ms();
     let state = if is_error { "failed" } else { "completed" };
     let display_json = display.as_ref().map(serde_json::to_string).transpose()?;
@@ -284,9 +229,7 @@ pub(super) fn finish_tool_call_in_transaction(
     let updated = transaction.execute(
         "UPDATE tool_calls
              SET state = ?2, result = ?3, is_error = ?4, finished_at_ms = ?5, display_json = ?7, execution_context_json = COALESCE(?8, execution_context_json)
-             WHERE id = ?1 AND run_id = ?6 AND (state='running' OR (state IN ('interrupted','failed')
-                 AND EXISTS(SELECT 1 FROM runs r JOIN native_command_owners n ON n.tool_call_id=?1
-                     WHERE r.id=?6 AND r.outcome_json IS NOT NULL AND n.owner_id=?9 AND n.result_saved=0)))",
+             WHERE id = ?1 AND run_id = ?6 AND state='running'",
         params![
             tool_call_id.to_string(),
             state,
@@ -296,47 +239,26 @@ pub(super) fn finish_tool_call_in_transaction(
             identity.run_id.to_string(),
             display_json,
             execution_context_json,
-            native_owner.map(|owner| owner.to_string()),
         ],
     )?;
     if updated != 1 {
         return Err(SessionRuntimeError::Unavailable);
-    }
-    if let Some(owner) = native_owner {
-        let written = transaction.execute(
-            "UPDATE native_command_owners SET result_saved=?3 WHERE tool_call_id=?1 AND owner_id=?2",
-            params![tool_call_id.to_string(), owner.to_string(), settled || identity.kind != RunKind::GoalCheck],
-        )?;
-        if written != 1 {
-            return Err(SessionRuntimeError::CONSTRAINT);
-        }
     }
     for update in &file_states {
         record_session_file(transaction, identity.session_id, update, now)?;
     }
     // The complete output and the result whose marker cites it commit
     // together: a marker never names a handle the store does not hold.
-    if settled && native_owner.is_some() {
-        // A failed observation may already have spilled its placeholder. The
-        // original owner's actual output replaces it atomically with the row.
-        transaction.execute(
-            "DELETE FROM tool_spills WHERE tool_call_id=?1",
-            [tool_call_id.to_string()],
-        )?;
-    }
     if let Some(spill) = spill {
         store_tool_spill(transaction, identity, tool_call_id, &tool_name, spill, now)?;
     }
     let tool_call = load_tool_call(transaction, tool_call_id)?;
-    let event = append_event(
+    append_event(
         transaction,
         EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolCallFinished { tool_call },
     )?;
-    Ok(ToolCallCommit {
-        event,
-        context_exhausted,
-    })
+    Ok(ToolCallCommit { context_exhausted })
 }
 
 /// Writes one complete output under its call. Past the per-session cap, the
@@ -526,81 +448,11 @@ pub(super) fn record_session_file(
     Ok(())
 }
 
-/// Copies the workspace's effective config grants into the new session's
-/// grant set, inside the CreateSession transaction. From here on the gate
-/// consults only `session_grants`, so config-seeded and approve-for-session
-/// grants are indistinguishable. Malformed or excess entries are skipped
-/// rather than failing creation: the config layer already validated
-/// well-formed grants, and a clamped seed never adds authority.
-pub(super) fn insert_seed_grants(
-    transaction: &Connection,
-    session_id: SessionId,
-    seed: &WorkspaceGrantSeed,
-    now: u64,
-) -> Result<(), SessionRuntimeError> {
-    let tools = seed.tools.iter().map(|value| ("tool", value));
-    let prefixes = seed
-        .shell_prefixes
-        .iter()
-        .map(|value| ("shell_prefix", value));
-    let hosts = seed.hosts.iter().map(|value| ("host", value));
-    let existing: u32 = transaction.query_row(
-        "SELECT COUNT(*) FROM session_grants WHERE session_id=?1",
-        [session_id.to_string()],
-        |row| row.get(0),
-    )?;
-    let mut remaining = MAX_SESSION_GRANTS.saturating_sub(existing);
-    for (kind, value) in tools.chain(prefixes).chain(hosts) {
-        let value = value.trim();
-        if value.is_empty() || value.len() > MAX_GRANT_BYTES {
-            continue;
-        }
-        // An explicit trusted seed supersedes a reviewer's exact-call row.
-        // Promotion adds no row and must still work at the grant cap.
-        if transaction.execute(
-            "UPDATE session_grants SET source='human', run_id=NULL, created_at_ms=?4
-             WHERE session_id=?1 AND kind=?2 AND value=?3
-               AND source IN ('delegate', 'jev')",
-            params![session_id.to_string(), kind, value, now],
-        )? != 0
-        {
-            continue;
-        }
-        if remaining == 0 {
-            continue;
-        }
-        let inserted = transaction.execute(
-            "INSERT OR IGNORE INTO session_grants(
-                     session_id, kind, value, created_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4)",
-            params![session_id.to_string(), kind, value, now],
-        )?;
-        if inserted != 0 {
-            remaining -= 1;
-        }
-    }
-    Ok(())
-}
-
-/// Effective local policy plus the ancestor ceilings applied before review.
+/// Effective local mode plus the ancestor ceilings applied before it.
 #[derive(Clone, Debug)]
 pub(super) struct ToolApprovalPolicy {
     pub mode: ApprovalMode,
-    pub grants: approval::SessionGrants,
-    pub delegate: Option<approval::ApprovalDelegate>,
-    pub ancestors: Vec<(ApprovalMode, approval::SessionGrants)>,
-    pub supervised: bool,
-}
-
-impl ToolApprovalPolicy {
-    fn same_authority(&self, other: &Self) -> bool {
-        // Delegate selection controls who reviews, not what they can authorize.
-        // An already requested review remains valid across preference changes.
-        self.mode == other.mode
-            && self.grants == other.grants
-            && self.ancestors == other.ancestors
-            && self.supervised == other.supervised
-    }
+    pub ancestors: Vec<ApprovalMode>,
 }
 
 /// Recover the immutable policy inputs recorded when the gate requested this
@@ -687,7 +539,6 @@ pub(super) fn migrate_pending_approval_inputs(
             fetch,
             question,
             edit,
-            delegated,
         } = envelope.event
         else {
             tracing::warn!(%call_id, "legacy approval inputs have the wrong type; approval remains disabled for this hold");
@@ -706,7 +557,6 @@ pub(super) fn migrate_pending_approval_inputs(
             edit,
             question: question.map(|value| *value),
             fetch: fetch.map(|value| *value),
-            delegated,
         };
         connection.execute(
             "UPDATE tool_calls SET approval_inputs_json=?2 WHERE id=?1",
@@ -727,93 +577,41 @@ pub(super) fn load_tool_approval_policy(
     connection: &Connection,
     session_id: SessionId,
 ) -> Result<ToolApprovalPolicy, SessionRuntimeError> {
-    let (mode, grants, delegate) = load_approval_policy(connection, session_id)?;
-    let ancestors = load_ancestor_approval_policies(connection, session_id)?;
-    let spawned: bool = connection.query_row(
-        "SELECT owner_run_id IS NOT NULL FROM sessions WHERE id = ?1",
-        [session_id.to_string()],
-        |row| row.get(0),
-    )?;
     Ok(ToolApprovalPolicy {
-        mode,
-        grants,
-        delegate,
-        supervised: spawned && mode != ApprovalMode::ReadOnly,
-        ancestors,
+        mode: load_approval_mode(connection, session_id)?,
+        ancestors: load_ancestor_approval_modes(connection, session_id)?,
     })
 }
 
-pub(super) fn load_ancestor_approval_policies(
+pub(super) fn load_ancestor_approval_modes(
     connection: &Connection,
     session_id: SessionId,
-) -> Result<Vec<(ApprovalMode, approval::SessionGrants)>, SessionRuntimeError> {
-    let mut policies = Vec::new();
+) -> Result<Vec<ApprovalMode>, SessionRuntimeError> {
+    let mut modes = Vec::new();
     let mut current = session_id;
     for _ in 0..=MAX_CHILD_DEPTH {
         let Some(parent) = session_parent(connection, current)? else {
-            return Ok(policies);
+            return Ok(modes);
         };
-        let (mode, grants, _) = load_approval_policy(connection, parent)?;
-        policies.push((mode, grants));
+        modes.push(load_approval_mode(connection, parent)?);
         current = parent;
     }
     Err(SessionRuntimeError::CONSTRAINT)
 }
 
-/// The session's mode, grants, and optional override of the configured delegate.
-pub(super) fn load_approval_policy(
+pub(super) fn load_approval_mode(
     connection: &Connection,
     session_id: SessionId,
-) -> Result<
-    (
-        ApprovalMode,
-        approval::SessionGrants,
-        Option<approval::ApprovalDelegate>,
-    ),
-    SessionRuntimeError,
-> {
-    let (mode, delegate) = connection
+) -> Result<ApprovalMode, SessionRuntimeError> {
+    let mode = connection
         .query_row(
-            "SELECT approval_mode, approval_delegate FROM sessions WHERE id = ?1",
+            "SELECT approval_mode FROM sessions WHERE id = ?1",
             [session_id.to_string()],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            |row| row.get::<_, String>(0),
         )
         .optional()?
         .ok_or(SessionRuntimeError::SessionNotFound)?;
-    let mode = parse_approval_mode(&mode)?;
-    let delegate = parse_approval_delegate(delegate.as_deref())?;
-    let mut statement = connection
-        .prepare("SELECT kind, value, source FROM session_grants WHERE session_id = ?1")?;
-    let rows = statement
-        .query_map([session_id.to_string()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut grants = approval::SessionGrants::default();
-    for (kind, value, source) in rows {
-        match (source.as_str(), kind.as_str()) {
-            ("human", "tool") => {
-                grants.tools.insert(value);
-            }
-            ("human", "shell_prefix") => grants.shell_prefixes.push(value),
-            ("human", "host") => grants.hosts.push(value),
-            // A delegate row is an exact string whichever delegate wrote it;
-            // the kinds it may hold are the two the gate can match exactly.
-            // Anything else in the table is a write this code never made.
-            ("delegate" | "jev", "shell_prefix") => {
-                grants.delegate.commands.insert(value);
-            }
-            ("delegate" | "jev", "host") => {
-                grants.delegate.hosts.insert(value);
-            }
-            _ => return Err(SessionRuntimeError::CONSTRAINT),
-        }
-    }
-    Ok((mode, grants, delegate))
+    parse_approval_mode(&mode)
 }
 
 pub(super) fn deny_tool_call(
@@ -894,8 +692,6 @@ pub(crate) struct ApprovalPreviews {
     pub(crate) edit: Option<EditPreview>,
     pub(crate) question: Option<QuestionPreview>,
     pub(crate) fetch: Option<FetchPreview>,
-    /// An approval delegate decides before any human is asked.
-    pub(crate) delegated: bool,
 }
 
 impl ApprovalPreviews {
@@ -934,17 +730,15 @@ pub(super) fn request_tool_approval(
         edit,
         question,
         fetch,
-        delegated,
     } = previews;
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
     let updated = transaction.execute(
-        "UPDATE tool_calls SET state = 'awaiting_approval', approval_delegated = ?3, approval_inputs_json = ?4
+        "UPDATE tool_calls SET state = 'awaiting_approval', approval_inputs_json = ?3
              WHERE id = ?1 AND run_id = ?2 AND state = 'requested'",
         params![
             tool_call_id.to_string(),
             identity.run_id.to_string(),
-            delegated,
             inputs_json
         ],
     )?;
@@ -961,338 +755,10 @@ pub(super) fn request_tool_approval(
             edit,
             question: question.map(Box::new),
             fetch: fetch.map(Box::new),
-            delegated,
         },
     )?;
     transaction.commit()?;
     Ok(event)
-}
-
-/// The exact string a delegate's approval may bless for the rest of the
-/// session, and the run whose cap it counts against. Only the two shapes the
-/// gate matches byte-for-byte exist; a delegate never records a tool name or
-/// a prefix, because either would widen what its own later verdicts skip.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DelegateGrant {
-    Command(String),
-    Host(String),
-}
-
-/// Delegate grants one run may record. Bounds how much a single run's
-/// reviewer can widen the session without a human, independent of the
-/// session-wide `MAX_SESSION_GRANTS`.
-pub(crate) const MAX_DELEGATE_GRANTS_PER_RUN: u32 = 64;
-
-/// Resolves one awaiting approval as reviewer-approved, unless a client
-/// resolution already committed — the client always wins the race. Returns
-/// the resolution event to publish when the reviewer's approval landed, and
-/// `None` when the call was no longer awaiting (already resolved, or the run
-/// finished and interrupted it).
-///
-/// A `grant` is recorded in the same transaction as the approval when it fits
-/// a session grant (non-empty, within `MAX_GRANT_BYTES`, session under
-/// `MAX_SESSION_GRANTS`) and this run is under `MAX_DELEGATE_GRANTS_PER_RUN`.
-/// A grant that does not fit is dropped and the call still executes once:
-/// the storage rule never fails an approval. The row's `source` names the
-/// delegate (`delegate` for the reviewer model, `jev` for Jev), so the gate
-/// reads it as an exact match only, the workspace promotion path never sees
-/// it, and an audit can tell the two delegates apart. If task or ancestor
-/// authority changed during review, settle as a policy denial instead of
-/// applying the stale verdict or recording a grant. A client resolution that
-/// already won remains authoritative.
-pub(super) fn resolve_approval_by_reviewer(
-    connection: &mut Connection,
-    store_id: StoreId,
-    identity: RunIdentity,
-    tool_call_id: ToolCallId,
-    grant: Option<DelegateGrant>,
-    expected_policy: &ToolApprovalPolicy,
-) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
-    let transaction = store::begin_unit(connection)?;
-    if !load_tool_approval_policy(&transaction, identity.session_id)?
-        .same_authority(expected_policy)
-    {
-        let event = deny_pending_approval(
-            &transaction,
-            store_id,
-            identity,
-            tool_call_id,
-            approval::AUTHORITY_CHANGED_RESULT,
-            (ApprovalResolution::Denied, None),
-        )?;
-        transaction.commit()?;
-        return Ok(event);
-    }
-    let now = now_ms();
-    let updated = transaction.execute(
-        "UPDATE tool_calls
-             SET state = 'requested', approval_resolution = ?2, resolved_at_ms = ?3
-             WHERE id = ?1 AND run_id = ?4 AND state = 'awaiting_approval'
-               AND approval_resolution IS NULL",
-        params![
-            tool_call_id.to_string(),
-            approval_resolution_str(ApprovalResolution::ApprovedByReviewer),
-            now,
-            identity.run_id.to_string(),
-        ],
-    )?;
-    if updated != 1 {
-        return Ok(None);
-    }
-    if let Some(grant) = grant {
-        let (kind, value) = match &grant {
-            DelegateGrant::Command(command) => ("shell_prefix", command.trim()),
-            DelegateGrant::Host(host) => ("host", host.trim()),
-        };
-        let session = identity.session_id.to_string();
-        let run = identity.run_id.to_string();
-        let recordable = !value.is_empty() && value.len() <= MAX_GRANT_BYTES && {
-            let already_stored: bool = transaction.query_row(
-                "SELECT EXISTS(
-                     SELECT 1 FROM session_grants
-                     WHERE session_id = ?1 AND kind = ?2 AND value = ?3
-                 )",
-                params![session, kind, value],
-                |row| row.get(0),
-            )?;
-            already_stored || {
-                let session_total: u32 = transaction.query_row(
-                    "SELECT COUNT(*) FROM session_grants WHERE session_id = ?1",
-                    [&session],
-                    |row| row.get(0),
-                )?;
-                let run_total: u32 = transaction.query_row(
-                    "SELECT COUNT(*) FROM session_grants
-                     WHERE session_id = ?1 AND source IN ('delegate', 'jev') AND run_id = ?2",
-                    params![session, run],
-                    |row| row.get(0),
-                )?;
-                session_total < MAX_SESSION_GRANTS && run_total < MAX_DELEGATE_GRANTS_PER_RUN
-            }
-        };
-        if recordable {
-            // OR IGNORE: a human grant with the same (kind, value) already
-            // covers the call and is the wider of the two; keep it.
-            transaction.execute(
-                "INSERT OR IGNORE INTO session_grants(
-                         session_id, kind, value, created_at_ms, source, run_id
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    session,
-                    kind,
-                    value,
-                    now,
-                    super::runtime::delegate_grant_source(DelegateIdentity::Reviewer),
-                    run
-                ],
-            )?;
-        }
-    }
-    let tool_call = load_tool_call(&transaction, tool_call_id)?;
-    let event = append_event(
-        &transaction,
-        EventContext::for_run(store_id, identity, now),
-        SessionEvent::ToolApprovalResolved {
-            tool_call,
-            resolution: ApprovalResolution::ApprovedByReviewer,
-            delegate: Some(DelegateIdentity::Reviewer),
-        },
-    )?;
-    transaction.commit()?;
-    Ok(Some(event))
-}
-
-/// A reviewer denial: the call settles as denied with the reviewer's bounded
-/// reason in one transaction, exactly like a human denial. Final under `auto`
-/// and `supervised`. `Ok(None)` when a client resolution won the race.
-pub(super) fn deny_approval_by_reviewer(
-    connection: &mut Connection,
-    store_id: StoreId,
-    identity: RunIdentity,
-    tool_call_id: ToolCallId,
-    message: &str,
-    delegate: DelegateIdentity,
-) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
-    let transaction = store::begin_unit(connection)?;
-    let event = deny_pending_approval(
-        &transaction,
-        store_id,
-        identity,
-        tool_call_id,
-        message,
-        (ApprovalResolution::DeniedByReviewer, Some(delegate)),
-    )?;
-    transaction.commit()?;
-    Ok(event)
-}
-
-fn deny_pending_approval(
-    transaction: &Connection,
-    store_id: StoreId,
-    identity: RunIdentity,
-    tool_call_id: ToolCallId,
-    message: &str,
-    settlement: (ApprovalResolution, Option<DelegateIdentity>),
-) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
-    let now = now_ms();
-    let Some((state, resolution, provider_call_id, first_result_in_turn)) = transaction
-        .query_row(
-            "SELECT current.state, current.approval_resolution, current.provider_call_id,
-                    NOT EXISTS(
-                        SELECT 1 FROM tool_calls previous
-                        WHERE previous.run_id = current.run_id
-                          AND previous.turn_ordinal = current.turn_ordinal
-                          AND previous.result IS NOT NULL
-                    )
-             FROM tool_calls current WHERE current.id = ?1 AND current.run_id = ?2",
-            params![tool_call_id.to_string(), identity.run_id.to_string()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, bool>(3)?,
-                ))
-            },
-        )
-        .optional()?
-    else {
-        return Err(SessionRuntimeError::ToolCallNotFound);
-    };
-    if state != "awaiting_approval" || resolution.is_some() {
-        return Ok(None);
-    }
-    reserve_tool_result_capacity(
-        transaction,
-        identity.run_id,
-        &provider_call_id,
-        message,
-        first_result_in_turn,
-    )?;
-    transaction.execute(
-        "UPDATE tool_calls
-             SET state = 'denied', result = ?2, is_error = 1,
-                 approval_resolution = ?3, resolved_at_ms = ?4, finished_at_ms = ?4
-             WHERE id = ?1 AND state = 'awaiting_approval'",
-        params![
-            tool_call_id.to_string(),
-            message,
-            approval_resolution_str(settlement.0),
-            now,
-        ],
-    )?;
-    let tool_call = load_tool_call(transaction, tool_call_id)?;
-    let event = append_event(
-        transaction,
-        EventContext::for_run(store_id, identity, now),
-        SessionEvent::ToolApprovalResolved {
-            tool_call,
-            resolution: settlement.0,
-            delegate: settlement.1,
-        },
-    )?;
-    Ok(Some(event))
-}
-
-/// A delegate handed the hold to the human: records why, without touching
-/// the call. `Ok(None)` when the call is no longer awaiting approval (a
-/// client resolution won the race), in which case nothing is published.
-pub(super) fn escalate_tool_approval(
-    connection: &mut Connection,
-    store_id: StoreId,
-    identity: RunIdentity,
-    tool_call_id: ToolCallId,
-    delegate: Option<DelegateIdentity>,
-    reason: &str,
-) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
-    let transaction = store::begin_unit(connection)?;
-    let awaiting: bool = transaction
-        .query_row(
-            "SELECT state = 'awaiting_approval' AND approval_resolution IS NULL
-             FROM tool_calls WHERE id = ?1 AND run_id = ?2",
-            params![tool_call_id.to_string(), identity.run_id.to_string()],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or(false);
-    if !awaiting {
-        return Ok(None);
-    }
-    // A human is asked from here on; summaries project that.
-    transaction.execute(
-        "UPDATE tool_calls SET approval_delegated=0,
-            approval_escalation_json=?2 WHERE id=?1",
-        params![
-            tool_call_id.to_string(),
-            serde_json::to_string(&qq_protocol::ApprovalEscalation {
-                delegate,
-                reason: reason.to_owned(),
-            })?
-        ],
-    )?;
-    let event = append_event(
-        &transaction,
-        EventContext::for_run(store_id, identity, now_ms()),
-        SessionEvent::ToolApprovalEscalated {
-            tool_call_id,
-            delegate,
-            reason: reason.to_owned(),
-        },
-    )?;
-    transaction.commit()?;
-    Ok(Some(event))
-}
-
-/// What a reviewer may know about the run beyond the held call: the brief
-/// that created a child run (its prompt) and the most recent finished tool
-/// calls by name and path. Bounded; never results or model text.
-pub(super) fn load_review_context(
-    connection: &Connection,
-    identity: RunIdentity,
-) -> Result<(Option<String>, Vec<RecentAction>), SessionRuntimeError> {
-    let task_brief = if identity.child {
-        connection
-            .query_row(
-                "SELECT m.output FROM messages m JOIN runs r ON r.user_message_id = m.id
-                 WHERE r.id = ?1",
-                [identity.run_id.to_string()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|brief| truncate_utf8(brief, MAX_REVIEW_BRIEF_BYTES))
-    } else {
-        None
-    };
-    let mut statement = connection.prepare(
-        "SELECT name, arguments_json FROM tool_calls
-             WHERE run_id = ?1 AND result IS NOT NULL
-             ORDER BY turn_ordinal DESC, call_ordinal DESC LIMIT ?2",
-    )?;
-    let mut recent = statement
-        .query_map(
-            params![
-                identity.run_id.to_string(),
-                MAX_REVIEW_RECENT_ACTIONS as i64
-            ],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|(tool, arguments)| RecentAction {
-            path: serde_json::from_str::<serde_json::Value>(&arguments)
-                .ok()
-                .and_then(|arguments| {
-                    arguments
-                        .get("path")
-                        .or_else(|| arguments.get("command"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                }),
-            tool,
-        })
-        .collect::<Vec<_>>();
-    recent.reverse();
-    Ok((task_brief, recent))
 }
 
 pub(super) fn conclude_tool_approval(
@@ -1333,15 +799,12 @@ pub(super) fn conclude_tool_approval(
         // A client resolution won the race; its transaction already
         // persisted the state change and published the event.
         return match parse_approval_resolution(&resolution)? {
-            ApprovalResolution::ApprovedOnce
-            | ApprovalResolution::ApprovedForSession
-            | ApprovalResolution::ApprovedForWorkspace
-            | ApprovalResolution::ApprovedByReviewer => Ok(ConcludedApproval::Approved),
-            ApprovalResolution::Denied
-            | ApprovalResolution::DeniedTimeout
-            | ApprovalResolution::DeniedByReviewer => Ok(ConcludedApproval::Denied {
-                message: result.unwrap_or_else(|| approval::USER_DENIED_RESULT.to_owned()),
-            }),
+            ApprovalResolution::ApprovedOnce => Ok(ConcludedApproval::Approved),
+            ApprovalResolution::Denied | ApprovalResolution::DeniedTimeout => {
+                Ok(ConcludedApproval::Denied {
+                    message: result.unwrap_or_else(|| approval::USER_DENIED_RESULT.to_owned()),
+                })
+            }
             ApprovalResolution::Answered => Ok(ConcludedApproval::Answered {
                 result: result.unwrap_or_else(|| approval::DECLINED_QUESTION_RESULT.to_owned()),
             }),
@@ -1377,7 +840,6 @@ pub(super) fn conclude_tool_approval(
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::DeniedTimeout,
-            delegate: None,
         },
     )?;
     let run_ids = goal_policy::pause_for_approval(
@@ -1396,82 +858,6 @@ pub(super) fn conclude_tool_approval(
     } else {
         Ok(ConcludedApproval::GoalStopped { run_ids })
     }
-}
-
-pub(super) fn next_grant_promotion(
-    connection: &mut Connection,
-) -> Result<Option<PendingGrantPromotion>, SessionRuntimeError> {
-    let row = connection
-        .query_row(
-            "SELECT command_id, promotion_json
-             FROM pending_workspace_grant_promotions
-             ORDER BY created_at_ms, command_id
-             LIMIT 1",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()?;
-    let Some((command_id, promotion)) = row else {
-        return Ok(None);
-    };
-    let row_command_id = parse_id::<CommandId>(&command_id)?;
-    let promotion = serde_json::from_str::<PendingGrantPromotion>(&promotion)?;
-    if promotion.command_id != row_command_id {
-        return Err(SessionRuntimeError::CODEC);
-    }
-    Ok(Some(promotion))
-}
-
-pub(super) fn settle_grant_promotion(
-    connection: &mut Connection,
-    store_id: StoreId,
-    promotion: &PendingGrantPromotion,
-    outcome: WorkspaceGrantOutcome,
-) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
-    let outcome = match outcome {
-        WorkspaceGrantOutcome::Failed { message } => WorkspaceGrantOutcome::Failed {
-            message: truncate_utf8(message, MAX_FAILURE_MESSAGE_BYTES),
-        },
-        outcome => outcome,
-    };
-    let transaction = store::begin_immediate_unit(connection)?;
-    let pending: bool = transaction.query_row(
-        "SELECT EXISTS(
-                 SELECT 1 FROM pending_workspace_grant_promotions
-                 WHERE command_id = ?1
-             )",
-        [promotion.command_id.to_string()],
-        |row| row.get(0),
-    )?;
-    if !pending {
-        return Ok(None);
-    }
-    // Only the workspace's event log is touched: the promotion outcome stays
-    // publishable even when the session was deleted in the meantime.
-    let event = append_event(
-        &transaction,
-        EventContext::for_run_ids(
-            store_id,
-            promotion.workspace_id,
-            promotion.session_id,
-            promotion.run_id,
-            Some(promotion.command_id),
-            now_ms(),
-        ),
-        SessionEvent::WorkspaceGrantPromoted {
-            grant: promotion.grant.clone(),
-            outcome,
-        },
-    )?;
-    let deleted = transaction.execute(
-        "DELETE FROM pending_workspace_grant_promotions WHERE command_id = ?1",
-        [promotion.command_id.to_string()],
-    )?;
-    if deleted != 1 {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    }
-    transaction.commit()?;
-    Ok(Some(event))
 }
 
 pub(super) fn reserve_tool_result_capacity(
@@ -1628,9 +1014,9 @@ pub(super) fn load_approval_preview(
     connection: &Connection,
     tool_call_id: ToolCallId,
 ) -> Result<Option<qq_protocol::ApprovalPreview>, SessionRuntimeError> {
-    let (encoded, escalated): (Option<String>, Option<String>) = connection.query_row(
-        "SELECT approval_inputs_json,approval_escalation_json FROM tool_calls WHERE id=?1 AND state='awaiting_approval' AND approval_resolution IS NULL",
-        [tool_call_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?)),
+    let encoded: Option<String> = connection.query_row(
+        "SELECT approval_inputs_json FROM tool_calls WHERE id=?1 AND state='awaiting_approval' AND approval_resolution IS NULL",
+        [tool_call_id.to_string()], |row| row.get(0),
     )?;
     encoded
         .map(|json| {
@@ -1640,82 +1026,7 @@ pub(super) fn load_approval_preview(
                 edit: inputs.edit,
                 question: inputs.question,
                 fetch: inputs.fetch,
-                escalated: escalated.as_deref().map(serde_json::from_str).transpose()?,
             })
         })
         .transpose()
-}
-
-pub(super) fn migrate_approval_escalations(
-    connection: &Connection,
-) -> Result<(), SessionRuntimeError> {
-    let pending: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE state='awaiting_approval' AND approval_resolution IS NULL AND approval_inputs_json IS NOT NULL)",
-        [], |row| row.get(0),
-    )?;
-    if !pending {
-        return Ok(());
-    }
-    let store: Option<String> = connection
-        .query_row(
-            "SELECT value FROM metadata WHERE key='store_id'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(store) = store else {
-        return Ok(());
-    };
-    let mut statement = connection.prepare(
-        "WITH evidence AS MATERIALIZED (
-            SELECT workspace_id,sequence,envelope_json FROM events
-            WHERE length(CAST(envelope_json AS BLOB))<=1048576
-              AND CASE WHEN json_valid(envelope_json)
-                  THEN json_extract(envelope_json,'$.event.type')='tool_approval_escalated' ELSE 0 END
-        ) SELECT e.envelope_json,c.id,c.run_id,r.session_id,s.workspace_id,e.sequence
-          FROM evidence e JOIN tool_calls c ON c.id=json_extract(e.envelope_json,'$.event.tool_call_id')
-          JOIN runs r ON r.id=c.run_id JOIN sessions s ON s.id=r.session_id
-          WHERE c.state='awaiting_approval' AND c.approval_resolution IS NULL
-            AND c.approval_inputs_json IS NOT NULL AND e.workspace_id=s.workspace_id
-            AND json_extract(e.envelope_json,'$.event.type')='tool_approval_escalated'
-          ORDER BY e.workspace_id,e.sequence",
-    )?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        let encoded: String = row.get(0)?;
-        let Ok(receipt) = serde_json::from_str::<SessionEventEnvelope>(&encoded) else {
-            continue;
-        };
-        let call: String = row.get(1)?;
-        let run: String = row.get(2)?;
-        let session: String = row.get(3)?;
-        let workspace: String = row.get(4)?;
-        let sequence: u64 = row.get(5)?;
-        let SessionEvent::ToolApprovalEscalated {
-            tool_call_id,
-            delegate,
-            reason,
-        } = receipt.event
-        else {
-            continue;
-        };
-        if receipt.cursor.store_id.to_string() != store
-            || receipt.cursor.workspace_id.to_string() != workspace
-            || receipt.cursor.sequence != sequence
-            || receipt.session_id.to_string() != session
-            || receipt.run_id.map(|id| id.to_string()).as_deref() != Some(run.as_str())
-            || tool_call_id.to_string() != call
-        {
-            continue;
-        }
-        let escalation = qq_protocol::ApprovalEscalation { delegate, reason };
-        let encoded = serde_json::to_string(&escalation)?;
-        if encoded.len() > 8192 {
-            continue;
-        }
-        connection
-            .prepare_cached("UPDATE tool_calls SET approval_escalation_json=?2 WHERE id=?1")?
-            .execute(params![call, encoded])?;
-    }
-    Ok(())
 }

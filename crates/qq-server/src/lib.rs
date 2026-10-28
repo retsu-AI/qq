@@ -30,7 +30,6 @@ use futures_util::StreamExt;
 use qq_core::PublishedEventStream;
 
 #[doc(hidden)]
-pub mod command_owner;
 mod cors;
 
 pub use cors::{AllowedOriginError, AllowedOrigins, MAX_ALLOWED_ORIGINS, MAX_ORIGIN_BYTES};
@@ -1014,7 +1013,6 @@ async fn session_command(
         | SessionCommand::CancelRun { .. }
         | SessionCommand::RespondToolApproval { .. }
         | SessionCommand::SetApprovalMode { .. }
-        | SessionCommand::SetApprovalDelegate { .. }
         | SessionCommand::SetSessionModel { .. }
         | SessionCommand::SetSessionProfile { .. }
         | SessionCommand::SetSessionEffort { .. }
@@ -1123,8 +1121,6 @@ fn server_capabilities(
         },
         approvals: vec![
             "approve_once".to_owned(),
-            "approve_for_session".to_owned(),
-            "approve_for_workspace".to_owned(),
             "deny".to_owned(),
             "answer".to_owned(),
         ],
@@ -2723,10 +2719,6 @@ mod tests {
                 session_id,
                 mode: ApprovalMode::Full,
             },
-            SessionCommandKind::SetApprovalDelegate => SessionCommand::SetApprovalDelegate {
-                session_id,
-                delegate: Some(qq_protocol::ApprovalDelegate::Off),
-            },
             SessionCommandKind::SetSessionModel => SessionCommand::SetSessionModel {
                 session_id,
                 model: qq_protocol::ModelSelection::default(),
@@ -3005,7 +2997,10 @@ mod tests {
             qq_core::catalog::MAX_CATALOG_TOOLS
         );
         assert_eq!(capabilities.tools.external_prefixes, ["mcp__", "ext__"]);
-        assert_eq!(body["approvals"][3], "deny");
+        assert_eq!(
+            body["approvals"],
+            serde_json::json!(["approve_once", "deny", "answer"])
+        );
 
         let (status, body) = post(
             &server,

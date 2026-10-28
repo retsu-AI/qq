@@ -69,7 +69,6 @@ async fn duration_withdraws_pending_approval_without_executing_the_tool() {
             tool: "__test_mutate",
             arguments: "{}",
             tool_turns: 1,
-            delegate: approval::ApprovalDelegate::ByMode,
         }),
         ApprovalMode::Ask,
     )
@@ -116,7 +115,6 @@ async fn duration_limited_run_does_not_settle_when_process_cleanup_is_unconfirme
             tool: "shell",
             arguments: crate::tools::PANIC_SHELL_ARGUMENTS,
             tool_turns: 1,
-            delegate: approval::ApprovalDelegate::ByMode,
         }),
         ApprovalMode::Full,
     )
@@ -162,7 +160,6 @@ async fn duration_stops_shell_while_output_persistence_is_blocked() {
             tool: "shell",
             arguments: r#"{"command":"printf ready; sleep 30"}"#,
             tool_turns: 1,
-            delegate: approval::ApprovalDelegate::ByMode,
         }),
         ApprovalMode::Ask,
     )
@@ -241,7 +238,6 @@ async fn duration_waits_for_blocking_attachment_guidance_and_skill_cleanup() {
                 tool: "load_skill",
                 arguments: r#"{"name":"stable"}"#,
                 tool_turns: usize::from(kind == "skill"),
-                delegate: approval::ApprovalDelegate::ByMode,
             }),
             ApprovalMode::Full,
         )
@@ -891,7 +887,7 @@ impl Provider for DeadlineProvider {
                 ProviderEvent::ToolCallStarted { id: "sleep".to_owned(), name: "shell".to_owned() },
                 ProviderEvent::ToolCallArgumentsDelta {
                     id: "sleep".to_owned(),
-                    json: serde_json::json!({"command": "sleep 30; printf late > late.txt", "timeout_seconds": 1800}).to_string(),
+                    json: serde_json::json!({"command": "printf before-deadline; sleep 30; printf late > late.txt", "timeout_seconds": 1800}).to_string(),
                 },
                 ProviderEvent::ToolCallCompleted { id: "sleep".to_owned() },
                 ProviderEvent::Completed { usage: None },
@@ -1002,6 +998,24 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
         "no final provider turn after expiry"
     );
     assert!(!directory.path().join("late.txt").exists());
+    // The command ran: its real output and a timeout outcome are durable,
+    // not an "interrupted before a result was recorded" placeholder.
+    let result: String = runtime
+        .inner
+        .store
+        .call(store::Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT result FROM tool_calls WHERE run_id=?1",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(
+        result.starts_with("shell exit=timeout ") && result.contains("before-deadline"),
+        "{result}"
+    );
     let next = queue_prompt(&runtime, session_id, "continue".to_owned()).await;
     let observed = collect_until(&mut events, finished_for(next)).await;
     assert!(observed.iter().any(|event| matches!(

@@ -1039,9 +1039,7 @@ mod tests {
     #[test]
     fn untrusted_project_configuration_fails_trust_until_granted() {
         let fixture = Fixture::new(Arc::new(MemoryKeyring::default()));
-        fixture.write_project(
-            "(version: 1, model: \"openai/gpt-5.6\", policy: (allow_shell_prefixes: [\"cargo test\"]))",
-        );
+        fixture.write_project("(version: 1, model: \"openai/gpt-5.6\")");
         let report = fixture.run();
 
         let configuration = check(&report, "configuration");
@@ -1059,11 +1057,7 @@ mod tests {
             trust.details[0].contains(&project_file.display().to_string()),
             "{trust:#?}"
         );
-        assert!(
-            trust.details[0].contains("model")
-                && trust.details[0].contains("policy.allow_shell_prefixes"),
-            "{trust:#?}"
-        );
+        assert!(trust.details[0].contains("model"), "{trust:#?}");
         assert!(
             trust.remedy.as_deref().unwrap().contains("qq trust"),
             "{trust:#?}"

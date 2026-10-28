@@ -14,20 +14,20 @@
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use qq_protocol::{
-    AgentPlanDigest, AgentProfileId, AgentProfileSummary, ApprovalDecision, ApprovalDelegate,
-    ApprovalGrant, ApprovalMode, ApprovalResolution, BudgetExhaustion, BudgetLimitKind,
-    CAPABILITIES_VERSION, CapabilitiesRequest, CapabilitySupport, CommandId, CommandOutcome,
-    CommandReceipt, CommandRequest, ContentHash, Correlation, CredentialEpoch, DelegateIdentity,
-    EventCapabilities, EventCursor, FetchPreview, FinalOutput, GenerationCapabilities, InputPart,
-    InputPartKind, InstructionHash, LimitCapabilities, MessageId, MessageRole, MessageSnapshot,
-    MessageState, ModelSelection, OutputContract, PROTOCOL_VERSION, PackSummary,
-    PromptCacheCapabilities, PromptVersion, Question, QuestionPreview, ResolvedModel,
-    ResolvedModelVersion, RunActivity, RunFailure, RunFailureKind, RunId, RunLimits, RunOutcome,
-    RunPause, RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus, ServerCapabilities,
-    ServerInfo, SessionCommand, SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionId,
-    SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict, SkillCapabilities,
-    SteeringCapabilities, StoreId, TokenUsage, ToolCallId, ToolCallSnapshot, ToolCallState,
-    ToolCapabilities, ToolExposure, ToolHostSummary, WorkspaceId, WorkspaceToolCapabilities,
+    AgentPlanDigest, AgentProfileId, AgentProfileSummary, ApprovalDecision, ApprovalMode,
+    BudgetExhaustion, BudgetLimitKind, CAPABILITIES_VERSION, CapabilitiesRequest,
+    CapabilitySupport, CommandId, CommandOutcome, CommandReceipt, CommandRequest, ContentHash,
+    Correlation, CredentialEpoch, EventCapabilities, EventCursor, FetchPreview, FinalOutput,
+    GenerationCapabilities, InputPart, InputPartKind, InstructionHash, LimitCapabilities,
+    MessageId, MessageRole, MessageSnapshot, MessageState, ModelSelection, OutputContract,
+    PROTOCOL_VERSION, PackSummary, PromptCacheCapabilities, PromptVersion, Question,
+    QuestionPreview, ResolvedModel, ResolvedModelVersion, RunActivity, RunFailure, RunFailureKind,
+    RunId, RunLimits, RunOutcome, RunPause, RunPlanIdentity, RunPromptIdentity, RunSnapshot,
+    RunStatus, ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind, SessionEvent,
+    SessionEventEnvelope, SessionId, SessionStatus, SessionSummary, ShellCommandPreview,
+    ShellVerdict, SkillCapabilities, SteeringCapabilities, StoreId, TokenUsage, ToolCallId,
+    ToolCallSnapshot, ToolCallState, ToolCapabilities, ToolExposure, ToolHostSummary, WorkspaceId,
+    WorkspaceToolCapabilities,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -69,7 +69,6 @@ fn summary() -> SessionSummary {
         model: Some("openai/gpt-5.6".to_owned()),
         profile: AgentProfileId::new("review").unwrap(),
         approval_mode: ApprovalMode::ReadOnly,
-        approval_delegate: None,
         reasoning_effort: None,
         correlation: correlation(&[("thread", "t-1")]),
         context_tokens: Some(1200),
@@ -210,7 +209,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 40);
+    assert_eq!(PROTOCOL_VERSION, 41);
     let catalog_cursor = qq_protocol::WorkspaceCatalogCursor {
         store_id: StoreId::from_bytes([1; 16]),
         workspace_id: WorkspaceId::from_bytes([2; 16]),
@@ -479,27 +478,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             SessionCommand::RespondToolApproval {
                 run_id,
                 tool_call_id: ToolCallId::from_bytes([5; 16]),
-                decision: ApprovalDecision::ApproveForSession {
-                    grant: ApprovalGrant::ShellPrefix {
-                        prefix: "cargo test".to_owned(),
-                    },
-                },
-            },
-        ),
-    );
-    // Version 22: a host grant for `fetch`.
-    check(
-        "command_respond_tool_approval_host",
-        &command(
-            0x27,
-            SessionCommand::RespondToolApproval {
-                run_id,
-                tool_call_id: ToolCallId::from_bytes([8; 16]),
-                decision: ApprovalDecision::ApproveForSession {
-                    grant: ApprovalGrant::Host {
-                        host: "*.docs.rs".to_owned(),
-                    },
-                },
+                decision: ApprovalDecision::ApproveOnce,
             },
         ),
     );
@@ -534,17 +513,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             SessionCommand::SetSessionEffort {
                 session_id,
                 effort: Some(qq_reasoning::ReasoningEffort::Xhigh),
-            },
-        ),
-    );
-    // Version 28: the session off switch for the approval delegate.
-    check(
-        "command_set_approval_delegate",
-        &command(
-            0x28,
-            SessionCommand::SetApprovalDelegate {
-                session_id,
-                delegate: Some(ApprovalDelegate::Off),
             },
         ),
     );
@@ -613,17 +581,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             CommandOutcome::SessionEffortSet {
                 session_id,
                 effort: Some(qq_reasoning::ReasoningEffort::Xhigh),
-            },
-        ),
-    );
-    check(
-        "receipt_approval_delegate_set",
-        &receipt(
-            0x28,
-            15,
-            CommandOutcome::ApprovalDelegateSet {
-                session_id,
-                delegate: Some(ApprovalDelegate::Off),
             },
         ),
     );
@@ -732,40 +689,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 edit: None,
                 question: None,
                 fetch: None,
-                delegated: false,
-            },
-        ),
-    );
-    // Version 32: the hold goes to an approval delegate before any human.
-    check(
-        "event_tool_approval_requested_delegated",
-        &envelope(
-            22,
-            SessionEvent::ToolApprovalRequested {
-                tool_call: ToolCallSnapshot {
-                    id: ToolCallId::from_bytes([6; 16]),
-                    session_id,
-                    run_id,
-                    turn_ordinal: 1,
-                    call_ordinal: 1,
-                    provider_call_id: "call_0".to_owned(),
-                    name: "shell".to_owned(),
-                    arguments: r#"{"command":"git push"}"#.to_owned(),
-                    state: ToolCallState::AwaitingApproval,
-                    result: None,
-                    is_error: false,
-                    display: None,
-                },
-                shell: Some(Box::new(ShellCommandPreview {
-                    command: "git push".to_owned(),
-                    cwd: None,
-                    verdict: Some(ShellVerdict::Prompt),
-                    reasons: vec!["publishes".to_owned()],
-                })),
-                edit: None,
-                question: None,
-                fetch: None,
-                delegated: true,
             },
         ),
     );
@@ -780,53 +703,14 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     pending_holds: vec![
                         qq_protocol::PendingHold {
                             tool_call_id: ToolCallId::from_bytes([6; 16]),
-                            delegated: false,
                         },
                         qq_protocol::PendingHold {
                             tool_call_id: ToolCallId::from_bytes([7; 16]),
-                            delegated: true,
                         },
                     ],
                     running_side_question: Some(RunId::from_bytes([8; 16])),
                     ..summary()
                 }),
-            },
-        ),
-    );
-    // Version 28: a reviewer resolution names the delegate that wrote it.
-    check(
-        "event_tool_approval_resolved_by_reviewer",
-        &envelope(
-            23,
-            SessionEvent::ToolApprovalResolved {
-                tool_call: ToolCallSnapshot {
-                    id: ToolCallId::from_bytes([6; 16]),
-                    session_id,
-                    run_id,
-                    turn_ordinal: 1,
-                    call_ordinal: 1,
-                    provider_call_id: "call_0".to_owned(),
-                    name: "shell".to_owned(),
-                    arguments: r#"{"command":"rm -r target"}"#.to_owned(),
-                    state: ToolCallState::Requested,
-                    result: None,
-                    is_error: false,
-                    display: None,
-                },
-                resolution: ApprovalResolution::ApprovedByReviewer,
-                delegate: Some(DelegateIdentity::Reviewer),
-            },
-        ),
-    );
-    // Version 28: a delegate passed the hold to the human and said why.
-    check(
-        "event_tool_approval_escalated",
-        &envelope(
-            24,
-            SessionEvent::ToolApprovalEscalated {
-                tool_call_id: ToolCallId::from_bytes([6; 16]),
-                delegate: Some(DelegateIdentity::Reviewer),
-                reason: "the command deletes a directory the task never mentioned".to_owned(),
             },
         ),
     );
@@ -861,7 +745,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     }],
                 })),
                 fetch: None,
-                delegated: false,
             },
         ),
     );
@@ -893,7 +776,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     host: "docs.rs".to_owned(),
                     method: None,
                 })),
-                delegated: false,
             },
         ),
     );
@@ -1201,8 +1083,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
             approvals: vec![
                 "approve_once".to_owned(),
-                "approve_for_session".to_owned(),
-                "approve_for_workspace".to_owned(),
                 "deny".to_owned(),
                 "answer".to_owned(),
             ],
@@ -1388,6 +1268,12 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
 /// current encoding without invalidating what an older peer produced).
 #[test]
 fn historical_fixtures_still_decode() {
+    const REMOVED_IN_41: [&str; 4] = [
+        "\"approve_for_session\"",
+        "\"approve_for_workspace\"",
+        "\"set_approval_delegate\"",
+        "\"approval_delegate_set\"",
+    ];
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     for version in retained_versions(&root) {
         let directory = fixture_dir(version);
@@ -1404,46 +1290,68 @@ fn historical_fixtures_still_decode() {
         for path in entries {
             let name = path.file_stem().unwrap().to_str().unwrap();
             let stored = fs::read_to_string(&path).unwrap();
-            fn decode<T: DeserializeOwned>(path: &std::path::Path, stored: &str) -> T {
-                serde_json::from_str(stored).unwrap_or_else(|error| {
-                    panic!(
-                        "{}: does not decode as version {PROTOCOL_VERSION}: {error}",
-                        path.display()
-                    )
-                })
+            // Protocol 41 removed approval grants and `approval_delegate`:
+            // commands, receipts and capability lists naming them are rejected
+            // now, and so is a strict summary naming a delegate. Their other
+            // recorded events still decode, as `retired`; stores strip the
+            // summary fields on upgrade.
+            let removed = (!name.starts_with("event_")
+                && REMOVED_IN_41.iter().any(|removed| stored.contains(removed)))
+                || stored.contains("\"delegated\": true")
+                || stored.contains("\"approval_delegate\":")
+                || stored.contains("\"escalated\":");
+            let decode_error = |error: serde_json::Error| -> ! {
+                panic!(
+                    "{}: does not decode as version {PROTOCOL_VERSION}: {error}",
+                    path.display()
+                )
+            };
+            fn try_decode<T: DeserializeOwned>(stored: &str) -> Result<T, serde_json::Error> {
+                serde_json::from_str(stored)
+            }
+            macro_rules! decode {
+                ($type:ty) => {
+                    match try_decode::<$type>(&stored) {
+                        Ok(decoded) => Some(decoded),
+                        Err(_) if removed => None,
+                        Err(error) => decode_error(error),
+                    }
+                };
             }
             // The prefix selects the type exactly as the golden test named it.
             if name.starts_with("workspace_catalog_request") {
-                decode::<qq_protocol::WorkspaceCatalogRequest>(&path, &stored);
+                decode!(qq_protocol::WorkspaceCatalogRequest);
             } else if name.starts_with("workspace_catalog_") {
-                decode::<qq_protocol::WorkspaceCatalog>(&path, &stored);
+                decode!(qq_protocol::WorkspaceCatalog);
             } else if name == "command_acknowledge_check_interruption" {
-                decode::<SessionCommand>(&path, &stored);
+                decode!(SessionCommand);
             } else if name == "event_check_interruption_changed" {
-                decode::<SessionEvent>(&path, &stored);
+                decode!(SessionEvent);
             } else if name == "outcome_check_interruption_acknowledged" {
-                decode::<CommandOutcome>(&path, &stored);
+                decode!(CommandOutcome);
             } else if name == "snapshot_check_interruption" || name == "snapshot_pending_approvals"
             {
-                decode::<qq_protocol::WorkspaceSnapshot>(&path, &stored);
+                decode!(qq_protocol::WorkspaceSnapshot);
             } else if name.starts_with("command_") {
-                decode::<CommandRequest>(&path, &stored);
+                decode!(CommandRequest);
             } else if name.starts_with("receipt_") {
-                decode::<CommandReceipt>(&path, &stored);
+                decode!(CommandReceipt);
             } else if name.starts_with("event_") {
-                decode::<SessionEventEnvelope>(&path, &stored);
+                decode!(SessionEventEnvelope);
             } else if name.starts_with("outcome_") {
-                decode::<RunOutcome>(&path, &stored);
+                decode!(RunOutcome);
             } else if name.starts_with("snapshot_") {
-                decode::<RunSnapshot>(&path, &stored);
+                decode!(RunSnapshot);
             } else if name.starts_with("capabilities_request") {
-                decode::<CapabilitiesRequest>(&path, &stored);
+                decode!(CapabilitiesRequest);
             } else if name == "capabilities" {
-                let decoded = decode::<ServerCapabilities>(&path, &stored);
-                assert_eq!(decoded.protocol_version, version);
+                if let Some(decoded) = decode!(ServerCapabilities) {
+                    assert_eq!(decoded.protocol_version, version);
+                }
             } else if name == "server_info" {
-                let decoded = decode::<ServerInfo>(&path, &stored);
-                assert_eq!(decoded.protocol_version, version);
+                if let Some(decoded) = decode!(ServerInfo) {
+                    assert_eq!(decoded.protocol_version, version);
+                }
             } else {
                 panic!(
                     "{}: unrecognized fixture prefix; extend this test",
@@ -1674,10 +1582,7 @@ fn current_goal_commands_receipts_and_origins_match_goldens() {
 fn pending_approval_snapshot_matches_its_golden() {
     let mut summary = summary();
     let call = ToolCallId::from_bytes([9; 16]);
-    summary.pending_holds = vec![qq_protocol::PendingHold {
-        tool_call_id: call,
-        delegated: false,
-    }];
+    summary.pending_holds = vec![qq_protocol::PendingHold { tool_call_id: call }];
     let body = qq_protocol::SessionSnapshot {
         approval_previews: vec![qq_protocol::PendingApprovalPreview {
             tool_call_id: call,
@@ -1688,10 +1593,6 @@ fn pending_approval_snapshot_matches_its_golden() {
                         options: vec!["core".to_owned(), "provider".to_owned()],
                         free_text: true,
                     }],
-                }),
-                escalated: Some(qq_protocol::ApprovalEscalation {
-                    delegate: None,
-                    reason: "The reviewer needs a human decision".to_owned(),
                 }),
                 ..qq_protocol::ApprovalPreview::default()
             },

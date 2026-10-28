@@ -4,8 +4,6 @@
 #![forbid(unsafe_code)]
 pub mod builtin_auth;
 mod catalog;
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
-mod command_worker;
 pub mod mcp;
 pub mod plan;
 pub mod runtime;
@@ -13,7 +11,7 @@ pub mod runtime;
 pub use catalog::ModelDiscoveryError;
 
 /// The executable hosting the runtime. Process provenance pins the source
-/// revision, and the command worker refuses a worker from a different build.
+/// revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostBuild {
     /// Full source revision, with `-dirty` when the tree was modified.

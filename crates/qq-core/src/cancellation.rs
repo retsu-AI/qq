@@ -16,6 +16,7 @@ pub struct RunCancellation(Arc<Inner>);
 
 #[derive(Default)]
 struct Inner {
+    /// 0 running, 1 cancelled, 2 expired; the first stop reason wins.
     reason: AtomicU8,
     wake: Notify,
 }
@@ -52,7 +53,8 @@ impl RunCancellation {
         self.0.wake.notify_waiters();
     }
 
-    /// Keep the first stop reason so explicit cancellation cannot become timeout.
+    /// Stops the run because its time limit passed. A command it kills
+    /// reports a timeout; an earlier explicit cancel still wins.
     pub(crate) fn expire(&self) {
         let _ = self
             .0

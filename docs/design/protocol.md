@@ -60,25 +60,37 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 40
+PROTOCOL_VERSION = 41
 ```
 
 Descriptor 16 adds sorted workspace-relative configured pack roots to the
 compiled authority identity; descriptor 15 and earlier retain their original
 encoding and digest domains.
 
+Version 41 removes the approval reviewer, `approval_delegate` and approval
+grants, with the private task workspaces and the command worker. Gone from
+the wire: the `approve_for_session` and `approve_for_workspace` decisions and
+their `grant` shapes; the `approved_for_session`, `approved_for_workspace`,
+`approved_by_reviewer` and `denied_by_reviewer` resolutions, which decode
+as `approved_once` and `denied`; `delegate` on `tool_approval_resolved`;
+`delegated` on `tool_approval_requested` and `PendingHold`; `escalated` on
+approval previews; `SessionSummary.approval_delegate`; the
+`set_approval_delegate` command and `/v1/sessions/approval-delegate`; and the
+`tool_approval_escalated`, `workspace_grant_promoted` and
+`approval_delegate_set` events, which decode as `retired`. Store schema 65
+drops the grant, delegate and native command storage.
+
 Version 40 adds task-scoped Auto goal-check authority, distinct from explicit
-consent to execute a goal check.
+consent to execute a goal check. Since version 41 those checks run in the
+checkout like any Auto command.
 
 Version 38 adds authenticated, store-qualified workspace catalog pages. Clients
 can discover registered roots without interpreting server paths locally;
 continuation cursors reject another store.
 
 Version 37 exposes four approval modes: `read_only`, `ask`, `auto`, and
-`full`. Ask requires fresh human approval for every non-read action;
-reviewers and reusable grants cannot bypass it. The former `strict` and
-`supervised` mode values are unsupported. Write-child review is internal
-runtime policy, independent of the user mode.
+`full`. Ask requires fresh human approval for every non-read action. The
+former `strict` and `supervised` mode values are unsupported.
 
 Version 36 removes Jev routing and checkpoints. The `routing_started`,
 `routing_completed`, `checkpoint_started` and `checkpoint_reviewed` events are
@@ -156,10 +168,10 @@ workspace IDs and server-side paths, qualified by the persistent store ID.
 Its `after` cursor includes that store ID; a cursor from another store is
 rejected. Clients use these identities to select a workspace without mapping
 its path onto the client machine. Listing neither registers a directory nor
-changes permission grants.
+changes permissions.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v40/`; the `v17`–`v39` directories are
+`crates/qq-protocol/tests/fixtures/v41/`; the `v17`–`v40` directories are
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -613,7 +625,6 @@ POST /v1/sessions/prompts
 POST /v1/sessions/side-questions
 POST /v1/sessions/side-questions/cancel
 POST /v1/sessions/approval-mode
-POST /v1/sessions/approval-delegate
 POST /v1/sessions/model
 POST /v1/sessions/effort
 POST /v1/sessions/profile
@@ -703,7 +714,7 @@ Response `ServerCapabilities` (abridged; see
     "max_output_continuations": 3,
     "max_descendants": 24
   },
-  "approvals": ["approve_once", "approve_for_session", "approve_for_workspace", "deny", "answer"],
+  "approvals": ["approve_once", "deny", "answer"],
   "approval_modes": ["read_only", "ask", "auto", "full"],
   "profiles": [
     { "id": "default", "model": "openai/gpt-5.6", "approval_mode": "auto" },
@@ -890,10 +901,7 @@ Outcome:
 }
 ```
 
-Emits `session_created`. The workspace's effective config grants (see
-`docs/design/tools.md`, "Grant Lifetimes") are copied into the new
-session's grant set inside the creation transaction; a later config edit
-affects only sessions created afterwards.
+Emits `session_created`.
 
 ### `POST /v1/sessions/prompts`
 
@@ -1106,32 +1114,8 @@ Decision variants:
 | `decision.type` | Meaning |
 | --- | --- |
 | `approve_once` | Run this call only |
-| `approve_for_session` | Run this call and record a session grant |
-| `approve_for_workspace` | Like `approve_for_session`, plus promote the grant into workspace configuration |
 | `deny` | Reject the call |
 | `answer` | Answer an `ask_user` question: `answers` is one string per question in order (an option's text or free text); empty declines |
-
-`approve_for_session` and `approve_for_workspace` include a grant:
-
-```json
-{ "type": "approve_for_session", "grant": { "type": "tool", "name": "edit_file" } }
-```
-
-```json
-{
-  "type": "approve_for_workspace",
-  "grant": { "type": "shell_prefix", "prefix": "cargo test" }
-}
-```
-
-```json
-{ "type": "approve_for_session", "grant": { "type": "host", "host": "*.docs.rs" } }
-```
-
-Grant shapes: `tool` (exact name), `shell_prefix` (word-granularity
-prefix), and `host` (protocol 22; exact lowercase name or one leading `*.`
-wildcard covering subdomains, never the apex). A held `fetch` names its
-judged host in the `fetch` preview, the natural grant value.
 
 Outcome:
 
@@ -1143,57 +1127,17 @@ Outcome:
 }
 ```
 
-Resolution values: `approved_once`, `approved_for_session`,
-`approved_for_workspace`, `approved_by_reviewer`, `denied`, `denied_timeout`,
-`denied_by_reviewer`, `answered`. `answered` settles an `ask_user` hold: the
-call is `completed` and its `result` is the rendered questions and answers
-(or the decline text). The reviewer resolutions are written by a configured
-delegate without a human, and only for an internally supervised `full`
-session; Auto never holds a call (an out-of-scope action is denied as a
-tool error) and Ask always asks a human. The shipped binary creates no
-supervised session, so current builds do not write these two resolutions;
-they still decode for stored history. `approved_by_reviewer` executes the call; `denied_by_reviewer` is final and
-the model receives the reason as a tool error. Ask never delegates. The
-`tool_approval_resolved` *event* (not the command outcome) carries
-`delegate: "reviewer"` beside these two resolutions (protocol 28; a recorded
-`"jev"` still decodes but is never written) and
-omits it for every other resolution. A reviewer `escalate` leaves the hold
-open for a client, whose wait starts at the escalation. The hold
-(`tool_approval_requested`) is always published before the reviewer is
-consulted, so a client may still answer first; the first durable resolution
-wins. It carries `delegated: true` when the reviewer is consulted (protocol
-32): a client then knows the human is asked only after
-`tool_approval_escalated`. Reviewer spend is charged to the reviewed run.
+Resolution values: `approved_once`, `denied`, `denied_timeout`, `answered`.
+`answered` settles an `ask_user` hold: the call is `completed` and its
+`result` is the rendered questions and answers (or the decline text).
+Resolutions recorded before protocol 41 (`approved_for_session`,
+`approved_for_workspace`, `approved_by_reviewer`, `denied_by_reviewer`)
+decode as `approved_once` and `denied`.
 
 Approval modes are `read_only`, `ask`, `auto` (default), and `full`.
-Ask requires fresh explicit human approval for each non-read action,
-ignoring stored grants and reviewer delegation. Session/workspace approval
-choices in Ask resolve once without persisting grants. Write children use
-Auto bounded by their parent's authority, with no reviewer; a client may
+Only Ask holds a call for a human, and each approval applies to that call.
+Write children use Auto bounded by their parent's authority; a client may
 only lower a child's mode, never raise it (`child_authority_escalation`).
-
-`approve_for_workspace` resolves the approval exactly like
-`approve_for_session` — the session grant is recorded in the same
-transaction, so the waiting run proceeds immediately — and additionally
-requests that the grant be written into the workspace's `.qq/config.ron`
-policy section. That durable write happens after the approval commits and
-is first recorded in a bounded SQLite outbox in the same transaction. One
-serial worker drains that outbox and atomically removes each entry with its
-separate `workspace_grant_promoted` fate event, carrying one of:
-
-```json
-{ "type": "written", "path": "/repo/.qq/config.ron" }
-{ "type": "already_present", "path": "/repo/.qq/config.ron" }
-{ "type": "failed", "message": "..." }
-```
-
-A `failed` outcome (managed-layer deny, IO error) is informational only:
-the approval stands and the session grant remains in force. Retrying the
-`respond_tool_approval` command with the same `command_id` replays the
-original receipt and does not enqueue a duplicate promotion. If the process
-stops after accepting the approval, startup resumes the existing outbox entry;
-the configuration write is idempotent, so recovery normally observes
-`already_present` when the file write landed before the interruption.
 
 ### `POST /v1/sessions/approval-mode`
 
@@ -1213,7 +1157,7 @@ Modes:
 | Mode | Behavior |
 | --- | --- |
 | `read_only` | Deny mutating, shell, and MCP tools without prompting |
-| `ask` | Fresh human approval for every non-read action, ignoring grants and reviewers; fixed stops are denied without asking |
+| `ask` | Fresh human approval for every non-read action; fixed stops are denied without asking |
 | `auto` | Default. Every call runs without prompting except a fixed stop (force-push, `sudo`, `rm -r` of home, credential files, …), which is denied as a tool error, never held |
 | `full` | Every tool call executes without prompting; fixed stops do not apply |
 
@@ -1228,43 +1172,6 @@ Outcome:
   "type": "approval_mode_set",
   "session_id": "...",
   "mode": "auto"
-}
-```
-
-### `POST /v1/sessions/approval-delegate`
-
-```json
-{
-  "command_id": "...",
-  "command": {
-    "type": "set_approval_delegate",
-    "session_id": "...",
-    "delegate": "off"
-  }
-}
-```
-
-Protocol 28. Overrides, for the rest of this session, who settles the calls
-the mode holds: `by_mode` or `on` (the reviewer), or `off` (every held
-call waits for a human — the "stop delegating" switch). Since Auto stopped
-holding calls (#463) the override has no effect in Auto. Ask always requires
-a human and never consults the reviewer. Omitting `delegate`
-clears the override so the workspace's configured `approval_delegate` applies
-again. The mode stays the ceiling, so there is no authority check: no value
-lets the model do more than the mode allows. Like the mode, the override is
-read when each approval is evaluated, so it applies to a running session's
-next held call without a restart and without touching `.qq/config.ron`.
-Spawned children start with the parent's override. The command commits and
-publishes a `session_updated` event whose summary carries
-`approval_delegate` (omitted when no override is set).
-
-Outcome:
-
-```json
-{
-  "type": "approval_delegate_set",
-  "session_id": "...",
-  "delegate": "off"
 }
 ```
 
@@ -1341,7 +1248,7 @@ Emits `session_updated`.
 ```
 
 Deletes the session and every row it owns — runs, messages, model turns, tool
-calls, session files, and grants — in one transaction. Rejected with `400`
+calls, and session files — in one transaction. Rejected with `400`
 while the session has an active run; cancel the run first. Child sessions
 survive as roots.
 
@@ -1670,9 +1577,8 @@ Every streamed payload is a `SessionEventEnvelope`:
 | `text_appended` | `message_id`, `channel`, `text` | Output or refusal delta |
 | `model_turn_completed` | `run_id`, `turn_ordinal`, `model`, optional `usage`, optional `estimated_cost_usd_nanos` | A provider inference and its accounting committed |
 | `tool_call_requested` | `tool_call` | Model finished requesting a tool call |
-| `tool_approval_requested` | `tool_call`, optional `shell`, optional `edit`, optional `question`, optional `fetch`, optional `delegated` | Policy needs a decision, or (`question`) the model asked one; `delegated` means an approval delegate decides first |
+| `tool_approval_requested` | `tool_call`, optional `shell`, optional `edit`, optional `question`, optional `fetch` | Policy needs a decision, or (`question`) the model asked one |
 | `tool_approval_resolved` | `tool_call`, `resolution` | Approval decision recorded |
-| `workspace_grant_promoted` | `grant`, `outcome` | An approve-for-workspace promotion finished (`written`, `already_present`, or non-fatal `failed`) |
 | `tool_call_started` | `tool_call` | Execution began |
 | `tool_call_output_delta` | `tool_call_id`, `chunk` | Incremental output from a running call (shell) |
 | `tool_call_finished` | `tool_call` | Execution ended with result/error |
@@ -1743,9 +1649,7 @@ clears it until another prompt turn reports usage; clients must not reconstruct
 it from cumulative run billing.
 
 `pending_holds` lists the active run's calls still awaiting a decision, at
-most 16, calls a human is asked ordered first: `{ "tool_call_id": "...",
-"delegated": true }`, where `delegated` (omitted when false) means an
-approval delegate decides before any human. `running_side_question` is the
+most 16: `{ "tool_call_id": "..." }`. `running_side_question` is the
 id of the session's running side question. Both are exact at the summary's
 cursor; `tool_approval_*`, `tool_call_*`, `run_finished`, and
 `side_question_updated` events move them on. A client that never loaded the
@@ -2182,10 +2086,10 @@ path (`qq ask` and internal runtime tests):
 - `RunEvent` — `started`, `output_text_delta`, `refusal_delta`, `usage`,
   `completed`, `failed`
 
-Direct requests declare workspace read tools and configuration-granted external
-tools; denied builtin mutation/command/question/network schemas are omitted.
-The gate uses the plan's immutable grant snapshot. Strict read-only session
-requests omit every External schema, regardless of hints or grants. This is
+Direct requests declare workspace read tools and the external tools named in
+an MCP server's `allow` list; builtin mutation/command/question/network
+schemas are omitted. Strict read-only session requests omit every External
+schema, regardless of hints. This is
 request visibility behavior; protocol and descriptor encodings are unchanged.
 
 These types are not persisted session state. `qq ask` consumes them entirely

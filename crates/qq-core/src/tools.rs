@@ -5,30 +5,18 @@ mod edit;
 pub(crate) mod fetch;
 pub(crate) mod goal;
 mod lang;
-#[cfg(target_os = "linux")]
-pub(crate) mod linux_owner;
-#[cfg(any(target_os = "macos", all(test, target_os = "linux")))]
-#[cfg_attr(
-    all(test, target_os = "linux"),
-    allow(
-        dead_code,
-        reason = "compile shared Unix launch interfaces and validate grants without claiming macOS enforcement"
-    )
-)]
-pub(crate) mod macos_owner;
 mod matching;
+#[cfg(not(target_os = "linux"))]
 mod native_exit;
 pub(crate) mod network;
 pub mod output;
 pub(crate) mod process_context;
+#[cfg(target_os = "linux")]
+pub(crate) mod process_group;
 mod read;
 mod search;
 mod shell;
-#[cfg(windows)]
-pub(crate) mod windows_owner;
-pub(crate) use shell::forward_shell_chunk;
 mod specs;
-pub(crate) mod task_git;
 mod tree;
 pub(crate) mod walk;
 #[cfg(windows)]
@@ -36,21 +24,68 @@ pub(crate) mod windows_job;
 mod write;
 
 pub(crate) use dispatch::{ToolCancellation, ToolTaskLease};
-pub(crate) use shell::MAX_SHELL_OUTPUT_BYTES;
-#[cfg(unix)]
-pub(crate) use shell::ProcessGroupGuard;
 
 /// Parse qualification envelopes with the same type used by shell dispatch.
-pub(crate) fn parsed_shell_command(arguments: &str) -> Option<(String, bool)> {
+pub(crate) fn parsed_shell_command(arguments: &str) -> Option<String> {
     process_context::arguments_digest("shell", arguments)?;
     match serde_json::from_str::<shell::ShellArgs>(arguments) {
-        Ok(arguments) => Some((arguments.command, !arguments.env.is_empty())),
+        Ok(arguments) => Some(arguments.command),
         Err(_) => None, // Malformed envelopes remain non-read without exposing their text.
     }
 }
 
 #[cfg(test)]
 pub(crate) use dispatch::{execute, test_executions_started};
+
+/// Runs a goal's completion check through the shell runner: in the
+/// workspace, with the process tree killed at the check's absolute deadline
+/// or on cancellation. Returns the terminal outcome and the bounded result
+/// text.
+#[cfg(any(not(unix), test))]
+pub(crate) async fn run_goal_check_shell(
+    workspace: &crate::workspace::Workspace,
+    command: String,
+    deadline: tokio::time::Instant,
+    cancelled: crate::RunCancellation,
+    producer: std::sync::Arc<crate::ProcessProducer>,
+    process: &mut ToolTaskLease,
+) -> (Option<dispatch::CommandOutcome>, String) {
+    let arguments = shell::ShellArgs {
+        command,
+        cwd: None,
+        timeout_seconds: None,
+    };
+    // The check's own deadline stops the command; a relative timeout would
+    // restart the clock and round it to whole seconds.
+    let stop = crate::RunCancellation::new();
+    let policy = crate::runtime::ShellPolicy::default();
+    let stopped = ToolCancellation::new(stop.clone());
+    let run = shell::run_shell(
+        workspace,
+        &policy,
+        std::sync::Arc::default(),
+        producer,
+        None,
+        shell::Launch::Shell(&arguments),
+        &stopped,
+        None,
+        process,
+    );
+    tokio::pin!(run);
+    let mut expired = false;
+    let result = tokio::select! {
+        result = &mut run => result,
+        () = cancelled.cancelled() => { stop.cancel(); run.await }
+        () = tokio::time::sleep_until(deadline) => { expired = true; stop.cancel(); run.await }
+    };
+    let outcome = match result.native_outcome {
+        Some(dispatch::CommandOutcome::Cancelled) if expired => {
+            Some(dispatch::CommandOutcome::TimedOut)
+        }
+        outcome => outcome,
+    };
+    (outcome, result.model_text)
+}
 
 /// Entry points for the `search_walk` and `edit_batch` benches. Not a
 /// public API.
@@ -147,7 +182,7 @@ use tokio::sync::mpsc;
 #[cfg(all(test, unix))]
 pub(crate) use shell::hold_shell_receipt;
 #[cfg(all(test, any(unix, windows)))]
-pub(crate) use shell::{limit_shell_read_chunks, observe_shell_spawn, observe_shell_termination};
+pub(crate) use shell::observe_shell_spawn;
 
 #[cfg(all(test, unix))]
 pub(crate) async fn create_test_fifo(path: &std::path::Path) {
@@ -3462,7 +3497,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "521e3115c1cf748d75b32e337ce10c086b8e424d569a905238bd63e5917b32ef"
+            "3a38ed59c2e281ed5fc3840f0adb9bef802939981d9fa0f18c2e65bacabda725"
         );
     }
 
@@ -4605,21 +4640,6 @@ mod tests {
         assert!(!cancelled.is_cancelled());
     }
 
-    #[tokio::test]
-    async fn dropped_durable_output_recording_is_not_a_clean_drain() {
-        let tasks = ToolTasks::default();
-        tasks
-            .set_output_recorder(|_, _| std::future::pending())
-            .unwrap();
-        let lease = tasks.enter();
-        let write = lease
-            .output_record(qq_protocol::ToolCallId::generate().unwrap(), b"checkpoint")
-            .unwrap();
-        drop(write);
-        drop(lease);
-        assert_eq!(tasks.drain().await, Err(ToolDrainError::UnrecordedOutput));
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn failed_process_receipt_write_reaps_child_and_blocks_settlement() {
@@ -4641,7 +4661,6 @@ mod tests {
             })
             .unwrap();
         let result = dispatch::execute_with_images(
-            None,
             workspace,
             Arc::new(FileState::default()),
             "shell".to_owned(),
@@ -4696,7 +4715,6 @@ mod tests {
                 arguments["timeout_seconds"] = json!(120);
             }
             let execution = tokio::spawn(dispatch::execute_with_images(
-                None,
                 workspace,
                 Arc::default(),
                 "shell".to_owned(),
@@ -4881,7 +4899,7 @@ mod tests {
 
         assert_eq!(
             result.native_outcome,
-            Some(crate::command_owner::NativeCommandOutcome::Exited { code: Some(0) })
+            Some(crate::tools::dispatch::CommandOutcome::Exited { code: Some(0) })
         );
         assert!(!result.is_error, "unexpected error: {}", result.model_text);
         assert!(result.model_text.contains("out\n"), "{}", result.model_text);
@@ -4913,7 +4931,7 @@ mod tests {
 
         assert_eq!(
             result.native_outcome,
-            Some(crate::command_owner::NativeCommandOutcome::Exited { code: Some(7) })
+            Some(crate::tools::dispatch::CommandOutcome::Exited { code: Some(7) })
         );
         assert!(result.is_error);
         assert!(
@@ -4998,99 +5016,6 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
-    async fn native_admission_freezes_task_and_explicit_command_deadlines_without_a_default_cap() {
-        use crate::command_owner::{
-            CommandOwnerError, CommandSnapshot, NativeCommand, NativeCommandFuture,
-            NativeCommandService,
-        };
-        struct Capture(Arc<std::sync::Mutex<Vec<NativeCommand>>>);
-        impl NativeCommandService for Capture {
-            fn identity(&self) -> NativeCommandFuture<qq_protocol::StoreId> {
-                Box::pin(async { Ok(qq_protocol::StoreId::from_bytes([7; 16])) })
-            }
-            fn acknowledge(&self, _: Vec<qq_protocol::ToolCallId>) -> NativeCommandFuture<()> {
-                unreachable!()
-            }
-            fn cancel(&self, _: qq_protocol::ToolCallId) -> NativeCommandFuture<()> {
-                unreachable!()
-            }
-            fn wait(
-                &self,
-                _: qq_protocol::ToolCallId,
-                _: u64,
-            ) -> NativeCommandFuture<CommandSnapshot> {
-                unreachable!()
-            }
-            fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()> {
-                self.0.lock().unwrap().push(request);
-                Box::pin(async { Err(CommandOwnerError::Full) })
-            }
-        }
-        let now = u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis(),
-        )
-        .unwrap();
-        let task_deadline = now + 600_000;
-        for name in ["shell", "exec"] {
-            for (timeout, task) in [
-                (None, Some(task_deadline)),
-                (None, None),
-                (Some(3600), Some(task_deadline)),
-                (Some(1), Some(task_deadline)),
-            ] {
-                let directory = tempfile::tempdir().unwrap();
-                let workspace = Workspace::open(directory.path()).unwrap();
-                let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-                let service = Arc::new(Capture(requests.clone()));
-                let tasks = ToolTasks::with_native_commands(Some(service));
-                tasks.set_native_recorder(|_, _| async { Ok(()) }).unwrap();
-                tasks.shorten_native_deadline(task);
-                let mut arguments = if name == "shell" {
-                    json!({"command":"unused"})
-                } else {
-                    json!({"program":"unused","args":[]})
-                };
-                if let Some(timeout) = timeout {
-                    arguments["timeout_seconds"] = json!(timeout);
-                }
-                let result = super::dispatch::execute_with_images(
-                    None,
-                    workspace,
-                    Arc::new(FileState::default()),
-                    name.to_owned(),
-                    arguments.to_string(),
-                    RunCancellation::new(),
-                    None,
-                    tasks.clone(),
-                    Arc::new(crate::ShellPolicy::default()),
-                    Arc::default(),
-                    Arc::default(),
-                    Arc::default(),
-                    Some(qq_protocol::ToolCallId::generate().unwrap()),
-                )
-                .await;
-                assert!(result.is_error);
-                tasks.drain().await.unwrap();
-                let requests = requests.lock().unwrap();
-                assert_eq!(requests.len(), 1);
-                let frozen = requests[0].not_after_ms;
-                if timeout == Some(1) {
-                    let frozen = frozen.expect("an explicit command timeout remains bounded");
-                    assert!(frozen >= now + 1_000 && frozen < task_deadline);
-                } else {
-                    assert_eq!(
-                        frozen, task,
-                        "{name} timeout={timeout:?} must not invent a two-minute cap"
-                    );
-                }
-            }
-        }
-    }
-
     #[cfg(unix)]
     async fn running_build_survives_clock_advance(arguments: &'static str, seconds: u64) {
         use std::io::Write as _;
@@ -5165,14 +5090,13 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn shell_children_start_from_a_cleared_environment_plus_allowlisted_names() {
+    async fn shell_children_inherit_the_full_environment() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        // The test process's own environment stands in for the server's:
-        // CARGO_MANIFEST_DIR is always set under `cargo test` and must not
-        // reach a child unless requested and allowed.
-        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
-        let run = |arguments: &'static str, policy: crate::runtime::ShellPolicy| {
+        // CARGO_MANIFEST_DIR is always set under `cargo test` and stands in
+        // for any variable of the user's environment.
+        let expected = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let run = |arguments: &'static str| {
             let workspace = workspace.clone();
             async move {
                 execute(
@@ -5183,80 +5107,27 @@ mod tests {
                     RunCancellation::new(),
                     None,
                     ToolTasks::default(),
-                    Arc::new(policy),
+                    Arc::new(crate::runtime::ShellPolicy::default()),
                     Arc::default(),
                 )
                 .await
             }
         };
-        let default = crate::runtime::ShellPolicy::default();
-        let allowing = crate::runtime::ShellPolicy {
-            env_allowlist: std::sync::Arc::from(["CARGO_MANIFEST_DIR".to_owned()]),
-            builtin_preference: crate::runtime::BuiltinPreference::Hint,
-            ..Default::default()
-        };
-
-        let leaked = run(
-            r#"{"command":"echo v=${CARGO_MANIFEST_DIR:-unset} path=${PATH:+set}"}"#,
-            default.clone(),
-        )
-        .await;
-        assert!(!leaked.is_error, "{}", leaked.model_text);
+        let inherited = run(r#"{"command":"echo v=${CARGO_MANIFEST_DIR:-unset}"}"#).await;
+        assert!(!inherited.is_error, "{}", inherited.model_text);
         assert!(
-            leaked.model_text.contains("v=unset path=set"),
+            inherited.model_text.contains(&format!("v={expected}")),
             "{}",
-            leaked.model_text
+            inherited.model_text
         );
-
-        // Not requested: not present, even though policy allows it.
-        let unrequested = run(
-            r#"{"command":"echo v=${CARGO_MANIFEST_DIR:-unset}"}"#,
-            allowing.clone(),
-        )
-        .await;
-        assert!(
-            unrequested.model_text.contains("v=unset"),
-            "{}",
-            unrequested.model_text
-        );
-        // Requested and allowed: present.
-        let requested = run(
-            r#"{"command":"echo v=${CARGO_MANIFEST_DIR:-unset}","env":["CARGO_MANIFEST_DIR"]}"#,
-            allowing.clone(),
-        )
-        .await;
-        assert!(
-            requested.model_text.contains("v=/"),
-            "{}",
-            requested.model_text
-        );
-        // Requested but not allowed: a typed refusal, nothing runs.
-        let refused = run(
-            r#"{"command":"echo v=$CARGO_MANIFEST_DIR","env":["CARGO_MANIFEST_DIR"]}"#,
-            default.clone(),
-        )
-        .await;
+        // `env` is no longer an argument: the call is refused, nothing runs.
+        let refused = run(r#"{"command":"echo ran","env":["CARGO_MANIFEST_DIR"]}"#).await;
         assert!(refused.is_error);
         assert!(
-            refused
-                .model_text
-                .starts_with("env_not_allowed: CARGO_MANIFEST_DIR"),
+            !refused.model_text.contains("ran\n"),
             "{}",
             refused.model_text
         );
-        let invalid = run(r#"{"command":"true","env":["1BAD"]}"#, allowing.clone()).await;
-        assert!(
-            invalid.model_text.starts_with("invalid_env"),
-            "{}",
-            invalid.model_text
-        );
-        // Base names never need listing.
-        let base = run(
-            r#"{"command":"echo h=${HOME:+set}","env":["HOME"]}"#,
-            default,
-        )
-        .await;
-        assert!(base.model_text.contains("h=set"), "{}", base.model_text);
     }
 
     #[cfg(unix)]
@@ -5328,7 +5199,7 @@ mod tests {
             (r#"{"program":""}"#, "invalid_program"),
             (
                 r#"{"program":"true","args":["x"],"stdin":"y","env":["1x"]}"#,
-                "invalid_env",
+                "unknown field `env`",
             ),
             (r#"{"program":"true","cwd":"../"}"#, "path"),
         ] {
@@ -5360,7 +5231,6 @@ mod tests {
                     None,
                     ToolTasks::default(),
                     Arc::new(crate::runtime::ShellPolicy {
-                        env_allowlist: std::sync::Arc::from([]),
                         builtin_preference: policy,
                         ..Default::default()
                     }),
@@ -5687,6 +5557,46 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(windows)))]
-#[path = "tools/windows_owner/arguments.rs"]
-mod windows_arguments;
+#[cfg(all(test, unix))]
+mod goal_check_shell_tests {
+    /// The check's absolute deadline stops a command that outlives it and
+    /// reports a timeout; a command that finishes in time keeps its exit.
+    #[tokio::test]
+    async fn goal_check_shell_keeps_the_absolute_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = crate::workspace::Workspace::open(directory.path()).unwrap();
+        let tasks = super::ToolTasks::default();
+        for (command, budget, expected) in [
+            (
+                "exit 3",
+                5_000,
+                super::dispatch::CommandOutcome::Exited { code: Some(3) },
+            ),
+            (
+                "exec tail -f /dev/null",
+                300,
+                super::dispatch::CommandOutcome::TimedOut,
+            ),
+        ] {
+            let mut lease = tasks.enter();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(budget);
+            let (outcome, _) = super::run_goal_check_shell(
+                &workspace,
+                command.to_owned(),
+                deadline,
+                crate::RunCancellation::new(),
+                std::sync::Arc::new(crate::ProcessProducer::new("test")),
+                &mut lease,
+            )
+            .await;
+            assert_eq!(outcome, Some(expected), "{command}");
+            // Stopping at the deadline itself, not a rounded or restarted
+            // relative timeout: teardown takes well under half a second.
+            assert!(
+                tokio::time::Instant::now() < deadline + std::time::Duration::from_millis(500),
+                "{command} outlived its absolute deadline"
+            );
+        }
+        tasks.drain().await.unwrap();
+    }
+}

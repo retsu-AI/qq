@@ -154,7 +154,7 @@ impl BudgetMeter {
             .saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
     }
 
-    /// Charges owned child, reviewer or compaction spend without counting it
+    /// Charges owned child or compaction spend without counting it
     /// as a prompt model turn. Tokens and cost consume the caller allowance;
     /// unknown owned spend makes the corresponding aggregate unknown.
     pub(crate) fn charge_child(&mut self, usage: Option<TokenUsage>, cost_usd_nanos: Option<u64>) {

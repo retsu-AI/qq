@@ -413,6 +413,25 @@ impl Home {
         if let Some(path) = env::var_os("PATH") {
             command.env("PATH", path);
         }
+        // Windows ignores XDG_*: without QQ_HOME every concurrent scenario
+        // shares the runner's real data directory and session store.
+        #[cfg(windows)]
+        {
+            command.env("QQ_HOME", self.root.join("qq-home"));
+            for name in [
+                "SYSTEMROOT",
+                "WINDIR",
+                "LOCALAPPDATA",
+                "APPDATA",
+                "USERPROFILE",
+                "TEMP",
+                "TMP",
+            ] {
+                if let Some(value) = env::var_os(name) {
+                    command.env(name, value);
+                }
+            }
+        }
         command
     }
 
@@ -509,6 +528,11 @@ const SCENARIOS: &[Scenario] = &[
         run: |home| Box::pin(run_then_undo(home)),
     },
     Scenario {
+        name: "run-in-place",
+        proves: "Auto commands run in the checkout as the user: `git status` sees its repository, `target/` survives between runs, an edit is visible before the run ends, a loopback server answers, and `git push` to a local bare remote succeeds",
+        run: |home| Box::pin(run_in_place(home)),
+    },
+    Scenario {
         name: "structured-tracing",
         proves: "QQ_LOG is opt-in; JSON spans cover run/turn/provider/tool/store without content",
         run: |home| Box::pin(structured_tracing(home)),
@@ -573,7 +597,7 @@ async fn permission_dispatch(home: &Home) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         let mut args = vec!["run", "--format", "jsonl"];
         if let Some(mode) = mode {
-            args.extend(["--approval", mode, "--allow-tool", "write_file"]);
+            args.extend(["--approval", mode]);
         }
         args.push("write the requested file");
         let output = home.run(&provider.base_url, &args).await?;
@@ -620,15 +644,7 @@ async fn permission_dispatch(home: &Home) -> Result<(), String> {
                     ])
                     .await
                     .map_err(|error| error.to_string())?;
-                let mut args = vec![
-                    "run",
-                    "--format",
-                    "jsonl",
-                    "--session",
-                    session,
-                    "--allow-tool",
-                    "write_file",
-                ];
+                let mut args = vec!["run", "--format", "jsonl", "--session", session];
                 if explicit {
                     args.extend(["--approval", "auto"]);
                 }
@@ -683,13 +699,15 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
     let index = home.git(&["ls-files", "--stage"]).await?;
     let stash = home.git(&["stash", "list", "--format=%H"]).await?;
 
-    let mut worker = Worker::start(home).await?;
-    let result = async {
+    {
         let provider = home
             .provider(vec![
                 Reply::ReadFile("inventory.rs"),
                 Reply::WriteFile("inventory.rs", "pub struct Changed;\n"),
-                Reply::Tool("shell", serde_json::json!({"command": "rm notes.txt"})),
+                Reply::Tool(
+                    "shell",
+                    serde_json::json!({"command": if cfg!(windows) { "del notes.txt" } else { "rm notes.txt" }}),
+                ),
                 Reply::WriteFile("created.txt", "agent file\n"),
                 Reply::Text("done"),
             ])
@@ -710,11 +728,7 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
             })
             .collect();
         ensure!(errors.is_empty(), "tool calls failed: {errors:?}");
-        Ok(())
     }
-    .await;
-    worker.stop().await?;
-    result?;
     let after_run = home.files().await?;
     ensure!(
         !after_run.contains_key(Path::new("notes.txt"))
@@ -732,9 +746,15 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
         undo.stdout,
         undo.stderr
     );
+    let restored = home.files().await?;
     ensure!(
-        home.files().await? == files,
-        "files differ from the snapshot after qq undo"
+        restored == files,
+        "files differ from the snapshot after qq undo: {:?}",
+        files
+            .keys()
+            .chain(restored.keys())
+            .filter(|path| files.get(*path) != restored.get(*path))
+            .collect::<std::collections::BTreeSet<_>>()
     );
     ensure!(
         home.git(&["ls-files", "--stage"]).await? == index,
@@ -760,6 +780,130 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
     ensure!(
         home.files().await? == after_run,
         "reversing the undo did not bring the run's edits back"
+    );
+    Ok(())
+}
+
+/// One Auto run whose commands each report through their tool result.
+async fn run_commands(home: &Home, replies: Vec<Reply>) -> Result<Vec<String>, String> {
+    let provider = home
+        .provider(replies)
+        .await
+        .map_err(|error| error.to_string())?;
+    let output = home
+        .run(
+            &provider.base_url,
+            &["run", "--format", "jsonl", "check the tree"],
+        )
+        .await?;
+    ensure!(output.status == Some(0), "run: {}", output.stderr);
+    let mut results = Vec::new();
+    for record in jsonl(&output.stdout)? {
+        let event = &record["envelope"]["event"];
+        if event["type"] == "tool_call_finished" {
+            let call = &event["tool_call"];
+            ensure!(call["is_error"] == false, "tool call failed: {call}");
+            results.push(call["result"].as_str().unwrap_or_default().to_owned());
+        }
+    }
+    Ok(results)
+}
+
+async fn run_in_place(home: &Home) -> Result<(), String> {
+    home.git(&["add", "inventory.rs"]).await?;
+    home.git(&["commit", "-q", "-m", "base"]).await?;
+    let remote = home.root.join("remote.git");
+    let remote_path = remote.to_string_lossy().into_owned();
+    home.git(&["init", "-q", "--bare", &remote_path]).await?;
+    home.git(&["remote", "add", "origin", &remote_path]).await?;
+    tokio::fs::write(home.workspace.join(".gitignore"), "target/\n")
+        .await
+        .map_err(|error| error.to_string())?;
+    tokio::fs::create_dir_all(home.workspace.join("target"))
+        .await
+        .map_err(|error| error.to_string())?;
+    tokio::fs::write(home.workspace.join("target/cache.bin"), "warm\n")
+        .await
+        .map_err(|error| error.to_string())?;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|error| error.to_string())?;
+    let url = format!(
+        "http://{}/",
+        listener.local_addr().map_err(|error| error.to_string())?
+    );
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let _ = read_http_request(&mut stream).await;
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\nconnection: close\r\n\r\nloopback",
+                )
+                .await;
+        }
+    });
+    let git =
+        |args: &[&str]| Reply::Tool("exec", serde_json::json!({"program": "git", "args": args}));
+    let results = run_commands(
+        home,
+        vec![
+            git(&["status", "--porcelain", "--untracked-files=all"]),
+            git(&["check-ignore", "target/cache.bin"]),
+            Reply::WriteFile("live.txt", "visible\n"),
+            git(&["status", "--porcelain", "--untracked-files=all"]),
+            Reply::Tool(
+                "exec",
+                serde_json::json!({"program": "curl", "args": ["-s", url]}),
+            ),
+            git(&["push", "-q", "origin", "HEAD:refs/heads/main"]),
+            Reply::Text("done"),
+        ],
+    )
+    .await;
+    server.abort();
+    let results = results?;
+    ensure!(results.len() == 6, "expected six results: {results:?}");
+    // The workspace's own repository: only its untracked `.gitignore`.
+    ensure!(
+        results[0].contains("?? .gitignore") && !results[0].contains("cache.bin"),
+        "git status did not see the workspace's repository: {}",
+        results[0]
+    );
+    ensure!(
+        results[1].contains("target/cache.bin"),
+        "the ignored build output is not in place: {}",
+        results[1]
+    );
+    ensure!(
+        results[3].contains("?? live.txt"),
+        "the edit was not visible to a command before the run ended: {}",
+        results[3]
+    );
+    ensure!(
+        results[4].contains("loopback"),
+        "the loopback server did not answer: {}",
+        results[4]
+    );
+    ensure!(
+        results[5].contains("exit=0"),
+        "git push failed: {}",
+        results[5]
+    );
+    ensure!(
+        home.git(&["--git-dir", &remote_path, "rev-parse", "main"])
+            .await?
+            == home.git(&["rev-parse", "HEAD"]).await?,
+        "the bare remote does not hold the pushed commit"
+    );
+    // A second run sees what the first left in `target/`.
+    let second = run_commands(
+        home,
+        vec![Reply::ReadFile("target/cache.bin"), Reply::Text("done")],
+    )
+    .await?;
+    ensure!(
+        second.first().is_some_and(|result| result.contains("warm")),
+        "target/ did not survive between runs: {second:?}"
     );
     Ok(())
 }
@@ -896,78 +1040,14 @@ async fn structured_tracing(home: &Home) -> Result<(), String> {
 }
 
 async fn run_command_deadlines(home: &Home) -> Result<(), String> {
-    let mut worker = Worker::start(home).await?;
-    let result = run_command_deadline_cases(home).await;
-    worker.stop().await?;
-    result
-}
-
-/// A fixture command worker. Production workers intentionally outlive CLI
-/// invocations; a smoke worker must not outlive its isolated home or keep
-/// the private executable open when the next smoke run replaces it.
-struct Worker(tokio::process::Child);
-
-impl Worker {
-    async fn start(home: &Home) -> Result<Self, String> {
-        let paths = home
-            .run("http://127.0.0.1:1/v1", &["config", "paths"])
-            .await?;
-        ensure!(paths.status == Some(0), "config paths: {}", paths.stderr);
-        let data = paths
-            .stdout
-            .lines()
-            .find_map(|line| line.strip_prefix("data:"))
-            .and_then(|line| line.trim().rsplit_once(" ("))
-            .map(|(path, _)| PathBuf::from(path))
-            .ok_or("config paths omitted the data directory")?;
-        ensure!(
-            data.starts_with(&home.root),
-            "fixture data directory escaped the isolated home: {}",
-            data.display()
-        );
-        let stderr = fs::File::create(home.root.join("worker.stderr"))
-            .map_err(|error| format!("create worker.stderr: {error}"))?;
-        let child = home
-            .command("http://127.0.0.1:1/v1")
-            .arg("_command-owner")
-            .arg("--state-dir")
-            .arg(data.join("command-owner-v3"))
-            .stderr(Stdio::from(stderr))
-            .spawn()
-            .map_err(|error| format!("start fixture worker: {error}"))?;
-        // `kill_on_drop` reaps the child if readiness fails below.
-        let mut worker = Self(child);
-        let stdout = worker.0.stdout.take().ok_or("worker stdout unavailable")?;
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        tokio::time::timeout(COMMAND_TIMEOUT, reader.read_line(&mut line))
-            .await
-            .map_err(|_| "fixture worker readiness timed out".to_owned())?
-            .map_err(|error| format!("read fixture worker readiness: {error}"))?;
-        ensure!(
-            line.starts_with("qq command owner listening at "),
-            "unexpected worker readiness: {line:?}"
-        );
-        Ok(worker)
-    }
-
-    async fn stop(&mut self) -> Result<(), String> {
-        self.0
-            .kill()
-            .await
-            .map_err(|error| format!("reap fixture worker: {error}"))
-    }
-}
-
-async fn run_command_deadline_cases(home: &Home) -> Result<(), String> {
     for (name, arguments) in [
         (
             "shell",
-            serde_json::json!({"command": "printf deadline-ok", "timeout_seconds": 1800}),
+            serde_json::json!({"command": "echo deadline-ok", "timeout_seconds": 1800}),
         ),
         (
             "exec",
-            serde_json::json!({"program": "printf", "args": ["deadline-ok"], "timeout_seconds": 1800}),
+            serde_json::json!({"program": "git", "args": ["-c", "alias.ok=!echo deadline-ok", "ok"], "timeout_seconds": 1800}),
         ),
     ] {
         let provider = home
@@ -977,14 +1057,7 @@ async fn run_command_deadline_cases(home: &Home) -> Result<(), String> {
         let output = home
             .run(
                 &provider.base_url,
-                &[
-                    "run",
-                    "--format",
-                    "jsonl",
-                    "--allow-shell",
-                    "printf",
-                    "run the command",
-                ],
+                &["run", "--format", "jsonl", "run the command"],
             )
             .await?;
         ensure!(output.status == Some(0), "{name}: {}", output.stderr);

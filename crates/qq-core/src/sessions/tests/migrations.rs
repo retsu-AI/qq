@@ -1,5 +1,15 @@
 use super::*;
 
+fn table_exists(connection: &Connection, table: &str) -> bool {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 #[tokio::test]
 async fn prune_deletes_only_idle_sessions_without_messages() {
     let (directory, runtime) = test_runtime().await;
@@ -174,7 +184,7 @@ fn version_one_migration_is_atomic_and_marks_historical_cost_unknown() {
             .unwrap(),
         "ask"
     );
-    assert!(has_column(&connection, "session_grants", "value").unwrap());
+    assert!(!table_exists(&connection, "session_grants"));
     assert!(has_column(&connection, "session_files", "content_hash").unwrap());
     assert!(has_column(&connection, "messages", "turn_ordinal").unwrap());
 }
@@ -724,85 +734,10 @@ fn version_fourteen_migration_adds_chunks_and_incremental_capacity_columns() {
     assert!(has_column(&connection, "message_chunks", "text").unwrap());
     assert!(has_column(&connection, "runs", "context_base_bytes").unwrap());
     assert!(has_column(&connection, "runs", "context_increment_bytes").unwrap());
-    assert!(
-        has_column(
-            &connection,
-            "pending_workspace_grant_promotions",
-            "promotion_json"
-        )
-        .unwrap()
-    );
-}
-
-#[test]
-fn version_fourteen_store_with_implicit_primary_key_outbox_migrates() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("sessions.sqlite3");
-    let connection = rusqlite::Connection::open(&path).unwrap();
-    connection
-        .execute_batch(
-            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             INSERT INTO metadata VALUES ('schema_version', '14');
-             CREATE TABLE runs (
-                 id TEXT PRIMARY KEY,
-                 session_id TEXT NOT NULL,
-                 command_id TEXT NOT NULL UNIQUE,
-                 user_message_id TEXT NOT NULL,
-                 assistant_message_id TEXT NOT NULL,
-                 status TEXT NOT NULL,
-                 kind TEXT NOT NULL DEFAULT 'prompt',
-                 auto_compaction INTEGER NOT NULL DEFAULT 0,
-                 cancel_requested INTEGER NOT NULL DEFAULT 0,
-                 prompt_identity_json TEXT,
-                 outcome_json TEXT,
-                 usage_json TEXT,
-                 context_tokens INTEGER,
-                 estimated_cost_usd_nanos INTEGER,
-                 created_at_ms INTEGER NOT NULL,
-                 started_at_ms INTEGER,
-                 finished_at_ms INTEGER
-             );
-             CREATE TABLE model_turns (
-                 run_id TEXT NOT NULL,
-                 turn_ordinal INTEGER NOT NULL,
-                 assistant_content_json TEXT NOT NULL,
-                 model_json TEXT,
-                 usage_json TEXT,
-                 estimated_cost_usd_nanos INTEGER,
-                 completed_at_ms INTEGER,
-                 PRIMARY KEY(run_id, turn_ordinal)
-             );
-             CREATE TABLE pending_workspace_grant_promotions (
-                 command_id TEXT PRIMARY KEY,
-                 created_at_ms INTEGER NOT NULL,
-                 promotion_json TEXT NOT NULL
-             );
-             CREATE INDEX pending_workspace_grant_promotions_fifo
-                 ON pending_workspace_grant_promotions(created_at_ms, command_id);",
-        )
-        .unwrap();
-    drop(connection);
-
-    let (connection, _) = open_database(&path).unwrap();
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key = 'schema_version'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap(),
-        STORE_SCHEMA_VERSION.to_string()
-    );
-    let command_id_not_null: bool = connection
-        .query_row(
-            "SELECT [notnull] FROM pragma_table_info('pending_workspace_grant_promotions')
-             WHERE name = 'command_id'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(command_id_not_null);
+    assert!(!table_exists(
+        &connection,
+        "pending_workspace_grant_promotions"
+    ));
 }
 
 #[test]
@@ -2175,62 +2110,6 @@ fn a_current_store_reopens_without_rerunning_migrations() {
     assert_eq!(version(&connection), STORE_SCHEMA_VERSION.to_string());
 }
 
-/// Schema 35 marks who recorded each session grant. A pre-35 store's rows are
-/// all `human`; the delegate columns arrive with their defaults and a column
-/// already present with the wrong shape is refused.
-#[test]
-fn version_thirty_four_gains_grant_provenance_and_keeps_old_rows_human() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("sessions.sqlite3");
-    let (connection, _) = open_database(&path).unwrap();
-    connection
-        .execute_batch(
-            "ALTER TABLE session_grants DROP COLUMN source;
-             ALTER TABLE session_grants DROP COLUMN run_id;
-             INSERT INTO workspaces(id, path) VALUES ('ws', '/tmp/ws');
-             INSERT INTO sessions(
-                 id, workspace_id, title, status, approval_mode, created_at_ms, updated_at_ms
-             ) VALUES ('s1', 'ws', 'old', 'idle', 'ask', 0, 0);
-             INSERT INTO session_grants(session_id, kind, value, created_at_ms)
-                 VALUES ('s1', 'shell_prefix', 'git push --force', 0);
-             UPDATE metadata SET value = '34' WHERE key = 'schema_version';",
-        )
-        .unwrap();
-    drop(connection);
-
-    let (connection, _) = open_database(&path).unwrap();
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key = 'schema_version'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap(),
-        STORE_SCHEMA_VERSION.to_string()
-    );
-    let (source, run_id): (String, Option<String>) = connection
-        .query_row(
-            "SELECT source, run_id FROM session_grants WHERE session_id = 's1'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(source, "human", "every pre-35 grant was a human grant");
-    assert_eq!(run_id, None);
-    connection
-        .execute_batch(
-            "ALTER TABLE session_grants DROP COLUMN source;
-             ALTER TABLE session_grants ADD COLUMN source INTEGER NOT NULL DEFAULT 0;",
-        )
-        .unwrap();
-    drop(connection);
-    assert!(matches!(
-        open_database(&path),
-        Err(SessionRuntimeError::CONSTRAINT)
-    ));
-}
-
 /// Schema 34 adds the nullable effort pin to a pre-34 store and refuses a
 /// column that already exists with the wrong shape.
 #[test]
@@ -2452,67 +2331,6 @@ fn version_fifteen_store_missing_a_linear_streaming_column_is_rejected() {
         open_database(&path),
         Err(SessionRuntimeError::CONSTRAINT)
     ));
-}
-
-#[test]
-fn version_fifteen_store_with_malformed_promotion_outbox_is_rejected() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("sessions.sqlite3");
-    let (connection, _) = open_database(&path).unwrap();
-    connection
-        .execute(
-            "ALTER TABLE pending_workspace_grant_promotions DROP COLUMN promotion_json",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-
-    assert!(matches!(
-        open_database(&path),
-        Err(SessionRuntimeError::CONSTRAINT)
-    ));
-}
-
-#[test]
-fn version_fifteen_store_with_implicit_primary_key_outbox_migrates() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("sessions.sqlite3");
-    let (connection, _) = open_database(&path).unwrap();
-    connection
-        .execute_batch(
-            "DROP TABLE pending_workspace_grant_promotions;
-             CREATE TABLE pending_workspace_grant_promotions (
-                 command_id TEXT PRIMARY KEY,
-                 created_at_ms INTEGER NOT NULL,
-                 promotion_json TEXT NOT NULL
-             );
-             CREATE INDEX pending_workspace_grant_promotions_fifo
-                 ON pending_workspace_grant_promotions(created_at_ms, command_id);
-             INSERT INTO pending_workspace_grant_promotions
-             VALUES ('legacy-command', 1, '{}');",
-        )
-        .unwrap();
-    drop(connection);
-
-    let (connection, _) = open_database(&path).unwrap();
-    let command_id_not_null: bool = connection
-        .query_row(
-            "SELECT [notnull] FROM pragma_table_info('pending_workspace_grant_promotions')
-             WHERE name = 'command_id'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(command_id_not_null);
-    let promotion_json: String = connection
-        .query_row(
-            "SELECT promotion_json FROM pending_workspace_grant_promotions
-             WHERE command_id = 'legacy-command'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(promotion_json, "{}");
 }
 
 #[test]
@@ -2900,13 +2718,9 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
         (workspace_id, session_id)
     };
 
-    // Rewind the file to the v0.1.4 shape: no session delegate column,
-    // schema_version 35.
+    // Rewind the file to the v0.1.4 shape: schema_version 35.
     {
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute("ALTER TABLE sessions DROP COLUMN approval_delegate", [])
-            .unwrap();
         connection
             .execute(
                 "UPDATE metadata SET value = '35' WHERE key = 'schema_version'",
@@ -2924,14 +2738,6 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
     {
         let connection = rusqlite::Connection::open(&path).unwrap();
         assert_eq!(version(&connection), STORE_SCHEMA_VERSION.to_string());
-        let delegate: Option<String> = connection
-            .query_row(
-                "SELECT approval_delegate FROM sessions WHERE id = ?1",
-                [session_id.to_string()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(delegate, None, "no session override is invented");
     }
     let focused_transcript = |snapshot: &qq_protocol::WorkspaceSnapshot| {
         snapshot
@@ -2963,22 +2769,12 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
     assert_eq!(migrated[1].0, qq_protocol::MessageRole::Assistant);
     assert_eq!(migrated[1].1, qq_protocol::MessageState::Complete);
     assert!(!migrated[1].2.is_empty(), "the assistant reply survives");
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SetApprovalDelegate {
-                session_id,
-                delegate: Some(qq_protocol::ApprovalDelegate::Off),
-            },
-        )
-        .await
-        .unwrap();
     // `close` releases the store's single-writer lock; `shutdown` alone
     // stops the scheduler but keeps the store open.
     runtime.close().await.unwrap();
 
-    // Reopening the upgraded store is a no-op: the version, the delegate
-    // written above and the transcript all come back unchanged.
+    // Reopening the upgraded store is a no-op: the version and the
+    // transcript come back unchanged.
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions::new(path.clone()),
         Arc::new(ScriptedLoader),
@@ -2988,14 +2784,6 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
     {
         let connection = rusqlite::Connection::open(&path).unwrap();
         assert_eq!(version(&connection), STORE_SCHEMA_VERSION.to_string());
-        let delegate: Option<String> = connection
-            .query_row(
-                "SELECT approval_delegate FROM sessions WHERE id = ?1",
-                [session_id.to_string()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(delegate.as_deref(), Some("off"));
     }
     let reopened = runtime
         .snapshot(SnapshotRequest {
@@ -3008,10 +2796,6 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
         .await
         .unwrap();
     assert_eq!(focused_transcript(&reopened), migrated);
-    assert_eq!(
-        reopened.focused.as_ref().unwrap().summary.approval_delegate,
-        Some(qq_protocol::ApprovalDelegate::Off)
-    );
     runtime.shutdown().await.unwrap();
 }
 
@@ -3417,102 +3201,6 @@ fn version_forty_two_gains_the_prune_watermark_at_the_newest_turn() {
     ));
 }
 
-/// Schema 45 records who a held call waits on. A schema-44 store holding a
-/// call upgrades with it waiting for a human, the safe reading: an older
-/// build never recorded a delegate. A column with the wrong shape is refused.
-#[test]
-fn version_forty_four_reads_existing_holds_as_waiting_for_a_human() {
-    for (previous, delegated) in [("44", false), ("45", true)] {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("sessions.sqlite3");
-        let (connection, _) = open_database(&path).unwrap();
-        let session_id = SessionId::from_bytes([0x46; 16]);
-        let workspace = WorkspaceId::from_bytes([0x45; 16]).to_string();
-        let session = session_id.to_string();
-        let run = RunId::from_bytes([0x47; 16]).to_string();
-        let message = MessageId::from_bytes([0x48; 16]).to_string();
-        let call = ToolCallId::from_bytes([0x49; 16]);
-        for (statement, values) in [
-        (
-            "INSERT INTO workspaces(id, path) VALUES (?1, '/v44-holds')",
-            vec![workspace.clone()],
-        ),
-        (
-            "INSERT INTO sessions(id, workspace_id, title, status, created_at_ms, updated_at_ms)
-             VALUES (?1, ?2, 't', 'running', 1, 1)",
-            vec![session.clone(), workspace],
-        ),
-        (
-            "INSERT INTO runs(id, session_id, command_id, user_message_id,
-                              assistant_message_id, status, created_at_ms)
-             VALUES (?1, ?2, ?1, ?3, ?3, 'running', 1)",
-            vec![run.clone(), session.clone(), message],
-        ),
-        (
-            "UPDATE sessions SET active_run_id = ?2 WHERE id = ?1",
-            vec![session, run.clone()],
-        ),
-        (
-            "INSERT INTO tool_calls(id, run_id, turn_ordinal, call_ordinal, provider_call_id,
-                                    name, arguments_json, state, requested_at_ms)
-             VALUES (?1, ?2, 1, 1, 'call_1', 'shell', '{}', 'awaiting_approval', 1)",
-            vec![call.to_string(), run],
-        ),
-    ] {
-        connection
-            .execute(statement, rusqlite::params_from_iter(values))
-            .unwrap();
-    }
-        connection
-            .execute("DROP INDEX runs_owned_compaction", [])
-            .unwrap();
-        if previous == "44" {
-            connection
-                .execute("ALTER TABLE tool_calls DROP COLUMN approval_delegated", [])
-                .unwrap();
-        } else {
-            connection
-                .execute(
-                    "UPDATE tool_calls SET approval_delegated = 1 WHERE id = ?1",
-                    [call.to_string()],
-                )
-                .unwrap();
-        }
-        connection
-            .execute(
-                "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
-                [previous],
-            )
-            .unwrap();
-        drop(connection);
-
-        let (connection, _) = open_database(&path).unwrap();
-        assert_eq!(
-            load_session_summary(&connection, session_id)
-                .unwrap()
-                .pending_holds,
-            [qq_protocol::PendingHold {
-                tool_call_id: call,
-                delegated,
-            }]
-        );
-        drop(connection);
-
-        let (connection, _) = open_database(&path).unwrap();
-        for statement in [
-            "ALTER TABLE tool_calls DROP COLUMN approval_delegated",
-            "ALTER TABLE tool_calls ADD COLUMN approval_delegated TEXT",
-        ] {
-            connection.execute(statement, []).unwrap();
-        }
-        drop(connection);
-        assert!(matches!(
-            open_database(&path),
-            Err(SessionRuntimeError::CONSTRAINT)
-        ));
-    }
-}
-
 #[test]
 fn ab5_store_open_rejects_the_next_schema_before_loading_sessions() {
     let directory = tempfile::tempdir().unwrap();
@@ -3837,4 +3525,297 @@ async fn retired_supervised_mode_upgrades_from(schema: u32) {
         remaining, 0,
         "from {schema}: the retired mode is rewritten once, at open"
     );
+}
+
+#[tokio::test]
+async fn a_schema_64_store_with_reviewer_delegate_and_grant_state_opens_and_replays() {
+    // Protocol 41 removed the approval reviewer, `approval_delegate` and
+    // session/workspace grants. A store written before then holds their
+    // tables and columns, summaries naming a delegate, delegated holds,
+    // grant and reviewer resolutions, and their events. It must open, drop
+    // that storage, and still snapshot and replay its history.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (workspace_id, session_id, store_id) = {
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(path.clone()),
+            Arc::new(ScriptedLoader),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let CommandOutcome::SessionCreated { session_id } =
+            create_session(&runtime, workspace_id, None).await.outcome
+        else {
+            panic!("unexpected receipt")
+        };
+        let queued = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text("written by v0.1.9".to_owned())],
+                    limits: qq_protocol::RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: queued.committed_through,
+            })
+            .unwrap();
+        collect_through_finished(&mut events).await;
+        let store_id = runtime.store_id();
+        runtime.close().await.unwrap();
+        (workspace_id, session_id, store_id)
+    };
+    let approved = ToolCallId::generate().unwrap();
+    let denied = ToolCallId::generate().unwrap();
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let run_id: String = connection
+            .query_row("SELECT id FROM runs", [], |row| row.get(0))
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session_grants (
+                     session_id TEXT NOT NULL REFERENCES sessions(id),
+                     kind TEXT NOT NULL,
+                     value TEXT NOT NULL,
+                     created_at_ms INTEGER NOT NULL,
+                     source TEXT NOT NULL DEFAULT 'human',
+                     run_id TEXT,
+                     UNIQUE(session_id, kind, value)
+                 );
+                 CREATE TABLE pending_workspace_grant_promotions (
+                     command_id TEXT NOT NULL PRIMARY KEY,
+                     created_at_ms INTEGER NOT NULL,
+                     promotion_json TEXT NOT NULL
+                 );
+                 CREATE INDEX pending_workspace_grant_promotions_fifo
+                     ON pending_workspace_grant_promotions(created_at_ms, command_id);
+                 CREATE TABLE native_command_owners (
+                     tool_call_id TEXT NOT NULL PRIMARY KEY CHECK(length(tool_call_id)=32),
+                     owner_id TEXT NOT NULL CHECK(length(owner_id)=32),
+                     result_saved INTEGER NOT NULL DEFAULT 0 CHECK(result_saved IN (0,1))
+                 ) STRICT;
+                 CREATE INDEX native_command_ack_pending ON native_command_owners(owner_id) WHERE result_saved=1;
+                 ALTER TABLE sessions ADD COLUMN approval_delegate TEXT;
+                 ALTER TABLE tool_calls ADD COLUMN approval_delegated INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE tool_calls ADD COLUMN approval_escalation_json TEXT CHECK(approval_escalation_json IS NULL OR (json_valid(approval_escalation_json) AND length(CAST(approval_escalation_json AS BLOB))<=8192));
+                 DROP TRIGGER IF EXISTS tool_calls_clear_approval_inputs;
+                 CREATE TRIGGER tool_calls_clear_approval_inputs AFTER UPDATE OF state,approval_resolution ON tool_calls
+                 WHEN (OLD.approval_inputs_json IS NOT NULL OR OLD.approval_escalation_json IS NOT NULL)
+                     AND (NEW.state!='awaiting_approval' OR NEW.approval_resolution IS NOT NULL)
+                 BEGIN UPDATE tool_calls SET approval_inputs_json=NULL,approval_escalation_json=NULL WHERE id=NEW.id; END;
+                 UPDATE sessions SET approval_delegate='off';",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_grants(session_id,kind,value,created_at_ms)
+                 VALUES (?1,'shell_prefix','cargo test',1)",
+                [session_id.to_string()],
+            )
+            .unwrap();
+        for (call, ordinal, state, resolution) in [
+            (approved, 1, "completed", "approved_for_session"),
+            (denied, 2, "denied", "denied_by_reviewer"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO tool_calls(
+                         id, run_id, turn_ordinal, call_ordinal, provider_call_id, name,
+                         arguments_json, state, result, is_error, requested_at_ms,
+                         approval_resolution, approval_delegated
+                     ) VALUES (?1, ?2, 1, ?3, ?4, 'shell', '{\"command\":\"cargo test\"}',
+                               ?5, 'done', ?6, 1, ?7, 1)",
+                    params![
+                        call.to_string(),
+                        run_id,
+                        ordinal,
+                        format!("call_{ordinal}"),
+                        state,
+                        state == "denied",
+                        resolution
+                    ],
+                )
+                .unwrap();
+        }
+        // Every journaled summary names a delegate; one also holds a
+        // delegated call, and so does the run's completion receipt.
+        connection
+            .execute_batch(&format!(
+                "UPDATE events SET envelope_json=json_set(envelope_json,'$.event.session.approval_delegate','off')
+                  WHERE json_extract(envelope_json,'$.event.session') IS NOT NULL;
+                 UPDATE events SET envelope_json=json_set(envelope_json,'$.event.session.pending_holds',
+                     json('[{{\"tool_call_id\":\"{approved}\"}},{{\"tool_call_id\":\"{denied}\",\"delegated\":true}}]'))
+                  WHERE json_extract(envelope_json,'$.event.type')='session_created';
+                 UPDATE runs SET completion_json=json_set(completion_json,'$.event.session.approval_delegate','on',
+                     '$.event.session.pending_holds',json('[{{\"tool_call_id\":\"{denied}\",\"delegated\":true}}]'))
+                  WHERE completion_json IS NOT NULL;"
+            ))
+            .unwrap();
+        for event in [
+            serde_json::json!({
+                "type": "tool_approval_escalated",
+                "tool_call_id": denied,
+                "delegate": "reviewer",
+                "reason": "outside the task",
+            }),
+            serde_json::json!({
+                "type": "workspace_grant_promoted",
+                "grant": { "type": "shell_prefix", "prefix": "cargo test" },
+                "outcome": { "type": "written", "path": "/repo/.qq/config.ron" },
+            }),
+        ] {
+            let sequence: u64 = connection
+                .query_row(
+                    "UPDATE workspaces SET next_sequence=next_sequence+1 WHERE id=?1
+                     RETURNING next_sequence",
+                    [workspace_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let envelope = serde_json::json!({
+                "cursor": { "store_id": store_id, "workspace_id": workspace_id, "sequence": sequence },
+                "session_id": session_id,
+                "run_id": run_id,
+                "occurred_at_ms": 1,
+                "event": event,
+            });
+            connection
+                .execute(
+                    "INSERT INTO events(workspace_id,sequence,envelope_json) VALUES (?1,?2,?3)",
+                    params![workspace_id.to_string(), sequence, envelope.to_string()],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE metadata SET value='64' WHERE key='schema_version'",
+                [],
+            )
+            .unwrap();
+    }
+
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(path.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let snapshot = runtime
+        .snapshot(SnapshotRequest {
+            workspace_id,
+            focused_session_id: Some(session_id),
+            include_sessions: Vec::new(),
+            session_limit: 8,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+    assert_eq!(snapshot.sessions.len(), 1);
+    let start = EventCursor {
+        store_id,
+        workspace_id,
+        sequence: 0,
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: start,
+        })
+        .unwrap();
+    let replayed = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut replayed = Vec::new();
+        while let Some(event) = events.next().await {
+            let event = event.unwrap();
+            let last = event.cursor.sequence == snapshot.cursor.sequence;
+            replayed.push(event);
+            if last {
+                break;
+            }
+        }
+        replayed
+    })
+    .await
+    .unwrap();
+    assert!(
+        replayed.iter().any(
+            |envelope| matches!(&envelope.event, SessionEvent::SessionCreated { session }
+                if session.pending_holds.len() == 2)
+        ),
+        "the journaled summary keeps its holds without the delegate flag"
+    );
+    assert_eq!(
+        replayed
+            .iter()
+            .filter(|envelope| matches!(envelope.event, SessionEvent::Retired))
+            .count(),
+        2,
+        "escalation and promotion events replay as retired"
+    );
+    let completions = runtime
+        .completed_runs(session_id, start, snapshot.cursor)
+        .await
+        .unwrap();
+    assert_eq!(completions.len(), 1, "the receipt survives");
+    runtime.close().await.unwrap();
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, STORE_SCHEMA_VERSION.to_string());
+    for table in [
+        "session_grants",
+        "pending_workspace_grant_promotions",
+        "native_command_owners",
+    ] {
+        let present: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!present, "{table} is dropped");
+    }
+    assert!(!has_column(&connection, "sessions", "approval_delegate").unwrap());
+    for column in ["approval_delegated", "approval_escalation_json"] {
+        assert!(!has_column(&connection, "tool_calls", column).unwrap());
+    }
+    let remaining: u64 = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM events WHERE instr(envelope_json,'\"approval_delegate\"')>0
+                         OR instr(envelope_json,'\"delegated\"')>0)
+                  + (SELECT COUNT(*) FROM runs WHERE instr(completion_json,'\"approval_delegate\"')>0
+                         OR instr(completion_json,'\"delegated\"')>0)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0, "removed summary fields are stripped");
+    for (call, expected) in [
+        (approved, ApprovalResolution::ApprovedOnce),
+        (denied, ApprovalResolution::Denied),
+    ] {
+        let stored: String = connection
+            .query_row(
+                "SELECT approval_resolution FROM tool_calls WHERE id=?1",
+                [call.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parse_approval_resolution(&stored).unwrap(), expected);
+    }
 }

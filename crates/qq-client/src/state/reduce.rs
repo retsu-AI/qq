@@ -8,12 +8,12 @@ use std::{collections::HashSet, sync::Arc};
 use qq_protocol::{
     AuditOutcome, MessageRole, MessageState, RunOutcome, ServerCapabilities, SessionEvent,
     SessionEventEnvelope, SessionId, SideQuestionState, SnapshotRequest, TextChannel,
-    ToolCallState, WorkspaceGrantOutcome, WorkspaceId,
+    ToolCallState, WorkspaceId,
 };
 
 use super::{
-    ApprovalEscalation, ApprovalPreview, ApprovalSettlement, ModelOption, SessionStore,
-    SessionView, body_request, plan_label, tool_call_state_is_terminal,
+    ApprovalPreview, ApprovalSettlement, ModelOption, SessionStore, SessionView, body_request,
+    plan_label, tool_call_state_is_terminal,
 };
 
 /// Characters of the compaction summary shown in its notice.
@@ -342,16 +342,9 @@ impl SessionStore {
                 edit,
                 question,
                 fetch,
-                delegated,
             } => {
                 if let Some(session) = self.get_mut(&session_id) {
-                    if tool_call.state == ToolCallState::AwaitingApproval && *delegated {
-                        session.live.with_delegate.insert(tool_call.id);
-                    }
-                    if tool_call.state == ToolCallState::AwaitingApproval
-                        && !*delegated
-                        && !context.attentive
-                    {
+                    if tool_call.state == ToolCallState::AwaitingApproval && !context.attentive {
                         effects.push(StateEffect::Attention(Attention::ApprovalRequested {
                             session_title: session.summary.title.clone(),
                         }));
@@ -364,36 +357,12 @@ impl SessionStore {
                                 edit: edit.clone(),
                                 question: question.as_deref().cloned(),
                                 fetch: fetch.as_deref().cloned(),
-                                escalated: None,
                             },
                         );
                     }
                     session.live.note_tool_call(tool_call);
                 }
                 self.upsert_tool_call(tool_call.clone());
-            }
-            // A delegate handed the hold to the human: keep why beside the
-            // preview so the prompt can say so. Advisory; the hold itself is
-            // unchanged, and a preview-less hold gets one to carry it. A late
-            // escalation for a call already answered changes nothing.
-            SessionEvent::ToolApprovalEscalated {
-                tool_call_id,
-                delegate,
-                reason,
-            } => {
-                if let Some(session) = self.get_mut(&session_id)
-                    && session.live.awaiting_approval.contains(tool_call_id)
-                {
-                    session.live.with_delegate.remove(tool_call_id);
-                    session
-                        .approval_previews
-                        .entry(*tool_call_id)
-                        .or_default()
-                        .escalated = Some(ApprovalEscalation {
-                        delegate: *delegate,
-                        reason: reason.clone(),
-                    });
-                }
             }
             // Live tool output chunks are display-only: they feed the bounded
             // tail under a running call's line, and the call's authoritative
@@ -425,16 +394,11 @@ impl SessionStore {
                             timing.finished_at_ms = Some(envelope.occurred_at_ms);
                             view.runs.entry(tool_call.run_id).or_default().tool_calls += 1;
                         }
-                        // Who settled the hold, so the row can say so once the
-                        // call has run.
-                        SessionEvent::ToolApprovalResolved {
-                            resolution,
-                            delegate,
-                            ..
-                        } => {
+                        // How the hold was settled, so the row can say so once
+                        // the call has run.
+                        SessionEvent::ToolApprovalResolved { resolution, .. } => {
                             timing.settled = Some(ApprovalSettlement {
                                 resolution: *resolution,
-                                delegate: *delegate,
                             });
                         }
                         _ => {}
@@ -559,25 +523,6 @@ impl SessionStore {
                         delay_ms.div_ceil(1_000),
                         qq_protocol::MAX_TURN_RETRIES
                     ),
-                });
-            }
-            // The follow-through of an approve-for-workspace decision. A
-            // failure is informational: the session grant already stands.
-            SessionEvent::WorkspaceGrantPromoted { outcome, .. } => {
-                effects.push(StateEffect::Notice {
-                    session: None,
-                    level: NoticeLevel::Warning,
-                    text: match outcome {
-                        WorkspaceGrantOutcome::Written { path } => {
-                            format!("grant written to {path}")
-                        }
-                        WorkspaceGrantOutcome::AlreadyPresent { path } => {
-                            format!("grant already present in {path}")
-                        }
-                        WorkspaceGrantOutcome::Failed { message } => {
-                            format!("workspace grant not saved: {message}")
-                        }
-                    },
                 });
             }
             SessionEvent::SessionCompacted {
@@ -713,7 +658,6 @@ impl SessionStore {
                 if !owned_step {
                     view.live.active_tool = None;
                     view.live.awaiting_approval.clear();
-                    view.live.with_delegate.clear();
                 }
                 if let Some(reasoning) = view.reasoning.get_mut(run_id) {
                     reasoning.streaming = false;

@@ -1,13 +1,11 @@
-mod native;
 use super::store::Priority;
 use super::*;
 #[cfg(unix)]
+use crate::tools::ToolCancellation;
+#[cfg(unix)]
 use crate::tools::process_context;
 #[cfg(unix)]
-use crate::tools::{ProcessGroupGuard, ToolCancellation};
-#[cfg(unix)]
 use crate::workspace::Workspace;
-pub(super) use native::recover_result;
 #[cfg(unix)]
 use std::collections::VecDeque;
 #[cfg(unix)]
@@ -72,18 +70,13 @@ pub(super) struct ProcessResult {
 
 #[derive(Debug, Error)]
 pub(super) enum ProcessError {
-    #[error("scoped completion checks require durable native command routing")]
+    #[error("the goal or its check authority changed before the check started")]
     ScopedExecutionUnavailable,
-    #[cfg(not(unix))]
-    #[error("completion-check process supervision is unavailable on this platform")]
-    UnsupportedPlatform,
-    #[cfg(unix)]
     #[error("check workspace could not open: {0}")]
     Workspace(#[source] std::io::Error),
     #[cfg(unix)]
     #[error("check preparation failed: {0}")]
     Preparation(#[source] process_context::PreparationError),
-    #[cfg(unix)]
     #[error("check preparation task stopped: {0}")]
     PreparationTask(#[source] tokio::task::JoinError),
     #[cfg(unix)]
@@ -136,7 +129,7 @@ async fn confirm_group_exit(pgid: rustix::process::Pid) -> std::io::Result<()> {
     .map_err(|_| std::io::Error::other("check group cleanup executor closed"))?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        confirm_linux_group_exit(pgid, deadline)
+        crate::tools::process_group::confirm_linux_group_exit(pgid, deadline)
     })
     .await
     .map_err(std::io::Error::other)?
@@ -164,196 +157,8 @@ pub(super) async fn confirm_reaped_group_exit(pgid: rustix::process::Pid) -> std
     })?
 }
 
-#[cfg(target_os = "linux")]
-fn group_member_identity(pid: u32) -> std::io::Result<Option<(i32, u64)>> {
-    let file = match std::fs::File::open(format!("/proc/{pid}/stat")) {
-        Ok(file) => file,
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound
-                || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-    read_group_member_identity(file)
-}
-
-#[cfg(target_os = "linux")]
-fn read_group_member_identity(file: std::fs::File) -> std::io::Result<Option<(i32, u64)>> {
-    use std::io::Read;
-    let mut stat = Vec::new();
-    match file.take(4097).read_to_end(&mut stat) {
-        Ok(_) => {}
-        // procfs can retain an open inode after its task is reaped. That
-        // task is gone, even though opening stat succeeded moments earlier.
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound
-                || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    }
-    if stat.len() > 4096 {
-        return Err(std::io::Error::other(
-            "check group member stat exceeds bound",
-        ));
-    }
-    let malformed = || std::io::Error::other("invalid check group member stat");
-    let delimiter = stat
-        .windows(2)
-        .rposition(|bytes| bytes == b") ")
-        .ok_or_else(malformed)?;
-    let fields = std::str::from_utf8(&stat[delimiter + 2..]).map_err(|_| malformed())?;
-    let mut fields = fields.split_ascii_whitespace();
-    let group = fields
-        .nth(2)
-        .ok_or_else(malformed)?
-        .parse()
-        .map_err(|_| malformed())?;
-    let started = fields
-        .nth(16)
-        .ok_or_else(malformed)?
-        .parse()
-        .map_err(|_| malformed())?;
-    Ok(Some((group, started)))
-}
-
-#[cfg(all(test, target_os = "linux"))]
-#[test]
-fn an_exited_process_stat_does_not_fail_group_cleanup() {
-    let mut child = std::process::Command::new("/bin/sh")
-        .env_clear()
-        .args(["-c", "read token"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let stat = std::fs::File::open(format!("/proc/{}/stat", child.id())).unwrap();
-    drop(child.stdin.take());
-    child.wait().unwrap();
-    assert_eq!(read_group_member_identity(stat).unwrap(), None);
-}
-
-#[cfg(target_os = "linux")]
-fn confirm_linux_group_exit(
-    pgid: rustix::process::Pid,
-    deadline: std::time::Instant,
-) -> std::io::Result<()> {
-    use rustix::event::{PollFd, PollFlags, Timespec, poll};
-    let mut confirmed = std::collections::HashSet::new();
-    loop {
-        let check_deadline = || {
-            deadline
-                .checked_duration_since(std::time::Instant::now())
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "check process group did not exit",
-                    )
-                })
-        };
-        check_deadline()?;
-        match rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL) {
-            Ok(()) | Err(rustix::io::Errno::SRCH) => {}
-            Err(error) => return Err(error.into()),
-        }
-        let mut members = Vec::new();
-        let mut identities = std::collections::HashSet::new();
-        for (index, entry) in std::fs::read_dir("/proc")?.enumerate() {
-            check_deadline()?;
-            if index >= 65_536 {
-                return Err(std::io::Error::other(
-                    "check group process enumeration exceeds bound",
-                ));
-            }
-            let entry = entry?;
-            let Some(pid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse::<u32>().ok())
-            else {
-                continue;
-            };
-            let Some((group, started)) = group_member_identity(pid)? else {
-                continue;
-            };
-            if group != pgid.as_raw_nonzero().get() {
-                continue;
-            }
-            if members.len() >= 4096 {
-                return Err(std::io::Error::other(
-                    "check group member count exceeds bound",
-                ));
-            }
-            let Some(process) = i32::try_from(pid)
-                .ok()
-                .and_then(rustix::process::Pid::from_raw)
-            else {
-                return Err(std::io::Error::other("invalid check group member pid"));
-            };
-            let descriptor =
-                match rustix::process::pidfd_open(process, rustix::process::PidfdFlags::empty()) {
-                    Ok(descriptor) => descriptor,
-                    Err(rustix::io::Errno::SRCH) => continue,
-                    Err(error) => return Err(error.into()),
-                };
-            match group_member_identity(pid)? {
-                None => continue,
-                Some(identity) if identity == (group, started) => {}
-                Some(_) => {
-                    return Err(std::io::Error::other(
-                        "check group member identity changed during observation",
-                    ));
-                }
-            }
-            identities.insert((pid, started));
-            members.push(descriptor);
-        }
-        // A zombie thread-group leader can still have live threads. Only
-        // pidfd readiness proves the whole process has stopped executing.
-        for member in &members {
-            loop {
-                let remaining = check_deadline()?;
-                let timeout = Timespec::try_from(remaining).map_err(std::io::Error::other)?;
-                let mut descriptors = [PollFd::new(member, PollFlags::IN)];
-                match poll(&mut descriptors, Some(&timeout)) {
-                    Err(rustix::io::Errno::INTR) => continue,
-                    Err(error) => return Err(error.into()),
-                    Ok(_)
-                        if descriptors[0]
-                            .revents()
-                            .intersects(PollFlags::IN | PollFlags::HUP) =>
-                    {
-                        break;
-                    }
-                    Ok(0) => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "check group member did not exit",
-                        ));
-                    }
-                    Ok(_) => {
-                        return Err(std::io::Error::other(
-                            "unexpected check group member readiness",
-                        ));
-                    }
-                }
-            }
-        }
-        // A complete rescan closes the fork-during-enumeration window.
-        // The unreaped leader pins pgid throughout every kill and scan.
-        if identities.is_subset(&confirmed) {
-            return Ok(());
-        }
-        confirmed = identities;
-    }
-}
-
-/// A scoped task must never reach the legacy host launcher. Durable check
-/// identities and terminal outcomes must be persisted before enabling this path.
+/// Runs the check command in the workspace as the user, killing its process
+/// tree on timeout or cancellation.
 pub(super) async fn run_process(
     workspace: PathBuf,
     command: String,
@@ -362,9 +167,6 @@ pub(super) async fn run_process(
     producer: Arc<crate::ProcessProducer>,
     resources: execution::RunResources,
 ) -> Result<ProcessResult, ProcessError> {
-    if resources.has_native_scope() {
-        return Err(ProcessError::ScopedExecutionUnavailable);
-    }
     run_host_process(
         workspace,
         command,
@@ -440,7 +242,7 @@ async fn run_host_process(
             tail: String::new(),
         });
     }
-    let mut child = match prepared
+    let (mut child, mut group) = match prepared
         .spawn(
             false,
             &lease,
@@ -449,11 +251,10 @@ async fn run_host_process(
         )
         .await
     {
-        Ok((child, _receipt)) => child,
+        Ok((child, group, _receipt)) => (child, group),
         Err(error) => return Err(ProcessError::Spawn(error)),
     };
     lease.process_started();
-    let mut group = ProcessGroupGuard::new(child.id());
     let pid = rustix::process::Pid::from_raw(
         i32::try_from(child.id().expect("spawned child has pid"))
             .expect("pid fits signed process id"),
@@ -512,6 +313,9 @@ async fn run_host_process(
                         Err(error) => break Err(ProcessError::Reap(error)),
                     };
                     group.disarm();
+                    if let Err(error) = group.reap_watcher().await {
+                        return Err(ProcessError::Cleanup { original: None, group: Some(error), leader: None, reap: None });
+                    }
                     if let Err(error) = confirm_reaped_group_exit(pid).await {
                         return Err(ProcessError::Cleanup { original: None, group: Some(error), leader: None, reap: None });
                     }
@@ -587,7 +391,10 @@ async fn run_host_process(
         }
         #[cfg(not(target_os = "linux"))]
         let confirmation_error = if reap_error.is_none() {
-            confirm_reaped_group_exit(pid).await.err()
+            match group.reap_watcher().await {
+                Ok(()) => confirm_reaped_group_exit(pid).await.err(),
+                Err(error) => Some(error),
+            }
         } else {
             None
         };
@@ -673,7 +480,7 @@ pub(super) enum Start {
     Policy(GoalCheckPolicyError),
     Expired,
     Waiting,
-    Started(Vec<SessionEventEnvelope>, Option<ToolCallId>),
+    Started(Vec<SessionEventEnvelope>),
     Stop,
 }
 
@@ -681,27 +488,17 @@ pub(super) fn check_scope_required(
     connection: &Connection,
     session: SessionId,
     authorization: Option<qq_protocol::GoalCheckAuthorization>,
-    native: bool,
-    task_workspaces: bool,
 ) -> Result<Option<bool>, SessionRuntimeError> {
     let current = load_tool_approval_policy(connection, session)?;
-    if current.mode == ApprovalMode::ReadOnly
-        || current
-            .ancestors
-            .iter()
-            .any(|(mode, _)| *mode == ApprovalMode::ReadOnly)
+    if current.mode == ApprovalMode::ReadOnly || current.ancestors.contains(&ApprovalMode::ReadOnly)
     {
         return Ok(None);
     }
-    let automatic = current.mode == ApprovalMode::Auto
-        || current
-            .ancestors
-            .iter()
-            .any(|(mode, _)| *mode == ApprovalMode::Auto);
+    let automatic =
+        current.mode == ApprovalMode::Auto || current.ancestors.contains(&ApprovalMode::Auto);
     let scoped =
         automatic || authorization == Some(qq_protocol::GoalCheckAuthorization::TaskScoped);
-    if scoped && (!goals::auto_check_authority(connection, session)? || !native || !task_workspaces)
-    {
+    if scoped && !goals::auto_check_authority(connection, session)? {
         return Ok(None);
     }
     Ok(Some(scoped))
@@ -710,8 +507,6 @@ pub(super) fn check_scope_required(
 pub(super) fn execution_scope_required(
     connection: &Connection,
     claimed: &ClaimedRun,
-    native: bool,
-    task_workspaces: bool,
 ) -> Result<Option<bool>, SessionRuntimeError> {
     let Some(current) = goals::load_live(connection, claimed.identity.session_id)? else {
         return Ok(None);
@@ -734,13 +529,7 @@ pub(super) fn execution_scope_required(
         } else {
             captured
         };
-    check_scope_required(
-        connection,
-        claimed.identity.session_id,
-        authorization,
-        native,
-        task_workspaces,
-    )
+    check_scope_required(connection, claimed.identity.session_id, authorization)
 }
 
 pub(super) fn try_start(
@@ -748,8 +537,6 @@ pub(super) fn try_start(
     store_id: StoreId,
     claimed: &ClaimedRun,
     deadline_ms: u64,
-    native: bool,
-    task_workspaces: bool,
 ) -> Result<Start, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
@@ -790,8 +577,6 @@ pub(super) fn try_start(
         &transaction,
         claimed.identity.session_id,
         goal.check_authorization,
-        native,
-        task_workspaces,
     )?
     .is_none()
     {
@@ -801,9 +586,7 @@ pub(super) fn try_start(
         AND (s.active_run_id IS NOT NULL OR (s.preparing_run_id IS NOT NULL AND s.preparing_run_id!=?2 AND EXISTS(SELECT 1 FROM runs preparing WHERE preparing.id=s.preparing_run_id AND preparing.kind!='goal_check'))))
         OR EXISTS(SELECT 1 FROM side_questions q JOIN sessions s ON s.id=q.session_id WHERE s.workspace_id=?1 AND q.state='running')",
         params![claimed.identity.workspace_id.to_string(),claimed.identity.run_id.to_string()],|row|row.get(0))?;
-    if busy
-        || super::native_recovery::workspace_blocked(&transaction, claimed.identity.workspace_id)?
-    {
+    if busy {
         return Ok(Start::Waiting);
     }
     let started = transaction.execute(
@@ -826,7 +609,7 @@ pub(super) fn try_start(
     goal.counters.audits += 1;
     goals::save(&transaction, &goal)?;
     let context = EventContext::for_run(store_id, claimed.identity, now);
-    let mut events = vec![
+    let events = vec![
         append_event(
             &transaction,
             context,
@@ -848,15 +631,8 @@ pub(super) fn try_start(
             },
         )?,
     ];
-    let call = if native {
-        let (id, call_events) = native::record_call(&transaction, store_id, claimed, now)?;
-        events.extend(call_events);
-        Some(id)
-    } else {
-        None
-    };
     transaction.commit()?;
-    Ok(Start::Started(events, call))
+    Ok(Start::Started(events))
 }
 
 pub(super) enum Completion {
@@ -1016,10 +792,7 @@ pub(super) fn finish_in_transaction(
             {
                 let current = load_tool_approval_policy(transaction, goal.session_id)?;
                 let automatic = current.mode == ApprovalMode::Auto
-                    || current
-                        .ancestors
-                        .iter()
-                        .any(|(mode, _)| *mode == ApprovalMode::Auto);
+                    || current.ancestors.contains(&ApprovalMode::Auto);
                 goal.status = qq_protocol::GoalStatus::Paused {
                     reason: qq_protocol::GoalPauseReason::NeedsUser {
                         cause: if automatic {
@@ -1091,8 +864,6 @@ pub(super) fn finish_in_transaction(
     if let Some(settled) = settled {
         events.extend(settled)
     }
-    // Reclaim the worker result only once the goal and run settlement are durable.
-    transaction.execute("UPDATE native_command_owners SET result_saved=1 WHERE tool_call_id IN (SELECT id FROM tool_calls WHERE run_id=?1 AND state IN ('completed','failed'))", [claimed.identity.run_id.to_string()])?;
     Ok(events)
 }
 
@@ -1100,7 +871,7 @@ pub(super) async fn execute(
     inner: Arc<runtime::SessionRuntimeInner>,
     claimed: ClaimedRun,
     mut cancellation: watch::Receiver<bool>,
-    mut resources: execution::RunResources,
+    resources: execution::RunResources,
 ) {
     let Some(captured) = claimed.goal.as_ref() else {
         inner.failed.send_replace(true);
@@ -1154,19 +925,10 @@ pub(super) async fn execute(
             }
         }
         let claim = claimed.clone();
-        let native = inner.native_commands.is_some();
-        let task_workspaces = inner.task_workspaces.is_some();
         let started = inner
             .store
             .call(Priority::AwaitControl, move |connection| {
-                try_start(
-                    connection,
-                    store_id,
-                    &claim,
-                    deadline_ms,
-                    native,
-                    task_workspaces,
-                )
+                try_start(connection, store_id, &claim, deadline_ms)
             })
             .await;
         match started {
@@ -1194,7 +956,7 @@ pub(super) async fn execute(
                     ()=tokio::time::sleep_until(deadline)=>{},
                 }
             }
-            Ok(Start::Started(events, call)) => {
+            Ok(Start::Started(events)) => {
                 for event in events {
                     inner.notify(event.cursor)
                 }
@@ -1204,35 +966,21 @@ pub(super) async fn execute(
                     let scope = inner
                         .store
                         .call(Priority::AwaitControl, move |connection| {
-                            execution_scope_required(connection, &claim, native, task_workspaces)
+                            execution_scope_required(connection, &claim)
                         })
                         .await;
-                    if !matches!(scope, Ok(Some(_)))
-                        || (call.is_none() && matches!(scope, Ok(Some(true))))
-                    {
+                    if !matches!(scope, Ok(Some(_))) {
                         return Err(ProcessError::ScopedExecutionUnavailable);
                     }
-                    if let Some(call) = call {
-                        Ok(native::run(
-                            &inner,
-                            &claimed,
-                            call,
-                            deadline_ms,
-                            cancelled.clone(),
-                            &mut resources,
-                        )
-                        .await)
-                    } else {
-                        run_process(
-                            PathBuf::from(&claimed.workspace),
-                            check.command.clone(),
-                            deadline,
-                            cancelled.clone(),
-                            Arc::new(crate::ProcessProducer::new(env!("CARGO_PKG_VERSION"))),
-                            resources.clone(),
-                        )
-                        .await
-                    }
+                    run_process(
+                        PathBuf::from(&claimed.workspace),
+                        check.command.clone(),
+                        deadline,
+                        cancelled.clone(),
+                        Arc::new(crate::ProcessProducer::new(env!("CARGO_PKG_VERSION"))),
+                        resources.clone(),
+                    )
+                    .await
                 };
                 tokio::pin!(process);
                 let result = tokio::select! {
@@ -1262,20 +1010,13 @@ pub(super) async fn execute(
             }
         }
     };
-    let mut teardown = match resources.drain().await {
+    let teardown = match resources.drain().await {
         Ok(teardown) => teardown,
         Err(_) => {
             inner.failed.send_replace(true);
             return;
         }
     };
-    if execution::persist_native_results(&inner, &claimed, &mut teardown)
-        .await
-        .is_err()
-    {
-        inner.failed.send_replace(true);
-        return;
-    }
     #[cfg(all(test, unix))]
     pause_result(claimed.identity.session_id).await;
     let claim = claimed.clone();
@@ -1296,9 +1037,6 @@ pub(super) async fn execute(
         Ok(events) => {
             for event in events {
                 inner.notify(event.cursor)
-            }
-            if let Some(ack) = &inner.native_ack {
-                ack.wake();
             }
         }
         Err(_) => {
@@ -1337,15 +1075,11 @@ pub(super) fn recover(
         .collect())
 }
 
-pub(super) fn interrupt_native(
+pub(super) fn interrupt(
     transaction: &Connection,
     store_id: StoreId,
     run: RunId,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
-    transaction.execute(
-        "DELETE FROM temp.native_observation_runs WHERE run_id=?1",
-        [run.to_string()],
-    )?;
     recover_checks(transaction, store_id, Some(run))
 }
 
@@ -1355,12 +1089,12 @@ fn recover_checks(
     run: Option<RunId>,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let run = run.map(|run| run.to_string());
-    let mut workspaces = transaction.prepare("SELECT DISTINCT s.workspace_id FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running' AND r.check_acknowledgment_pending=0 AND (?1 IS NULL OR r.id=?1) AND NOT EXISTS(SELECT 1 FROM temp.native_observation_runs n WHERE n.run_id=r.id)")?;
+    let mut workspaces = transaction.prepare("SELECT DISTINCT s.workspace_id FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running' AND r.check_acknowledgment_pending=0 AND (?1 IS NULL OR r.id=?1)")?;
     let ids = workspaces
         .query_map([&run], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(workspaces);
-    transaction.execute("UPDATE runs AS r SET check_acknowledgment_pending=1 WHERE kind='goal_check' AND status='running' AND (?1 IS NULL OR r.id=?1) AND NOT EXISTS(SELECT 1 FROM temp.native_observation_runs n WHERE n.run_id=r.id)",[&run])?;
+    transaction.execute("UPDATE runs AS r SET check_acknowledgment_pending=1 WHERE kind='goal_check' AND status='running' AND (?1 IS NULL OR r.id=?1)",[&run])?;
     let mut hold_cursors = Vec::new();
     for workspace in ids {
         let workspace = parse_id(&workspace)?;
@@ -1375,7 +1109,7 @@ fn recover_checks(
         }
     }
     let mut statement=transaction.prepare("SELECT r.id,r.session_id,s.workspace_id,r.goal_id,r.goal_revision
-        FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running' AND (?1 IS NULL OR r.id=?1) AND NOT EXISTS(SELECT 1 FROM temp.native_observation_runs n WHERE n.run_id=r.id)")?;
+        FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running' AND (?1 IS NULL OR r.id=?1)")?;
     let rows = statement
         .query_map([&run], |row| {
             Ok((
@@ -1423,12 +1157,55 @@ fn recover_checks(
 
 #[cfg(not(unix))]
 async fn run_host_process(
-    _workspace: PathBuf,
-    _command: String,
-    _deadline: tokio::time::Instant,
-    _cancellation: RunCancellation,
-    _producer: Arc<crate::ProcessProducer>,
-    _resources: execution::RunResources,
+    workspace: PathBuf,
+    command: String,
+    deadline: tokio::time::Instant,
+    cancellation: RunCancellation,
+    producer: Arc<crate::ProcessProducer>,
+    resources: execution::RunResources,
 ) -> Result<ProcessResult, ProcessError> {
-    Err(ProcessError::UnsupportedPlatform)
+    let stopped = if cancellation.is_cancelled() {
+        Some(ProcessOutcome::Cancelled)
+    } else if tokio::time::Instant::now() >= deadline {
+        Some(ProcessOutcome::TimedOut)
+    } else {
+        None
+    };
+    if let Some(outcome) = stopped {
+        return Ok(ProcessResult {
+            outcome,
+            tail: String::new(),
+        });
+    }
+    let workspace =
+        tokio::task::spawn_blocking(move || crate::workspace::Workspace::open(&workspace))
+            .await
+            .map_err(ProcessError::PreparationTask)?
+            .map_err(ProcessError::Workspace)?;
+    let mut lease = resources.process_lease();
+    let (outcome, text) = crate::tools::run_goal_check_shell(
+        &workspace,
+        command,
+        deadline,
+        cancellation,
+        producer,
+        &mut lease,
+    )
+    .await;
+    let outcome = match outcome {
+        Some(crate::tools::dispatch::CommandOutcome::Exited { code }) => {
+            ProcessOutcome::Exited { code }
+        }
+        Some(crate::tools::dispatch::CommandOutcome::TimedOut) => ProcessOutcome::TimedOut,
+        Some(crate::tools::dispatch::CommandOutcome::Cancelled) => ProcessOutcome::Cancelled,
+        None => ProcessOutcome::Failed,
+    };
+    let mut start = text.len().saturating_sub(OUTPUT_BYTES);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    Ok(ProcessResult {
+        outcome,
+        tail: text[start..].to_owned(),
+    })
 }

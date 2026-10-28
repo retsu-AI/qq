@@ -40,8 +40,8 @@ Requires a terminal on stdin and stdout; in a pipe use `qq ask` or `qq run`.
 
 ## `qq ask PROMPT`
 
-One streamed answer with workspace read tools and configuration-granted external
-tools; no approval questions or persisted session. [Headless](headless.md#qq-ask--one-answer).
+One streamed answer with workspace read tools and the MCP tools a server's
+`allow` lists; no approval questions or persisted session. [Headless](headless.md#qq-ask--one-answer).
 
 ## `qq run [FLAGS] PROMPT`
 
@@ -53,7 +53,6 @@ One unattended agent task. [Headless](headless.md#qq-run--the-agent-unattended).
 | `--session ID` | new session |
 | `--approval read-only\|ask\|auto\|full` | `auto` |
 | `--profile NAME` | `default` |
-| `--allow-tool NAME`, `--allow-shell PREFIX`, `--allow-host HOST` | none; repeatable |
 | `--steer-stdin` | stdin unread |
 | `--timeout-seconds N`, `--max-turns N`, `--max-cost-usd V` | unlimited |
 | `--correlation KEY=VALUE` | none; ≤ 8 |
@@ -71,8 +70,8 @@ or budget · 4 harness failure · 5 needs input · 130 interrupted.
 prompt. Bare `--goal --session ID` resumes the stored goal. Goal exits are
 0 achieved, 6 paused, 7 blocked, 8 goal budget exhausted, 130 interrupted;
 setup/harness errors retain 2/4. Check consent requires both the exact
-`--check COMMAND` and `--goal-check-approval` scope. `--approval` and
-`--allow-shell` cannot grant check consent. `--replace` requires an objective.
+`--check COMMAND` and `--goal-check-approval` scope. `--approval` does not
+grant check consent. `--replace` requires an objective.
 Goal flags conflict with an ordinary prompt; goal mode also rejects
 `--steer-stdin` and `--output-schema`. With an objective, timeout/turn flags
 set per-run limits, while `--max-cost-usd` caps total goal spending. Budget
@@ -129,7 +128,7 @@ A successful control exits 0 even when the resulting goal is paused.
 | `sources` | every file consulted in precedence order, and `pending trust:` lines |
 | `check` | `configuration is valid (model: …)` or the first error; exit 1 on error |
 | `show` | the merged configuration with secrets redacted, then TUI settings |
-| `explain FIELD` | which source set `FIELD`: `model`, `organization`, `worker_model`, `delegation`, `audit`, `approval_delegate`, `approval_timeout`, `reasoning_effort`, `max_output_tokens`, `provider.NAME`, `profile.NAME`, `pack.ID`, `grant.tool.NAME`, `grant.shell.PREFIX`, `tui.theme`, `tui.bindings.ACTION` |
+| `explain FIELD` | which source set `FIELD`: `model`, `organization`, `worker_model`, `delegation`, `audit`, `approval_timeout`, `reasoning_effort`, `max_output_tokens`, `goals.FIELD`, `policy.goals.FIELD`, `provider.NAME`, `profile.NAME`, `pack.ID`, `tui.theme`, `tui.bindings.ACTION` |
 
 ## `qq auth …`
 

@@ -45,7 +45,9 @@ release is a bump PR followed by a tag on the merged result.
    Review the changelog section in the diff: it is the release's user-facing
    summary, and a commit that landed with a wrong Conventional Commit type
    shows up in the wrong group here. Add the Upgrading block (below) when a
-   contract or configuration changed. Do **not** move the guide's version
+   contract or configuration changed; if `CHANGELOG.md` has an
+   `## Unreleased` section, move its Upgrading block into the new release
+   section and delete the `## Unreleased` heading. Do **not** move the guide's version
    pins here: the site deploys on merge, before the tag's assets exist.
    Docs-truth accepts the previous release's pins until step 6.
 

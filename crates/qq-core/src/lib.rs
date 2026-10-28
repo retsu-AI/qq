@@ -37,8 +37,6 @@ use thiserror::Error;
 mod approval;
 mod cancellation;
 pub mod catalog;
-#[doc(hidden)]
-pub mod command_owner;
 pub mod context_source;
 pub mod hosts;
 mod input;
@@ -47,13 +45,17 @@ pub mod output;
 pub mod plan;
 mod runtime;
 mod sessions;
-mod task_git;
-mod task_git_helper_image;
-#[doc(hidden)]
-pub mod task_git_job;
-pub mod task_workspace;
 mod tools;
 pub mod undo;
+
+/// Places this process in QQ's own job, which permits breakaway, so a child
+/// spawned with `CREATE_BREAKAWAY_FROM_JOB` leaves every enclosing job that
+/// permits it. The detached daemon uses this to outlive the shell that
+/// started it.
+#[cfg(windows)]
+pub fn prepare_detached_spawn() -> std::io::Result<()> {
+    tools::windows_job::root_job().map(|_| ())
+}
 
 #[doc(hidden)]
 pub use tools::process_context::ProcessProducer;
@@ -67,7 +69,6 @@ pub use tools::bench_support as tool_bench;
 pub use tools::network::{NetworkPolicy, host_grant_matches};
 #[doc(hidden)]
 pub use tools::output::bench_support as tool_output_bench;
-mod storage;
 mod workspace;
 
 use runtime::{
@@ -78,7 +79,7 @@ use runtime::{
     ToolGateFuture, TurnBlock, render_history_matches, render_tool_result,
 };
 
-pub use approval::{ApprovalDelegate, goal_check_shell_denied, shell_prefix_matches};
+pub use approval::goal_check_shell_denied;
 pub use cancellation::RunCancellation;
 pub use context_source::{
     ContextBudget, ContextBundle, ContextCache, ContextFetchFuture, ContextItem, ContextRequest,
@@ -94,24 +95,19 @@ pub use runtime::{
     AUDIT_TOOL_CALL_THRESHOLD, ApprovedReadImage, ApprovedReadImages, AuditMode, AuditPolicy,
     AuditRequest, AuditVerdict, AuditedAction, BASE_ENV, BuiltinPreference, MAX_AUDIT_ACTION_BYTES,
     MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS, MAX_AUDIT_CHILD_TURNS,
-    MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, MAX_SHELL_ENV_ALLOWLIST,
-    MAX_SHELL_ENV_NAMES, ReadImageApprovalError, ReadImageContract, ReadImageFamily, ShellPolicy,
-    valid_env_name,
+    MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, ReadImageApprovalError,
+    ReadImageContract, ReadImageFamily, ShellPolicy,
 };
 pub use sessions::{
-    ApprovalReviewer, DelegateIdentity, GoalCheckPolicyError, GoalCheckPolicyFuture, GoalPolicy,
-    GoalPolicyError, GoalPolicyFuture, GoalValidationError, GrantPromotionFuture, GrantSeedFuture,
-    LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN,
-    MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT, MAX_GRANT_BYTES, MAX_PENDING_PROMPTS,
-    MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES,
-    MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent,
-    PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest,
-    ReviewSpend, ReviewVerdict, RunCompletion, RunResult, RuntimeLoadError, RuntimeLoadFuture,
-    RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION,
-    SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer,
-    SideQueryLimits, SlashCommandError, SpawnModelValidationFuture, TaskGitPolicy,
-    TaskHostingAuthorization, TaskHostingLoadFuture, TaskWorkspacePolicy, WorkerRuntimeLoadFuture,
-    WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
+    GoalCheckPolicyError, GoalCheckPolicyFuture, GoalPolicy, GoalPolicyError, GoalPolicyFuture,
+    GoalValidationError, LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING,
+    MAX_CONCURRENT_CHILDREN_PER_RUN, MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT,
+    MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS, MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault,
+    PublishedEvent, PublishedEventStream, RunCompletion, RunResult, RuntimeLoadError,
+    RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader,
+    STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime, SessionRuntimeError,
+    SessionRuntimeOptions, SideAnswer, SideQueryLimits, SlashCommandError,
+    SpawnModelValidationFuture, WorkerRuntimeLoadFuture, WorkspacePolicyAuthority, run_cost,
 };
 /// Merkle index over the workspace tree the tools see.
 /// Detects changed paths between bounded workspace scans.
@@ -720,7 +716,6 @@ pub(crate) struct RunCapabilities {
     /// direct runs have no durable history to search.
     history: Option<Arc<dyn HistorySearcher>>,
     goal: Option<sessions::GoalRunInput>,
-    task_git: Option<Arc<sessions::TaskGitRunInput>>,
     goal_spend_tracking: bool,
     goal_paid: Option<sessions::GoalPaidInput>,
     /// Stored complete tool outputs for `read_tool_result`. Session runs
@@ -778,7 +773,6 @@ impl RunCapabilities {
             pricing: None,
             history: None,
             goal: None,
-            task_git: None,
             goal_spend_tracking: false,
             goal_paid: None,
             spills: None,
@@ -852,11 +846,6 @@ impl RunCapabilities {
 
     pub(crate) fn with_goal(mut self, goal: Option<sessions::GoalRunInput>) -> Self {
         self.goal = goal;
-        self
-    }
-
-    pub(crate) fn with_task_git(mut self, input: Option<sessions::TaskGitRunInput>) -> Self {
-        self.task_git = input.map(Arc::new);
         self
     }
 
@@ -954,7 +943,6 @@ impl RunCapabilities {
             pricing: None,
             history: None,
             goal: None,
-            task_git: None,
             goal_spend_tracking: false,
             goal_paid: None,
             spills: None,
@@ -974,9 +962,9 @@ impl RunCapabilities {
 
 struct StaticPolicyGate {
     mode: ApprovalMode,
-    /// Workspace-configured grants (today: MCP allowlist entries by exact
-    /// namespaced name). Mode still wins: read-only denies granted tools.
-    grants: approval::SessionGrants,
+    /// Workspace-configured tool allowlist entries by exact namespaced name.
+    /// Mode still wins: read-only denies granted tools.
+    tools: std::collections::HashSet<String>,
     network: Arc<tools::network::NetworkPolicy>,
 }
 
@@ -1008,7 +996,7 @@ impl ToolGate for ConfiguredToolGate {
         if !matches!(
             call.effect,
             catalog::EffectClass::ReadOnly | catalog::EffectClass::Interactive
-        ) && !self.0.grants.tools.contains(&call.name)
+        ) && !self.0.tools.contains(&call.name)
         {
             return Box::pin(std::future::ready(GateDecision::Deny {
                 message: approval::UNATTENDED_DENIED_RESULT.to_owned(),
@@ -1050,8 +1038,6 @@ pub struct Runtime {
     pub(crate) process_producer: Arc<ProcessProducer>,
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
     pub(crate) turn_recovery: TurnRecoveryPolicy,
-    /// Who settles the calls the session's approval mode holds.
-    pub(crate) approval_delegate: approval::ApprovalDelegate,
 }
 
 impl Runtime {
@@ -1103,7 +1089,6 @@ impl Runtime {
             process_producer: Arc::default(),
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
-            approval_delegate: approval::ApprovalDelegate::default(),
         })
     }
 
@@ -1112,15 +1097,6 @@ impl Runtime {
     #[must_use]
     pub const fn with_turn_recovery(mut self, policy: TurnRecoveryPolicy) -> Self {
         self.turn_recovery = policy;
-        self
-    }
-
-    /// Sets who settles held approvals: the configured reviewer under the
-    /// modes that consult it, or a human for everything. Inert without a
-    /// reviewer installed on the session runtime.
-    #[must_use]
-    pub const fn with_approval_delegate(mut self, delegate: approval::ApprovalDelegate) -> Self {
-        self.approval_delegate = delegate;
         self
     }
 
@@ -1633,7 +1609,7 @@ impl Runtime {
             cancelled,
             Arc::new(ConfiguredToolGate(StaticPolicyGate {
                 mode: ApprovalMode::Auto,
-                grants: approval::SessionGrants::default(),
+                tools: std::collections::HashSet::new(),
                 network: Arc::clone(&self.network),
             })),
             Arc::new(workspace::FileState::default()),
@@ -1758,10 +1734,7 @@ impl Runtime {
             let gate = if capabilities.unattended {
                 Arc::new(ConfiguredToolGate(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
-                    grants: approval::SessionGrants {
-                        tools: compiled.descriptor().tools.config_grants.iter().cloned().collect(),
-                        ..approval::SessionGrants::default()
-                    },
+                    tools: compiled.descriptor().tools.config_grants.iter().cloned().collect(),
                     network: Arc::clone(&compiled.runtime.network),
                 })) as Arc<dyn ToolGate>
             } else { gate };
@@ -1784,25 +1757,20 @@ impl plan::CompiledAgentPlan {
     pub fn run(self: &Arc<Self>, command: RunCommand) -> RunStream {
         let mut capabilities = RunCapabilities::user(None);
         capabilities.unattended = true;
-        let grants = approval::SessionGrants {
-            tools: self
-                .descriptor()
-                .tools
-                .config_grants
-                .iter()
-                .cloned()
-                .collect(),
-            shell_prefixes: Vec::new(),
-            hosts: Vec::new(),
-            delegate: approval::DelegateGrants::default(),
-        };
+        let tools = self
+            .descriptor()
+            .tools
+            .config_grants
+            .iter()
+            .cloned()
+            .collect();
         public_run_stream(
             self.execute(
                 vec![Message::user(input::render_text(command.input()))],
                 RunCancellation::new(),
                 Arc::new(ConfiguredToolGate(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
-                    grants,
+                    tools,
                     network: Arc::clone(&self.runtime.network),
                 })),
                 Arc::new(workspace::FileState::default()),
@@ -1883,8 +1851,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 // Direct runs have no steering channel, so these never fire.
                 | RuntimeEvent::SteeringApplied { .. }
                 | RuntimeEvent::Interrupted { .. }
-                // Direct runs have no reviewer or auditor either.
-                | RuntimeEvent::ReviewCharged { .. }
+                // Direct runs have no auditor either.
                 | RuntimeEvent::Audited { .. }
                 // Continuation is transparent to the direct stream: the text
                 // keeps flowing and the typed failure names exhaustion.
@@ -2456,7 +2423,7 @@ mod tests {
                     RunCancellation::new(),
                     Arc::new(StaticPolicyGate {
                         mode: ApprovalMode::ReadOnly,
-                        grants: approval::SessionGrants::default(),
+                        tools: Default::default(),
                         network: Arc::default(),
                     }),
                     Arc::new(workspace::FileState::default()),
@@ -2511,7 +2478,6 @@ mod tests {
                 spawn_agent: false,
                 search_history: false,
                 update_goal: false,
-                task_git: false,
                 read_tool_result: false,
                 load_skill: true,
                 read_only: false,
@@ -3060,7 +3026,6 @@ mod tests {
                 spawn_agent: false,
                 search_history: false,
                 update_goal: false,
-                task_git: false,
                 read_tool_result: false,
                 load_skill: true,
                 read_only: false,
@@ -3081,7 +3046,7 @@ mod tests {
                     RunCancellation::new(),
                     Arc::new(StaticPolicyGate {
                         mode: ApprovalMode::ReadOnly,
-                        grants: approval::SessionGrants::default(),
+                        tools: Default::default(),
                         network: Arc::default(),
                     }),
                     Arc::new(workspace::FileState::default()),
@@ -3173,7 +3138,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::ReadOnly,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -4572,7 +4537,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Full,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -5075,7 +5040,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -5810,7 +5775,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::ReadOnly,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -5877,7 +5842,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::ReadOnly,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -6288,7 +6253,7 @@ mod tests {
             RunCancellation::new(),
             Arc::new(StaticPolicyGate {
                 mode: ApprovalMode::ReadOnly,
-                grants: approval::SessionGrants::default(),
+                tools: Default::default(),
                 network: Arc::default(),
             }),
             Arc::new(workspace::FileState::default()),
@@ -6362,7 +6327,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -6429,7 +6394,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Ask,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -6848,7 +6813,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -7617,7 +7582,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -8057,7 +8022,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Ask,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -9753,18 +9718,19 @@ mod tests {
             None,
             None,
         );
-        // Prompt 25 changes write-child guidance (absent here). Prompt 24
+        // Prompt 26 changes execution guidance again; prompt 25 changes
+        // write-child guidance (absent here). Prompt 24
         // drops the workspace root from the header; prompt 23
         // changes execution, questions and public-fetch guidance. Undo those
         // declared changes before checking the historical v14 bytes.
-        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 25);
+        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 26);
         let prompt = prompt
             .replacen(
                 "operating in a workspace.\n",
                 "operating in the workspace rooted at /tmp/qq-prompt-test.\n",
                 1,
             )
-            .replacen("run commands under the host filesystem, network and environment policy, using the task deadline or an earlier explicit timeout. Native Auto preserves normal installed-tool configuration; explicit credential environment names require a policy grant. Auto never waits for human approval: a denied call is a tool error, so choose another permitted approach without bypassing the boundary. Ask may require human approval; ", "run one command in the workspace with a bounded timeout and may require user approval; the child starts from a cleared environment (PATH HOME LANG TERM TMPDIR) plus names you list in env that policy allows, and commands the policy classifies as forbidden (rm -rf on system paths, sudo, curl | sh, force-push, …) are refused under every approval mode; ", 1)
+            .replacen("run commands in the workspace as the user, with the inherited environment and host network, using the task deadline or an earlier explicit timeout. Auto never waits for human approval: a denied call is a tool error, so choose another permitted approach without bypassing the boundary. Ask may require human approval; ", "run one command in the workspace with a bounded timeout and may require user approval; the child starts from a cleared environment (PATH HOME LANG TERM TMPDIR) plus names you list in env that policy allows, and commands the policy classifies as forbidden (rm -rf on system paths, sudo, curl | sh, force-push, …) are refused under every approval mode; ", 1)
             .replacen("ask_user asks a bounded multiple-choice question when human input is enabled; in Auto it returns a result telling you to decide without human input; ", "ask_user puts a bounded multiple-choice question to the user and waits for the answer; ", 1)
             .replacen("fetch reads one public http(s) URL (HTML as markdown, JSON formatted). Auto needs no per-host approval; Ask requires human approval. Private, link-local and managed-denied hosts are refused.", "fetch reads one public http(s) URL (HTML as markdown, JSON formatted) and may require approval for the host; private and link-local hosts are refused.", 1);
         // Reconstruct v19 by undoing AB2's explicitly scoped changes; the
@@ -9802,13 +9768,13 @@ mod tests {
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
         // AB2 widens the cursor bound; AB3 removes the fixed read-limit default.
-        // Native Auto updates the shell environment description as well.
+        // Run-in-place drops the shell and exec `env` argument.
         // Record the current schema identity separately from the historical prompt.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "521e3115c1cf748d75b32e337ce10c086b8e424d569a905238bd63e5917b32ef"
+            "3a38ed59c2e281ed5fc3840f0adb9bef802939981d9fa0f18c2e65bacabda725"
         );
         let spawn = specs.last().unwrap();
         assert!(
@@ -10332,7 +10298,7 @@ mod tests {
                         RunCancellation::new(),
                         Arc::new(StaticPolicyGate {
                             mode,
-                            grants: approval::SessionGrants::default(),
+                            tools: Default::default(),
                             network: Arc::default(),
                         }),
                         Arc::new(workspace::FileState::default()),
@@ -10408,12 +10374,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Full,
-                    grants: approval::SessionGrants {
-                        tools: ["edit_file".to_owned()].into_iter().collect(),
-                        shell_prefixes: Vec::new(),
-                        hosts: Vec::new(),
-                        delegate: approval::DelegateGrants::default(),
-                    },
+                    tools: ["edit_file".to_owned()].into_iter().collect(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -10442,85 +10403,6 @@ mod tests {
             std::fs::read_to_string(directory.path().join("note.txt")).unwrap(),
             "before"
         );
-    }
-
-    #[tokio::test]
-    async fn task_git_without_session_capability_never_reaches_approval_or_execution() {
-        struct NoApproval;
-        impl ToolGate for NoApproval {
-            fn resolve(&self, call: &RuntimeToolCall) -> ToolGateFuture {
-                panic!("unavailable task operation reached approval: {}", call.name);
-            }
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let runtime = Runtime::new(
-            TurnScript {
-                turns: vec![
-                    vec![
-                        ("task_commit", r#"{"message":"task"}"#.into()),
-                        ("task_push", "{}".into()),
-                        ("task_pr", r#"{"title":"task","body":"body"}"#.into()),
-                    ],
-                    Vec::new(),
-                ],
-                requests: Arc::clone(&requests),
-            },
-            "test-model",
-            256,
-        )
-        .unwrap();
-        let workspace = directory.path().canonicalize().unwrap();
-        let plan = tokio::task::spawn_blocking(move || {
-            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
-                &runtime, workspace,
-            ))
-            .unwrap()
-        })
-        .await
-        .unwrap();
-        let events = plan
-            .execute(
-                vec![Message::user("commit the task")],
-                RunCancellation::new(),
-                Arc::new(NoApproval),
-                Arc::new(workspace::FileState::default()),
-                RunCapabilities::user(None),
-            )
-            .collect::<Vec<_>>()
-            .await;
-        assert!(
-            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
-            "{events:?}"
-        );
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(
-                    event,
-                    RuntimeEvent::ToolCallUnexecuted { .. }
-                        | RuntimeEvent::ToolCallFinished { is_error: true, .. }
-                ))
-                .count(),
-            3,
-            "{events:?}"
-        );
-        assert!(!events.iter().any(|event| matches!(
-            event,
-            RuntimeEvent::ToolCallFinished {
-                is_error: false,
-                ..
-            }
-        )));
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        for request in requests.iter() {
-            assert!(
-                tool_names(request)
-                    .iter()
-                    .all(|name| !matches!(*name, "task_commit" | "task_push" | "task_pr"))
-            );
-        }
     }
 
     #[tokio::test]
@@ -10674,7 +10556,7 @@ mod tests {
                     RunCancellation::new(),
                     Arc::new(StaticPolicyGate {
                         mode: ApprovalMode::Auto,
-                        grants: approval::SessionGrants::default(),
+                        tools: Default::default(),
                         network: Arc::clone(&plan.runtime.network),
                     }),
                     Arc::new(workspace::FileState::default()),
@@ -10802,16 +10684,13 @@ mod tests {
                             RunCancellation::new(),
                             Arc::new(ConfiguredToolGate(StaticPolicyGate {
                                 mode: ApprovalMode::Auto,
-                                grants: approval::SessionGrants {
-                                    tools: plan
-                                        .descriptor()
-                                        .tools
-                                        .config_grants
-                                        .iter()
-                                        .cloned()
-                                        .collect(),
-                                    ..approval::SessionGrants::default()
-                                },
+                                tools: plan
+                                    .descriptor()
+                                    .tools
+                                    .config_grants
+                                    .iter()
+                                    .cloned()
+                                    .collect(),
                                 network: Arc::default(),
                             })),
                             Arc::new(workspace::FileState::default()),
@@ -10967,7 +10846,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::ReadOnly,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::clone(&plan.runtime.network),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -11095,7 +10974,7 @@ mod tests {
                     RunCancellation::new(),
                     Arc::new(StaticPolicyGate {
                         mode: ApprovalMode::Auto,
-                        grants: approval::SessionGrants::default(),
+                        tools: Default::default(),
                         network: Arc::clone(&plan.runtime.network),
                     }),
                     Arc::new(workspace::FileState::default()),
@@ -11493,7 +11372,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::ReadOnly,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::clone(&plan.runtime.network),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -11708,7 +11587,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Ask,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),

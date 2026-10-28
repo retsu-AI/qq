@@ -6,18 +6,16 @@ A single Rust binary that runs AI coding agents: interactively in a terminal
 UI, unattended from scripts (`qq run`), and as a local HTTP/SSE server that
 several clients can share. Agents read, search, and edit your files, run
 commands, call MCP tools, and spawn sub-agents, with every action gated by
-an approval policy you control, shell commands confined by the operating
-system's sandbox, and every event stored in SQLite so sessions survive
-restarts.
+an approval mode you choose, a snapshot before each run that `qq undo`
+restores, and every event stored in SQLite so sessions survive restarts.
 
 ### How is it different from Codex, OpenCode, Pi, or Claude Code?
 
 Mostly in emphasis. QQ is built for running *many* agents at once with
 bounded resources and a durable record — sessions are first-class, the
-default mode works unattended in a sandboxed private copy of the workspace
-and publishes checked edits, the server is part of the design rather than an
-add-on, and it is
-one static binary with no runtime. It is younger and has fewer integrations.
+default mode works unattended in your checkout with a snapshot to undo, the
+server is part of the design rather than an add-on, and it is one static
+binary with no runtime. It is younger and has fewer integrations.
 A detailed comparison lives in
 [the archived harness comparison](https://github.com/retsu-AI/qq/blob/2cafa6537e61495f0a7ef022eef9b985ade9dc22/docs/research/harness-comparison.md) (2026-09-16 snapshot).
 
@@ -62,19 +60,16 @@ scope instructions to a subtree.
 
 ### Why does it ask me before running `cargo test`?
 
-Under the default `auto` mode it should not: Auto runs commands inside its
-task sandbox without asking. A prompt means the session is in `ask` mode,
-which asks before every non-read call. The top row shows the mode; switch
-with `/approval`. If commands fail instead, check the
-[sandbox requirements](install.md#system-requirements).
+Under the default `auto` mode it should not: Auto runs commands without
+asking. A prompt means the session is in `ask` mode, which asks before every
+non-read call. The top row shows the mode; switch with `/approval`.
 [Permissions](permissions.md).
 
 ### Can it run unattended in CI?
 
 Yes: `qq run --approval auto --format jsonl …` with credentials from the
-environment, on a runner that meets the
-[sandbox requirements](install.md#system-requirements).
-[Headless › In CI](headless.md#in-ci).
+environment. Commands run as the CI user, so give the job only the
+credentials it needs. [Headless › In CI](headless.md#in-ci).
 
 ### Can I use it on a remote machine?
 

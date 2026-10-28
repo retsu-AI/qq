@@ -73,7 +73,6 @@ impl ToolGate for CompactionRunGate {
 /// a child session uses the user key instead, so its compaction only misses
 /// the cache. The golden tests hold the two derivations equal.
 fn session_prompt_prefix_key(
-    inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
     loaded: &LoadedRuntime,
 ) -> crate::plan::PromptPrefixKey {
@@ -84,7 +83,6 @@ fn session_prompt_prefix_key(
             spawn_agent: claimed.depth < delegation.max_depth.min(MAX_CHILD_DEPTH),
             search_history: true,
             update_goal: claimed.goal.is_some(),
-            task_git: super::TaskGitRunInput::offered(inner, claimed),
             read_tool_result: true,
             load_skill: user,
             read_only: claimed.approval_mode == ApprovalMode::ReadOnly,
@@ -131,7 +129,6 @@ struct PreparedExecution {
 #[derive(Clone, Default)]
 pub(super) struct RunResources {
     tools: crate::tools::ToolTasks,
-    task: Arc<std::sync::OnceLock<Arc<super::task_workspaces::TaskExecution>>>,
     children: Arc<ChildTasks>,
     #[cfg(test)]
     run_id: Option<RunId>,
@@ -149,21 +146,15 @@ pub(super) enum ExecutionCleanupError {
 /// to settle a started run, so a terminal event cannot be published while
 /// execution is still in flight; only `RunResources::drain` / `stop` mint it.
 #[derive(Clone, Debug)]
-pub(super) struct TeardownComplete(
-    Vec<(ToolCallId, crate::tools::ToolOutput)>,
-    Option<Arc<super::task_workspaces::TaskExecution>>,
-);
+pub(super) struct TeardownComplete(Vec<(ToolCallId, crate::tools::ToolOutput)>);
 
 impl TeardownComplete {
     /// Store-level tests settle claims that never ran anything.
     #[cfg(test)]
     pub(super) const fn nothing_ran() -> Self {
-        Self(Vec::new(), None)
+        Self(Vec::new())
     }
 }
-
-#[cfg(test)]
-pub(super) static PANIC_NATIVE_FINISH: Mutex<Vec<ToolCallId>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 static STOP_OBSERVERS: Mutex<Vec<(RunId, oneshot::Sender<()>)>> = Mutex::new(Vec::new());
@@ -176,49 +167,6 @@ pub(super) fn observe_execution_stop(run_id: RunId) -> oneshot::Receiver<()> {
 }
 
 impl RunResources {
-    pub(super) fn with_native_commands(
-        service: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
-        scopes: Option<Arc<super::native_scope::NativeScopes>>,
-    ) -> Self {
-        Self {
-            tools: crate::tools::ToolTasks::with_native_commands(service)
-                .with_native_scopes(scopes),
-            ..Self::default()
-        }
-    }
-
-    pub(super) fn native_tools(&self) -> crate::tools::ToolTasks {
-        self.tools.clone()
-    }
-
-    pub(super) fn bind_task(
-        &mut self,
-        task: Arc<super::task_workspaces::TaskExecution>,
-    ) -> Result<Arc<super::native_scope::NativeScopes>, SessionRuntimeError> {
-        let scopes = super::native_scope::NativeScopes::single(task.scope.clone())?;
-        if self.task.get().is_some()
-            || !self.tools.set_task_home(task.home())
-            || self.task.set(task).is_err()
-        {
-            return Err(SessionRuntimeError::CONSTRAINT);
-        }
-        self.tools = self.tools.with_native_scopes(Some(scopes.clone()));
-        Ok(scopes)
-    }
-
-    pub(super) fn task_scope(&self) -> Option<Arc<crate::command_owner::NativeCommandScope>> {
-        self.task.get().map(|task| Arc::new(task.scope.clone()))
-    }
-
-    pub(super) fn task_home(&self) -> Option<PathBuf> {
-        self.task.get().map(|task| task.home())
-    }
-
-    pub(super) fn has_native_scope(&self) -> bool {
-        self.tools.has_native_scope()
-    }
-
-    #[cfg(unix)]
     pub(super) fn process_lease(&self) -> crate::tools::ToolTaskLease {
         self.tools.enter()
     }
@@ -231,10 +179,7 @@ impl RunResources {
     pub(super) async fn drain(&self) -> Result<TeardownComplete, ExecutionCleanupError> {
         let (tools, children) = tokio::join!(self.tools.drain(), self.children.drain());
         match (tools, children) {
-            (Ok(()), Ok(_)) => Ok(TeardownComplete(
-                self.tools.drain_native_results(),
-                self.task.get().cloned(),
-            )),
+            (Ok(()), Ok(_)) => Ok(TeardownComplete(self.tools.take_finished())),
             (Err(error), _) => Err(ExecutionCleanupError::Tools(error)),
             (_, Err(error)) => Err(ExecutionCleanupError::Children(error)),
         }
@@ -288,13 +233,6 @@ async fn prepare_execution(
             exhaustion: Box::new(deadline.exhaustion()),
         });
     }
-    resources
-        .tools
-        .shorten_native_deadline(claimed.limits.max_duration_ms.map(|limit| {
-            let elapsed =
-                u64::try_from(execution_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            now_ms().saturating_add(limit.saturating_sub(elapsed))
-        }));
     let tool_cancellation = RunCancellation::new();
     let internal = claimed.identity.kind == RunKind::Compaction;
     // Take the only full transcript before cloning run metadata into gates or
@@ -312,7 +250,6 @@ async fn prepare_execution(
             cancellation.clone(),
             loaded.plan.network_policy(),
             loaded.plan.shell_policy(),
-            loaded.plan.approval_delegate(),
         ))
     };
     // The claim carried the session's file hashes, so nothing here waits on
@@ -420,7 +357,7 @@ async fn prepare_execution(
                 },
                 None,
             )
-            .summarizer(session_prompt_prefix_key(inner, claimed, loaded))
+            .summarizer(session_prompt_prefix_key(claimed, loaded))
             .with_max_output_tokens(context::summarizer_output_tokens(
                 loaded.resolved_model().max_output_tokens,
                 loaded.resolved_model().context_window,
@@ -575,16 +512,6 @@ async fn prepare_execution(
     .with_tool_tasks(resources.tools.clone())
     .with_output(claimed.output.clone())
     .with_inherited_effects(inherited_effects);
-    if !internal {
-        capabilities = capabilities.with_task_git(resources.task.get().and_then(|task| {
-            super::TaskGitRunInput::new(
-                Arc::clone(inner),
-                claimed,
-                Arc::clone(task),
-                resources.tools.clone(),
-            )
-        }));
-    }
     if claimed
         .goal
         .as_ref()
@@ -735,17 +662,8 @@ pub(super) async fn execute_run(
     inner: Arc<SessionRuntimeInner>,
     mut claimed: ClaimedRun,
     mut cancellation: watch::Receiver<bool>,
-    mut resources: RunResources,
+    resources: RunResources,
 ) {
-    let native_store = inner.store.clone();
-    let native_identity = claimed.identity;
-    if let Err(error) = resources.tools.set_native_recorder(move |id, owner| {
-        let store = native_store.clone();
-        async move { store.set_native_owner(native_identity, id, owner).await }
-    }) {
-        finish_reserved_run(&inner, &claimed, internal_failure(&error.to_string())).await;
-        return;
-    }
     let process_store = inner.store.clone();
     let process_identity = claimed.identity;
     if let Err(error) = resources.tools.set_process_recorder(move |id, receipt| {
@@ -757,22 +675,6 @@ pub(super) async fn execute_run(
         }
     }) {
         finish_reserved_run(&inner, &claimed, internal_failure(&error.to_string())).await;
-        return;
-    }
-    if let Some(scopes) = &inner.native_scopes
-        && let Err(message) = scopes.admit(Path::new(&claimed.workspace)).await
-    {
-        finish_reserved_run(
-            &inner,
-            &claimed,
-            RunOutcome::Failed {
-                failure: RunFailure {
-                    kind: RunFailureKind::Configuration,
-                    message,
-                },
-            },
-        )
-        .await;
         return;
     }
     match goal_policy::refresh(&inner, &claimed, &mut cancellation).await {
@@ -865,7 +767,6 @@ pub(super) async fn execute_run(
     let load_progress = RuntimeLoadProgress::default();
     let mut load = inner.loader.load_with_progress(
         RuntimeLoadRequest {
-            execution_workspace: None,
             reasoning_effort: claimed.reasoning_effort,
             workspace: claimed.workspace.clone(),
             model: claimed.model.clone(),
@@ -873,7 +774,7 @@ pub(super) async fn execute_run(
         },
         load_progress.clone(),
     );
-    let mut loaded = tokio::select! {
+    let loaded = tokio::select! {
         biased;
         () = RunDeadline::wait(deadline) => {
             let unfinished_stage = load_progress.stage();
@@ -939,123 +840,6 @@ pub(super) async fn execute_run(
         return;
     }
     let input_workspace = loaded.plan.workspace_handle();
-    let preparation_stop = RunCancellation::new();
-    let mut preparation = Box::pin(super::task_workspaces::prepare(
-        &inner,
-        &claimed,
-        loaded.plan.clone(),
-        &preparation_stop,
-        claimed
-            .limits
-            .max_duration_ms
-            .map(|duration| execution_started + std::time::Duration::from_millis(duration)),
-    ));
-    let prepared_task = tokio::select! {
-        biased;
-        () = RunDeadline::wait(deadline) => {
-            preparation_stop.expire();
-            let _ = preparation.await;
-            finish_reserved_run(&inner, &claimed, RunOutcome::BudgetExhausted {
-                exhaustion: Box::new(deadline.expect("finite deadline").exhaustion()),
-            }).await;
-            return;
-        }
-        changed = cancellation.changed() => {
-            preparation_stop.cancel();
-            let _ = preparation.await;
-            let outcome = if changed.is_ok() { RunOutcome::Cancelled } else { RunOutcome::Interrupted };
-            finish_reserved_run(&inner, &claimed, outcome).await;
-            return;
-        }
-        result = &mut preparation => result,
-    };
-    drop(preparation);
-    let task = match prepared_task {
-        Ok(task) => task,
-        Err(super::task_workspaces::TaskExecutionError::Stopped) => {
-            let outcome = if preparation_stop.timed_out() {
-                RunOutcome::BudgetExhausted {
-                    exhaustion: Box::new(deadline.expect("finite deadline").exhaustion()),
-                }
-            } else {
-                RunOutcome::Cancelled
-            };
-            finish_reserved_run(&inner, &claimed, outcome).await;
-            return;
-        }
-        Err(error) => {
-            finish_reserved_run(
-                &inner,
-                &claimed,
-                internal_failure(&format!("task preparation failed: {error}")),
-            )
-            .await;
-            return;
-        }
-    };
-    if let Some(task) = task {
-        let scopes = match resources.bind_task(task.clone()) {
-            Ok(scopes) => scopes,
-            Err(error) => {
-                finish_reserved_run(&inner, &claimed, internal_failure(&error.to_string())).await;
-                return;
-            }
-        };
-        let progress = RuntimeLoadProgress::default();
-        let mut load = inner.loader.load_with_progress(
-            RuntimeLoadRequest {
-                execution_workspace: Some(task.directory_grant()),
-                workspace: claimed.workspace.clone(),
-                model: claimed.model.clone(),
-                profile: claimed.profile.clone(),
-                reasoning_effort: claimed.reasoning_effort,
-            },
-            progress.clone(),
-        );
-        loaded = tokio::select! {
-            biased;
-            () = RunDeadline::wait(deadline) => {
-                progress.cancel(); let _ = load.await;
-                finish_reserved_run(&inner, &claimed, RunOutcome::BudgetExhausted { exhaustion: Box::new(deadline.expect("finite deadline").exhaustion()) }).await;
-                return;
-            }
-            changed = cancellation.changed() => {
-                progress.cancel(); let _ = load.await;
-                if changed.is_ok() { finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await; }
-                return;
-            }
-            result = &mut load => match result {
-                Ok(loaded) => loaded,
-                Err(error) => {
-                    finish_reserved_run(&inner, &claimed, RunOutcome::Failed {failure: RunFailure {kind:error.kind, message:error.message}}).await;
-                    return;
-                }
-            }
-        };
-        if let Err(message) = scopes.validate_opened(loaded.plan.workspace_handle()).await {
-            finish_reserved_run(&inner, &claimed, internal_failure(&message)).await;
-            return;
-        }
-    }
-    if resources.task.get().is_none()
-        && let Some(scopes) = &inner.native_scopes
-    {
-        let checked = scopes.validate_opened(loaded.plan.workspace_handle()).await;
-        if let Err(message) = checked {
-            finish_reserved_run(
-                &inner,
-                &claimed,
-                RunOutcome::Failed {
-                    failure: RunFailure {
-                        kind: RunFailureKind::Configuration,
-                        message,
-                    },
-                },
-            )
-            .await;
-            return;
-        }
-    }
     match goal_policy::refresh(&inner, &claimed, &mut cancellation).await {
         Ok(true) => {}
         Ok(false) => {
@@ -1289,11 +1073,6 @@ pub(super) async fn execute_run(
                         .await;
                         return;
                     }
-                    Ok(Err(claim::GoalStartRefusal::NativeRecoveryPending)) => {
-                        // The reservation was released without starting the model.
-                        // Authenticated native recovery wakes queued work.
-                        return;
-                    }
                     Ok(Err(claim::GoalStartRefusal::Reprepare { limits, final_slot })) => {
                         // The stream has not been polled. Reassemble under the
                         // tighter bounds while retaining resolved input bytes.
@@ -1338,8 +1117,7 @@ pub(super) async fn execute_run(
                             claim::GoalStartRefusal::PerRunDuration => {
                                 per_run_duration_exhaustion()
                             }
-                            claim::GoalStartRefusal::NativeRecoveryPending
-                            | claim::GoalStartRefusal::Reprepare { .. } => {
+                            claim::GoalStartRefusal::Reprepare { .. } => {
                                 unreachable!("reprepare handled before terminal refusal")
                             }
                         };
@@ -2024,32 +1802,6 @@ async fn execute_started_run(
     if goal_spend {
         accounting = accounting.with_zero_spend();
     }
-    let storage_scope = resources.task_scope();
-    let pressure = async move {
-        match storage_scope {
-            Some(scope) => {
-                let permit = match crate::workspace::blocking_permits().acquire_owned().await {
-                    Ok(permit) => permit,
-                    Err(_) => return crate::storage::Pressure::Unavailable,
-                };
-                let workspace = tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    crate::workspace::Workspace::open(&scope.workspace.path)
-                })
-                .await;
-                let workspace = match workspace {
-                    Ok(result) => result.map_err(crate::storage::Pressure::from),
-                    Err(error) => Err(crate::storage::Pressure::from(error)),
-                };
-                match workspace {
-                    Ok(workspace) => crate::storage::watch(workspace).await,
-                    Err(error) => error,
-                }
-            }
-            None => std::future::pending().await,
-        }
-    };
-    tokio::pin!(pressure);
     let mut runtime_failed = inner.failed.subscribe();
     if *runtime_failed.borrow() {
         tool_cancellation.cancel();
@@ -2103,7 +1855,6 @@ async fn execute_started_run(
             tokio::select! {
                 biased;
                 _ = runtime_failed.changed() => RunInput::RuntimeFailed,
-                pressure = &mut pressure => RunInput::StoragePressure(pressure),
                 changed = cancellation.changed() => {
                     if changed.is_ok() && *cancellation.borrow() {
                         RunInput::Cancelled
@@ -2118,7 +1869,6 @@ async fn execute_started_run(
             tokio::select! {
                 biased;
                 _ = runtime_failed.changed() => RunInput::RuntimeFailed,
-                pressure = &mut pressure => RunInput::StoragePressure(pressure),
                 changed = cancellation.changed() => {
                     if changed.is_ok() && *cancellation.borrow() {
                         RunInput::Cancelled
@@ -2180,10 +1930,7 @@ async fn execute_started_run(
         }
         let stopped = matches!(
             &input,
-            RunInput::Cancelled
-                | RunInput::Interrupted
-                | RunInput::RuntimeFailed
-                | RunInput::StoragePressure(_)
+            RunInput::Cancelled | RunInput::Interrupted | RunInput::RuntimeFailed
         );
         if !pending_tool_output.is_empty()
             && !continues_tool_output
@@ -2376,22 +2123,6 @@ async fn execute_started_run(
                     &inner,
                     &claimed,
                     outcome,
-                    Some(accounting.snapshot()),
-                    teardown,
-                )
-                .await;
-                return;
-            }
-            RunInput::StoragePressure(pressure) => {
-                tool_cancellation.cancel();
-                let Ok(teardown) = resources.stop(&mut events).await else {
-                    inner.failed.send_replace(true);
-                    return;
-                };
-                finish_run_accounted(
-                    &inner,
-                    &claimed,
-                    internal_failure(&pressure.to_string()),
                     Some(accounting.snapshot()),
                     teardown,
                 )
@@ -2765,7 +2496,7 @@ async fn execute_started_run(
                     {
                         accounting.record_turn(usage);
                     } else if model_work == crate::runtime::ModelWorkDisposition::Uncertain {
-                        accounting.record_review(None, None);
+                        accounting.record_unattributed(None, None);
                     }
                     if calls.is_empty() {
                         // A fresh response supersedes the previous portion,
@@ -2867,7 +2598,7 @@ async fn execute_started_run(
                 {
                     accounting.record_turn(usage);
                 } else if model_work == crate::runtime::ModelWorkDisposition::Uncertain {
-                    accounting.record_review(None, None);
+                    accounting.record_unattributed(None, None);
                 }
                 let turn_accounting = accounting.snapshot();
                 // The completed turn's usage measures the context the run now
@@ -3002,14 +2733,6 @@ async fn execute_started_run(
                     }
                 }
             }
-            // Reviewer spend joins the run's accounting; the next persisted
-            // turn or the run's settlement carries the updated totals.
-            RunInput::Event(Some(RuntimeEvent::ReviewCharged {
-                usage,
-                cost_usd_nanos,
-            })) => {
-                accounting.record_review(usage, cost_usd_nanos);
-            }
             RunInput::Event(Some(RuntimeEvent::ToolCallStarted {
                 id,
                 may_change_files,
@@ -3143,7 +2866,6 @@ async fn execute_started_run(
                 }
             }
             RunInput::Event(Some(RuntimeEvent::ToolCallFinished {
-                native_owner,
                 id,
                 result,
                 is_error,
@@ -3154,18 +2876,6 @@ async fn execute_started_run(
             })) => {
                 if internal {
                     continue;
-                }
-                #[cfg(test)]
-                {
-                    let panic = {
-                        let mut calls = PANIC_NATIVE_FINISH.lock().unwrap();
-                        calls
-                            .iter()
-                            .position(|call| *call == id)
-                            .map(|index| calls.remove(index))
-                            .is_some()
-                    };
-                    assert!(!panic, "fixture panic before native result persistence");
                 }
                 // Any buffered live output flushes first so replay preserves
                 // the chunk-then-result order.
@@ -3201,15 +2911,11 @@ async fn execute_started_run(
                         display,
                         spill,
                         execution_context,
-                        native_owner,
                     )
                     .await
                 {
                     Ok(commit) => {
-                        resources.tools.take_native_result(id);
-                        if let Some(acknowledgements) = &inner.native_ack {
-                            acknowledgements.wake();
-                        }
+                        resources.tools.forget_finished(id);
                         if commit.context_exhausted {
                             let Ok(teardown) = resources.stop(&mut events).await else {
                                 inner.failed.send_replace(true);
@@ -3802,7 +3508,6 @@ enum RunInput {
     Cancelled,
     Interrupted,
     RuntimeFailed,
-    StoragePressure(crate::storage::Pressure),
 }
 
 async fn flush_pending_reasoning(
@@ -3919,14 +3624,14 @@ pub(super) async fn finish_run(
     finish_run_accounted(inner, claimed, outcome, None, teardown).await;
 }
 
-/// Preserve observations drained after their runtime event waiter disappeared.
-pub(super) async fn persist_native_results(
+/// Persists commands that finished after the run stopped listening: a
+/// cancelled or expired run drops the stream that would have carried their
+/// results, but they ran, so their real results precede settlement.
+pub(super) async fn persist_finished_results(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
     teardown: &mut TeardownComplete,
 ) -> Result<(), SessionRuntimeError> {
-    // The event waiter may have been dropped during cancellation. Its owned
-    // observer still drains, and its actual result must precede run settlement.
     for (id, result) in std::mem::take(&mut teardown.0) {
         let result = if result.spill.is_some() {
             let run_id = claimed.identity.run_id;
@@ -3955,15 +3660,12 @@ pub(super) async fn persist_native_results(
                 result.ui_payload,
                 result.spill,
                 result.execution_context,
-                result.native_owner,
             )
             .await
         {
-            Ok(commit) => inner.notify(commit.event.cursor),
+            // Already settled through the event stream.
+            Ok(_) | Err(SessionRuntimeError::ToolCallNotFound) => {}
             Err(error) => return Err(error),
-        }
-        if let Some(acknowledgements) = &inner.native_ack {
-            acknowledgements.wake();
         }
     }
     Ok(())
@@ -3976,7 +3678,7 @@ async fn finish_run_accounted(
     accounting: Option<RunAccounting>,
     mut teardown: TeardownComplete,
 ) {
-    if persist_native_results(inner, claimed, &mut teardown)
+    if persist_finished_results(inner, claimed, &mut teardown)
         .await
         .is_err()
     {
@@ -3992,26 +3694,6 @@ async fn finish_run_accounted(
         inner.failed.send_replace(true);
         return;
     }
-    let outcome = if let Some(task) = teardown
-        .1
-        .take()
-        .filter(|_| matches!(outcome, RunOutcome::Completed))
-    {
-        let path = task.scope.workspace.path.clone();
-        match task
-            .publish(inner, claimed.identity.session_id, claimed.identity.run_id)
-            .await
-        {
-            Ok(()) => outcome,
-            Err(super::task_workspaces::TaskExecutionError::Stopped) => RunOutcome::Cancelled,
-            Err(error) => internal_failure(&format!(
-                "task edits could not be published; work is retained at {}: {error}",
-                path.display()
-            )),
-        }
-    } else {
-        outcome
-    };
     match inner
         .store
         .finish_run(claimed, outcome, accounting, teardown)
@@ -4082,10 +3764,14 @@ impl RunAccountingAccumulator {
         self
     }
 
-    /// Adds a reviewer's provider spend to the run's totals. It is not a turn
-    /// of this run (context occupancy is untouched) but the run is
-    /// accountable for it; unknown spend makes the totals unknown.
-    pub(super) fn record_review(&mut self, usage: Option<TokenUsage>, cost_usd_nanos: Option<u64>) {
+    /// Adds provider spend that is not a turn of this run (context occupancy
+    /// is untouched) but that the run is accountable for; unknown spend makes
+    /// the totals unknown.
+    pub(super) fn record_unattributed(
+        &mut self,
+        usage: Option<TokenUsage>,
+        cost_usd_nanos: Option<u64>,
+    ) {
         self.saw_spend = true;
         match usage {
             Some(usage) => self.usage = self.usage.and_then(|total| add_usage(total, usage)),

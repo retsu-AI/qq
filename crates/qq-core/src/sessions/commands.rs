@@ -12,9 +12,6 @@ pub(super) struct AppliedCommand {
     /// command: an auto-compaction made unnecessary by its queued prompt, or
     /// running child work durably owned by a cancelled parent.
     pub(super) cascade_cancels: Vec<RunId>,
-    /// Wakes the single promotion worker when this command has durable outbox
-    /// work. Replays retain the signal while the same row remains pending.
-    pub(super) grant_promotion_pending: bool,
     /// The receipt was replayed from the command journal; in-memory signals
     /// that already fired the first time (steering hand-off) must not repeat.
     pub(super) replayed: bool,
@@ -22,11 +19,9 @@ pub(super) struct AppliedCommand {
 
 #[derive(Default)]
 pub(super) struct CommandAdmission {
-    pub(super) seed: WorkspaceGrantSeed,
     pub(super) goal_work_present: bool,
     pub(super) pause_goal_only_if_active: bool,
     pub(super) goal_check_policy: Option<Result<(), GoalCheckPolicyError>>,
-    pub(super) contained_goal_checks: bool,
     pub(super) goal_policy: Option<Result<GoalPolicy, GoalPolicyError>>,
 }
 
@@ -34,19 +29,6 @@ pub(super) struct CreatedChildRun {
     pub(super) session_id: SessionId,
     pub(super) run_id: RunId,
     pub(super) committed_through: EventCursor,
-}
-
-/// One approve-for-workspace promotion carried out of the command
-/// transaction. The durable config write happens after the approval commits,
-/// so a promotion failure can never fail the approval that requested it.
-#[derive(Debug, Serialize, Deserialize)]
-pub(super) struct PendingGrantPromotion {
-    pub(super) workspace_id: WorkspaceId,
-    pub(super) workspace_path: String,
-    pub(super) session_id: SessionId,
-    pub(super) run_id: RunId,
-    pub(super) command_id: CommandId,
-    pub(super) grant: ApprovalGrant,
 }
 
 /// The durable identity of the run that owns a new child.
@@ -100,7 +82,7 @@ pub(super) fn create_child_run(
         purpose,
         detached,
     } = admission;
-    // Children start ReadOnly or Auto with internal supervision. The
+    // Children start ReadOnly or Auto within their ancestors' ceilings. The
     // spawner cannot give a child Full authority.
     if !matches!(approval_mode, ApprovalMode::ReadOnly | ApprovalMode::Auto) {
         return Err(SessionRuntimeError::ChildAuthorityEscalation);
@@ -181,10 +163,9 @@ pub(super) fn create_child_run(
                 id, workspace_id, parent_id, owner_run_id, spawned_by_tool_call_id, title,
                 status, queued_prompts, model, max_output_tokens, organization, approval_mode,
                 created_at_ms, updated_at_ms, depth, root_run_id, purpose, profile, model_is_fallback,
-                reasoning_effort, approval_delegate
+                reasoning_effort
              ) VALUES (?1, ?2, ?3, ?4, ?10, ?5, 'queued', 1, ?6, ?7, ?8, ?11, ?9, ?9, ?12, ?13, ?14, ?15, ?16,
-                COALESCE(?17, (SELECT reasoning_effort FROM sessions WHERE id = ?3)),
-                (SELECT approval_delegate FROM sessions WHERE id = ?3))",
+                COALESCE(?17, (SELECT reasoning_effort FROM sessions WHERE id = ?3)))",
             params![
                 session_id.to_string(),
                 workspace_id.to_string(),
@@ -206,23 +187,6 @@ pub(super) fn create_child_run(
             ],
         )
         ?;
-    // Inherit only authority explicitly supplied by the operator. Reviewer
-    // rows remain local exact-call decisions. Dispatch still applies every
-    // ancestor ceiling and mandatory write-child supervision.
-    if approval_mode == ApprovalMode::Auto {
-        transaction.execute(
-            "INSERT INTO session_grants(session_id,kind,value,created_at_ms,source)
-             SELECT ?1,kind,value,?3,'human' FROM session_grants
-             WHERE session_id=?2 AND source='human'
-             ORDER BY kind,value LIMIT ?4",
-            params![
-                session_id.to_string(),
-                parent_session_id.to_string(),
-                now,
-                MAX_SESSION_GRANTS,
-            ],
-        )?;
-    }
     transaction.execute(
         "INSERT INTO runs(
                 id, session_id, command_id, user_message_id, assistant_message_id,
@@ -412,14 +376,6 @@ pub(super) fn execute_command(
                 }
                 _ => Vec::new(),
             },
-            grant_promotion_pending: connection.query_row(
-                "SELECT EXISTS(
-                         SELECT 1 FROM pending_workspace_grant_promotions
-                         WHERE command_id = ?1
-                     )",
-                [command_id.to_string()],
-                |row| row.get(0),
-            )?,
         });
     }
     // The counter is maintained beside every insert (schema 25) so the bound
@@ -445,7 +401,6 @@ pub(super) fn execute_command(
 
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
-    let mut grant_promotion_pending = false;
     let mut cascade_cancels = Vec::new();
     let mut side_launch = None;
     let (receipt, schedule) = match command {
@@ -478,8 +433,7 @@ pub(super) fn execute_command(
             if let Some(check) = goal.check.as_ref()
                 && load_tool_approval_policy(&transaction, session_id)?.mode == ApprovalMode::Auto
             {
-                if !admission.contained_goal_checks
-                    || !goals::auto_check_authority(&transaction, session_id)?
+                if !goals::auto_check_authority(&transaction, session_id)?
                     || admission.goal_check_policy.is_none()
                 {
                     return Err(GoalCheckPolicyError::Unavailable.into());
@@ -664,8 +618,7 @@ pub(super) fn execute_command(
                     goal.check_authorization
                         == Some(qq_protocol::GoalCheckAuthorization::TaskScoped)
                 })
-                && (!admission.contained_goal_checks
-                    || !goals::auto_check_authority(&transaction, session_id)?)
+                && !goals::auto_check_authority(&transaction, session_id)?
             {
                 return Err(GoalCheckPolicyError::Unavailable.into());
             }
@@ -935,9 +888,8 @@ pub(super) fn execute_command(
                         id, workspace_id, parent_id, title, status, model,
                         max_output_tokens, organization, approval_mode,
                         created_at_ms, updated_at_ms, profile, correlation_json, depth,
-                        root_run_id, model_is_fallback, reasoning_effort, approval_delegate
-                     ) VALUES (?1, ?2, ?3, 'New session', 'idle', ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                        (SELECT approval_delegate FROM sessions WHERE id = ?3))",
+                        root_run_id, model_is_fallback, reasoning_effort
+                     ) VALUES (?1, ?2, ?3, 'New session', 'idle', ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                     params![
                         session_id.to_string(),
                         workspace_id.to_string(),
@@ -956,7 +908,6 @@ pub(super) fn execute_command(
                     ],
                 )
                 ?;
-            insert_seed_grants(&transaction, session_id, &admission.seed, now)?;
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
@@ -1198,9 +1149,9 @@ pub(super) fn execute_command(
                 }
                 Err(error) => return Err(SessionRuntimeError::InvalidInput(error)),
             }
-            let (session_id, status, stored_outcome, kind, observation_only) = transaction
+            let (session_id, status, stored_outcome, kind) = transaction
                 .query_row(
-                    "SELECT session_id, status, outcome_json, kind, EXISTS(SELECT 1 FROM temp.native_observation_runs WHERE run_id=runs.id) FROM runs WHERE id = ?1",
+                    "SELECT session_id, status, outcome_json, kind FROM runs WHERE id = ?1",
                     [run_id.to_string()],
                     |row| {
                         Ok((
@@ -1208,7 +1159,6 @@ pub(super) fn execute_command(
                             row.get::<_, String>(1)?,
                             row.get::<_, Option<String>>(2)?,
                             row.get::<_, String>(3)?,
-                            row.get::<_, bool>(4)?,
                         ))
                     },
                 )
@@ -1235,10 +1185,7 @@ pub(super) fn execute_command(
                 // Only an executing prompt run has a boundary to steer at. A
                 // queued run has not started: the client submits a new prompt
                 // or cancels instead. Compaction runs take no user input.
-                if observation_only
-                    || status != "running"
-                    || parse_run_kind(&kind)? != RunKind::Prompt
-                {
+                if status != "running" || parse_run_kind(&kind)? != RunKind::Prompt {
                     return Err(SessionRuntimeError::RunNotSteerable);
                 }
                 let pending: u16 = transaction.query_row(
@@ -1549,23 +1496,13 @@ pub(super) fn execute_command(
                 if state != "awaiting_approval" {
                     return Err(SessionRuntimeError::ApprovalNotPending);
                 }
-                // A session or workspace choice whose grant cannot be stored
-                // still approves this call. Refusing the whole command is what
-                // produced "approval grant is empty or exceeds the session
-                // limit" and left the call waiting after the user had already
-                // approved it. The grant is dropped; the call runs once.
                 // A pending prompt is not a lasting grant. Re-evaluate every
-                // ancestor ceiling in this transaction before any approval or
-                // grant write; a child approval cannot widen its parent's
-                // current authority. Questions still accept their answers.
-                let own_mode = load_approval_policy(&transaction, session_id)?.0;
-                let ancestors = load_ancestor_approval_policies(&transaction, session_id)?;
-                let approving = matches!(
-                    decision,
-                    ApprovalDecision::ApproveOnce
-                        | ApprovalDecision::ApproveForSession { .. }
-                        | ApprovalDecision::ApproveForWorkspace { .. }
-                );
+                // ancestor ceiling in this transaction before any approval
+                // write; a child approval cannot widen its parent's current
+                // authority. Questions still accept their answers.
+                let own_mode = load_approval_mode(&transaction, session_id)?;
+                let ancestors = load_ancestor_approval_modes(&transaction, session_id)?;
+                let approving = matches!(decision, ApprovalDecision::ApproveOnce);
                 let mut refusal = None;
                 if approving && own_mode == ApprovalMode::ReadOnly {
                     refusal = Some(approval::AUTHORITY_CHANGED_RESULT.to_owned());
@@ -1577,7 +1514,7 @@ pub(super) fn execute_command(
                         run_id,
                         tool_call_id,
                     )?;
-                    for (mode, _) in &ancestors {
+                    for mode in &ancestors {
                         refusal = match approval::evaluate(*mode, &class) {
                             approval::PolicyDecision::Execute
                             | approval::PolicyDecision::AskUser { .. } => continue,
@@ -1600,44 +1537,18 @@ pub(super) fn execute_command(
                 }
                 let revoked = refusal.is_some();
                 let denial_message = refusal.as_deref().unwrap_or(approval::USER_DENIED_RESULT);
-                let human_only = own_mode == ApprovalMode::Ask
-                    || ancestors.iter().any(|(mode, _)| *mode == ApprovalMode::Ask);
                 let decision = if revoked {
                     ApprovalDecision::Deny
-                } else if human_only
-                    && matches!(
-                        decision,
-                        ApprovalDecision::ApproveForSession { .. }
-                            | ApprovalDecision::ApproveForWorkspace { .. }
-                    )
-                {
-                    ApprovalDecision::ApproveOnce
                 } else {
                     decision
                 };
-                let mut grant_not_recorded = false;
                 let resolution = match &decision {
                     ApprovalDecision::ApproveOnce => ApprovalResolution::ApprovedOnce,
-                    ApprovalDecision::ApproveForSession { grant }
-                    | ApprovalDecision::ApproveForWorkspace { grant }
-                        if !session_grant_recordable(&transaction, session_id, grant)? =>
-                    {
-                        grant_not_recorded = true;
-                        ApprovalResolution::ApprovedOnce
-                    }
-                    ApprovalDecision::ApproveForSession { .. } => {
-                        ApprovalResolution::ApprovedForSession
-                    }
-                    ApprovalDecision::ApproveForWorkspace { .. } => {
-                        ApprovalResolution::ApprovedForWorkspace
-                    }
                     ApprovalDecision::Deny => ApprovalResolution::Denied,
                     ApprovalDecision::Answer { .. } => ApprovalResolution::Answered,
                 };
                 match &decision {
-                    ApprovalDecision::ApproveOnce
-                    | ApprovalDecision::ApproveForSession { .. }
-                    | ApprovalDecision::ApproveForWorkspace { .. } => {
+                    ApprovalDecision::ApproveOnce => {
                         transaction.execute(
                             "UPDATE tool_calls
                                  SET state = 'requested', approval_resolution = ?2,
@@ -1706,56 +1617,6 @@ pub(super) fn execute_command(
                         )?;
                     }
                 }
-                // Approve-for-workspace records the same session grant as
-                // approve-for-session — the running session must proceed on
-                // it immediately — and additionally schedules the promotion
-                // below, outside this transaction. A grant that cannot be
-                // stored was already folded into an once-approval above.
-                if !grant_not_recorded
-                    && let ApprovalDecision::ApproveForSession { grant }
-                    | ApprovalDecision::ApproveForWorkspace { grant } = &decision
-                {
-                    let (kind, value) = session_grant_parts(grant);
-                    transaction.execute(
-                        "INSERT OR IGNORE INTO session_grants(
-                                 session_id, kind, value, created_at_ms
-                             ) VALUES (?1, ?2, ?3, ?4)",
-                        params![session_id.to_string(), kind, value, now],
-                    )?;
-                }
-                if !grant_not_recorded
-                    && let ApprovalDecision::ApproveForWorkspace { grant } = &decision
-                {
-                    let workspace_path: String = transaction.query_row(
-                        "SELECT path FROM workspaces WHERE id = ?1",
-                        [workspace_id.to_string()],
-                        |row| row.get(0),
-                    )?;
-                    let promotion = PendingGrantPromotion {
-                        workspace_id,
-                        workspace_path,
-                        session_id,
-                        run_id,
-                        command_id,
-                        grant: grant.clone(),
-                    };
-                    let pending_count: u32 = transaction.query_row(
-                        "SELECT COUNT(*) FROM pending_workspace_grant_promotions",
-                        [],
-                        |row| row.get(0),
-                    )?;
-                    if pending_count >= MAX_PENDING_GRANT_PROMOTIONS {
-                        return Err(SessionRuntimeError::Overloaded);
-                    }
-                    let promotion_json = serde_json::to_string(&promotion)?;
-                    transaction.execute(
-                        "INSERT INTO pending_workspace_grant_promotions(
-                                 command_id, created_at_ms, promotion_json
-                             ) VALUES (?1, ?2, ?3)",
-                        params![command_id.to_string(), now, promotion_json],
-                    )?;
-                    grant_promotion_pending = true;
-                }
                 let tool_call = load_tool_call(&transaction, tool_call_id)?;
                 let event = append_event(
                     &transaction,
@@ -1770,7 +1631,6 @@ pub(super) fn execute_command(
                     SessionEvent::ToolApprovalResolved {
                         tool_call,
                         resolution,
-                        delegate: None,
                     },
                 )?;
                 (
@@ -1825,53 +1685,6 @@ pub(super) fn execute_command(
                     command_id,
                     committed_through: event.cursor,
                     outcome: CommandOutcome::ApprovalModeSet { session_id, mode },
-                },
-                false,
-            )
-        }
-        SessionCommand::SetApprovalDelegate {
-            session_id,
-            delegate,
-        } => {
-            let workspace_id = session_workspace(&transaction, session_id)?;
-            // The mode stays the ceiling, so no authority check: this only
-            // chooses who answers inside it, and every value asks at least
-            // as much of a human as the configured choice could.
-            let updated = transaction.execute(
-                "UPDATE sessions SET approval_delegate = ?2, updated_at_ms = ?3 WHERE id = ?1",
-                params![
-                    session_id.to_string(),
-                    approval_delegate_column(delegate),
-                    now
-                ],
-            )?;
-            if updated != 1 {
-                return Err(SessionRuntimeError::SessionNotFound);
-            }
-            // Read by the gate at each held call, so a running session's next
-            // hold already honors it; the summary carries it to every client.
-            let summary = load_session_summary(&transaction, session_id)?;
-            let event = append_event(
-                &transaction,
-                EventContext::for_session(
-                    store_id,
-                    workspace_id,
-                    session_id,
-                    Some(command_id),
-                    now,
-                ),
-                SessionEvent::SessionUpdated {
-                    session: Box::new(summary),
-                },
-            )?;
-            (
-                CommandReceipt {
-                    command_id,
-                    committed_through: event.cursor,
-                    outcome: CommandOutcome::ApprovalDelegateSet {
-                        session_id,
-                        delegate,
-                    },
                 },
                 false,
             )
@@ -2241,7 +2054,6 @@ pub(super) fn execute_command(
         receipt,
         schedule,
         cascade_cancels,
-        grant_promotion_pending,
         replayed: false,
         side_launch,
     })
@@ -2421,11 +2233,6 @@ pub(super) fn delete_idle_session(
                     ) OR EXISTS(
                         SELECT 1 FROM side_questions
                         WHERE session_id = sessions.id AND state = 'running'
-                    ) OR EXISTS(
-                        SELECT 1 FROM native_command_owners native
-                        JOIN tool_calls call ON call.id=native.tool_call_id
-                        JOIN runs run ON run.id=call.run_id
-                        WHERE run.session_id=sessions.id AND native.result_saved=0
                     )
              FROM sessions WHERE id = ?1",
             [session_id.to_string()],
@@ -2467,9 +2274,6 @@ pub(super) fn delete_idle_session(
                  WHERE owner.id IS NULL OR ancestor.id IS NULL
                      OR owner.status NOT IN
                          ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted', 'paused')
-                     OR EXISTS(SELECT 1 FROM native_command_owners native
-                         JOIN tool_calls call ON call.id=native.tool_call_id
-                         WHERE call.run_id=owner.id AND native.result_saved=0)
                      OR (owners.depth = ?2 AND ancestor.owner_run_id IS NOT NULL)
              )",
         params![session_id.to_string(), MAX_CHILD_DEPTH],
@@ -2487,16 +2291,9 @@ pub(super) fn delete_idle_session(
          ) SELECT EXISTS(
             SELECT 1 FROM paid JOIN runs r ON r.id=paid.run_id
             WHERE r.status IN ('queued','running') OR EXISTS(
-                SELECT 1 FROM native_command_owners native
-                JOIN tool_calls call ON call.id=native.tool_call_id
-                WHERE call.run_id=r.id AND native.result_saved=0
-            ) OR EXISTS(
                 SELECT 1 FROM runs helper WHERE helper.kind='compaction'
                   AND helper.auto_compaction=1 AND helper.auto_compaction_for_run_id=r.id
-                  AND helper.session_id=r.session_id AND (helper.status IN ('queued','running')
-                    OR EXISTS(SELECT 1 FROM native_command_owners native
-                        JOIN tool_calls call ON call.id=native.tool_call_id
-                        WHERE call.run_id=helper.id AND native.result_saved=0))
+                  AND helper.session_id=r.session_id AND helper.status IN ('queued','running')
             )
          )",
         params![session_id.to_string(), MAX_CHILD_DEPTH],
@@ -2521,7 +2318,6 @@ pub(super) fn delete_idle_session(
         "DELETE FROM child_reports WHERE parent_session_id = ?1",
         "DELETE FROM messages WHERE session_id = ?1",
         "DELETE FROM runs WHERE session_id = ?1",
-        "DELETE FROM session_grants WHERE session_id = ?1",
         "DELETE FROM session_files WHERE session_id = ?1",
         "DELETE FROM session_compactions WHERE session_id = ?1",
         "DELETE FROM sessions WHERE id = ?1",
@@ -2634,48 +2430,6 @@ pub(super) fn prompt_title(prompt: &str) -> String {
     } else {
         title
     }
-}
-
-/// The `(kind, value)` pair a session grant stores. The value is trimmed;
-/// emptiness and the byte cap are [`session_grant_recordable`]'s concern.
-fn session_grant_parts(grant: &ApprovalGrant) -> (&'static str, &str) {
-    match grant {
-        ApprovalGrant::Tool { name } => ("tool", name.trim()),
-        ApprovalGrant::ShellPrefix { prefix } => ("shell_prefix", prefix.trim()),
-        ApprovalGrant::Host { host } => ("host", host.trim()),
-    }
-}
-
-/// Whether this grant can be inserted into `session_grants` for the session:
-/// non-empty, within [`MAX_GRANT_BYTES`], and the session is under
-/// [`MAX_SESSION_GRANTS`]. A grant that is already stored counts as
-/// recordable, so re-approving it does not trip the cap.
-fn session_grant_recordable(
-    transaction: &rusqlite::Connection,
-    session_id: SessionId,
-    grant: &ApprovalGrant,
-) -> Result<bool, SessionRuntimeError> {
-    let (kind, value) = session_grant_parts(grant);
-    if value.is_empty() || value.len() > MAX_GRANT_BYTES {
-        return Ok(false);
-    }
-    let already_stored: bool = transaction.query_row(
-        "SELECT EXISTS(
-             SELECT 1 FROM session_grants
-             WHERE session_id = ?1 AND kind = ?2 AND value = ?3
-         )",
-        params![session_id.to_string(), kind, value],
-        |row| row.get(0),
-    )?;
-    if already_stored {
-        return Ok(true);
-    }
-    let grant_count: u32 = transaction.query_row(
-        "SELECT COUNT(*) FROM session_grants WHERE session_id = ?1",
-        [session_id.to_string()],
-        |row| row.get(0),
-    )?;
-    Ok(grant_count < MAX_SESSION_GRANTS)
 }
 
 /// Cancellation preserves reservations until their executor has drained.

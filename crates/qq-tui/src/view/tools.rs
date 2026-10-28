@@ -2,8 +2,8 @@ use std::cell::RefCell;
 
 use super::*;
 use markdown::{CODE_PANEL_INSET, panel_content_width, panel_rows, panel_rows_at};
-use qq_client::state::{ApprovalSettlement, ToolCallTiming};
-use qq_protocol::{ApprovalResolution, DelegateIdentity, ToolErrorKind};
+use qq_client::state::ToolCallTiming;
+use qq_protocol::ToolErrorKind;
 
 /// Runs with more than this many quiet tool calls fold into one summary row.
 pub(super) const TOOL_FOLD_THRESHOLD: usize = 3;
@@ -811,21 +811,7 @@ pub(super) fn tool_summary_line(
         Some(ToolErrorKind::Failure) | None => {
             (call.state != ToolCallState::Completed).then(|| {
                 (
-                    // A delegate's denial says who denied it; the human's and the
-                    // timeout's read as before.
-                    match (call.state, context.clock.timing.settled) {
-                        (
-                            ToolCallState::Denied,
-                            Some(ApprovalSettlement {
-                                resolution: ApprovalResolution::DeniedByReviewer,
-                                delegate,
-                            }),
-                        ) => match delegate.unwrap_or_default() {
-                            DelegateIdentity::Jev => "denied by jev",
-                            DelegateIdentity::Reviewer => "denied by reviewer",
-                        },
-                        _ => tool_state_label(call.state),
-                    },
+                    tool_state_label(call.state),
                     match call.state {
                         ToolCallState::Failed | ToolCallState::Denied => failure(),
                         ToolCallState::AwaitingApproval => warning(),
@@ -1099,8 +1085,7 @@ pub(super) fn tool_expanded_lines(
         (false, Some(finished)) => fields.push(format!("→ {}", format_clock(finished))),
         (false, None) => {}
     }
-    // Who settled a held call: `approved by jev`, `denied by reviewer`, so an
-    // operator can tell a delegate's decision from their own.
+    // How a held call was settled: `denied by you`, `denied by timeout`.
     if let Some(label) = timing.settled.and_then(|settled| settled.label()) {
         fields.push(label);
     }

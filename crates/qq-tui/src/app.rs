@@ -13,11 +13,11 @@ use qq_client::state::{
     model_reasoning_efforts,
 };
 use qq_protocol::{
-    AgentProfileId, ApprovalDecision, ApprovalDelegate, ApprovalGrant, ApprovalMode,
-    ApprovalResolution, CommandId, CommandOutcome, CommandRequest, ModelSelection, QuestionPreview,
-    ReasoningEffort, RunId, ServerCapabilities, SessionCommand, SessionEvent, SessionEventEnvelope,
-    SessionId, SessionStatus, SideQuestionState, SteeringCapabilities, ToolCallSnapshot,
-    ToolCallState, WorkspaceId, WorkspaceSnapshot,
+    AgentProfileId, ApprovalDecision, ApprovalMode, ApprovalResolution, CommandId, CommandOutcome,
+    CommandRequest, ModelSelection, QuestionPreview, ReasoningEffort, RunId, ServerCapabilities,
+    SessionCommand, SessionEvent, SessionEventEnvelope, SessionId, SessionStatus,
+    SideQuestionState, SteeringCapabilities, ToolCallSnapshot, ToolCallState, WorkspaceId,
+    WorkspaceSnapshot,
 };
 use thiserror::Error;
 
@@ -26,7 +26,7 @@ use crate::{
     commands::{self, Command, SlashAction, SlashEntry},
     composer::Composer,
     effect::{Effect, Effects, PendingSubmit, Redraw, SubmitTarget},
-    input::{Mode, Overlay, SessionConfirm, approval_mode_label, delegate_label, effort_label},
+    input::{Mode, Overlay, SessionConfirm, approval_mode_label, effort_label},
     picker::Picker,
     terminal,
     theme::Theme,
@@ -294,9 +294,6 @@ enum PendingIntent {
         session_id: SessionId,
     },
     SetEffort {
-        session_id: SessionId,
-    },
-    SetDelegate {
         session_id: SessionId,
     },
     Delete {
@@ -607,21 +604,9 @@ impl App {
                             self.set_info(
                                 match resolution {
                                     ApprovalResolution::ApprovedOnce => "tool call approved",
-                                    ApprovalResolution::ApprovedForSession => {
-                                        "tool call approved for this session"
-                                    }
-                                    ApprovalResolution::ApprovedForWorkspace => {
-                                        "tool call approved for this workspace"
-                                    }
-                                    ApprovalResolution::ApprovedByReviewer => {
-                                        "tool call already approved by the delegate"
-                                    }
                                     ApprovalResolution::Denied => "tool call denied",
                                     ApprovalResolution::DeniedTimeout => {
                                         "tool call already denied by timeout"
-                                    }
-                                    ApprovalResolution::DeniedByReviewer => {
-                                        "tool call already denied by the delegate"
                                     }
                                     ApprovalResolution::Answered => "answer sent",
                                 }
@@ -719,24 +704,6 @@ impl App {
                                 self.set_info_for(
                                     Some(*session_id),
                                     format!("session effort set to {}", effort_label(*effort)),
-                                );
-                            }
-                            CommandOutcome::ApprovalDelegateSet {
-                                session_id,
-                                delegate,
-                            } => {
-                                self.set_info_for(
-                                    Some(*session_id),
-                                    match delegate {
-                                        Some(ApprovalDelegate::Off) => {
-                                            "delegate off: every held call now waits for you"
-                                                .to_owned()
-                                        }
-                                        Some(_) | None => format!(
-                                            "session delegate set to {}",
-                                            delegate_label(*delegate)
-                                        ),
-                                    },
                                 );
                             }
                             CommandOutcome::SessionDeleted { .. } => {
@@ -1298,7 +1265,6 @@ impl App {
             | Some(PendingIntent::SetProfile { session_id })
             | Some(PendingIntent::SetApprovalMode { session_id })
             | Some(PendingIntent::SetEffort { session_id })
-            | Some(PendingIntent::SetDelegate { session_id })
             | Some(PendingIntent::Delete { session_id }) => Some(*session_id),
             Some(PendingIntent::Approval { tool_call_id }) => self
                 .sessions
@@ -1376,7 +1342,6 @@ impl App {
             | Mode::Profiles
             | Mode::ApprovalModes
             | Mode::Effort
-            | Mode::Delegate
             | Mode::Skills
             | Mode::Themes
             | Mode::Commands
@@ -1740,7 +1705,6 @@ impl App {
             Command::OpenProfiles => self.open_profiles(),
             Command::OpenApprovalModes => self.open_approval_modes(),
             Command::OpenEffort => self.open_effort(),
-            Command::OpenDelegate => self.open_delegate(),
             Command::OpenSkills => self.open_skills(),
             Command::OpenThemes => self.open_themes(),
             Command::OpenSessions => self.open_sessions(),
@@ -2537,21 +2501,6 @@ impl App {
             .get(&tool_call.id)
     }
 
-    /// Ask authority also applies to a child's held calls.
-    pub(crate) fn pending_approval_is_ask(&self) -> bool {
-        let mut session = self.pending_approval().map(|call| call.session_id);
-        for _ in 0..self.sessions.len() {
-            let Some(view) = session.and_then(|id| self.sessions.get(&id)) else {
-                break;
-            };
-            if view.summary.approval_mode == ApprovalMode::Ask {
-                return true;
-            }
-            session = view.summary.parent_id;
-        }
-        false
-    }
-
     /// The pending hold's question, when it is an `ask_user` call.
     pub(crate) fn pending_question(&self) -> Option<&QuestionPreview> {
         self.pending_approval_preview()?.question.as_ref()
@@ -2596,8 +2545,6 @@ impl App {
         }
         match key.code {
             KeyCode::Char('y') => self.respond_to_approval(ApprovalChoice::Once),
-            KeyCode::Char('a' | 'A') => self.respond_to_approval(ApprovalChoice::Session),
-            KeyCode::Char('w' | 'W') => self.respond_to_approval(ApprovalChoice::Workspace),
             KeyCode::Char('n') | KeyCode::Esc => self.respond_to_approval(ApprovalChoice::Deny),
             // Shift-Y / Shift-N: decide and then steer the run with a note,
             // for "yes, but…" and "no, do this instead".
@@ -2744,48 +2691,11 @@ impl App {
         };
         let tool_call_id = tool_call.id;
         let run_id = tool_call.run_id;
-        let preview = self.pending_approval_preview();
-        let ask = self.pending_approval_is_ask();
-        // A session or workspace choice whose grant cannot be stored must not
-        // be sent as one: the server would reject the whole approval. Approve
-        // this call once and say why, so the key never produces a 400.
-        let (decision, notice) = match choice {
-            ApprovalChoice::Once => (ApprovalDecision::ApproveOnce, None),
-            ApprovalChoice::Session | ApprovalChoice::Workspace if ask => (
-                ApprovalDecision::ApproveOnce,
-                Some("approved once; ask mode requires approval for each call".to_owned()),
-            ),
-            ApprovalChoice::Session | ApprovalChoice::Workspace => {
-                let grant = approval_grant(tool_call, preview);
-                let workspace = matches!(choice, ApprovalChoice::Workspace);
-                match grant_recording(&grant) {
-                    GrantRecording::Recorded => (
-                        if workspace {
-                            ApprovalDecision::ApproveForWorkspace { grant }
-                        } else {
-                            ApprovalDecision::ApproveForSession { grant }
-                        },
-                        None,
-                    ),
-                    GrantRecording::TooLong { bytes } => (
-                        ApprovalDecision::ApproveOnce,
-                        Some(format!(
-                            "approved once; a session grant may be at most {} bytes and this command is {bytes}",
-                            qq_core::MAX_GRANT_BYTES
-                        )),
-                    ),
-                    GrantRecording::Empty => (
-                        ApprovalDecision::ApproveOnce,
-                        Some("approved once; there is no command or tool name to grant".to_owned()),
-                    ),
-                }
-            }
-            ApprovalChoice::Deny => (ApprovalDecision::Deny, None),
-            ApprovalChoice::Answer(answers) => (ApprovalDecision::Answer { answers }, None),
+        let decision = match choice {
+            ApprovalChoice::Once => ApprovalDecision::ApproveOnce,
+            ApprovalChoice::Deny => ApprovalDecision::Deny,
+            ApprovalChoice::Answer(answers) => ApprovalDecision::Answer { answers },
         };
-        if let Some(notice) = notice {
-            self.set_warning(notice);
-        }
         self.answered_approvals.insert(tool_call_id);
         self.send(
             PendingIntent::Approval { tool_call_id },
@@ -3079,7 +2989,6 @@ impl App {
                 | PendingIntent::SetProfile { .. }
                 | PendingIntent::SetApprovalMode { .. }
                 | PendingIntent::SetEffort { .. }
-                | PendingIntent::SetDelegate { .. }
                 | PendingIntent::Delete { .. }
                 | PendingIntent::Side { .. }
                 | PendingIntent::CancelSide { .. }
@@ -3155,75 +3064,9 @@ impl App {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ApprovalChoice {
     Once,
-    Session,
-    Workspace,
     Deny,
     /// Answers to an `ask_user` hold; empty declines.
     Answer(Vec<String>),
-}
-
-/// Derives the approve-for-session grant from the pending call: shell calls
-/// allowlist their exact command as a prefix, fetch calls grant the host the
-/// server judged, everything else grants the tool.
-fn approval_grant(
-    tool_call: &ToolCallSnapshot,
-    preview: Option<&ApprovalPreview>,
-) -> ApprovalGrant {
-    if let Some(fetch) = preview.and_then(|preview| preview.fetch.as_ref()) {
-        return ApprovalGrant::Host {
-            host: fetch.host.clone(),
-        };
-    }
-    if tool_call.name == "shell"
-        && let Ok(arguments) = serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
-        && let Some(command) = arguments.get("command").and_then(|value| value.as_str())
-        && !command.trim().is_empty()
-    {
-        return ApprovalGrant::ShellPrefix {
-            prefix: command.to_owned(),
-        };
-    }
-    ApprovalGrant::Tool {
-        name: tool_call.name.clone(),
-    }
-}
-
-/// Why a derived grant cannot be recorded, or that it can. The byte cap is the
-/// server's `MAX_GRANT_BYTES`; a value past it used to fail the whole approval
-/// with "approval grant is empty or exceeds the session limit".
-enum GrantRecording {
-    Recorded,
-    Empty,
-    TooLong { bytes: usize },
-}
-
-fn grant_recording(grant: &ApprovalGrant) -> GrantRecording {
-    let value = match grant {
-        ApprovalGrant::Tool { name } => name,
-        ApprovalGrant::ShellPrefix { prefix } => prefix,
-        ApprovalGrant::Host { host } => host,
-    };
-    let value = value.trim();
-    if value.is_empty() {
-        GrantRecording::Empty
-    } else if value.len() > qq_core::MAX_GRANT_BYTES {
-        GrantRecording::TooLong { bytes: value.len() }
-    } else {
-        GrantRecording::Recorded
-    }
-}
-
-/// Whether the approval prompt may offer a session or workspace grant for this
-/// call. The server's per-session count is not known here; a grant that is
-/// empty or over the byte cap is the case the prompt can prevent.
-pub(crate) fn approval_grant_recordable(
-    tool_call: &ToolCallSnapshot,
-    preview: Option<&ApprovalPreview>,
-) -> bool {
-    matches!(
-        grant_recording(&approval_grant(tool_call, preview)),
-        GrantRecording::Recorded
-    )
 }
 
 fn valid_model_route(route: &str) -> bool {

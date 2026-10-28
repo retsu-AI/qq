@@ -58,16 +58,6 @@ pub(crate) struct ExecutionContextProof {
     pub(crate) manifest: Arc<[crate::runtime::ApprovedReadImage]>,
     pub(crate) policy_sha256: ContentHash,
     pub(crate) producer: Arc<provenance::ProducerEvidence>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) task_git: Option<TaskGitReceiptBinding>,
-}
-
-/// Binds a logical task call while retaining the actual launch proof unchanged.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TaskGitReceiptBinding {
-    tool: String,
-    arguments_sha256: ContentHash,
 }
 
 pub(crate) fn policy_digest() -> ContentHash {
@@ -154,10 +144,7 @@ impl ExecutionContextReceipt {
                     let Ok(manifest) = ApprovedReadImages::new(proof.manifest.to_vec()) else {
                         return false;
                     };
-                    proof.task_git.as_ref().is_none_or(|binding| {
-                        super::task_git::is_tool(&binding.tool)
-                            && matches!(facts.verdict, ExecutionVerdict::Work { .. })
-                    }) && manifest.entries() == proof.manifest.as_ref()
+                    manifest.entries() == proof.manifest.as_ref()
                         && manifest.digest() == facts.manifest_sha256
                         && match facts.verdict {
                             ExecutionVerdict::VerifiedRead {
@@ -176,17 +163,6 @@ impl ExecutionContextReceipt {
         let Some((digest, requested_env)) = argument_identity(tool, arguments) else {
             return false;
         };
-        if let Self::V2(proof) = self
-            && let Some(binding) = &proof.task_git
-        {
-            return self.valid()
-                && proof.facts.context_id == call_id
-                && binding.tool == tool
-                && binding.arguments_sha256 == digest;
-        }
-        if super::task_git::is_tool(tool) {
-            return false;
-        }
         self.valid()
             && digest == self.facts().arguments_sha256
             && match self {
@@ -195,31 +171,6 @@ impl ExecutionContextReceipt {
                     proof.facts.context_id == call_id && proof.facts.requested_env == requested_env
                 }
             }
-    }
-    pub(crate) fn bind_task_git(
-        &mut self,
-        call_id: ToolCallId,
-        launch_arguments: &str,
-        call: &crate::command_owner::NativeTaskGitCall,
-    ) -> Result<(), ()> {
-        if !super::task_git::is_tool(&call.tool)
-            || !self.bound_to(call_id, "exec", launch_arguments)
-        {
-            return Err(());
-        }
-        let digest = arguments_digest(&call.tool, &call.arguments).ok_or(())?;
-        let Self::V2(proof) = self else {
-            return Err(());
-        };
-        if proof.task_git.is_some() || !matches!(proof.facts.verdict, ExecutionVerdict::Work { .. })
-        {
-            return Err(());
-        }
-        proof.task_git = Some(TaskGitReceiptBinding {
-            tool: call.tool.clone(),
-            arguments_sha256: digest,
-        });
-        Ok(())
     }
 }
 
@@ -233,15 +184,11 @@ fn argument_identity(tool: &str, arguments: &str) -> Option<(ContentHash, bool)>
         "shell" => {
             let args: ShellArgs = serde_json::from_str(arguments).ok()?;
             super::shell::Launch::Shell(&args).validate().ok()?;
-            (serde_json::to_vec(&args).ok()?, !args.env.is_empty())
+            (serde_json::to_vec(&args).ok()?, false)
         }
         "exec" => {
             let args: ExecArgs = serde_json::from_str(arguments).ok()?;
             super::shell::Launch::Exec(&args).validate().ok()?;
-            (serde_json::to_vec(&args).ok()?, !args.env.is_empty())
-        }
-        name if super::task_git::is_tool(name) => {
-            let args = super::task_git::parse(name, arguments).ok()?;
             (serde_json::to_vec(&args).ok()?, false)
         }
         _ => return None,
@@ -258,13 +205,6 @@ pub(super) enum OwnedLaunch {
     Exec(ExecArgs),
 }
 
-pub(crate) struct NativeExecution {
-    pub environment: crate::command_owner::NativeEnvironment,
-    pub filesystem: crate::command_owner::NativeFilesystem,
-    pub network: crate::command_owner::NativeNetwork,
-    pub resources: crate::command_owner::NativeResources,
-}
-
 /// The command and its capabilities are prepared together. Keeping this value
 /// alive through reap prevents later path/env changes from replacing a verified
 /// image or working directory.
@@ -274,83 +214,9 @@ pub(crate) struct PreparedLaunch {
     _cwd: Option<cap_std::fs::Dir>,
     #[cfg(target_os = "linux")]
     _image: Option<(std::fs::File, String)>,
-    #[cfg(target_os = "linux")]
-    startup: Option<super::linux_owner::Startup>,
-    #[cfg(target_os = "macos")]
-    macos_startup: Option<super::macos_owner::Startup>,
-    #[cfg(windows)]
-    windows_startup: Option<super::windows_owner::Startup>,
 }
 
 impl PreparedLaunch {
-    #[cfg(target_os = "linux")]
-    pub(super) fn owned_linux(
-        mut self,
-        owner: &super::linux_owner::LinuxOwner,
-        native: Option<&NativeExecution>,
-    ) -> Result<Self, PreparationError> {
-        let command = self
-            .command
-            .take()
-            .expect("newly prepared launch has a command");
-        let (command, startup) = owner
-            .wrap(
-                command,
-                self._cwd.as_ref().expect("prepared cwd is held"),
-                self._image.as_ref(),
-                native,
-            )
-            .map_err(PreparationError::Custody)?;
-        self.command = Some(command);
-        self.startup = Some(startup);
-        Ok(self)
-    }
-    #[cfg(target_os = "macos")]
-    pub(super) fn owned_macos(
-        mut self,
-        owner: &super::macos_owner::MacosOwner,
-        native: Option<&NativeExecution>,
-        deadline: Instant,
-    ) -> Result<Self, PreparationError> {
-        let command = self
-            .command
-            .take()
-            .expect("newly prepared launch has a command");
-        let (command, startup) = owner
-            .wrap(
-                command,
-                self._cwd.as_ref().expect("prepared cwd is held"),
-                native,
-                deadline,
-            )
-            .map_err(PreparationError::Macos)?;
-        self.command = Some(command);
-        self.macos_startup = Some(startup);
-        Ok(self)
-    }
-    #[cfg(windows)]
-    pub(super) fn owned_windows(
-        mut self,
-        owner: &super::windows_owner::WindowsOwner,
-        native: Option<&NativeExecution>,
-        deadline: Instant,
-    ) -> Result<Self, PreparationError> {
-        let command = self
-            .command
-            .take()
-            .expect("newly prepared launch has a command");
-        let (command, startup) = owner
-            .wrap(
-                command,
-                self._cwd.as_ref().expect("prepared cwd is held"),
-                native,
-                deadline,
-            )
-            .map_err(PreparationError::Windows)?;
-        self.command = Some(command);
-        self.windows_startup = startup;
-        Ok(self)
-    }
     /// Only stream/process supervision settings may change after verification.
     pub(crate) async fn spawn(
         &mut self,
@@ -360,6 +226,7 @@ impl PreparedLaunch {
         deadline: Instant,
     ) -> std::io::Result<(
         super::shell::NativeChild,
+        super::shell::ProcessGroupGuard,
         Option<Box<ExecutionContextReceipt>>,
     )> {
         if cancelled.is_cancelled() {
@@ -389,28 +256,27 @@ impl PreparedLaunch {
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
-        #[cfg(target_os = "macos")]
-        let child = if let Some(startup) = self.macos_startup.take() {
-            super::macos_owner::spawn(command, startup, process, cancelled, deadline).await?
-        } else {
-            command.spawn()?.into()
-        };
-        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-        let child = {
+        #[cfg(not(windows))]
+        let (child, guard) = {
             let _ = process;
-            command.spawn()?
-        };
-        #[cfg(target_os = "linux")]
-        let child = if let Some(startup) = self.startup.take() {
-            super::linux_owner::spawn(command, startup, process, cancelled, deadline).await?
-        } else {
-            command.spawn()?.into()
+            let mut child = command.spawn()?;
+            let mut guard = super::shell::ProcessGroupGuard::new(child.id());
+            // No await since spawn: the watcher joins the group before
+            // anything else can run, so the group never lacks one.
+            match super::shell::spawn_watcher(child.id()) {
+                Ok(watcher) => guard.watch(watcher),
+                Err(error) => {
+                    let _ = guard.kill();
+                    let _ = child.wait().await;
+                    guard.disarm();
+                    return Err(error);
+                }
+            }
+            (child, guard)
         };
         #[cfg(windows)]
-        let child = super::windows_owner::spawn(
+        let child = super::windows_job::spawn(
             command,
-            self.windows_startup.take(),
-            piped_stdin,
             self._cwd
                 .take()
                 .ok_or_else(|| std::io::Error::other("launch directory was already consumed"))?,
@@ -419,32 +285,19 @@ impl PreparedLaunch {
             deadline,
         )
         .await?;
+        #[cfg(windows)]
+        let guard = super::shell::ProcessGroupGuard::new(child.id());
         let receipt = child.id().map(|pid| {
             let mut receipt = self.receipt.clone();
             receipt.facts_mut().pid = pid;
             Box::new(receipt)
         });
-        Ok((child, receipt))
+        Ok((child, guard, receipt))
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PreparationError {
-    #[error("resource enforcement is unavailable for this command launcher")]
-    ResourcesUnavailable,
-    #[error("network enforcement is unavailable for this command launcher")]
-    NetworkUnavailable,
-    #[error("filesystem enforcement is unavailable for this command launcher")]
-    FilesystemUnavailable,
-    #[cfg(target_os = "linux")]
-    #[error("could not establish Linux command custody: {0}")]
-    Custody(#[source] std::io::Error),
-    #[cfg(target_os = "macos")]
-    #[error("could not establish macOS command isolation: {0}")]
-    Macos(#[source] std::io::Error),
-    #[cfg(windows)]
-    #[error("could not establish Windows command isolation: {0}")]
-    Windows(#[source] std::io::Error),
     #[error("captured child environment exceeds 256 KiB")]
     EnvironmentBound,
     #[error("could not capture cwd: {0}")]
@@ -459,12 +312,7 @@ pub(crate) enum PreparationError {
     Cancelled,
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "captured invocation values, image approvals, identity and cancellation are distinct inputs"
-)]
 pub(super) fn prepare(
-    captured: Option<&crate::command_owner::NativeEnvironment>,
     workspace: Workspace,
     launch: OwnedLaunch,
     approvals: Arc<ApprovedReadImages>,
@@ -478,42 +326,19 @@ pub(super) fn prepare(
     if cancelled.is_cancelled() || Instant::now() >= deadline {
         return Err(PreparationError::Cancelled);
     }
-    let (cwd, requested, encoded) = match &launch {
-        OwnedLaunch::Shell(args) => (
-            args.cwd.as_deref(),
-            args.env.as_slice(),
-            serde_json::to_vec(args),
-        ),
-        OwnedLaunch::Exec(args) => (
-            args.cwd.as_deref(),
-            args.env.as_slice(),
-            serde_json::to_vec(args),
-        ),
+    let (cwd, encoded) = match &launch {
+        OwnedLaunch::Shell(args) => (args.cwd.as_deref(), serde_json::to_vec(args)),
+        OwnedLaunch::Exec(args) => (args.cwd.as_deref(), serde_json::to_vec(args)),
     };
     let encoded = encoded.map_err(PreparationError::Arguments)?;
-    let mut environment =
-        Vec::<(OsString, OsString)>::with_capacity(BASE_ENV.len() + requested.len());
+    // Commands inherit the server's whole environment. A verified read runs
+    // with only these base names, so no variable can point it at helpers.
+    let mut environment = Vec::<(OsString, OsString)>::with_capacity(BASE_ENV.len());
     let mut bytes = 0_usize;
     let mut base_env_present = 0;
     let mut locale = Locale::Unset;
-    let names = match captured {
-        Some(captured) => captured.names().collect::<Vec<_>>(),
-        None => BASE_ENV
-            .iter()
-            .copied()
-            .chain(requested.iter().map(String::as_str))
-            .collect(),
-    };
-    #[cfg(target_os = "linux")]
-    let additional_environment = names.iter().any(|name| !BASE_ENV.contains(name));
-    for name in names {
-        if environment.iter().any(|(saved, _)| saved == name) {
-            continue;
-        }
-        if let Some(value) = match captured {
-            Some(captured) => captured.get(name),
-            None => std::env::var_os(name),
-        } {
+    for name in BASE_ENV {
+        if let Some(value) = std::env::var_os(name) {
             bytes = bytes
                 .saturating_add(name.len())
                 .saturating_add(value.as_encoded_bytes().len());
@@ -581,7 +406,6 @@ pub(super) fn prepare(
                 &approvals,
                 &environment,
                 &cwd_path,
-                !requested.is_empty() || additional_environment,
                 locale,
                 cancelled,
                 deadline,
@@ -610,7 +434,10 @@ pub(super) fn prepare(
             (command, verdict)
         }
     };
-    command.env_clear().envs(environment).current_dir(cwd_path);
+    if matches!(verdict, ExecutionVerdict::VerifiedRead { .. }) {
+        command.env_clear().envs(environment);
+    }
+    command.current_dir(cwd_path);
     let context_id = match call_id {
         Some(id) => id,
         None => ToolCallId::generate().map_err(PreparationError::Identity)?,
@@ -620,7 +447,7 @@ pub(super) fn prepare(
         arguments_sha256: ContentHash::from_bytes(Sha256::digest(encoded).into()),
         manifest_sha256: approvals.digest(),
         base_env_present,
-        requested_env: !requested.is_empty(),
+        requested_env: false,
         locale,
         cwd: cwd_identity,
         verdict,
@@ -628,7 +455,6 @@ pub(super) fn prepare(
     };
     let receipt = match call_id {
         Some(_) => ExecutionContextReceipt::V2(ExecutionContextProof {
-            task_git: None,
             facts,
             manifest: approvals.shared_entries(),
             policy_sha256: policy_digest(),
@@ -643,26 +469,15 @@ pub(super) fn prepare(
         _cwd: Some(directory),
         #[cfg(target_os = "linux")]
         _image: image,
-        #[cfg(target_os = "linux")]
-        startup: None,
-        #[cfg(target_os = "macos")]
-        macos_startup: None,
-        #[cfg(windows)]
-        windows_startup: None,
     })
 }
 
 #[cfg(target_os = "linux")]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the verifier consumes exactly the prepared call inputs"
-)]
 fn bind_read_image(
     args: &ExecArgs,
     approvals: &ApprovedReadImages,
     environment: &[(OsString, OsString)],
     cwd: &std::path::Path,
-    requested: bool,
     locale: Locale,
     cancelled: &ToolCancellation,
     deadline: Instant,
@@ -674,9 +489,6 @@ fn bind_read_image(
         io::{Read as _, Seek as _, Write as _},
         os::fd::AsRawFd as _,
     };
-    if requested {
-        return Err(UnverifiedReason::RequestedEnvironment);
-    }
     if locale == Locale::Other {
         return Err(UnverifiedReason::UnsupportedLocale);
     }
@@ -909,93 +721,6 @@ mod tests {
     };
     use std::os::unix::fs::PermissionsExt as _;
 
-    #[tokio::test]
-    async fn captured_tool_environment_reaches_the_launched_process() {
-        let directory = tempfile::tempdir().unwrap();
-        let environment = crate::command_owner::NativeEnvironment::from_values([(
-            "UNLISTED_COMPILER_HOME".to_owned(),
-            "installed-compiler-input".into(),
-        )])
-        .unwrap();
-        let cancelled = ToolCancellation::new(RunCancellation::new());
-        let launch = OwnedLaunch::Shell(
-            serde_json::from_value(serde_json::json!({
-                "command": "printf '%s' \"$UNLISTED_COMPILER_HOME\"",
-            }))
-            .unwrap(),
-        );
-        let mut prepared = prepare(
-            Some(&environment),
-            Workspace::open(directory.path()).unwrap(),
-            launch,
-            Arc::default(),
-            Arc::default(),
-            None,
-            &cancelled,
-            Instant::now() + std::time::Duration::from_secs(5),
-        )
-        .unwrap();
-        let output = prepared.command.take().unwrap().output().await.unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(output.stdout, b"installed-compiler-input");
-    }
-
-    #[test]
-    fn extra_captured_configuration_cannot_claim_a_verified_read() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let program = root.join("grep");
-        let image = test_read_image(0);
-        std::fs::write(&program, &image).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let approved = Arc::new(
-            ApprovedReadImages::new(vec![ApprovedReadImage {
-                family: ReadImageFamily::Grep,
-                sha256: ContentHash::from_bytes(Sha256::digest(&image).into()),
-                contract: ReadImageContract::SelfContainedReadV1,
-            }])
-            .unwrap(),
-        );
-        let cancelled = ToolCancellation::new(RunCancellation::new());
-        for extra in [false, true] {
-            let mut values = vec![("LANG".to_owned(), "C".into())];
-            if extra {
-                values.push(("RIPGREP_CONFIG_PATH".to_owned(), "tool-config".into()));
-            }
-            let environment = crate::command_owner::NativeEnvironment::from_values(values).unwrap();
-            let launch = OwnedLaunch::Exec(
-                serde_json::from_value(serde_json::json!({
-                    "program": program, "args": ["x", "f"],
-                }))
-                .unwrap(),
-            );
-            let prepared = prepare(
-                Some(&environment),
-                Workspace::open(&root).unwrap(),
-                launch,
-                approved.clone(),
-                Arc::default(),
-                None,
-                &cancelled,
-                Instant::now() + std::time::Duration::from_secs(5),
-            )
-            .unwrap();
-            if extra {
-                assert!(matches!(
-                    prepared.receipt.facts().verdict,
-                    ExecutionVerdict::Work {
-                        reason: UnverifiedReason::RequestedEnvironment
-                    }
-                ));
-            } else {
-                assert!(matches!(
-                    prepared.receipt.facts().verdict,
-                    ExecutionVerdict::VerifiedRead { .. }
-                ));
-            }
-        }
-    }
-
     #[test]
     fn ab1_verified_image_is_bound_and_unverified_effects_count_as_work() {
         if std::env::var_os("QQ_CONTEXT_IMAGE_WORKER").is_none() {
@@ -1024,27 +749,7 @@ mod tests {
         let arguments = serde_json::json!({"program":program,"args":["x","f"]}).to_string();
         let workspace = Workspace::open(&root).unwrap();
         let cancelled = ToolCancellation::new(RunCancellation::new());
-        let mut requested: ExecArgs = serde_json::from_str(&arguments).unwrap();
-        requested.env.push("PATH".to_owned());
-        let unsupported = prepare(
-            None,
-            workspace.clone(),
-            OwnedLaunch::Exec(requested),
-            approved.clone(),
-            Arc::default(),
-            None,
-            &cancelled,
-            Instant::now() + std::time::Duration::from_secs(5),
-        )
-        .unwrap();
-        assert_eq!(
-            unsupported.receipt.facts().verdict,
-            ExecutionVerdict::Work {
-                reason: UnverifiedReason::RequestedEnvironment
-            }
-        );
         let unapproved = prepare(
-            None,
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             Arc::default(),
@@ -1061,7 +766,6 @@ mod tests {
             }
         );
         let mut prepared = prepare(
-            None,
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             approved.clone(),
@@ -1075,9 +779,27 @@ mod tests {
             prepared.receipt.facts().verdict,
             ExecutionVerdict::VerifiedRead { .. }
         ));
+        // A verified read runs with only the base names, so no variable can
+        // point it at helpers; unverified work inherits the whole environment.
+        let explicit = |launch: &PreparedLaunch| {
+            let command = launch.command.as_ref().unwrap().as_std();
+            let mut names = command
+                .get_envs()
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let mut base = BASE_ENV
+            .iter()
+            .filter(|name| std::env::var_os(name).is_some())
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        base.sort();
+        assert_eq!(explicit(&prepared), base);
+        assert!(explicit(&unapproved).is_empty(), "unverified work inherits");
         std::fs::create_dir(root.join("work")).unwrap();
         let mut cwd_bound = prepare(
-            None,
             workspace.clone(),
             OwnedLaunch::Shell(
                 serde_json::from_value(
@@ -1101,7 +823,7 @@ mod tests {
         assert!(
             cwd_runtime
                 .block_on(async {
-                    let (mut child, _) = cwd_bound
+                    let (mut child, _guard, _) = cwd_bound
                         .spawn(
                             false,
                             &super::super::dispatch::ToolTasks::default().enter(),
@@ -1131,7 +853,7 @@ mod tests {
         assert!(
             runtime
                 .block_on(async {
-                    let (mut child, _) = prepared
+                    let (mut child, _guard, _) = prepared
                         .spawn(
                             false,
                             &super::super::dispatch::ToolTasks::default().enter(),
@@ -1146,7 +868,6 @@ mod tests {
         );
         assert!(!root.join("written.txt").exists());
         let result = runtime.block_on(super::super::dispatch::execute_with_images(
-            None,
             workspace.clone(),
             Arc::default(),
             "exec".to_owned(),
@@ -1175,7 +896,6 @@ mod tests {
             .unwrap(),
         );
         let script_bound = prepare(
-            None,
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             script_approval,
@@ -1194,7 +914,6 @@ mod tests {
         );
         std::fs::write(&program, &image).unwrap();
         let result = runtime.block_on(super::super::dispatch::execute_with_images(
-            None,
             workspace,
             Arc::default(),
             "exec".to_owned(),
@@ -1238,13 +957,11 @@ pub(crate) fn prepare_goal_check(
     deadline: Instant,
 ) -> Result<PreparedLaunch, PreparationError> {
     prepare(
-        None,
         workspace,
         OwnedLaunch::Shell(ShellArgs {
             command,
             cwd: None,
             timeout_seconds: None,
-            env: Vec::new(),
         }),
         Arc::new(ApprovedReadImages::default()),
         producer,

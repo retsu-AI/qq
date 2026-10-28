@@ -6,7 +6,6 @@ use qq_protocol::{
     MessageId, MessageRole, MessageSnapshot, MessageState, ModelDescriptor, RunActivity, RunId,
     RunOutcome, RunSnapshot, RunStatus, SessionEvent, SessionSnapshot, SessionStatus,
     SessionSummary, SnapshotRequest, TextChannel, TokenUsage, ToolCallId, ToolCallState,
-    WorkspaceGrantOutcome,
 };
 
 use super::*;
@@ -169,197 +168,7 @@ fn approval_prompt_captures_keys_and_sends_the_decision() {
 }
 
 #[test]
-fn approve_for_session_grants_shell_commands_as_prefixes() {
-    let mut app = App::new(TuiOptions::default());
-    let initial = snapshot();
-    let session_id = initial.focused.as_ref().unwrap().summary.id;
-    app.apply_snapshot(initial);
-    app.sessions.upsert_tool_call(ToolCallSnapshot {
-        run_id: id(4, RunId::from_bytes),
-        call_ordinal: 1,
-        provider_call_id: "call_0".to_owned(),
-        arguments: r#"{"command":"cargo test --workspace","cwd":"crates"}"#.to_owned(),
-        state: ToolCallState::AwaitingApproval,
-        ..fixtures::tool_call(id(8, ToolCallId::from_bytes), session_id, "shell")
-    });
-
-    let (_, requests) = app
-        .handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
-        .split();
-    let ClientRequest::Command(request) = requests.into_iter().next().unwrap() else {
-        panic!("expected a command")
-    };
-    assert!(matches!(
-        request.command,
-        SessionCommand::RespondToolApproval {
-            decision: ApprovalDecision::ApproveForSession {
-                grant: ApprovalGrant::ShellPrefix { prefix },
-            },
-            ..
-        } if prefix == "cargo test --workspace"
-    ));
-}
-
-#[test]
-fn ask_approval_never_records_a_session_grant() {
-    let mut app = App::new(TuiOptions::default());
-    let mut initial = snapshot();
-    let focused = initial.focused.as_mut().unwrap();
-    focused.summary.approval_mode = ApprovalMode::Ask;
-    let session_id = focused.summary.id;
-    app.apply_snapshot(initial);
-    app.sessions.upsert_tool_call(ToolCallSnapshot {
-        run_id: id(4, RunId::from_bytes),
-        state: ToolCallState::AwaitingApproval,
-        ..fixtures::tool_call(id(8, ToolCallId::from_bytes), session_id, "write_file")
-    });
-    let request = only_command(press(&mut app, KeyCode::Char('a')));
-    assert!(matches!(
-        request.command,
-        SessionCommand::RespondToolApproval {
-            decision: ApprovalDecision::ApproveOnce,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn a_command_past_the_grant_cap_approves_once_and_says_why() {
-    // Approving a command longer than the session grant cap for the session
-    // used to send a grant the server rejected with "approval grant is empty
-    // or exceeds the session limit", which re-opened the prompt. The key now
-    // approves this call once and explains why no grant was recorded.
-    let mut app = App::new(TuiOptions::default());
-    let initial = snapshot();
-    let session_id = initial.focused.as_ref().unwrap().summary.id;
-    app.apply_snapshot(initial);
-    let command = format!("echo {}", "x".repeat(qq_core::MAX_GRANT_BYTES));
-    let run_id = id(4, RunId::from_bytes);
-    let tool_call = ToolCallSnapshot {
-        run_id,
-        call_ordinal: 1,
-        provider_call_id: "call_0".to_owned(),
-        arguments: serde_json::json!({"command": command}).to_string(),
-        state: ToolCallState::AwaitingApproval,
-        ..fixtures::tool_call(id(8, ToolCallId::from_bytes), session_id, "shell")
-    };
-    app.apply_live_event(SessionEventEnvelope {
-        run_id: Some(run_id),
-        occurred_at_ms: 2,
-        ..fixtures::envelope(
-            2,
-            session_id,
-            SessionEvent::ToolApprovalRequested {
-                tool_call: tool_call.clone(),
-                shell: Some(Box::new(qq_protocol::ShellCommandPreview {
-                    command,
-                    cwd: None,
-                    verdict: None,
-                    reasons: Vec::new(),
-                })),
-                edit: None,
-                question: None,
-                fetch: None,
-                delegated: false,
-            },
-        )
-    });
-    assert!(
-        !approval_grant_recordable(&tool_call, app.pending_approval_preview()),
-        "the prompt must not offer a grant the server cannot store"
-    );
-
-    let (_, requests) = app
-        .handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
-        .split();
-    let ClientRequest::Command(request) = requests.into_iter().next().unwrap() else {
-        panic!("expected a command")
-    };
-    assert_eq!(
-        request.command,
-        SessionCommand::RespondToolApproval {
-            run_id,
-            tool_call_id: tool_call.id,
-            decision: ApprovalDecision::ApproveOnce,
-        }
-    );
-    assert!(
-        app.visible_status()
-            .is_some_and(|(text, _)| text.contains("approved once")),
-        "the status must say why the session grant was not recorded"
-    );
-}
-
-#[test]
-fn approve_for_workspace_sends_the_decision_and_surfaces_the_promotion() {
-    let mut app = App::new(TuiOptions::default());
-    let initial = snapshot();
-    let session_id = initial.focused.as_ref().unwrap().summary.id;
-    app.apply_snapshot(initial);
-    app.sessions.upsert_tool_call(ToolCallSnapshot {
-        run_id: id(4, RunId::from_bytes),
-        call_ordinal: 1,
-        provider_call_id: "call_0".to_owned(),
-        arguments: r#"{"command":"cargo test --workspace"}"#.to_owned(),
-        state: ToolCallState::AwaitingApproval,
-        ..fixtures::tool_call(id(8, ToolCallId::from_bytes), session_id, "shell")
-    });
-
-    let (_, requests) = app
-        .handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))
-        .split();
-    let ClientRequest::Command(request) = requests.into_iter().next().unwrap() else {
-        panic!("expected a command")
-    };
-    assert!(matches!(
-        request.command,
-        SessionCommand::RespondToolApproval {
-            decision: ApprovalDecision::ApproveForWorkspace {
-                grant: ApprovalGrant::ShellPrefix { prefix },
-            },
-            ..
-        } if prefix == "cargo test --workspace"
-    ));
-
-    let envelope = |sequence, outcome| SessionEventEnvelope {
-        run_id: Some(id(4, RunId::from_bytes)),
-        caused_by: Some(request.command_id),
-        occurred_at_ms: sequence,
-        ..fixtures::envelope(
-            sequence,
-            session_id,
-            SessionEvent::WorkspaceGrantPromoted {
-                grant: ApprovalGrant::ShellPrefix {
-                    prefix: "cargo test --workspace".to_owned(),
-                },
-                outcome,
-            },
-        )
-    };
-    app.apply_live_event(envelope(
-        2,
-        WorkspaceGrantOutcome::Written {
-            path: "/repo/.qq/config.ron".to_owned(),
-        },
-    ));
-    assert_eq!(
-        app.status.as_deref(),
-        Some("grant written to /repo/.qq/config.ron")
-    );
-    app.apply_live_event(envelope(
-        3,
-        WorkspaceGrantOutcome::Failed {
-            message: "denied by managed policy".to_owned(),
-        },
-    ));
-    assert_eq!(
-        app.status.as_deref(),
-        Some("workspace grant not saved: denied by managed policy")
-    );
-}
-
-#[test]
-fn a_fetch_hold_renders_the_url_and_grants_the_host_for_the_session() {
+fn a_fetch_hold_renders_the_url_and_approves_once() {
     let mut app = App::new(TuiOptions::default());
     let initial = snapshot();
     let session_id = initial.focused.as_ref().unwrap().summary.id;
@@ -389,7 +198,6 @@ fn a_fetch_hold_renders_the_url_and_grants_the_host_for_the_session() {
                     host: "docs.rs".to_owned(),
                     method: None,
                 })),
-                delegated: false,
             },
         )
     });
@@ -400,7 +208,7 @@ fn a_fetch_hold_renders_the_url_and_grants_the_host_for_the_session() {
         Some("docs.rs")
     );
     let (_, requests) = app
-        .handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        .handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
         .split();
     let ClientRequest::Command(request) = requests.into_iter().next().unwrap() else {
         panic!("expected a command")
@@ -410,11 +218,7 @@ fn a_fetch_hold_renders_the_url_and_grants_the_host_for_the_session() {
         SessionCommand::RespondToolApproval {
             run_id,
             tool_call_id: tool_call.id,
-            decision: ApprovalDecision::ApproveForSession {
-                grant: ApprovalGrant::Host {
-                    host: "docs.rs".to_owned(),
-                },
-            },
+            decision: ApprovalDecision::ApproveOnce,
         }
     );
 }
@@ -459,7 +263,6 @@ fn a_question_hold_collects_one_answer_per_question_and_sends_them_together() {
                     ],
                 })),
                 fetch: None,
-                delegated: false,
             },
         )
     };
@@ -553,7 +356,6 @@ fn approval_previews_are_kept_only_while_the_approval_is_pending() {
             }),
             question: None,
             fetch: None,
-            delegated: false,
         },
     ));
     assert_eq!(
@@ -2681,7 +2483,6 @@ fn live_status_tracks_cold_sessions_and_activity_seeds_from_snapshots() {
         edit: None,
         question: None,
         fetch: None,
-        delegated: false,
     }));
 
     let live = &app.sessions[&child.id].live;
@@ -3337,7 +3138,6 @@ fn an_included_body_older_than_live_events_is_caught_up_by_replay() {
                 edit: None,
                 question: None,
                 fetch: None,
-                delegated: false,
             },
         )
     });
@@ -3596,7 +3396,6 @@ fn attention_is_requested_only_while_the_terminal_is_unfocused() {
         edit: None,
         question: None,
         fetch: None,
-        delegated: false,
     }));
     assert!(matches!(
         attention(effects),
@@ -4160,82 +3959,6 @@ fn effort_picker_sets_the_focused_idle_session_effort_and_refuses_running_ones()
             .as_deref()
             .unwrap()
             .contains("wait for the run to finish")
-    );
-}
-
-#[test]
-fn delegate_picker_switches_the_focused_session_off_and_reports_the_receipt() {
-    // DA6: `/delegate` → `off` sends `set_approval_delegate` for the focused
-    // session (running or not: the gate reads it at the next hold) and the
-    // receipt says what changed. Rows: configured, by_mode, on, off.
-    let (mut app, _, _, _) = running_app();
-    let focused = app.focused().unwrap();
-    app.execute(Command::OpenDelegate);
-    for _ in 0..3 {
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    }
-    let (_, requests) = app
-        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-        .split();
-    let [ClientRequest::Command(request)] = requests.as_slice() else {
-        panic!("expected one set-approval-delegate command")
-    };
-    assert!(matches!(
-        &request.command,
-        SessionCommand::SetApprovalDelegate {
-            session_id,
-            delegate: Some(qq_protocol::ApprovalDelegate::Off),
-        } if *session_id == focused
-    ));
-    assert!(app.overlay.is_none());
-
-    app.apply_client_update(ClientUpdate::CommandResult {
-        command_id: request.command_id,
-        result: Ok(qq_protocol::CommandReceipt {
-            command_id: request.command_id,
-            outcome: CommandOutcome::ApprovalDelegateSet {
-                session_id: focused,
-                delegate: Some(qq_protocol::ApprovalDelegate::Off),
-            },
-            committed_through: fixtures::cursor(2),
-        }),
-    });
-    assert_eq!(
-        app.status.as_deref(),
-        Some("delegate off: every held call now waits for you")
-    );
-
-    // Choosing what the session already has sends nothing.
-    let mut session = app.sessions.get(&focused).unwrap().summary.clone();
-    session.approval_delegate = Some(qq_protocol::ApprovalDelegate::Off);
-    app.sessions.get_mut(&focused).unwrap().summary = session;
-    app.execute(Command::OpenDelegate);
-    let (_, requests) = app
-        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-        .split();
-    assert!(requests.is_empty(), "the picker opens on the active row");
-    assert_eq!(
-        app.status.as_deref(),
-        Some("session already uses delegate off")
-    );
-}
-
-#[test]
-fn delegate_picker_needs_a_focused_session() {
-    // There is no "next session" default for the delegate: the switch is
-    // about a session that exists and may already be running.
-    let mut app = App::new(TuiOptions::default());
-    let mut empty = snapshot();
-    empty.sessions.clear();
-    empty.focused = None;
-    app.apply_snapshot(empty);
-    let (_, requests) = app.execute(Command::OpenDelegate).split();
-    assert!(requests.is_empty());
-    assert!(app.overlay.is_none());
-    assert!(
-        app.status.as_deref().unwrap().contains("focus a session"),
-        "{:?}",
-        app.status
     );
 }
 

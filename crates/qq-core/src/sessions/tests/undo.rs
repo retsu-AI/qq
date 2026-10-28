@@ -176,6 +176,7 @@ fn open_for_writing(fifo: &Path) {
     }
 }
 
+#[cfg(unix)]
 fn one_write() -> Vec<Vec<(&'static str, String)>> {
     vec![vec![(
         "write_file",
