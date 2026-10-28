@@ -33,8 +33,8 @@ crates/qq-core/src/sessions/tests/nonblocking.rs	2694	fn cancel_first(children: 
 crates/qq-core/src/sessions/tests/settlement.rs	1301	async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime() {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/tools.rs	237	pub(crate) async fn assert_panicked_process_exits(pid: u32) {	tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 crates/qq-core/src/tools.rs	4871	async fn assert_process_exits(pid: u32) {	tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-crates/qq-core/src/tools/dispatch.rs	700	pub(super) fn execute_blocking(	std::thread::sleep(std::time::Duration::from_millis(1));
-crates/qq-core/src/tools/dispatch.rs	715	pub(super) fn execute_blocking(	std::thread::sleep(std::time::Duration::from_millis(1));
+crates/qq-core/src/tools/dispatch.rs	750	pub(super) fn execute_blocking(	std::thread::sleep(std::time::Duration::from_millis(1));
+crates/qq-core/src/tools/dispatch.rs	765	pub(super) fn execute_blocking(	std::thread::sleep(std::time::Duration::from_millis(1));
 crates/qq-core/tests/soak.rs	511	async fn stopping_a_pending_summarizer_preserves_measured_turns_and_unknown_totals() {	tokio::time::sleep(Duration::from_millis(5)).await;
 crates/qq-core/tests/soak.rs	789	fn terminate(&mut self) -> io::Result<ExitStatus> {	std::thread::sleep(Duration::from_millis(5));
 crates/qq-core/tests/soak.rs	820	fn worker_guard_reaps_an_already_exited_worker() {	std::thread::sleep(Duration::from_millis(5));
