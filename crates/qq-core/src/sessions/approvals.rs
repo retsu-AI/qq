@@ -10,7 +10,6 @@ pub(super) struct SessionToolGate {
     cancellation: watch::Receiver<bool>,
     network: Arc<crate::tools::network::NetworkPolicy>,
     shell: Arc<crate::ShellPolicy>,
-    delegate: approval::ApprovalDelegate,
 }
 
 impl SessionToolGate {
@@ -20,7 +19,6 @@ impl SessionToolGate {
         cancellation: watch::Receiver<bool>,
         network: Arc<crate::tools::network::NetworkPolicy>,
         shell: Arc<crate::ShellPolicy>,
-        delegate: approval::ApprovalDelegate,
     ) -> Self {
         Self {
             inner,
@@ -28,7 +26,6 @@ impl SessionToolGate {
             cancellation,
             network,
             shell,
-            delegate,
         }
     }
 }
@@ -41,7 +38,6 @@ impl ToolGate for SessionToolGate {
         let mut cancellation = self.cancellation.clone();
         let network = Arc::clone(&self.network);
         let shell = Arc::clone(&self.shell);
-        let delegate = self.delegate;
         Box::pin(async move {
             let policy = match inner
                 .store
@@ -51,17 +47,7 @@ impl ToolGate for SessionToolGate {
                 Ok(policy) => policy,
                 Err(error) => return approval_persistence_failure(error),
             };
-            let ToolApprovalPolicy {
-                mode,
-                grants,
-                delegate: session_delegate,
-                ancestors,
-                supervised,
-            } = policy.clone();
-            // The session's own choice (`set_approval_delegate`) wins over the
-            // configured one for the rest of the session; read here, at the
-            // hold, so it applies to the next held call without a restart.
-            let delegate = session_delegate.unwrap_or(delegate);
+            let ToolApprovalPolicy { mode, ancestors } = policy;
             let class = approval::classify(call.effect, &call.name, &call.arguments, &network);
             if let approval::ToolClass::Shell { command, .. } = &class
                 && approval::managed_shell_denied(command, &shell.deny_prefixes)
@@ -78,10 +64,8 @@ impl ToolGate for SessionToolGate {
             }
             // Auto is an unattended ceiling for the entire descendant tree,
             // even if a child session later selects a different mode.
-            let auto_ceiling = mode == ApprovalMode::Auto
-                || ancestors
-                    .iter()
-                    .any(|(mode, _)| *mode == ApprovalMode::Auto);
+            let auto_ceiling =
+                mode == ApprovalMode::Auto || ancestors.contains(&ApprovalMode::Auto);
             if auto_ceiling
                 && matches!(
                     class,
@@ -98,18 +82,13 @@ impl ToolGate for SessionToolGate {
                     Err(error) => approval_persistence_failure(error),
                 };
             }
-            // Existing explicit internal supervision remains available outside
-            // Auto. Authorized Auto child actions use their parent's policy,
-            // without introducing another per-action reviewer.
-            let internal_supervision = supervised && !auto_ceiling && mode == ApprovalMode::Full;
-            let no_human_approval = auto_ceiling || internal_supervision;
             let mut mode = mode;
-            for (parent_mode, _) in ancestors {
+            for parent_mode in ancestors {
                 let message = match approval::evaluate(parent_mode, &class) {
                     approval::PolicyDecision::Execute
                     | approval::PolicyDecision::AskUser { .. } => continue,
                     approval::PolicyDecision::RequireApproval
-                        if parent_mode == ApprovalMode::Ask && !no_human_approval =>
+                        if parent_mode == ApprovalMode::Ask && !auto_ceiling =>
                     {
                         // Ask applies to each child action too. Auto children
                         // deny instead of inheriting a human approval wait.
@@ -133,29 +112,16 @@ impl ToolGate for SessionToolGate {
                 };
             }
             let decision = approval::evaluate(mode, &class);
-            // A reviewer may supervise existing authority, never create it.
-            let decision = if no_human_approval
-                && matches!(decision, approval::PolicyDecision::RequireApproval)
-            {
-                approval::PolicyDecision::Deny {
-                    reason: approval::DenyReason::OutOfScope,
-                }
-            } else {
-                decision
-            };
-            // Parent ceilings were checked before any internal supervision.
-            let decision = if internal_supervision
-                && matches!(decision, approval::PolicyDecision::Execute)
-                && !matches!(
-                    class,
-                    approval::ToolClass::ReadOnly
-                        | approval::ToolClass::Interactive { .. }
-                        | approval::ToolClass::Network { host: None, .. }
-                ) {
-                approval::PolicyDecision::RequireApproval
-            } else {
-                decision
-            };
+            // Auto never starts a human wait, so it cannot authorize what it
+            // would otherwise hold.
+            let decision =
+                if auto_ceiling && matches!(decision, approval::PolicyDecision::RequireApproval) {
+                    approval::PolicyDecision::Deny {
+                        reason: approval::DenyReason::OutOfScope,
+                    }
+                } else {
+                    decision
+                };
             match decision {
                 approval::PolicyDecision::Execute => GateDecision::Execute,
                 approval::PolicyDecision::Deny { reason } => {
@@ -171,8 +137,7 @@ impl ToolGate for SessionToolGate {
                 }
                 approval::PolicyDecision::AskUser { question } => {
                     // A question is a hold without a permission: same
-                    // registration, persistence, and wait as an approval;
-                    // no reviewer (there is nothing to adjudicate).
+                    // registration, persistence, and wait as an approval.
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
                     match inner
                         .store
@@ -214,25 +179,9 @@ impl ToolGate for SessionToolGate {
                         () = sleep_until_or_never(deadline) => true,
                     };
                     inner.remove_approval(call.id);
-                    conclude(&inner, &claimed, call.id, timed_out, None).await
+                    conclude(&inner, &claimed, call.id, timed_out).await
                 }
                 approval::PolicyDecision::RequireApproval => {
-                    let consult = delegate.consults_reviewer(if no_human_approval {
-                        ApprovalMode::Auto
-                    } else {
-                        mode
-                    }) && inner.approval_reviewer.is_some();
-                    if no_human_approval && !consult {
-                        let message = approval::UNATTENDED_DENIED_RESULT.to_owned();
-                        return match inner
-                            .store
-                            .deny_tool_call(&claimed, call.id, message.clone())
-                            .await
-                        {
-                            Ok(_) => GateDecision::Deny { message },
-                            Err(error) => approval_persistence_failure(error),
-                        };
-                    }
                     #[cfg(not(feature = "tool-fetch"))]
                     let fetch = None;
                     #[cfg(feature = "tool-fetch")]
@@ -240,20 +189,6 @@ impl ToolGate for SessionToolGate {
                         approval::ToolClass::Network {
                             host: Some(host), ..
                         } => crate::tools::fetch::preview(&call.arguments, host),
-                        _ => None,
-                    };
-                    // What a delegate's Approve may bless for the rest of the
-                    // session: the exact command string or the exact host,
-                    // nothing wider, and nothing for other tool classes. The
-                    // human's own choices (prefix, tool name, workspace) stay
-                    // on the client path; a delegate never gets them.
-                    let mut delegate_grant = match &class {
-                        approval::ToolClass::Shell { command, .. } => {
-                            Some(DelegateGrant::Command(command.clone()))
-                        }
-                        approval::ToolClass::Network {
-                            host: Some(host), ..
-                        } => Some(DelegateGrant::Host(host.clone())),
                         _ => None,
                     };
                     let shell = match class {
@@ -271,19 +206,16 @@ impl ToolGate for SessionToolGate {
                     // Register before publishing the request so a client
                     // response can never race past the waiting run.
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
-                    // Decided before publishing so the request says who is
-                    // asked first; see the comment on the review below.
                     match inner
                         .store
                         .request_tool_approval(
                             &claimed,
                             call.id,
                             ApprovalPreviews {
-                                shell: shell.clone(),
-                                edit: edit.clone(),
+                                shell,
+                                edit,
                                 question: None,
                                 fetch,
-                                delegated: consult,
                             },
                         )
                         .await
@@ -301,204 +233,26 @@ impl ToolGate for SessionToolGate {
                             return approval_persistence_failure(error);
                         }
                     };
-                    // Only existing internal supervision reaches a reviewer.
-                    // Missing authority was denied above; a reviewer cannot grant it.
-                    // Ask requires a human and never consults the reviewer.
-                    let mut review: Option<ReviewFuture> = match &inner.approval_reviewer {
-                        Some(reviewer) if consult => {
-                            // Context is advisory: a missing brief must not
-                            // skip the review.
-                            let (task_brief, recent_actions) = inner
-                                .store
-                                .review_context(&claimed)
-                                .await
-                                .unwrap_or_default();
-                            Some(reviewer.review(ReviewRequest {
-                                tool_name: call.name.clone(),
-                                arguments: truncate_utf8(
-                                    call.arguments.clone(),
-                                    MAX_REVIEW_ARGUMENT_BYTES,
-                                ),
-                                shell,
-                                edit,
-                                workspace: claimed.workspace.clone(),
-                                origin: if claimed.identity.child {
-                                    ReviewOrigin::Child {
-                                        depth: claimed.depth,
-                                        parent_run: claimed.identity.run_id,
-                                    }
-                                } else {
-                                    ReviewOrigin::Root
-                                },
-                                task_brief,
-                                mode,
-                                recent_actions,
-                                granted_tools: grants.tools.iter().cloned().collect(),
-                                granted_shell_prefixes: grants.shell_prefixes.clone(),
-                            }))
+                    // The configured human deadline, also bounded by the
+                    // goal's fixed deadline.
+                    let deadline = human_deadline(inner.approval_timeout)
+                        .into_iter()
+                        .chain(goal_deadline)
+                        .min();
+                    let timed_out = tokio::select! {
+                        biased;
+                        changed = cancellation.changed() => {
+                            // The gate can observe cancellation before the
+                            // session loop; retain an expired goal hold first.
+                            let _ = changed;
+                            return cancelled_hold(&inner, &claimed, call.id,
+                                "The run stopped before this approval was resolved.").await;
                         }
-                        _ => None,
-                    };
-                    // `Some` once a reviewer verdict arrived; its spend is
-                    // charged to this run whatever the outcome.
-                    let mut review_spend: Option<ReviewSpend> = None;
-                    // Internal supervision has a bounded deadline. Auto denies on
-                    // timeout; it never starts a human wait. Ask uses the configured
-                    // human deadline, also bounded by the goal's fixed deadline.
-                    let delegate_deadline = tokio::time::Instant::now() + inner.delegate_timeout;
-                    let mut deadline = if review.is_some() {
-                        goal_deadline
-                    } else {
-                        human_deadline(inner.approval_timeout)
-                            .into_iter()
-                            .chain(goal_deadline)
-                            .min()
-                    };
-                    let timed_out = loop {
-                        if let Some(pending_review) = review.as_mut() {
-                            tokio::select! {
-                                biased;
-                                changed = cancellation.changed() => {
-                                    let _ = changed;
-                                    return cancelled_hold(&inner, &claimed, call.id,
-                                        "The run stopped before this approval was resolved.").await;
-                                }
-                                result = &mut resolved => break result.is_err(),
-                                () = sleep_until_or_never(goal_deadline) => break true,
-                                verdict = pending_review => {
-                                    review = None;
-                                    review_spend = Some(verdict.spend);
-                                    let decision = match verdict.decision {
-                                        ReviewDecision::Escalate { reason } if no_human_approval => ReviewDecision::Deny { reason },
-                                        decision => decision,
-                                    };
-                                    match decision {
-                                        ReviewDecision::Approve => {
-                                            match inner
-                                                .store
-                                                .resolve_approval_by_reviewer(
-                                                    &claimed,
-                                                    call.id,
-                                                    delegate_grant.take(),
-                                                    policy.clone(),
-                                                )
-                                                .await
-                                            {
-                                                Ok(Some(_)) => {
-                                                    inner.remove_approval(call.id);
-                                                    return conclude(&inner, &claimed, call.id, false, review_spend).await;
-                                                }
-                                                // A client resolution won the
-                                                // race or the write failed:
-                                                // fall through to conclude,
-                                                // which reads the durable state.
-                                                Ok(None) | Err(_) => break false,
-                                            }
-                                        }
-                                        // A reviewer denial is final. Ask never
-                                        // reaches the reviewer.
-                                        ReviewDecision::Deny { reason } =>
-                                        {
-                                            let message = approval::reviewer_denied_result(
-                                                &truncate_utf8(reason, MAX_REVIEW_REASON_BYTES),
-                                            );
-                                            match inner
-                                                .store
-                                                .deny_approval_by_reviewer(
-                                                    &claimed,
-                                                    call.id,
-                                                    message.clone(),
-                                                    DelegateIdentity::Reviewer,
-                                                )
-                                                .await
-                                            {
-                                                Ok(Some(_)) => {
-                                                    inner.remove_approval(call.id);
-                                                    return reviewed(
-                                                        GateDecision::Deny { message },
-                                                        review_spend,
-                                                    );
-                                                }
-                                                Ok(None) | Err(_) => break false,
-                                            }
-                                        }
-                                        // Escalate, or a non-final Deny: the
-                                        // human's wait starts here, on the
-                                        // remaining select arms. The
-                                        // escalation is published so the
-                                        // prompt can say why the delegate did
-                                        // not decide; a failed write changes
-                                        // nothing about the hold.
-                                        ReviewDecision::Escalate { reason } => {
-                                            if let Err(error) = inner
-                                                .store
-                                                .escalate_tool_approval(
-                                                    &claimed,
-                                                    call.id,
-                                                    Some(DelegateIdentity::Reviewer),
-                                                    truncate_utf8(reason, MAX_REVIEW_REASON_BYTES),
-                                                )
-                                                .await
-                                            {
-                                                inner.remove_approval(call.id);
-                                                return reviewed(
-                                                    approval_persistence_failure(error),
-                                                    review_spend,
-                                                );
-                                            }
-                                            deadline = human_deadline(inner.approval_timeout).into_iter().chain(goal_deadline).min();
-                                        }
-                                    }
-                                }
-                                // Auto settles unavailable supervision as a denial.
-                                // Other approval paths retain their human deadline.
-                                () = tokio::time::sleep_until(delegate_deadline) => {
-                                    review = None;
-                                    if no_human_approval {
-                                        let message = approval::reviewer_denied_result(approval::DELEGATE_TIMED_OUT_REASON);
-                                        match inner.store.deny_approval_by_reviewer(
-                                            &claimed, call.id, message.clone(), DelegateIdentity::Reviewer,
-                                        ).await {
-                                            Ok(Some(_)) => {
-                                                inner.remove_approval(call.id);
-                                                return reviewed(GateDecision::Deny { message }, review_spend);
-                                            }
-                                            Ok(None) | Err(_) => break false,
-                                        }
-                                    }
-                                    if let Err(error) = inner
-                                        .store
-                                        .escalate_tool_approval(
-                                            &claimed,
-                                            call.id,
-                                            None,
-                                            approval::DELEGATE_TIMED_OUT_REASON.to_owned(),
-                                        )
-                                        .await
-                                    {
-                                        inner.remove_approval(call.id);
-                                        return approval_persistence_failure(error);
-                                    }
-                                    deadline = human_deadline(inner.approval_timeout).into_iter().chain(goal_deadline).min();
-                                }
-                            }
-                        } else {
-                            tokio::select! {
-                                biased;
-                                changed = cancellation.changed() => {
-                                    // The gate can observe cancellation before the
-                                    // session loop; retain an expired goal hold first.
-                                    let _ = changed;
-                                    return cancelled_hold(&inner, &claimed, call.id,
-                                        "The run stopped before this approval was resolved.").await;
-                                }
-                                result = &mut resolved => break result.is_err(),
-                                () = sleep_until_or_never(deadline) => break true,
-                            }
-                        }
+                        result = &mut resolved => result.is_err(),
+                        () = sleep_until_or_never(deadline) => true,
                     };
                     inner.remove_approval(call.id);
-                    conclude(&inner, &claimed, call.id, timed_out, review_spend).await
+                    conclude(&inner, &claimed, call.id, timed_out).await
                 }
             }
         })
@@ -564,27 +318,21 @@ async fn conclude(
     claimed: &ClaimedRun,
     call_id: ToolCallId,
     timed_out: bool,
-    review_spend: Option<ReviewSpend>,
 ) -> GateDecision {
     match inner
         .store
         .conclude_tool_approval(claimed, call_id, timed_out)
         .await
     {
-        Ok(ConcludedApproval::Approved) => reviewed(GateDecision::Execute, review_spend),
-        Ok(ConcludedApproval::Denied { message }) => {
-            reviewed(GateDecision::Deny { message }, review_spend)
-        }
+        Ok(ConcludedApproval::Approved) => GateDecision::Execute,
+        Ok(ConcludedApproval::Denied { message }) => GateDecision::Deny { message },
         Ok(ConcludedApproval::GoalStopped { run_ids }) => {
             for run in run_ids {
                 inner.cancel(run);
             }
-            reviewed(
-                GateDecision::Deny {
-                    message: approval::TIMEOUT_DENIED_RESULT.to_owned(),
-                },
-                review_spend,
-            )
+            GateDecision::Deny {
+                message: approval::TIMEOUT_DENIED_RESULT.to_owned(),
+            }
         }
         Ok(ConcludedApproval::Answered { result }) => GateDecision::Answered { result },
         Ok(ConcludedApproval::StillWaiting) => GateDecision::Fail {
@@ -622,21 +370,6 @@ pub(super) enum ConcludedApproval {
         result: String,
     },
     StillWaiting,
-}
-
-/// Longest reviewer rationale carried into a denial result.
-const MAX_REVIEW_REASON_BYTES: usize = 512;
-
-/// Wraps a decision with the reviewer's spend when a reviewer answered, so
-/// the run loop charges it; no reviewer, no wrapper.
-fn reviewed(decision: GateDecision, spend: Option<ReviewSpend>) -> GateDecision {
-    match spend {
-        Some(spend) => GateDecision::Reviewed {
-            decision: Box::new(decision),
-            spend,
-        },
-        None => decision,
-    }
 }
 
 /// The run-duration clock may win the select against a goal hold's deadline.

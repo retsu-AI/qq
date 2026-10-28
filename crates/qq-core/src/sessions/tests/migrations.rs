@@ -3838,3 +3838,296 @@ async fn retired_supervised_mode_upgrades_from(schema: u32) {
         "from {schema}: the retired mode is rewritten once, at open"
     );
 }
+
+#[tokio::test]
+async fn a_schema_64_store_with_reviewer_delegate_and_grant_state_opens_and_replays() {
+    // Protocol 41 removed the approval reviewer, `approval_delegate` and
+    // session/workspace grants. A store written before then holds their
+    // tables and columns, summaries naming a delegate, delegated holds,
+    // grant and reviewer resolutions, and their events. It must open, drop
+    // that storage, and still snapshot and replay its history.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (workspace_id, session_id, store_id) = {
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(path.clone()),
+            Arc::new(ScriptedLoader),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let CommandOutcome::SessionCreated { session_id } =
+            create_session(&runtime, workspace_id, None).await.outcome
+        else {
+            panic!("unexpected receipt")
+        };
+        let queued = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text("written by v0.1.9".to_owned())],
+                    limits: qq_protocol::RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: queued.committed_through,
+            })
+            .unwrap();
+        collect_through_finished(&mut events).await;
+        let store_id = runtime.store_id();
+        runtime.close().await.unwrap();
+        (workspace_id, session_id, store_id)
+    };
+    let approved = ToolCallId::generate().unwrap();
+    let denied = ToolCallId::generate().unwrap();
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let run_id: String = connection
+            .query_row("SELECT id FROM runs", [], |row| row.get(0))
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session_grants (
+                     session_id TEXT NOT NULL REFERENCES sessions(id),
+                     kind TEXT NOT NULL,
+                     value TEXT NOT NULL,
+                     created_at_ms INTEGER NOT NULL,
+                     source TEXT NOT NULL DEFAULT 'human',
+                     run_id TEXT,
+                     UNIQUE(session_id, kind, value)
+                 );
+                 CREATE TABLE pending_workspace_grant_promotions (
+                     command_id TEXT NOT NULL PRIMARY KEY,
+                     created_at_ms INTEGER NOT NULL,
+                     promotion_json TEXT NOT NULL
+                 );
+                 CREATE INDEX pending_workspace_grant_promotions_fifo
+                     ON pending_workspace_grant_promotions(created_at_ms, command_id);
+                 CREATE TABLE native_command_owners (
+                     tool_call_id TEXT NOT NULL PRIMARY KEY CHECK(length(tool_call_id)=32),
+                     owner_id TEXT NOT NULL CHECK(length(owner_id)=32),
+                     result_saved INTEGER NOT NULL DEFAULT 0 CHECK(result_saved IN (0,1))
+                 ) STRICT;
+                 CREATE INDEX native_command_ack_pending ON native_command_owners(owner_id) WHERE result_saved=1;
+                 ALTER TABLE sessions ADD COLUMN approval_delegate TEXT;
+                 ALTER TABLE tool_calls ADD COLUMN approval_delegated INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE tool_calls ADD COLUMN approval_escalation_json TEXT CHECK(approval_escalation_json IS NULL OR (json_valid(approval_escalation_json) AND length(CAST(approval_escalation_json AS BLOB))<=8192));
+                 DROP TRIGGER IF EXISTS tool_calls_clear_approval_inputs;
+                 CREATE TRIGGER tool_calls_clear_approval_inputs AFTER UPDATE OF state,approval_resolution ON tool_calls
+                 WHEN (OLD.approval_inputs_json IS NOT NULL OR OLD.approval_escalation_json IS NOT NULL)
+                     AND (NEW.state!='awaiting_approval' OR NEW.approval_resolution IS NOT NULL)
+                 BEGIN UPDATE tool_calls SET approval_inputs_json=NULL,approval_escalation_json=NULL WHERE id=NEW.id; END;
+                 UPDATE sessions SET approval_delegate='off';",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_grants(session_id,kind,value,created_at_ms)
+                 VALUES (?1,'shell_prefix','cargo test',1)",
+                [session_id.to_string()],
+            )
+            .unwrap();
+        for (call, ordinal, state, resolution) in [
+            (approved, 1, "completed", "approved_for_session"),
+            (denied, 2, "denied", "denied_by_reviewer"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO tool_calls(
+                         id, run_id, turn_ordinal, call_ordinal, provider_call_id, name,
+                         arguments_json, state, result, is_error, requested_at_ms,
+                         approval_resolution, approval_delegated
+                     ) VALUES (?1, ?2, 1, ?3, ?4, 'shell', '{\"command\":\"cargo test\"}',
+                               ?5, 'done', ?6, 1, ?7, 1)",
+                    params![
+                        call.to_string(),
+                        run_id,
+                        ordinal,
+                        format!("call_{ordinal}"),
+                        state,
+                        state == "denied",
+                        resolution
+                    ],
+                )
+                .unwrap();
+        }
+        // Every journaled summary names a delegate; one also holds a
+        // delegated call, and so does the run's completion receipt.
+        connection
+            .execute_batch(&format!(
+                "UPDATE events SET envelope_json=json_set(envelope_json,'$.event.session.approval_delegate','off')
+                  WHERE json_extract(envelope_json,'$.event.session') IS NOT NULL;
+                 UPDATE events SET envelope_json=json_set(envelope_json,'$.event.session.pending_holds',
+                     json('[{{\"tool_call_id\":\"{approved}\"}},{{\"tool_call_id\":\"{denied}\",\"delegated\":true}}]'))
+                  WHERE json_extract(envelope_json,'$.event.type')='session_created';
+                 UPDATE runs SET completion_json=json_set(completion_json,'$.event.session.approval_delegate','on',
+                     '$.event.session.pending_holds',json('[{{\"tool_call_id\":\"{denied}\",\"delegated\":true}}]'))
+                  WHERE completion_json IS NOT NULL;"
+            ))
+            .unwrap();
+        for event in [
+            serde_json::json!({
+                "type": "tool_approval_escalated",
+                "tool_call_id": denied,
+                "delegate": "reviewer",
+                "reason": "outside the task",
+            }),
+            serde_json::json!({
+                "type": "workspace_grant_promoted",
+                "grant": { "type": "shell_prefix", "prefix": "cargo test" },
+                "outcome": { "type": "written", "path": "/repo/.qq/config.ron" },
+            }),
+        ] {
+            let sequence: u64 = connection
+                .query_row(
+                    "UPDATE workspaces SET next_sequence=next_sequence+1 WHERE id=?1
+                     RETURNING next_sequence",
+                    [workspace_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let envelope = serde_json::json!({
+                "cursor": { "store_id": store_id, "workspace_id": workspace_id, "sequence": sequence },
+                "session_id": session_id,
+                "run_id": run_id,
+                "occurred_at_ms": 1,
+                "event": event,
+            });
+            connection
+                .execute(
+                    "INSERT INTO events(workspace_id,sequence,envelope_json) VALUES (?1,?2,?3)",
+                    params![workspace_id.to_string(), sequence, envelope.to_string()],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE metadata SET value='64' WHERE key='schema_version'",
+                [],
+            )
+            .unwrap();
+    }
+
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(path.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let snapshot = runtime
+        .snapshot(SnapshotRequest {
+            workspace_id,
+            focused_session_id: Some(session_id),
+            include_sessions: Vec::new(),
+            session_limit: 8,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+    assert_eq!(snapshot.sessions.len(), 1);
+    let start = EventCursor {
+        store_id,
+        workspace_id,
+        sequence: 0,
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: start,
+        })
+        .unwrap();
+    let replayed = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut replayed = Vec::new();
+        while let Some(event) = events.next().await {
+            let event = event.unwrap();
+            let last = event.cursor.sequence == snapshot.cursor.sequence;
+            replayed.push(event);
+            if last {
+                break;
+            }
+        }
+        replayed
+    })
+    .await
+    .unwrap();
+    assert!(
+        replayed.iter().any(
+            |envelope| matches!(&envelope.event, SessionEvent::SessionCreated { session }
+                if session.pending_holds.len() == 2)
+        ),
+        "the journaled summary keeps its holds without the delegate flag"
+    );
+    assert_eq!(
+        replayed
+            .iter()
+            .filter(|envelope| matches!(envelope.event, SessionEvent::Retired))
+            .count(),
+        2,
+        "escalation and promotion events replay as retired"
+    );
+    let completions = runtime
+        .completed_runs(session_id, start, snapshot.cursor)
+        .await
+        .unwrap();
+    assert_eq!(completions.len(), 1, "the receipt survives");
+    runtime.close().await.unwrap();
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, STORE_SCHEMA_VERSION.to_string());
+    for table in [
+        "session_grants",
+        "pending_workspace_grant_promotions",
+        "native_command_owners",
+    ] {
+        let present: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!present, "{table} is dropped");
+    }
+    assert!(!has_column(&connection, "sessions", "approval_delegate").unwrap());
+    for column in ["approval_delegated", "approval_escalation_json"] {
+        assert!(!has_column(&connection, "tool_calls", column).unwrap());
+    }
+    let remaining: u64 = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM events WHERE instr(envelope_json,'\"approval_delegate\"')>0
+                         OR instr(envelope_json,'\"delegated\"')>0)
+                  + (SELECT COUNT(*) FROM runs WHERE instr(completion_json,'\"approval_delegate\"')>0
+                         OR instr(completion_json,'\"delegated\"')>0)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0, "removed summary fields are stripped");
+    for (call, expected) in [
+        (approved, ApprovalResolution::ApprovedOnce),
+        (denied, ApprovalResolution::Denied),
+    ] {
+        let stored: String = connection
+            .query_row(
+                "SELECT approval_resolution FROM tool_calls WHERE id=?1",
+                [call.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parse_approval_resolution(&stored).unwrap(), expected);
+    }
+}

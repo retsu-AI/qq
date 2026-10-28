@@ -237,26 +237,6 @@ pub(super) fn parse_approval_mode(value: &str) -> Result<ApprovalMode, SessionRu
     }
 }
 
-/// NULL is no session override: the configured `approval_delegate` applies.
-/// A stored value is the session's own choice for the rest of the session.
-pub(super) fn parse_approval_delegate(
-    encoded: Option<&str>,
-) -> Result<Option<qq_protocol::ApprovalDelegate>, SessionRuntimeError> {
-    match encoded {
-        None => Ok(None),
-        Some("by_mode") => Ok(Some(qq_protocol::ApprovalDelegate::ByMode)),
-        Some("on") => Ok(Some(qq_protocol::ApprovalDelegate::On)),
-        Some("off") => Ok(Some(qq_protocol::ApprovalDelegate::Off)),
-        Some(_) => Err(SessionRuntimeError::CODEC),
-    }
-}
-
-pub(super) fn approval_delegate_column(
-    delegate: Option<qq_protocol::ApprovalDelegate>,
-) -> Option<&'static str> {
-    delegate.map(qq_protocol::ApprovalDelegate::as_str)
-}
-
 /// NULL is omission (provider/config defaults). A stored value is the session's
 /// explicit pin for the next claim.
 pub(super) fn parse_reasoning_effort(
@@ -296,27 +276,24 @@ pub(super) const fn approval_rank(mode: ApprovalMode) -> u8 {
 pub(super) const fn approval_resolution_str(resolution: ApprovalResolution) -> &'static str {
     match resolution {
         ApprovalResolution::ApprovedOnce => "approved_once",
-        ApprovalResolution::ApprovedForSession => "approved_for_session",
-        ApprovalResolution::ApprovedForWorkspace => "approved_for_workspace",
-        ApprovalResolution::ApprovedByReviewer => "approved_by_reviewer",
         ApprovalResolution::Denied => "denied",
         ApprovalResolution::DeniedTimeout => "denied_timeout",
-        ApprovalResolution::DeniedByReviewer => "denied_by_reviewer",
         ApprovalResolution::Answered => "answered",
     }
 }
 
+/// Rows written before protocol 41 may hold the removed grant and reviewer
+/// resolutions; they read as the plain approval or denial they were.
 pub(super) fn parse_approval_resolution(
     value: &str,
 ) -> Result<ApprovalResolution, SessionRuntimeError> {
     match value {
-        "approved_once" => Ok(ApprovalResolution::ApprovedOnce),
-        "approved_for_session" => Ok(ApprovalResolution::ApprovedForSession),
-        "approved_for_workspace" => Ok(ApprovalResolution::ApprovedForWorkspace),
-        "approved_by_reviewer" => Ok(ApprovalResolution::ApprovedByReviewer),
-        "denied" => Ok(ApprovalResolution::Denied),
+        "approved_once"
+        | "approved_for_session"
+        | "approved_for_workspace"
+        | "approved_by_reviewer" => Ok(ApprovalResolution::ApprovedOnce),
+        "denied" | "denied_by_reviewer" => Ok(ApprovalResolution::Denied),
         "denied_timeout" => Ok(ApprovalResolution::DeniedTimeout),
-        "denied_by_reviewer" => Ok(ApprovalResolution::DeniedByReviewer),
         "answered" => Ok(ApprovalResolution::Answered),
         _ => Err(SessionRuntimeError::CONSTRAINT),
     }

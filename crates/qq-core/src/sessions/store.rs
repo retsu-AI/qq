@@ -5,7 +5,7 @@ use std::sync::{
 
 use crossbeam_channel::{Sender, TrySendError};
 use rusqlite::Connection;
-use tokio::sync::{Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, oneshot, watch};
 
 use super::*;
 use feed::WorkspaceFeed;
@@ -700,15 +700,14 @@ impl Store {
         .await
     }
 
-    /// Applies one command with no config-grant seed; only CreateSession
-    /// consults the seed, so this shorthand keeps non-seeding tests direct.
+    /// Applies one command with default admission.
     #[cfg(test)]
     pub(super) async fn command(
         &self,
         command_id: CommandId,
         command: SessionCommand,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
-        self.command_with_admission(command_id, command, CommandAdmission::default(), None)
+        self.command_with_admission(command_id, command, CommandAdmission::default())
             .await
     }
 
@@ -741,16 +740,9 @@ impl Store {
         command_id: CommandId,
         command: SessionCommand,
         admission: CommandAdmission,
-        promotion_wakeup: Option<mpsc::Sender<()>>,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
-        self.command_from(
-            command_id,
-            command,
-            admission,
-            promotion_wakeup,
-            CommandOrigin::Client,
-        )
-        .await
+        self.command_from(command_id, command, admission, CommandOrigin::Client)
+            .await
     }
 
     /// A `CancelRun` the runtime issues while settling: exempt from the
@@ -764,7 +756,6 @@ impl Store {
             command_id,
             SessionCommand::CancelRun { run_id },
             CommandAdmission::default(),
-            None,
             CommandOrigin::RuntimeSettlement,
         )
         .await
@@ -775,7 +766,6 @@ impl Store {
         command_id: CommandId,
         command: SessionCommand,
         admission: CommandAdmission,
-        promotion_wakeup: Option<mpsc::Sender<()>>,
         origin: CommandOrigin,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
         let store_id = self.store_id;
@@ -826,16 +816,6 @@ impl Store {
             )?;
             if creates_goal {
                 present.store(true, Ordering::Release);
-            }
-            if applied.grant_promotion_pending
-                && let Some(wakeup) = promotion_wakeup
-            {
-                match wakeup.try_send(()) {
-                    Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {}
-                    // The outbox row remains authoritative and will be
-                    // recovered when a healthy runtime next opens the store.
-                    Err(mpsc::error::TrySendError::Closed(())) => {}
-                }
             }
             Ok(applied)
         })
@@ -922,29 +902,6 @@ impl Store {
                 )
                 .optional()?
                 .ok_or(SessionRuntimeError::WorkspaceNotFound)
-        })
-        .await
-    }
-
-    /// Returns the oldest accepted workspace promotion without removing it.
-    /// SQLite is the queue; the runtime channel only coalesces wakeups.
-    pub(super) async fn next_grant_promotion(
-        &self,
-    ) -> Result<Option<PendingGrantPromotion>, SessionRuntimeError> {
-        self.call(Priority::Output, next_grant_promotion).await
-    }
-
-    /// Persists the fate of one approve-for-workspace promotion and removes
-    /// its outbox row in the same transaction. A missing row means another
-    /// runtime already settled the idempotent external write.
-    pub(super) async fn settle_grant_promotion(
-        &self,
-        promotion: PendingGrantPromotion,
-        outcome: WorkspaceGrantOutcome,
-    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
-        let store_id = self.store_id;
-        self.call(Priority::Output, move |connection| {
-            settle_grant_promotion(connection, store_id, &promotion, outcome)
         })
         .await
     }
@@ -1975,19 +1932,12 @@ impl Store {
     }
 
     #[cfg(test)]
-    pub(super) async fn approval_policy(
+    pub(super) async fn approval_mode(
         &self,
         session_id: SessionId,
-    ) -> Result<
-        (
-            ApprovalMode,
-            approval::SessionGrants,
-            Option<approval::ApprovalDelegate>,
-        ),
-        SessionRuntimeError,
-    > {
+    ) -> Result<ApprovalMode, SessionRuntimeError> {
         self.call(Priority::Output, move |connection| {
-            load_approval_policy(connection, session_id)
+            load_approval_mode(connection, session_id)
         })
         .await
     }
@@ -2066,31 +2016,6 @@ impl Store {
         .await
     }
 
-    /// Resolves a held call as reviewer-approved and, when `grant` is given,
-    /// records the delegate's exact grant in the same transaction. See
-    /// [`resolve_approval_by_reviewer`] for the storage rule.
-    pub(super) async fn resolve_approval_by_reviewer(
-        &self,
-        claimed: &ClaimedRun,
-        tool_call_id: ToolCallId,
-        grant: Option<DelegateGrant>,
-        expected_policy: ToolApprovalPolicy,
-    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
-        let store_id = self.store_id;
-        let identity = claimed.identity;
-        self.call(Priority::Output, move |connection| {
-            resolve_approval_by_reviewer(
-                connection,
-                store_id,
-                identity,
-                tool_call_id,
-                grant,
-                &expected_policy,
-            )
-        })
-        .await
-    }
-
     /// Persists the final-answer audit record on the run and publishes it.
     pub(super) async fn record_audit(
         &self,
@@ -2124,66 +2049,6 @@ impl Store {
                 origin,
                 arguments,
             )
-        })
-        .await
-    }
-
-    /// Settles a held call as denied by the reviewer. Final under `auto` and
-    /// `supervised`; a client resolution that already committed wins.
-    pub(super) async fn deny_approval_by_reviewer(
-        &self,
-        claimed: &ClaimedRun,
-        tool_call_id: ToolCallId,
-        message: String,
-        delegate: DelegateIdentity,
-    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
-        let store_id = self.store_id;
-        let identity = claimed.identity;
-        self.call(Priority::Output, move |connection| {
-            deny_approval_by_reviewer(
-                connection,
-                store_id,
-                identity,
-                tool_call_id,
-                &message,
-                delegate,
-            )
-        })
-        .await
-    }
-
-    /// Records that a delegate handed the hold to the human and why. Advisory:
-    /// a client resolution that already committed leaves nothing to say.
-    pub(super) async fn escalate_tool_approval(
-        &self,
-        claimed: &ClaimedRun,
-        tool_call_id: ToolCallId,
-        delegate: Option<DelegateIdentity>,
-        reason: String,
-    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
-        let store_id = self.store_id;
-        let identity = claimed.identity;
-        self.call(Priority::Output, move |connection| {
-            escalate_tool_approval(
-                connection,
-                store_id,
-                identity,
-                tool_call_id,
-                delegate,
-                &reason,
-            )
-        })
-        .await
-    }
-
-    /// The bounded run context a review request carries.
-    pub(super) async fn review_context(
-        &self,
-        claimed: &ClaimedRun,
-    ) -> Result<(Option<String>, Vec<RecentAction>), SessionRuntimeError> {
-        let identity = claimed.identity;
-        self.call(Priority::AwaitControl, move |connection| {
-            load_review_context(connection, identity)
         })
         .await
     }
@@ -2553,24 +2418,6 @@ pub(super) fn begin_unit(connection: &mut Connection) -> Result<Unit<'_>, Sessio
     if connection.is_autocommit() {
         connection
             .transaction()
-            .map(Unit::Transaction)
-            .map_err(SessionRuntimeError::from)
-    } else {
-        rusqlite::Savepoint::new(connection)
-            .map(Unit::Savepoint)
-            .map_err(SessionRuntimeError::from)
-    }
-}
-
-/// `begin_unit` with `BEGIN IMMEDIATE` when it opens a real transaction, for
-/// operations that must take the write lock before reading. Inside a group
-/// the write lock is already held, so the savepoint form is identical.
-pub(super) fn begin_immediate_unit(
-    connection: &mut Connection,
-) -> Result<Unit<'_>, SessionRuntimeError> {
-    if connection.is_autocommit() {
-        connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map(Unit::Transaction)
             .map_err(SessionRuntimeError::from)
     } else {

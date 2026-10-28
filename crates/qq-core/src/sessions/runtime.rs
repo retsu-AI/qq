@@ -114,7 +114,6 @@ impl LoadedRuntime {
         profile = profile
             .with_context_cache(Arc::clone(&runtime.context_cache))
             .with_turn_recovery(runtime.turn_recovery)
-            .with_approval_delegate(runtime.approval_delegate)
             .with_output_ceiling(runtime.output_ceiling);
         Ok(Self::new(CompiledAgentPlan::compile_blocking(profile)?))
     }
@@ -288,29 +287,6 @@ pub struct RuntimeLoadError {
     pub message: String,
 }
 
-/// The workspace-configured grants that merge into a session's grant set at
-/// creation: exact tool names (including folded `mcp__<server>__<tool>`
-/// allowlist entries) and word-granularity shell command prefixes.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WorkspaceGrantSeed {
-    pub tools: Vec<String>,
-    pub shell_prefixes: Vec<String>,
-    /// Hosts `fetch` may reach without prompting: exact or `*.suffix`.
-    pub hosts: Vec<String>,
-}
-
-impl WorkspaceGrantSeed {
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.tools.is_empty() && self.shell_prefixes.is_empty() && self.hosts.is_empty()
-    }
-}
-
-pub type GrantSeedFuture = Pin<Box<dyn Future<Output = WorkspaceGrantSeed> + Send + 'static>>;
-
-pub type GrantPromotionFuture =
-    Pin<Box<dyn Future<Output = WorkspaceGrantOutcome> + Send + 'static>>;
-
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum GoalCheckPolicyError {
     #[error("the check is denied by managed shell policy")]
@@ -326,24 +302,14 @@ pub enum GoalCheckPolicyError {
 pub type GoalCheckPolicyFuture =
     Pin<Box<dyn Future<Output = Result<(), GoalCheckPolicyError>> + Send + 'static>>;
 
-/// The configuration-facing seam for workspace-lifetime grants, provided at
+/// The configuration-facing seam for workspace goal policy, provided at
 /// runtime construction. qq-core stays configuration-agnostic: the embedding
-/// application implements both directions against its config layer.
-pub trait WorkspaceGrantAuthority: Send + Sync + 'static {
-    /// The workspace's effective config grants, resolved when a session is
-    /// created. A failure to resolve should seed nothing rather than error:
-    /// session creation must not depend on a loadable configuration.
-    fn seed_grants(&self, workspace: &Path) -> GrantSeedFuture;
-
+/// application implements it against its config layer.
+pub trait WorkspacePolicyAuthority: Send + Sync + 'static {
     /// Resolve current goal settings. Failure must reject new activation.
     fn goal_policy(&self, _workspace: &Path) -> GoalPolicyFuture {
         Box::pin(std::future::ready(Err(GoalPolicyError::Unavailable)))
     }
-
-    /// Durably promotes one approval grant into the workspace configuration.
-    /// Failures are data ([`WorkspaceGrantOutcome::Failed`]), never errors:
-    /// a promotion must not fail the approval that requested it.
-    fn promote_grant(&self, workspace: &Path, grant: &ApprovalGrant) -> GrantPromotionFuture;
 
     /// Validate the current managed hard denies before issuing exact check
     /// authority. An authority must implement this rather than silently
@@ -351,134 +317,6 @@ pub trait WorkspaceGrantAuthority: Send + Sync + 'static {
     fn validate_goal_check(&self, _workspace: &Path, _command: &str) -> GoalCheckPolicyFuture {
         Box::pin(std::future::ready(Err(GoalCheckPolicyError::Unavailable)))
     }
-}
-
-/// Bounds on the context a review request carries. The reviewer sees only
-/// what it needs to judge one action; a poisoned transcript must not be able
-/// to argue its own call safe.
-pub const MAX_REVIEW_ARGUMENT_BYTES: usize = 16 * 1024;
-pub const MAX_REVIEW_BRIEF_BYTES: usize = 8 * 1024;
-pub const MAX_REVIEW_RECENT_ACTIONS: usize = 16;
-
-/// Where the reviewed call originates: a root session, or a child spawned by
-/// a parent run with the given nesting depth.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReviewOrigin {
-    Root,
-    Child { depth: u16, parent_run: RunId },
-}
-
-/// One earlier tool call of the same run, for the reviewer's sense of what
-/// the run has been doing. Names and paths only, never results.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecentAction {
-    pub tool: String,
-    pub path: Option<String>,
-}
-
-/// Everything an approval reviewer may see about one held tool call. The
-/// transcript is deliberately absent; for a child the task brief its parent
-/// wrote stands in, so the reviewer can judge whether the action is plausibly
-/// necessary for the stated task.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewRequest {
-    pub tool_name: String,
-    /// The call's arguments as JSON, truncated to `MAX_REVIEW_ARGUMENT_BYTES`.
-    pub arguments: String,
-    pub shell: Option<ShellCommandPreview>,
-    pub edit: Option<EditPreview>,
-    pub workspace: String,
-    pub origin: ReviewOrigin,
-    /// The child's task brief (the prompt that created its run), truncated to
-    /// `MAX_REVIEW_BRIEF_BYTES`. `None` for root sessions.
-    pub task_brief: Option<String>,
-    /// The session's approval mode. Native Auto does not consult the reviewer;
-    /// explicit supervised delegation outside Auto may still request a verdict.
-    pub mode: ApprovalMode,
-    /// The last `MAX_REVIEW_RECENT_ACTIONS` finished tool calls of the run.
-    pub recent_actions: Vec<RecentAction>,
-    /// Tool names and shell prefixes the session has been granted.
-    pub granted_tools: Vec<String>,
-    pub granted_shell_prefixes: Vec<String>,
-}
-
-/// What the reviewer's own provider call cost, charged to the reviewed run.
-/// `None` fields mean unknown, never zero.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ReviewSpend {
-    pub usage: Option<TokenUsage>,
-    pub cost_usd_nanos: Option<u64>,
-}
-
-/// Which delegate produced a verdict. The wire type
-/// (`qq_protocol::DelegateIdentity`) is the one source: the embedding
-/// application selects the implementation, the store records the identity on
-/// every grant a delegate writes, and `tool_approval_resolved` carries it so
-/// a supervisor can tell the two apart from the stream. `qq-core` does not
-/// know what either delegate is beyond this name.
-pub use qq_protocol::DelegateIdentity;
-
-/// The `session_grants.source` value a grant from this delegate carries.
-/// `jev` is historical: only rows written while Jev existed carry it.
-#[must_use]
-pub(super) const fn delegate_grant_source(delegate: DelegateIdentity) -> &'static str {
-    match delegate {
-        DelegateIdentity::Reviewer => "delegate",
-        DelegateIdentity::Jev => "jev",
-    }
-}
-
-/// A reviewer's answer for one held tool call, with what answering cost.
-/// Every verdict is attributed to [`DelegateIdentity::Reviewer`]; the
-/// historical `Jev` identity only decodes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewVerdict {
-    pub decision: ReviewDecision,
-    pub spend: ReviewSpend,
-}
-
-impl ReviewVerdict {
-    /// A verdict that cost nothing: reviewer unavailable, not configured, or
-    /// answered from policy without a model call.
-    #[must_use]
-    pub const fn free(decision: ReviewDecision) -> Self {
-        Self {
-            decision,
-            spend: ReviewSpend {
-                usage: None,
-                cost_usd_nanos: Some(0),
-            },
-        }
-    }
-}
-
-/// The reviewer's judgement for an internally supervised call. `Approve`
-/// executes within the existing authority; `Deny` settles it as a tool error.
-/// Under Auto (including an Auto ancestor), `Escalate` also denies the call.
-/// A reviewer that cannot answer must return `Escalate`, never hang or approve.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReviewDecision {
-    Approve,
-    /// The reviewer declines to decide. Auto treats this as a denial.
-    Escalate {
-        reason: String,
-    },
-    /// The reviewer judges the call unsafe or unnecessary for the task. Final:
-    /// the call is denied and the model receives the reason as a tool error.
-    Deny {
-        reason: String,
-    },
-}
-
-pub type ReviewFuture = Pin<Box<dyn Future<Output = ReviewVerdict> + Send + 'static>>;
-
-/// A model-backed adjudicator for tool calls that static policy holds for
-/// approval. The embedding application implements this against its provider
-/// layer; qq-core stays ignorant of model routing and prompting. Reviewer
-/// failures must resolve as `Escalate`, never approve. The gate bounds the
-/// review wait and denies unavailable supervision under Auto.
-pub trait ApprovalReviewer: Send + Sync + 'static {
-    fn review(&self, request: ReviewRequest) -> ReviewFuture;
 }
 
 pub type SessionEventStream =
@@ -503,17 +341,9 @@ pub struct SessionRuntimeOptions {
     /// cancellation, and is never denied by a timer the operator did not set.
     /// A supervisor that wants a bound sets one.
     pub approval_timeout: Option<Duration>,
-    /// How long the gate waits for a delegate's verdict before treating the
-    /// silence as an escalation. Separate from the human's wait, which starts
-    /// only once the delegate has answered or been cut off.
-    pub delegate_timeout: Duration,
-    /// Where workspace-lifetime grants come from and go to. Absent, sessions
-    /// seed no config grants and approve-for-workspace decisions record only
-    /// their session grant (the promotion reports failure).
-    pub grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
-    /// Model-backed adjudication for calls held for approval under `Auto`
-    /// mode. Absent, held calls wait for a client exactly as before.
-    pub approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
+    /// Where workspace goal policy comes from. Absent, goals use the default
+    /// policy and checks that need managed-policy validation are refused.
+    pub grant_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
 }
 
 impl std::fmt::Debug for SessionRuntimeOptions {
@@ -525,9 +355,7 @@ impl std::fmt::Debug for SessionRuntimeOptions {
             .field("max_active_side_queries", &self.max_active_side_queries)
             .field("side_query_limits", &self.side_query_limits)
             .field("approval_timeout", &self.approval_timeout)
-            .field("delegate_timeout", &self.delegate_timeout)
             .field("grant_authority", &self.grant_authority.is_some())
-            .field("approval_reviewer", &self.approval_reviewer.is_some())
             .finish()
     }
 }
@@ -541,9 +369,7 @@ impl SessionRuntimeOptions {
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
-            delegate_timeout: DEFAULT_DELEGATE_TIMEOUT,
             grant_authority: None,
-            approval_reviewer: None,
         }
     }
 
@@ -556,14 +382,8 @@ impl SessionRuntimeOptions {
     }
 
     #[must_use]
-    pub fn with_grant_authority(mut self, authority: Arc<dyn WorkspaceGrantAuthority>) -> Self {
+    pub fn with_grant_authority(mut self, authority: Arc<dyn WorkspacePolicyAuthority>) -> Self {
         self.grant_authority = Some(authority);
-        self
-    }
-
-    #[must_use]
-    pub fn with_approval_reviewer(mut self, reviewer: Arc<dyn ApprovalReviewer>) -> Self {
-        self.approval_reviewer = Some(reviewer);
         self
     }
 }
@@ -576,8 +396,7 @@ pub struct SessionRuntime {
 pub(super) struct SessionRuntimeInner {
     pub(super) store: Store,
     pub(super) loader: Arc<dyn RuntimeLoader>,
-    pub(super) grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
-    pub(super) approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
+    pub(super) grant_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
     pub(super) permits: Arc<Semaphore>,
     pub(super) side_permits: Arc<Semaphore>,
     pub(super) side_tasks: AtomicUsize,
@@ -606,14 +425,11 @@ pub(super) struct SessionRuntimeInner {
     pub(super) steering: Mutex<HashMap<RunId, crate::runtime::SteeringSender>>,
     approvals: Mutex<HashMap<ToolCallId, PendingApproval>>,
     pub(super) approval_timeout: Option<Duration>,
-    pub(super) delegate_timeout: Duration,
     wakeups: Mutex<HashMap<WorkspaceId, watch::Sender<u64>>>,
     pub(super) failed: watch::Sender<bool>,
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) scheduler_stopped: watch::Sender<bool>,
     pub(super) settlements: watch::Sender<u64>,
-    pub(super) grant_promotions: mpsc::Sender<()>,
-    grant_promotion_stopped: watch::Sender<bool>,
     pub(super) lifecycle: RwLock<()>,
     pub(super) draining: AtomicBool,
 }
@@ -621,94 +437,6 @@ pub(super) struct SessionRuntimeInner {
 struct PendingApproval {
     run_id: RunId,
     signal: oneshot::Sender<()>,
-}
-
-struct GrantPromotionStopGuard(watch::Sender<bool>);
-
-impl Drop for GrantPromotionStopGuard {
-    fn drop(&mut self) {
-        self.0.send_replace(true);
-    }
-}
-
-/// Drains the durable workspace-grant outbox serially. The channel is only a
-/// capacity-one wakeup: accepted work lives in SQLite, survives process loss,
-/// and is deleted only with its persisted fate event.
-async fn run_grant_promotions(
-    inner: std::sync::Weak<SessionRuntimeInner>,
-    mut receiver: mpsc::Receiver<()>,
-    mut shutdown: watch::Receiver<bool>,
-    stopped: watch::Sender<bool>,
-) {
-    let _stopped = GrantPromotionStopGuard(stopped);
-    loop {
-        let Some(runtime) = inner.upgrade() else {
-            return;
-        };
-        if *runtime.failed.borrow() {
-            return;
-        }
-        let promotion = match runtime.store.next_grant_promotion().await {
-            Ok(promotion) => promotion,
-            Err(_) => {
-                runtime.failed.send_replace(true);
-                return;
-            }
-        };
-        let Some(promotion) = promotion else {
-            drop(runtime);
-            if *shutdown.borrow() {
-                return;
-            }
-            tokio::select! {
-                biased;
-                changed = shutdown.changed() => {
-                    if changed.is_err() {
-                        return;
-                    }
-                }
-                wake = receiver.recv() => {
-                    if wake.is_none() {
-                        return;
-                    }
-                }
-            }
-            continue;
-        };
-        let outcome = match &runtime.grant_authority {
-            Some(authority) => {
-                match AssertUnwindSafe(async {
-                    authority
-                        .promote_grant(Path::new(&promotion.workspace_path), &promotion.grant)
-                        .await
-                })
-                .catch_unwind()
-                .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(_) => WorkspaceGrantOutcome::Failed {
-                        message: "the workspace grant authority panicked".to_owned(),
-                    },
-                }
-            }
-            None => WorkspaceGrantOutcome::Failed {
-                message: "this server has no workspace grant store; the approval covers this \
-                          session only"
-                    .to_owned(),
-            },
-        };
-        match runtime
-            .store
-            .settle_grant_promotion(promotion, outcome)
-            .await
-        {
-            Ok(Some(_)) | Ok(None) => {}
-            Err(_) => {
-                runtime.failed.send_replace(true);
-                return;
-            }
-        }
-    }
 }
 
 impl SessionRuntime {
@@ -756,17 +484,14 @@ impl SessionRuntime {
             })
             .await?;
         let (schedule, receiver) = mpsc::channel(1);
-        let (grant_promotions, grant_promotion_receiver) = mpsc::channel(1);
         let (failed, _) = watch::channel(false);
         let (shutdown, shutdown_receiver) = watch::channel(false);
         let (scheduler_stopped, _) = watch::channel(false);
-        let (grant_promotion_stopped, _) = watch::channel(false);
         let (settlements, _) = watch::channel(0_u64);
         let inner = Arc::new(SessionRuntimeInner {
             store,
             loader,
             grant_authority: options.grant_authority,
-            approval_reviewer: options.approval_reviewer,
             permits: Arc::new(Semaphore::new(options.max_active_runs)),
             side_permits: Arc::new(Semaphore::new(side_limit)),
             side_tasks: AtomicUsize::new(0),
@@ -783,14 +508,11 @@ impl SessionRuntime {
             steering: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
             approval_timeout: options.approval_timeout,
-            delegate_timeout: options.delegate_timeout,
             wakeups: Mutex::new(HashMap::new()),
             failed,
             shutdown,
             scheduler_stopped,
             settlements,
-            grant_promotions,
-            grant_promotion_stopped,
             lifecycle: RwLock::new(()),
             draining: AtomicBool::new(false),
         });
@@ -800,18 +522,11 @@ impl SessionRuntime {
         tokio::spawn(schedule_runs(
             Arc::downgrade(&inner),
             receiver,
-            shutdown_receiver.clone(),
-            inner.scheduler_stopped.clone(),
-        ));
-        tokio::spawn(run_grant_promotions(
-            Arc::downgrade(&inner),
-            grant_promotion_receiver,
             shutdown_receiver,
-            inner.grant_promotion_stopped.clone(),
+            inner.scheduler_stopped.clone(),
         ));
         let runtime = Self { inner };
         runtime.request_schedule();
-        runtime.request_grant_promotions();
         Ok(runtime)
     }
 
@@ -860,42 +575,6 @@ impl SessionRuntime {
         .await
     }
 
-    /// Add authority explicitly supplied by the trusted embedding surface.
-    /// This is not a model tool or a wire command. It seeds only the named
-    /// root session; dispatch still enforces mode, parent and managed limits.
-    pub async fn seed_session_grants(
-        &self,
-        session_id: SessionId,
-        seed: WorkspaceGrantSeed,
-    ) -> Result<(), SessionRuntimeError> {
-        if seed.is_empty() {
-            return Ok(());
-        }
-        if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
-            return Err(SessionRuntimeError::Unavailable);
-        }
-        self.inner
-            .store
-            .call_write(store::Priority::Control, move |connection| {
-                let transaction = store::begin_unit(connection)?;
-                let parent: Option<String> = transaction
-                    .query_row(
-                        "SELECT parent_id FROM sessions WHERE id=?1",
-                        [session_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .ok_or(SessionRuntimeError::SessionNotFound)?;
-                if parent.is_some() {
-                    return Err(SessionRuntimeError::ChildAuthorityEscalation);
-                }
-                insert_seed_grants(&transaction, session_id, &seed, now_ms())?;
-                transaction.commit()?;
-                Ok(())
-            })
-            .await
-    }
-
     async fn command_with_pause_condition(
         &self,
         command_id: CommandId,
@@ -929,20 +608,6 @@ impl SessionRuntime {
             _ => None,
         };
         let should_schedule = matches!(command, SessionCommand::SubmitPrompt { .. });
-        // Config grants merge into the session's grant set at creation
-        // (tools.md "Grant Lifetimes"): the workspace's effective grants are
-        // resolved here — the seam may do blocking configuration IO, so it
-        // runs outside the store worker — and copied into `session_grants`
-        // rows inside the CreateSession transaction. Copy-at-creation is
-        // deliberate: the gate consults only the session's own rows
-        // afterwards, so a later config edit affects new sessions only.
-        let seed = match (&command, &self.inner.grant_authority) {
-            (SessionCommand::CreateSession { workspace_id, .. }, Some(authority)) => {
-                let path = self.inner.store.workspace_path(*workspace_id).await?;
-                authority.seed_grants(Path::new(&path)).await
-            }
-            _ => WorkspaceGrantSeed::default(),
-        };
         let goal_session = match &command {
             SessionCommand::SetGoal { session_id, .. }
             | SessionCommand::GoalControl {
@@ -1035,11 +700,9 @@ impl SessionRuntime {
                 CommandAdmission {
                     goal_work_present: false,
                     pause_goal_only_if_active,
-                    seed,
                     goal_check_policy,
                     goal_policy,
                 },
-                Some(self.inner.grant_promotions.clone()),
             )
             .await?;
         self.inner.notify(applied.receipt.committed_through);
@@ -1078,9 +741,6 @@ impl SessionRuntime {
                 },
                 interrupt,
             );
-        }
-        if applied.grant_promotion_pending {
-            self.request_grant_promotions();
         }
         debug_assert!(
             applied.side_launch.is_none(),
@@ -1400,7 +1060,6 @@ impl SessionRuntime {
         }
 
         let mut settlements = self.inner.settlements.subscribe();
-        let mut grant_promotion_stopped = self.inner.grant_promotion_stopped.subscribe();
         for run_id in self.inner.store.unfinished_run_ids().await? {
             let command_id = CommandId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
             let applied = self
@@ -1430,7 +1089,6 @@ impl SessionRuntime {
             if self.inner.side_tasks.load(Ordering::Acquire) == 0
                 && unfinished.is_empty()
                 && preparation_quiescent
-                && *grant_promotion_stopped.borrow()
                 && self
                     .inner
                     .side_sessions
@@ -1438,18 +1096,11 @@ impl SessionRuntime {
                     .expect("side admission lock")
                     .is_empty()
             {
-                // The promotion worker publishes `failed` before its stopped
-                // guard fires. Re-read after observing stopped so its failure
-                // cannot race this success boundary.
-                if *self.inner.failed.borrow() {
-                    return Err(SessionRuntimeError::Unavailable);
-                }
                 return Ok(());
             }
             tokio::time::timeout_at(deadline, async {
                 tokio::select! {
                     changed = settlements.changed() => changed,
-                    changed = grant_promotion_stopped.changed() => changed,
                     () = tokio::time::sleep(Duration::from_millis(10)) => Ok(()),
                 }
             })
@@ -1550,15 +1201,6 @@ impl SessionRuntime {
             return;
         }
         let _ = self.inner.schedule.try_send(());
-    }
-
-    fn request_grant_promotions(&self) {
-        match self.inner.grant_promotions.try_send(()) {
-            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {}
-            Err(mpsc::error::TrySendError::Closed(())) => {
-                self.inner.failed.send_replace(true);
-            }
-        }
     }
 }
 

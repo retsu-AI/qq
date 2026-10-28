@@ -200,12 +200,7 @@ impl SessionRuntime {
             let applied = match runtime
                 .inner
                 .store
-                .command_with_admission(
-                    command_id,
-                    command,
-                    CommandAdmission::default(),
-                    Some(runtime.inner.grant_promotions.clone()),
-                )
+                .command_with_admission(command_id, command, CommandAdmission::default())
                 .await
             {
                 Ok(applied) => applied,

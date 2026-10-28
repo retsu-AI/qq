@@ -63,8 +63,8 @@ pub(crate) struct SpawnRequest {
     /// from the entry via `qq_protocol::child_reasoning_effort`.
     pub(crate) reasoning_effort: Option<qq_provider::ReasoningEffort>,
     /// The authority the parent asked for. `Write` is admitted only when the
-    /// roster allows write children and a reviewer is installed; the child
-    /// then runs `Supervised`, never above.
+    /// roster allows write children; the child then runs `Auto` within its
+    /// ancestors' ceilings, never above.
     pub(crate) authority: ChildAuthority,
     /// The parent's remaining budget at spawn time. The child is admitted
     /// with these bounds, never with the parent's original caps.

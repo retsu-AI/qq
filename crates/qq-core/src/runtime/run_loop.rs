@@ -3469,19 +3469,6 @@ impl RunState {
                                 tool_scope.interrupted = true;
                                 break;
                             };
-                            // Reviewer spend is charged whatever the verdict; the
-                            // wrapped decision is then applied like any other.
-                            let decision = match decision {
-                                GateDecision::Reviewed { decision, spend } => {
-                                    run.budget.charge_child(spend.usage, spend.cost_usd_nanos);
-                                    yield TurnStep::Emit( RuntimeEvent::ReviewCharged {
-                                        usage: spend.usage,
-                                        cost_usd_nanos: spend.cost_usd_nanos,
-                                    });
-                                    *decision
-                                }
-                                decision => decision,
-                            };
                             match decision {
                                 GateDecision::Execute => {}
                                 GateDecision::Deny { message } => {
@@ -3501,9 +3488,6 @@ impl RunState {
                                 GateDecision::Fail { kind, message } => {
                                     yield TurnStep::Emit( RuntimeEvent::Failed { kind, message });
                                     yield TurnStep::Stop; return;
-                                }
-                                GateDecision::Reviewed { .. } => {
-                                    unreachable!("reviewed decisions are unwrapped once, never nested")
                                 }
                             }
                                 if results[index].is_some() { break; }

@@ -251,13 +251,6 @@ pub(crate) enum RuntimeEvent {
         cost_usd_nanos: Option<u64>,
         audit_session: Option<qq_protocol::SessionId>,
     },
-    /// The approval reviewer answered for one of this run's held calls; its
-    /// provider spend is the run's to account for. Emitted before the call
-    /// executes or settles as denied.
-    ReviewCharged {
-        usage: Option<TokenUsage>,
-        cost_usd_nanos: Option<u64>,
-    },
     /// The run stubbed stale read-only results in its live messages before
     /// preparing `turn_ordinal`: a prune seam. The session layer moves the
     /// durable watermark to the turn before it, so assembly replays the

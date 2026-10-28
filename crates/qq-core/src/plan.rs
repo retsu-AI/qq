@@ -120,7 +120,6 @@ pub struct AgentProfile {
     process_producer: Arc<crate::ProcessProducer>,
     network: crate::tools::network::NetworkPolicy,
     turn_recovery: crate::TurnRecoveryPolicy,
-    approval_delegate: crate::approval::ApprovalDelegate,
     output_ceiling: Option<crate::OutputCeiling>,
     adapter_build: String,
     provenance: Vec<String>,
@@ -166,7 +165,6 @@ impl AgentProfile {
             process_producer: Arc::default(),
             network: crate::tools::network::NetworkPolicy::default(),
             turn_recovery: crate::TurnRecoveryPolicy::default(),
-            approval_delegate: crate::approval::ApprovalDelegate::default(),
             output_ceiling: None,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
@@ -185,17 +183,6 @@ impl AgentProfile {
     #[must_use]
     pub const fn with_turn_recovery(mut self, policy: crate::TurnRecoveryPolicy) -> Self {
         self.turn_recovery = policy;
-        self
-    }
-
-    /// Who settles the calls the session's approval mode holds. Not part of
-    /// the plan digest: it changes who is asked, never what the model may do.
-    #[must_use]
-    pub const fn with_approval_delegate(
-        mut self,
-        delegate: crate::approval::ApprovalDelegate,
-    ) -> Self {
-        self.approval_delegate = delegate;
         self
     }
 
@@ -238,7 +225,6 @@ impl AgentProfile {
             process_producer: Arc::clone(&runtime.process_producer),
             network: runtime.network.as_ref().clone(),
             turn_recovery: runtime.turn_recovery,
-            approval_delegate: runtime.approval_delegate,
             output_ceiling: runtime.output_ceiling,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
@@ -317,7 +303,6 @@ impl AgentProfile {
         self.context_sources.clear();
         self.delegation = DelegationRoster::default();
         self.audit = AuditPolicy::default();
-        self.approval_delegate = crate::approval::ApprovalDelegate::default();
         self.pack = None;
         self
     }
@@ -672,7 +657,6 @@ impl CompiledAgentPlan {
             process_producer,
             network,
             turn_recovery,
-            approval_delegate,
             output_ceiling,
             adapter_build,
             provenance,
@@ -705,8 +689,7 @@ impl CompiledAgentPlan {
         .with_approved_read_images(approved_read_images)
         .with_process_producer(process_producer)
         .with_network_policy(network)
-        .with_turn_recovery(turn_recovery)
-        .with_approval_delegate(approval_delegate);
+        .with_turn_recovery(turn_recovery);
         if let Some(effort) = reasoning_effort {
             runtime = runtime.with_reasoning_effort(effort);
         }
@@ -1181,13 +1164,6 @@ impl CompiledAgentPlan {
 
     pub(crate) fn shell_policy(&self) -> Arc<crate::ShellPolicy> {
         Arc::clone(&self.runtime.shell)
-    }
-
-    /// Who settles the approvals this plan's sessions hold. Not part of the
-    /// digest: it changes who is asked, never what the model may do.
-    #[must_use]
-    pub const fn approval_delegate(&self) -> crate::approval::ApprovalDelegate {
-        self.runtime.approval_delegate
     }
 
     /// The highest cap the empty-truncation recovery may raise a turn to.

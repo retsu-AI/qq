@@ -251,7 +251,6 @@ async fn prepare_execution(
             cancellation.clone(),
             loaded.plan.network_policy(),
             loaded.plan.shell_policy(),
-            loaded.plan.approval_delegate(),
         ))
     };
     // The claim carried the session's file hashes, so nothing here waits on
@@ -1932,9 +1931,7 @@ async fn execute_started_run(
         }
         let stopped = matches!(
             &input,
-            RunInput::Cancelled
-                | RunInput::Interrupted
-                | RunInput::RuntimeFailed
+            RunInput::Cancelled | RunInput::Interrupted | RunInput::RuntimeFailed
         );
         if !pending_tool_output.is_empty()
             && !continues_tool_output
@@ -2500,7 +2497,7 @@ async fn execute_started_run(
                     {
                         accounting.record_turn(usage);
                     } else if model_work == crate::runtime::ModelWorkDisposition::Uncertain {
-                        accounting.record_review(None, None);
+                        accounting.record_unattributed(None, None);
                     }
                     if calls.is_empty() {
                         // A fresh response supersedes the previous portion,
@@ -2602,7 +2599,7 @@ async fn execute_started_run(
                 {
                     accounting.record_turn(usage);
                 } else if model_work == crate::runtime::ModelWorkDisposition::Uncertain {
-                    accounting.record_review(None, None);
+                    accounting.record_unattributed(None, None);
                 }
                 let turn_accounting = accounting.snapshot();
                 // The completed turn's usage measures the context the run now
@@ -2736,14 +2733,6 @@ async fn execute_started_run(
                         return;
                     }
                 }
-            }
-            // Reviewer spend joins the run's accounting; the next persisted
-            // turn or the run's settlement carries the updated totals.
-            RunInput::Event(Some(RuntimeEvent::ReviewCharged {
-                usage,
-                cost_usd_nanos,
-            })) => {
-                accounting.record_review(usage, cost_usd_nanos);
             }
             RunInput::Event(Some(RuntimeEvent::ToolCallStarted {
                 id,
@@ -3712,10 +3701,14 @@ impl RunAccountingAccumulator {
         self
     }
 
-    /// Adds a reviewer's provider spend to the run's totals. It is not a turn
-    /// of this run (context occupancy is untouched) but the run is
-    /// accountable for it; unknown spend makes the totals unknown.
-    pub(super) fn record_review(&mut self, usage: Option<TokenUsage>, cost_usd_nanos: Option<u64>) {
+    /// Adds provider spend that is not a turn of this run (context occupancy
+    /// is untouched) but that the run is accountable for; unknown spend makes
+    /// the totals unknown.
+    pub(super) fn record_unattributed(
+        &mut self,
+        usage: Option<TokenUsage>,
+        cost_usd_nanos: Option<u64>,
+    ) {
         self.saw_spend = true;
         match usage {
             Some(usage) => self.usage = self.usage.and_then(|total| add_usage(total, usage)),

@@ -678,19 +678,12 @@ pub(super) fn check_scope_required(
     authorization: Option<qq_protocol::GoalCheckAuthorization>,
 ) -> Result<Option<bool>, SessionRuntimeError> {
     let current = load_tool_approval_policy(connection, session)?;
-    if current.mode == ApprovalMode::ReadOnly
-        || current
-            .ancestors
-            .iter()
-            .any(|(mode, _)| *mode == ApprovalMode::ReadOnly)
+    if current.mode == ApprovalMode::ReadOnly || current.ancestors.contains(&ApprovalMode::ReadOnly)
     {
         return Ok(None);
     }
-    let automatic = current.mode == ApprovalMode::Auto
-        || current
-            .ancestors
-            .iter()
-            .any(|(mode, _)| *mode == ApprovalMode::Auto);
+    let automatic =
+        current.mode == ApprovalMode::Auto || current.ancestors.contains(&ApprovalMode::Auto);
     let scoped =
         automatic || authorization == Some(qq_protocol::GoalCheckAuthorization::TaskScoped);
     if scoped && !goals::auto_check_authority(connection, session)? {
@@ -724,11 +717,7 @@ pub(super) fn execution_scope_required(
         } else {
             captured
         };
-    check_scope_required(
-        connection,
-        claimed.identity.session_id,
-        authorization,
-    )
+    check_scope_required(connection, claimed.identity.session_id, authorization)
 }
 
 pub(super) fn try_start(
@@ -991,10 +980,7 @@ pub(super) fn finish_in_transaction(
             {
                 let current = load_tool_approval_policy(transaction, goal.session_id)?;
                 let automatic = current.mode == ApprovalMode::Auto
-                    || current
-                        .ancestors
-                        .iter()
-                        .any(|(mode, _)| *mode == ApprovalMode::Auto);
+                    || current.ancestors.contains(&ApprovalMode::Auto);
                 goal.status = qq_protocol::GoalStatus::Paused {
                     reason: qq_protocol::GoalPauseReason::NeedsUser {
                         cause: if automatic {

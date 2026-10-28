@@ -70,7 +70,7 @@ use runtime::{
     ToolGateFuture, TurnBlock, render_history_matches, render_tool_result,
 };
 
-pub use approval::{ApprovalDelegate, goal_check_shell_denied, shell_prefix_matches};
+pub use approval::goal_check_shell_denied;
 pub use cancellation::RunCancellation;
 pub use context_source::{
     ContextBudget, ContextBundle, ContextCache, ContextFetchFuture, ContextItem, ContextRequest,
@@ -91,18 +91,15 @@ pub use runtime::{
     valid_env_name,
 };
 pub use sessions::{
-    ApprovalReviewer, DelegateIdentity, GoalCheckPolicyError, GoalCheckPolicyFuture, GoalPolicy,
-    GoalPolicyError, GoalPolicyFuture, GoalValidationError, GrantPromotionFuture, GrantSeedFuture,
-    LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN,
-    MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT, MAX_GRANT_BYTES, MAX_PENDING_PROMPTS,
-    MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES,
-    MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent,
-    PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest,
-    ReviewSpend, ReviewVerdict, RunCompletion, RunResult, RuntimeLoadError, RuntimeLoadFuture,
-    RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION,
-    SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer,
-    SideQueryLimits, SlashCommandError, SpawnModelValidationFuture, WorkerRuntimeLoadFuture,
-    WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
+    GoalCheckPolicyError, GoalCheckPolicyFuture, GoalPolicy, GoalPolicyError, GoalPolicyFuture,
+    GoalValidationError, LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING,
+    MAX_CONCURRENT_CHILDREN_PER_RUN, MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT,
+    MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS, MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault,
+    PublishedEvent, PublishedEventStream, RunCompletion, RunResult, RuntimeLoadError,
+    RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader,
+    STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime, SessionRuntimeError,
+    SessionRuntimeOptions, SideAnswer, SideQueryLimits, SlashCommandError,
+    SpawnModelValidationFuture, WorkerRuntimeLoadFuture, WorkspacePolicyAuthority, run_cost,
 };
 /// Merkle index over the workspace tree the tools see.
 /// Detects changed paths between bounded workspace scans.
@@ -957,9 +954,9 @@ impl RunCapabilities {
 
 struct StaticPolicyGate {
     mode: ApprovalMode,
-    /// Workspace-configured grants (today: MCP allowlist entries by exact
-    /// namespaced name). Mode still wins: read-only denies granted tools.
-    grants: approval::SessionGrants,
+    /// Workspace-configured tool allowlist entries by exact namespaced name.
+    /// Mode still wins: read-only denies granted tools.
+    tools: std::collections::HashSet<String>,
     network: Arc<tools::network::NetworkPolicy>,
 }
 
@@ -991,7 +988,7 @@ impl ToolGate for ConfiguredToolGate {
         if !matches!(
             call.effect,
             catalog::EffectClass::ReadOnly | catalog::EffectClass::Interactive
-        ) && !self.0.grants.tools.contains(&call.name)
+        ) && !self.0.tools.contains(&call.name)
         {
             return Box::pin(std::future::ready(GateDecision::Deny {
                 message: approval::UNATTENDED_DENIED_RESULT.to_owned(),
@@ -1033,8 +1030,6 @@ pub struct Runtime {
     pub(crate) process_producer: Arc<ProcessProducer>,
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
     pub(crate) turn_recovery: TurnRecoveryPolicy,
-    /// Who settles the calls the session's approval mode holds.
-    pub(crate) approval_delegate: approval::ApprovalDelegate,
 }
 
 impl Runtime {
@@ -1086,7 +1081,6 @@ impl Runtime {
             process_producer: Arc::default(),
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
-            approval_delegate: approval::ApprovalDelegate::default(),
         })
     }
 
@@ -1095,15 +1089,6 @@ impl Runtime {
     #[must_use]
     pub const fn with_turn_recovery(mut self, policy: TurnRecoveryPolicy) -> Self {
         self.turn_recovery = policy;
-        self
-    }
-
-    /// Sets who settles held approvals: the configured reviewer under the
-    /// modes that consult it, or a human for everything. Inert without a
-    /// reviewer installed on the session runtime.
-    #[must_use]
-    pub const fn with_approval_delegate(mut self, delegate: approval::ApprovalDelegate) -> Self {
-        self.approval_delegate = delegate;
         self
     }
 
@@ -1616,7 +1601,7 @@ impl Runtime {
             cancelled,
             Arc::new(ConfiguredToolGate(StaticPolicyGate {
                 mode: ApprovalMode::Auto,
-                grants: approval::SessionGrants::default(),
+                tools: std::collections::HashSet::new(),
                 network: Arc::clone(&self.network),
             })),
             Arc::new(workspace::FileState::default()),
@@ -1741,10 +1726,7 @@ impl Runtime {
             let gate = if capabilities.unattended {
                 Arc::new(ConfiguredToolGate(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
-                    grants: approval::SessionGrants {
-                        tools: compiled.descriptor().tools.config_grants.iter().cloned().collect(),
-                        ..approval::SessionGrants::default()
-                    },
+                    tools: compiled.descriptor().tools.config_grants.iter().cloned().collect(),
                     network: Arc::clone(&compiled.runtime.network),
                 })) as Arc<dyn ToolGate>
             } else { gate };
@@ -1767,25 +1749,20 @@ impl plan::CompiledAgentPlan {
     pub fn run(self: &Arc<Self>, command: RunCommand) -> RunStream {
         let mut capabilities = RunCapabilities::user(None);
         capabilities.unattended = true;
-        let grants = approval::SessionGrants {
-            tools: self
-                .descriptor()
-                .tools
-                .config_grants
-                .iter()
-                .cloned()
-                .collect(),
-            shell_prefixes: Vec::new(),
-            hosts: Vec::new(),
-            delegate: approval::DelegateGrants::default(),
-        };
+        let tools = self
+            .descriptor()
+            .tools
+            .config_grants
+            .iter()
+            .cloned()
+            .collect();
         public_run_stream(
             self.execute(
                 vec![Message::user(input::render_text(command.input()))],
                 RunCancellation::new(),
                 Arc::new(ConfiguredToolGate(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
-                    grants,
+                    tools,
                     network: Arc::clone(&self.runtime.network),
                 })),
                 Arc::new(workspace::FileState::default()),
@@ -1866,8 +1843,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 // Direct runs have no steering channel, so these never fire.
                 | RuntimeEvent::SteeringApplied { .. }
                 | RuntimeEvent::Interrupted { .. }
-                // Direct runs have no reviewer or auditor either.
-                | RuntimeEvent::ReviewCharged { .. }
+                // Direct runs have no auditor either.
                 | RuntimeEvent::Audited { .. }
                 // Continuation is transparent to the direct stream: the text
                 // keeps flowing and the typed failure names exhaustion.

@@ -292,7 +292,7 @@ fn literal_policy_argv(source: &str) -> Vec<Vec<Option<String>>> {
 
 /// Matches managed denies against every visible shell command, including
 /// wrappers and nested shell payloads. Unresolved syntax refuses authority.
-/// This is independent of ordinary prefix grants and is used only for checks.
+/// It is used only for goal completion checks.
 #[must_use]
 pub fn goal_check_shell_denied(command: &str, denied_prefixes: &[String]) -> bool {
     if denied_prefixes.is_empty() {

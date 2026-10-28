@@ -7,7 +7,7 @@ use crate::sessions::{PersistenceFault, SessionRuntimeError};
 
 /// Current session store schema, stored as `metadata.schema_version`. Bump it
 /// with every migration step appended to `open_database`.
-pub const STORE_SCHEMA_VERSION: u16 = 64;
+pub const STORE_SCHEMA_VERSION: u16 = 65;
 
 // Also a reclamation outbox: pending acknowledgements survive session pruning.
 const NATIVE_COMMAND_OWNERS: &str = "CREATE TABLE native_command_owners (
@@ -208,11 +208,6 @@ pub(in crate::sessions) fn open_database(
                  request_json TEXT NOT NULL,
                  receipt_json TEXT NOT NULL
              );
-             CREATE TABLE IF NOT EXISTS pending_workspace_grant_promotions (
-                 command_id TEXT NOT NULL PRIMARY KEY,
-                 created_at_ms INTEGER NOT NULL,
-                 promotion_json TEXT NOT NULL
-             );
              CREATE INDEX IF NOT EXISTS sessions_workspace_updated
                  ON sessions(workspace_id, updated_at_ms DESC);
               CREATE INDEX IF NOT EXISTS runs_ready
@@ -220,9 +215,7 @@ pub(in crate::sessions) fn open_database(
               CREATE INDEX IF NOT EXISTS runs_session_started
                   ON runs(session_id, started_at_ms);
              CREATE INDEX IF NOT EXISTS messages_session_ordinal
-                 ON messages(session_id, ordinal);
-             CREATE INDEX IF NOT EXISTS pending_workspace_grant_promotions_fifo
-                 ON pending_workspace_grant_promotions(created_at_ms, command_id);",
+                 ON messages(session_id, ordinal);",
     )?;
     let schema_version = connection
         .query_row(
@@ -231,6 +224,10 @@ pub(in crate::sessions) fn open_database(
             |row| row.get::<_, String>(0),
         )
         .optional()?;
+    // 65 dropped the approval grant, delegate and native command owner
+    // storage; the steps before it still create and check that storage for
+    // the stores they migrate.
+    let grants_retired = schema_version.as_deref() == Some("65");
     match schema_version.as_deref() {
         None => {
             let transaction = connection.transaction()?;
@@ -397,7 +394,7 @@ pub(in crate::sessions) fn open_database(
             | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29" | "30" | "31" | "32" | "33"
             | "34" | "35" | "36" | "37" | "38" | "39" | "40" | "41" | "42" | "43" | "44" | "45"
             | "46" | "47" | "48" | "49" | "50" | "51" | "52" | "53" | "54" | "55" | "56" | "57"
-            | "58" | "59" | "60" | "61" | "62" | "63" | "64",
+            | "58" | "59" | "60" | "61" | "62" | "63" | "64" | "65",
         ) => {}
         Some(_) => return Err(SessionRuntimeError::CONSTRAINT),
     }
@@ -457,6 +454,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -522,6 +520,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -586,6 +585,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -649,6 +649,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -712,27 +713,29 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
         add_linear_streaming_storage(&transaction)?;
-        validate_linear_streaming_schema(&transaction)?;
+        validate_linear_streaming_schema(&transaction, false)?;
         transaction.execute(
             "UPDATE metadata SET value = '15' WHERE key = 'schema_version'",
             [],
         )?;
         transaction.commit()?;
-    } else if column_shape(
-        &connection,
-        "pending_workspace_grant_promotions",
-        "command_id",
-    )? != ("TEXT".to_owned(), true, None, 1)
+    } else if !grants_retired
+        && column_shape(
+            &connection,
+            "pending_workspace_grant_promotions",
+            "command_id",
+        )? != ("TEXT".to_owned(), true, None, 1)
     {
         let transaction = connection.transaction()?;
         normalize_promotion_outbox(&transaction)?;
         transaction.commit()?;
     }
-    validate_linear_streaming_schema(&connection)?;
+    validate_linear_streaming_schema(&connection, grants_retired)?;
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -784,6 +787,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -847,6 +851,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -908,6 +913,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -968,6 +974,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1027,6 +1034,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1083,6 +1091,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1138,6 +1147,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1193,6 +1203,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1247,6 +1258,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1300,6 +1312,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1352,6 +1365,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1403,6 +1417,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1453,6 +1468,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1502,6 +1518,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1550,6 +1567,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1597,6 +1615,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1652,6 +1671,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1712,6 +1732,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1780,6 +1801,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1835,6 +1857,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1856,10 +1879,11 @@ pub(in crate::sessions) fn open_database(
         )?;
         transaction.commit()?;
     }
-    if column_shape(&connection, "session_grants", "source")?
-        != ("TEXT".to_owned(), true, Some("'human'".to_owned()), 0)
-        || column_shape(&connection, "session_grants", "run_id")?
-            != ("TEXT".to_owned(), false, None, 0)
+    if !grants_retired
+        && (column_shape(&connection, "session_grants", "source")?
+            != ("TEXT".to_owned(), true, Some("'human'".to_owned()), 0)
+            || column_shape(&connection, "session_grants", "run_id")?
+                != ("TEXT".to_owned(), false, None, 0))
     {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
@@ -1898,6 +1922,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1910,8 +1935,9 @@ pub(in crate::sessions) fn open_database(
         )?;
         transaction.commit()?;
     }
-    if column_shape(&connection, "sessions", "approval_delegate")?
-        != ("TEXT".to_owned(), false, None, 0)
+    if !grants_retired
+        && column_shape(&connection, "sessions", "approval_delegate")?
+            != ("TEXT".to_owned(), false, None, 0)
     {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
@@ -1946,6 +1972,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         connection.execute(
@@ -1983,6 +2010,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         connection.execute(
@@ -2019,6 +2047,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         connection.execute(
@@ -2056,6 +2085,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -2100,6 +2130,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -2139,6 +2170,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -2178,6 +2210,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -2236,6 +2269,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -2298,6 +2332,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -2314,6 +2349,7 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     if has_tool_calls
+        && !grants_retired
         && column_shape(&connection, "tool_calls", "approval_delegated")?
             != ("INTEGER".to_owned(), true, Some("0".to_owned()), 0)
     {
@@ -2342,6 +2378,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -2380,6 +2417,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -2418,6 +2456,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -2468,6 +2507,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -2494,6 +2534,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -2554,6 +2595,7 @@ pub(in crate::sessions) fn open_database(
                 | "62"
                 | "63"
                 | "64"
+                | "65"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -2577,7 +2619,20 @@ pub(in crate::sessions) fn open_database(
     // 53: immutable initial delegated paid-owner anchors.
     if !matches!(
         schema_version.as_deref(),
-        Some("53" | "54" | "55" | "56" | "57" | "58" | "59" | "60" | "61" | "62" | "63" | "64")
+        Some(
+            "53" | "54"
+                | "55"
+                | "56"
+                | "57"
+                | "58"
+                | "59"
+                | "60"
+                | "61"
+                | "62"
+                | "63"
+                | "64"
+                | "65"
+        )
     ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "runs", "goal_paid_owner_run_id")? {
@@ -2597,7 +2652,7 @@ pub(in crate::sessions) fn open_database(
     // 54: recover work evidence omitted by the nullable schema52 migration.
     if !matches!(
         schema_version.as_deref(),
-        Some("54" | "55" | "56" | "57" | "58" | "59" | "60" | "61" | "62" | "63" | "64")
+        Some("54" | "55" | "56" | "57" | "58" | "59" | "60" | "61" | "62" | "63" | "64" | "65")
     ) {
         let transaction = connection.transaction()?;
         restore_unfinished_model_work(&transaction)?;
@@ -2611,7 +2666,7 @@ pub(in crate::sessions) fn open_database(
     // 55: preserve legacy admissions that have no completed model-turn row.
     if !matches!(
         schema_version.as_deref(),
-        Some("55" | "56" | "57" | "58" | "59" | "60" | "61" | "62" | "63" | "64")
+        Some("55" | "56" | "57" | "58" | "59" | "60" | "61" | "62" | "63" | "64" | "65")
     ) {
         let transaction = connection.transaction()?;
         restore_unfinished_goal_dispatch(&transaction)?;
@@ -2625,7 +2680,7 @@ pub(in crate::sessions) fn open_database(
     // 56: GoalCheck is a persisted run kind. Older readers cannot recover it.
     if !matches!(
         schema_version.as_deref(),
-        Some("56" | "57" | "58" | "59" | "60" | "61" | "62" | "63" | "64")
+        Some("56" | "57" | "58" | "59" | "60" | "61" | "62" | "63" | "64" | "65")
     ) {
         connection.execute(
             "UPDATE metadata SET value='56' WHERE key='schema_version'",
@@ -2635,7 +2690,7 @@ pub(in crate::sessions) fn open_database(
 
     if !matches!(
         schema_version.as_deref(),
-        Some("57" | "58" | "59" | "60" | "61" | "62" | "63" | "64")
+        Some("57" | "58" | "59" | "60" | "61" | "62" | "63" | "64" | "65")
     ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "runs", "check_acknowledgment_pending")? {
@@ -2651,7 +2706,7 @@ pub(in crate::sessions) fn open_database(
 
     if !matches!(
         schema_version.as_deref(),
-        Some("58" | "59" | "60" | "61" | "62" | "63" | "64")
+        Some("58" | "59" | "60" | "61" | "62" | "63" | "64" | "65")
     ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "session_goals", "policy_json")? {
@@ -2674,7 +2729,7 @@ pub(in crate::sessions) fn open_database(
 
     if !matches!(
         schema_version.as_deref(),
-        Some("59" | "60" | "61" | "62" | "63" | "64")
+        Some("59" | "60" | "61" | "62" | "63" | "64" | "65")
     ) {
         let transaction = connection.transaction()?;
         if !has_table(&transaction, "native_command_owners")? {
@@ -2686,16 +2741,6 @@ pub(in crate::sessions) fn open_database(
             [],
         )?;
         transaction.commit()?;
-    }
-    let native_sql: String = connection.query_row(
-        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='native_command_owners'",
-        [],
-        |row| row.get(0),
-    )?;
-    if native_sql.split_whitespace().collect::<String>()
-        != NATIVE_COMMAND_OWNERS.split_whitespace().collect::<String>()
-    {
-        return Err(SessionRuntimeError::CONSTRAINT);
     }
 
     // Additive projection index: assembling human answers must not revisit
@@ -2713,7 +2758,7 @@ pub(in crate::sessions) fn open_database(
     // must refuse this store rather than ignore its authority metadata.
     if !matches!(
         schema_version.as_deref(),
-        Some("60" | "61" | "62" | "63" | "64")
+        Some("60" | "61" | "62" | "63" | "64" | "65")
     ) {
         connection.execute(
             "UPDATE metadata SET value='60' WHERE key='schema_version'",
@@ -2722,7 +2767,10 @@ pub(in crate::sessions) fn open_database(
     }
 
     // 61: recovery evidence survives independently of delivery replay.
-    if !matches!(schema_version.as_deref(), Some("61" | "62" | "63" | "64")) {
+    if !matches!(
+        schema_version.as_deref(),
+        Some("61" | "62" | "63" | "64" | "65")
+    ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "model_turns", "legacy_checkpoint_required")? {
             transaction.execute_batch("ALTER TABLE model_turns ADD COLUMN legacy_checkpoint_required INTEGER NOT NULL DEFAULT 0 CHECK(legacy_checkpoint_required IN (0,1));")?;
@@ -2779,15 +2827,16 @@ pub(in crate::sessions) fn open_database(
     }
 
     // 62: terminal receipts belong to runs, independently of delivery replay.
-    if !matches!(schema_version.as_deref(), Some("62" | "63" | "64")) {
+    if !matches!(schema_version.as_deref(), Some("62" | "63" | "64" | "65")) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "runs", "completion_sequence")? {
             transaction.execute_batch("ALTER TABLE runs ADD COLUMN completion_sequence INTEGER NOT NULL DEFAULT 0 CHECK(completion_sequence>=0);
                 ALTER TABLE runs ADD COLUMN completion_json TEXT CHECK((completion_json IS NULL AND completion_sequence=0) OR (completion_json IS NOT NULL AND completion_sequence>0 AND json_valid(completion_json) AND length(CAST(completion_json AS BLOB))<=1048576));
                 CREATE INDEX runs_completion ON runs(session_id,completion_sequence) WHERE completion_sequence>0;")?;
         }
-        // The backfill decodes journaled summaries; see migration 64.
+        // The backfill decodes journaled summaries; see migrations 64 and 65.
         retire_supervised_mode(&transaction)?;
+        retire_approval_delegate_fields(&transaction)?;
         crate::sessions::completions::migrate(&transaction)?;
         transaction.execute(
             "UPDATE metadata SET value='62' WHERE key='schema_version'",
@@ -2805,7 +2854,7 @@ pub(in crate::sessions) fn open_database(
     }
 
     // 63: snapshots carry the original hold details and delegate escalation.
-    if !matches!(schema_version.as_deref(), Some("63" | "64")) {
+    if !matches!(schema_version.as_deref(), Some("63" | "64" | "65")) {
         let transaction = connection.transaction()?;
         if has_tool_calls {
             if !has_column(&transaction, "tool_calls", "approval_escalation_json")? {
@@ -2816,7 +2865,6 @@ pub(in crate::sessions) fn open_database(
                 WHEN (OLD.approval_inputs_json IS NOT NULL OR OLD.approval_escalation_json IS NOT NULL)
                     AND (NEW.state!='awaiting_approval' OR NEW.approval_resolution IS NOT NULL)
                 BEGIN UPDATE tool_calls SET approval_inputs_json=NULL,approval_escalation_json=NULL WHERE id=NEW.id; END;")?;
-            crate::sessions::tool_calls::migrate_approval_escalations(&transaction)?;
         }
         if !has_column(&transaction, "messages", "chunks_ordered")? {
             transaction.execute_batch("ALTER TABLE messages ADD COLUMN chunks_ordered INTEGER NOT NULL DEFAULT 0 CHECK(chunks_ordered IN (0,1));")?;
@@ -2837,6 +2885,7 @@ pub(in crate::sessions) fn open_database(
         return Err(SessionRuntimeError::CONSTRAINT);
     }
     if has_tool_calls
+        && !grants_retired
         && column_shape(&connection, "tool_calls", "approval_escalation_json")?
             != ("TEXT".to_owned(), false, None, 0)
     {
@@ -2845,12 +2894,52 @@ pub(in crate::sessions) fn open_database(
 
     // 64: retire the `supervised` approval mode (see `retire_supervised_mode`).
     // Stores from before 62 already did so ahead of the receipt backfill.
-    if schema_version.as_deref() != Some("64") {
+    if !matches!(schema_version.as_deref(), Some("64" | "65")) {
         let transaction = connection.transaction()?;
         retire_supervised_mode(&transaction)?;
         transaction.execute(
             "UPDATE metadata SET value='64' WHERE key='schema_version'",
             [],
+        )?;
+        transaction.commit()?;
+    }
+
+    // 65: protocol 41 removed the approval reviewer, `approval_delegate`
+    // and session/workspace approval grants, and shell commands no longer
+    // have a native owner. Drop their storage and strip the removed fields
+    // from journaled summaries and recorded hold inputs, whose decoders
+    // reject unknown fields.
+    if !grants_retired {
+        let transaction = connection.transaction()?;
+        retire_approval_delegate_fields(&transaction)?;
+        if has_table(&transaction, "tool_calls")? {
+            transaction
+                .execute_batch("DROP TRIGGER IF EXISTS tool_calls_clear_approval_inputs;")?;
+            for column in ["approval_escalation_json", "approval_delegated"] {
+                if has_column(&transaction, "tool_calls", column)? {
+                    transaction
+                        .execute_batch(&format!("ALTER TABLE tool_calls DROP COLUMN {column};"))?;
+                }
+            }
+            transaction.execute_batch(
+                "CREATE TRIGGER tool_calls_clear_approval_inputs
+                AFTER UPDATE OF state, approval_resolution ON tool_calls
+                WHEN OLD.approval_inputs_json IS NOT NULL
+                 AND (NEW.state!='awaiting_approval' OR NEW.approval_resolution IS NOT NULL)
+                BEGIN UPDATE tool_calls SET approval_inputs_json=NULL WHERE id=NEW.id; END;",
+            )?;
+        }
+        if has_column(&transaction, "sessions", "approval_delegate")? {
+            transaction.execute_batch("ALTER TABLE sessions DROP COLUMN approval_delegate;")?;
+        }
+        transaction.execute_batch(
+            "DROP INDEX IF EXISTS pending_workspace_grant_promotions_fifo;
+             DROP TABLE IF EXISTS pending_workspace_grant_promotions;
+             DROP TABLE IF EXISTS pending_workspace_grant_promotions_normalized;
+             DROP INDEX IF EXISTS native_command_ack_pending;
+             DROP TABLE IF EXISTS native_command_owners;
+             DROP TABLE IF EXISTS session_grants;
+             UPDATE metadata SET value='65' WHERE key='schema_version';",
         )?;
         transaction.commit()?;
     }
@@ -2889,8 +2978,8 @@ pub(in crate::sessions) fn open_database(
 }
 
 /// v0.1.3 through v0.1.8 recorded write sub-agents as `supervised`, a mode
-/// protocol 37 retired. Those children now run as `auto` with internal
-/// supervision, so the row and every journaled summary of it say `auto`;
+/// protocol 37 retired. Those children now run as `auto`, so the row and
+/// every journaled summary of it say `auto`;
 /// nothing else in the store ever held the value. Runs once `runs` has
 /// completion receipts, and before anything decodes journaled summaries:
 /// such readers skip what they cannot decode.
@@ -2904,6 +2993,31 @@ fn retire_supervised_mode(connection: &Connection) -> Result<(), SessionRuntimeE
           WHERE instr(completion_json,'\"supervised\"')>0
             AND json_extract(completion_json,'$.event.session.approval_mode')='supervised';",
     )?;
+    Ok(())
+}
+
+/// Protocol 41 removed `SessionSummary::approval_delegate`,
+/// `PendingHold::delegated` and the recorded hold's `delegated` flag; their
+/// decoders reject unknown fields, so journaled summaries, completion
+/// receipts and pending hold inputs drop them. Runs before anything decodes
+/// journaled summaries, like [`retire_supervised_mode`].
+fn retire_approval_delegate_fields(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    let holds = (0..qq_protocol::MAX_PENDING_HOLDS)
+        .map(|index| format!(",'$.event.session.pending_holds[{index}].delegated'"))
+        .collect::<String>();
+    for (table, column) in [("events", "envelope_json"), ("runs", "completion_json")] {
+        connection.execute_batch(&format!(
+            "UPDATE {table} SET {column}=json_remove({column},'$.event.session.approval_delegate'{holds})
+              WHERE (instr({column},'\"approval_delegate\"')>0 OR instr({column},'\"delegated\"')>0)
+                AND json_valid({column});"
+        ))?;
+    }
+    if has_column(connection, "tool_calls", "approval_inputs_json")? {
+        connection.execute_batch(
+            "UPDATE tool_calls SET approval_inputs_json=json_remove(approval_inputs_json,'$.delegated')
+              WHERE instr(approval_inputs_json,'\"delegated\"')>0 AND json_valid(approval_inputs_json);",
+        )?;
+    }
     Ok(())
 }
 
@@ -3228,7 +3342,10 @@ fn normalize_promotion_outbox(connection: &Connection) -> Result<(), SessionRunt
         .map_err(|_| SessionRuntimeError::CONSTRAINT)
 }
 
-fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
+fn validate_linear_streaming_schema(
+    connection: &Connection,
+    grants_retired: bool,
+) -> Result<(), SessionRuntimeError> {
     for (table, column) in [
         ("message_chunks", "message_id"),
         ("message_chunks", "channel"),
@@ -3240,6 +3357,9 @@ fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), Sessi
         ("pending_workspace_grant_promotions", "created_at_ms"),
         ("pending_workspace_grant_promotions", "promotion_json"),
     ] {
+        if grants_retired && table == "pending_workspace_grant_promotions" {
+            continue;
+        }
         if !has_column(connection, table, column)? {
             return Err(SessionRuntimeError::CONSTRAINT);
         }
@@ -3349,6 +3469,9 @@ fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), Sessi
         || !schema_sql.contains("check(chunk_ordinal > 0)")
     {
         return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    if grants_retired {
+        return Ok(());
     }
     let mut promotion_columns =
         connection.prepare("PRAGMA table_info(pending_workspace_grant_promotions)")?;
