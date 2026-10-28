@@ -122,35 +122,6 @@ list of stops plus undo is easier to predict.
 - `$ARGUMENTS` is not substituted, the skill's directory is not given, and
   `.agents/skills` is invisible to the model.
 
-## C. Long-running shell commands
-
-Snapshots and `qq undo` (#482), the mode table and fixed stops (#483), one
-denial format (#486), and running in place with the sandbox, task
-workspaces, reviewer and grants deleted shipped first; see
-[permissions](../guide/permissions.md) and
-[tools](../design/tools.md#where-commands-run).
-
-- Add `yield_after_seconds` to `shell` and `exec` (default about 30 s). A
-  command still running at that point returns a command id. A new
-  `command_status(id, wait_seconds)` tool waits on it, cancels it or reads
-  its output, the way `wait_agents` follows children. A background process
-  that holds the pipe open no longer blocks the turn.
-- Stream full output into the spill, up to its 8 MiB cap, so
-  `read_tool_result` can reach the middle of a build log.
-- Set `NO_COLOR=1`, `PAGER=cat`, `GIT_PAGER=cat` and `TERM=dumb` unless the
-  caller sets them.
-- A timeout result names the limit and suggests a larger timeout or the
-  yield mode.
-- An argument over 64 KiB becomes a tool error naming the limit.
-
-**Accepted when** each of these is demonstrated by a test:
-
-- A `cargo build`-length scripted command yields, then completes through
-  `command_status`.
-- `sleep 600 &` returns.
-- A 1 MiB log is searchable through `read_tool_result`.
-- A 70 KiB `write_file` gets a tool error and the run continues.
-
 ## D. Tool calls tell the model how to recover
 
 - Re-measure the top argument errors on a v0.1.9 build with the
@@ -255,7 +226,7 @@ task against the loopback fake provider in CI.
 
 ## Order
 
-1. C, D, E, F and G in parallel with disjoint owned paths.
+1. D, E, F and G in parallel with disjoint owned paths.
 2. H whenever there is room.
 
 Each PR:

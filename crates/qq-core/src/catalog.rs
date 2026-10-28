@@ -59,6 +59,9 @@ pub(crate) enum ToolHost {
     /// is, and dispatched to the same spawner.
     WaitAgents,
     CancelAgent,
+    /// `command_status`: offered exactly when `shell` or `exec` is, and
+    /// dispatched to the run's yielded commands.
+    CommandStatus,
     UpdateGoal,
     SearchHistory,
     ReadToolResult,
@@ -787,6 +790,8 @@ impl StaticFilter {
             ToolHost::UpdateGoal => self.update_goal,
             ToolHost::ReadToolResult => self.read_tool_result,
             ToolHost::LoadSkill => self.load_skill,
+            // Follows shell, which neither restriction offers.
+            ToolHost::CommandStatus => !self.read_only && !self.unattended,
             ToolHost::BuiltIn | ToolHost::SelectTools | ToolHost::External { .. } => true,
         }
     }

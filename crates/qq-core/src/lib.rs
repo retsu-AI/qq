@@ -5248,6 +5248,177 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_tool_arguments_yield_a_tool_error_and_continue_the_run() {
+        struct OversizedArgumentsProvider {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for OversizedArgumentsProvider {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let mut requests = self.requests.lock().unwrap();
+                let turn = requests.len();
+                requests.push(request);
+                drop(requests);
+                if turn == 0 {
+                    let content = "x".repeat(35 * 1024);
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::ToolCallStarted {
+                            id: "big".to_owned(),
+                            name: "write_file".to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "big".to_owned(),
+                            json: format!(r#"{{"path":"big.txt","content":"{content}"#),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "big".to_owned(),
+                            json: format!(r#"{content}"}}"#),
+                        }),
+                        Ok(ProviderEvent::ToolCallCompleted {
+                            id: "big".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            OversizedArgumentsProvider {
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("write")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{:?}",
+            events.last()
+        );
+        assert!(!directory.path().join("big.txt").exists());
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(matches!(
+            requests[1].messages()[2].content(),
+            [ContentBlock::ToolResult {
+                call_id,
+                content,
+                is_error: true,
+            }] if call_id == "big" && content.contains("64 KiB limit")
+        ));
+    }
+
+    /// A run follows a yielded command with `command_status` on a later
+    /// turn, then ends with a second one still running: the run completes
+    /// and its teardown stops that command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_run_follows_a_yielded_command_and_stops_the_rest_when_it_ends() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let tool_tasks = tools::ToolTasks::default();
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![
+                    vec![(
+                        "shell",
+                        r#"{"command":"echo building; sleep 2; echo built","yield_after_seconds":1}"#
+                            .to_owned(),
+                    )],
+                    vec![(
+                        "command_status",
+                        r#"{"id":"c1","wait_seconds":30}"#.to_owned(),
+                    )],
+                    vec![(
+                        "shell",
+                        r#"{"command":"echo pid:$$; exec tail -f /dev/null","yield_after_seconds":1}"#
+                            .to_owned(),
+                    )],
+                ],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            runtime
+                .run_loop_with_spawner(
+                    vec![Message::user("build")],
+                    directory.path().to_owned(),
+                    RunCancellation::new(),
+                    Arc::new(StaticPolicyGate {
+                        mode: ApprovalMode::Full,
+                        tools: Default::default(),
+                        network: Arc::default(),
+                    }),
+                    Arc::new(workspace::FileState::default()),
+                    RunCapabilities::user(None).with_tool_tasks(tool_tasks.clone()),
+                )
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("a yielded command must not hold the run");
+        // A session's teardown drains the run's tools before it settles.
+        tokio::time::timeout(std::time::Duration::from_secs(20), tool_tasks.drain())
+            .await
+            .expect("teardown must stop the yielded command")
+            .unwrap();
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let results = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::ToolCallFinished { result, .. } => Some(result.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(results.len(), 3, "{results:?}");
+        assert!(
+            results[0].starts_with("shell exit=running id=c1 "),
+            "{}",
+            results[0]
+        );
+        assert!(results[1].starts_with("shell exit=0 "), "{}", results[1]);
+        assert!(results[1].contains("built"), "{}", results[1]);
+        assert!(
+            results[2].starts_with("shell exit=running id=c2 "),
+            "{}",
+            results[2]
+        );
+        let pid = results[2]
+            .split("pid:")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|pid| pid.parse::<i32>().ok())
+            .and_then(rustix::process::Pid::from_raw)
+            .expect("the command printed its pid");
+        assert!(
+            rustix::process::test_kill_process(pid).is_err(),
+            "the run's end stops its yielded commands"
+        );
+    }
+
+    #[tokio::test]
     async fn reports_the_underlying_workspace_open_error() {
         let runtime = Runtime::new(
             ScriptedProvider {
@@ -9768,13 +9939,14 @@ mod tests {
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
         // AB2 widens the cursor bound; AB3 removes the fixed read-limit default.
-        // Run-in-place drops the shell and exec `env` argument.
+        // Run-in-place drops the shell and exec `env` argument; long-running
+        // commands add `yield_after_seconds`.
         // Record the current schema identity separately from the historical prompt.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "3a38ed59c2e281ed5fc3840f0adb9bef802939981d9fa0f18c2e65bacabda725"
+            "285e379ac833a9fba2176f5296d3735ffa0e24ff555d678e50e5f13774ae60ae"
         );
         let spawn = specs.last().unwrap();
         assert!(
@@ -10988,10 +11160,15 @@ mod tests {
             );
             let requests = requests.lock().unwrap();
             assert_eq!(requests.len(), 1);
-            assert_eq!(
-                tool_names(&requests[0]),
-                expected.iter().map(String::as_str).collect::<Vec<_>>()
-            );
+            // `command_status` follows `shell` and `exec`.
+            let mut declared = expected.iter().map(String::as_str).collect::<Vec<_>>();
+            if declared
+                .iter()
+                .any(|name| matches!(*name, "shell" | "exec"))
+            {
+                declared.push("command_status");
+            }
+            assert_eq!(tool_names(&requests[0]), declared);
             let prompt = requests[0].system().unwrap();
             if !expected.iter().any(|name| name == "read_file") {
                 assert!(

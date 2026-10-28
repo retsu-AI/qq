@@ -387,6 +387,8 @@ pub(crate) struct PendingToolCall {
     pub(crate) arguments: String,
     pub(crate) rejection: Option<String>,
     pub(crate) completed: bool,
+    /// The streamed arguments passed the 64 KiB limit and were discarded.
+    pub(crate) oversized: bool,
 }
 
 pub(crate) enum TurnBlock {

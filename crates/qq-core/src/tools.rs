@@ -1,4 +1,5 @@
 pub(crate) mod ask;
+mod commands;
 pub(crate) mod dispatch;
 mod edit;
 #[cfg(feature = "tool-fetch")]
@@ -24,6 +25,18 @@ pub(crate) mod windows_job;
 mod write;
 
 pub(crate) use dispatch::{ToolCancellation, ToolTaskLease};
+
+/// `command_status`: waits on, reads, or cancels a command this run yielded.
+pub(crate) async fn command_status(
+    tasks: &ToolTasks,
+    arguments: &str,
+    cancelled: crate::RunCancellation,
+) -> ToolOutput {
+    tasks
+        .commands()
+        .status(arguments, &ToolCancellation::new(cancelled))
+        .await
+}
 
 /// Parse qualification envelopes with the same type used by shell dispatch.
 pub(crate) fn parsed_shell_command(arguments: &str) -> Option<String> {
@@ -54,6 +67,7 @@ pub(crate) async fn run_goal_check_shell(
         command,
         cwd: None,
         timeout_seconds: None,
+        yield_after_seconds: None,
     };
     // The check's own deadline stops the command; a relative timeout would
     // restart the clock and round it to whole seconds.
@@ -70,6 +84,7 @@ pub(crate) async fn run_goal_check_shell(
         &stopped,
         None,
         process,
+        None,
     );
     tokio::pin!(run);
     let mut expired = false;
@@ -140,8 +155,8 @@ pub mod bench_support {
     }
 }
 pub(crate) use dispatch::{
-    ResultDisposition, SpillRecord, ToolDrainError, ToolOutput, ToolTasks, bounded_result,
-    execute_with_images,
+    ResultDisposition, SpillRecord, StopYieldedOnDrop, ToolDrainError, ToolOutput, ToolTasks,
+    bounded_result, execute_with_images,
 };
 #[cfg(test)]
 pub(crate) use edit::hold_tool_apply;
@@ -152,8 +167,8 @@ pub(crate) use output::{ResultRecall, TurnOutputBudget, finalize_spill_marker, h
 pub(crate) use read::hold_tool_read;
 pub(crate) use specs::{
     CancelAgentArgs, MAX_SPAWN_AGENT_SCHEMA_BYTES, MAX_WAIT_AGENTS_SECS, SPAWN_AGENT_TOOL,
-    SpawnAgentArgs, WaitAgentsArgs, cancel_agent_spec, spawn_agent_spec, spawn_model_routes,
-    static_tools, wait_agents_spec,
+    SpawnAgentArgs, WaitAgentsArgs, cancel_agent_spec, command_status_spec, spawn_agent_spec,
+    spawn_model_routes, static_tools, wait_agents_spec,
 };
 #[cfg(test)]
 pub(crate) use specs::{specs, test_tool_effect};
@@ -3497,7 +3512,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "3a38ed59c2e281ed5fc3840f0adb9bef802939981d9fa0f18c2e65bacabda725"
+            "285e379ac833a9fba2176f5296d3735ffa0e24ff555d678e50e5f13774ae60ae"
         );
     }
 
@@ -5001,7 +5016,7 @@ mod tests {
     #[tokio::test]
     async fn a_running_build_survives_the_old_ten_minute_ceiling() {
         running_build_survives_clock_advance(
-            r#"{"command":"printf ready; read token < release; printf build-finished","timeout_seconds":1800}"#,
+            r#"{"command":"printf ready; read token < release; printf build-finished","timeout_seconds":1800,"yield_after_seconds":3600}"#,
             601,
         ).await;
     }
@@ -5010,7 +5025,7 @@ mod tests {
     #[tokio::test]
     async fn a_running_build_without_a_command_timeout_survives_two_minutes() {
         running_build_survives_clock_advance(
-            r#"{"command":"printf ready; read token < release; printf build-finished"}"#,
+            r#"{"command":"printf ready; read token < release; printf build-finished","yield_after_seconds":3600}"#,
             121,
         )
         .await;
@@ -5278,6 +5293,259 @@ mod tests {
             result.model_text
         );
         assert_process_exits(parse_marked_pid(&result.model_text)).await;
+    }
+
+    /// Commands print plain text into a pipe: TERM is always dumb, and the
+    /// color and pager defaults apply unless the user set their own.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn commands_get_plain_output_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_shell_tool(
+            workspace,
+            r#"{"command":"echo TERM=$TERM NO_COLOR=${NO_COLOR-unset} PAGER=${PAGER-unset} GIT_PAGER=${GIT_PAGER-unset}"}"#,
+            RunCancellation::new(),
+            None,
+        )
+        .await;
+        assert!(
+            result.model_text.contains("TERM=dumb "),
+            "{}",
+            result.model_text
+        );
+        for (name, default) in [("NO_COLOR", "1"), ("PAGER", "cat"), ("GIT_PAGER", "cat")] {
+            let expected = std::env::var(name).unwrap_or_else(|_| default.to_owned());
+            assert!(
+                result.model_text.contains(&format!("{name}={expected}")),
+                "{name}: {}",
+                result.model_text
+            );
+        }
+    }
+
+    /// The timeout result names the limit that fired and the two ways to
+    /// give a long command more room.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shell_timeout_names_its_limit_and_how_to_raise_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_shell_tool(
+            workspace,
+            r#"{"command":"exec tail -f /dev/null","timeout_seconds":1}"#,
+            RunCancellation::new(),
+            None,
+        )
+        .await;
+        assert!(result.is_error);
+        for expected in [
+            "timeout_seconds=1 limit",
+            "larger timeout_seconds",
+            "yield_after_seconds",
+            "command_status",
+        ] {
+            assert!(
+                result.model_text.contains(expected),
+                "{expected}: {}",
+                result.model_text
+            );
+        }
+    }
+
+    /// A background child that keeps the output pipe open no longer holds
+    /// the call until its timeout: the leader's exit ends it, and its group
+    /// (with the child) is killed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_background_process_holding_the_pipe_does_not_block_the_call() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run_shell_tool(
+                workspace,
+                r#"{"command":"sleep 600 & echo pid:$!; echo started"}"#,
+                RunCancellation::new(),
+                None,
+            ),
+        )
+        .await
+        .expect("a background child holding the pipe must not block the call");
+        assert!(
+            result.model_text.starts_with("shell exit=0 "),
+            "{}",
+            result.model_text
+        );
+        assert!(
+            result.model_text.contains("started"),
+            "{}",
+            result.model_text
+        );
+        assert_process_exits(parse_marked_pid(&result.model_text)).await;
+    }
+
+    /// A command that outlives its yield point returns a command id; the
+    /// command keeps running, and `command_status` reads its progress and
+    /// then returns its final result.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_long_command_yields_and_completes_through_command_status() {
+        use std::io::Write as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let release = directory.path().join("release");
+        crate::tools::create_test_fifo(&release).await;
+        let gate = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(release)
+            .unwrap();
+        let tasks = ToolTasks::default();
+        let cancelled = RunCancellation::new();
+        let yielded = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            execute(
+                workspace,
+                Arc::new(FileState::default()),
+                "shell".to_owned(),
+                r#"{"command":"echo compiling; read token < release; echo finished; exit 3","yield_after_seconds":1}"#.to_owned(),
+                cancelled.clone(),
+                None,
+                tasks.clone(),
+                Arc::new(crate::runtime::ShellPolicy::default()),
+                Arc::default(),
+            ),
+        )
+        .await
+        .expect("a running command must yield");
+        assert!(!yielded.is_error, "{}", yielded.model_text);
+        assert!(
+            yielded.model_text.starts_with("shell exit=running id=c1 "),
+            "{}",
+            yielded.model_text
+        );
+        assert!(yielded.model_text.contains("compiling"));
+        assert!(yielded.model_text.contains("command_status"));
+
+        let running =
+            command_status(&tasks, r#"{"id":"c1","wait_seconds":0}"#, cancelled.clone()).await;
+        assert!(
+            running
+                .model_text
+                .starts_with("command_status id=c1 state=running "),
+            "{}",
+            running.model_text
+        );
+        assert!(running.model_text.contains("compiling"));
+
+        let mut writer = gate.try_clone().unwrap();
+        tokio::task::spawn_blocking(move || writer.write_all(b"go\n").unwrap())
+            .await
+            .unwrap();
+        let finished = command_status(
+            &tasks,
+            r#"{"id":"c1","wait_seconds":20}"#,
+            cancelled.clone(),
+        )
+        .await;
+        assert!(
+            finished.model_text.starts_with("shell exit=3 "),
+            "{}",
+            finished.model_text
+        );
+        assert!(finished.model_text.contains("finished"));
+        assert!(finished.execution_context.is_none());
+        // A finished command is forgotten once its result was returned.
+        let gone = command_status(&tasks, r#"{"id":"c1","wait_seconds":0}"#, cancelled).await;
+        assert!(
+            gone.model_text.starts_with("unknown_command:"),
+            "{}",
+            gone.model_text
+        );
+        tasks.drain().await.unwrap();
+    }
+
+    /// `cancel=true` kills a yielded command's process group, and run
+    /// teardown stops any yielded command still running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn yielded_commands_stop_on_cancel_and_on_teardown() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let tasks = ToolTasks::default();
+        let cancelled = RunCancellation::new();
+        let start = |command: &'static str| {
+            execute(
+                workspace.clone(),
+                Arc::new(FileState::default()),
+                "shell".to_owned(),
+                command.to_owned(),
+                cancelled.clone(),
+                None,
+                tasks.clone(),
+                Arc::new(crate::runtime::ShellPolicy::default()),
+                Arc::default(),
+            )
+        };
+        let first =
+            start(r#"{"command":"echo pid:$$; exec sleep 600","yield_after_seconds":1}"#).await;
+        let second =
+            start(r#"{"command":"echo pid:$$; exec sleep 600","yield_after_seconds":1}"#).await;
+        assert!(first.model_text.contains("id=c1"), "{}", first.model_text);
+        assert!(second.model_text.contains("id=c2"), "{}", second.model_text);
+
+        let stopped = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            command_status(&tasks, r#"{"id":"c1","cancel":true}"#, cancelled.clone()),
+        )
+        .await
+        .expect("cancel must stop the command promptly");
+        assert!(
+            stopped.model_text.starts_with("shell exit=cancelled "),
+            "{}",
+            stopped.model_text
+        );
+        assert_process_exits(parse_marked_pid(&first.model_text)).await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(20), tasks.drain())
+            .await
+            .expect("teardown must stop yielded commands")
+            .unwrap();
+        assert_process_exits(parse_marked_pid(&second.model_text)).await;
+    }
+
+    /// The whole output of a long command is kept for `read_tool_result`,
+    /// not only the head and tail the model sees inline.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_one_mebibyte_log_is_searchable_through_read_tool_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        // About 1.1 MiB: 16,000 numbered lines with one marker in the middle.
+        let result = run_shell_tool(
+            workspace,
+            r#"{"command":"i=0; while [ $i -lt 16000 ]; do if [ $i -eq 8000 ]; then echo 'error[E0308]: mismatched types in the middle'; fi; printf 'line %05d %s\n' $i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done"}"#,
+            RunCancellation::new(),
+            None,
+        )
+        .await;
+        assert!(
+            !result.model_text.contains("E0308"),
+            "the middle is not inline"
+        );
+        let spill = result.spill.expect("the full output is kept");
+        assert!(spill.text.len() > 1024 * 1024, "{}", spill.text.len());
+        assert!(!spill.text.contains("not captured"));
+        let handle = format!("t:shell:00000001:{}", &spill.digest[..8]);
+        let arguments: crate::runtime::ReadToolResultArgs =
+            serde_json::from_value(json!({"handle": handle, "query": "E0308"})).unwrap();
+        let page = crate::runtime::render_tool_result(&handle, &arguments, &spill.text).unwrap();
+        assert!(
+            page.contains("error[E0308]: mismatched types in the middle"),
+            "{page}"
+        );
     }
 
     #[cfg(unix)]

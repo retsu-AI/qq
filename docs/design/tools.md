@@ -406,9 +406,9 @@ handle, so a later read says `spill_evicted` — the cap did its job —
 rather than `spill_missing`. Handles are session-scoped: a child session
 holding a parent's handle reads `handle_foreign_session`, never data.
 Spills delete with the session; `qq sessions prune` touches only sessions
-with no runs, which have none. Shell captures are cut at 128 KiB
-(`MAX_SHELL_OUTPUT_BYTES`) before they reach the boundary, so a shell spill
-is at most that.
+with no runs, which have none. A shell capture stops 64 KiB short of the
+item cap (`MAX_CAPTURE_BYTES`, head+tail past it), so a long build log
+spills whole and `read_tool_result` can search its middle.
 
 ### Context Budget
 
@@ -514,8 +514,9 @@ and keeps the schema for each tool in one place:
   (§ Edit Semantics); the unified diff of what changed is the UI payload.
 - `write_file` — create (parents made) or fully overwrite; `create_only`,
   `if_hash`, and a `use_edit_file` hint when most lines are kept.
-- `shell` — one command via `sh -c`, 16 KiB head+tail model bound, cleared
-  environment (§ Shell Execution).
+- `shell` — one command via `sh -c`, 16 KiB head+tail model bound, inherited
+  environment; a command still running after `yield_after_seconds` returns a
+  command id (§ Shell Execution).
 - `exec` — one program with an argument list and no shell between the model
   and the process; same environment, timeout, output, and approval path as
   `shell`, but the stop check sees exact argv.
@@ -1093,10 +1094,29 @@ after a restart.
 - Windows starts commands suspended, assigns a job that forbids breakaway,
   then resumes them. Completion, cancellation and timeout terminate the job
   and confirm that it has no remaining processes before settling the tool.
-- Combined stdout+stderr captured head+tail within 128 KiB (a capture cap,
-  marked `bytes not captured` when exceeded) and streamed to clients as
-  `ToolCallOutputDelta` events through the existing batching path so long
-  builds render live.
+- Combined stdout+stderr captured head+tail within just under the 8 MiB
+  spill item cap (a capture cap, marked `bytes not captured` when exceeded)
+  and streamed to clients as `ToolCallOutputDelta` events through the
+  existing batching path so long builds render live. Live output stops after
+  128 KiB; the capture does not.
+- The command ends when its leader exits. The exit observer kills the
+  leader's process group, so `sleep 600 &` dies with it; output still in the
+  pipes is read for two more seconds, after which a process that escaped the
+  group no longer holds the call.
+- **Yield.** A command still running `yield_after_seconds` after it started
+  (default 30) settles its call with `<tool> exit=running id=c<n> …`, the
+  output so far, and a pointer to `command_status`. The dispatch task keeps
+  owning the process, its lease and its receipt. `command_status(id,
+  wait_seconds ≤ 600, cancel)` waits for the command and returns its final
+  result (the same text a non-yielded call would have returned), or its
+  output so far while it runs; `cancel=true` kills its group. A run keeps at
+  most 16 yielded commands; past that a command runs to completion in its
+  call. A user interrupt waits only for calls that have not returned; when
+  the run ends, its yielded commands are cancelled and teardown reaps them
+  like any other tool task. `command_status` is declared exactly when
+  `shell` or `exec` is and follows them through pack and policy filters.
+- Timeouts name the limit (`timeout_seconds=<n>`) and suggest a larger
+  timeout or the yield mode; a run deadline says so instead.
 - Model-facing text bounded to 16 KiB head+tail behind a
   `shell exit=<code> elapsed=<s> bytes=<n>` header (§ Output Bounding). The
   head shows how a command started, the tail its verdict; the middle of a
@@ -1104,7 +1124,9 @@ after a restart.
   by default. `exit` is `signal:<n>` or `timeout` when there is no code.
 - No login/profile shell initialization on the hot path.
 - The **inherited environment**: the child gets the server process's whole
-  environment, credentials included. The tools take no `env` argument. The
+  environment, credentials included, with `TERM=dumb` and, unless already
+  set, `NO_COLOR=1`, `PAGER=cat` and `GIT_PAGER=cat`, because output goes to
+  a pipe the model reads. The tools take no `env` argument. The
   one exception is an attested read image (`--approve-self-contained-read-image`),
   which runs with only `PATH HOME LANG TERM TMPDIR` (also `SYSTEMROOT
   LOCALAPPDATA` on Windows) so no variable can point it at helpers.
@@ -1127,7 +1149,8 @@ after a restart.
   limitation can require the model to recover using the shell form.
 
 **`exec`** runs one program with an argument list (`program`, `args` ≤ 64 ×
-4 KiB, optional `stdin` ≤ 64 KiB, `cwd`, `timeout_seconds`) with no
+4 KiB, optional `stdin` ≤ 64 KiB, `cwd`, `timeout_seconds`,
+`yield_after_seconds`) with no
 shell in between: no quoting, globbing, `$`, or pipes. For policy it is
 rendered as the equivalent command line — each argument single-quoted when
 it holds metacharacters — so the fixed stops, managed deny prefixes

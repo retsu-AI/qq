@@ -549,6 +549,8 @@ impl plan::CompiledAgentPlan {
                        cache_key,
                    } = capabilities;
                    let tool_tasks = tool_tasks.unwrap_or_default();
+                   // Yielded commands belong to this run: they stop when it ends.
+                   let _stop_yielded = tools::StopYieldedOnDrop(tool_tasks.clone());
                    let steering = steering;
                    let handled_interrupt = steering
                        .as_ref()
@@ -1862,6 +1864,7 @@ impl RunState {
                                         arguments: String::new(),
                                         completed: false,
                                         rejection,
+                                        oversized: false,
                                     });
                                     if !over_cap && !checkpoint_turn && !final_answer_turn {
                                         slice.slice_tool_calls += 1;
@@ -1884,12 +1887,19 @@ impl RunState {
                                         });
                                         yield TurnStep::Stop; return;
                                     }
+                                    // Oversized arguments are the model's mistake: the
+                                    // call gets a tool error and the run continues.
+                                    if call.oversized {
+                                        continue;
+                                    }
                                     if call.arguments.len().saturating_add(json.len()) > MAX_TOOL_ARGUMENT_BYTES {
-                                        yield TurnStep::Emit( RuntimeEvent::Failed {
-                                            kind: RunFailureKind::ProviderProtocol,
-                                            message: format!("tool call {id:?} arguments exceed the 64 KiB limit"),
-                                        });
-                                        yield TurnStep::Stop; return;
+                                        call.oversized = true;
+                                        call.arguments = String::new();
+                                        call.rejection.get_or_insert_with(|| format!(
+                                            "not executed: this call's arguments exceed the {} KiB limit; split the content across several smaller calls",
+                                            MAX_TOOL_ARGUMENT_BYTES / 1024
+                                        ));
+                                        continue;
                                     }
                                     call.arguments.push_str(&json);
                                 }
@@ -3241,6 +3251,12 @@ impl RunState {
                                         },
                                         None => tools::ToolOutput::refused(SPAWN_UNAVAILABLE_RESULT),
                                     },
+                                    // A command this run yielded: wait on it, read
+                                    // it, or cancel it. The task that started it
+                                    // still owns the process.
+                                    None if host == Some(catalog::ToolHost::CommandStatus) => {
+                                        tools::command_status(&tool_tasks, &call.arguments, cancelled).await
+                                    }
                                     // Full-transcript recall dispatches to the session
                                     // layer; the tool is declared only when a searcher
                                     // exists, so a guessed call is simply unknown here.
@@ -3381,7 +3397,7 @@ impl RunState {
                         let overlaps = |call: &RuntimeToolCall| {
                             !(bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
                             && !catalog.lookup(&call.name).is_some_and(|entry| {
-                                matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent | catalog::ToolHost::UpdateGoal | catalog::ToolHost::SelectTools)
+                                matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent | catalog::ToolHost::CommandStatus | catalog::ToolHost::UpdateGoal | catalog::ToolHost::SelectTools)
                             })
                             && matches!(
                                 approval::classify(call.effect, &call.name, &call.arguments, network_policy),
@@ -3697,7 +3713,7 @@ impl RunState {
                                             // Stop dispatch, then await owned local work
                                             // and children before applying steering.
                                             drop(execution);
-                                            if let Err(error) = tool_tasks.drain().await {
+                                            if let Err(error) = tool_tasks.drain_calls().await {
                                                 yield TurnStep::Emit( RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() });
                                                 yield TurnStep::Stop; return;
                                             }
@@ -3776,7 +3792,7 @@ impl RunState {
                                 }
                         }
                         if tool_scope.interrupted {
-                            if let Err(error) = tool_tasks.drain().await {
+                            if let Err(error) = tool_tasks.drain_calls().await {
                                                 yield TurnStep::Emit( RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() });
                                                 yield TurnStep::Stop; return;
                                             }
