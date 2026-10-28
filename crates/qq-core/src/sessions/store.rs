@@ -1883,7 +1883,7 @@ impl Store {
         display: Option<ToolCallDisplay>,
         spill: Option<crate::tools::SpillRecord>,
         execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
-    ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    ) -> Result<ToolCallCommit, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {

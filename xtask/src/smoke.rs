@@ -413,6 +413,25 @@ impl Home {
         if let Some(path) = env::var_os("PATH") {
             command.env("PATH", path);
         }
+        // Windows ignores XDG_*: without QQ_HOME every concurrent scenario
+        // shares the runner's real data directory and session store.
+        #[cfg(windows)]
+        {
+            command.env("QQ_HOME", self.root.join("qq-home"));
+            for name in [
+                "SYSTEMROOT",
+                "WINDIR",
+                "LOCALAPPDATA",
+                "APPDATA",
+                "USERPROFILE",
+                "TEMP",
+                "TMP",
+            ] {
+                if let Some(value) = env::var_os(name) {
+                    command.env(name, value);
+                }
+            }
+        }
         command
     }
 
@@ -685,7 +704,10 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
             .provider(vec![
                 Reply::ReadFile("inventory.rs"),
                 Reply::WriteFile("inventory.rs", "pub struct Changed;\n"),
-                Reply::Tool("shell", serde_json::json!({"command": "rm notes.txt"})),
+                Reply::Tool(
+                    "shell",
+                    serde_json::json!({"command": if cfg!(windows) { "del notes.txt" } else { "rm notes.txt" }}),
+                ),
                 Reply::WriteFile("created.txt", "agent file\n"),
                 Reply::Text("done"),
             ])
@@ -1015,11 +1037,11 @@ async fn run_command_deadlines(home: &Home) -> Result<(), String> {
     for (name, arguments) in [
         (
             "shell",
-            serde_json::json!({"command": "printf deadline-ok", "timeout_seconds": 1800}),
+            serde_json::json!({"command": "echo deadline-ok", "timeout_seconds": 1800}),
         ),
         (
             "exec",
-            serde_json::json!({"program": "printf", "args": ["deadline-ok"], "timeout_seconds": 1800}),
+            serde_json::json!({"program": "git", "args": ["-c", "alias.ok=!echo deadline-ok", "ok"], "timeout_seconds": 1800}),
         ),
     ] {
         let provider = home

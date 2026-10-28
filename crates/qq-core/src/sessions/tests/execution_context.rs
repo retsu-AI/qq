@@ -525,3 +525,55 @@ async fn ab1_historical_context_stays_unavailable_and_wrong_schema_is_rejected()
         "current schema without receipts must not be reinterpreted"
     );
 }
+
+#[tokio::test]
+async fn a_completed_result_past_the_context_limit_stays_durable_and_stops_the_run() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (claimed, id) = pending_process_call(
+        &store,
+        directory.path(),
+        "shell",
+        r#"{"command":"printf done"}"#,
+    )
+    .await;
+    let run = claimed.identity.run_id;
+    store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.execute(
+                "UPDATE runs SET context_base_bytes=?2, context_increment_bytes=0 WHERE id=?1",
+                params![run.to_string(), MAX_CONTEXT_BYTES - 8],
+            )?)
+        })
+        .await
+        .unwrap();
+    let commit = store
+        .finish_tool_call(
+            &claimed,
+            id,
+            "the command ran and printed this".to_owned(),
+            false,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(commit.context_exhausted);
+    let (state, result): (String, String) = store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT state, result FROM tool_calls WHERE id=?1",
+                [id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    assert_eq!(state, "completed");
+    assert_eq!(result, "the command ran and printed this");
+}

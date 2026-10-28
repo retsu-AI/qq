@@ -6,10 +6,13 @@ pub(crate) mod fetch;
 pub(crate) mod goal;
 mod lang;
 mod matching;
+#[cfg(not(target_os = "linux"))]
 mod native_exit;
 pub(crate) mod network;
 pub mod output;
 pub(crate) mod process_context;
+#[cfg(target_os = "linux")]
+pub(crate) mod process_group;
 mod read;
 mod search;
 mod shell;
@@ -37,39 +40,53 @@ pub(crate) fn parsed_shell_command(arguments: &str) -> Option<String> {
 pub(crate) use dispatch::{execute, test_executions_started};
 
 /// Runs a goal's completion check through the shell runner: in the
-/// workspace, with the process tree killed on timeout or cancellation.
-/// Returns the terminal outcome and the bounded result text.
-#[cfg(not(unix))]
+/// workspace, with the process tree killed at the check's absolute deadline
+/// or on cancellation. Returns the terminal outcome and the bounded result
+/// text.
+#[cfg(any(not(unix), test))]
 pub(crate) async fn run_goal_check_shell(
     workspace: &crate::workspace::Workspace,
     command: String,
-    deadline: std::time::Instant,
+    deadline: tokio::time::Instant,
     cancelled: crate::RunCancellation,
     producer: std::sync::Arc<crate::ProcessProducer>,
     process: &mut ToolTaskLease,
 ) -> (Option<dispatch::CommandOutcome>, String) {
-    let timeout_seconds = deadline
-        .saturating_duration_since(std::time::Instant::now())
-        .as_secs()
-        .max(1);
     let arguments = shell::ShellArgs {
         command,
         cwd: None,
-        timeout_seconds: Some(timeout_seconds),
+        timeout_seconds: None,
     };
-    let result = shell::run_shell(
+    // The check's own deadline stops the command; a relative timeout would
+    // restart the clock and round it to whole seconds.
+    let stop = crate::RunCancellation::new();
+    let policy = crate::runtime::ShellPolicy::default();
+    let stopped = ToolCancellation::new(stop.clone());
+    let run = shell::run_shell(
         workspace,
-        &crate::runtime::ShellPolicy::default(),
+        &policy,
         std::sync::Arc::default(),
         producer,
         None,
         shell::Launch::Shell(&arguments),
-        &ToolCancellation::new(cancelled),
+        &stopped,
         None,
         process,
-    )
-    .await;
-    (result.native_outcome, result.model_text)
+    );
+    tokio::pin!(run);
+    let mut expired = false;
+    let result = tokio::select! {
+        result = &mut run => result,
+        () = cancelled.cancelled() => { stop.cancel(); run.await }
+        () = tokio::time::sleep_until(deadline) => { expired = true; stop.cancel(); run.await }
+    };
+    let outcome = match result.native_outcome {
+        Some(dispatch::CommandOutcome::Cancelled) if expired => {
+            Some(dispatch::CommandOutcome::TimedOut)
+        }
+        outcome => outcome,
+    };
+    (outcome, result.model_text)
 }
 
 /// Entry points for the `search_walk` and `edit_batch` benches. Not a
@@ -5539,5 +5556,49 @@ mod tests {
             fs::read_to_string(outside.path().join("victim.txt")).unwrap(),
             "untouched\n"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod goal_check_shell_tests {
+    /// The check's absolute deadline stops a command that outlives it and
+    /// reports a timeout; a command that finishes in time keeps its exit.
+    #[tokio::test]
+    async fn goal_check_shell_keeps_the_absolute_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = crate::workspace::Workspace::open(directory.path()).unwrap();
+        let tasks = super::ToolTasks::default();
+        for (command, budget, expected) in [
+            (
+                "exit 3",
+                5_000,
+                super::dispatch::CommandOutcome::Exited { code: Some(3) },
+            ),
+            (
+                "exec tail -f /dev/null",
+                300,
+                super::dispatch::CommandOutcome::TimedOut,
+            ),
+        ] {
+            let mut lease = tasks.enter();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(budget);
+            let (outcome, _) = super::run_goal_check_shell(
+                &workspace,
+                command.to_owned(),
+                deadline,
+                crate::RunCancellation::new(),
+                std::sync::Arc::new(crate::ProcessProducer::new("test")),
+                &mut lease,
+            )
+            .await;
+            assert_eq!(outcome, Some(expected), "{command}");
+            // Stopping at the deadline itself, not a rounded or restarted
+            // relative timeout: teardown takes well under half a second.
+            assert!(
+                tokio::time::Instant::now() < deadline + std::time::Duration::from_millis(500),
+                "{command} outlived its absolute deadline"
+            );
+        }
+        tasks.drain().await.unwrap();
     }
 }

@@ -2914,7 +2914,16 @@ async fn execute_started_run(
                     )
                     .await
                 {
-                    Ok(_) => {}
+                    Ok(commit) => {
+                        if commit.context_exhausted {
+                            let Ok(teardown) = resources.stop(&mut events).await else {
+                                inner.failed.send_replace(true);
+                                return;
+                            };
+                            finish_run(&inner, &claimed, context_budget_failure(), teardown).await;
+                            return;
+                        }
+                    }
                     Err(error) => {
                         let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);

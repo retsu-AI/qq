@@ -129,7 +129,7 @@ async fn confirm_group_exit(pgid: rustix::process::Pid) -> std::io::Result<()> {
     .map_err(|_| std::io::Error::other("check group cleanup executor closed"))?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        confirm_linux_group_exit(pgid, deadline)
+        crate::tools::process_group::confirm_linux_group_exit(pgid, deadline)
     })
     .await
     .map_err(std::io::Error::other)?
@@ -155,194 +155,6 @@ pub(super) async fn confirm_reaped_group_exit(pgid: rustix::process::Pid) -> std
             "check process group did not exit",
         )
     })?
-}
-
-#[cfg(target_os = "linux")]
-fn group_member_identity(pid: u32) -> std::io::Result<Option<(i32, u64)>> {
-    let file = match std::fs::File::open(format!("/proc/{pid}/stat")) {
-        Ok(file) => file,
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound
-                || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-    read_group_member_identity(file)
-}
-
-#[cfg(target_os = "linux")]
-fn read_group_member_identity(file: std::fs::File) -> std::io::Result<Option<(i32, u64)>> {
-    use std::io::Read;
-    let mut stat = Vec::new();
-    match file.take(4097).read_to_end(&mut stat) {
-        Ok(_) => {}
-        // procfs can retain an open inode after its task is reaped. That
-        // task is gone, even though opening stat succeeded moments earlier.
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound
-                || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    }
-    if stat.len() > 4096 {
-        return Err(std::io::Error::other(
-            "check group member stat exceeds bound",
-        ));
-    }
-    let malformed = || std::io::Error::other("invalid check group member stat");
-    let delimiter = stat
-        .windows(2)
-        .rposition(|bytes| bytes == b") ")
-        .ok_or_else(malformed)?;
-    let fields = std::str::from_utf8(&stat[delimiter + 2..]).map_err(|_| malformed())?;
-    let mut fields = fields.split_ascii_whitespace();
-    let group = fields
-        .nth(2)
-        .ok_or_else(malformed)?
-        .parse()
-        .map_err(|_| malformed())?;
-    let started = fields
-        .nth(16)
-        .ok_or_else(malformed)?
-        .parse()
-        .map_err(|_| malformed())?;
-    Ok(Some((group, started)))
-}
-
-#[cfg(all(test, target_os = "linux"))]
-#[test]
-fn an_exited_process_stat_does_not_fail_group_cleanup() {
-    let mut child = std::process::Command::new("/bin/sh")
-        .env_clear()
-        .args(["-c", "read token"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let stat = std::fs::File::open(format!("/proc/{}/stat", child.id())).unwrap();
-    drop(child.stdin.take());
-    child.wait().unwrap();
-    assert_eq!(read_group_member_identity(stat).unwrap(), None);
-}
-
-#[cfg(target_os = "linux")]
-fn confirm_linux_group_exit(
-    pgid: rustix::process::Pid,
-    deadline: std::time::Instant,
-) -> std::io::Result<()> {
-    use rustix::event::{PollFd, PollFlags, Timespec, poll};
-    let mut confirmed = std::collections::HashSet::new();
-    loop {
-        let check_deadline = || {
-            deadline
-                .checked_duration_since(std::time::Instant::now())
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "check process group did not exit",
-                    )
-                })
-        };
-        check_deadline()?;
-        match rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL) {
-            Ok(()) | Err(rustix::io::Errno::SRCH) => {}
-            Err(error) => return Err(error.into()),
-        }
-        let mut members = Vec::new();
-        let mut identities = std::collections::HashSet::new();
-        for (index, entry) in std::fs::read_dir("/proc")?.enumerate() {
-            check_deadline()?;
-            if index >= 65_536 {
-                return Err(std::io::Error::other(
-                    "check group process enumeration exceeds bound",
-                ));
-            }
-            let entry = entry?;
-            let Some(pid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse::<u32>().ok())
-            else {
-                continue;
-            };
-            let Some((group, started)) = group_member_identity(pid)? else {
-                continue;
-            };
-            if group != pgid.as_raw_nonzero().get() {
-                continue;
-            }
-            if members.len() >= 4096 {
-                return Err(std::io::Error::other(
-                    "check group member count exceeds bound",
-                ));
-            }
-            let Some(process) = i32::try_from(pid)
-                .ok()
-                .and_then(rustix::process::Pid::from_raw)
-            else {
-                return Err(std::io::Error::other("invalid check group member pid"));
-            };
-            let descriptor =
-                match rustix::process::pidfd_open(process, rustix::process::PidfdFlags::empty()) {
-                    Ok(descriptor) => descriptor,
-                    Err(rustix::io::Errno::SRCH) => continue,
-                    Err(error) => return Err(error.into()),
-                };
-            match group_member_identity(pid)? {
-                None => continue,
-                Some(identity) if identity == (group, started) => {}
-                Some(_) => {
-                    return Err(std::io::Error::other(
-                        "check group member identity changed during observation",
-                    ));
-                }
-            }
-            identities.insert((pid, started));
-            members.push(descriptor);
-        }
-        // A zombie thread-group leader can still have live threads. Only
-        // pidfd readiness proves the whole process has stopped executing.
-        for member in &members {
-            loop {
-                let remaining = check_deadline()?;
-                let timeout = Timespec::try_from(remaining).map_err(std::io::Error::other)?;
-                let mut descriptors = [PollFd::new(member, PollFlags::IN)];
-                match poll(&mut descriptors, Some(&timeout)) {
-                    Err(rustix::io::Errno::INTR) => continue,
-                    Err(error) => return Err(error.into()),
-                    Ok(_)
-                        if descriptors[0]
-                            .revents()
-                            .intersects(PollFlags::IN | PollFlags::HUP) =>
-                    {
-                        break;
-                    }
-                    Ok(0) => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "check group member did not exit",
-                        ));
-                    }
-                    Ok(_) => {
-                        return Err(std::io::Error::other(
-                            "unexpected check group member readiness",
-                        ));
-                    }
-                }
-            }
-        }
-        // A complete rescan closes the fork-during-enumeration window.
-        // The unreaped leader pins pgid throughout every kill and scan.
-        if identities.is_subset(&confirmed) {
-            return Ok(());
-        }
-        confirmed = identities;
-    }
 }
 
 /// Runs the check command in the workspace as the user, killing its process
@@ -1369,7 +1181,7 @@ async fn run_host_process(
     let (outcome, text) = crate::tools::run_goal_check_shell(
         &workspace,
         command,
-        deadline.into_std(),
+        deadline,
         cancellation,
         producer,
         &mut lease,

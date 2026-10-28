@@ -565,11 +565,7 @@ pub(super) async fn run_shell(
                 hint.as_deref(),
             ),
             ShellOutcome::Exited(Err(error)) => {
-                if super::native_exit::confirmed_launch_failure(&error) {
-                    ToolOutput::refused(error.to_string())
-                } else {
-                    ToolOutput::unobserved(format!("could not observe the command exit: {error}"))
-                }
+                ToolOutput::unobserved(format!("could not observe the command exit: {error}"))
             }
             ShellOutcome::ReadFailed { stream, source } => {
                 if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
@@ -651,11 +647,7 @@ pub(super) async fn confirm_child_exit(
     guard: &mut ProcessGroupGuard,
     process: &mut super::ToolTaskLease,
 ) -> std::io::Result<std::process::ExitStatus> {
-    if status.is_ok()
-        || status
-            .as_ref()
-            .is_err_and(super::native_exit::confirmed_launch_failure)
-    {
+    if status.is_ok() {
         guard.confirm_stopped().await?;
         process.process_reaped();
     }
@@ -696,7 +688,6 @@ async fn stop_shell(
             }
             Ok(())
         }
-        Err(error) if super::native_exit::confirmed_launch_failure(&error) => Ok(()),
         Err(error) => Err(format!("could not confirm the command exit: {error}")),
     }
 }
@@ -910,7 +901,18 @@ impl ProcessGroupGuard {
     }
 
     async fn confirm_stopped(&self) -> std::io::Result<()> {
-        #[cfg(unix)]
+        // Zombie descendants count as stopped: a container's PID 1 may never
+        // reap them, and signal zero would keep finding the group.
+        #[cfg(target_os = "linux")]
+        if let Some(pgid) = self.killed_pgid {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            return tokio::task::spawn_blocking(move || {
+                super::process_group::confirm_linux_group_exit(pgid, deadline)
+            })
+            .await
+            .map_err(std::io::Error::other)?;
+        }
+        #[cfg(all(unix, not(target_os = "linux")))]
         if let Some(pgid) = self.killed_pgid {
             let result =
                 super::native_exit::confirm(

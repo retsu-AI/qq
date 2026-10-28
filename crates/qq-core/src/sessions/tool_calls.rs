@@ -114,9 +114,9 @@ pub(super) fn finish_tool_call(
     display: Option<ToolCallDisplay>,
     spill: Option<crate::tools::SpillRecord>,
     execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
-) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+) -> Result<ToolCallCommit, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    let event = finish_tool_call_in_transaction(
+    let commit = finish_tool_call_in_transaction(
         &transaction,
         store_id,
         identity,
@@ -129,7 +129,14 @@ pub(super) fn finish_tool_call(
         execution_context,
     )?;
     transaction.commit()?;
-    Ok(event)
+    Ok(commit)
+}
+
+/// A settled tool result. `context_exhausted` means the result is durable
+/// but cannot enter model context, so the run must stop before another turn.
+#[derive(Debug)]
+pub(super) struct ToolCallCommit {
+    pub(super) context_exhausted: bool,
 }
 
 #[expect(
@@ -147,7 +154,7 @@ pub(super) fn finish_tool_call_in_transaction(
     display: Option<ToolCallDisplay>,
     spill: Option<crate::tools::SpillRecord>,
     execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
-) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+) -> Result<ToolCallCommit, SessionRuntimeError> {
     let (provider_call_id, tool_name, first_result_in_turn, recorded_context) = transaction
         .query_row(
             "SELECT current.provider_call_id, current.name,
@@ -176,15 +183,21 @@ pub(super) fn finish_tool_call_in_transaction(
     // provider call id does enter the next ToolResult block and is counted.
     // Completion checks have no provider turn. Their bounded result is audit
     // evidence; only the goal notice may enter a later model context.
-    if identity.kind != RunKind::GoalCheck {
-        reserve_tool_result_capacity(
+    // A result that ran is durable even when it cannot enter model context:
+    // the call settles with its real outcome, and the caller then stops the
+    // run for context exhaustion instead of another model turn.
+    let context_exhausted = identity.kind != RunKind::GoalCheck
+        && match reserve_tool_result_capacity(
             transaction,
             identity.run_id,
             &provider_call_id,
             &result,
             first_result_in_turn,
-        )?;
-    }
+        ) {
+            Ok(()) => false,
+            Err(SessionRuntimeError::OutputTooLarge) => true,
+            Err(error) => return Err(error),
+        };
     let now = now_ms();
     let state = if is_error { "failed" } else { "completed" };
     let display_json = display.as_ref().map(serde_json::to_string).transpose()?;
@@ -240,12 +253,12 @@ pub(super) fn finish_tool_call_in_transaction(
         store_tool_spill(transaction, identity, tool_call_id, &tool_name, spill, now)?;
     }
     let tool_call = load_tool_call(transaction, tool_call_id)?;
-    let event = append_event(
+    append_event(
         transaction,
         EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolCallFinished { tool_call },
     )?;
-    Ok(event)
+    Ok(ToolCallCommit { context_exhausted })
 }
 
 /// Writes one complete output under its call. Past the per-session cap, the

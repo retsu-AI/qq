@@ -6,16 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Debug, thiserror::Error)]
-#[error("native payload launch failed before process creation")]
-pub(super) struct LaunchNotStarted;
-
-pub(super) fn confirmed_launch_failure(error: &io::Error) -> bool {
-    error
-        .get_ref()
-        .is_some_and(|source| source.is::<LaunchNotStarted>())
-}
-
 pub(super) async fn confirm(
     mut stopped: impl FnMut() -> io::Result<bool> + Send + 'static,
 ) -> io::Result<()> {
