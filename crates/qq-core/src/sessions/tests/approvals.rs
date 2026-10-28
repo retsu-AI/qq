@@ -934,13 +934,20 @@ async fn cancelling_a_run_interrupts_the_running_shell_call() {
         .await
         .unwrap();
     let observed = collect_through_finished_generously(&mut harness.events).await;
-    assert!(observed.iter().any(|event| matches!(
-        &event.event,
-        SessionEvent::ToolCallFinished { tool_call: finished }
-            if finished.id == tool_call.id
-                && finished.state == ToolCallState::Interrupted
-                && finished.result.as_deref() == Some(INTERRUPTED_TOOL_RESULT)
-    )));
+    // The command ran, so its real result settles the call: what it
+    // printed before the cancel, not an interrupted placeholder.
+    assert!(
+        observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::ToolCallFinished { tool_call: finished }
+                if finished.id == tool_call.id
+                    && finished.state == ToolCallState::Failed
+                    && finished.result.as_deref().is_some_and(|result| {
+                        result.starts_with("shell exit=cancelled ") && result.contains("running")
+                    })
+        )),
+        "{observed:?}"
+    );
     assert!(matches!(
         &observed.last().unwrap().event,
         SessionEvent::RunFinished {
@@ -1024,8 +1031,11 @@ async fn cancelling_with_buffered_tool_output_drops_it_before_terminal_settlemen
                 &event.event,
                 SessionEvent::ToolCallFinished { tool_call: finished }
                     if finished.id == tool_call.id
-                        && finished.state == ToolCallState::Interrupted
-                        && finished.result.as_deref() == Some(INTERRUPTED_TOOL_RESULT)
+                        && finished.state == ToolCallState::Failed
+                        && finished.result.as_deref().is_some_and(|result| {
+                            result.starts_with("shell exit=cancelled ")
+                                && result.contains("buffered-output")
+                        })
             )
         })
         .unwrap();

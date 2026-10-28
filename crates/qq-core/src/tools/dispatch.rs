@@ -39,6 +39,10 @@ pub(crate) struct ToolTasks(Arc<ToolTaskState>);
 #[derive(Default)]
 struct ToolTaskState {
     process_recorder: OnceLock<ProcessRecorder>,
+    /// Finished command results, kept until the run persists them: a
+    /// cancelled or expired run drops the event stream that would have
+    /// carried them, but the command did run.
+    finished: std::sync::Mutex<std::collections::HashMap<qq_protocol::ToolCallId, ToolOutput>>,
     unrecorded_process: AtomicBool,
     active: AtomicUsize,
     idle: Notify,
@@ -66,6 +70,34 @@ pub enum ToolDrainError {
 }
 
 impl ToolTasks {
+    /// The result of a command that finished, if it was not yet persisted.
+    pub(crate) fn finished_result(&self, id: qq_protocol::ToolCallId) -> Option<ToolOutput> {
+        self.0
+            .finished
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id)
+            .cloned()
+    }
+
+    pub(crate) fn forget_finished(&self, id: qq_protocol::ToolCallId) {
+        self.0
+            .finished
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
+    }
+
+    /// Every finished command result not yet persisted, for run teardown.
+    pub(crate) fn take_finished(&self) -> Vec<(qq_protocol::ToolCallId, ToolOutput)> {
+        self.0
+            .finished
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .collect()
+    }
+
     pub(crate) fn set_process_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
     where
         F: Fn(qq_protocol::ToolCallId, Box<super::process_context::ExecutionContextReceipt>) -> Fut
@@ -119,6 +151,14 @@ pub(crate) struct ToolTaskLease {
 }
 
 impl ToolTaskLease {
+    fn save_finished(&self, id: qq_protocol::ToolCallId, result: &ToolOutput) {
+        self.tasks
+            .finished
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, result.clone());
+    }
+
     /// Keep native startup and its child tracked if the awaiting task unwinds.
     #[cfg(windows)]
     pub(super) fn fork(&self) -> Self {
@@ -208,6 +248,10 @@ impl ToolCancellation {
             run,
             call: Arc::new(CallCancellation::default()),
         }
+    }
+
+    pub(crate) fn timed_out(&self) -> bool {
+        self.run.timed_out()
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
@@ -346,7 +390,7 @@ pub(crate) async fn execute_with_images(
                 (_, Some(exec)) => Launch::Exec(exec),
                 (None, None) => unreachable!("one launch shape was parsed"),
             };
-            run_shell(
+            let result = run_shell(
                 &workspace,
                 &shell_policy,
                 approved_read_images,
@@ -357,7 +401,13 @@ pub(crate) async fn execute_with_images(
                 output.as_ref(),
                 &mut lease,
             )
-            .await
+            .await;
+            if let Some(id) = call_id
+                && result.native_outcome.is_some()
+            {
+                lease.save_finished(id, &result);
+            }
+            result
         })
         .await
         {

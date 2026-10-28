@@ -479,6 +479,7 @@ pub(super) async fn run_shell(
     // once per output chunk, and re-creating either per iteration would
     // re-register on each of them.
     let mut timeout = std::pin::pin!(wait_for_command_deadline(command_deadline));
+    let cancellation = cancelled;
     let mut cancelled = std::pin::pin!(cancelled.cancelled());
 
     let outcome = loop {
@@ -488,16 +489,14 @@ pub(super) async fn run_shell(
             && (buffered_output.len() >= SHELL_READ_CHUNK_BYTES
                 || (stdout.is_none() && stderr.is_none()))
         {
-            forward_shell_chunk(output, &mut streamed, &buffered_output);
-            buffered_output.clear();
+            forward_shell_chunk(output, &mut streamed, &mut buffered_output, false);
         }
         tokio::select! {
             biased;
             () = &mut cancelled => break ShellOutcome::Cancelled,
             () = &mut timeout => break ShellOutcome::TimedOut,
             () = &mut output_flush, if !buffered_output.is_empty() => {
-                forward_shell_chunk(output, &mut streamed, &buffered_output);
-                buffered_output.clear();
+                forward_shell_chunk(output, &mut streamed, &mut buffered_output, false);
             }
             read = read_from(&mut stdout, &mut stdout_buffer), if stdout.is_some() => {
                 #[cfg(test)]
@@ -553,6 +552,12 @@ pub(super) async fn run_shell(
         }
     };
 
+    // The run's own time limit stops the command as a timeout, not a cancel.
+    let run_expired = cancellation.timed_out();
+    let outcome = match outcome {
+        ShellOutcome::Cancelled if run_expired => ShellOutcome::TimedOut,
+        outcome => outcome,
+    };
     let elapsed = started.elapsed();
     let result = async {
         match outcome {
@@ -593,7 +598,7 @@ pub(super) async fn run_shell(
                 if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
                     return ToolOutput::unobserved(message);
                 }
-                let reason = match timeout_seconds {
+                let reason = match timeout_seconds.filter(|_| !run_expired) {
                     Some(seconds) => format!(
                         "command timed out after {seconds} s; its process group was killed"
                     ),
@@ -634,7 +639,7 @@ pub(super) async fn run_shell(
     // Cancellation and read failures also keep the bounded tail, after the
     // process has stopped.
     if !buffered_output.is_empty() {
-        forward_shell_chunk(output, &mut streamed, &buffered_output);
+        forward_shell_chunk(output, &mut streamed, &mut buffered_output, true);
     }
     let mut result = result;
     result.execution_context = receipt;
@@ -699,7 +704,23 @@ pub(super) fn shell_command(command: &str) -> tokio::process::Command {
     shell
 }
 
-#[cfg(not(unix))]
+/// `cmd /D /S /C "<text>"`, passed raw: `/S` strips exactly the outer pair
+/// of quotes and cmd parses the text unchanged, where the C runtime's
+/// backslash escaping would turn its quotes into literals. `/D` skips the
+/// user's registry AutoRun commands.
+#[cfg(windows)]
+pub(super) fn shell_command(command: &str) -> tokio::process::Command {
+    let mut shell = tokio::process::Command::new("cmd");
+    shell.raw_arg(cmd_arguments(command));
+    shell
+}
+
+#[cfg(any(windows, test))]
+fn cmd_arguments(command: &str) -> String {
+    format!("/D /S /C \"{command}\"")
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(super) fn shell_command(command: &str) -> tokio::process::Command {
     let mut shell = tokio::process::Command::new("cmd");
     shell.arg("/C").arg(command);
@@ -727,15 +748,26 @@ where
 
 /// Forwards one raw output chunk as a lossy UTF-8 delta, bounded by the same
 /// budget as the captured result so a runaway command cannot flood clients.
+/// Sends and drains `buffered`, except an incomplete UTF-8 sequence at its
+/// end, which waits for the next read so a character split across reads is
+/// not shown as two replacement characters. `last` sends everything.
 pub(super) fn forward_shell_chunk(
     output: Option<&mpsc::Sender<String>>,
     streamed: &mut usize,
-    bytes: &[u8],
+    buffered: &mut Vec<u8>,
+    last: bool,
 ) {
+    let split = if last {
+        buffered.len()
+    } else {
+        incomplete_utf8_start(buffered)
+    };
+    let held = buffered.split_off(split);
+    let bytes = std::mem::replace(buffered, held);
     let Some(sender) = output else {
         return;
     };
-    if *streamed >= MAX_SHELL_OUTPUT_BYTES {
+    if *streamed >= MAX_SHELL_OUTPUT_BYTES || bytes.is_empty() {
         return;
     }
     let remaining = MAX_SHELL_OUTPUT_BYTES - *streamed;
@@ -749,6 +781,29 @@ pub(super) fn forward_shell_chunk(
         Err(mpsc::error::TrySendError::Full(_)) => *streamed += bytes.len(),
         Err(mpsc::error::TrySendError::Closed(_)) => *streamed = MAX_SHELL_OUTPUT_BYTES,
     }
+}
+
+/// Where a UTF-8 sequence that the next read may complete begins: the start
+/// of an unfinished multibyte character in the last three bytes, else the end.
+fn incomplete_utf8_start(bytes: &[u8]) -> usize {
+    for back in 1..=bytes.len().min(3) {
+        let byte = bytes[bytes.len() - back];
+        if byte & 0b1100_0000 == 0b1000_0000 {
+            continue;
+        }
+        let width = match byte {
+            0b1100_0000..=0b1101_1111 => 2,
+            0b1110_0000..=0b1110_1111 => 3,
+            0b1111_0000..=0b1111_0111 => 4,
+            _ => 1,
+        };
+        return if width > back {
+            bytes.len() - back
+        } else {
+            bytes.len()
+        };
+    }
+    bytes.len()
 }
 
 /// `<tool> exit=<why> elapsed=<s> bytes=<n>`, the captured output, then the
@@ -1338,5 +1393,56 @@ mod orphan_tests {
                 std::thread::park_timeout(std::time::Duration::from_millis(10));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cmd_text_tests {
+    #[test]
+    fn cmd_gets_the_shell_text_unescaped_without_autorun() {
+        assert_eq!(
+            super::cmd_arguments(r#"echo "a b" > "out file.txt""#),
+            r#"/D /S /C "echo "a b" > "out file.txt"""#
+        );
+    }
+
+    /// Quoted paths reach cmd unchanged; the C runtime's `\"` escaping
+    /// would make cmd write a file named with literal backslashes.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn quoted_redirection_reaches_cmd_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let status = super::shell_command(r#"echo quoted> "out file.txt""#)
+            .current_dir(directory.path())
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("out file.txt")).unwrap(),
+            "quoted\r\n"
+        );
+    }
+}
+
+#[cfg(test)]
+mod live_output_tests {
+    #[test]
+    fn a_character_split_across_reads_arrives_whole() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let mut streamed = 0;
+        let mut buffered = "a é".as_bytes()[..3].to_vec();
+        super::forward_shell_chunk(Some(&sender), &mut streamed, &mut buffered, false);
+        assert_eq!(receiver.try_recv().unwrap(), "a ");
+        assert_eq!(buffered, [0xc3]);
+        buffered.extend_from_slice(&[0xa9, b'!']);
+        super::forward_shell_chunk(Some(&sender), &mut streamed, &mut buffered, false);
+        assert_eq!(receiver.try_recv().unwrap(), "é!");
+        assert!(buffered.is_empty());
+        // At the end nothing more can complete it.
+        buffered.push(0xe2);
+        super::forward_shell_chunk(Some(&sender), &mut streamed, &mut buffered, true);
+        assert_eq!(receiver.try_recv().unwrap(), "\u{fffd}");
+        assert!(buffered.is_empty());
     }
 }

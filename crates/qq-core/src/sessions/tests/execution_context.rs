@@ -85,6 +85,23 @@ async fn command_receipt_is_durable_before_live_output_and_survives_reopen() {
             finished, live,
             "completion and reopen must retain the same process identity"
         );
+        // A cancelled command ran: its captured output is the durable result.
+        let result: String = connection
+            .query_row(
+                "SELECT result FROM tool_calls WHERE run_id=?1",
+                [run.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let expected = if cancel {
+            "shell exit=cancelled "
+        } else {
+            "shell exit=0 "
+        };
+        assert!(
+            result.starts_with(expected) && result.contains("ready"),
+            "{result}"
+        );
     }
 }
 

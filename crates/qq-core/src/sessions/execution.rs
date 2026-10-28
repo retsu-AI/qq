@@ -146,13 +146,13 @@ pub(super) enum ExecutionCleanupError {
 /// to settle a started run, so a terminal event cannot be published while
 /// execution is still in flight; only `RunResources::drain` / `stop` mint it.
 #[derive(Clone, Debug)]
-pub(super) struct TeardownComplete(());
+pub(super) struct TeardownComplete(Vec<(ToolCallId, crate::tools::ToolOutput)>);
 
 impl TeardownComplete {
     /// Store-level tests settle claims that never ran anything.
     #[cfg(test)]
     pub(super) const fn nothing_ran() -> Self {
-        Self(())
+        Self(Vec::new())
     }
 }
 
@@ -179,7 +179,7 @@ impl RunResources {
     pub(super) async fn drain(&self) -> Result<TeardownComplete, ExecutionCleanupError> {
         let (tools, children) = tokio::join!(self.tools.drain(), self.children.drain());
         match (tools, children) {
-            (Ok(()), Ok(_)) => Ok(TeardownComplete(())),
+            (Ok(()), Ok(_)) => Ok(TeardownComplete(self.tools.take_finished())),
             (Err(error), _) => Err(ExecutionCleanupError::Tools(error)),
             (_, Err(error)) => Err(ExecutionCleanupError::Children(error)),
         }
@@ -2915,6 +2915,7 @@ async fn execute_started_run(
                     .await
                 {
                     Ok(commit) => {
+                        resources.tools.forget_finished(id);
                         if commit.context_exhausted {
                             let Ok(teardown) = resources.stop(&mut events).await else {
                                 inner.failed.send_replace(true);
@@ -3623,13 +3624,67 @@ pub(super) async fn finish_run(
     finish_run_accounted(inner, claimed, outcome, None, teardown).await;
 }
 
+/// Persists commands that finished after the run stopped listening: a
+/// cancelled or expired run drops the stream that would have carried their
+/// results, but they ran, so their real results precede settlement.
+pub(super) async fn persist_finished_results(
+    inner: &SessionRuntimeInner,
+    claimed: &ClaimedRun,
+    teardown: &mut TeardownComplete,
+) -> Result<(), SessionRuntimeError> {
+    for (id, result) in std::mem::take(&mut teardown.0) {
+        let result = if result.spill.is_some() {
+            let run_id = claimed.identity.run_id;
+            let tool: String = inner
+                .store
+                .call(super::store::Priority::Control, move |connection| {
+                    Ok(connection.query_row(
+                        "SELECT name FROM tool_calls WHERE id=?1 AND run_id=?2",
+                        params![id.to_string(), run_id.to_string()],
+                        |row| row.get(0),
+                    )?)
+                })
+                .await?;
+            crate::cite_spill(result, &tool, id, true)
+        } else {
+            result
+        };
+        match inner
+            .store
+            .finish_tool_call(
+                claimed,
+                id,
+                result.model_text,
+                result.is_error,
+                result.file_states,
+                result.ui_payload,
+                result.spill,
+                result.execution_context,
+            )
+            .await
+        {
+            // Already settled through the event stream.
+            Ok(_) | Err(SessionRuntimeError::ToolCallNotFound) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 async fn finish_run_accounted(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
     outcome: RunOutcome,
     accounting: Option<RunAccounting>,
-    teardown: TeardownComplete,
+    mut teardown: TeardownComplete,
 ) {
+    if persist_finished_results(inner, claimed, &mut teardown)
+        .await
+        .is_err()
+    {
+        inner.failed.send_replace(true);
+        return;
+    }
     if matches!(&outcome, RunOutcome::BudgetExhausted { exhaustion }
         if exhaustion.limit == qq_protocol::BudgetLimitKind::Duration)
         && approvals::expire_goal_hold(inner, claimed, false)

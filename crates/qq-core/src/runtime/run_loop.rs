@@ -3797,7 +3797,8 @@ impl RunState {
                             for (index, call) in calls.iter().enumerate() {
                                 if results[index].is_none() {
                                     if started_calls[index] {
-                                        let result = tools::ToolOutput::interrupted(INTERRUPTED_TOOL_RESULT.to_owned());
+                                        let result = tool_tasks.finished_result(call.id)
+                                            .unwrap_or_else(|| tools::ToolOutput::interrupted(INTERRUPTED_TOOL_RESULT.to_owned()));
                                         let result = cite_spill(result, &call.name, call.id, spills.is_some());
                                         results[index] = Some(RetainedResult::retain(&result, &call.name, call.id));
                                         yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {

@@ -114,8 +114,20 @@ pub(super) async fn schedule_runs(
                         .await;
                         if execution.is_err() {
                             match resources.drain().await {
-                                Ok(_) => {
-                                    settle_panicked_execution(&task_inner, &panic_claimed).await;
+                                Ok(mut teardown) => {
+                                    if execution::persist_finished_results(
+                                        &task_inner,
+                                        &panic_claimed,
+                                        &mut teardown,
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        task_inner.failed.send_replace(true);
+                                    } else {
+                                        settle_panicked_execution(&task_inner, &panic_claimed)
+                                            .await;
+                                    }
                                 }
                                 Err(_) => {
                                     task_inner.failed.send_replace(true);
