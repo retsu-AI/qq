@@ -1,12 +1,12 @@
-//! Per-plan shell policy: which environment variables a `shell`/`exec` call
-//! may request into a cleared child environment, and how hard the runtime
-//! steers the model from shell habits toward the bounded built-ins. Set by
-//! the application from configuration; core never sees the document.
+//! Per-plan shell policy: managed command-prefix denials and how hard the
+//! runtime steers the model from shell habits toward the bounded built-ins.
+//! Set by the application from configuration; core never sees the document.
 
 use std::sync::Arc;
 
-/// Variables every child starts with regardless of the allowlist: enough
-/// for a program to find its tools, home, locale, terminal, and scratch.
+/// Variables a verified read starts with, its environment otherwise cleared:
+/// enough for a program to find its tools, home, locale, terminal, and
+/// scratch. Every other command inherits the whole environment.
 #[cfg(not(windows))]
 pub const BASE_ENV: [&str; 5] = ["PATH", "HOME", "LANG", "TERM", "TMPDIR"];
 /// Windows loaders require SYSTEMROOT and AppContainer startup requires
@@ -23,10 +23,6 @@ pub const BASE_ENV: [&str; 7] = [
     "SYSTEMROOT",
     "LOCALAPPDATA",
 ];
-/// Names a call may request per invocation.
-pub const MAX_SHELL_ENV_NAMES: usize = 16;
-/// Names the allowlist may hold.
-pub const MAX_SHELL_ENV_ALLOWLIST: usize = 64;
 
 /// How the runtime treats a shell command whose first program has a bounded
 /// built-in equivalent (`grep` → `search`, `cat` → `read_file`, …).
@@ -45,9 +41,6 @@ pub enum BuiltinPreference {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShellPolicy {
-    /// Environment variable names a call may pass through from the server's
-    /// environment, beyond [`BASE_ENV`]. Sorted, deduplicated, validated.
-    pub env_allowlist: Arc<[String]>,
     pub builtin_preference: BuiltinPreference,
     /// Explicit literal command-prefix controls, independent of approval mode.
     /// These are not filesystem or network containment boundaries.
@@ -58,17 +51,9 @@ pub struct ShellPolicy {
 impl Default for ShellPolicy {
     fn default() -> Self {
         Self {
-            env_allowlist: Arc::from([]),
             builtin_preference: BuiltinPreference::default(),
             deny_prefixes: Arc::from([]),
         }
-    }
-}
-
-impl ShellPolicy {
-    /// Whether a call may request `name`. Base names are always allowed.
-    pub(crate) fn permits_env(&self, name: &str) -> bool {
-        BASE_ENV.contains(&name) || self.env_allowlist.iter().any(|allowed| allowed == name)
     }
 }
 
@@ -237,16 +222,6 @@ impl ApprovedReadImages {
     }
 }
 
-/// A valid environment variable name: `[A-Za-z_][A-Za-z0-9_]*`, ≤ 128 bytes.
-pub fn valid_env_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 128
-        && !name.as_bytes()[0].is_ascii_digit()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-}
-
 /// A hint may name an equivalent without claiming the shell is replaceable.
 /// Prefixed or compound commands and uncertain paths still need the shell.
 pub(crate) struct BuiltinAlternative {
@@ -366,24 +341,6 @@ mod tests {
         ] {
             assert!(value.parse::<ApprovedReadImage>().is_err(), "{value}");
         }
-    }
-
-    #[test]
-    fn env_names_are_validated_and_base_names_always_pass() {
-        for ok in ["PATH", "_X", "CARGO_HOME", "a1"] {
-            assert!(valid_env_name(ok), "{ok}");
-        }
-        for bad in ["", "1A", "A-B", "A B", "A=B", &"X".repeat(129)] {
-            assert!(!valid_env_name(bad), "{bad}");
-        }
-        let policy = ShellPolicy {
-            env_allowlist: Arc::from(["CARGO_HOME".to_owned()]),
-            builtin_preference: BuiltinPreference::Hint,
-            ..Default::default()
-        };
-        assert!(policy.permits_env("PATH"));
-        assert!(policy.permits_env("CARGO_HOME"));
-        assert!(!policy.permits_env("AWS_SECRET_ACCESS_KEY"));
     }
 
     #[test]

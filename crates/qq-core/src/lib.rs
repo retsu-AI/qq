@@ -86,9 +86,8 @@ pub use runtime::{
     AUDIT_TOOL_CALL_THRESHOLD, ApprovedReadImage, ApprovedReadImages, AuditMode, AuditPolicy,
     AuditRequest, AuditVerdict, AuditedAction, BASE_ENV, BuiltinPreference, MAX_AUDIT_ACTION_BYTES,
     MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS, MAX_AUDIT_CHILD_TURNS,
-    MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, MAX_SHELL_ENV_ALLOWLIST,
-    MAX_SHELL_ENV_NAMES, ReadImageApprovalError, ReadImageContract, ReadImageFamily, ShellPolicy,
-    valid_env_name,
+    MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, ReadImageApprovalError,
+    ReadImageContract, ReadImageFamily, ShellPolicy,
 };
 pub use sessions::{
     GoalCheckPolicyError, GoalCheckPolicyFuture, GoalPolicy, GoalPolicyError, GoalPolicyFuture,
@@ -9710,18 +9709,19 @@ mod tests {
             None,
             None,
         );
-        // Prompt 25 changes write-child guidance (absent here). Prompt 24
+        // Prompt 26 changes execution guidance again; prompt 25 changes
+        // write-child guidance (absent here). Prompt 24
         // drops the workspace root from the header; prompt 23
         // changes execution, questions and public-fetch guidance. Undo those
         // declared changes before checking the historical v14 bytes.
-        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 25);
+        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 26);
         let prompt = prompt
             .replacen(
                 "operating in a workspace.\n",
                 "operating in the workspace rooted at /tmp/qq-prompt-test.\n",
                 1,
             )
-            .replacen("run commands under the host filesystem, network and environment policy, using the task deadline or an earlier explicit timeout. Native Auto preserves normal installed-tool configuration; explicit credential environment names require a policy grant. Auto never waits for human approval: a denied call is a tool error, so choose another permitted approach without bypassing the boundary. Ask may require human approval; ", "run one command in the workspace with a bounded timeout and may require user approval; the child starts from a cleared environment (PATH HOME LANG TERM TMPDIR) plus names you list in env that policy allows, and commands the policy classifies as forbidden (rm -rf on system paths, sudo, curl | sh, force-push, …) are refused under every approval mode; ", 1)
+            .replacen("run commands in the workspace as the user, with the inherited environment and host network, using the task deadline or an earlier explicit timeout. Auto never waits for human approval: a denied call is a tool error, so choose another permitted approach without bypassing the boundary. Ask may require human approval; ", "run one command in the workspace with a bounded timeout and may require user approval; the child starts from a cleared environment (PATH HOME LANG TERM TMPDIR) plus names you list in env that policy allows, and commands the policy classifies as forbidden (rm -rf on system paths, sudo, curl | sh, force-push, …) are refused under every approval mode; ", 1)
             .replacen("ask_user asks a bounded multiple-choice question when human input is enabled; in Auto it returns a result telling you to decide without human input; ", "ask_user puts a bounded multiple-choice question to the user and waits for the answer; ", 1)
             .replacen("fetch reads one public http(s) URL (HTML as markdown, JSON formatted). Auto needs no per-host approval; Ask requires human approval. Private, link-local and managed-denied hosts are refused.", "fetch reads one public http(s) URL (HTML as markdown, JSON formatted) and may require approval for the host; private and link-local hosts are refused.", 1);
         // Reconstruct v19 by undoing AB2's explicitly scoped changes; the

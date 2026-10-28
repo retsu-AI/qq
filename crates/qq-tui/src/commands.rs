@@ -29,10 +29,6 @@ pub(crate) enum Command {
     /// Choose reasoning effort for the focused session, or the default for
     /// new sessions. Pins the next run; `default` restores config/profile.
     OpenEffort,
-    /// Choose who settles the focused session's held calls for the rest of
-    /// the session: the configured delegate, or an override such as `off`
-    /// ("stop delegating"). Read at the next held call; no restart.
-    OpenDelegate,
     /// List the workspace's commands and skills as the server indexes them.
     OpenSkills,
     OpenThemes,
@@ -156,7 +152,7 @@ macro_rules! spec {
 
 /// Presentation order is invocation frequency within a category, and the
 /// palette shows categories in this order too.
-pub(crate) const COMMANDS: [CommandSpec; 45] = [
+pub(crate) const COMMANDS: [CommandSpec; 44] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -317,13 +313,6 @@ pub(crate) const COMMANDS: [CommandSpec; 45] = [
         "choose reasoning effort",
         Model,
         ["/effort"],
-        []
-    ),
-    spec!(
-        OpenDelegate,
-        "choose who settles held approvals",
-        Model,
-        ["/delegate"],
         []
     ),
     spec!(

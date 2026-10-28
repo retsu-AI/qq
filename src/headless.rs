@@ -19,11 +19,11 @@ use std::{
 use futures_util::StreamExt;
 use qq_core::{SessionRuntime, SessionRuntimeError};
 use qq_protocol::{
-    ApprovalDecision, ApprovalGrant, ApprovalMode, ApprovalResolution, BudgetLimitKind, CommandId,
-    CommandOutcome, CommandReceipt, ContentHash, HeadlessOutcome, HeadlessRecordRef, HeadlessTrial,
-    InputPart, ModelSelection, RunId, RunLimits, RunOutcome, RunPromptIdentity, SessionAccounting,
-    SessionCommand, SessionEvent, SessionEventEnvelope, SessionId, ShellCommandPreview,
-    SnapshotRequest, SubscribeRequest, TokenUsage, ToolCallState, WorkspaceId,
+    ApprovalDecision, ApprovalMode, BudgetLimitKind, CommandId, CommandOutcome, CommandReceipt,
+    ContentHash, HeadlessOutcome, HeadlessRecordRef, HeadlessTrial, InputPart, ModelSelection,
+    RunId, RunLimits, RunOutcome, RunPromptIdentity, SessionAccounting, SessionCommand,
+    SessionEvent, SessionEventEnvelope, SessionId, SnapshotRequest, SubscribeRequest, TokenUsage,
+    ToolCallState, WorkspaceId,
 };
 pub use qq_protocol::{HeadlessApproval, HeadlessStatus};
 use sha2::{Digest, Sha256};
@@ -32,13 +32,6 @@ use tokio::time::Instant;
 /// How long a cancelled run may take to reach its terminal durable event
 /// before the invocation gives up and reports a harness failure.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
-/// How long an `auto` headless run holds an escalated approval open for the
-/// configured delegate before denying it. Covers the reviewer model's own
-/// 10 s bound with margin. A delegate's
-/// `approve` and `deny` both settle the call themselves; this deny is the
-/// unattended answer to an `escalate`, a delegate timeout, or an outage, so
-/// the run never stalls. Without a delegate configured the deny is immediate.
-const REVIEWER_DENY_GRACE: Duration = Duration::from_secs(20);
 /// Steering lines buffered between stdin and the run. Beyond this the reader
 /// waits; the runtime's own per-run pending bound refuses the rest anyway.
 pub const MAX_PENDING_STEER_LINES: usize = 8;
@@ -65,26 +58,6 @@ pub struct HeadlessOptions {
     pub approval: HeadlessApproval,
     /// Whether the invocation explicitly overrides a resumed session's mode.
     pub approval_explicit: bool,
-    /// Whether a held call has an approval delegate that exists: a
-    /// configured `reviewer_model`.
-    /// Whether one is *consulted* also depends on `approval_delegate`, which
-    /// the run applies with the session's own override (see
-    /// `configured_delegate`). With a consulted delegate, `auto` holds an
-    /// escalated call briefly so the delegate can approve it, instead of
-    /// denying the moment the request is published.
-    pub reviewer_configured: bool,
-    /// The resolved `approval_delegate` setting (override, profile, top
-    /// level). A resumed session's persisted override wins over it, exactly
-    /// as the session gate applies it.
-    pub configured_delegate: qq_protocol::ApprovalDelegate,
-    /// Tools whose held calls are approved for the session on first request.
-    pub allow_tools: Vec<String>,
-    /// Shell prefixes (word-boundary, as the policy matches them) whose held
-    /// commands are approved for the session on first request.
-    pub allow_shell_prefixes: Vec<String>,
-    /// Hosts (exact or `*.suffix`) whose held `fetch` calls are approved for
-    /// the session on first request.
-    pub allow_hosts: Vec<String>,
     pub timeout: Option<Duration>,
     pub max_turns: Option<u32>,
     pub max_cost_usd_nanos: Option<u64>,
@@ -268,8 +241,6 @@ struct SessionHandle {
     workspace_id: WorkspaceId,
     session_id: SessionId,
     subscribe_after: qq_protocol::EventCursor,
-    wait_for_delegate: bool,
-    child_waits_for_delegate: bool,
 }
 
 #[derive(Clone)]
@@ -279,11 +250,6 @@ struct RunHandle {
     session_id: SessionId,
     run_id: RunId,
     subscribe_after: qq_protocol::EventCursor,
-    /// A held root call under `auto` waits for a delegate rather than being
-    /// denied at once (see `submit`).
-    wait_for_delegate: bool,
-    /// The same for an owned child's held call (supervised mode).
-    child_waits_for_delegate: bool,
 }
 
 struct AcceptedRunGuard {
@@ -585,7 +551,6 @@ pub async fn run_goal(
                                     let body = recovery_snapshot(sessions, handle.workspace_id, session).await?.focused
                                         .ok_or_else(|| Failure::harness("approval session has no snapshot body"))?;
                                     for hold in &body.summary.pending_holds {
-                                        if hold.delegated { continue; }
                                         let call = body.tool_calls.iter().find(|call| call.id==hold.tool_call_id)
                                             .ok_or_else(|| Failure::harness("pending approval is missing its call"))?;
                                         if !sessions.goal_owns_run(handle.session_id, expected, call.run_id).await.map_err(|error| Failure::harness(error.to_string()))? { continue; }
@@ -605,10 +570,10 @@ pub async fn run_goal(
                                             let (settled, through) = settle_goal(sessions, &handle, expected).await?;
                                             final_goal = Some((settled, through.sequence, None));
                                             break;
-                                        } else if let Some(preview) = preview {
+                                        } else if preview.is_some() {
                                             let client = SessionHandle { approval: handle.approval, workspace_id: handle.workspace_id, session_id: handle.session_id,
-                                                subscribe_after: snapshot.cursor, wait_for_delegate: false, child_waits_for_delegate: false };
-                                            unattended_call(sessions, &options, &client, call, preview.shell.as_ref(), preview.fetch.as_ref(), stderr).await;
+                                                subscribe_after: snapshot.cursor };
+                                            unattended_call(sessions, &client, call, stderr).await;
                                         } else {
                                             respond_approval(sessions, call.run_id, call.id, ApprovalDecision::Deny, stderr).await;
                                         }
@@ -661,19 +626,6 @@ pub async fn run_goal(
                                     .map_err(|error| Failure::harness(error.to_string()))?,
                                 None => true,
                             } => {}
-                        SessionEvent::ToolApprovalEscalated { tool_call_id, .. }
-                            if final_goal.is_none() => {
-                            if let Some(run_id) = envelope.run_id
-                                && sessions.goal_owns_run(handle.session_id, expected, run_id).await
-                                    .map_err(|error| Failure::harness(error.to_string()))?
-                            {
-                                // A recovered delegated hold did not arm the
-                                // live request's deferred deny. Once the reviewer
-                                // passes or times out, supply the unattended answer.
-                                respond_approval(sessions, run_id, *tool_call_id,
-                                    ApprovalDecision::Deny, stderr).await;
-                            }
-                        }
                         SessionEvent::ToolApprovalRequested { tool_call, question: Some(_), .. } => {
                             // The core validates held-question ownership before stopping.
                             let id = CommandId::generate()
@@ -693,7 +645,7 @@ pub async fn run_goal(
                             final_goal = Some((goal, through.sequence, None));
                         }
                         SessionEvent::ToolApprovalRequested { .. } => {
-                            unattended_approval(sessions, &options, &handle, &envelope, stderr).await;
+                            unattended_approval(sessions, &handle, &envelope, stderr).await;
                         }
                         SessionEvent::TextAppended { text, .. }
                             if options.format == HeadlessFormat::Text
@@ -1303,8 +1255,6 @@ async fn submit(
         workspace_id,
         session_id,
         subscribe_after,
-        wait_for_delegate,
-        child_waits_for_delegate,
     } = prepare_session(sessions, options, SessionIntent::Prompt).await?;
     // Budgets are core-owned: the runtime enforces them and settles the run
     // with a typed outcome, so this adapter only relays and renders.
@@ -1349,8 +1299,6 @@ async fn submit(
         // is the snapshot cursor (or the last settings write), not the
         // session's history.
         subscribe_after,
-        wait_for_delegate,
-        child_waits_for_delegate,
     })
 }
 
@@ -1378,7 +1326,7 @@ async fn prepare_session(
         ));
     };
 
-    let (session_id, subscribe_after, session_delegate, approval) = match options.session {
+    let (session_id, subscribe_after, approval) = match options.session {
         None => {
             let created = send(
                 sessions,
@@ -1398,12 +1346,7 @@ async fn prepare_session(
                     "session creation returned an unexpected outcome",
                 ));
             };
-            (
-                session_id,
-                created.committed_through,
-                None,
-                options.approval,
-            )
+            (session_id, created.committed_through, options.approval)
         }
         Some(session_id) => {
             let snapshot = match sessions
@@ -1520,44 +1463,15 @@ async fn prepare_session(
                 } else {
                     after
                 },
-                summary.approval_delegate,
                 approval,
             )
         }
     };
-    if matches!(approval, HeadlessApproval::Auto | HeadlessApproval::Full) {
-        sessions
-            .seed_session_grants(
-                session_id,
-                qq_core::WorkspaceGrantSeed {
-                    tools: options.allow_tools.clone(),
-                    shell_prefixes: options.allow_shell_prefixes.clone(),
-                    hosts: options.allow_hosts.clone(),
-                },
-            )
-            .await
-            .map_err(|error| Failure::harness(error.to_string()))?;
-    }
-    // Whether a held call waits for a delegate: one exists and the effective
-    // delegate setting (the session's override, else the configured one)
-    // consults it under the call's approval mode. Without that, waiting only
-    // delays a denial nobody else will issue. Owned children copy the root
-    // session's override at spawn and run `supervised`, so their check uses
-    // the same setting under that mode.
-    let effective_delegate = session_delegate.unwrap_or(options.configured_delegate);
-    let wait_for_delegate = options.reviewer_configured
-        && effective_delegate.consults_reviewer(approval_mode(approval));
-    let child_waits_for_delegate = approval != HeadlessApproval::Ask
-        && options.reviewer_configured
-        && effective_delegate.consults_reviewer(qq_protocol::ApprovalMode::Auto);
-
     Ok(SessionHandle {
         approval,
         workspace_id,
         session_id,
         subscribe_after,
-        wait_for_delegate,
-        child_waits_for_delegate,
     })
 }
 
@@ -1668,7 +1582,6 @@ async fn stream_run(
                             let body = recovery_snapshot(sessions, handle.workspace_id, session).await?.focused
                                 .ok_or_else(|| Failure::harness("approval session has no snapshot body"))?;
                             for hold in &body.summary.pending_holds {
-                                if hold.delegated { continue; }
                                 let call = body.tool_calls.iter().find(|call| call.id==hold.tool_call_id)
                                     .ok_or_else(|| Failure::harness("pending approval is missing its call"))?;
                                 if session==handle.session_id && call.run_id!=handle.run_id { continue; }
@@ -1683,9 +1596,9 @@ async fn stream_run(
                                     } else {
                                         respond_approval(sessions, call.run_id, call.id, ApprovalDecision::Answer { answers: Vec::new() }, stderr).await;
                                     }
-                                } else if let Some(preview) = preview {
-                                    let client = SessionHandle { approval: handle.approval, workspace_id: handle.workspace_id, session_id: handle.session_id, subscribe_after: snapshot.cursor, wait_for_delegate: false, child_waits_for_delegate: false };
-                                    unattended_call(sessions, options, &client, call, preview.shell.as_ref(), preview.fetch.as_ref(), stderr).await;
+                                } else if preview.is_some() {
+                                    let client = SessionHandle { approval: handle.approval, workspace_id: handle.workspace_id, session_id: handle.session_id, subscribe_after: snapshot.cursor };
+                                    unattended_call(sessions, &client, call, stderr).await;
                                 } else {
                                     // Missing legacy inputs convey no authority.
                                     respond_approval(sessions, call.run_id, call.id, ApprovalDecision::Deny, stderr).await;
@@ -1734,56 +1647,6 @@ async fn stream_run(
                                 tool_call.name,
                                 concise(&tool_call.arguments),
                             );
-                        }
-                    }
-                    // A delegate settled a held call: say which one, so the
-                    // operator reading the log can tell the reviewer model's
-                    // decision from their own allowlist.
-                    SessionEvent::ToolApprovalResolved {
-                        tool_call,
-                        resolution:
-                            resolution @ (ApprovalResolution::ApprovedByReviewer
-                            | ApprovalResolution::DeniedByReviewer),
-                        delegate,
-                    } if ours && text => {
-                        let _ = write_delegate_resolution(
-                            stderr,
-                            &tool_call.name,
-                            *resolution,
-                            *delegate,
-                        );
-                    }
-                    // The delegate passed: say why, so the unattended deny that
-                    // follows (or the allowlist answer) reads as a consequence.
-                    // Unattended `auto` has no human to wait for, so the
-                    // escalation is answered at once instead of at the end
-                    // of the reviewer grace. Under `ask` a real client owns
-                    // the prompt and headless never waits there.
-                    SessionEvent::ToolApprovalEscalated {
-                        tool_call_id, delegate, reason,
-                    } => {
-                        if ours && text {
-                            let _ = match delegate {
-                                Some(delegate) => writeln!(
-                                    stderr,
-                                    "[tool] {} passed to the human: {}",
-                                    delegate.as_str(),
-                                    concise(reason)
-                                ),
-                                None => writeln!(stderr, "[tool] {}", concise(reason)),
-                            };
-                        }
-                        let unattended = !ours
-                            || matches!(handle.approval, HeadlessApproval::Auto | HeadlessApproval::Ask);
-                        if unattended && let Some(run_id) = envelope.run_id {
-                            respond_approval(
-                                sessions,
-                                run_id,
-                                *tool_call_id,
-                                ApprovalDecision::Deny,
-                                stderr,
-                            )
-                            .await;
                         }
                     }
                     SessionEvent::ToolCallFinished { tool_call } if ours => {
@@ -1836,11 +1699,10 @@ async fn stream_run(
                             }
                             continue;
                         }
-                        unattended_approval(sessions, options, &SessionHandle {
+                        unattended_approval(sessions, &SessionHandle {
                             approval: handle.approval,
                             workspace_id: handle.workspace_id, session_id: handle.session_id,
-                            subscribe_after: handle.subscribe_after, wait_for_delegate: handle.wait_for_delegate,
-                            child_waits_for_delegate: handle.child_waits_for_delegate,
+                            subscribe_after: handle.subscribe_after,
                         }, &envelope, stderr).await;
                     }
                     SessionEvent::RunFinished { run_id, .. } if *run_id == handle.run_id => {
@@ -2108,168 +1970,46 @@ async fn cancel_and_settle(sessions: &SessionRuntime, handle: &RunHandle) -> Res
     .map_err(|_| Failure::harness("accepted run did not settle within the shutdown period"))?
 }
 
-/// Answers one pending tool approval. Failures are reported but never fatal:
-/// an unanswerable approval resolves by the runtime's own deny-by-timeout,
-/// so the run still cannot stall forever.
-/// The session grant an allowlist entry earns a held call, if any. Shell
-/// prefixes match the server's own preview of the command with the policy's
-/// word-boundary rule, so `--allow-shell "cargo test"` covers
-/// `cargo test -p qq-core` and never `cargo test | sh`.
-fn allowlisted_grant(
-    options: &HeadlessOptions,
-    approval: HeadlessApproval,
-    tool_name: &str,
-    shell: Option<&ShellCommandPreview>,
-    fetch: Option<&qq_protocol::FetchPreview>,
-) -> Option<ApprovalGrant> {
-    // Auto's declared grants were stored before dispatch. Any remaining
-    // approval is internal supervision, which these flags cannot bypass.
-    if approval == HeadlessApproval::Auto {
-        return None;
-    }
-    if recordable_grant(tool_name) && options.allow_tools.iter().any(|name| name == tool_name) {
-        return Some(ApprovalGrant::Tool {
-            name: tool_name.to_owned(),
-        });
-    }
-    if let Some(fetch) = fetch {
-        return options
-            .allow_hosts
-            .iter()
-            .find(|grant| {
-                recordable_grant(grant) && qq_core::host_grant_matches(grant, &fetch.host)
-            })
-            .map(|grant| ApprovalGrant::Host {
-                host: grant.clone(),
-            });
-    }
-    let command = shell.map(|preview| preview.command.as_str())?;
-    options
-        .allow_shell_prefixes
-        .iter()
-        .find(|prefix| recordable_grant(prefix) && qq_core::shell_prefix_matches(prefix, command))
-        .map(|prefix| ApprovalGrant::ShellPrefix {
-            prefix: prefix.clone(),
-        })
-}
-
-/// A grant value the session table will store: non-empty and within
-/// [`qq_core::MAX_GRANT_BYTES`]. An allowlist entry past that bound used to
-/// make the approval command fail with "approval grant is empty or exceeds the
-/// session limit"; such an entry now matches nothing, so the call takes the
-/// unattended path instead of erroring.
-fn recordable_grant(value: &str) -> bool {
-    let value = value.trim();
-    !value.is_empty() && value.len() <= qq_core::MAX_GRANT_BYTES
-}
-
 async fn unattended_approval(
     sessions: &SessionRuntime,
-    options: &HeadlessOptions,
     handle: &SessionHandle,
     envelope: &SessionEventEnvelope,
     stderr: &mut impl Write,
 ) {
-    let SessionEvent::ToolApprovalRequested {
-        tool_call,
-        shell,
-        fetch,
-        ..
-    } = &envelope.event
-    else {
+    let SessionEvent::ToolApprovalRequested { tool_call, .. } = &envelope.event else {
         return;
     };
-    unattended_call(
-        sessions,
-        options,
-        handle,
-        tool_call,
-        shell.as_deref(),
-        fetch.as_deref(),
-        stderr,
-    )
-    .await;
+    unattended_call(sessions, handle, tool_call, stderr).await;
 }
 
 async fn unattended_call(
     sessions: &SessionRuntime,
-    options: &HeadlessOptions,
     handle: &SessionHandle,
     tool_call: &qq_protocol::ToolCallSnapshot,
-    shell: Option<&ShellCommandPreview>,
-    fetch: Option<&qq_protocol::FetchPreview>,
     stderr: &mut impl Write,
 ) {
-    let text = options.format == HeadlessFormat::Text;
-    // The headless invocation is the approval client for
-    // the holds that remain: Ask, and supervised calls
-    // outside Auto. An explicit allowlist answers first, as
-    // a session grant so the same tool or prefix is not held
-    // again. Otherwise full approves unattended and anything
-    // else is denied so the run never stalls waiting for a
-    // human, but when a reviewer model is configured the
-    // deny is deferred briefly, giving the reviewer its
-    // window.
-    // The reviewer settles the call itself on approve or
-    // deny; the deferred deny is the unattended answer to
-    // an escalation. A late deny is harmless: resolution is
-    // idempotent, so a reviewer resolution that landed
-    // first stands.
-    // A child session's held calls belong to a supervised
-    // write child: the reviewer adjudicates them, and the
-    // headless root only supplies the unattended fallback
-    // (a deferred deny), never a blanket approve. The
-    // root's predeclared authority still applies through normal dispatch.
+    // The headless invocation is the approval client for the holds that
+    // remain. Full approves unattended; anything else is denied so the run
+    // never stalls waiting for a human. A child session's held calls are
+    // never blanket-approved by the root: they are denied.
     let approval =
         if handle.approval == HeadlessApproval::Ask || tool_call.session_id == handle.session_id {
             handle.approval
         } else {
             HeadlessApproval::Auto
         };
-    let granted = allowlisted_grant(options, approval, &tool_call.name, shell, fetch);
-    let decision = match (granted, approval) {
-        (_, HeadlessApproval::Ask) => Some(ApprovalDecision::Deny),
-        (Some(grant), _) => {
-            if text {
-                let _ = writeln!(
-                    stderr,
-                    "[tool] {} approved for the session by allowlist",
-                    tool_call.name
-                );
-            }
-            Some(ApprovalDecision::ApproveForSession { grant })
+    let decision = match approval {
+        HeadlessApproval::Full => ApprovalDecision::ApproveOnce,
+        HeadlessApproval::Ask | HeadlessApproval::Auto | HeadlessApproval::ReadOnly => {
+            ApprovalDecision::Deny
         }
-        (None, HeadlessApproval::Full) => Some(ApprovalDecision::ApproveOnce),
-        (None, HeadlessApproval::Auto)
-            if (tool_call.session_id == handle.session_id && handle.wait_for_delegate)
-                || (tool_call.session_id != handle.session_id
-                    && handle.child_waits_for_delegate) =>
-        {
-            let run_id = tool_call.run_id;
-            let sessions = sessions.clone();
-            let tool_call_id = tool_call.id;
-            tokio::spawn(async move {
-                tokio::time::sleep(REVIEWER_DENY_GRACE).await;
-                let _ = send(
-                    &sessions,
-                    SessionCommand::RespondToolApproval {
-                        run_id,
-                        tool_call_id,
-                        decision: ApprovalDecision::Deny,
-                    },
-                )
-                .await;
-            });
-            None
-        }
-        (None, HeadlessApproval::Auto | HeadlessApproval::ReadOnly) => Some(ApprovalDecision::Deny),
     };
-    if let Some(decision) = decision {
-        let run_id = tool_call.run_id;
-        respond_approval(sessions, run_id, tool_call.id, decision, stderr).await;
-    }
+    respond_approval(sessions, tool_call.run_id, tool_call.id, decision, stderr).await;
 }
 
+/// Answers one pending tool approval. Failures are reported but never fatal:
+/// an unanswerable approval resolves by the runtime's own deny-by-timeout,
+/// so the run still cannot stall forever.
 async fn respond_approval(
     sessions: &SessionRuntime,
     run_id: RunId,
@@ -2327,24 +2067,6 @@ const fn status_for_error(error: &SessionRuntimeError) -> HeadlessStatus {
         | SessionRuntimeError::GoalCheckPolicy(_) => HeadlessStatus::InvalidConfiguration,
         _ => HeadlessStatus::HarnessFailure,
     }
-}
-
-fn write_delegate_resolution(
-    stderr: &mut impl Write,
-    name: &str,
-    resolution: ApprovalResolution,
-    delegate: Option<qq_protocol::DelegateIdentity>,
-) -> io::Result<()> {
-    let verdict = match resolution {
-        ApprovalResolution::ApprovedByReviewer => "approved",
-        ApprovalResolution::DeniedByReviewer => "denied",
-        _ => return Ok(()),
-    };
-    writeln!(
-        stderr,
-        "[tool] {name} {verdict} by {}",
-        delegate.unwrap_or_default().as_str()
-    )
 }
 
 /// One bounded single-line summary of tool arguments for text output.

@@ -1013,7 +1013,6 @@ async fn session_command(
         | SessionCommand::CancelRun { .. }
         | SessionCommand::RespondToolApproval { .. }
         | SessionCommand::SetApprovalMode { .. }
-        | SessionCommand::SetApprovalDelegate { .. }
         | SessionCommand::SetSessionModel { .. }
         | SessionCommand::SetSessionProfile { .. }
         | SessionCommand::SetSessionEffort { .. }
@@ -1122,8 +1121,6 @@ fn server_capabilities(
         },
         approvals: vec![
             "approve_once".to_owned(),
-            "approve_for_session".to_owned(),
-            "approve_for_workspace".to_owned(),
             "deny".to_owned(),
             "answer".to_owned(),
         ],

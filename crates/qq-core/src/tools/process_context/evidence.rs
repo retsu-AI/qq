@@ -378,9 +378,7 @@ pub fn validate_process_evidence(
     let Some(arguments) = arguments.filter(|value| value.len() <= 256 * 1024) else {
         return Status::MissingArguments;
     };
-    if arguments.len() > 64 * 1024
-        || arguments_digest(tool, arguments).is_none()
-    {
+    if arguments.len() > 64 * 1024 || arguments_digest(tool, arguments).is_none() {
         return Status::InvalidArguments;
     }
     let Some(receipt) = receipt else {
@@ -457,8 +455,7 @@ pub fn validate_process_evidence(
             for (slot, arg) in argv.iter_mut().zip(&args.args) {
                 *slot = arg;
             }
-            if !args.env.is_empty()
-                || name != Some(family.program())
+            if name != Some(family.program())
                 || args.args.iter().map(String::len).sum::<usize>() > 16 * 1024
                 || !crate::approval::read_only_argv(family.program(), &argv[..args.args.len()])
             {

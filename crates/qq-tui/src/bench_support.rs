@@ -860,7 +860,6 @@ impl BenchHarness {
                 edit: None,
                 question: None,
                 fetch: None,
-                delegated: false,
             },
         );
         // Sessions 2 and 3 stream prose; the rail shows the tails.
@@ -1019,7 +1018,6 @@ impl BenchHarness {
                 }),
                 question: None,
                 fetch: None,
-                delegated: false,
             },
         );
     }

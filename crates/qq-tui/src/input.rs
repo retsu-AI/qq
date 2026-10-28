@@ -11,9 +11,7 @@ mod goal_form;
 pub(crate) use goal_form::{GoalForm, GoalFormRefresh};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use qq_protocol::{
-    AgentProfileId, ApprovalDelegate, ApprovalMode, GuidanceKind, ReasoningEffort, SessionId,
-};
+use qq_protocol::{AgentProfileId, ApprovalMode, GuidanceKind, ReasoningEffort, SessionId};
 
 use crate::{
     commands::{Command, CommandSpec},
@@ -96,22 +94,6 @@ pub(crate) struct EffortRow {
 }
 
 impl PickerItem for EffortRow {
-    fn search_text<'a>(&'a self, out: &mut Vec<&'a str>) {
-        out.push(self.label);
-        out.push(self.summary);
-    }
-}
-
-/// A row in the delegate picker: one session override of who settles held
-/// calls, or `None` to restore the configured `approval_delegate`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DelegateRow {
-    pub delegate: Option<ApprovalDelegate>,
-    pub label: &'static str,
-    pub summary: &'static str,
-}
-
-impl PickerItem for DelegateRow {
     fn search_text<'a>(&'a self, out: &mut Vec<&'a str>) {
         out.push(self.label);
         out.push(self.summary);
@@ -242,9 +224,6 @@ pub(crate) enum Overlay {
     Profiles(Picker<ProfileRow>),
     ApprovalModes(Picker<ApprovalModeRow>),
     Effort(Picker<EffortRow>),
-    /// Who settles the focused session's held calls for the rest of the
-    /// session: the configured choice, or an override.
-    Delegate(Picker<DelegateRow>),
     /// The workspace's indexed commands and skills. Enter puts a command in
     /// the composer for its arguments or submits a skill.
     Skills(Picker<SkillRow>),
@@ -281,7 +260,6 @@ pub(crate) enum Mode {
     Profiles,
     ApprovalModes,
     Effort,
-    Delegate,
     Skills,
     Themes,
     Sessions,
@@ -351,7 +329,6 @@ impl Overlay {
             Self::Profiles(_) => Mode::Profiles,
             Self::ApprovalModes(_) => Mode::ApprovalModes,
             Self::Effort(_) => Mode::Effort,
-            Self::Delegate(_) => Mode::Delegate,
             Self::Skills(_) => Mode::Skills,
             Self::Themes { .. } => Mode::Themes,
             Self::Sessions { .. } => Mode::Sessions,
@@ -411,7 +388,6 @@ impl Overlay {
             Self::Profiles(picker) => dispatch(picker, key),
             Self::ApprovalModes(picker) => dispatch(picker, key),
             Self::Effort(picker) => dispatch(picker, key),
-            Self::Delegate(picker) => dispatch(picker, key),
             Self::Skills(picker) => dispatch(picker, key),
             Self::Themes { picker, .. } => dispatch(picker, key),
             Self::Sessions { picker, .. } => dispatch(picker, key),
@@ -429,7 +405,6 @@ impl Overlay {
             Self::Profiles(picker) => picker.push_query(text),
             Self::ApprovalModes(picker) => picker.push_query(text),
             Self::Effort(picker) => picker.push_query(text),
-            Self::Delegate(picker) => picker.push_query(text),
             Self::Skills(picker) => picker.push_query(text),
             Self::Themes { picker, .. } => picker.push_query(text),
             Self::Sessions { picker, .. } => picker.push_query(text),
@@ -469,13 +444,16 @@ pub(crate) const fn approval_mode_row(mode: ApprovalMode) -> ApprovalModeRow {
         ),
         ApprovalMode::Ask => (
             "ask",
-            "require your approval for every non-read action; ignore grants and reviewers",
+            "require your approval for every non-read action, every time",
         ),
         ApprovalMode::Auto => (
             "auto",
-            "runs inside the task sandbox without asking; out-of-bounds calls are denied",
+            "run in the workspace without asking; fixed stops are denied",
         ),
-        ApprovalMode::Full => ("full", "runs without asking or task sandbox containment"),
+        ApprovalMode::Full => (
+            "full",
+            "run everything without asking, fixed stops included",
+        ),
     };
     ApprovalModeRow {
         mode,
@@ -510,32 +488,6 @@ pub(crate) const fn effort_row(effort: Option<ReasoningEffort>) -> EffortRow {
     EffortRow {
         effort,
         label: effort_label(effort),
-        summary,
-    }
-}
-
-/// What `/delegate` and the status row call a session's delegate choice.
-/// `None` is the unremarkable configured choice.
-pub(crate) const fn delegate_label(delegate: Option<ApprovalDelegate>) -> &'static str {
-    match delegate {
-        None => "configured",
-        Some(delegate) => delegate.as_str(),
-    }
-}
-
-/// Every delegate choice with the one-line meaning the picker shows. Order
-/// is configured first, then most to least delegated.
-pub(crate) const fn delegate_row(delegate: Option<ApprovalDelegate>) -> DelegateRow {
-    let summary = match delegate {
-        None => "use the workspace's approval_delegate setting",
-        Some(ApprovalDelegate::ByMode | ApprovalDelegate::On) => {
-            "the reviewer settles auto holds; ask calls require your approval"
-        }
-        Some(ApprovalDelegate::Off) => "stop delegating: every held call waits for you",
-    };
-    DelegateRow {
-        delegate,
-        label: delegate_label(delegate),
         summary,
     }
 }

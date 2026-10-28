@@ -62,7 +62,6 @@ crossbeam-channel = "0.5"
 directories = "6"
 futures-core = "0.3"
 futures-util = "0.3"
-fs4 = { version = "1.1", default-features = false }
 getrandom = "0.3"
 goblin = { version = "0.10.7", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 hmac = "0.12"
@@ -131,7 +130,6 @@ clap.workspace = true
 directories.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
-getrandom.workspace = true
 qq-auth.workspace = true
 qq-client.workspace = true
 qq-config.workspace = true

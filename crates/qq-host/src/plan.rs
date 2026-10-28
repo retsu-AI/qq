@@ -57,7 +57,6 @@ pub struct PlanKey {
     pub profile: AgentProfileId,
     pub explicit_config_path: Option<PathBuf>,
     pub explicit_config_content: Option<String>,
-    pub approval_delegate: Option<qq_config::ApprovalDelegateSetting>,
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
     /// Keep strict inspection separate from runtime loads withholding untrusted authority.
     pub ignore_untrusted_project_config: bool,
@@ -616,7 +615,6 @@ mod tests {
             profile: AgentProfileId::default(),
             explicit_config_path: None,
             explicit_config_content: None,
-            approval_delegate: None,
             reasoning_effort: None,
             ignore_untrusted_project_config: false,
         }

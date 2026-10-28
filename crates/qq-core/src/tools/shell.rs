@@ -10,7 +10,7 @@ pub(crate) type NativeChild = super::windows_job::Child;
 pub(crate) type NativeChild = tokio::process::Child;
 
 use crate::{
-    runtime::{BASE_ENV, BuiltinPreference, MAX_SHELL_ENV_NAMES, ShellPolicy, builtin_alternative},
+    runtime::{BuiltinPreference, ShellPolicy, builtin_alternative},
     workspace::Workspace,
 };
 
@@ -117,10 +117,6 @@ pub(super) struct ShellArgs {
     pub(super) cwd: Option<String>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
-    /// Environment variable names to pass through from the server's
-    /// environment. The child otherwise starts from [`BASE_ENV`] only.
-    #[serde(default)]
-    pub(super) env: Vec<String>,
 }
 
 /// `exec`: one program with an argument list and no shell between the model
@@ -138,8 +134,6 @@ pub(super) struct ExecArgs {
     stdin: Option<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
-    #[serde(default)]
-    pub(super) env: Vec<String>,
 }
 
 pub(super) const MAX_EXEC_ARGS: usize = 64;
@@ -194,14 +188,6 @@ impl Launch<'_> {
         {
             return Err(InvalidLaunch::Timeout);
         }
-        if self.env().len() > MAX_SHELL_ENV_NAMES
-            || self
-                .env()
-                .iter()
-                .any(|name| !crate::runtime::valid_env_name(name))
-        {
-            return Err(InvalidLaunch::Env);
-        }
         let cwd = match self {
             Self::Shell(args) => args.cwd.as_deref(),
             Self::Exec(args) => args.cwd.as_deref(),
@@ -229,13 +215,6 @@ impl Launch<'_> {
         match self {
             Self::Shell(args) => args.timeout_seconds,
             Self::Exec(args) => args.timeout_seconds,
-        }
-    }
-
-    fn env(&self) -> &[String] {
-        match self {
-            Self::Shell(args) => &args.env,
-            Self::Exec(args) => &args.env,
         }
     }
 
@@ -275,8 +254,6 @@ pub(super) enum InvalidLaunch {
     Stdin,
     #[error("timeout_seconds must be positive and fit a monotonic deadline")]
     Timeout,
-    #[error("invalid_env: at most 16 valid environment names per call")]
-    Env,
     #[error("cwd must be a nonempty relative workspace path without NUL")]
     Cwd,
 }
@@ -318,15 +295,6 @@ pub(super) async fn run_shell(
     }
     if let Err(error) = launch.validate() {
         return ToolOutput::refused(error.to_string());
-    }
-    let env_names = launch.env();
-    for name in env_names {
-        if !policy.permits_env(name) {
-            return ToolOutput::refused(format!(
-                "env_not_allowed: {name} is not in policy.shell_env; the child sees only {} plus allowlisted names",
-                BASE_ENV.join(" ")
-            ));
-        }
     }
     // The prefer-built-in nudge: strict mode is refused before the gate
     // (see approval); here it can only be a hint appended to the result.
@@ -372,29 +340,28 @@ pub(super) async fn run_shell(
     let preparation_cancelled = cancelled.clone();
     let preparation_workspace = workspace.clone();
     use tracing::Instrument as _;
-    let mut prepared =
-        match tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            super::process_context::prepare(
-                preparation_workspace,
-                owned,
-                approved_read_images,
-                process_producer,
-                call_id,
-                &preparation_cancelled,
-                preparation_deadline,
-            )
-        })
-        .instrument(tracing::info_span!(target: "qq::diagnostic", "native_prepare"))
-        .await
-        {
-            Ok(Ok(prepared)) => prepared,
-            Ok(Err(error)) if cancelled.is_cancelled() => {
-                return ToolOutput::interrupted(error.to_string());
-            }
-            Ok(Err(error)) => return ToolOutput::refused(error.to_string()),
-            Err(_) => return ToolOutput::unobserved("process preparation stopped unexpectedly"),
-        };
+    let mut prepared = match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        super::process_context::prepare(
+            preparation_workspace,
+            owned,
+            approved_read_images,
+            process_producer,
+            call_id,
+            &preparation_cancelled,
+            preparation_deadline,
+        )
+    })
+    .instrument(tracing::info_span!(target: "qq::diagnostic", "native_prepare"))
+    .await
+    {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(error)) if cancelled.is_cancelled() => {
+            return ToolOutput::interrupted(error.to_string());
+        }
+        Ok(Err(error)) => return ToolOutput::refused(error.to_string()),
+        Err(_) => return ToolOutput::unobserved("process preparation stopped unexpectedly"),
+    };
     if cancelled.is_cancelled() {
         return ToolOutput::interrupted("tool execution was cancelled before spawn");
     }

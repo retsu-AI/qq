@@ -499,7 +499,6 @@ async fn prepare_headless(
         .map_err(|error| invalid(error.to_string()))?
         .with_untrusted_project_config_ignored();
     let model_is_fallback = load.overrides().model().is_none();
-    let overrides_approval_delegate = load.overrides().approval_delegate();
     let config_factory = factory.clone();
     let snapshot = tokio::task::spawn_blocking(move || config_factory.load(&load))
         .await
@@ -561,8 +560,6 @@ async fn prepare_headless(
             runtime::RuntimeHandlerError::Sessions(error) => harness(error.to_string()),
         })?;
 
-    let (reviewer_configured, configured_delegate) =
-        headless_delegate_options(&snapshot, &profile, overrides_approval_delegate);
     let goal = args.goal.map(|objective| headless::GoalInvocation {
         objective,
         check: args.check,
@@ -592,11 +589,6 @@ async fn prepare_headless(
             cli::RunApproval::Auto => headless::HeadlessApproval::Auto,
             cli::RunApproval::Full => headless::HeadlessApproval::Full,
         },
-        reviewer_configured,
-        configured_delegate,
-        allow_tools: args.allow_tools,
-        allow_shell_prefixes: args.allow_shell_prefixes,
-        allow_hosts: args.allow_hosts,
         timeout: args.timeout_seconds.map(std::time::Duration::from_secs),
         max_turns: args.max_turns,
         max_cost_usd_nanos,
@@ -1191,7 +1183,6 @@ fn config_command(
                     "worker_model" => snapshot.provenance().worker_model(),
                     "delegation" => snapshot.provenance().delegation(),
                     "audit" => snapshot.provenance().audit(),
-                    "approval_delegate" => snapshot.provenance().approval_delegate(),
                     "approval_timeout" => snapshot.provenance().approval_timeout(),
                     "reasoning_effort" => snapshot.provenance().reasoning_effort(),
                     "max_output_tokens" => snapshot.provenance().max_output_tokens(),
@@ -1215,16 +1206,6 @@ fn config_command(
                             field
                                 .strip_prefix("provider.")
                                 .and_then(|name| snapshot.provenance().provider(name))
-                                .or_else(|| {
-                                    field
-                                        .strip_prefix("grant.tool.")
-                                        .and_then(|name| snapshot.provenance().grant_tool(name))
-                                })
-                                .or_else(|| {
-                                    field.strip_prefix("grant.shell.").and_then(|prefix| {
-                                        snapshot.provenance().grant_shell_prefix(prefix)
-                                    })
-                                })
                         }),
                 }
                 .cloned()
@@ -1305,12 +1286,6 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
             .expect("numeric goal ceilings serialize")
     );
     println!(
-        "approval_delegate: {}",
-        snapshot
-            .approval_delegate()
-            .map_or("by_mode", config::ApprovalDelegateSetting::as_str)
-    );
-    println!(
         "approval_timeout_seconds: {}",
         snapshot
             .approval_timeout()
@@ -1325,20 +1300,8 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
     for (name, provider) in snapshot.providers() {
         println!("  {name}: {}", provider.kind().name());
     }
-    // Grants are not secrets; they render unredacted.
-    let grants = snapshot.grants();
-    println!("policy grants:");
-    println!("  tools: {}", join_or_none(grants.tools()));
     println!(
-        "  shell prefixes: {}",
-        join_or_none(grants.shell_prefixes())
-    );
-    println!(
-        "  shell env: {}",
-        join_or_none(snapshot.policy().shell_env())
-    );
-    println!(
-        "  builtin preference: {:?}",
+        "policy.builtin_preference: {:?}",
         snapshot.policy().builtin_preference()
     );
     if !snapshot.packs().is_empty() {
@@ -1371,9 +1334,6 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
                     config::ProfileApprovalMode::Full => "full",
                 };
                 parts.push(format!("approval_mode={mode}"));
-            }
-            if let Some(delegate) = profile.approval_delegate() {
-                parts.push(format!("approval_delegate={}", delegate.as_str()));
             }
             if let Some(tokens) = profile.max_output_tokens() {
                 parts.push(format!("max_output_tokens={tokens}"));
@@ -1556,33 +1516,6 @@ fn tui_action_name(action: qq_tui::Action) -> &'static str {
         qq_tui::Action::CancelRun => "cancel_run",
         qq_tui::Action::InterruptRun => "interrupt_run",
     }
-}
-
-/// The headless run's delegate options, from the loaded configuration as
-/// `prepare_headless` builds them: whether a delegate exists (a
-/// `reviewer_model`), and the
-/// resolved `approval_delegate` (override, then the selected profile, then
-/// the top level; absent is `by_mode`).
-fn headless_delegate_options(
-    snapshot: &config::ConfigSnapshot,
-    profile: &qq_protocol::AgentProfileId,
-    override_approval_delegate: Option<config::ApprovalDelegateSetting>,
-) -> (bool, qq_protocol::ApprovalDelegate) {
-    let selected = snapshot.profile(profile.as_str());
-    let reviewer_configured = snapshot.reviewer_model().is_some();
-    let configured_delegate = match override_approval_delegate
-        .or_else(|| {
-            selected
-                .as_ref()
-                .and_then(config::AgentProfileConfig::approval_delegate)
-        })
-        .or(snapshot.approval_delegate())
-    {
-        None => qq_protocol::ApprovalDelegate::ByMode,
-        Some(config::ApprovalDelegateSetting::On) => qq_protocol::ApprovalDelegate::On,
-        Some(config::ApprovalDelegateSetting::Off) => qq_protocol::ApprovalDelegate::Off,
-    };
-    (reviewer_configured, configured_delegate)
 }
 
 fn trust_command(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {

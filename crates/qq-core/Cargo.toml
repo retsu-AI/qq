@@ -18,7 +18,6 @@ cap-primitives.workspace = true
 crossbeam-channel.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
-fs4.workspace = true
 htmd = { workspace = true, optional = true }
 ignore.workspace = true
 ipnet.workspace = true

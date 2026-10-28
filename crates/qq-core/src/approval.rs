@@ -29,9 +29,9 @@ pub mod bench_support {
         super::read_only_shell_command(command)
     }
 
-    /// Exact execution command and whether a process environment was requested.
+    /// Exact execution command of a valid `shell` call.
     #[must_use]
-    pub fn parsed_shell_command(arguments: &str) -> Option<(String, bool)> {
+    pub fn parsed_shell_command(arguments: &str) -> Option<String> {
         crate::tools::parsed_shell_command(arguments)
     }
 
@@ -368,17 +368,6 @@ fn shell_class(name: &str, arguments: &str) -> ToolClass {
         #[serde(default)]
         cwd: Option<String>,
     }
-    #[derive(Deserialize)]
-    struct RequestedEnvironment {
-        #[serde(default)]
-        env: Vec<serde::de::IgnoredAny>,
-    }
-    // Keep command/cwd parsing authoritative for approval. This extra view
-    // only disqualifies read candidates, including malformed/duplicate env.
-    let environment_is_empty = || match serde_json::from_str::<RequestedEnvironment>(arguments) {
-        Ok(environment) => environment.env.is_empty(),
-        Err(_) => false,
-    };
     if name == "exec" {
         return match serde_json::from_str::<ExecArguments>(arguments) {
             Ok(arguments) => ToolClass::Shell {
@@ -396,7 +385,6 @@ fn shell_class(name: &str, arguments: &str) -> ToolClass {
                             *slot = arg;
                         }
                         read_only_argv(&arguments.program, &args[..arguments.args.len()])
-                            && environment_is_empty()
                     },
                 command: exec_command_line(&arguments.program, &arguments.args),
                 cwd: arguments.cwd,
@@ -410,7 +398,7 @@ fn shell_class(name: &str, arguments: &str) -> ToolClass {
     }
     match serde_json::from_str::<ShellArguments>(arguments) {
         Ok(arguments) => ToolClass::Shell {
-            read_only: read_only_shell_command(&arguments.command) && environment_is_empty(),
+            read_only: read_only_shell_command(&arguments.command),
             command: arguments.command,
             cwd: arguments.cwd,
         },

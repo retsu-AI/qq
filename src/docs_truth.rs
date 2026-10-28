@@ -1058,9 +1058,8 @@ mod tests {
             };
             let mut routes = vec![snapshot.model().as_str().to_owned()];
             routes.extend(
-                [snapshot.worker_model(), snapshot.reviewer_model()]
-                    .into_iter()
-                    .flatten()
+                snapshot
+                    .worker_model()
                     .map(|route| route.as_str().to_owned()),
             );
             routes.extend(
@@ -1439,9 +1438,9 @@ mod tests {
                     continue;
                 }
                 let is_managed_only = qq_config::MANAGED_ONLY_POLICY_FIELD_NAMES.contains(&key);
-                let is_not_organization =
-                    qq_config::ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES.contains(&key);
-                let is_host_only = qq_config::HOST_ONLY_POLICY_FIELD_NAMES.contains(&key);
+                // No policy key is organization-forbidden or host-only any more.
+                let is_not_organization = false;
+                let is_host_only = false;
                 if (
                     is_managed_only,
                     is_not_organization && !is_host_only,

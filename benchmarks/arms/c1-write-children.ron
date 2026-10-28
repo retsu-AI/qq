@@ -1,9 +1,6 @@
-// C1: A2 plus supervised write children. Requires a reviewer_model to
-// adjudicate every mutating action a write child takes; without one the
-// spawner refuses write authority and the arm degenerates to A2.
+// C1: A2 plus write children.
 (
     version: 1,
-    reviewer_model: "PROVIDER/REVIEWER",
     delegation: (
         roster: [
             (route: "PROVIDER/FAST", role: fast, note: "lookups, breadth"),

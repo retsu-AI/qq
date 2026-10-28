@@ -184,12 +184,12 @@ fn argument_identity(tool: &str, arguments: &str) -> Option<(ContentHash, bool)>
         "shell" => {
             let args: ShellArgs = serde_json::from_str(arguments).ok()?;
             super::shell::Launch::Shell(&args).validate().ok()?;
-            (serde_json::to_vec(&args).ok()?, !args.env.is_empty())
+            (serde_json::to_vec(&args).ok()?, false)
         }
         "exec" => {
             let args: ExecArgs = serde_json::from_str(arguments).ok()?;
             super::shell::Launch::Exec(&args).validate().ok()?;
-            (serde_json::to_vec(&args).ok()?, !args.env.is_empty())
+            (serde_json::to_vec(&args).ok()?, false)
         }
         _ => return None,
     };
@@ -296,10 +296,6 @@ pub(crate) enum PreparationError {
     Cancelled,
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "captured invocation values, image approvals, identity and cancellation are distinct inputs"
-)]
 pub(super) fn prepare(
     workspace: Workspace,
     launch: OwnedLaunch,
@@ -461,10 +457,6 @@ pub(super) fn prepare(
 }
 
 #[cfg(target_os = "linux")]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the verifier consumes exactly the prepared call inputs"
-)]
 fn bind_read_image(
     args: &ExecArgs,
     approvals: &ApprovedReadImages,
@@ -1047,7 +1039,6 @@ pub(crate) fn prepare_goal_check(
             command,
             cwd: None,
             timeout_seconds: None,
-            env: Vec::new(),
         }),
         Arc::new(ApprovedReadImages::default()),
         producer,

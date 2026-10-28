@@ -18,10 +18,7 @@ use super::{
     shell::{MAX_EXEC_ARG_BYTES, MAX_EXEC_ARGS, MAX_EXEC_PROGRAM_BYTES, MAX_EXEC_STDIN_BYTES},
     tree::{MAX_DEPTH, MAX_ENTRIES},
 };
-use crate::{
-    catalog::{EffectClass, StaticTool, ToolHost},
-    runtime::MAX_SHELL_ENV_NAMES,
-};
+use crate::catalog::{EffectClass, StaticTool, ToolHost};
 
 /// The sub-agent tool. Not a [`BuiltInTool`]: it is declared only for runs
 /// that may spawn (never for child sessions), and it dispatches to the
@@ -214,7 +211,7 @@ impl BuiltInTool {
             Self::Shell => ToolSpec::new(
                 "shell",
                 format!(
-                    "Run one shell command in the workspace via `{}`. Not for reading files or searching; use read_file, search, tree. Capture combined stdout and stderr (head+tail; the full output is stored). The host controls environment inheritance; name explicitly permitted variables in env. Native Auto preserves normal tool configuration and filters credential-like environment names unless granted. Uses the task deadline unless timeout_seconds imposes an earlier limit; no implicit command runtime cap. The {} is killed on timeout or cancel.",
+                    "Run one shell command in the workspace via `{}`. Not for reading files or searching; use read_file, search, tree. Capture combined stdout and stderr (head+tail; the full output is stored). It runs as the user with the inherited environment and host network. Uses the task deadline unless timeout_seconds imposes an earlier limit; no implicit command runtime cap. The {} is killed on timeout or cancel.",
                     if cfg!(windows) { "cmd /C" } else { "sh -c" },
                     if cfg!(windows) {
                         "owned process tree"
@@ -233,11 +230,6 @@ impl BuiltInTool {
                         "timeout_seconds": {
                             "type": "integer",
                             "minimum": 1
-                        },
-                        "env": {
-                            "type": "array",
-                            "maxItems": MAX_SHELL_ENV_NAMES,
-                            "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
                         }
                     },
                     "required": ["command"],
@@ -261,11 +253,6 @@ impl BuiltInTool {
                         "timeout_seconds": {
                             "type": "integer",
                             "minimum": 1
-                        },
-                        "env": {
-                            "type": "array",
-                            "maxItems": MAX_SHELL_ENV_NAMES,
-                            "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
                         }
                     },
                     "required": ["program"],

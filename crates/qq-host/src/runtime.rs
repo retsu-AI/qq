@@ -1,7 +1,7 @@
 //! Application configuration to model-runtime composition.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -10,26 +10,24 @@ use std::{
 use qq_auth::{AuthError, CredentialStore, Secret};
 use qq_config::{
     AwsAuth, BedrockAuth, ClientSnapshot, ConfigError, ConfigLoader, ConfigSnapshot, EndpointMode,
-    HttpAccess, HttpCredential, LoadRequest, PromotionOutcome, ProviderAccess, ProviderApi,
-    ProviderAuth, ProviderConfig, RuntimeOverrides, WorkspaceGrant,
+    HttpAccess, HttpCredential, LoadRequest, ProviderAccess, ProviderApi, ProviderAuth,
+    ProviderConfig, RuntimeOverrides,
 };
 use qq_core::{
-    ApprovalReviewer, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, PublishedEventStream,
-    ReviewDecision, ReviewFuture, ReviewRequest, ReviewVerdict, RuntimeConfigError,
-    RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadRequest, RuntimeLoader, SessionRuntime,
-    SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
-    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
+    LoadedRuntime, PublishedEventStream, RuntimeConfigError, RuntimeLoadError, RuntimeLoadFuture,
+    RuntimeLoadRequest, RuntimeLoader, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions,
+    SpawnModelValidationFuture, WorkerRuntimeLoadFuture, WorkspacePolicyAuthority,
     plan::{
         AgentProfile, CompiledAgentPlan, CredentialReference, HostSnapshot, PackSelection,
         PlanCompileError, ProviderDescriptor, SourceFingerprint,
     },
 };
 use qq_protocol::{
-    AgentProfileId, AgentProfileSummary, ApprovalGrant, ApprovalMode, CapabilitySupport,
-    CommandRequest, GenerationCapabilities, ModelCatalogRequest, ModelDescriptor, ModelSelection,
+    AgentProfileId, AgentProfileSummary, ApprovalMode, CapabilitySupport, CommandRequest,
+    GenerationCapabilities, ModelCatalogRequest, ModelDescriptor, ModelSelection,
     PromptCacheCapabilities, ProviderRequestShapeIdentity, ProviderRequestShapeVersion,
     ResolvedModel, ResolvedModelVersion, RunFailureKind, SnapshotRequest, SubscribeRequest,
-    WorkspaceGrantOutcome, WorkspaceId,
+    WorkspaceId,
 };
 use qq_provider::{
     BedrockAuth as ProviderBedrockAuth, CacheRouting, EndpointSpec, HttpAuth, HttpProtocol,
@@ -900,14 +898,13 @@ impl RuntimeFactory {
         if snapshot.organization().is_some()
             || !snapshot.mcp_servers().is_empty()
             || snapshot.worker_model().is_some()
-            || snapshot.reviewer_model().is_some()
             || !snapshot.delegation().roster().is_empty()
             || snapshot.audit().mode() != qq_config::AuditMode::Off
             || !snapshot.profiles().is_empty()
             || !snapshot.packs().is_empty()
         {
             return Err(invalid(
-                "organizations, MCP, worker/reviewer routes, delegation, audit, profiles, and packs are not allowed",
+                "organizations, MCP, worker routes, delegation, audit, profiles, and packs are not allowed",
             ));
         }
         Ok(())
@@ -1260,7 +1257,6 @@ impl RuntimeFactory {
             profile: profile.clone(),
             explicit_config_path: request.explicit_path().map(Path::to_owned),
             explicit_config_content: request.explicit_content().map(str::to_owned),
-            approval_delegate: request.overrides().approval_delegate(),
             reasoning_effort: request.overrides().reasoning_effort(),
             ignore_untrusted_project_config: request.ignores_untrusted_project_config(),
         };
@@ -1375,11 +1371,6 @@ impl RuntimeFactory {
                     && let Some(effort) = profile.reasoning_effort()
                 {
                     overrides = overrides.with_reasoning_effort(effort);
-                }
-                if request.overrides().approval_delegate().is_none()
-                    && let Some(setting) = profile.approval_delegate()
-                {
-                    overrides = overrides.with_approval_delegate(setting);
                 }
                 preparation_phase(progress, qq_core::RuntimeLoadStage::LoadingConfiguration)?;
                 let snapshot = self.load(&request.clone().with_overrides(overrides))?;
@@ -1521,7 +1512,6 @@ impl RuntimeFactory {
         let audit = audit_policy(snapshot.audit());
         let shell = shell_policy(snapshot.policy());
         let network = network_policy(snapshot.policy());
-        let approval_delegate = approval_delegate(snapshot.approval_delegate());
         let mut profile =
             AgentProfile::new(provider, descriptor, resolved_model, workspace.to_owned())
                 .with_spawn_model_routes(spawn_model_routes)
@@ -1531,7 +1521,6 @@ impl RuntimeFactory {
                 .with_approved_read_images(self.inner.approved_read_images.clone())
                 .with_process_producer(Arc::clone(&self.inner.process_producer))
                 .with_network_policy(network)
-                .with_approval_delegate(approval_delegate)
                 .with_output_ceiling(output_ceiling)
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
@@ -2328,7 +2317,7 @@ impl RuntimeLoader for RuntimeFactory {
     }
 }
 
-impl WorkspaceGrantAuthority for RuntimeFactory {
+impl WorkspacePolicyAuthority for RuntimeFactory {
     fn goal_policy(&self, workspace: &Path) -> qq_core::GoalPolicyFuture {
         let factory = self.clone();
         let workspace = workspace.to_owned();
@@ -2459,391 +2448,6 @@ impl WorkspaceGrantAuthority for RuntimeFactory {
             }
         })
     }
-
-    fn seed_grants(&self, workspace: &Path) -> GrantSeedFuture {
-        let factory = self.clone();
-        let workspace = workspace.to_owned();
-        Box::pin(async move {
-            let seed = tokio::task::spawn_blocking(move || {
-                let load = factory.request_for_workspace(&workspace, None).ok()?;
-                let snapshot = factory.load(&load).ok()?;
-                let grants = snapshot.grants();
-                Some(WorkspaceGrantSeed {
-                    tools: grants.tools().to_vec(),
-                    shell_prefixes: grants.shell_prefixes().to_vec(),
-                    hosts: grants.hosts().to_vec(),
-                })
-            })
-            .await;
-            // A configuration that fails to load seeds nothing: the session
-            // is still created, and the next run surfaces the configuration
-            // error through the ordinary run-failure path.
-            seed.ok().flatten().unwrap_or_default()
-        })
-    }
-
-    fn promote_grant(&self, workspace: &Path, grant: &ApprovalGrant) -> GrantPromotionFuture {
-        let factory = self.clone();
-        let workspace = workspace.to_owned();
-        let grant = match grant {
-            ApprovalGrant::Tool { name } => WorkspaceGrant::Tool(name.clone()),
-            ApprovalGrant::ShellPrefix { prefix } => WorkspaceGrant::ShellPrefix(prefix.clone()),
-            ApprovalGrant::Host { host } => WorkspaceGrant::Host(host.clone()),
-        };
-        Box::pin(async move {
-            if let Err(error) = factory
-                .validate_isolated_tui_qa_state()
-                .and_then(|()| factory.validate_tui_qa_workspace(&workspace))
-            {
-                return WorkspaceGrantOutcome::Failed {
-                    message: error.to_string(),
-                };
-            }
-            let config = factory.inner.config.clone();
-            let written = tokio::task::spawn_blocking(move || {
-                config.promote_workspace_grant(&workspace, &grant)
-            })
-            .await;
-            match written {
-                Ok(Ok(promotion)) => {
-                    let path = promotion.path().display().to_string();
-                    match promotion.outcome() {
-                        PromotionOutcome::Added => WorkspaceGrantOutcome::Written { path },
-                        PromotionOutcome::AlreadyPresent => {
-                            WorkspaceGrantOutcome::AlreadyPresent { path }
-                        }
-                    }
-                }
-                Ok(Err(error)) => WorkspaceGrantOutcome::Failed {
-                    message: error.to_string(),
-                },
-                Err(_) => WorkspaceGrantOutcome::Failed {
-                    message: "the workspace grant write stopped unexpectedly".to_owned(),
-                },
-            }
-        })
-    }
-}
-
-/// One-shot reviewer verdict budget: a bounded read of a small model's single
-/// JSON line. Raised from 512 when requests gained arguments and briefs.
-const REVIEWER_MAX_OUTPUT_TOKENS: u32 = 1_024;
-const REVIEWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-/// Bytes of one section (arguments, brief, diff) quoted to the reviewer.
-const REVIEWER_SECTION_BYTES: usize = 8 * 1024;
-
-/// Adjudicates held tool approvals with the workspace-configured
-/// `reviewer_model`, through the same provider compilation path as ordinary
-/// runs. Every failure — no reviewer configured, config or provider errors,
-/// timeout, unparseable verdict — resolves as `Escalate`, leaving the human
-/// approval path untouched.
-///
-/// The compiled provider is cached per workspace and revalidated by
-/// credential epoch, so a held call does not pay a configuration load.
-pub struct ModelApprovalReviewer {
-    factory: RuntimeFactory,
-    cache: Arc<std::sync::Mutex<HashMap<PathBuf, CachedReviewer>>>,
-}
-
-#[derive(Clone)]
-struct CachedReviewer {
-    epoch: qq_protocol::CredentialEpoch,
-    route: qq_config::ModelRoute,
-    provider: Arc<dyn qq_provider::Provider>,
-    pricing: Option<qq_protocol::ModelPricing>,
-}
-
-impl ModelApprovalReviewer {
-    pub fn new(factory: RuntimeFactory) -> Self {
-        Self {
-            factory,
-            cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        }
-    }
-
-    fn escalate(reason: &str) -> ReviewVerdict {
-        ReviewVerdict::free(ReviewDecision::Escalate {
-            reason: reason.to_owned(),
-        })
-    }
-
-    /// Blocking: the cached reviewer for `workspace` when its credential epoch
-    /// still matches, else a fresh compile. A rotated credential or changed
-    /// reviewer route is observed on the next epoch.
-    fn prepare(&self, workspace: &Path) -> Result<CachedReviewer, String> {
-        let epoch = self
-            .factory
-            .inner
-            .credentials
-            .epoch()
-            .map_err(|error| error.to_string())?;
-        if let Ok(cache) = self.cache.lock()
-            && let Some(cached) = cache.get(workspace)
-            && cached.epoch == epoch
-        {
-            return Ok(cached.clone());
-        }
-        let load = self
-            .factory
-            .request_for_workspace(workspace, None)
-            .map_err(|error| error.to_string())?;
-        let snapshot = self
-            .factory
-            .load(&load)
-            .map_err(|error| error.to_string())?;
-        let Some(route) = snapshot.reviewer_model() else {
-            return Err("no reviewer model is configured".to_owned());
-        };
-        let provider_config = snapshot
-            .providers()
-            .get(route.provider())
-            .ok_or_else(|| format!("unknown reviewer provider {}", route.provider()))?;
-        let (recipe, _) = self
-            .factory
-            .prepare_provider(route.provider(), route.model(), provider_config)
-            .map_err(|error| error.to_string())?;
-        let provider = self
-            .factory
-            .inner
-            .providers
-            .compile(recipe)
-            .map_err(|error| error.to_string())?;
-        let pricing = provider_config
-            .models()
-            .get(route.model())
-            .and_then(qq_config::ModelMetadata::pricing)
-            .cloned()
-            .map(protocol_model_pricing);
-        let cached = CachedReviewer {
-            epoch,
-            route: route.clone(),
-            provider,
-            pricing,
-        };
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(workspace.to_owned(), cached.clone());
-        }
-        Ok(cached)
-    }
-}
-
-impl ApprovalReviewer for ModelApprovalReviewer {
-    fn review(&self, request: ReviewRequest) -> ReviewFuture {
-        let reviewer = Self {
-            factory: self.factory.clone(),
-            cache: Arc::clone(&self.cache),
-        };
-        Box::pin(async move {
-            let workspace = PathBuf::from(&request.workspace);
-            let prepared = tokio::task::spawn_blocking(move || reviewer.prepare(&workspace)).await;
-            let cached = match prepared {
-                Ok(Ok(prepared)) => prepared,
-                Ok(Err(_)) | Err(_) => return Self::escalate("reviewer unavailable"),
-            };
-            let verdict = tokio::time::timeout(
-                REVIEWER_TIMEOUT,
-                collect_reviewer_verdict(
-                    cached.provider,
-                    cached.route.model(),
-                    cached.pricing.as_ref(),
-                    &request,
-                ),
-            )
-            .await;
-            match verdict {
-                Ok(verdict) => verdict,
-                Err(_) => Self::escalate("reviewer timed out"),
-            }
-        })
-    }
-}
-
-/// The reviewer's contract: one strict JSON line. Anything else escalates.
-const REVIEWER_SYSTEM_PROMPT: &str = "You are a tool-call reviewer for a coding agent. \
-The agent proposed one action that policy held for review. Judge only the action shown; \
-you have no transcript and must not assume intent beyond the stated task. \
-Two criteria, both required to approve: (1) safety — the worst plausible outcome is \
-recoverable within the workspace (for example: deleting build artifacts, killing a process \
-the workspace owns, reinstalling dependencies, editing source files); escalate anything \
-externally visible, credential-touching, system-level, or ambiguous (force-pushing shared \
-branches, sudo, piped installers, writes outside the workspace). (2) necessity — when a task \
-brief is given, the action must be plausibly necessary for that task; deny actions clearly \
-outside it. Your deny is final: the agent receives it as a tool error. \
-Escalate when you are unsure; a human decides escalations. \
-Reply with exactly one JSON object on one line and nothing else: \
-{\"verdict\":\"approve\"} or {\"verdict\":\"escalate\",\"reason\":\"...\"} \
-or {\"verdict\":\"deny\",\"reason\":\"...\"}.";
-
-async fn collect_reviewer_verdict(
-    provider: Arc<dyn qq_provider::Provider>,
-    model: &str,
-    pricing: Option<&qq_protocol::ModelPricing>,
-    request: &ReviewRequest,
-) -> ReviewVerdict {
-    use futures_util::StreamExt as _;
-    use qq_provider::{ContentBlock, Message, ModelRequest, ProviderEvent, Role};
-
-    let mut description = format!(
-        "Tool: {}\nWorkspace: {}\nSession mode: {}\n",
-        request.tool_name,
-        request.workspace,
-        match request.mode {
-            qq_protocol::ApprovalMode::Auto =>
-                "auto: execute within policy; return denied actions as tool errors",
-            qq_protocol::ApprovalMode::Ask => "ask: only the human can approve this action",
-            qq_protocol::ApprovalMode::ReadOnly => "read-only session",
-            qq_protocol::ApprovalMode::Full => "full autonomy session",
-        }
-    );
-    match request.origin {
-        qq_core::ReviewOrigin::Root => {}
-        qq_core::ReviewOrigin::Child { depth, .. } => {
-            description.push_str(&format!("Origin: sub-agent at depth {depth}\n"));
-        }
-    }
-    if let Some(brief) = &request.task_brief {
-        description.push_str("Task brief given to the sub-agent:\n");
-        description.push_str(&bounded(brief, REVIEWER_SECTION_BYTES));
-        description.push('\n');
-    }
-    if let Some(shell) = &request.shell {
-        description.push_str("Shell command: ");
-        description.push_str(&shell.command);
-        description.push('\n');
-        if let Some(cwd) = &shell.cwd {
-            description.push_str("Working directory: ");
-            description.push_str(cwd);
-            description.push('\n');
-        }
-    }
-    if let Some(edit) = &request.edit {
-        description.push_str("Edit path: ");
-        description.push_str(&edit.path);
-        description.push_str("\nDiff preview:\n");
-        description.push_str(&bounded(&edit.diff, REVIEWER_SECTION_BYTES));
-        description.push('\n');
-    }
-    if request.shell.is_none() && request.edit.is_none() {
-        description.push_str("Arguments: ");
-        description.push_str(&bounded(&request.arguments, REVIEWER_SECTION_BYTES));
-        description.push('\n');
-    }
-    if !request.recent_actions.is_empty() {
-        description.push_str("Recent tool calls of this run (oldest first): ");
-        let listed = request
-            .recent_actions
-            .iter()
-            .map(|action| match &action.path {
-                Some(path) => format!("{}({})", action.tool, bounded(path, 120)),
-                None => action.tool.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        description.push_str(&listed);
-        description.push('\n');
-    }
-    if !request.granted_tools.is_empty() || !request.granted_shell_prefixes.is_empty() {
-        description.push_str(&format!(
-            "Session grants: tools {:?}; shell prefixes {:?}\n",
-            request.granted_tools, request.granted_shell_prefixes
-        ));
-    }
-    let model_request = ModelRequest::new(
-        model.to_owned(),
-        vec![Message::new(
-            Role::User,
-            vec![ContentBlock::Text { text: description }],
-        )],
-        REVIEWER_MAX_OUTPUT_TOKENS,
-    )
-    .with_system(REVIEWER_SYSTEM_PROMPT);
-    let mut stream = provider.stream(model_request);
-    let mut text = String::new();
-    let mut spend = qq_core::ReviewSpend::default();
-    loop {
-        match stream.next().await {
-            Some(Ok(ProviderEvent::OutputTextDelta { text: delta })) => text.push_str(&delta),
-            Some(Ok(
-                ProviderEvent::Completed { usage } | ProviderEvent::Incomplete { usage, .. },
-            )) => {
-                let usage = usage.map(|usage| qq_protocol::TokenUsage {
-                    input_tokens: usage.input_tokens,
-                    cache_read_input_tokens: usage.cache_read_input_tokens,
-                    cache_write_input_tokens: usage.cache_write_input_tokens,
-                    output_tokens: usage.output_tokens,
-                    reasoning_tokens: usage.reasoning_tokens,
-                });
-                spend = qq_core::ReviewSpend {
-                    usage,
-                    cost_usd_nanos: match (usage, pricing) {
-                        (Some(usage), Some(pricing)) => qq_core::run_cost(usage, pricing),
-                        _ => None,
-                    },
-                };
-                break;
-            }
-            Some(Ok(_)) => {}
-            Some(Err(_)) => {
-                return ReviewVerdict {
-                    decision: ReviewDecision::Escalate {
-                        reason: "reviewer request failed".to_owned(),
-                    },
-                    // The request was sent; its spend is unknown, not zero.
-                    spend: qq_core::ReviewSpend {
-                        usage: None,
-                        cost_usd_nanos: None,
-                    },
-                };
-            }
-            None => break,
-        }
-    }
-    ReviewVerdict {
-        decision: parse_reviewer_decision(&text),
-        spend,
-    }
-}
-
-fn bounded(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_owned();
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…[truncated]", &text[..end])
-}
-
-/// Parses the reviewer's reply. The verdict must be the only JSON object in
-/// the reply and `approve` carries no qualifier; everything else escalates.
-fn parse_reviewer_decision(text: &str) -> ReviewDecision {
-    #[derive(serde::Deserialize)]
-    struct Reply {
-        verdict: String,
-        #[serde(default)]
-        reason: Option<String>,
-    }
-    let trimmed = text.trim();
-    let Ok(reply) = serde_json::from_str::<Reply>(trimmed) else {
-        return ReviewDecision::Escalate {
-            reason: "reviewer reply was not a valid verdict".to_owned(),
-        };
-    };
-    let reason = |reply: Reply| {
-        reply
-            .reason
-            .unwrap_or_else(|| "reviewer verdict".to_owned())
-    };
-    match reply.verdict.as_str() {
-        "approve" => ReviewDecision::Approve,
-        "deny" => ReviewDecision::Deny {
-            reason: reason(reply),
-        },
-        _ => ReviewDecision::Escalate {
-            reason: reason(reply),
-        },
-    }
 }
 
 enum ResolvedAuth {
@@ -2903,19 +2507,11 @@ impl RuntimeHandler {
     ) -> Result<Self, RuntimeHandlerError> {
         factory.validate_isolated_tui_qa_state()?;
         let database_path = factory.inner.config.session_database_path()?;
-        // The factory is both the runtime loader and the workspace grant
-        // authority: config grants seed each new session's grant set, and
-        // approve-for-workspace promotions write back through the loader's
-        // configuration layer.
-        // Held calls go to the held workspace's `reviewer_model`, then the
-        // human. The reviewer speaks `ReviewDecision`; qq-core learns nothing
-        // about it.
-        let reviewer: Arc<dyn ApprovalReviewer> =
-            Arc::new(ModelApprovalReviewer::new(factory.clone()));
+        // The factory is both the runtime loader and the workspace policy
+        // authority that resolves goal settings and managed check denies.
         let options = SessionRuntimeOptions::new(database_path)
             .with_approval_timeout(approval_timeout)
-            .with_grant_authority(Arc::new(factory.clone()))
-            .with_approval_reviewer(reviewer);
+            .with_grant_authority(Arc::new(factory.clone()));
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
         Ok(Self { durable, factory })
     }
@@ -3312,8 +2908,6 @@ fn delegation_roster(
     }
 }
 
-/// Translates the configured shell policy: the environment allowlist and
-/// the built-in preference.
 /// Translates the managed host denies into the runtime's network policy.
 fn network_policy(policy: &qq_config::EffectivePolicy) -> qq_core::NetworkPolicy {
     qq_core::NetworkPolicy {
@@ -3325,7 +2919,6 @@ fn network_policy(policy: &qq_config::EffectivePolicy) -> qq_core::NetworkPolicy
 fn shell_policy(policy: &qq_config::EffectivePolicy) -> qq_core::ShellPolicy {
     qq_core::ShellPolicy {
         deny_prefixes: policy.deny_shell_prefixes().to_vec().into(),
-        env_allowlist: policy.shell_env().to_vec().into(),
         builtin_preference: match policy.builtin_preference() {
             qq_config::BuiltinPreference::Off => qq_core::BuiltinPreference::Off,
             qq_config::BuiltinPreference::Hint => qq_core::BuiltinPreference::Hint,
@@ -3352,18 +2945,6 @@ const fn delegation_role(role: qq_config::DelegationRole) -> qq_protocol::Delega
         qq_config::DelegationRole::Fast => qq_protocol::DelegationRole::Fast,
         qq_config::DelegationRole::Balanced => qq_protocol::DelegationRole::Balanced,
         qq_config::DelegationRole::Strong => qq_protocol::DelegationRole::Strong,
-    }
-}
-
-/// Translates the configured delegate choice: absent means the mode's own
-/// default, so a configuration that never mentions it behaves as before.
-const fn approval_delegate(
-    setting: Option<qq_config::ApprovalDelegateSetting>,
-) -> qq_core::ApprovalDelegate {
-    match setting {
-        None => qq_core::ApprovalDelegate::ByMode,
-        Some(qq_config::ApprovalDelegateSetting::On) => qq_core::ApprovalDelegate::On,
-        Some(qq_config::ApprovalDelegateSetting::Off) => qq_core::ApprovalDelegate::Off,
     }
 }
 
