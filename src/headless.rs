@@ -2088,8 +2088,6 @@ fn concise(arguments: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "linux")]
-    mod recovery;
     use std::{
         path::Path,
         sync::{Arc, Mutex},
@@ -2893,11 +2891,6 @@ mod tests {
             pricing_provenance: Some("test fixture".to_owned()),
             approval: HeadlessApproval::ReadOnly,
             approval_explicit: false,
-            reviewer_configured: false,
-            configured_delegate: qq_protocol::ApprovalDelegate::ByMode,
-            allow_tools: Vec::new(),
-            allow_shell_prefixes: Vec::new(),
-            allow_hosts: Vec::new(),
             timeout: None,
             max_turns: None,
             max_cost_usd_nanos: None,
@@ -3031,15 +3024,9 @@ mod tests {
     #[tokio::test]
     async fn foreground_goal_reopen_replays_work_before_client_adoption() {
         struct CheckAuthority;
-        impl qq_core::WorkspaceGrantAuthority for CheckAuthority {
+        impl qq_core::WorkspacePolicyAuthority for CheckAuthority {
             fn goal_policy(&self, _: &Path) -> qq_core::GoalPolicyFuture {
                 Box::pin(std::future::ready(Ok(qq_core::GoalPolicy::default())))
-            }
-            fn seed_grants(&self, _: &Path) -> qq_core::GrantSeedFuture {
-                Box::pin(std::future::ready(qq_core::WorkspaceGrantSeed::default()))
-            }
-            fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> qq_core::GrantPromotionFuture {
-                panic!("check consent must not promote tool grants")
             }
             fn validate_goal_check(
                 &self,
@@ -4056,15 +4043,9 @@ mod tests {
     #[tokio::test]
     async fn foreground_goal_refused_check_consent_is_invalid_configuration() {
         struct DeniedCheck;
-        impl qq_core::WorkspaceGrantAuthority for DeniedCheck {
-            fn seed_grants(&self, _: &Path) -> qq_core::GrantSeedFuture {
-                Box::pin(std::future::ready(qq_core::WorkspaceGrantSeed::default()))
-            }
+        impl qq_core::WorkspacePolicyAuthority for DeniedCheck {
             fn goal_policy(&self, _: &Path) -> qq_core::GoalPolicyFuture {
                 Box::pin(std::future::ready(Ok(qq_core::GoalPolicy::default())))
-            }
-            fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> qq_core::GrantPromotionFuture {
-                panic!("refused check cannot promote grants")
             }
             fn validate_goal_check(&self, _: &Path, _: &str) -> qq_core::GoalCheckPolicyFuture {
                 Box::pin(std::future::ready(Err(
@@ -4204,15 +4185,9 @@ mod tests {
     async fn foreground_goal_check_scopes_control_real_repeated_check_execution() {
         const CHECK: &str = "printf x >> checks.log; if test -e checks.flag; then exit 0; else printf ready > checks.flag; exit 1; fi";
         struct CheckAuthority;
-        impl qq_core::WorkspaceGrantAuthority for CheckAuthority {
-            fn seed_grants(&self, _: &Path) -> qq_core::GrantSeedFuture {
-                Box::pin(std::future::ready(qq_core::WorkspaceGrantSeed::default()))
-            }
+        impl qq_core::WorkspacePolicyAuthority for CheckAuthority {
             fn goal_policy(&self, _: &Path) -> qq_core::GoalPolicyFuture {
                 Box::pin(std::future::ready(Ok(qq_core::GoalPolicy::default())))
-            }
-            fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> qq_core::GrantPromotionFuture {
-                panic!("goal check consent must not promote ordinary tool grants")
             }
             fn validate_goal_check(
                 &self,
@@ -5525,12 +5500,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ask_mode_denies_mutations_even_with_explicit_allowlists() {
+    async fn ask_mode_denies_mutations_immediately_without_a_client() {
         let fixture = fixture(MutatingProvider::new).await;
         let mut options = options(&fixture.workspace);
         options.approval = HeadlessApproval::Ask;
-        options.allow_tools = vec!["write_file".to_owned(), "shell".to_owned()];
-        options.allow_shell_prefixes = vec!["cp".to_owned()];
         let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
         assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
         assert!(!fixture.workspace.join("note.txt").exists());
@@ -5591,27 +5564,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn explicit_allowlists_cannot_resolve_auto_supervision() {
-        let mut options = options(Path::new("."));
-        options.allow_tools = vec!["shell".into()];
-        assert_eq!(
-            allowlisted_grant(&options, HeadlessApproval::Auto, "shell", None, None),
-            None,
-            "a root allowlist must not impersonate its child's reviewer"
-        );
-        assert_eq!(
-            allowlisted_grant(&options, HeadlessApproval::Full, "shell", None, None),
-            Some(ApprovalGrant::Tool {
-                name: "shell".into()
-            })
-        );
-    }
-
-    /// Explicit prefixes are stored before dispatch, including on resume.
-    /// No prefix lifts a fixed stop.
+    /// Auto runs a workspace `rm -r` without a hold; a fixed stop is denied.
     #[tokio::test]
-    async fn shell_allowlist_grants_the_session_before_dispatch() {
+    async fn auto_runs_shell_directly_but_fixed_stops_deny() {
         let fixture = fixture(|| DangerousShellProvider {
             turn: Mutex::new(0),
             stopped: false,
@@ -5622,7 +5577,6 @@ mod tests {
         }
         let mut options = options(&fixture.workspace);
         options.approval = HeadlessApproval::Auto;
-        options.allow_shell_prefixes = vec!["rm -r".to_owned()];
 
         let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
 
@@ -5646,7 +5600,6 @@ mod tests {
                 .all(|call| call["state"] == "completed")
         );
 
-        // No prefix lifts a fixed stop.
         let unmatched = self::fixture(|| DangerousShellProvider {
             turn: Mutex::new(0),
             stopped: true,
@@ -5654,36 +5607,12 @@ mod tests {
         .await;
         let mut strict = self::options(&unmatched.workspace);
         strict.approval = HeadlessApproval::Auto;
-        strict.allow_shell_prefixes = vec!["sudo rm -r".to_owned(), "cargo".to_owned()];
         let (status, stdout, _) = run_to_end(&unmatched, strict, std::future::pending()).await;
         assert_eq!(status, HeadlessStatus::Completed);
         assert!(
             finished_tool_calls(&parse_records(&stdout))
                 .iter()
                 .all(|call| call["state"] == "denied")
-        );
-    }
-
-    /// An explicit Auto tool grant is installed before the first call.
-    #[tokio::test]
-    async fn tool_allowlist_approves_held_calls_under_auto() {
-        let fixture = fixture(|| DangerousShellProvider {
-            turn: Mutex::new(0),
-            stopped: false,
-        })
-        .await;
-        for name in ["scratch0", "scratch1"] {
-            std::fs::create_dir_all(fixture.workspace.join(name)).unwrap();
-        }
-        let mut options = options(&fixture.workspace);
-        options.approval = HeadlessApproval::Auto;
-        options.allow_tools = vec!["shell".to_owned()];
-        let (status, stdout, _) = run_to_end(&fixture, options, std::future::pending()).await;
-        assert_eq!(status, HeadlessStatus::Completed);
-        assert!(
-            finished_tool_calls(&parse_records(&stdout))
-                .iter()
-                .all(|call| call["state"] == "completed")
         );
     }
 
@@ -5804,10 +5733,10 @@ mod tests {
         );
     }
 
-    /// Public fetch needs no per-host grant; legacy flags never add a hold.
+    /// Public fetch needs no per-host grant and opens no hold under Auto.
     #[tokio::test]
-    async fn auto_fetch_dispatches_public_hosts_with_or_without_host_flags() {
-        for with_host_flag in [false, true] {
+    async fn auto_fetch_dispatches_public_hosts_without_a_hold() {
+        {
             let server = qq_provider::test_support::LoopbackServer::respond(
                 200,
                 "text/plain",
@@ -5819,9 +5748,6 @@ mod tests {
             .await;
             let mut options = options(&fixture.workspace);
             options.approval = HeadlessApproval::Auto;
-            if with_host_flag {
-                options.allow_hosts = vec!["127.0.0.1".into()];
-            }
             let (status, stdout, stderr) =
                 run_to_end(&fixture, options, std::future::pending()).await;
             assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
@@ -6058,16 +5984,7 @@ mod tests {
         let mut resumed = options(&fixture.workspace);
         resumed.session = Some(stored.session_id);
         resumed.approval = HeadlessApproval::Auto;
-        resumed.reviewer_configured = true;
-        resumed.configured_delegate = qq_protocol::ApprovalDelegate::On;
-        resumed.allow_tools = vec!["write_file".into(), "shell".into()];
-        resumed.allow_shell_prefixes = vec!["cp".into()];
-        let (status, stdout, stderr) = tokio::time::timeout(
-            REVIEWER_DENY_GRACE / 2,
-            run_to_end(&fixture, resumed, std::future::pending()),
-        )
-        .await
-        .expect("stored Ask must deny unattended immediately, without waiting for a reviewer");
+        let (status, stdout, stderr) = run_to_end(&fixture, resumed, std::future::pending()).await;
         assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
         assert!(
             !fixture.workspace.join("note.txt").exists(),
@@ -6121,8 +6038,6 @@ mod tests {
                         HeadlessApproval::Auto
                     };
                     resumed.approval_explicit = explicit;
-                    resumed.reviewer_configured = true;
-                    resumed.configured_delegate = qq_protocol::ApprovalDelegate::On;
                     let request = goal_request();
                     let intent = if goal {
                         SessionIntent::Goal(&request)
@@ -6138,14 +6053,6 @@ mod tests {
                         stored_mode
                     };
                     assert_eq!(effective.approval, expected);
-                    assert_eq!(
-                        effective.wait_for_delegate,
-                        expected == HeadlessApproval::Auto
-                    );
-                    assert_eq!(
-                        effective.child_waits_for_delegate,
-                        expected != HeadlessApproval::Ask
-                    );
                     assert_eq!(
                         workspace_snapshot(&fixture).await.sessions[0].approval_mode,
                         approval_mode(expected)
@@ -6166,7 +6073,6 @@ mod tests {
         let mut resumed = options(&fixture.workspace);
         resumed.session = Some(stored.session_id);
         resumed.approval = HeadlessApproval::Auto;
-        resumed.allow_tools = vec!["write_file".into(), "shell".into()];
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = run_goal(
@@ -6800,7 +6706,7 @@ mod tests {
         assert_eq!(outcomes.len(), 1, "exactly one terminal outcome");
         assert_eq!(outcomes[0]["status"], "completed");
         assert_eq!(outcomes[0]["exit_code"], 0);
-        assert_eq!(outcomes[0]["prompt_identity"]["version"], 25);
+        assert_eq!(outcomes[0]["prompt_identity"]["version"], 26);
         assert!(outcomes[0]["prompt_identity"]["system_prompt_hash"].is_string());
         assert!(outcomes[0]["prompt_identity"]["tool_schema_hash"].is_string());
         assert_eq!(
@@ -6932,103 +6838,8 @@ mod tests {
         assert_eq!(stderr.matches(DENIAL_HINT).count(), 1, "{stderr}");
     }
 
-    struct CountingReviewer {
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-        escalate: bool,
-    }
-
-    impl qq_core::ApprovalReviewer for CountingReviewer {
-        fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let decision = if self.escalate {
-                qq_core::ReviewDecision::Escalate {
-                    reason: "reviewer abstained".to_owned(),
-                }
-            } else {
-                qq_core::ReviewDecision::Approve
-            };
-            Box::pin(async move { qq_core::ReviewVerdict::free(decision) })
-        }
-    }
-
-    async fn root_shell_reviewer_fixture(
-        escalate: bool,
-    ) -> (Fixture, Arc<std::sync::atomic::AtomicUsize>) {
-        let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
-        let workspace = root.join("work");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let workspace = std::fs::canonicalize(&workspace).unwrap();
-        for name in ["scratch0", "scratch1"] {
-            std::fs::create_dir_all(workspace.join(name)).unwrap();
-        }
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
-        runtime_options.approval_reviewer = Some(Arc::new(CountingReviewer {
-            calls: Arc::clone(&calls),
-            escalate,
-        }));
-        let sessions = SessionRuntime::open(
-            runtime_options,
-            Arc::new(ProviderLoader(|| DangerousShellProvider {
-                turn: Mutex::new(0),
-                stopped: true,
-            })),
-        )
-        .await
-        .unwrap();
-        (
-            Fixture {
-                sessions,
-                workspace,
-                _directory: directory,
-            },
-            calls,
-        )
-    }
-
-    fn assert_root_shell_denied_without_review(
-        fixture: &Fixture,
-        calls: &std::sync::atomic::AtomicUsize,
-        records: &[serde_json::Value],
-    ) {
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-        let finished = finished_tool_calls(records);
-        assert_eq!(finished.len(), 2, "{records:?}");
-        assert!(finished.iter().all(|call| call["state"] == "denied"));
-        assert!(
-            event_records(records).iter().all(|record| {
-                !record["envelope"]["event"]["type"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("tool_approval_")
-            }),
-            "missing authority must not produce approval events: {records:?}"
-        );
-        for name in ["scratch0", "scratch1"] {
-            assert!(fixture.workspace.join(name).is_dir());
-        }
-    }
-
-    /// A loaded configuration with a `reviewer_model`, read by the real
-    /// loader from an explicit document.
-    fn reviewer_snapshot(workspace: &Path) -> qq_config::ConfigSnapshot {
-        let root = workspace.parent().unwrap();
-        let loader = qq_config::ConfigLoader::new(qq_config::ConfigPaths::new(
-            root.join("cfg-global"),
-            root.join("cfg-data"),
-            root.join("cfg-managed"),
-        ));
-        loader
-            .load(&qq_config::LoadRequest::new(workspace).with_explicit_content(
-                r#"(version: 1, model: "test/model", reviewer_model: "test/model",
-                    providers: { "test": Custom(connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth), models: { "model": (name: "m") }) })"#,
-            ))
-            .unwrap()
-    }
-
     #[tokio::test]
-    async fn auto_children_fetch_public_hosts_but_explicit_managed_denies_prevent_dispatch() {
+    async fn auto_children_fetch_public_hosts_but_managed_denies_prevent_dispatch() {
         struct ChildFetchProvider {
             child: bool,
             first: Mutex<bool>,
@@ -7106,17 +6917,6 @@ mod tests {
                 })
             }
         }
-        struct DenyChildFetch(Arc<std::sync::atomic::AtomicUsize>);
-        impl qq_core::ApprovalReviewer for DenyChildFetch {
-            fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Box::pin(async {
-                    qq_core::ReviewVerdict::free(qq_core::ReviewDecision::Deny {
-                        reason: "stop before network dispatch".into(),
-                    })
-                })
-            }
-        }
         for (approval, deny_host) in [
             (HeadlessApproval::Full, false),
             (HeadlessApproval::Auto, false),
@@ -7138,11 +6938,8 @@ mod tests {
             let root = std::fs::canonicalize(directory.path()).unwrap();
             let workspace = root.join("work");
             std::fs::create_dir(&workspace).unwrap();
-            let consulted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
             runtime_options.max_active_runs = 2;
-            runtime_options.approval_reviewer =
-                Some(Arc::new(DenyChildFetch(Arc::clone(&consulted))));
             let fixture = Fixture {
                 sessions: SessionRuntime::open(
                     runtime_options,
@@ -7155,8 +6952,6 @@ mod tests {
             };
             let mut options = options(&fixture.workspace);
             options.approval = approval;
-            options.allow_hosts = vec!["docs.invalid".into()];
-            options.reviewer_configured = true;
             let (status, stdout, _) = run_to_end(&fixture, options, std::future::pending()).await;
             assert_eq!(status, HeadlessStatus::Completed, "{approval:?}: {stdout}");
             let records = parse_records(&stdout);
@@ -7171,11 +6966,6 @@ mod tests {
                 })
                 .expect("actual write child must be created");
             assert_eq!(child["approval_mode"], "auto");
-            assert_eq!(
-                consulted.load(std::sync::atomic::Ordering::SeqCst),
-                0,
-                "{approval:?}: public research never needs a reviewer: {stdout}"
-            );
             let fetch = events
                 .iter()
                 .find_map(|record| {
@@ -7208,7 +6998,7 @@ mod tests {
             });
             assert_eq!(
                 started, !deny_host,
-                "managed denies precede dispatch even with host flags: {stdout}"
+                "managed denies precede dispatch: {stdout}"
             );
             assert!(
                 !events
@@ -7234,185 +7024,6 @@ mod tests {
                 assert_eq!(request.request_line(), Some("GET /docs HTTP/1.1"));
             }
             fixture.sessions.close().await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn root_auto_without_authority_does_not_consult_a_configured_reviewer() {
-        let (fixture, calls) = root_shell_reviewer_fixture(false).await;
-        let mut options = options(&fixture.workspace);
-        options.approval = HeadlessApproval::Auto;
-        let snapshot = reviewer_snapshot(&fixture.workspace);
-        let (reviewer_configured, configured_delegate) = crate::headless_delegate_options(
-            &snapshot,
-            &qq_protocol::AgentProfileId::default(),
-            None,
-        );
-        assert!(reviewer_configured);
-        options.reviewer_configured = reviewer_configured;
-        options.configured_delegate = configured_delegate;
-        let (status, stdout, _) =
-            run_to_end(&fixture, options.clone(), std::future::pending()).await;
-        assert_eq!(status, HeadlessStatus::Completed);
-        assert_root_shell_denied_without_review(&fixture, &calls, &parse_records(&stdout));
-
-        options.format = HeadlessFormat::Text;
-        let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
-        assert_eq!(status, HeadlessStatus::Completed);
-        assert!(stderr.contains("[tool] shell denied"), "{stderr}");
-        assert!(!stderr.contains("approved by reviewer"), "{stderr}");
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-        for name in ["scratch0", "scratch1"] {
-            assert!(fixture.workspace.join(name).is_dir());
-        }
-    }
-
-    #[tokio::test]
-    async fn root_auto_denies_without_waiting_for_an_escalating_reviewer() {
-        let (fixture, calls) = root_shell_reviewer_fixture(true).await;
-        let mut options = options(&fixture.workspace);
-        options.approval = HeadlessApproval::Auto;
-        options.reviewer_configured = true;
-        let (status, stdout, _) = tokio::time::timeout(
-            REVIEWER_DENY_GRACE / 2,
-            run_to_end(&fixture, options, std::future::pending()),
-        )
-        .await
-        .expect("missing authority must deny without waiting for reviewer escalation");
-        assert_eq!(status, HeadlessStatus::Completed);
-        assert_root_shell_denied_without_review(&fixture, &calls, &parse_records(&stdout));
-    }
-
-    #[tokio::test]
-    async fn a_delegate_that_is_configured_but_switched_off_does_not_delay_the_denial() {
-        let (fixture, calls) = root_shell_reviewer_fixture(false).await;
-        let mut options = options(&fixture.workspace);
-        options.approval = HeadlessApproval::Auto;
-        options.reviewer_configured = true;
-        options.configured_delegate = qq_protocol::ApprovalDelegate::Off;
-        let (status, stdout, _) = tokio::time::timeout(
-            REVIEWER_DENY_GRACE / 2,
-            run_to_end(&fixture, options.clone(), std::future::pending()),
-        )
-        .await
-        .expect("the denial must not wait for a delegate that is switched off");
-        assert_eq!(status, HeadlessStatus::Completed);
-        let records = parse_records(&stdout);
-        assert_root_shell_denied_without_review(&fixture, &calls, &records);
-
-        let session_id: SessionId = records[0]["session_id"].as_str().unwrap().parse().unwrap();
-        send(
-            &fixture.sessions,
-            SessionCommand::SetApprovalDelegate {
-                session_id,
-                delegate: Some(qq_protocol::ApprovalDelegate::Off),
-            },
-        )
-        .await
-        .unwrap();
-        let resumed = HeadlessOptions {
-            session: Some(session_id),
-            approval: HeadlessApproval::Auto,
-            reviewer_configured: true,
-            configured_delegate: qq_protocol::ApprovalDelegate::ByMode,
-            ..options
-        };
-        let (status, stdout, _) = tokio::time::timeout(
-            REVIEWER_DENY_GRACE / 2,
-            run_to_end(&fixture, resumed, std::future::pending()),
-        )
-        .await
-        .expect("the session's off override must not wait either");
-        assert_eq!(status, HeadlessStatus::Completed);
-        assert_root_shell_denied_without_review(&fixture, &calls, &parse_records(&stdout));
-    }
-
-    #[test]
-    fn delegated_resolution_retains_reviewer_identity_in_jsonl_and_text() {
-        // Real child supervision is covered in qq-core; this adapter must
-        // preserve its typed result without treating a root denial as review.
-        for (resolution, expected) in [
-            (ApprovalResolution::ApprovedByReviewer, "approved"),
-            (ApprovalResolution::DeniedByReviewer, "denied"),
-        ] {
-            let tool_call = qq_protocol::ToolCallSnapshot {
-                id: qq_protocol::ToolCallId::from_bytes([1; 16]),
-                session_id: SessionId::from_bytes([2; 16]),
-                run_id: RunId::from_bytes([3; 16]),
-                turn_ordinal: 0,
-                call_ordinal: 0,
-                provider_call_id: "child-call".into(),
-                name: "write_file".into(),
-                arguments: r#"{"path":"note.txt","content":"child work"}"#.into(),
-                state: if resolution == ApprovalResolution::DeniedByReviewer {
-                    ToolCallState::Denied
-                } else {
-                    ToolCallState::Completed
-                },
-                result: None,
-                is_error: resolution == ApprovalResolution::DeniedByReviewer,
-                display: None,
-            };
-            let envelope = SessionEventEnvelope {
-                cursor: qq_protocol::EventCursor {
-                    store_id: qq_protocol::StoreId::from_bytes([4; 16]),
-                    workspace_id: WorkspaceId::from_bytes([5; 16]),
-                    sequence: 1,
-                },
-                session_id: tool_call.session_id,
-                run_id: Some(tool_call.run_id),
-                caused_by: None,
-                occurred_at_ms: 1,
-                event: SessionEvent::ToolApprovalResolved {
-                    tool_call,
-                    resolution,
-                    delegate: Some(qq_protocol::DelegateIdentity::Reviewer),
-                },
-            };
-            let mut sink = RecordSink {
-                goal_record: GoalRecordState::Pending,
-                stdout_failed: false,
-                trace: None,
-                to_stdout: true,
-            };
-            let mut stdout = Vec::new();
-            sink.record(
-                &mut stdout,
-                HeadlessRecordRef::Event {
-                    envelope: &envelope,
-                },
-            )
-            .unwrap();
-            let records = parse_records(&String::from_utf8(stdout).unwrap());
-            assert_eq!(records[0]["envelope"]["event"]["delegate"], "reviewer");
-            assert_eq!(
-                records[0]["envelope"]["event"]["resolution"],
-                serde_json::to_value(resolution).unwrap()
-            );
-            let SessionEvent::ToolApprovalResolved {
-                tool_call,
-                resolution,
-                delegate,
-            } = &envelope.event
-            else {
-                unreachable!()
-            };
-            let mut stderr = Vec::new();
-            write_delegate_resolution(&mut stderr, &tool_call.name, *resolution, *delegate)
-                .unwrap();
-            assert_eq!(
-                String::from_utf8(stderr).unwrap(),
-                format!("[tool] write_file {expected} by reviewer\n")
-            );
-            assert!(
-                write_delegate_resolution(
-                    &mut BrokenWriter,
-                    &tool_call.name,
-                    *resolution,
-                    *delegate,
-                )
-                .is_err()
-            );
         }
     }
 
@@ -7988,8 +7599,6 @@ mod tests {
             workspace_id: workspace,
             session_id: session,
             subscribe_after: after,
-            wait_for_delegate: false,
-            child_waits_for_delegate: false,
         };
         let mut sink = RecordSink::open(&options(&fixture.workspace)).unwrap();
         let mut replayed = Vec::new();
@@ -8113,18 +7722,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn foreground_auto_goal_denies_without_human_wait_with_a_reviewer_configured() {
+    async fn foreground_auto_goal_denies_fixed_stops_without_a_human_wait() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let workspace = root.join("work");
         std::fs::create_dir_all(&workspace).unwrap();
-        let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
-        runtime_options.approval_reviewer = Some(Arc::new(CountingReviewer {
-            escalate: true,
-            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }));
         let sessions = SessionRuntime::open(
-            runtime_options,
+            SessionRuntimeOptions::new(root.join("sessions.sqlite3")),
             Arc::new(ProviderLoader(|| DangerousShellProvider {
                 turn: Mutex::new(0),
                 stopped: true,
@@ -8139,22 +7743,17 @@ mod tests {
         };
         let mut opts = options(&fixture.workspace);
         opts.approval = HeadlessApproval::Auto;
-        opts.reviewer_configured = true;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let code = tokio::time::timeout(
-            REVIEWER_DENY_GRACE / 2,
-            run_goal(
-                &fixture.sessions,
-                opts,
-                goal_request(),
-                std::future::pending(),
-                &mut stdout,
-                &mut stderr,
-            ),
+        let code = run_goal(
+            &fixture.sessions,
+            opts,
+            goal_request(),
+            std::future::pending(),
+            &mut stdout,
+            &mut stderr,
         )
-        .await
-        .expect("the reviewer has passed; no human is attached to this goal");
+        .await;
         assert_eq!(code, 8, "{}", String::from_utf8_lossy(&stderr));
         let records = parse_records(&String::from_utf8(stdout).unwrap());
         let terminal = records.last().unwrap();

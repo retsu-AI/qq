@@ -943,53 +943,6 @@ fn git_commit() -> String {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn ab6_qualification_commands_require_an_explicit_cohort_and_files() {
-        use clap::Parser;
-        assert!(
-            super::Cli::try_parse_from([
-                "cargo xtask",
-                "action-bias",
-                "export",
-                "--store",
-                "store.sqlite",
-                "--start",
-                "2026-09-13",
-                "--end",
-                "2026-10-13",
-                "--cutoff",
-                "2026-10-14",
-                "--output",
-                "cohort.jsonl"
-            ])
-            .is_ok()
-        );
-        assert!(
-            super::Cli::try_parse_from([
-                "cargo xtask",
-                "action-bias",
-                "recount",
-                "--input",
-                "cohort.jsonl",
-                "--output",
-                "receipt.json"
-            ])
-            .is_ok()
-        );
-        assert!(
-            super::Cli::try_parse_from([
-                "cargo xtask",
-                "action-bias",
-                "export",
-                "--store",
-                "store.sqlite",
-                "--output",
-                "cohort.jsonl"
-            ])
-            .is_err()
-        );
-    }
-
     use std::collections::BTreeSet;
 
     use futures_util::stream;
