@@ -1568,7 +1568,7 @@ pub(super) fn execute_command(
                 );
                 let mut refusal = None;
                 if approving && own_mode == ApprovalMode::ReadOnly {
-                    refusal = Some("permission_denied: authority_changed: task permissions are now read-only; a pending approval cannot restore revoked authority".to_owned());
+                    refusal = Some(approval::AUTHORITY_CHANGED_RESULT.to_owned());
                 } else if approving && !ancestors.is_empty() {
                     let (_, class) = load_pending_approval_class(
                         &transaction,
@@ -1583,9 +1583,17 @@ pub(super) fn execute_command(
                             | approval::PolicyDecision::AskUser { .. } => continue,
                             // The pending response supplies the fresh human
                             // approval required by an Ask ancestor.
-                            approval::PolicyDecision::RequireApproval if *mode == ApprovalMode::Ask => continue,
-                            approval::PolicyDecision::RequireApproval => Some("permission_denied: authority_changed: parent_permission_required: this child action is outside its parent's grants; explicitly grant the parent the required tool, command, or host scope".to_owned()),
-                            approval::PolicyDecision::Deny { reason } => Some(format!("permission_denied: authority_changed: {}", approval::deny_result(&reason))),
+                            approval::PolicyDecision::RequireApproval
+                                if *mode == ApprovalMode::Ask =>
+                            {
+                                continue;
+                            }
+                            approval::PolicyDecision::RequireApproval => {
+                                Some(approval::PARENT_DENIED_RESULT.to_owned())
+                            }
+                            approval::PolicyDecision::Deny { reason } => {
+                                Some(approval::deny_result(&reason))
+                            }
                         };
                         break;
                     }

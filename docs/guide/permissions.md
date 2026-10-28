@@ -81,7 +81,11 @@ Auto does not ask a human or consult a reviewer model for ordinary actions,
 including actions taken by write sub-agents. Auto questions return a result
 telling the agent to decide without human input. A denied operation returns a tool
 error so the agent can choose another permitted approach. Denial does not grant
-permission to bypass the boundary. Children remain subject to their parent's
+permission to bypass the boundary. Every denial reads
+`permission_denied: <who>: <reason>; <what to do instead>`, followed by
+"Do not retry it in another form." `<who>` is
+`fixed_stop`, `user` (you said no, or nobody answered in time), `mode` or
+`config`. Children remain subject to their parent's
 permissions, including later revocation.
 
 Ask requires fresh human approval for each non-read call. Stored grants and

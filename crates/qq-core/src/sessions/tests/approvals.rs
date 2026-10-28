@@ -261,7 +261,7 @@ async fn managed_shell_denial_precedes_auto_and_full_and_allows_continuation() {
             )));
             assert!(observed.iter().any(|event| matches!(&event.event,
                 SessionEvent::ToolCallFinished { tool_call } if tool_call.name == tool && tool_call.is_error
-                    && tool_call.result.as_deref().is_some_and(|result| result.contains("managed_shell_deny"))
+                    && tool_call.result.as_deref().is_some_and(|result| result == approval::MANAGED_SHELL_DENIED_RESULT)
             )));
             assert!(observed.iter().any(|event| matches!(&event.event,
                 SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "__test_mutate" && !tool_call.is_error
@@ -373,7 +373,7 @@ async fn an_auto_parent_prevents_child_mode_changes_from_introducing_human_appro
                     .result
                     .as_deref()
                     .unwrap()
-                    .contains("outside_auto_scope")
+                    .starts_with("permission_denied: mode: this action is outside the authority")
             );
             assert!(consulted.lock().unwrap().is_empty());
         }
@@ -2698,7 +2698,7 @@ async fn fetch_to_a_blocked_host_is_denied_under_full_without_a_hold() {
         SessionEvent::ToolCallFinished { tool_call }
             if tool_call.state == ToolCallState::Denied
                 && tool_call.result.as_deref().is_some_and(|result| {
-                    result.starts_with("fetch refused: host 169.254.169.254 resolves to a private")
+                    result.starts_with("permission_denied: config: fetch refused: host 169.254.169.254 resolves to a private")
                 })
     )));
 }
@@ -2736,7 +2736,7 @@ async fn a_blocked_host_never_reaches_the_delegate_even_when_one_would_approve()
         SessionEvent::ToolCallFinished { tool_call }
             if tool_call.state == ToolCallState::Denied
                 && tool_call.result.as_deref().is_some_and(|result| {
-                    result.starts_with("fetch refused: host 169.254.169.254 resolves to a private")
+                    result.starts_with("permission_denied: config: fetch refused: host 169.254.169.254 resolves to a private")
                 })
     )));
     assert!(
@@ -3461,7 +3461,7 @@ async fn readonly_revocation_denies_a_late_human_approval_without_recording_gran
                 SessionEvent::ToolCallStarted { tool_call } if tool_call.id == call.id)));
             assert!(observed.iter().any(|event| matches!(&event.event,
                 SessionEvent::ToolApprovalResolved { tool_call, .. }
-                    if tool_call.id == call.id && tool_call.result.as_deref().is_some_and(|text| text.contains("permission_denied: authority_changed")))));
+                    if tool_call.id == call.id && tool_call.result.as_deref().is_some_and(|text| text == approval::AUTHORITY_CHANGED_RESULT))));
             let (_, grants, _) = harness
                 .runtime
                 .inner

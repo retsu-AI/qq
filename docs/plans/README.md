@@ -120,96 +120,12 @@ list of stops plus undo is easier to predict.
 - `$ARGUMENTS` is not substituted, the skill's directory is not given, and
   `.agents/skills` is invisible to the model.
 
-## A. Safety: snapshots, modes, fixed stops
-
-Lands first. B removes the sandbox only after A ships.
-
-### Modes
-
-The protocol's mode names stay; what they mean changes.
-
-| Mode | Behavior |
-| --- | --- |
-| `read_only` | Reads run. Everything else is denied. |
-| `ask` | Read tools run. Every other call, shell included, waits for the human: `y` runs it once, `n` denies it. Fixed stops are denied without asking. |
-| `auto` (default) | Everything runs except the fixed stops. Nothing asks. |
-| `full` | Everything runs. No stops. Snapshots still run. |
-
-Headless Ask denies what it would ask, because nobody is there.
-
-There is no reviewer model and no routine list. Session and workspace
-grants (`a`, `w`, `allow_shell_prefixes`) stop mattering for shell in Auto,
-because Auto already runs the command. They are deleted with the sandbox in
-B.
-
-### Fixed stops
-
-These are denied in every mode except `full`:
-
-- `git push` with `--force`, `-f`, `--force-with-lease`, `--mirror`,
-  `--prune`, `--delete`/`-d`, or a `+ref`/`:ref` refspec.
-- `rm -r` or `chmod`/`chown`/`chgrp -R` on `/`, `~`, `$HOME`, or a path
-  directly under `/` or home; `mv` of such a path.
-- `sudo`, `doas`, `su`, `pkexec`; `mkfs*`, `fdisk`, `parted`, `wipefs`;
-  `dd` or a redirect writing to a disk device; shutdown and reboot.
-- A shell command that names `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`,
-  `~/.config/gh`, `~/.docker/config.json`, `~/.kube`, `~/.git-credentials`,
-  or QQ's credential store. Read tools already refuse paths outside the
-  workspace.
-- Managed `deny_shell_prefixes`.
-
-The check keeps the `tree-sitter-bash` parse and wrapper peeling from
-`approval/classify.rs` (`env`, `timeout`, `nice`, `sh -c`, `xargs`), so
-`cd x && sudo …` and `sh -c 'git push -f'` are caught. `approval/rules.rs`
-and its allow/prompt/forbidden tiers are deleted. A command the parser can't
-read is not a stop.
-
-TODO: a user-level `deny_shell_prefixes`. Today only managed config may set
-it.
-
-The guide calls this an accident net, not a security boundary: a script or
-an interpreter can do any of these things without a literal command.
-
-### Snapshots and `qq undo`
-
-- **When.** Before the first mutating call of a run in a Git workspace, QQ
-  records the working tree, including untracked files, without touching the
-  user's index or stash. It uses a temporary `GIT_INDEX_FILE`, `add -A`,
-  `write-tree` and `commit-tree`, and stores the result under
-  `refs/qq/snapshots/<run-id>`. The last 50 per repository are kept.
-- **Restore.** `qq undo [<run>]` first snapshots the current state, so undo
-  can itself be undone. It then restores tracked and untracked files to the
-  snapshot and prints what changed. The TUI exposes the same command.
-- **What it doesn't cover.** Ignored files, anything outside the workspace,
-  and remote effects. A non-Git workspace gets no snapshot, and the prompt
-  and `qq doctor` say so.
-
-### Denials
-
-There is one denial format the model can act on:
-
-```
-permission_denied: <who>: <reason>; <what to do instead>
-```
-
-`<who>` is `fixed_stop`, `user`, `mode` or `config`. The text tells the
-agent not to retry the same action in another form and to find another way
-or tell the user what it needs.
-
-**Accepted when** all of the following are shown:
-
-- Every fixed stop has a test, including wrapped forms (`cd x && …`,
-  `env A=b …`, `sh -c '…'`, `timeout 5 …`).
-- Tests cover the mode table: Auto runs unknown and dynamic commands; Ask
-  holds non-reads, runs reads and denies stops; read-only denies non-reads;
-  Full runs stops.
-- A smoke scenario edits files, deletes a file, adds an untracked file and
-  then runs `qq undo`. The workspace matches the snapshot byte for byte,
-  and the index and stash are untouched.
-
 ## B. Run in place, as the user; delete the sandbox
 
-Lands after A.
+Snapshots and `qq undo` (#482), the mode table and fixed stops (#483), and
+one denial format shipped first; see
+[permissions](../guide/permissions.md) and
+[tools](../design/tools.md#fixed-stops). This section is next.
 
 1. `shell` and `exec` run in the session's working directory, as the
    user, with the inherited environment, host network and a real HOME. The
@@ -358,8 +274,8 @@ arguments.
     unattended goals.
 - Headless `qq run --goal` on the host prints a one-line note pointing at
   that guide. It never blocks.
-- Rewrite `guide/permissions.md`, `design/tools.md` and `faq.md` for A and
-  B in the same PRs.
+- Rewrite `guide/permissions.md`, `design/tools.md` and `faq.md` for B in
+  the same PRs.
 
 **Accepted when** the devcontainer builds and runs one deterministic smoke
 task against the loopback fake provider in CI.
@@ -376,16 +292,18 @@ task against the loopback fake provider in CI.
   carried over from the retired auth plan.
 - Bound store growth with an explicit retention setting before more runs
   die on `DiskFull`. Snapshot refs follow the same setting.
+- A user-level `deny_shell_prefixes`. Today only managed config may set it.
+- `/undo` in the TUI, as a server command: the runtime refuses it while
+  any run is active, queued or due from a goal, and admits no run until the
+  restore finishes. A client-side guard cannot see other clients or goal
+  scheduling.
 
 ## Order
 
-1. A, as two PRs: snapshots and `qq undo`; modes and fixed stops (with
-   `/undo` in the TUI).
-2. B after A, as about two PRs: run in place; deletions with the protocol
-   bump.
-3. C, D, E, F and G in parallel with disjoint owned paths. C's runner and
+1. B, as about two PRs: run in place; deletions with the protocol bump.
+2. C, D, E, F and G in parallel with disjoint owned paths. C's runner and
    E's environment text land with or after B.
-4. H whenever there is room.
+3. H whenever there is room.
 
 Each PR:
 - shows its regression failing before the fix;

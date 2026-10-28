@@ -320,6 +320,76 @@ impl Home {
         FakeProvider::start(self.root.join("provider-requests.txt"), script).await
     }
 
+    /// Runs git in the workspace with a fixture identity and no user config.
+    async fn git(&self, args: &[&str]) -> Result<String, String> {
+        let mut command = Command::new("git");
+        // An inherited repository override (a hook's GIT_DIR, GIT_INDEX_FILE)
+        // would aim the fixture's commits at some other repository.
+        for (name, _) in env::vars_os() {
+            if name.to_string_lossy().starts_with("GIT_") {
+                command.env_remove(name);
+            }
+        }
+        command
+            .current_dir(&self.workspace)
+            .env("HOME", &self.root)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
+            .env("GIT_AUTHOR_NAME", "Smoke")
+            .env("GIT_AUTHOR_EMAIL", "smoke@localhost")
+            .env("GIT_COMMITTER_NAME", "Smoke")
+            .env("GIT_COMMITTER_EMAIL", "smoke@localhost")
+            .args(args)
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(COMMAND_TIMEOUT, command.output())
+            .await
+            .map_err(|_| format!("git {args:?} did not exit within {COMMAND_TIMEOUT:?}"))?
+            .map_err(|error| format!("git {args:?}: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Every file under the workspace except `.git`, with its bytes. The walk
+    /// is synchronous, so it runs off the Tokio workers.
+    async fn files(&self) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+        fn walk(
+            root: &Path,
+            directory: &Path,
+            files: &mut BTreeMap<PathBuf, Vec<u8>>,
+        ) -> io::Result<()> {
+            for entry in fs::read_dir(directory)? {
+                let path = entry?.path();
+                if path.file_name().is_some_and(|name| name == ".git") {
+                    continue;
+                }
+                if path.is_dir() {
+                    walk(root, &path, files)?;
+                } else {
+                    let relative = path.strip_prefix(root).unwrap_or(&path).to_owned();
+                    files.insert(relative, fs::read(&path)?);
+                }
+            }
+            Ok(())
+        }
+        let root = self.workspace.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut files = BTreeMap::new();
+            walk(&root, &root, &mut files).map(|()| files)
+        })
+        .await
+        .map_err(|error| format!("read the workspace: {error}"))?
+        .map_err(|error| format!("read the workspace: {error}"))
+    }
+
     fn command(&self, base_url: &str) -> Command {
         let config = format!(
             r#"(version: 1, model: "smoke/model", providers: {{"smoke": Custom(connection: (base_url: "{}", api: OpenAiResponses, auth: NoAuth), models: {{"model": (name: "Smoke model")}})}})"#,
@@ -432,6 +502,11 @@ const SCENARIOS: &[Scenario] = &[
         name: "permission-dispatch",
         proves: "all four approval modes dispatch correctly, Ask denies unattended writes, and built-ins protect policy/Git files",
         run: |home| Box::pin(permission_dispatch(home)),
+    },
+    Scenario {
+        name: "run-then-undo",
+        proves: "`qq undo` restores files a run edited, deleted and created, byte for byte, leaves the index and stash alone, and can be reversed",
+        run: |home| Box::pin(run_then_undo(home)),
     },
     Scenario {
         name: "structured-tracing",
@@ -585,6 +660,110 @@ async fn permission_dispatch(home: &Home) -> Result<(), String> {
     Ok(())
 }
 
+async fn run_then_undo(home: &Home) -> Result<(), String> {
+    // The user's state: a commit, a stash entry, a staged change, and an
+    // untracked draft. Undo must bring the files back and leave the rest.
+    tokio::fs::write(home.workspace.join("notes.txt"), "base notes\n")
+        .await
+        .map_err(|e| e.to_string())?;
+    home.git(&["add", "inventory.rs", "notes.txt"]).await?;
+    home.git(&["commit", "-q", "-m", "base"]).await?;
+    tokio::fs::write(home.workspace.join("notes.txt"), "stashed notes\n")
+        .await
+        .map_err(|e| e.to_string())?;
+    home.git(&["stash", "-q"]).await?;
+    tokio::fs::write(home.workspace.join("notes.txt"), "staged notes\n")
+        .await
+        .map_err(|e| e.to_string())?;
+    home.git(&["add", "notes.txt"]).await?;
+    tokio::fs::write(home.workspace.join("draft.txt"), "user draft\r\nkeep\n")
+        .await
+        .map_err(|e| e.to_string())?;
+    let files = home.files().await?;
+    let index = home.git(&["ls-files", "--stage"]).await?;
+    let stash = home.git(&["stash", "list", "--format=%H"]).await?;
+
+    let mut worker = Worker::start(home).await?;
+    let result = async {
+        let provider = home
+            .provider(vec![
+                Reply::ReadFile("inventory.rs"),
+                Reply::WriteFile("inventory.rs", "pub struct Changed;\n"),
+                Reply::Tool("shell", serde_json::json!({"command": "rm notes.txt"})),
+                Reply::WriteFile("created.txt", "agent file\n"),
+                Reply::Text("done"),
+            ])
+            .await
+            .map_err(|error| error.to_string())?;
+        let output = home
+            .run(
+                &provider.base_url,
+                &["run", "--format", "jsonl", "change things"],
+            )
+            .await?;
+        ensure!(output.status == Some(0), "run: {}", output.stderr);
+        let errors: Vec<_> = jsonl(&output.stdout)?
+            .into_iter()
+            .filter(|record| {
+                record["envelope"]["event"]["type"] == "tool_call_finished"
+                    && record["envelope"]["event"]["tool_call"]["is_error"] == true
+            })
+            .collect();
+        ensure!(errors.is_empty(), "tool calls failed: {errors:?}");
+        Ok(())
+    }
+    .await;
+    worker.stop().await?;
+    result?;
+    let after_run = home.files().await?;
+    ensure!(
+        !after_run.contains_key(Path::new("notes.txt"))
+            && after_run.contains_key(Path::new("created.txt"))
+            && after_run.get(Path::new("inventory.rs")).map(Vec::as_slice)
+                == Some(b"pub struct Changed;\n".as_slice()),
+        "the run's edits did not land: {:?}",
+        after_run.keys().collect::<Vec<_>>()
+    );
+
+    let undo = home.run("http://127.0.0.1:1/v1", &["undo"]).await?;
+    ensure!(
+        undo.status == Some(0),
+        "qq undo: {}{}",
+        undo.stdout,
+        undo.stderr
+    );
+    ensure!(
+        home.files().await? == files,
+        "files differ from the snapshot after qq undo"
+    );
+    ensure!(
+        home.git(&["ls-files", "--stage"]).await? == index,
+        "qq undo changed the index"
+    );
+    ensure!(
+        home.git(&["stash", "list", "--format=%H"]).await? == stash,
+        "qq undo changed the stash"
+    );
+
+    // The undo is itself undoable.
+    let reverse = undo
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("To reverse this: qq undo "))
+        .ok_or_else(|| format!("qq undo did not name its reversal: {}", undo.stdout))?
+        .trim()
+        .to_owned();
+    let redo = home
+        .run("http://127.0.0.1:1/v1", &["undo", &reverse])
+        .await?;
+    ensure!(redo.status == Some(0), "qq undo {reverse}: {}", redo.stderr);
+    ensure!(
+        home.files().await? == after_run,
+        "reversing the undo did not bring the run's edits back"
+    );
+    Ok(())
+}
+
 async fn ask_streams_text(home: &Home) -> Result<(), String> {
     let provider = home
         .provider(vec![Reply::Text("pong from the fake")])
@@ -717,37 +896,48 @@ async fn structured_tracing(home: &Home) -> Result<(), String> {
 }
 
 async fn run_command_deadlines(home: &Home) -> Result<(), String> {
-    let paths = home
-        .run("http://127.0.0.1:1/v1", &["config", "paths"])
-        .await?;
-    ensure!(paths.status == Some(0), "config paths: {}", paths.stderr);
-    let data = paths
-        .stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("data:"))
-        .and_then(|line| line.trim().rsplit_once(" ("))
-        .map(|(path, _)| PathBuf::from(path))
-        .ok_or("config paths omitted the data directory")?;
-    ensure!(
-        data.starts_with(&home.root),
-        "fixture data directory escaped the isolated home: {}",
-        data.display()
-    );
-    // Own the fixture worker explicitly. Production workers intentionally
-    // outlive CLI invocations; a smoke worker must not outlive its isolated home
-    // or keep the private executable open when the next smoke run replaces it.
-    let stderr = fs::File::create(home.root.join("worker.stderr"))
-        .map_err(|error| format!("create worker.stderr: {error}"))?;
-    let mut worker = home
-        .command("http://127.0.0.1:1/v1")
-        .arg("_command-owner")
-        .arg("--state-dir")
-        .arg(data.join("command-owner-v3"))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .map_err(|error| format!("start fixture worker: {error}"))?;
-    let result = async {
-        let stdout = worker.stdout.take().ok_or("worker stdout unavailable")?;
+    let mut worker = Worker::start(home).await?;
+    let result = run_command_deadline_cases(home).await;
+    worker.stop().await?;
+    result
+}
+
+/// A fixture command worker. Production workers intentionally outlive CLI
+/// invocations; a smoke worker must not outlive its isolated home or keep
+/// the private executable open when the next smoke run replaces it.
+struct Worker(tokio::process::Child);
+
+impl Worker {
+    async fn start(home: &Home) -> Result<Self, String> {
+        let paths = home
+            .run("http://127.0.0.1:1/v1", &["config", "paths"])
+            .await?;
+        ensure!(paths.status == Some(0), "config paths: {}", paths.stderr);
+        let data = paths
+            .stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("data:"))
+            .and_then(|line| line.trim().rsplit_once(" ("))
+            .map(|(path, _)| PathBuf::from(path))
+            .ok_or("config paths omitted the data directory")?;
+        ensure!(
+            data.starts_with(&home.root),
+            "fixture data directory escaped the isolated home: {}",
+            data.display()
+        );
+        let stderr = fs::File::create(home.root.join("worker.stderr"))
+            .map_err(|error| format!("create worker.stderr: {error}"))?;
+        let child = home
+            .command("http://127.0.0.1:1/v1")
+            .arg("_command-owner")
+            .arg("--state-dir")
+            .arg(data.join("command-owner-v3"))
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .map_err(|error| format!("start fixture worker: {error}"))?;
+        // `kill_on_drop` reaps the child if readiness fails below.
+        let mut worker = Self(child);
+        let stdout = worker.0.stdout.take().ok_or("worker stdout unavailable")?;
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
         tokio::time::timeout(COMMAND_TIMEOUT, reader.read_line(&mut line))
@@ -758,15 +948,15 @@ async fn run_command_deadlines(home: &Home) -> Result<(), String> {
             line.starts_with("qq command owner listening at "),
             "unexpected worker readiness: {line:?}"
         );
-        run_command_deadline_cases(home).await
+        Ok(worker)
     }
-    .await;
-    // Stop only the child owned by this scenario, including on assertion failure.
-    worker
-        .kill()
-        .await
-        .map_err(|error| format!("reap fixture worker: {error}"))?;
-    result
+
+    async fn stop(&mut self) -> Result<(), String> {
+        self.0
+            .kill()
+            .await
+            .map_err(|error| format!("reap fixture worker: {error}"))
+    }
 }
 
 async fn run_command_deadline_cases(home: &Home) -> Result<(), String> {

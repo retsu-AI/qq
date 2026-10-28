@@ -6,7 +6,7 @@
   `--organization` (`src/cli.rs`). It runs in-process and streams the answer
   to stdout (`src/main.rs` `fn ask`).
 - The read-only tools (`read_file`, `tree`, `search`) run. Mutating tools are
-  refused, not held: "Tool approval is unavailable for this run".
+  refused, not held: "permission_denied: mode: this run has no one to approve calls".
 
 ## How to get to it (user POV)
 

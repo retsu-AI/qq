@@ -2167,7 +2167,6 @@ dispatch overhead has a benchmark.
 
 - Per-child isolation for editing subagents (Auto children share their
   root's private task tree).
-- A harness-owned undo layer (run snapshots) independent of the user's VCS.
 - User-home, administrator-managed, and bundled skill roots.
 - Approval pattern languages or per-path ACLs.
 - A plugin API beyond MCP.
