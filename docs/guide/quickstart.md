@@ -73,12 +73,11 @@ qq
 
 The TUI opens on a new session in this directory. Type a request and press
 Enter. Under the default `auto` mode the agent reads, edits, and runs
-commands without stopping to ask. It works in a private copy of the project
-and runs commands inside the operating system's sandbox. When the run
-completes, QQ copies the changed files back into your checkout, keeping any
-edits you made meanwhile. A failed or cancelled run leaves your checkout
-untouched. Anything outside that boundary is refused and reported to the
-agent, which picks another way.
+commands without stopping to ask. It works in your checkout and runs
+commands as you, with your network. Before the run first changes a file in a
+Git work tree, QQ takes a snapshot; `qq undo` restores it. A few
+irreversible commands, such as `git push --force`, are refused and reported
+to the agent, which picks another way.
 
 To review each action yourself, switch the session to `ask` with
 `/approval`. The agent then stops before every non-read call:
@@ -92,11 +91,6 @@ y once   n deny
 `y` runs it once, and `n` denies and tells the model why. `/approval
 read_only` lets it look but not touch. See
 [Permissions and trust](permissions.md) for the full model.
-
-On Linux, commands need a non-root user, unprivileged user namespaces, and
-kernel 6.12 or newer; Ubuntu 24.04 and most containers need a setting
-changed first. See
-[Install › What the shell sandbox needs](install.md#system-requirements).
 
 Skipped step 1 or 2? `qq` still opens. Without a model the top row reads
 `no model` and the composer rule says `choose a model with /models`; pick
@@ -124,7 +118,7 @@ them.
 
 A repository can ship its own `.qq/config.ron` (like this one does). QQ
 starts there without asking, but leaves the file's sensitive settings off:
-models, providers, MCP servers that run commands, grants, and packs. Its
+models, providers, MCP servers that run commands, profiles, and packs. Its
 other settings apply. `qq config sources` and `qq doctor` list what is
 waiting:
 

@@ -40,21 +40,22 @@ reachable.
 
 **Default Auto, probed on 2026-10-26.** A debug build at `fd15a11` (which
 includes #463) ran scripted shell calls through the `verify-qq` fake
-provider in a scratch Git repository:
+provider in a scratch Git repository. Running in place, since shipped,
+fixed all of this:
 
-- The shell runs in a private copy under `data/qq/task-workspaces/<run>/`,
+- The shell ran in a private copy under `data/qq/task-workspaces/<run>/`,
   not in the checkout.
-- `.git` is not copied. Git searches upward from the copy, so `git status`
-  reported the *enclosing* repository's changes; outside one it fails with
+- `.git` was not copied. Git searched upward from the copy, so `git status`
+  reported the *enclosing* repository's changes; outside one it failed with
   `not a git repository`.
-- Ignored directories are not copied, so `target/` is empty on every run and
-  every Rust task starts with a cold build.
-- There is no network: `cargo build` with a new dependency failed with
-  `Could not resolve host: index.crates.io`. No setting enables it.
-- HOME is read-only (`Read-only file system`), so tools that write caches or
-  config under HOME fail.
-- Edits reach the checkout only when the run completes successfully.
-- The model is told none of this. The prompt says commands run "under the
+- Ignored directories were not copied, so `target/` was empty on every run
+  and every Rust task started with a cold build.
+- There was no network: `cargo build` with a new dependency failed with
+  `Could not resolve host: index.crates.io`. No setting enabled it.
+- HOME was read-only (`Read-only file system`), so tools that write caches
+  or config under HOME failed.
+- Edits reached the checkout only when the run completed successfully.
+- The model was told none of this. The prompt said commands ran "under the
   host filesystem, network and environment policy".
 
 The session store had no runs on this build yet, so none of the problems
@@ -85,12 +86,13 @@ Giving it context would fix that case, but the review would still add a
 model call, a failure mode and a black box to every unusual action. A short
 list of stops plus undo is easier to predict.
 
-**Code review.** Several parts of the current code don't help:
+**Code review.** Several parts of the code didn't help:
 
-- The reviewer/delegate path is unreachable today: `internal_supervision`
-  requires a supervised Full session, and the binary creates none. It is
-  deleted in B.
-- The containment code is about 28k lines including tests:
+- The reviewer/delegate path was unreachable: `internal_supervision`
+  required a supervised Full session, and the binary created none. It has
+  since been deleted.
+- The containment code was about 28k lines including tests. Everything but
+  the approval classifier has since been deleted:
 
   | Code | Lines |
   | --- | --- |
@@ -102,7 +104,7 @@ list of stops plus undo is easier to predict.
   | Task workspaces and publication | 1.9k |
   | Task Git helpers, the helper image and hosting brokers | 6.1k |
 
-  Most of the release notes since v0.1.5 are patches to it.
+  Most of the release notes from v0.1.5 to v0.1.9 were patches to it.
 - Shell commands have no background mode and no default timeout.
 - Capture keeps 128 KiB of head and tail, so the middle of a long log is
   lost; it never reaches the spill.
@@ -120,58 +122,13 @@ list of stops plus undo is easier to predict.
 - `$ARGUMENTS` is not substituted, the skill's directory is not given, and
   `.agents/skills` is invisible to the model.
 
-## B. Run in place, as the user; delete the sandbox
-
-Snapshots and `qq undo` (#482), the mode table and fixed stops (#483), and
-one denial format shipped first; see
-[permissions](../guide/permissions.md) and
-[tools](../design/tools.md#fixed-stops). This section is next.
-
-1. `shell` and `exec` run in the session's working directory, as the
-   user, with the inherited environment, host network and a real HOME. The
-   runner keeps:
-   - a process group per command;
-   - timeout and cancellation that kill the group;
-   - output capture into the spill;
-   - the background mode from section C.
-
-   A command no longer survives a daemon restart. On restart, unfinished
-   commands are reported as interrupted.
-2. Delete the following, together with their tests and docs:
-   - the Linux, macOS and Windows owners, and the `landlock` and
-     `seccompiler` dependencies;
-   - the command owner's grants, native scopes and durable job state;
-   - task workspaces and publication;
-   - the `task_git*` helpers, the helper image, the hosting brokers, and the
-     `task_commit`/`task_push`/`task_pr` tools;
-   - `allow_hosts`/`--allow-host`, `shell_env` filtering, `writable_roots`,
-     `task_hosting` grants and `qq-config/src/promote.rs`;
-   - the old supervision routing, the approval reviewer and
-     `approval_delegate`;
-   - session and workspace approval grants;
-   - `xtask action-bias` and its runbook.
-
-   Trim `run-output-queries.md` to the queries still in use, and update
-   `src/docs_truth.rs` to match.
-3. Parallel goals that need separate trees use `git worktree add` under
-   `.worktrees/`, which keeps a real `.git` and the build cache. No copies.
-   This waits until the fleet plan needs it.
-4. Wire and config removals bump `PROTOCOL_VERSION`, regenerate the
-   fixtures, and add an `### Upgrading` note that lists every removed key.
-   A removed key in a config file is a load error naming its replacement,
-   not silently ignored.
-
-**Accepted when** a smoke scenario on Linux, macOS and Windows shows all of
-the following:
-- `git status` reports the workspace's own repository;
-- a file under `target/` survives between runs;
-- an edit is visible before the run ends;
-- a loopback HTTP server is reachable from a shell command;
-- `git push` to a local bare remote succeeds in Auto.
-
-The lines deleted against the table in Evidence are reported in the PR.
-
 ## C. Long-running shell commands
+
+Snapshots and `qq undo` (#482), the mode table and fixed stops (#483), one
+denial format (#486), and running in place with the sandbox, task
+workspaces, reviewer and grants deleted shipped first; see
+[permissions](../guide/permissions.md) and
+[tools](../design/tools.md#where-commands-run).
 
 - Add `yield_after_seconds` to `shell` and `exec` (default about 30 s). A
   command still running at that point returns a command id. A new
@@ -274,8 +231,6 @@ arguments.
     unattended goals.
 - Headless `qq run --goal` on the host prints a one-line note pointing at
   that guide. It never blocks.
-- Rewrite `guide/permissions.md`, `design/tools.md` and `faq.md` for B in
-  the same PRs.
 
 **Accepted when** the devcontainer builds and runs one deterministic smoke
 task against the loopback fake provider in CI.
@@ -300,10 +255,8 @@ task against the loopback fake provider in CI.
 
 ## Order
 
-1. B, as about two PRs: run in place; deletions with the protocol bump.
-2. C, D, E, F and G in parallel with disjoint owned paths. C's runner and
-   E's environment text land with or after B.
-3. H whenever there is room.
+1. C, D, E, F and G in parallel with disjoint owned paths.
+2. H whenever there is room.
 
 Each PR:
 - shows its regression failing before the fix;
@@ -314,7 +267,10 @@ Each PR:
 
 Out of scope for v0.1.10: the [desktop, mobile and fleet
 plan](desktop-mobile-fleet.md), the TUI session-rail branches, new
-providers, and any in-process sandbox.
+providers, and any in-process sandbox. Parallel goals that need separate
+trees will use `git worktree add` under `.worktrees/`, which keeps a real
+`.git` and the build cache, never copies; that waits until the fleet plan
+needs it.
 
 ## Release check
 
@@ -350,4 +306,4 @@ build, with the same model, effort and config, from an authorized account
 within a stated spend cap. If there is no cap, the check is recorded as not
 run. Report every outcome, tool failure, denial and human
 intervention as observed. Never combine passes from different builds or
-rerun until green. Run section B's smoke scenario on the same build.
+rerun until green. Run the `run-in-place` smoke scenario on the same build.

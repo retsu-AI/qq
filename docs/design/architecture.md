@@ -44,7 +44,7 @@ The binary has multiple process modes:
   provider. MCP, additional agent routes, delegation, audit, profiles, packs,
   are rejected rather than disabled. The ordinary
   no-flag path uses the user-scoped system directories. This fixture demonstrates TUI behavior only; it is not
-  evidence for a real provider or reviewer integration.
+  evidence for a real provider integration.
 - `qq serve [ARGS]` runs the server without a TUI. It is suitable for a
   persistent process on a desktop or home server.
 - `qq ask PROMPT` streams one model response to stdout through the same core
@@ -85,9 +85,8 @@ and the [guide](../guide/troubleshooting.md#diagnostic-tracing) for activation.
 QQ is a Cargo workspace whose root package builds the `qq` binary. Library
 crates live under `crates/`, while repository automation lives in `xtask/`.
 `qq-host` is the composition library: configuration-to-runtime composition
-(`RuntimeFactory`, the `RuntimeLoader`, approval reviewer and workspace grant
-authority, `RuntimeHandler`), authenticated model discovery, the command-worker
-client, the bounded compiled-plan cache (`qq_host::plan`) and the configured MCP
+(`RuntimeFactory`, the `RuntimeLoader`, workspace policy authority,
+`RuntimeHandler`), authenticated model discovery, the bounded compiled-plan cache (`qq_host::plan`) and the configured MCP
 bridge (`qq_host::mcp`). The binary passes its build identity
 (`qq_host::HostBuild`) in and keeps CLI, TUI and server wiring, headless
 outcome driving and onboarding. Core does not depend on `qq-host` or
@@ -140,7 +139,6 @@ crates/
     src/runtime.rs         configuration-to-runtime composition
     src/catalog.rs         authenticated model discovery
     src/builtin_auth.rs    built-in provider credential policy (ADR-0064)
-    src/command_worker.rs  client of the out-of-process command worker
     src/plan.rs
     src/mcp.rs
   qq-mcp/
@@ -253,7 +251,7 @@ xtask/
   Per-field provenance distinguishes defaults from the ceilings constraining
   them. Configuration-owned goal values do not depend on core runtime types.
   Root translates workspace goal bounds into core-owned GoalPolicy values
-  through the existing grant authority seam, sharing its bounded configuration
+  through the existing workspace policy authority seam, sharing its bounded configuration
   loading pool. SetGoal and activating controls validate current settings after
   journal replay. Goal commands probe immutable journal identity before external
   policy resolution, so a committed replay cannot wait on a hung resolver.
@@ -504,8 +502,9 @@ whole prompt and the prompt body is neither rebuilt nor rehashed per run.
 Tool visibility follows immutable run authority. Strict read-only runs omit
 mutating, shell, network and all external schemas; external read-only hints
 never grant permission. Unattended direct runs omit questions and retain
-read-only builtins plus configuration-granted external tools. The compiler
-captures grants once; direct gates use that same snapshot. The declaration
+read-only builtins plus the external tools an MCP server's `allow` list
+names. The compiler captures that list once; direct gates use that same
+snapshot. The declaration
 predicate also filters recovered pins, progressive indexes and selector
 reports. Read-only roots receive exact caller-applied changes instead of an
 implementation obligation; unattended roots use declared tools and return
@@ -536,7 +535,7 @@ and static header *names*, the resolved model, workspace root, prompt version,
 instruction hash and source, the tool catalog (digest, exposure, admitted
 names, host generations, typed exclusions), the skill index, the selected pack
 (identifier, version, manifest digest, persona hash, tool policy), spawn
-routes, configuration grants, MCP server declarations (transport, sanitized
+routes, MCP `allow` lists, MCP server declarations (transport, sanitized
 target, credential *reference*, and the configured tool-set `pin`),
 configuration source labels, and every registered context source (name,
 version, the clamped budget the runtime enforces, fail policy). Retry is the
@@ -1820,14 +1819,12 @@ unavailable policy pauses the active goal and cancels its paid family in the
 same store transaction. Goal-less runs skip this policy work. Refresh preserves
 the specification's original deadline anchor and never resumes a stopped goal.
 
-An unanswered goal-bound tool approval has a fixed deadline spanning reviewer
-and human stages: the earlier of its persisted goal approval wait and absolute
+An unanswered goal-bound tool approval has a fixed deadline: the earlier of its persisted goal approval wait and absolute
 goal deadline. An earlier ordinary human timeout also applies. Timeout durably
 denies the call, pauses the goal for approval, and requests family cancellation
 before another model request. This approval pause takes precedence over goal
 exhaustion, including when the absolute deadline ends the hold. A client resolution
-that committed first retains precedence. Escalation does not restart the goal
-clock; ordinary goal-less approval behavior is unchanged. Sponsored approval
+that committed first retains precedence. Ordinary goal-less approval behavior is unchanged. Sponsored approval
 cancellation also checks live monotonic owner deadlines, retained through child
 drain and removed with the execution owner. Preparation counts toward expiry;
 the later durable RunStarted timestamp is not a replacement clock. Expiry is
@@ -2062,8 +2059,9 @@ The verdict is retained on the run through existing FinalOutput persistence.
 
 The server executes tools on the machine where it runs. In local `qq` mode,
 the workspace defaults to the canonical current working directory. Tool paths
-must remain within the selected workspace unless the user explicitly grants
-wider access.
+must remain within the selected workspace. Shell commands start in the
+workspace but run as the user, with the user's environment and network
+([tools § Where Commands Run](tools.md#where-commands-run)).
 
 The built-in tool set is deliberately small and is specified in
 [`tools.md` § Built-In Tools](tools.md#built-in-tools).
@@ -2189,7 +2187,7 @@ Application configuration types must not leak into `qq-core`.
 | General tools | MCP and the embedded `ExternalToolHost` | Startup catalog; call on demand | One selected adapter call | MCP process/HTTP boundary or trusted embedder |
 | Context/memory | Typed bounded `ContextSource` | Plan compile plus pre-turn fetch | No per-delta hook | Time/byte/token budgets; explicit fail policy |
 | Observers | Durable SSE/outbox | Subscription | Post-commit only | Cannot affect authoritative execution |
-| Process execution | Durable command worker with native Linux, macOS and Windows backends ([tools § Native filesystem restriction primitive](tools.md#native-filesystem-restriction-primitive)) | Startup | Direct selected backend | Explicit filesystem/network/process capabilities; unavailable enforcement refuses execution |
+| Process execution | In-process `/bin/sh` or `cmd` per call, one process group or job each ([tools § Where Commands Run](tools.md#where-commands-run)) | Per call | Direct spawn | Runs as the user in the checkout; fixed stops and managed denies are the only checks |
 | Surface adapters | Versioned `qq-client` contract | Client startup | Outside agent loop | Product owns remote auth and UX |
 
 Rules that remain in force: the built-in Rust tools stay the zero-overhead

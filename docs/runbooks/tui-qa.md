@@ -164,10 +164,10 @@ qq --tui-qa-root "$QA_ROOT"
 ```
 
 The profile ignores unselected providers and rejects a remote or authenticated selected
-provider, static headers, stored credentials, organizations, MCP, worker or
-reviewer routes, delegation, audit, profiles, and packs. The isolation policy
+provider, static headers, stored credentials, organizations, MCP, worker
+routes, delegation, audit, profiles, and packs. The isolation policy
 remains attached to the runtime factory across model catalogs, session loads,
-reconnects, spawn checks, grant reads, and capability refreshes; none of those
+reconnects, spawn checks, and capability refreshes; none of those
 callbacks reconstructs QA configuration from the process environment. It never
 changes or unsets those settings. Fixture directories and files are rechecked
 throughout that lifecycle, and QQ fails closed if a path is replaced by a

@@ -5,7 +5,9 @@ is about making single-agent runs reliable first). Section 1's evidence was
 checked at `b11092e8`, before #431 moved runtime composition into
 `crates/qq-host` (the `src/runtime.rs` references and the `qq-harness` rename
 are now history) and before #440 shipped `qq daemon run --detach`, `status`,
-`stop` and `restart`. Refresh §1 and the P1 checklist before starting this
+`stop` and `restart`, and before v0.1.10 deleted the command worker, task
+workspaces, the approval reviewer and approval grants (shell now runs in
+place, as the user). Refresh §1 and the P1 checklist before starting this
 work.
 
 ## 0. Decisions and the main principle
@@ -64,9 +66,9 @@ All of these were checked against `main` at `b11092e8`.
                          │  HTTP/1.1+2, SSE  (loopback token locally; enrolled credential remotely)
                  ┌───────▼────────────────────────────────────────────┐
                  │ qq daemon  = qq-server (transport) + qq-host        │
-                 │   qq-host: composition (factory, loader, reviewer,  │
-                 │            trust, auth, config, catalog, mentions,  │
-                 │            command worker, env policy, lifecycle)   │
+                 │   qq-host: composition (factory, loader, goal       │
+                 │            authority, trust, auth, config, catalog, │
+                 │            mentions, env policy, lifecycle)         │
                  │   qq-core: sessions, runs, goals, tools, checkouts  │
                  │   qq-fleet: hub (projects, tasks, scheduler, inbox) │
                  └─────────────────────────────────────────────────────┘
@@ -78,7 +80,7 @@ All of these were checked against `main` at `b11092e8`.
 |---|---|---|
 | `qq-protocol` | Wire types only | + bootstrap, trust, auth, config, mentions, feed, checkout, enrollment, fleet types; tolerant versioning |
 | `qq-core` | Runtime | + execution checkouts, parked holds, retention, server-feed emission; no surface code |
-| **`qq-host`** (rename `qq-harness` and finish ADR-0050) | Composition: `RuntimeFactory`, `RuntimeLoader`, reviewer, grant/goal authority, model catalog and discovery, trust, server-side auth flows, config inspect/edit, mention resolution, command-worker client, env policy, `Daemon::start(paths, env) -> DaemonHandle`, and the headless driver core | Moved out of `src/` |
+| **`qq-host`** (rename `qq-harness` and finish ADR-0050) | Composition: `RuntimeFactory`, `RuntimeLoader`, goal authority, model catalog and discovery, trust, server-side auth flows, config inspect/edit, mention resolution, env policy, `Daemon::start(paths, env) -> DaemonHandle`, and the headless driver core | Moved out of `src/` |
 | `qq-server` | HTTP/SSE transport, auth, TLS, routes | + new routes, TLS, enrollment, feed, explicit HTTP/2 |
 | `qq-fleet` | Hub (§6) | New |
 | `qq-client` | Transport, `SessionClient`, connection supervisor (start-or-attach, backoff, routes, pinning), `ServerRegistry` | `TuiClient` replaced by surface-neutral `WorkspaceSession` |
@@ -123,11 +125,6 @@ Who starts it:
 - `qq daemon upgrade` (also a desktop button) restarts the daemon onto the newest binary with a drain.
 - An incompatible client gets a typed `DaemonIncompatible{daemon, supported}` error and an upgrade offer. No silent failure.
 
-**Command worker.**
-- Its state directory is scoped to the daemon instance and build.
-- It exits when its coordinator daemon exits or after it has been idle.
-- Mixed builds can never block shell tools again.
-
 **Environment policy.**
 - The daemon's config is **independent of how it was launched**. Server controls such as `approval_timeout` come from global and managed config, never from the launch cwd.
 - On start, the daemon captures a login-shell environment (`$SHELL -lc env`, with a timeout). Config `daemon.env` can pass or deny specific variables.
@@ -154,7 +151,7 @@ Who starts it:
 | MCP inspect, doctor, init, packs | Local | `mcp/inspect`, `doctor/report`, `workspace/init`, plus packs in bootstrap |
 | Queued drafts | Client-local, ≤8, lost on quit | Become **server follow-ups** using the existing queue, ≤16 per session, editable and removable through `edit_follow_up` and `remove_follow_up`. Every surface sees them. |
 | Headless driver needs (`run_snapshot`, `goal_owns_run`, `goal_pending_runs`, `pause_goal_if_active`, recovered-command wait) | In-process only | Routes; `qq run` becomes a `SessionClient` consumer |
-| Unattended approval policy (`--allow-*`, unattended deny) | Client-side in `headless.rs` | A session-level `UnattendedPolicy` the daemon enforces, so goal attempts and `qq run` behave the same |
+| Unattended approval policy (unattended deny) | Client-side in `headless.rs` | A session-level `UnattendedPolicy` the daemon enforces, so goal attempts and `qq run` behave the same |
 
 **Stays client-local by design:** layout, fold/focus, threadline, theme, keybindings, unread markers, composer text.
 
@@ -209,7 +206,6 @@ An Execution Checkout is a **session attribute under one workspace, not a new wo
 - Tools use it:
   - File tools: `Workspace::open(execution_root)` with the same protections.
   - Shell: `cwd` resolves under `execution_root`.
-  - Native scopes are keyed by `(workspace, execution_root)`, and a read-write scope also grants the worktree's gitdir inside the main `.git`.
   - Edit `apply_lock` is already keyed by path, so attempts don't contend.
 - **Config and trust come from the workspace's trusted digest at session creation and are pinned into the plan.** They are never read from the worktree. An agent that edits `.qq/` in its branch cannot widen its own authority.
 - **Plan cache key** uses the workspace and config digest, not the checkout.
@@ -224,7 +220,7 @@ An Execution Checkout is a **session attribute under one workspace, not a new wo
   - A cap per placement.
   - Snapshot to a ref, then delete.
   - Never delete active or pinned checkouts.
-- **Git in checkouts:** commit is allowed by the attempt's `UnattendedPolicy` grant (prefix `git commit`, `git add` scoped to the checkout). Push and PR are a separate Repository Publication policy, with credentials kept outside the agent (per stabilization).
+- **Git in checkouts:** the agent runs `git` from the shell in the checkout, as in any Auto run. Push and PR are a separate Repository Publication policy per project.
 
 ---
 
@@ -328,7 +324,7 @@ Every view answers one of three questions: **what needs me, what is moving, what
 - **Inbox (home):**
   - Contents: approvals, questions, failed checks, ready reviews, blocked tasks and budget stops.
   - Sorted by unblock value: how many downstream tasks are waiting.
-  - Keys: `j/k` move, `a` approve, `A` approve for session, `d` deny, `r` reply, `e` snooze, `⏎` open. The goal state is empty.
+  - Keys: `j/k` move, `a` approve, `d` deny, `r` reply, `e` snooze, `⏎` open. The goal state is empty.
 - **Pulse:**
   - One painted grid with a cell per running attempt, grouped by project. Color shows state; brightness shows recency.
   - Header: tasks per hour, spend per hour, critical-path ETA, capacity per worker.
@@ -396,7 +392,7 @@ This is mostly refactoring and deletion, so it fits stabilization's "less code" 
    - `qq daemon run|status|stop|restart|upgrade|install`;
    - detach and readiness handshake; SIGTERM drain; start-or-attach in `qq-client`;
    - bare `qq` stops embedding the server and the `owns_server` path is deleted;
-   - command worker scoped to the daemon instance; environment and cwd policy.
+   - environment and cwd policy.
 3. Versioning ADR, tolerant decoding, typed store and daemon incompatibility errors.
 4. Parity routes (§2.3). Server-side follow-ups replace client drafts. `UnattendedPolicy`.
 5. `qq run`, `qq goal`, `qq config`, `qq auth`, `qq trust`, `qq doctor` become daemon clients. `--isolated` mode added.

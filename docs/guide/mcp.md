@@ -17,7 +17,7 @@ approval policy as built-ins.
             args: ["mcp"],
             env: ["EXECUTOR_API_KEY"],      // variables passed through from your shell
             eager: true,                    // connect at startup instead of on first use
-            allow: ["execute", "skills"],   // tools granted for the workspace
+            allow: ["execute", "skills"],   // tools `qq ask` may call
         ),
 
         // A remote endpoint.
@@ -44,7 +44,7 @@ approval policy as built-ins.
 | `url` | | required | the streamable-HTTP endpoint |
 | `bearer` | | optional | `Env("NAME")` or `Stored("name")`; literal values are refused |
 | `eager` | `false` | `false` | connect when QQ starts; otherwise on first use |
-| `allow` | `[]` | `[]` | tool names granted for the workspace, folded into `policy.allow_tools` as `mcp__server__tool` |
+| `allow` | `[]` | `[]` | tool names `qq ask` may call, which has no approval channel; [Approval](#approval) |
 | `call_timeout_seconds` | `60` | `60` | per call |
 | `max_concurrent_calls` | `4` | `4` | per server |
 | `pin` | optional | optional | the 64-hex-digit digest of the server's tool set from `qq mcp inspect`; a server whose tools no longer match is quarantined |
@@ -123,11 +123,10 @@ host. In CI prefer `bearer: Env("LINEAR_TOKEN")`.
 
 ## Approval
 
-MCP calls are `External` effect class: under `read_only` they are denied
-unless the server marks the tool read-only and it is allowlisted; under
-`ask` each call asks; under `auto` and `full` they run without asking.
-`allow: [...]` on the server is the workspace grant, and
-`--allow-tool mcp__linear__create_issue` grants one for a headless run.
+MCP calls are `External` effect class: under `read_only` they are denied;
+under `ask` each call asks; under `auto` and `full` they run without asking.
+`qq ask` cannot ask, so it offers only the tools listed in the server's
+`allow: [...]` and runs them without asking.
 
 ## When a server is unavailable
 
@@ -138,7 +137,7 @@ unavailable error to the model. The next use retries with backoff.
 
 A server whose `Stored(...)` or `Env(...)` bearer does not resolve on this
 machine degrades the same way rather than failing the run. Its `allow`
-grants stay in force and its tool names stay reserved; the readiness
+list stays in force and its tool names stay reserved; the readiness
 message names the credential and the fix:
 
 ```text
@@ -159,8 +158,6 @@ of `/skills`. Inline `Value(...)` bearers are unaffected.
 - `qq config show` lists declared servers with redacted bearers.
 - In the TUI, an MCP tool call row shows the server, tool, and arguments
   when expanded (`Enter` on the row).
-- `qq config explain grant.tool.mcp__linear__create_issue` says which layer
-  granted a tool.
 
 Bounds and the host model are in [`../design/tools.md`](../design/tools.md)
 § External Tool Hosts and § MCP.

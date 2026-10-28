@@ -10,9 +10,10 @@ qq ask "Explain what src/parser.rs does in three sentences"
 qq ask --model openai/gpt-5.4-mini "Reply with pong"
 ```
 
-Streams an answer to stdout using workspace read tools and configuration-granted
-external tools. It cannot ask approval questions: built-in edits, commands,
-questions and ungranted external/network tools are omitted. No session is
+Streams an answer to stdout using workspace read tools and the MCP tools a
+server's [`allow`](mcp.md#approval) lists. It cannot ask approval questions:
+built-in edits, commands, questions, `fetch` and other MCP tools are
+omitted. No session is
 persisted. Use it to check a credential or for quick questions from a script.
 Exit `0` on success, `1` otherwise.
 
@@ -33,14 +34,13 @@ qq run --goal "Finish the migration" --check 'cargo test' --format jsonl
 qq run --goal --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012 --check 'cargo test' --goal-check-approval once --format jsonl
 ```
 
-Auto authorizes the exact check within its native task scope without a separate
-approval. Every execution rechecks current authority and containment; it cannot
-fall back to host execution. Missing containment, fixed stops, or policy
-denials refuse admission instead of asking for approval.
+Auto runs the exact check without a separate approval. Every execution
+rechecks current authority; fixed stops and managed denies refuse it instead
+of asking.
 
-Other modes retain separate check consent: `once` permits one execution and
-`for-goal` permits reuse for this exact check. An ordinary shell allowlist does
-not authorize a goal check. Read-only mode never executes shell checks.
+Other modes need separate check consent: `once` permits one execution and
+`for-goal` permits reuse for this exact check. Read-only mode never executes
+shell checks.
 
 `--goal-deadline 24h`, `--goal-max-runs 20` and `--max-cost-usd 5` bound the
 goal; workspace defaults apply when omitted. Timeout and turn flags constrain
@@ -69,9 +69,9 @@ answer schema; those flags apply to ordinary prompt runs.
 | `--approval` | Meaning |
 | --- | --- |
 | `read-only` | reads only; every edit, shell, MCP, and network call is denied and reported to the model |
-| `ask` | reads run; every other call needs fresh human approval, so with no human present it is denied immediately, even with matching allowlists |
-| `auto` (default) | edits, shell, MCP, and public `fetch` run without asking, in a private [task copy](permissions.md#task-workspaces) of the workspace under the [shell sandbox](install.md#system-requirements); the checked edits are published when the run completes; anything outside that boundary is denied and reported to the model |
-| `full` | everything runs without asking, in the checkout itself and without the task sandbox; managed policy and protected files still apply |
+| `ask` | reads run; every other call needs human approval, so with no human present it is denied immediately |
+| `auto` (default) | edits, shell, MCP, and public `fetch` run without asking, in the checkout; [fixed stops](permissions.md#fixed-stops) are denied and reported to the model |
+| `full` | everything runs without asking, fixed stops included; managed denies and protected files still apply |
 
 No mode waits for a human: `qq run` never stops on an approval prompt.
 
@@ -80,26 +80,6 @@ ends with `held calls were denied under --approval read-only; rerun with
 --approval auto to allow workspace edits` on stderr (after the answer, before
 the resume hint). The exit status is unchanged; JSONL output carries no hint
 because each denied call is already in its `tool_call_finished` record.
-
-Auto already runs any command inside its task sandbox, so most runs need no
-grants. They matter where the policy would otherwise deny a call: a child
-session whose parent lacks that authority, an embedding without a task
-scope, or a host outside the public network policy:
-
-```sh
-qq run --approval auto \
-  --allow-shell "cargo test" --allow-shell "cargo fmt --all" \
-  --allow-tool write_file \
-  --allow-host crates.io \
-  "…"
-```
-
-Grants use the same shapes as configuration grants
-([Permissions](permissions.md#grants-in-configuration)); `--allow-shell
-"cargo test"` covers `cargo test -p x` and never `cargo test | sh`.
-Under Auto and Full, these grants are stored before the prompt is submitted,
-including when resuming a session. They do not open an approval hold.
-Read-only, Ask, parent authority, and managed denies still apply.
 
 ### Limits
 
@@ -168,11 +148,9 @@ history. The model and profile come from this invocation. The stored approval
 mode is preserved unless you explicitly pass `--approval`. New sessions
 default to Auto. Every exit prints the id you need.
 
-When reopening after a coordinator crash, it waits for that session's inherited
-native commands and includes their saved results before starting the new
-prompt. Commands keep their original deadlines and are not executed again.
-Ctrl-C during this wait cancels and drains the inherited run, pauses its owning
-goal, and exits with status 130.
+A command does not survive the process that started it. After a crash or a
+restart, the unfinished run and its commands are reported as interrupted, and
+the session accepts the new prompt.
 
 ### Steering from a pipe
 
@@ -271,13 +249,8 @@ without waiting for the goal to finish. See [CLI flags](cli.md#qq-goal).
            --format jsonl "Fix the failing tests" > run.jsonl
 ```
 
-The runner must meet the [shell sandbox requirements](install.md#system-requirements).
-GitHub-hosted Ubuntu runners (24.04 and later) restrict unprivileged user
-namespaces; allow them in an earlier step:
-
-```yaml
-- run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-```
+Commands run as the runner's user with the job's environment, so pass the
+job only the secrets the task needs.
 
 Or skip the store entirely: QQ reads `ANTHROPIC_API_KEY` from the
 environment when nothing is stored. `QQ_CONFIG_CONTENT='(version: 1, model:
