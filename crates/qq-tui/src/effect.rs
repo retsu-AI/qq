@@ -25,9 +25,6 @@ pub(crate) enum Effect {
         query: String,
         recent: Vec<String>,
     },
-    /// Restore this workspace to the snapshot before its newest run, off
-    /// the executor; the loop reports the outcome back to the app.
-    UndoRun(std::path::PathBuf),
     /// Ring the terminal for an event that happened while it was unfocused.
     Attention(Attention),
     /// Turn terminal mouse reporting on or off.

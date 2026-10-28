@@ -187,9 +187,6 @@ where
     let mut last_client_failure: Option<String> = None;
     // Set when input or a client update arrived since the last herdr report.
     let mut state_may_change = false;
-    // At most one `/undo` restore runs at a time, off the loop so input and
-    // frames keep flowing while Git works.
-    let mut undo: Option<tokio::task::JoinHandle<Result<String, String>>> = None;
 
     loop {
         if redraw == Some(Redraw::Immediate) {
@@ -244,17 +241,6 @@ where
             }
             highlighted = renderer.highlighter.next() => {
                 Effects::changed(renderer.apply_highlight(highlighted))
-            }
-            Some(joined) = async {
-                match undo.as_mut() {
-                    Some(task) => Some(task.await),
-                    None => None,
-                }
-            }, if undo.is_some() => {
-                undo = None;
-                app.apply_undo_result(
-                    joined.unwrap_or_else(|_| Err("/undo stopped unexpectedly".to_owned())),
-                )
             }
             _ = animation_tick.tick(), if app.has_activity() => {
                 Effects::changed(app.advance_animation())
@@ -327,11 +313,6 @@ where
                         }));
                     }
                 }
-                Effect::UndoRun(root) => {
-                    if undo.is_none() {
-                        undo = Some(tokio::spawn(async move { undo_newest_run(&root).await }));
-                    }
-                }
                 Effect::Attention(attention) => {
                     output.write_all(&attention_bytes(&attention)).await?;
                     output.flush().await?;
@@ -368,34 +349,6 @@ where
         }
     }
     Ok(app)
-}
-
-/// Restores `root` to the snapshot before its newest run, as `qq undo` does,
-/// and phrases the outcome for the status line.
-async fn undo_newest_run(root: &std::path::Path) -> Result<String, String> {
-    let target = qq_core::undo::newest_run(root)
-        .await
-        .map_err(|error| format!("/undo: {error}"))?
-        .ok_or_else(|| {
-            "/undo: no run has been snapshotted here; snapshots are taken before a run first changes files in a Git work tree".to_owned()
-        })?;
-    let restored = qq_core::undo::restore(&target)
-        .await
-        .map_err(|error| format!("/undo: {error}"))?;
-    let changed = match restored.changes.len() {
-        0 => "nothing had changed".to_owned(),
-        1 => "1 path restored".to_owned(),
-        count => format!("{count} paths restored"),
-    };
-    let head = if restored.head_moved.is_some() {
-        "; HEAD moved since, so commits are unchanged"
-    } else {
-        ""
-    };
-    Ok(format!(
-        "restored snapshot {}: {changed}{head}; reverse with qq undo {}",
-        target.name, restored.before.name
-    ))
 }
 
 /// Terminal bytes that ask for the user's attention: BEL for the terminal's

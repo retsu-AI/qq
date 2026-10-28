@@ -306,33 +306,6 @@ enum PendingIntent {
     Prune,
 }
 
-impl PendingIntent {
-    /// Whether the command may start or resume work that edits the
-    /// workspace, so `/undo` must wait for it.
-    const fn may_start_run(&self) -> bool {
-        match self {
-            Self::Prompt { .. }
-            | Self::Steer { .. }
-            | Self::GoalSet { .. }
-            | Self::GoalControl { .. }
-            | Self::Approval { .. } => true,
-            Self::Side { .. }
-            | Self::CancelSide { .. }
-            | Self::Create
-            | Self::Cancel { .. }
-            | Self::Compact { .. }
-            | Self::Rollback { .. }
-            | Self::SetModel { .. }
-            | Self::SetProfile { .. }
-            | Self::SetApprovalMode { .. }
-            | Self::SetEffort { .. }
-            | Self::SetDelegate { .. }
-            | Self::Delete { .. }
-            | Self::Prune => false,
-        }
-    }
-}
-
 pub(crate) struct App {
     pub settings: Settings,
     pub model: ModelSelection,
@@ -356,11 +329,6 @@ pub(crate) struct App {
     /// Local root for `@` mention resolution and completion, when this
     /// client has the tree.
     pub(crate) workspace_root: Option<std::path::PathBuf>,
-    /// A `/undo` restore is running; a second one waits for it.
-    undoing: bool,
-    /// The newest event a run-starting command's receipt committed through.
-    /// Until the stream reaches it, the summaries may not show that run yet.
-    run_start_through: u64,
     pub sessions: SessionStore,
     /// Transcript panes left to right, each following its own view with its
     /// own scroll state; the renderer reconciles them every frame. One pane
@@ -472,8 +440,6 @@ impl App {
             workspace_path: String::new(),
             check_interruption: None,
             workspace_root: options.workspace_root,
-            undoing: false,
-            run_start_through: 0,
             sessions: SessionStore::with_sanitizer(terminal_safe_character),
             panes: vec![TranscriptPane::default()],
             focused_pane: 0,
@@ -579,7 +545,6 @@ impl App {
                 }
                 self.overlay = None;
                 self.last_sequence = 0;
-                self.run_start_through = 0;
                 self.recent_events.clear();
                 self.set_warning("session state reset after reconnecting".to_owned());
                 self.apply_snapshot(snapshot)
@@ -616,11 +581,6 @@ impl App {
                 match result {
                     Ok(receipt) => {
                         let intent = self.pending.remove(&command_id);
-                        if intent.as_ref().is_some_and(PendingIntent::may_start_run) {
-                            self.run_start_through = self
-                                .run_start_through
-                                .max(receipt.committed_through.sequence);
-                        }
                         if let CommandOutcome::SessionCreated { session_id } = receipt.outcome
                             && intent
                                 .as_ref()
@@ -1797,7 +1757,6 @@ impl App {
             Command::NewChildSession => self.create_session(self.focused()),
             Command::CompactSession => self.compact_session(),
             Command::RollbackCompaction => self.rollback_compaction(),
-            Command::UndoRun => self.undo_run(),
             Command::CancelRun => self.cancel_run(),
             Command::ToggleMouse => {
                 self.mouse_capture = !self.mouse_capture;
@@ -1904,27 +1863,6 @@ impl App {
     /// failure is attributed to the right session and can undo optimistic
     /// state. Every request that carries a `CommandId` goes through here.
     fn send(&mut self, intent: PendingIntent, command: SessionCommand) -> Effects {
-        // A restore rewrites the workspace; this client starts, resumes or
-        // releases no work that could edit it meanwhile. Text goes back to
-        // the composer.
-        if self.undoing && intent.may_start_run() {
-            match &intent {
-                PendingIntent::Prompt { text, .. } | PendingIntent::Steer { text, .. }
-                    if self.composer.text.is_empty() =>
-                {
-                    self.composer.replace(text.clone());
-                }
-                // Re-open the prompt so the user can answer after the restore.
-                PendingIntent::Approval { tool_call_id } => {
-                    self.answered_approvals.remove(tool_call_id);
-                }
-                _ => {}
-            }
-            self.set_warning(
-                "/undo is restoring the workspace; send again when it finishes".to_owned(),
-            );
-            return Effects::redraw(Redraw::Immediate);
-        }
         let Ok(command_id) = CommandId::generate() else {
             self.set_warning("secure randomness is unavailable".to_owned());
             return Effects::redraw(Redraw::Immediate);
@@ -2486,58 +2424,6 @@ impl App {
             PendingIntent::Compact { session_id },
             SessionCommand::CompactSession { session_id },
         )
-    }
-
-    /// `/undo`: restore the workspace to the snapshot before its newest run.
-    /// Refused while any run in the workspace is active, so a restore never
-    /// races an agent's edits.
-    fn undo_run(&mut self) -> Effects {
-        let Some(root) = self.workspace_root.clone() else {
-            self.set_warning(
-                "/undo needs the workspace tree; run qq undo on that machine".to_owned(),
-            );
-            return Effects::redraw(Redraw::Immediate);
-        };
-        if self.undoing {
-            self.set_warning("/undo is already restoring the workspace".to_owned());
-            return Effects::redraw(Redraw::Immediate);
-        }
-        // A run this client just started may not show in the summaries yet:
-        // its command is in flight, its mentions are resolving, or its
-        // receipt arrived before the events it committed.
-        // Summaries prove nothing until the workspace snapshot has loaded and
-        // the event stream is live; an attach may still be discovering runs.
-        if self.workspace_id.is_none() || self.connection != ConnectionState::Live {
-            self.set_warning("/undo waits until the workspace has loaded".to_owned());
-            return Effects::redraw(Redraw::Immediate);
-        }
-        let starting = self.resolving > 0
-            || self.pending.values().any(PendingIntent::may_start_run)
-            || self.last_sequence < self.run_start_through;
-        if starting
-            || self
-                .sessions
-                .values()
-                .any(|session| session.summary.status != SessionStatus::Idle)
-        {
-            self.set_warning("/undo needs every run to finish; wait or cancel first".to_owned());
-            return Effects::redraw(Redraw::Immediate);
-        }
-        self.undoing = true;
-        self.set_info("restoring the snapshot before the newest run…".to_owned());
-        let mut effects = Effects::redraw(Redraw::Immediate);
-        effects.push(Effect::UndoRun(root));
-        effects
-    }
-
-    /// The outcome of `/undo`, already phrased for the status line.
-    pub(crate) fn apply_undo_result(&mut self, result: Result<String, String>) -> Effects {
-        self.undoing = false;
-        match result {
-            Ok(text) => self.set_info(text),
-            Err(text) => self.set_warning(text),
-        }
-        Effects::redraw(Redraw::Immediate)
     }
 
     fn rollback_compaction(&mut self) -> Effects {

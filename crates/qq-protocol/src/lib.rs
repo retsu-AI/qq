@@ -96,7 +96,7 @@ pub const MAX_TURN_RETRIES: u16 = 5;
 /// Slash commands owned by interactive clients rather than the shared
 /// runtime. Keeping this vocabulary in the transport-neutral protocol avoids
 /// a client/runtime drift where one side forwards a name the other reserves.
-pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 29] = [
+pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 28] = [
     "/goal",
     "/btw",
     "/ask",
@@ -119,7 +119,6 @@ pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 29] = [
     "/clear",
     "/compact",
     "/rollback",
-    "/undo",
     "/prune",
     "/mouse",
     "/attention",

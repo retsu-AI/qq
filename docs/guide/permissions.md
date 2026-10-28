@@ -189,8 +189,8 @@ prefixes that are denied in every mode, Full included.
 ## Undoing a run
 
 Before a run first changes files in a Git work tree, QQ snapshots the
-workspace. `qq undo`, or `/undo` in the TUI once every run is idle (the TUI holds new
-prompts until the restore finishes), restores the newest run's snapshot, and the undo can itself be undone. See [`qq undo`](cli.md#qq-undo---list-snapshot).
+workspace. `qq undo` restores the newest run's snapshot, and the undo can
+itself be undone. See [`qq undo`](cli.md#qq-undo---list-snapshot).
 
 ## The approval prompt
 

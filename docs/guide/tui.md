@@ -274,7 +274,6 @@ searchable palette that runs the highlighted command on `Enter`.
 | create a child session |  | `Alt-C` |
 | compact session context | `/compact` |  |
 | undo the newest compaction | `/rollback` |  |
-| restore files to before the newest run | `/undo` |  |
 | delete every empty session | `/prune` |  |
 | focus the parent session |  | `Esc` |
 | focus the first child session |  | `Alt-Down` |

@@ -323,6 +323,13 @@ impl Home {
     /// Runs git in the workspace with a fixture identity and no user config.
     async fn git(&self, args: &[&str]) -> Result<String, String> {
         let mut command = Command::new("git");
+        // An inherited repository override (a hook's GIT_DIR, GIT_INDEX_FILE)
+        // would aim the fixture's commits at some other repository.
+        for (name, _) in env::vars_os() {
+            if name.to_string_lossy().starts_with("GIT_") {
+                command.env_remove(name);
+            }
+        }
         command
             .current_dir(&self.workspace)
             .env("HOME", &self.root)

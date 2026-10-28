@@ -261,7 +261,7 @@ impl Workspace {
             {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
-                    "protected_path: write directory aliases a trusted directory",
+                    "permission_denied: config: protected_path: this write directory aliases a protected directory; write somewhere else, or ask the user to change it. Do not retry it in another form.",
                 ));
             }
         }

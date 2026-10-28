@@ -137,14 +137,6 @@ pub async fn list(directory: &Path) -> Result<Vec<Snapshot>, UndoError> {
     Ok(snapshots)
 }
 
-/// The newest snapshot taken before a run, among those [`list`] returns.
-pub async fn newest_run(directory: &Path) -> Result<Option<Snapshot>, UndoError> {
-    Ok(list(directory)
-        .await?
-        .into_iter()
-        .find(|snapshot| matches!(snapshot.kind, SnapshotKind::Run(_))))
-}
-
 /// Restores `target`'s workspace to the snapshot, after recording the
 /// current state as a [`SnapshotKind::BeforeUndo`] snapshot.
 pub async fn restore(target: &Snapshot) -> Result<Restored, UndoError> {

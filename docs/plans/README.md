@@ -122,8 +122,8 @@ list of stops plus undo is easier to predict.
 
 ## B. Run in place, as the user; delete the sandbox
 
-Snapshots and `qq undo` (#482), the mode table and fixed stops (#483),
-`/undo` in the TUI and one denial format shipped first; see
+Snapshots and `qq undo` (#482), the mode table and fixed stops (#483), and
+one denial format shipped first; see
 [permissions](../guide/permissions.md) and
 [tools](../design/tools.md#fixed-stops). This section is next.
 
@@ -293,6 +293,10 @@ task against the loopback fake provider in CI.
 - Bound store growth with an explicit retention setting before more runs
   die on `DiskFull`. Snapshot refs follow the same setting.
 - A user-level `deny_shell_prefixes`. Today only managed config may set it.
+- `/undo` in the TUI, as a server command: the runtime refuses it while
+  any run is active, queued or due from a goal, and admits no run until the
+  restore finishes. A client-side guard cannot see other clients or goal
+  scheduling.
 
 ## Order
 

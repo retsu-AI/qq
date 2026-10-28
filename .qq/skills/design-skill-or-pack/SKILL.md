@@ -52,7 +52,7 @@ directory with any other name is skipped without a warning. Reserved names are
 every entry of `qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS` (`goal`, `btw`,
 `ask`, `help`, `commands`, `models`, `profile`, `approval`, `delegate`,
 `effort`, `skills`, `sessions`, `resume`, `agents`, `theme`, `editor`, `new`,
-`clear`, `compact`, `rollback`, `undo`, `prune`, `mouse`, `attention`, `changes`,
+`clear`, `compact`, `rollback`, `prune`, `mouse`, `attention`, `changes`,
 `quit`, `exit`, and the `btw-` variants).
 
 Start with YAML front matter carrying one interpreted key:
