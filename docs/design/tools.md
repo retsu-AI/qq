@@ -27,8 +27,11 @@ A command does not outlive the process that started it. On Unix each
 command's process group also holds a small watcher that reads a pipe only
 the QQ process holds open; when QQ exits for any reason, SIGKILL included,
 the watcher kills the group. On Windows each command's job is killed when
-its handle closes. A command that leaves its process group (`setsid`, a
-double fork into a new group) escapes this, as it escapes timeouts. On
+its handle closes. On Unix a command that leaves its process group (`setsid`, a
+double fork into a new group) escapes this, as it escapes timeouts; Windows
+jobs follow every descendant. Commands share the user's terminal, so a
+command that prompts there waits until its timeout or a cancel. There is no
+disk-space reserve for commands. On
 restart, runs and commands that were in flight are settled as interrupted;
 nothing is reattached or run again.
 
@@ -537,10 +540,7 @@ never grant execution authority. A final semicolon after validated reads is
 accepted; incomplete conjunctions/pipelines are work. Literal sed scripts use
 only supported addresses, printing and pattern-space substitutions with safe
 flags; delimiter escapes and embedded semicolons are parsed before separators.
-Any nonempty requested shell/exec environment counts as work, including benign
-names conservatively. An additional environment view only disqualifies read
-candidates, preserving command/cwd parsing and approval previews even when the
-environment field is malformed or duplicated. JJ repository loading counts as work because
+JJ repository loading counts as work because
 operation reconciliation may persist state. File timestamp-restoring modes
 count as work; Unix sed supports a literal last-line print address.
 

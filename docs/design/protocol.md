@@ -81,7 +81,8 @@ approval previews; `SessionSummary.approval_delegate`; the
 drops the grant, delegate and native command storage.
 
 Version 40 adds task-scoped Auto goal-check authority, distinct from explicit
-consent to execute a goal check.
+consent to execute a goal check. Since version 41 those checks run in the
+checkout like any Auto command.
 
 Version 38 adds authenticated, store-qualified workspace catalog pages. Clients
 can discover registered roots without interpreting server paths locally;
