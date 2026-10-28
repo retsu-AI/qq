@@ -1,8 +1,5 @@
 //! Application configuration to model-runtime composition.
 
-#[path = "runtime/task_hosting.rs"]
-mod task_hosting;
-
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     net::IpAddr,
@@ -153,7 +150,6 @@ pub struct RuntimeFactory {
 }
 
 struct RuntimeFactoryInner {
-    build: HostBuild,
     config: ConfigLoader,
     credentials: CredentialStore,
     mode: RuntimeMode,
@@ -309,7 +305,6 @@ impl RuntimeFactory {
     ) -> Result<Self, RuntimeBuildError> {
         Ok(Self {
             inner: Arc::new(RuntimeFactoryInner {
-                build,
                 config,
                 credentials,
                 mode,
@@ -1218,7 +1213,7 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
     ) -> Result<Arc<CompiledAgentPlan>, RuntimeBuildError> {
-        self.plan_with_lookup_progress(request, profile, None, None)
+        self.plan_with_lookup_progress(request, profile, None)
             .map(|(plan, _)| plan)
     }
 
@@ -1227,9 +1222,8 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
         progress: &qq_core::RuntimeLoadProgress,
-        execution_workspace: Option<&qq_core::command_owner::NativeDirectoryGrant>,
     ) -> Result<Arc<CompiledAgentPlan>, RuntimeBuildError> {
-        self.plan_with_lookup_progress(request, profile, Some(progress), execution_workspace)
+        self.plan_with_lookup_progress(request, profile, Some(progress))
             .map(|(plan, _)| plan)
     }
 
@@ -1240,7 +1234,7 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
-        self.plan_with_lookup_progress(request, profile, None, None)
+        self.plan_with_lookup_progress(request, profile, None)
     }
 
     fn plan_with_lookup_progress(
@@ -1248,37 +1242,15 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
         progress: Option<&qq_core::RuntimeLoadProgress>,
-        execution_workspace: Option<&qq_core::command_owner::NativeDirectoryGrant>,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
         preparation_phase(progress, qq_core::RuntimeLoadStage::CanonicalizingWorkspace)?;
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(request.cwd())?;
         let configuration_workspace = qq_config::canonical_working_directory(request.cwd())?;
-        let workspace = if let Some(grant) = execution_workspace {
-            let validate = || {
-                let canonical = std::fs::canonicalize(&grant.path)?;
-                if canonical != grant.path
-                    || qq_core::command_owner::NativeWorkspaceIdentity::capture(&canonical)?
-                        != grant.identity
-                {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "task execution workspace changed",
-                    ));
-                }
-                Ok(canonical)
-            };
-            validate().map_err(|source| RuntimeBuildError::ExecutionWorkspace {
-                path: grant.path.clone(),
-                source,
-            })?
-        } else {
-            configuration_workspace.clone()
-        };
+        let workspace = configuration_workspace.clone();
         let key = PlanKey {
             configuration_workspace,
             workspace: workspace.clone(),
-            execution_workspace_identity: execution_workspace.map(|grant| grant.identity),
             model: ModelSelection {
                 model_is_fallback: false,
                 model: request.overrides().model().map(str::to_owned),
@@ -1296,26 +1268,7 @@ impl RuntimeFactory {
             self.compile_generation(request, profile, &workspace, progress)
         });
         match lookup {
-            Ok((plan, lookup)) => {
-                if let Some(grant) = execution_workspace {
-                    let held = plan.workspace_identity().map_err(|source| {
-                        RuntimeBuildError::ExecutionWorkspace {
-                            path: grant.path.clone(),
-                            source,
-                        }
-                    })?;
-                    if plan.workspace_path() != grant.path || held != grant.identity {
-                        return Err(RuntimeBuildError::ExecutionWorkspace {
-                            path: grant.path.clone(),
-                            source: std::io::Error::new(
-                                std::io::ErrorKind::PermissionDenied,
-                                "compiled plan does not hold the admitted task workspace",
-                            ),
-                        });
-                    }
-                }
-                Ok((plan, lookup))
-            }
+            Ok((plan, lookup)) => Ok((plan, lookup)),
             Err(PlanCacheError::Compile(error)) => Err(error),
             Err(PlanCacheError::Capacity { .. }) => Err(RuntimeBuildError::PlanCacheFull),
             Err(PlanCacheError::ShutDown) => Err(RuntimeBuildError::PlanCacheShutDown),
@@ -2241,13 +2194,6 @@ pub fn aws_profile_configured(profile: &str) -> bool {
 }
 
 impl RuntimeLoader for RuntimeFactory {
-    fn authorize_task_hosting(
-        &self,
-        workspace: qq_core::command_owner::NativeDirectoryGrant,
-    ) -> qq_core::TaskHostingLoadFuture {
-        self.load_task_hosting(workspace)
-    }
-
     fn resolve_worker_model(
         &self,
         workspace: String,
@@ -2361,12 +2307,8 @@ impl RuntimeLoader for RuntimeFactory {
                     overrides = overrides.with_organization(organization);
                 }
                 load = load.with_overrides(overrides);
-                let plan = factory.plan_for_profile_with_progress(
-                    &load,
-                    &request.profile,
-                    &progress,
-                    request.execution_workspace.as_ref(),
-                )?;
+                let plan =
+                    factory.plan_for_profile_with_progress(&load, &request.profile, &progress)?;
                 Ok::<_, RuntimeBuildError>(LoadedRuntime::new(plan))
             })
             .await;
@@ -2959,36 +2901,6 @@ impl RuntimeHandler {
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
     ) -> Result<Self, RuntimeHandlerError> {
-        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-        let commands: Option<Arc<dyn qq_core::command_owner::NativeCommandService>> =
-            Some(Arc::new(crate::command_worker::CommandWorker::new(
-                factory
-                    .inner
-                    .config
-                    .paths()
-                    .data_dir()
-                    .join("command-owner-v3"),
-                std::env::current_exe().map_err(qq_core::command_owner::CommandOwnerError::Io)?,
-                factory.inner.build.version,
-            )?));
-        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-        let commands = None;
-        Self::open_with_commands(factory, approval_timeout, commands).await
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn open_with(
-        factory: RuntimeFactory,
-        approval_timeout: Option<std::time::Duration>,
-    ) -> Result<Self, RuntimeHandlerError> {
-        Self::open_with_commands(factory, approval_timeout, None).await
-    }
-
-    async fn open_with_commands(
-        factory: RuntimeFactory,
-        approval_timeout: Option<std::time::Duration>,
-        native_commands: Option<Arc<dyn qq_core::command_owner::NativeCommandService>>,
-    ) -> Result<Self, RuntimeHandlerError> {
         factory.validate_isolated_tui_qa_state()?;
         let database_path = factory.inner.config.session_database_path()?;
         // The factory is both the runtime loader and the workspace grant
@@ -3000,39 +2912,20 @@ impl RuntimeHandler {
         // about it.
         let reviewer: Arc<dyn ApprovalReviewer> =
             Arc::new(ModelApprovalReviewer::new(factory.clone()));
-        let mut options = SessionRuntimeOptions::new(database_path)
+        let options = SessionRuntimeOptions::new(database_path)
             .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()))
             .with_approval_reviewer(reviewer);
-        // Native backends share task ownership and publication. Resource policy
-        // names the actual backend guarantee: kernel limits or sampled safeguards.
-        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-        if native_commands.is_some() {
-            let directory = factory
-                .inner
-                .config
-                .paths()
-                .data_dir()
-                .join("task-workspaces");
-            options.task_workspaces = Some(
-                tokio::task::spawn_blocking(move || task_workspace_policy(&directory))
-                    .await
-                    .map_err(RuntimeHandlerError::TaskPreparation)??,
-            );
-        }
-        if let Some(policy) = options.task_workspaces.as_ref()
-            && native_commands.is_some()
-        {
-            let control = policy.directory.clone();
-            options.task_git = tokio::task::spawn_blocking(move || {
-                qq_core::TaskGitPolicy::from_process_env(control)
-            })
-            .await
-            .map_err(RuntimeHandlerError::TaskPreparation)??;
-        }
-        options.native_commands = native_commands;
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
         Ok(Self { durable, factory })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn open_with(
+        factory: RuntimeFactory,
+        approval_timeout: Option<std::time::Duration>,
+    ) -> Result<Self, RuntimeHandlerError> {
+        Self::open_owned(factory, approval_timeout).await
     }
 
     /// The durable session runtime this handler serves. Headless `qq run`
@@ -3296,7 +3189,6 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         )
         | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Unavailable)
         | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Overloaded)
-        | SessionRuntimeError::NativeCommandCapacity
         | SessionRuntimeError::QueueFull
         | SessionRuntimeError::SteeringQueueFull
         | SessionRuntimeError::WorkspaceLimitReached
@@ -3304,7 +3196,6 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::CommandLimitReached
         | SessionRuntimeError::Overloaded => ServerHandlerError::Unavailable,
         SessionRuntimeError::InvalidRunLimit
-        | SessionRuntimeError::InvalidNativeScope { .. }
         | SessionRuntimeError::SnapshotTooLarge
         | SessionRuntimeError::OutputTooLarge
         | SessionRuntimeError::AccountingUnavailable
@@ -3318,65 +3209,11 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 #[derive(Debug, Error)]
 pub enum RuntimeHandlerError {
     #[error(transparent)]
-    TaskGitHelper(#[from] qq_core::task_git_job::HelperImageError),
-    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-    #[error("task workspace preparation stopped: {0}")]
-    TaskPreparation(#[source] tokio::task::JoinError),
-    #[error("native command service failed: {0}")]
-    NativeCommands(#[from] qq_core::command_owner::CommandOwnerError),
-    #[error(transparent)]
     Build(#[from] RuntimeBuildError),
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
     Sessions(#[from] SessionRuntimeError),
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
-fn task_workspace_policy(
-    directory: &Path,
-) -> Result<qq_core::TaskWorkspacePolicy, RuntimeBuildError> {
-    let prepare = || -> std::io::Result<_> {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt as _;
-            builder.mode(0o700);
-        }
-        builder.create(directory)?;
-        let directory = directory.canonicalize()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            let metadata = std::fs::metadata(&directory)?;
-            if metadata.mode() & 0o077 != 0 || metadata.uid() != rustix::process::getuid().as_raw()
-            {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "task control directory must be private and owned by this user",
-                ));
-            }
-        }
-        Ok(qq_core::TaskWorkspacePolicy {
-            directory: qq_core::command_owner::NativeDirectoryGrant::capture(&directory)?,
-            read_access: qq_core::command_owner::NativeReadAccess::Host,
-            read_only: Vec::new(),
-            #[cfg(windows)]
-            network: qq_core::command_owner::NativeNetwork::Host,
-            #[cfg(not(windows))]
-            network: qq_core::command_owner::NativeNetwork::Isolated,
-            resources: qq_core::command_owner::NativeResources::Host,
-            limits: qq_core::task_workspace::TaskWorkspaceLimits {
-                max_entries: 16_384,
-                max_bytes: 256 * 1024 * 1024,
-            },
-        })
-    };
-    prepare().map_err(|source| RuntimeBuildError::ExecutionWorkspace {
-        path: directory.to_owned(),
-        source,
-    })
 }
 
 /// Translates the configured roster into the protocol shape, decorating each
@@ -3748,12 +3585,6 @@ fn preparation_phase(
 
 #[derive(Debug, Error)]
 pub enum RuntimeBuildError {
-    #[error("could not admit task execution workspace {path}: {source}")]
-    ExecutionWorkspace {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("runtime preparation was cancelled")]
     PreparationCancelled,
     #[error(transparent)]
@@ -3828,7 +3659,7 @@ impl RuntimeBuildError {
     fn failure_kind(&self) -> RunFailureKind {
         match self {
             Self::Config(ConfigError::PolicyViolation { .. }) => RunFailureKind::Policy,
-            Self::Config(_) | Self::ExecutionWorkspace { .. } => RunFailureKind::Configuration,
+            Self::Config(_) => RunFailureKind::Configuration,
             Self::Auth(_) => RunFailureKind::Authentication,
             Self::Provider(error) => match error.kind() {
                 qq_provider::ProviderErrorKind::Configuration => {

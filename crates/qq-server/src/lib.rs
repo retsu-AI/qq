@@ -30,7 +30,6 @@ use futures_util::StreamExt;
 use qq_core::PublishedEventStream;
 
 #[doc(hidden)]
-pub mod command_owner;
 mod cors;
 
 pub use cors::{AllowedOriginError, AllowedOrigins, MAX_ALLOWED_ORIGINS, MAX_ORIGIN_BYTES};

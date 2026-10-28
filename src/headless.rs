@@ -473,7 +473,7 @@ pub async fn run_goal(
     let result: Result<u8, Failure> = async {
         let sink = record_sink.insert(RecordSink::open(&options)
             .map_err(|error| Failure::invalid(format!("could not open trace: {error}")))?);
-        let handle = prepare_session_with_interrupt(sessions, &options, SessionIntent::Goal(&request), interrupt.as_mut()).await?;
+        let handle = prepare_session(sessions, &options, SessionIntent::Goal(&request)).await?;
         direct_record_cursor = Some(handle.subscribe_after);
         let snapshot = sessions.snapshot(SnapshotRequest::new(
             handle.workspace_id, Some(handle.session_id), 1, 1,
@@ -1134,7 +1134,7 @@ pub async fn run(
         }
         parts
     };
-    let handle = match submit(sessions, &options, input, interrupt.as_mut()).await {
+    let handle = match submit(sessions, &options, input).await {
         Ok(handle) => handle,
         Err(failure) => {
             let _ = writeln!(stderr, "error: {}", failure.message);
@@ -1297,7 +1297,6 @@ async fn submit(
     sessions: &SessionRuntime,
     options: &HeadlessOptions,
     input: Vec<qq_protocol::InputPart>,
-    interrupt: impl Future<Output = ()>,
 ) -> Result<RunHandle, Failure> {
     let SessionHandle {
         approval,
@@ -1306,7 +1305,7 @@ async fn submit(
         subscribe_after,
         wait_for_delegate,
         child_waits_for_delegate,
-    } = prepare_session_with_interrupt(sessions, options, SessionIntent::Prompt, interrupt).await?;
+    } = prepare_session(sessions, options, SessionIntent::Prompt).await?;
     // Budgets are core-owned: the runtime enforces them and settles the run
     // with a typed outcome, so this adapter only relays and renders.
     let queued = send(
@@ -1355,22 +1354,11 @@ async fn submit(
     })
 }
 
-#[cfg(test)]
 async fn prepare_session(
     sessions: &SessionRuntime,
     options: &HeadlessOptions,
     intent: SessionIntent<'_>,
 ) -> Result<SessionHandle, Failure> {
-    prepare_session_with_interrupt(sessions, options, intent, std::future::pending()).await
-}
-
-async fn prepare_session_with_interrupt(
-    sessions: &SessionRuntime,
-    options: &HeadlessOptions,
-    intent: SessionIntent<'_>,
-    interrupt: impl Future<Output = ()>,
-) -> Result<SessionHandle, Failure> {
-    let mut interrupt = pin!(interrupt);
     if options.session.is_none()
         && let SessionIntent::Goal(request) = intent
     {
@@ -1418,7 +1406,7 @@ async fn prepare_session_with_interrupt(
             )
         }
         Some(session_id) => {
-            let mut snapshot = match sessions
+            let snapshot = match sessions
                 .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 1))
                 .await
             {
@@ -1438,36 +1426,6 @@ async fn prepare_session_with_interrupt(
                     });
                 }
             };
-            if let Some(run_id) = snapshot
-                .focused
-                .as_ref()
-                .and_then(|focused| focused.summary.active_run_id)
-                && sessions.is_recovered_run(run_id)
-            {
-                tokio::select! {
-                    biased;
-                    () = interrupt.as_mut() => {
-                        if let Some(goal) = snapshot.focused.as_ref().and_then(|focused| focused.goal.as_ref())
-                            && sessions.goal_owns_run(session_id, goal_identity(goal), run_id).await.map_err(|error| Failure::harness(error.to_string()))?
-                        {
-                            sessions.pause_goal_if_active(session_id, goal_identity(goal)).await.map_err(|error| Failure::harness(error.to_string()))?;
-                        }
-                        let handle = RunHandle {
-                            approval: options.approval, workspace_id, session_id, run_id,
-                            subscribe_after: snapshot.cursor, wait_for_delegate: false, child_waits_for_delegate: false,
-                        };
-                        cancel_and_settle(sessions, &handle).await?;
-                        return Err(Failure { status: HeadlessStatus::Interrupted, message: "interrupted while waiting for inherited commands".to_owned() });
-                    }
-                    recovered = sessions.await_recovered_commands(workspace_id, session_id) => {
-                        recovered.map_err(|error| Failure::harness(error.to_string()))?;
-                    }
-                }
-                snapshot = sessions
-                    .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 1))
-                    .await
-                    .map_err(|error| Failure::harness(error.to_string()))?;
-            }
             let Some(focused) = snapshot.focused else {
                 return Err(Failure::harness(
                     "workspace snapshot omitted the focused session",
@@ -6796,7 +6754,6 @@ mod tests {
                 ..options(&workspace)
             },
             vec![qq_protocol::InputPart::text("hang")],
-            std::future::pending(),
         )
         .await
         .unwrap();
@@ -8550,14 +8507,9 @@ mod tests {
         .await;
         let mut options = options(&fixture.workspace);
         options.approval = HeadlessApproval::Full;
-        let handle = submit(
-            &fixture.sessions,
-            &options,
-            vec![InputPart::text("finish")],
-            std::future::pending(),
-        )
-        .await
-        .unwrap();
+        let handle = submit(&fixture.sessions, &options, vec![InputPart::text("finish")])
+            .await
+            .unwrap();
         let mut events = fixture
             .sessions
             .subscribe(SubscribeRequest {
@@ -8682,7 +8634,6 @@ mod tests {
             &fixture.sessions,
             &options(&fixture.workspace),
             vec![InputPart::text("finish")],
-            std::future::pending(),
         )
         .await
         .unwrap();

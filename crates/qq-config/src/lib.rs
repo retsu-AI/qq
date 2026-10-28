@@ -21,8 +21,6 @@ pub mod pack;
 mod promote;
 mod providers;
 mod remote;
-mod task_hosting;
-pub use task_hosting::GithubTaskHostingGrant;
 mod theme;
 mod tui;
 
@@ -78,7 +76,7 @@ pub const REMOVED_ENVIRONMENT_VARIABLES: [&str; 3] =
     ["QQ_JEV_CHECKPOINTS", "QQ_JEV_ROUTING", "QQ_JEV_APPROVAL"];
 
 pub use document::{
-    DOCUMENT_FIELD_NAMES, HOST_ONLY_POLICY_FIELD_NAMES, MANAGED_ONLY_POLICY_FIELD_NAMES,
+    DOCUMENT_FIELD_NAMES, MANAGED_ONLY_POLICY_FIELD_NAMES,
     ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES, POLICY_FIELD_NAMES,
 };
 pub use providers::{
@@ -1204,7 +1202,6 @@ pub struct EffectivePolicy {
     allow_shell_prefixes: Vec<String>,
     allow_hosts: Vec<String>,
     shell_env: Vec<String>,
-    task_hosting: Vec<GithubTaskHostingGrant>,
     builtin_preference: BuiltinPreference,
     deny_tools: Vec<String>,
     deny_shell_prefixes: Vec<String>,
@@ -1226,7 +1223,6 @@ impl Default for EffectivePolicy {
             allow_shell_prefixes: Vec::new(),
             allow_hosts: Vec::new(),
             shell_env: Vec::new(),
-            task_hosting: Vec::new(),
             builtin_preference: BuiltinPreference::default(),
             deny_tools: Vec::new(),
             deny_shell_prefixes: Vec::new(),
@@ -1317,12 +1313,6 @@ impl EffectivePolicy {
     #[must_use]
     pub fn shell_env(&self) -> &[String] {
         &self.shell_env
-    }
-
-    /// Host-only, workspace-scoped GitHub publication destinations.
-    #[must_use]
-    pub fn task_hosting(&self) -> &[GithubTaskHostingGrant] {
-        &self.task_hosting
     }
 
     /// How hard the runtime steers shell habits toward built-ins.
@@ -1596,15 +1586,9 @@ pub struct ConfigProvenance {
     grant_shell_prefixes: BTreeMap<String, SourceIdentity>,
     grant_hosts: BTreeMap<String, SourceIdentity>,
     shell_env: BTreeMap<String, SourceIdentity>,
-    task_hosting: BTreeMap<PathBuf, SourceIdentity>,
 }
 
 impl ConfigProvenance {
-    #[must_use]
-    pub fn task_hosting(&self, workspace: &Path) -> Option<&SourceIdentity> {
-        self.task_hosting.get(workspace)
-    }
-
     /// Sources of chosen goal defaults and monotonic managed ceilings.
     #[must_use]
     pub const fn goals(&self) -> &BTreeMap<String, SourceIdentity> {
@@ -2465,8 +2449,6 @@ pub enum ConfigError {
     PolicyOutsideManaged { origin: SourceIdentity },
     #[error("remote configuration cannot declare approval grants: {origin}")]
     RemotePolicyGrantsForbidden { origin: SourceIdentity },
-    #[error("task hosting grants may only be declared in host configuration: {origin}")]
-    TaskHostingOutsideHost { origin: SourceIdentity },
     #[error("workspace grant is invalid: {message}")]
     InvalidGrant { message: String },
     #[error("workspace grant {grant:?} is denied by managed policy {rule}")]

@@ -16,7 +16,6 @@ use qq_protocol::{RunCommand, RunEvent};
 use qq_server as server;
 
 mod cli;
-mod command_owner;
 mod daemon;
 #[cfg(test)]
 mod docs_truth;
@@ -30,62 +29,6 @@ mod output;
 mod undo;
 
 fn main() -> ExitCode {
-    if let Some(request) = cli::task_git_request() {
-        return match request.map_err(io::Error::other).and_then(|path| {
-            qq_core::task_git_job::execute_job_with_token(
-                &path,
-                std::env::var(qq_core::task_git_job::HOSTING_TOKEN_ENV)
-                    .ok()
-                    .map(qq_provider::SecretLiteral::new),
-            )
-            .map_err(io::Error::other)
-        }) {
-            Ok(receipt) => {
-                match serde_json::to_string(&receipt) {
-                    Ok(encoded) => println!("{encoded}"),
-                    Err(error) => {
-                        eprintln!("task Git receipt: {error}");
-                        return ExitCode::FAILURE;
-                    }
-                }
-                if receipt.result.is_success() {
-                    ExitCode::SUCCESS
-                } else {
-                    ExitCode::FAILURE
-                }
-            }
-            Err(error) => {
-                eprintln!("task Git job: {error}");
-                ExitCode::FAILURE
-            }
-        };
-    }
-    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("_command-exec")) {
-        return match std::env::args_os()
-            .nth(2)
-            .ok_or_else(|| io::Error::other("missing native launch descriptors"))
-            .and_then(|encoded| {
-                let encoded = encoded
-                    .to_str()
-                    .ok_or_else(|| io::Error::other("invalid native launch descriptors"))?;
-                qq_core::command_owner::execute_native_launch(encoded)
-            }) {
-            Ok(code) => ExitCode::from(code),
-            Err(error) => {
-                eprintln!("native launch: {error}");
-                let mut cause = std::error::Error::source(&error);
-                for _ in 0..8 {
-                    let Some(source) = cause else {
-                        break;
-                    };
-                    eprintln!("caused by: {source}");
-                    cause = source.source();
-                }
-                ExitCode::FAILURE
-            }
-        };
-    }
     let logging_enabled = match logging::enabled(std::env::var_os("QQ_LOG").as_deref()) {
         Ok(enabled) => enabled,
         Err(error) => {
@@ -196,7 +139,6 @@ async fn run(cli: cli::Cli) -> Result<ExitCode, Box<dyn Error>> {
         Some(cli::Command::Daemon { command }) => {
             return daemon::command(command, &overrides).await;
         }
-        Some(cli::Command::NativeWorker { state_dir }) => command_owner::run(state_dir).await?,
         Some(cli::Command::Config { command }) => config_command(command, &overrides)?,
         Some(cli::Command::Auth { command }) => {
             run_blocking_command(move || auth_command(command)).await?
@@ -617,10 +559,6 @@ async fn prepare_headless(
             runtime::RuntimeHandlerError::Build(error) => invalid(error.to_string()),
             runtime::RuntimeHandlerError::Config(error) => invalid(error.to_string()),
             runtime::RuntimeHandlerError::Sessions(error) => harness(error.to_string()),
-            runtime::RuntimeHandlerError::NativeCommands(error) => harness(error.to_string()),
-            runtime::RuntimeHandlerError::TaskGitHelper(error) => harness(error.to_string()),
-            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-            runtime::RuntimeHandlerError::TaskPreparation(error) => harness(error.to_string()),
         })?;
 
     let (reviewer_configured, configured_delegate) =

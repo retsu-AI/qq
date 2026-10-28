@@ -19,13 +19,13 @@ use super::{
     BuiltinPreference, BuiltinProvider, ClientSnapshot, ConfigError, ConfigKey, ConfigProvenance,
     ConfigSnapshot, ConfigSources, Connection, DEFAULT_MAX_OUTPUT_TOKENS,
     DEFAULT_MCP_CALL_TIMEOUT_SECONDS, DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig,
-    DelegationEntry, DelegationRole, EffectivePolicy, GithubTaskHostingGrant, GoalCeilings,
-    GoalsConfig, HttpAccess, InputModality, MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS,
-    MAX_DELEGATION_DEPTH, MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER,
-    MAX_MCP_CALL_TIMEOUT_SECONDS, MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES,
-    McpServerConfig, McpTransport, ModelMetadata, ModelPricing, ModelRoute, PolicyGrants,
-    ProfileApprovalMode, ProviderAccess, ProviderApi, ProviderConfig, ProviderKind,
-    RuntimeOverrides, SecretRef, SourceIdentity, SourceKind, SourceReport, WorkspaceGrant,
+    DelegationEntry, DelegationRole, EffectivePolicy, GoalCeilings, GoalsConfig, HttpAccess,
+    InputModality, MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH,
+    MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER, MAX_MCP_CALL_TIMEOUT_SECONDS,
+    MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, McpServerConfig, McpTransport,
+    ModelMetadata, ModelPricing, ModelRoute, PolicyGrants, ProfileApprovalMode, ProviderAccess,
+    ProviderApi, ProviderConfig, ProviderKind, RuntimeOverrides, SecretRef, SourceIdentity,
+    SourceKind, SourceReport, WorkspaceGrant,
 };
 
 pub(super) fn deserialize_unique_btree_map<'de, D, K, V>(
@@ -637,7 +637,7 @@ impl GrantEntry {
 /// order. The user guide must name each; the docs-truth test in the root
 /// crate reads this list, and a unit test here holds it equal to the field
 /// list the `Deserialize` derive reports.
-pub const POLICY_FIELD_NAMES: [&str; 17] = [
+pub const POLICY_FIELD_NAMES: [&str; 16] = [
     "allowed_providers",
     "exposed_tools",
     "denied_providers",
@@ -649,7 +649,6 @@ pub const POLICY_FIELD_NAMES: [&str; 17] = [
     "allow_shell_prefixes",
     "allow_hosts",
     "shell_env",
-    "task_hosting",
     "builtin_preference",
     "deny_tools",
     "deny_shell_prefixes",
@@ -675,17 +674,12 @@ pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 10] = [
 
 /// The `policy` approval grants an organization manifest may not set;
 /// there they are [`ConfigError::RemotePolicyGrantsForbidden`](crate::ConfigError).
-/// Task hosting additionally requires a host-controlled source.
-pub const ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES: [&str; 5] = [
+pub const ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES: [&str; 4] = [
     "allow_tools",
     "allow_shell_prefixes",
     "allow_hosts",
     "shell_env",
-    "task_hosting",
 ];
-
-/// Policy fields forbidden in project and organization sources even when trusted.
-pub const HOST_ONLY_POLICY_FIELD_NAMES: [&str; 1] = ["task_hosting"];
 
 /// Every top-level key a configuration document accepts, as spelled in RON,
 /// in declaration order. See [`POLICY_FIELD_NAMES`].
@@ -733,7 +727,6 @@ pub(super) struct PolicyPatch {
     /// child (beyond PATH HOME LANG TERM TMPDIR). Authority-bearing like a
     /// grant: gated by workspace trust, layered with `Remove(...)`.
     shell_env: Option<Vec<GrantEntry>>,
-    task_hosting: Option<Vec<GithubTaskHostingGrant>>,
     /// How hard the runtime steers the model from shell habits to built-ins:
     /// `off`, `hint` (default), or `strict` (refuse before execution).
     builtin_preference: Option<BuiltinPreference>,
@@ -766,13 +759,12 @@ impl PolicyPatch {
             || self.goals.is_some()
     }
 
-    /// Authority-bearing declarations; task hosting additionally requires a host source.
+    /// Authority-bearing declarations.
     fn has_grants(&self) -> bool {
         self.allow_tools.is_some()
             || self.allow_shell_prefixes.is_some()
             || self.allow_hosts.is_some()
             || self.shell_env.is_some()
-            || self.task_hosting.is_some()
     }
 }
 
@@ -920,21 +912,6 @@ impl Document {
                     origin: origin.clone(),
                 });
             }
-            if policy.task_hosting.is_some()
-                && !matches!(
-                    origin.kind(),
-                    SourceKind::Global
-                        | SourceKind::Explicit
-                        | SourceKind::Inline
-                        | SourceKind::Managed
-                        | SourceKind::Mdm
-                        | SourceKind::Remote
-                )
-            {
-                return Err(ConfigError::TaskHostingOutsideHost {
-                    origin: origin.clone(),
-                });
-            }
             // Approval grants name commands and tools that run without
             // prompting; remote configuration may never plant them, exactly
             // like MCP declarations.
@@ -1051,9 +1028,6 @@ impl Document {
             if policy.shell_env.is_some() {
                 sections.push("policy.shell_env");
             }
-            if policy.task_hosting.is_some() {
-                sections.push("policy.task_hosting");
-            }
         }
         sections
     }
@@ -1079,8 +1053,6 @@ impl Document {
             allow_hosts: Option<&'a Vec<GrantEntry>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             shell_env: Option<&'a Vec<GrantEntry>>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            task_hosting: Option<&'a Vec<GithubTaskHostingGrant>>,
         }
 
         #[derive(Serialize)]
@@ -1145,7 +1117,6 @@ impl Document {
                     allow_shell_prefixes: policy.allow_shell_prefixes.as_ref(),
                     allow_hosts: policy.allow_hosts.as_ref(),
                     shell_env: policy.shell_env.as_ref(),
-                    task_hosting: policy.task_hosting.as_ref(),
                 }),
         };
         let canonical =
@@ -1554,9 +1525,6 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
                 )));
             }
         }
-    }
-    if let Some(grants) = &policy.task_hosting {
-        crate::task_hosting::validate(grants, origin)?;
     }
     for (field, values, shape) in [
         ("deny_tools", policy.deny_tools.as_deref(), GrantShape::Tool),
@@ -2316,13 +2284,6 @@ impl MergeState {
             &mut self.provenance.shell_env,
             source,
         );
-        if let Some(grants) = &patch.task_hosting {
-            self.policy.task_hosting = grants.clone();
-            self.provenance.task_hosting = grants
-                .iter()
-                .map(|grant| (grant.workspace().to_owned(), source.clone()))
-                .collect();
-        }
         // Later layers may only tighten the preference: `hint` over `off`,
         // `strict` over either. A managed source that says strict wins.
         if let Some(incoming) = patch.builtin_preference {
