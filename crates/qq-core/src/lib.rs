@@ -5248,6 +5248,228 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_tool_arguments_yield_a_tool_error_and_continue_the_run() {
+        struct OversizedArgumentsProvider {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for OversizedArgumentsProvider {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let mut requests = self.requests.lock().unwrap();
+                let turn = requests.len();
+                requests.push(request);
+                drop(requests);
+                if turn == 0 {
+                    let content = "x".repeat(35 * 1024);
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::ToolCallStarted {
+                            id: "big".to_owned(),
+                            name: "write_file".to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "big".to_owned(),
+                            json: format!(r#"{{"path":"big.txt","content":"{content}"#),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "big".to_owned(),
+                            json: format!(r#"{content}"}}"#),
+                        }),
+                        Ok(ProviderEvent::ToolCallCompleted {
+                            id: "big".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            OversizedArgumentsProvider {
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("write")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{:?}",
+            events.last()
+        );
+        assert!(!directory.path().join("big.txt").exists());
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(matches!(
+            requests[1].messages()[2].content(),
+            [ContentBlock::ToolResult {
+                call_id,
+                content,
+                is_error: true,
+            }] if call_id == "big" && content.contains("64 KiB limit")
+        ));
+    }
+
+    /// A run follows a yielded command with `command_status` on a later
+    /// turn, then ends with a second one still running: the run completes
+    /// and its teardown stops that command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_run_follows_a_yielded_command_and_stops_the_rest_when_it_ends() {
+        struct ReleaseOnSecondTurn {
+            script: TurnScript,
+            gate: std::fs::File,
+        }
+
+        impl Provider for ReleaseOnSecondTurn {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                // The second request means the first call already yielded:
+                // only then may the command finish. Like a model, it follows
+                // the id the yielded result named.
+                if self.script.requests.lock().unwrap().len() == 1 {
+                    use std::io::Write as _;
+                    (&self.gate).write_all(b"go\n").unwrap();
+                    let id = request
+                        .messages()
+                        .iter()
+                        .flat_map(|message| message.content())
+                        .find_map(|block| match block {
+                            ContentBlock::ToolResult { content, .. } => content
+                                .split("id=")
+                                .nth(1)
+                                .and_then(|rest| rest.split_whitespace().next())
+                                .map(str::to_owned),
+                            _ => None,
+                        })
+                        .expect("the first result names its command id");
+                    self.script.requests.lock().unwrap().push(request);
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::ToolCallStarted {
+                            id: "status".to_owned(),
+                            name: "command_status".to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "status".to_owned(),
+                            json: serde_json::json!({"id": id, "wait_seconds": 30}).to_string(),
+                        }),
+                        Ok(ProviderEvent::ToolCallCompleted {
+                            id: "status".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                self.script.stream(request)
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let release = directory.path().join("release");
+        tools::create_test_fifo(&release).await;
+        let gate = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&release)
+            .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let tool_tasks = tools::ToolTasks::default();
+        let script = TurnScript {
+                turns: vec![
+                    vec![(
+                        "shell",
+                        r#"{"command":"echo building; read token < release; echo built","yield_after_seconds":1}"#
+                            .to_owned(),
+                    )],
+                    // Turn two is built by the provider from the first result.
+                    Vec::new(),
+                    vec![(
+                        "shell",
+                        r#"{"command":"echo pid:$$; exec tail -f /dev/null","yield_after_seconds":1}"#
+                            .to_owned(),
+                    )],
+                ],
+                requests: Arc::clone(&requests),
+            };
+        let runtime =
+            Runtime::new(ReleaseOnSecondTurn { script, gate }, "test-model", 256).unwrap();
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            runtime
+                .run_loop_with_spawner(
+                    vec![Message::user("build")],
+                    directory.path().to_owned(),
+                    RunCancellation::new(),
+                    Arc::new(StaticPolicyGate {
+                        mode: ApprovalMode::Full,
+                        tools: Default::default(),
+                        network: Arc::default(),
+                    }),
+                    Arc::new(workspace::FileState::default()),
+                    RunCapabilities::user(None).with_tool_tasks(tool_tasks.clone()),
+                )
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("a yielded command must not hold the run");
+        // The run's end alone stops the command: wait for it to finish
+        // without draining, which would cancel it itself.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            tool_tasks.commands().all_finished(),
+        )
+        .await
+        .expect("no yielded command outlives its run");
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let results = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::ToolCallFinished { result, .. } => Some(result.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(results.len(), 3, "{results:?}");
+        assert!(
+            results[0].starts_with("shell exit=running id=c"),
+            "{}",
+            results[0]
+        );
+        assert!(results[1].starts_with("shell exit=0 "), "{}", results[1]);
+        assert!(results[1].contains("built"), "{}", results[1]);
+        assert!(
+            results[2].starts_with("shell exit=running id=c"),
+            "{}",
+            results[2]
+        );
+        let pid = results[2]
+            .split("pid:")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|pid| pid.parse::<i32>().ok())
+            .and_then(rustix::process::Pid::from_raw)
+            .expect("the command printed its pid");
+        assert!(
+            rustix::process::test_kill_process(pid).is_err(),
+            "the run's end stops its yielded commands"
+        );
+    }
+
+    #[tokio::test]
     async fn reports_the_underlying_workspace_open_error() {
         let runtime = Runtime::new(
             ScriptedProvider {
@@ -9768,13 +9990,14 @@ mod tests {
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
         // AB2 widens the cursor bound; AB3 removes the fixed read-limit default.
-        // Run-in-place drops the shell and exec `env` argument.
+        // Run-in-place drops the shell and exec `env` argument; long-running
+        // commands add `yield_after_seconds`.
         // Record the current schema identity separately from the historical prompt.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "3a38ed59c2e281ed5fc3840f0adb9bef802939981d9fa0f18c2e65bacabda725"
+            "18b8c7e06cd2f016433bdf5bd2ee4188b69074a7b732adfdb000d8e28002a248"
         );
         let spawn = specs.last().unwrap();
         assert!(
@@ -10988,10 +11211,15 @@ mod tests {
             );
             let requests = requests.lock().unwrap();
             assert_eq!(requests.len(), 1);
-            assert_eq!(
-                tool_names(&requests[0]),
-                expected.iter().map(String::as_str).collect::<Vec<_>>()
-            );
+            // `command_status` follows `shell` and `exec`.
+            let mut declared = expected.iter().map(String::as_str).collect::<Vec<_>>();
+            if declared
+                .iter()
+                .any(|name| matches!(*name, "shell" | "exec"))
+            {
+                declared.push("command_status");
+            }
+            assert_eq!(tool_names(&requests[0]), declared);
             let prompt = requests[0].system().unwrap();
             if !expected.iter().any(|name| name == "read_file") {
                 assert!(

@@ -43,8 +43,12 @@ struct ToolTaskState {
     /// cancelled or expired run drops the event stream that would have
     /// carried them, but the command did run.
     finished: std::sync::Mutex<std::collections::HashMap<qq_protocol::ToolCallId, ToolOutput>>,
+    commands: super::commands::Commands,
     unrecorded_process: AtomicBool,
     active: AtomicUsize,
+    /// Executions whose call has not returned: active work minus yielded
+    /// commands and the leases they forked.
+    calls: AtomicUsize,
     idle: Notify,
     unconfirmed_process_exit: AtomicBool,
 }
@@ -124,23 +128,47 @@ impl ToolTasks {
         }
     }
 
+    /// Waits for every local execution, stopping yielded commands first: a
+    /// run's teardown leaves no command running.
     pub(crate) async fn drain(&self) -> Result<(), ToolDrainError> {
+        self.0.commands.cancel_all();
+        self.wait_until(|state| state.active.load(Ordering::Acquire) == 0)
+            .await
+    }
+
+    /// Waits for executions whose calls have not returned. Yielded commands
+    /// keep running: their calls already settled.
+    pub(crate) async fn drain_calls(&self) -> Result<(), ToolDrainError> {
+        self.wait_until(|state| state.calls.load(Ordering::Acquire) == 0)
+            .await
+    }
+
+    async fn wait_until(
+        &self,
+        done: impl Fn(&ToolTaskState) -> bool,
+    ) -> Result<(), ToolDrainError> {
         loop {
             let idle = self.0.idle.notified();
             tokio::pin!(idle);
             idle.as_mut().enable();
-            if self.0.active.load(Ordering::Acquire) == 0 {
+            if done(&self.0) {
                 return self.check();
             }
             idle.await;
         }
     }
 
+    pub(crate) fn commands(&self) -> &super::commands::Commands {
+        &self.0.commands
+    }
+
     pub(crate) fn enter(&self) -> ToolTaskLease {
         self.0.active.fetch_add(1, Ordering::AcqRel);
+        self.0.calls.fetch_add(1, Ordering::AcqRel);
         ToolTaskLease {
             tasks: Arc::clone(&self.0),
             process_pending: false,
+            call: true,
         }
     }
 }
@@ -148,17 +176,11 @@ impl ToolTasks {
 pub(crate) struct ToolTaskLease {
     tasks: Arc<ToolTaskState>,
     process_pending: bool,
+    /// Counts toward [`ToolTasks::drain_calls`] until it yields or drops.
+    call: bool,
 }
 
 impl ToolTaskLease {
-    fn save_finished(&self, id: qq_protocol::ToolCallId, result: &ToolOutput) {
-        self.tasks
-            .finished
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id, result.clone());
-    }
-
     /// Keep native startup and its child tracked if the awaiting task unwinds.
     #[cfg(windows)]
     pub(super) fn fork(&self) -> Self {
@@ -166,7 +188,24 @@ impl ToolTaskLease {
         Self {
             tasks: Arc::clone(&self.tasks),
             process_pending: false,
+            call: false,
         }
+    }
+
+    /// The call returned a command id; the command keeps this lease.
+    pub(super) fn yielded(&mut self) {
+        if std::mem::take(&mut self.call) {
+            self.tasks.calls.fetch_sub(1, Ordering::AcqRel);
+            self.tasks.idle.notify_waiters();
+        }
+    }
+
+    pub(super) fn save_finished(&self, id: qq_protocol::ToolCallId, result: &ToolOutput) {
+        self.tasks
+            .finished
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, result.clone());
     }
 
     pub(crate) fn record_process(
@@ -220,9 +259,11 @@ impl Drop for ToolTaskLease {
                 .unconfirmed_process_exit
                 .store(true, Ordering::Release);
         }
-        if self.tasks.active.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.tasks.idle.notify_waiters();
+        if self.call {
+            self.tasks.calls.fetch_sub(1, Ordering::AcqRel);
         }
+        self.tasks.active.fetch_sub(1, Ordering::AcqRel);
+        self.tasks.idle.notify_waiters();
     }
 }
 
@@ -237,9 +278,21 @@ pub(crate) struct ToolCancellation {
 }
 
 #[derive(Default)]
-struct CallCancellation {
+pub(super) struct CallCancellation {
     cancelled: AtomicBool,
     wake: Notify,
+}
+
+impl CallCancellation {
+    #[cfg(test)]
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub(super) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.wake.notify_waiters();
+    }
 }
 
 impl ToolCancellation {
@@ -278,12 +331,15 @@ impl ToolCancellation {
     }
 }
 
-struct CancelCallOnDrop(Arc<CallCancellation>);
+/// Cancels the call when its waiter goes away, unless the call already
+/// handed its command to `command_status`.
+struct CancelCallOnDrop(Option<Arc<CallCancellation>>);
 
 impl Drop for CancelCallOnDrop {
     fn drop(&mut self) {
-        self.0.cancelled.store(true, Ordering::Release);
-        self.0.wake.notify_waiters();
+        if let Some(call) = &self.0 {
+            call.cancel();
+        }
     }
 }
 
@@ -339,7 +395,7 @@ pub(crate) async fn execute_with_images(
         return ToolOutput::refused("tool arguments exceed the 64 KiB limit");
     }
     let cancelled = ToolCancellation::new(cancelled);
-    let _cancel_on_drop = CancelCallOnDrop(Arc::clone(&cancelled.call));
+    let mut cancel_on_drop = CancelCallOnDrop(Some(Arc::clone(&cancelled.call)));
     // Fetch awaits sockets, not files: it runs on the async runtime like
     // shell, under the same task lease, never on a blocking permit.
     #[cfg(not(feature = "tool-fetch"))]
@@ -383,7 +439,14 @@ pub(crate) async fn execute_with_images(
             (false, _) => None,
         };
         let lease = tasks.enter();
-        return match tokio::spawn(async move {
+        let (early, mut yielded) = tokio::sync::oneshot::channel();
+        let mut yielding = super::shell::Yielding {
+            tasks: tasks.clone(),
+            call: Arc::clone(&cancelled.call),
+            early: Some(early),
+            command: None,
+        };
+        let execution = tokio::spawn(async move {
             let mut lease = lease;
             let launch = match (&shell_arguments, &exec_arguments) {
                 (Some(shell), _) => Launch::Shell(shell),
@@ -400,19 +463,34 @@ pub(crate) async fn execute_with_images(
                 &cancelled,
                 output.as_ref(),
                 &mut lease,
+                Some(&mut yielding),
             )
             .await;
-            if let Some(id) = call_id
-                && result.native_outcome.is_some()
-            {
-                lease.save_finished(id, &result);
+            match &yielding.command {
+                // The call settled with its command id; the result goes to
+                // `command_status`, never to this call's row.
+                Some(_) => {}
+                None => {
+                    if let Some(id) = call_id
+                        && result.native_outcome.is_some()
+                    {
+                        lease.save_finished(id, &result);
+                    }
+                }
             }
             result
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => ToolOutput::unobserved("tool execution stopped unexpectedly"),
+        });
+        tokio::pin!(execution);
+        return tokio::select! {
+            biased;
+            Ok(result) = &mut yielded => {
+                cancel_on_drop.0 = None;
+                result
+            }
+            result = &mut execution => match result {
+                Ok(result) => result,
+                Err(_) => ToolOutput::unobserved("tool execution stopped unexpectedly"),
+            },
         };
     }
     let permit = match blocking_permits().acquire_owned().await {

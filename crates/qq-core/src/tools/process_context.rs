@@ -23,6 +23,8 @@ use crate::{
 };
 
 const MAX_ENV_BYTES: usize = 256 * 1024;
+const PLAIN_OUTPUT_ENV: [(&str, &str); 3] =
+    [("NO_COLOR", "1"), ("PAGER", "cat"), ("GIT_PAGER", "cat")];
 #[cfg(target_os = "linux")]
 const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_EXECUTION_CONTEXT_BYTES: usize = 16 * 1024;
@@ -436,6 +438,16 @@ pub(super) fn prepare(
     };
     if matches!(verdict, ExecutionVerdict::VerifiedRead { .. }) {
         command.env_clear().envs(environment);
+    } else {
+        // Output goes to a pipe the model reads: plain text, no pager. TERM
+        // is always replaced because a terminal's own value is nearly always
+        // set; the rest yield to values the user already chose.
+        command.env("TERM", "dumb");
+        for (name, value) in PLAIN_OUTPUT_ENV {
+            if std::env::var_os(name).is_none() {
+                command.env(name, value);
+            }
+        }
     }
     command.current_dir(cwd_path);
     let context_id = match call_id {
@@ -797,7 +809,19 @@ mod tests {
             .collect::<Vec<_>>();
         base.sort();
         assert_eq!(explicit(&prepared), base);
-        assert!(explicit(&unapproved).is_empty(), "unverified work inherits");
+        let mut plain = vec!["TERM".to_owned()];
+        plain.extend(
+            PLAIN_OUTPUT_ENV
+                .iter()
+                .filter(|(name, _)| std::env::var_os(name).is_none())
+                .map(|(name, _)| (*name).to_owned()),
+        );
+        plain.sort();
+        assert_eq!(
+            explicit(&unapproved),
+            plain,
+            "unverified work inherits, with plain-output defaults"
+        );
         std::fs::create_dir(root.join("work")).unwrap();
         let mut cwd_bound = prepare(
             workspace.clone(),
@@ -962,6 +986,7 @@ pub(crate) fn prepare_goal_check(
             command,
             cwd: None,
             timeout_seconds: None,
+            yield_after_seconds: None,
         }),
         Arc::new(ApprovedReadImages::default()),
         producer,

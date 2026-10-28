@@ -848,6 +848,13 @@ impl CompiledAgentPlan {
             ToolHost::CancelAgent,
             EffectClass::ReadOnly,
         ));
+        // Waiting on, reading or cancelling the run's own yielded commands;
+        // starting one is what shell or exec was approved for.
+        static_tools.push(StaticTool::new(
+            tools::command_status_spec(),
+            ToolHost::CommandStatus,
+            EffectClass::ReadOnly,
+        ));
         static_tools.push(StaticTool::new(
             search_history_spec(),
             ToolHost::SearchHistory,
@@ -883,7 +890,12 @@ impl CompiledAgentPlan {
             // tools that follow spawn_agent are not names of their own.
             let known = static_tools
                 .iter()
-                .filter(|tool| !matches!(tool.host, ToolHost::WaitAgents | ToolHost::CancelAgent))
+                .filter(|tool| {
+                    !matches!(
+                        tool.host,
+                        ToolHost::WaitAgents | ToolHost::CancelAgent | ToolHost::CommandStatus
+                    )
+                })
                 .map(|tool| tool.spec.name())
                 .chain(std::iter::once("load_skill"))
                 .chain(
@@ -908,10 +920,13 @@ impl CompiledAgentPlan {
         // and the delegation prompt never names a tool the run lacks.
         let follows_spawn =
             |tool: &StaticTool| matches!(tool.host, ToolHost::WaitAgents | ToolHost::CancelAgent);
+        // `command_status` follows `shell` and `exec` the same way.
+        let follows_shell = |tool: &StaticTool| tool.host == ToolHost::CommandStatus;
         if let Some(selection) = &pack {
             static_tools.retain(|tool| {
                 matches!(tool.host, ToolHost::SelectTools | ToolHost::LoadSkill)
                     || follows_spawn(tool)
+                    || follows_shell(tool)
                     || selection.permits(tool.spec.name())
             });
             for contribution in &mut contributions {
@@ -922,7 +937,9 @@ impl CompiledAgentPlan {
             }
         }
         if let Some(names) = &exposed_tools {
-            static_tools.retain(|tool| follows_spawn(tool) || names.contains(tool.spec.name()));
+            static_tools.retain(|tool| {
+                follows_spawn(tool) || follows_shell(tool) || names.contains(tool.spec.name())
+            });
             for contribution in &mut contributions {
                 contribution
                     .catalog
@@ -935,6 +952,12 @@ impl CompiledAgentPlan {
             .any(|tool| tool.host == ToolHost::SpawnAgent)
         {
             static_tools.retain(|tool| !follows_spawn(tool));
+        }
+        if !static_tools
+            .iter()
+            .any(|tool| matches!(tool.spec.name(), "shell" | "exec"))
+        {
+            static_tools.retain(|tool| !follows_shell(tool));
         }
         let has_read_file = static_tools
             .iter()

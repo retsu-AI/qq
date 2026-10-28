@@ -1879,6 +1879,7 @@ impl ToolErrorKind {
                 | "spawn_agent"
                 | "wait_agents"
                 | "cancel_agent"
+                | "command_status"
         ) {
             return Self::Failure;
         }
@@ -1912,6 +1913,9 @@ impl ToolErrorKind {
             "command must not be empty",
             "query must not be empty",
             "timeout_seconds must be",
+            "wait_seconds must be",
+            "yield_after_seconds must be",
+            "unknown_command:",
             "url exceeds",
             "invalid url:",
             "ask_user needs ",

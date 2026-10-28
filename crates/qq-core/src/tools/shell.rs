@@ -19,9 +19,17 @@ use super::{
     output::{Bounds, Header},
 };
 
-/// Combined output captured (head+tail) and streamed per command. The full
-/// capture is what a spill store keeps; the model sees [`SHELL_BOUNDS`].
-const MAX_SHELL_OUTPUT_BYTES: usize = 128 * 1024;
+/// Live output streamed to clients per command. The captured output is
+/// larger: see [`MAX_CAPTURE_BYTES`].
+const MAX_LIVE_OUTPUT_BYTES: usize = 128 * 1024;
+/// Combined output captured (head+tail) per command: what the spill store
+/// keeps for `read_tool_result`, leaving room under its item cap for the
+/// header and trailing notes. The model sees [`SHELL_BOUNDS`].
+const MAX_CAPTURE_BYTES: usize = super::output::MAX_SPILL_ITEM_BYTES - 64 * 1024;
+/// How long output still buffered in the pipes is read after the leader
+/// exits and its process group is killed. A process that escaped the group
+/// can hold a pipe open forever; it no longer holds the call.
+const EXIT_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
 /// Model-facing bound: the head of a command's output and its tail, where the
 /// verdict lives, are what the model reads; the middle of a long build log
 /// is noise it should page into deliberately.
@@ -105,6 +113,8 @@ pub(super) struct ShellArgs {
     pub(super) cwd: Option<String>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) yield_after_seconds: Option<u64>,
 }
 
 /// `exec`: one program with an argument list and no shell between the model
@@ -122,6 +132,8 @@ pub(super) struct ExecArgs {
     stdin: Option<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    yield_after_seconds: Option<u64>,
 }
 
 pub(super) const MAX_EXEC_ARGS: usize = 64;
@@ -176,6 +188,14 @@ impl Launch<'_> {
         {
             return Err(InvalidLaunch::Timeout);
         }
+        if let Some(after) = self.yield_after_seconds()
+            && (after == 0
+                || std::time::Instant::now()
+                    .checked_add(std::time::Duration::from_secs(after))
+                    .is_none())
+        {
+            return Err(InvalidLaunch::YieldAfter);
+        }
         let cwd = match self {
             Self::Shell(args) => args.cwd.as_deref(),
             Self::Exec(args) => args.cwd.as_deref(),
@@ -203,6 +223,13 @@ impl Launch<'_> {
         match self {
             Self::Shell(args) => args.timeout_seconds,
             Self::Exec(args) => args.timeout_seconds,
+        }
+    }
+
+    fn yield_after_seconds(&self) -> Option<u64> {
+        match self {
+            Self::Shell(args) => args.yield_after_seconds,
+            Self::Exec(args) => args.yield_after_seconds,
         }
     }
 
@@ -242,6 +269,8 @@ pub(super) enum InvalidLaunch {
     Stdin,
     #[error("timeout_seconds must be positive and fit a monotonic deadline")]
     Timeout,
+    #[error("yield_after_seconds must be positive and fit a monotonic deadline")]
+    YieldAfter,
     #[error("cwd must be a nonempty relative workspace path without NUL")]
     Cwd,
 }
@@ -255,6 +284,16 @@ enum ShellOutcome {
     },
     TimedOut,
     Cancelled,
+}
+
+/// How a call hands a still-running command to `command_status`: at the
+/// yield point the call's result goes to `early` and the command is
+/// registered in `tasks`; this task keeps owning the process to its end.
+pub(super) struct Yielding {
+    pub(super) tasks: super::ToolTasks,
+    pub(super) call: std::sync::Arc<super::dispatch::CallCancellation>,
+    pub(super) early: Option<tokio::sync::oneshot::Sender<ToolOutput>>,
+    pub(super) command: Option<std::sync::Arc<super::commands::Command>>,
 }
 
 /// Executes one bounded shell command on the async runtime: `sh -c` in its own
@@ -277,6 +316,7 @@ pub(super) async fn run_shell(
     cancelled: &ToolCancellation,
     output: Option<&mpsc::Sender<String>>,
     process: &mut super::ToolTaskLease,
+    mut yielding: Option<&mut Yielding>,
 ) -> ToolOutput {
     if cancelled.is_cancelled() {
         return ToolOutput::interrupted("tool execution was cancelled");
@@ -467,7 +507,9 @@ pub(super) async fn run_shell(
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let started = tokio::time::Instant::now();
-    let mut capture = BoundedCapture::new(MAX_SHELL_OUTPUT_BYTES);
+    let capture = std::sync::Arc::new(std::sync::Mutex::new(BoundedCapture::new(
+        MAX_CAPTURE_BYTES,
+    )));
     let mut identity = ShellResultIdentity::default();
     let mut streamed = LiveOutput::default();
     let mut buffered_output = Vec::with_capacity(SHELL_READ_CHUNK_BYTES);
@@ -481,76 +523,144 @@ pub(super) async fn run_shell(
     let mut timeout = std::pin::pin!(wait_for_command_deadline(command_deadline));
     let cancellation = cancelled;
     let mut cancelled = std::pin::pin!(cancelled.cancelled());
+    let yield_after = yielding.is_some().then(|| {
+        std::time::Duration::from_secs(
+            launch
+                .yield_after_seconds()
+                .unwrap_or(super::commands::DEFAULT_YIELD_AFTER_SECS),
+        )
+    });
+    let mut yield_timer = std::pin::pin!(tokio::time::sleep_until(
+        yield_after
+            .and_then(|after| started.checked_add(after))
+            .unwrap_or(started)
+    ));
+    let mut yield_armed = yield_after.is_some();
+    let mut drain = std::pin::pin!(tokio::time::sleep(EXIT_DRAIN));
+    let mut exited = None;
+    let push = |capture: &std::sync::Mutex<BoundedCapture>, bytes: &[u8]| {
+        capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(bytes);
+    };
 
-    let outcome = loop {
-        // Bound memory and delta frequency. Flush the final tail before
-        // observing completion.
-        if !buffered_output.is_empty()
-            && (buffered_output.len() >= SHELL_READ_CHUNK_BYTES
-                || (stdout.is_none() && stderr.is_none()))
-        {
-            streamed.forward(output, &mut buffered_output, false);
-        }
-        tokio::select! {
-            biased;
-            () = &mut cancelled => break ShellOutcome::Cancelled,
-            () = &mut timeout => break ShellOutcome::TimedOut,
-            () = &mut output_flush, if !buffered_output.is_empty() => {
+    let ended = {
+        // Polled from the start: the leader's exit ends the command even when
+        // a process outside the call still holds a pipe open.
+        let mut exit = std::pin::pin!(child_exit.wait(&mut child, &mut guard));
+        loop {
+            if exited.is_some() && stdout.is_none() && stderr.is_none() {
+                break None;
+            }
+            // Bound memory and delta frequency. Flush the final tail before
+            // observing completion.
+            if !buffered_output.is_empty()
+                && (buffered_output.len() >= SHELL_READ_CHUNK_BYTES
+                    || (stdout.is_none() && stderr.is_none()))
+            {
                 streamed.forward(output, &mut buffered_output, false);
             }
-            read = read_from(&mut stdout, &mut stdout_buffer), if stdout.is_some() => {
-                #[cfg(test)]
-                let read = if read_fault == Some(false) {
-                    read_fault = None;
-                    Err(std::io::Error::other("injected stdout read failure"))
-                } else { read };
-                match read {
-                    Ok(0) => stdout = None,
-                    Err(source) => break ShellOutcome::ReadFailed { stream: "stdout", source },
-                    Ok(read) => {
-                        identity.stdout.update(&stdout_buffer[..read]);
-                        identity.stdout_bytes += read as u64;
-                        capture.push(&stdout_buffer[..read]);
-                        if buffered_output.is_empty() {
-                            output_flush.as_mut().reset(tokio::time::Instant::now() + OUTPUT_FLUSH_INTERVAL);
+            tokio::select! {
+                biased;
+                () = &mut cancelled => break exited.is_none().then_some(ShellOutcome::Cancelled),
+                () = &mut timeout => break exited.is_none().then_some(ShellOutcome::TimedOut),
+                () = &mut drain, if exited.is_some() => break None,
+                () = &mut yield_timer, if yield_armed && exited.is_none() => {
+                    yield_armed = false;
+                    if let Some(yielding) = yielding.as_deref_mut()
+                        && let Some(command) = yielding.tasks.commands().register(
+                            call_id,
+                            launch.header_tool(),
+                            started,
+                            std::sync::Arc::clone(&capture),
+                            std::sync::Arc::clone(&yielding.call),
+                        )
+                    {
+                        let mut result = yielded_result(launch.header_tool(), &command.id, started.elapsed(), &capture);
+                        result.execution_context.clone_from(&receipt);
+                        process.yielded();
+                        if let Some(id) = call_id {
+                            process.save_finished(id, &result);
                         }
-                        let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(streamed.sent + buffered_output.len());
-                        buffered_output.extend_from_slice(&stdout_buffer[..read.min(remaining)]);
+                        if let Some(early) = yielding.early.take() {
+                            let _ = early.send(result);
+                        }
+                        yielding.command = Some(command);
                     }
                 }
-            }
-            read = read_from(&mut stderr, &mut stderr_buffer), if stderr.is_some() => {
-                #[cfg(test)]
-                let read = if read_fault == Some(true) {
-                    read_fault = None;
-                    Err(std::io::Error::other("injected stderr read failure"))
-                } else { read };
-                match read {
-                    Ok(0) => stderr = None,
-                    Err(source) => break ShellOutcome::ReadFailed { stream: "stderr", source },
-                    Ok(read) => {
-                        identity.stderr.update(&stderr_buffer[..read]);
-                        identity.stderr_bytes += read as u64;
-                        capture.push(&stderr_buffer[..read]);
-                        if buffered_output.is_empty() {
-                            output_flush.as_mut().reset(tokio::time::Instant::now() + OUTPUT_FLUSH_INTERVAL);
+                () = &mut output_flush, if !buffered_output.is_empty() => {
+                    streamed.forward(output, &mut buffered_output, false);
+                }
+                read = read_from(&mut stdout, &mut stdout_buffer), if stdout.is_some() => {
+                    #[cfg(test)]
+                    let read = if read_fault == Some(false) {
+                        read_fault = None;
+                        Err(std::io::Error::other("injected stdout read failure"))
+                    } else { read };
+                    match read {
+                        Ok(0) => stdout = None,
+                        Err(source) => break Some(ShellOutcome::ReadFailed { stream: "stdout", source }),
+                        Ok(read) => {
+                            identity.stdout.update(&stdout_buffer[..read]);
+                            identity.stdout_bytes += read as u64;
+                            push(&capture, &stdout_buffer[..read]);
+                            if buffered_output.is_empty() {
+                                output_flush.as_mut().reset(tokio::time::Instant::now() + OUTPUT_FLUSH_INTERVAL);
+                            }
+                            let remaining = MAX_LIVE_OUTPUT_BYTES.saturating_sub(streamed.sent + buffered_output.len());
+                            buffered_output.extend_from_slice(&stdout_buffer[..read.min(remaining)]);
                         }
-                        let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(streamed.sent + buffered_output.len());
-                        buffered_output.extend_from_slice(&stderr_buffer[..read.min(remaining)]);
                     }
                 }
-            }
-            // The command is done only when both pipes reached end-of-file and
-            // the child was reaped; a grandchild that inherited a pipe keeps
-            // the call running (until the timeout) so its output is captured.
-            status = child_exit.wait(&mut child, &mut guard), if stdout.is_none() && stderr.is_none() => {
-                // The exit observer terminates the group before reaping its
-                // leader, while that leader still pins the group identity.
-                // Confirm disappearance without ever signalling a saved PID.
-                break ShellOutcome::Exited(confirm_child_exit(status, &mut guard, process).await);
+                read = read_from(&mut stderr, &mut stderr_buffer), if stderr.is_some() => {
+                    #[cfg(test)]
+                    let read = if read_fault == Some(true) {
+                        read_fault = None;
+                        Err(std::io::Error::other("injected stderr read failure"))
+                    } else { read };
+                    match read {
+                        Ok(0) => stderr = None,
+                        Err(source) => break Some(ShellOutcome::ReadFailed { stream: "stderr", source }),
+                        Ok(read) => {
+                            identity.stderr.update(&stderr_buffer[..read]);
+                            identity.stderr_bytes += read as u64;
+                            push(&capture, &stderr_buffer[..read]);
+                            if buffered_output.is_empty() {
+                                output_flush.as_mut().reset(tokio::time::Instant::now() + OUTPUT_FLUSH_INTERVAL);
+                            }
+                            let remaining = MAX_LIVE_OUTPUT_BYTES.saturating_sub(streamed.sent + buffered_output.len());
+                            buffered_output.extend_from_slice(&stderr_buffer[..read.min(remaining)]);
+                        }
+                    }
+                }
+                // The exit observer kills the leader's process group before
+                // reaping it, so anything it left running stops. Output still
+                // buffered in the pipes is read for a short while after.
+                status = &mut exit, if exited.is_none() => {
+                    exited = Some(status);
+                    drain.as_mut().reset(tokio::time::Instant::now() + EXIT_DRAIN);
+                }
             }
         }
     };
+    // Stop reading: a process that escaped the group may hold a pipe open.
+    drop((stdout, stderr));
+    let outcome = match (ended, exited) {
+        (Some(outcome), _) => outcome,
+        // The leader still pins the group identity until it is reaped;
+        // confirm disappearance without ever signalling a saved PID.
+        (None, Some(status)) => {
+            ShellOutcome::Exited(confirm_child_exit(status, &mut guard, process).await)
+        }
+        (None, None) => unreachable!("the loop ends without an outcome only after the exit"),
+    };
+    let capture = std::mem::replace(
+        &mut *capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        BoundedCapture::new(0),
+    );
 
     // The run's own time limit stops the command as a timeout, not a cancel.
     let run_expired = cancellation.timed_out();
@@ -600,9 +710,9 @@ pub(super) async fn run_shell(
                 }
                 let reason = match timeout_seconds.filter(|_| !run_expired) {
                     Some(seconds) => format!(
-                        "command timed out after {seconds} s; its process group was killed"
+                        "command timed out after its timeout_seconds={seconds} limit; its process group was killed. Retry with a larger timeout_seconds, or let it run in the background: it returns a command id after yield_after_seconds, and command_status waits on it"
                     ),
-                    None => "command deadline expired; its process group was killed".to_owned(),
+                    None => "the task deadline expired while the command ran; its process group was killed".to_owned(),
                 };
                 let mut result = ToolOutput::bounded(
                     stopped_result(launch.header_tool(), "timeout", elapsed, capture, &reason),
@@ -642,7 +752,42 @@ pub(super) async fn run_shell(
     let mut result = result;
     result.execution_context = receipt;
     drop(prepared);
-    result
+    // A yielded call already settled: its result belongs to `command_status`.
+    match yielding.and_then(|yielding| yielding.command.as_ref()) {
+        Some(command) => {
+            command.finish(result);
+            ToolOutput::unobserved("the command result went to command_status")
+        }
+        None => result,
+    }
+}
+
+/// `<tool> exit=running id=<id> elapsed=<s> bytes=<n>`, the output so far,
+/// then how to follow the command.
+fn yielded_result(
+    tool: &str,
+    id: &str,
+    elapsed: std::time::Duration,
+    capture: &std::sync::Mutex<BoundedCapture>,
+) -> ToolOutput {
+    let capture = capture
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let mut content = Header::new(tool, None)
+        .field("exit", "running")
+        .field("id", id)
+        .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
+        .field("bytes", capture.total())
+        .into_line();
+    content.push_str(&capture.into_output());
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(&format!(
+        "still running as command {id}; call command_status with id={id} to wait for it, read its output, or cancel it"
+    ));
+    ToolOutput::bounded(content, &SHELL_BOUNDS, false)
 }
 
 pub(super) async fn confirm_child_exit(
@@ -782,10 +927,10 @@ pub(super) fn forward_shell_chunk(
     let Some(sender) = output else {
         return;
     };
-    if *streamed >= MAX_SHELL_OUTPUT_BYTES || bytes.is_empty() {
+    if *streamed >= MAX_LIVE_OUTPUT_BYTES || bytes.is_empty() {
         return;
     }
-    let remaining = MAX_SHELL_OUTPUT_BYTES - *streamed;
+    let remaining = MAX_LIVE_OUTPUT_BYTES - *streamed;
     let bytes = &bytes[..bytes.len().min(remaining)];
     let chunk = String::from_utf8_lossy(bytes).into_owned();
     match sender.try_send(chunk) {
@@ -794,7 +939,7 @@ pub(super) fn forward_shell_chunk(
         // by the terminal result. A slow renderer may miss deltas, but it can
         // never stall process timeout, cancellation, or final persistence.
         Err(mpsc::error::TrySendError::Full(_)) => *streamed += bytes.len(),
-        Err(mpsc::error::TrySendError::Closed(_)) => *streamed = MAX_SHELL_OUTPUT_BYTES,
+        Err(mpsc::error::TrySendError::Closed(_)) => *streamed = MAX_LIVE_OUTPUT_BYTES,
     }
 }
 
@@ -1097,6 +1242,7 @@ impl ShellResultIdentity {
 /// Bounded head+tail capture of combined command output: the first half of
 /// the budget keeps the start of the output, the second half keeps a rolling
 /// window of its end, and everything between is counted as omitted.
+#[derive(Clone)]
 pub(super) struct BoundedCapture {
     head: Vec<u8>,
     tail: std::collections::VecDeque<u8>,
@@ -1202,6 +1348,7 @@ mod identity_tests {
                         &cancelled,
                         None,
                         &mut process,
+                        None,
                     ),
                 )
                 .await
@@ -1243,8 +1390,8 @@ mod identity_tests {
         let a = vec![b'x'; super::super::output::MAX_SPILL_ITEM_BYTES + 1024];
         let mut b = a.clone();
         b[a.len() / 2] = b'y';
-        let mut first_capture = BoundedCapture::new(MAX_SHELL_OUTPUT_BYTES);
-        let mut second_capture = BoundedCapture::new(MAX_SHELL_OUTPUT_BYTES);
+        let mut first_capture = BoundedCapture::new(MAX_CAPTURE_BYTES);
+        let mut second_capture = BoundedCapture::new(MAX_CAPTURE_BYTES);
         first_capture.push(&a);
         second_capture.push(&b);
         assert_eq!(first_capture.into_output(), second_capture.into_output());
@@ -1291,7 +1438,7 @@ mod identity_tests {
     fn shell_identity_excludes_elapsed_and_hint_but_preserves_stored_hash() {
         use std::os::unix::process::ExitStatusExt;
         let output = |elapsed, hint| {
-            let mut capture = BoundedCapture::new(MAX_SHELL_OUTPUT_BYTES);
+            let mut capture = BoundedCapture::new(MAX_CAPTURE_BYTES);
             let bytes = b"line\n".repeat(10_000);
             capture.push(&bytes);
             shell_result(
@@ -1341,6 +1488,7 @@ mod orphan_tests {
                 command,
                 cwd: None,
                 timeout_seconds: None,
+                yield_after_seconds: None,
             };
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1359,6 +1507,7 @@ mod orphan_tests {
                         &super::ToolCancellation::new(crate::RunCancellation::new()),
                         None,
                         &mut lease,
+                        None,
                     )
                     .await
                 });
@@ -1476,6 +1625,7 @@ mod split_character_tests {
             command: r"printf '\303'; sleep 0.2; printf '\251done'".to_owned(),
             cwd: None,
             timeout_seconds: Some(30),
+            yield_after_seconds: None,
         };
         let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
         let tasks = crate::tools::ToolTasks::default();
@@ -1492,6 +1642,7 @@ mod split_character_tests {
                 &super::ToolCancellation::new(crate::RunCancellation::new()),
                 Some(&sender),
                 &mut lease,
+                None,
             ),
         )
         .await

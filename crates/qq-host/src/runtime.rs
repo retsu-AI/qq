@@ -7207,12 +7207,12 @@ mod tests {
         };
         let factory = fixture.factory();
         let default = factory.plan_for(&fixture.request(document(""))).unwrap();
-        // wait_agents and cancel_agent follow spawn_agent and are not policy
-        // names: exposing spawn_agent exposes them.
+        // wait_agents and cancel_agent follow spawn_agent, and command_status
+        // follows shell and exec; none is a policy name.
         let names: Vec<_> = default
             .catalog()
             .names()
-            .filter(|name| !matches!(*name, "wait_agents" | "cancel_agent"))
+            .filter(|name| !matches!(*name, "wait_agents" | "cancel_agent" | "command_status"))
             .map(str::to_owned)
             .collect();
         assert!(names.iter().any(|name| name == "load_skill"));
