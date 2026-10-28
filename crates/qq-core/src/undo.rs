@@ -741,6 +741,11 @@ fn command(directory: &Path, index: Option<&Path>) -> tokio::process::Command {
         },
         "-c",
         "core.fsmonitor=false",
+        // A snapshot holds the working tree byte for byte. Git for Windows
+        // sets core.autocrlf=true system-wide, which would turn LF into
+        // CRLF on restore.
+        "-c",
+        "core.autocrlf=false",
     ]);
     command
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -874,6 +879,32 @@ mod tests {
 
     fn read(path: &Path) -> Option<String> {
         std::fs::read_to_string(path).ok()
+    }
+
+    /// Git for Windows sets core.autocrlf=true for every repository; the
+    /// restore must still write back the bytes the snapshot recorded.
+    #[tokio::test]
+    async fn restore_keeps_line_endings_byte_for_byte_under_autocrlf() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        git(root, &["config", "core.autocrlf", "true"]);
+        std::fs::write(root.join("draft.txt"), "lf\nmixed\r\n").unwrap();
+        let taken = snapshot(
+            root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+        std::fs::remove_file(root.join("draft.txt")).unwrap();
+        restore(&taken).await.unwrap();
+        assert_eq!(std::fs::read(root.join("tracked.txt")).unwrap(), b"base\n");
+        assert_eq!(
+            std::fs::read(root.join("draft.txt")).unwrap(),
+            b"lf\nmixed\r\n"
+        );
     }
 
     #[tokio::test]

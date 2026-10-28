@@ -746,9 +746,15 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
         undo.stdout,
         undo.stderr
     );
+    let restored = home.files().await?;
     ensure!(
-        home.files().await? == files,
-        "files differ from the snapshot after qq undo"
+        restored == files,
+        "files differ from the snapshot after qq undo: {:?}",
+        files
+            .keys()
+            .chain(restored.keys())
+            .filter(|path| files.get(*path) != restored.get(*path))
+            .collect::<std::collections::BTreeSet<_>>()
     );
     ensure!(
         home.git(&["ls-files", "--stage"]).await? == index,

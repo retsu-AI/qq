@@ -1,6 +1,8 @@
 //! Linux process-group teardown that counts a zombie as stopped. Signal zero
 //! still finds a killed descendant until something reaps it, and a container
 //! whose PID 1 never reaps would otherwise look like a group that will not die.
+//! The caller kills the group while its leader still pins the id; this only
+//! waits, and never signals a group by its number.
 
 fn group_member_identity(pid: u32) -> std::io::Result<Option<(i32, u64)>> {
     let file = match std::fs::File::open(format!("/proc/{pid}/stat")) {
@@ -91,10 +93,9 @@ pub(crate) fn confirm_linux_group_exit(
                 })
         };
         check_deadline()?;
-        match rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL) {
-            Ok(()) | Err(rustix::io::Errno::SRCH) => {}
-            Err(error) => return Err(error.into()),
-        }
+        // The caller killed the group while its leader still pinned the id.
+        // The leader is reaped by now, so the id may name someone else's
+        // group: never signal it, only wait for the members found in it.
         let mut members = Vec::new();
         let mut identities = std::collections::HashSet::new();
         for (index, entry) in std::fs::read_dir("/proc")?.enumerate() {
@@ -178,8 +179,9 @@ pub(crate) fn confirm_linux_group_exit(
                 }
             }
         }
-        // A complete rescan closes the fork-during-enumeration window.
-        // The unreaped leader pins pgid throughout every kill and scan.
+        // A complete rescan closes the fork-during-enumeration window. A
+        // recycled group id can only add an unrelated process to the scan,
+        // which is waited for, never signalled by group.
         if identities.is_subset(&confirmed) {
             return Ok(());
         }
@@ -236,5 +238,32 @@ mod tests {
             std::time::Instant::now() + std::time::Duration::from_secs(5),
         )
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    /// After the leader is reaped its group id may be reused. Confirmation
+    /// reaches only processes it found and pinned, and a live one is waited
+    /// for, never killed: a reused id can delay teardown, not kill a stranger.
+    #[test]
+    fn confirmation_never_kills_a_live_process_in_a_reused_group() {
+        use std::os::unix::process::CommandExt as _;
+        let mut unrelated = std::process::Command::new("/bin/sh")
+            .args(["-c", "exec tail -f /dev/null"])
+            .stdout(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = rustix::process::Pid::from_raw(i32::try_from(unrelated.id()).unwrap()).unwrap();
+        let result = super::confirm_linux_group_exit(
+            group,
+            std::time::Instant::now() + std::time::Duration::from_millis(300),
+        );
+        let alive = unrelated.try_wait().unwrap().is_none();
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+        assert!(alive, "confirmation killed a process it does not own");
+        assert!(result.is_err(), "a live member must not count as stopped");
     }
 }

@@ -35,11 +35,6 @@ impl Process {
         self.inner.id()
     }
 
-    #[cfg(test)]
-    pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.inner.try_wait()
-    }
-
     pub(super) async fn wait(&mut self) -> io::Result<ExitStatus> {
         self.inner.wait().await
     }

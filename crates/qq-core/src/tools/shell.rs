@@ -469,7 +469,7 @@ pub(super) async fn run_shell(
     let started = tokio::time::Instant::now();
     let mut capture = BoundedCapture::new(MAX_SHELL_OUTPUT_BYTES);
     let mut identity = ShellResultIdentity::default();
-    let mut streamed = 0_usize;
+    let mut streamed = LiveOutput::default();
     let mut buffered_output = Vec::with_capacity(SHELL_READ_CHUNK_BYTES);
     let mut output_flush = std::pin::pin!(tokio::time::sleep(OUTPUT_FLUSH_INTERVAL));
     let read_chunk_bytes = SHELL_READ_CHUNK_BYTES;
@@ -489,14 +489,14 @@ pub(super) async fn run_shell(
             && (buffered_output.len() >= SHELL_READ_CHUNK_BYTES
                 || (stdout.is_none() && stderr.is_none()))
         {
-            forward_shell_chunk(output, &mut streamed, &mut buffered_output, false);
+            streamed.forward(output, &mut buffered_output, false);
         }
         tokio::select! {
             biased;
             () = &mut cancelled => break ShellOutcome::Cancelled,
             () = &mut timeout => break ShellOutcome::TimedOut,
             () = &mut output_flush, if !buffered_output.is_empty() => {
-                forward_shell_chunk(output, &mut streamed, &mut buffered_output, false);
+                streamed.forward(output, &mut buffered_output, false);
             }
             read = read_from(&mut stdout, &mut stdout_buffer), if stdout.is_some() => {
                 #[cfg(test)]
@@ -514,7 +514,7 @@ pub(super) async fn run_shell(
                         if buffered_output.is_empty() {
                             output_flush.as_mut().reset(tokio::time::Instant::now() + OUTPUT_FLUSH_INTERVAL);
                         }
-                        let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(streamed + buffered_output.len());
+                        let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(streamed.sent + buffered_output.len());
                         buffered_output.extend_from_slice(&stdout_buffer[..read.min(remaining)]);
                     }
                 }
@@ -535,7 +535,7 @@ pub(super) async fn run_shell(
                         if buffered_output.is_empty() {
                             output_flush.as_mut().reset(tokio::time::Instant::now() + OUTPUT_FLUSH_INTERVAL);
                         }
-                        let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(streamed + buffered_output.len());
+                        let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(streamed.sent + buffered_output.len());
                         buffered_output.extend_from_slice(&stderr_buffer[..read.min(remaining)]);
                     }
                 }
@@ -638,9 +638,7 @@ pub(super) async fn run_shell(
     .await;
     // Cancellation and read failures also keep the bounded tail, after the
     // process has stopped.
-    if !buffered_output.is_empty() {
-        forward_shell_chunk(output, &mut streamed, &mut buffered_output, true);
-    }
+    streamed.forward(output, &mut buffered_output, true);
     let mut result = result;
     result.execution_context = receipt;
     drop(prepared);
@@ -746,24 +744,41 @@ where
     }
 }
 
+/// Live output already sent, and an incomplete UTF-8 sequence held back so
+/// a character split across reads is not shown as two replacement
+/// characters. The held bytes stay out of the flush buffer: a buffer that
+/// never empties would keep an expired flush timer ready forever.
+#[derive(Default)]
+struct LiveOutput {
+    sent: usize,
+    carry: Vec<u8>,
+}
+
+impl LiveOutput {
+    /// Sends and drains `buffered`, keeping an incomplete trailing UTF-8
+    /// sequence for the next call. `last` sends everything.
+    fn forward(
+        &mut self,
+        output: Option<&mpsc::Sender<String>>,
+        buffered: &mut Vec<u8>,
+        last: bool,
+    ) {
+        let mut bytes = std::mem::take(&mut self.carry);
+        bytes.append(buffered);
+        if !last {
+            self.carry = bytes.split_off(incomplete_utf8_start(&bytes));
+        }
+        forward_shell_chunk(output, &mut self.sent, &bytes);
+    }
+}
+
 /// Forwards one raw output chunk as a lossy UTF-8 delta, bounded by the same
 /// budget as the captured result so a runaway command cannot flood clients.
-/// Sends and drains `buffered`, except an incomplete UTF-8 sequence at its
-/// end, which waits for the next read so a character split across reads is
-/// not shown as two replacement characters. `last` sends everything.
 pub(super) fn forward_shell_chunk(
     output: Option<&mpsc::Sender<String>>,
     streamed: &mut usize,
-    buffered: &mut Vec<u8>,
-    last: bool,
+    bytes: &[u8],
 ) {
-    let split = if last {
-        buffered.len()
-    } else {
-        incomplete_utf8_start(buffered)
-    };
-    let held = buffered.split_off(split);
-    let bytes = std::mem::replace(buffered, held);
     let Some(sender) = output else {
         return;
     };
@@ -1430,19 +1445,69 @@ mod live_output_tests {
     #[test]
     fn a_character_split_across_reads_arrives_whole() {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
-        let mut streamed = 0;
+        let mut live = super::LiveOutput::default();
         let mut buffered = "a é".as_bytes()[..3].to_vec();
-        super::forward_shell_chunk(Some(&sender), &mut streamed, &mut buffered, false);
+        live.forward(Some(&sender), &mut buffered, false);
         assert_eq!(receiver.try_recv().unwrap(), "a ");
-        assert_eq!(buffered, [0xc3]);
-        buffered.extend_from_slice(&[0xa9, b'!']);
-        super::forward_shell_chunk(Some(&sender), &mut streamed, &mut buffered, false);
-        assert_eq!(receiver.try_recv().unwrap(), "é!");
+        // The held byte leaves the flush buffer, so an expired flush timer
+        // never sees a buffer it cannot drain.
         assert!(buffered.is_empty());
+        buffered.extend_from_slice(&[0xa9, b'!']);
+        live.forward(Some(&sender), &mut buffered, false);
+        assert_eq!(receiver.try_recv().unwrap(), "é!");
         // At the end nothing more can complete it.
         buffered.push(0xe2);
-        super::forward_shell_chunk(Some(&sender), &mut streamed, &mut buffered, true);
+        live.forward(Some(&sender), &mut buffered, false);
+        assert!(receiver.try_recv().is_err());
+        live.forward(Some(&sender), &mut buffered, true);
         assert_eq!(receiver.try_recv().unwrap(), "\u{fffd}");
-        assert!(buffered.is_empty());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod split_character_tests {
+    /// Half a character, a pause longer than the flush interval, then the
+    /// rest: the command still completes and its output is whole.
+    #[tokio::test]
+    async fn a_paused_partial_character_does_not_stall_the_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = crate::workspace::Workspace::open(directory.path()).unwrap();
+        let arguments = super::ShellArgs {
+            command: r"printf '\303'; sleep 0.2; printf '\251done'".to_owned(),
+            cwd: None,
+            timeout_seconds: Some(30),
+        };
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        let tasks = crate::tools::ToolTasks::default();
+        let mut lease = tasks.enter();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            super::run_shell(
+                &workspace,
+                &crate::runtime::ShellPolicy::default(),
+                std::sync::Arc::default(),
+                std::sync::Arc::default(),
+                None,
+                super::Launch::Shell(&arguments),
+                &super::ToolCancellation::new(crate::RunCancellation::new()),
+                Some(&sender),
+                &mut lease,
+            ),
+        )
+        .await
+        .expect("a held partial character must not stall the command");
+        drop(lease);
+        assert!(
+            result.model_text.starts_with("shell exit=0 "),
+            "{}",
+            result.model_text
+        );
+        assert!(result.model_text.contains("édone"), "{}", result.model_text);
+        let mut live = String::new();
+        while let Ok(chunk) = receiver.try_recv() {
+            live.push_str(&chunk);
+        }
+        assert_eq!(live, "édone");
+        tasks.drain().await.unwrap();
     }
 }
