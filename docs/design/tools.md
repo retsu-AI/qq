@@ -1113,8 +1113,9 @@ after a restart.
   output so far while it runs; `cancel=true` kills its group and waits a
   bounded time for the result. A run keeps at most 16 yielded commands; a
   full table forgets its oldest finished, unread result, and when all 16
-  are running a new command runs to completion in its call. A user interrupt waits only for calls that have not returned; when
-  the run ends, its yielded commands are cancelled and teardown reaps them
+  are running a new command runs to completion in its call. A user
+  interrupt waits only for calls that have not returned; when the run
+  ends, its yielded commands are cancelled and teardown reaps them
   like any other tool task. `command_status` is declared exactly when
   `shell` or `exec` is and follows them through pack and policy filters.
 - Timeouts name the limit (`timeout_seconds=<n>`) and suggest a larger
