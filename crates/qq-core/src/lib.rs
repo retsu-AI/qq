@@ -48,6 +48,15 @@ mod sessions;
 mod tools;
 pub mod undo;
 
+/// Places this process in QQ's own job, which permits breakaway, so a child
+/// spawned with `CREATE_BREAKAWAY_FROM_JOB` leaves every enclosing job that
+/// permits it. The detached daemon uses this to outlive the shell that
+/// started it.
+#[cfg(windows)]
+pub fn prepare_detached_spawn() -> std::io::Result<()> {
+    tools::windows_job::root_job().map(|_| ())
+}
+
 #[doc(hidden)]
 pub use tools::process_context::ProcessProducer;
 

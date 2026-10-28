@@ -304,7 +304,22 @@ async fn start_detached(
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(windows)]
-    command.creation_flags(0x0000_0008 | 0x0000_0200); // DETACHED_PROCESS | NEW_PROCESS_GROUP.
+    {
+        // A terminal, SSH session or CI step may hold its processes in a job
+        // that kills them when it closes. From inside QQ's own job, which
+        // permits breakaway, the daemon leaves every enclosing job that
+        // permits it too. One that forbids breakaway keeps the daemon; it
+        // still starts.
+        let breakaway = match tokio::task::spawn_blocking(qq_core::prepare_detached_spawn).await {
+            Ok(Ok(())) => 0x0100_0000, // CREATE_BREAKAWAY_FROM_JOB.
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "the daemon stays in the job that started it");
+                0
+            }
+            Err(error) => return Err(error.into()),
+        };
+        command.creation_flags(breakaway | 0x0000_0008 | 0x0000_0200); // DETACHED_PROCESS | NEW_PROCESS_GROUP.
+    }
     let mut child = command.spawn()?;
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     loop {

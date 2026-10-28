@@ -40,35 +40,11 @@ url.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs", "event", "pipe", "thread", "net"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-sysctl.workspace = true
-command-fds.workspace = true
-libproc.workspace = true
-nix.workspace = true
-tempfile.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-rustix = { workspace = true, features = ["mount"] }
-command-fds.workspace = true
-landlock.workspace = true
-goblin.workspace = true
-nix.workspace = true
-
-[target.'cfg(all(target_os = "linux", target_endian = "little", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))'.dependencies]
-seccompiler.workspace = true
-
 [target.'cfg(windows)'.dependencies]
-dunce.workspace = true
-directories.workspace = true
-rappct.workspace = true
-tempfile.workspace = true
 subc-jobobject.workspace = true
 win32job.workspace = true
 win-custody.workspace = true
-winsafe = { workspace = true, features = ["kernel"] }
-firehazard.workspace = true
 windows-permissions.workspace = true
-winapi-util.workspace = true
 
 [build-dependencies]
 sha2.workspace = true

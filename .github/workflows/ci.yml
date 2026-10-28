@@ -200,6 +200,7 @@ jobs:
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: bash
         run: |
+          cargo test --locked -p qq --no-default-features --test daemon_windows -- --exact a_detached_daemon_leaves_a_job_that_permits_it_and_starts_in_one_that_does_not
           bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_children_are_owned_before_command_job_assignment
           bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_startup_rechecks_cancellation_and_deadline_before_resume
       - name: Goal approval recovery

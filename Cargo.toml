@@ -63,14 +63,11 @@ directories = "6"
 futures-core = "0.3"
 futures-util = "0.3"
 getrandom = "0.3"
-goblin = { version = "0.10.7", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 hmac = "0.12"
 http-body = "1"
 httpdate = "1"
 ignore = "0.4"
 keyring = "4"
-libproc = "0.14.11"
-sysctl = "0.7.1"
 qq-auth = { path = "crates/qq-auth" }
 qq-client = { path = "crates/qq-client" }
 qq-config = { path = "crates/qq-config" }
@@ -82,12 +79,8 @@ qq-protocol = { path = "crates/qq-protocol" }
 qq-reasoning = { path = "crates/qq-reasoning" }
 qq-server = { path = "crates/qq-server" }
 qq-tui = { path = "crates/qq-tui" }
-# The published 0.13 release moves SECURITY_CAPABILITIES after registering its
-# pointer. Pin the owned attribute-storage fix and explicit stdio handle list.
-rappct = { git = "https://github.com/cpjet64/rappct", rev = "c02f9dd960645522009da3827a79bdc99f50c9c1" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rustix = { version = "1", default-features = false, features = ["process", "std"] }
-seccompiler = { version = "0.5", default-features = false }
 # reqwest 0.13.2 dropped the optional `webpki-roots` dependency (and with it
 # the implicit `webpki-roots` feature); the `rustls` feature verifies against
 # platform trust roots via rustls-platform-verifier instead.
@@ -95,7 +88,6 @@ regex = "1"
 reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "form", "json", "rustls", "stream"] }
 htmd = "0.2"
 url = "2.5"
-landlock = "0.4.7"
 ipnet = "2.12"
 rmcp = { version = "3.0.0", default-features = false, features = ["client", "reqwest", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 ron = "0.12"
@@ -114,16 +106,10 @@ tracing = "0.1"
 
 tracing-core = { version = "0.1", default-features = false, features = ["std"] }
 webbrowser = "1"
-dunce = "1.0.5"
 win-custody = "0.1.1"
-winsafe = { version = "0.0.29", default-features = false }
-firehazard = "=0.0.0-2022-09-10"
 windows-permissions = "0.2.4"
-winapi-util = "0.1"
 subc-jobobject = "0.2.2"
 win32job = "2.0.3"
-command-fds = "0.3.3"
-nix = { version = "0.31", default-features = false }
 
 [dependencies]
 clap.workspace = true
@@ -216,14 +202,8 @@ ron.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
 
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-libproc.workspace = true
-nix = { workspace = true, features = ["event", "process", "signal"] }
-
 [target.'cfg(windows)'.dev-dependencies]
-rappct.workspace = true
 win-custody.workspace = true
 # Shell-like jobs that permit breakaway, for the detached daemon test.
 win32job.workspace = true
 windows-permissions.workspace = true
-winsafe = { workspace = true, features = ["advapi"] }
