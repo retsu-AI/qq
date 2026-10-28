@@ -672,7 +672,7 @@ pub const REMOVED_KEYS: [(&str, &str); 8] = [
     (
         "allow_tools",
         "was removed in v0.1.10: Auto and Full run tools without grants and Ask asks every \
-         time; restrict tools with `deny_tools` instead; delete the key",
+         time; hide a tool from the model with `policy.exposed_tools` instead; delete the key",
     ),
     (
         "allow_shell_prefixes",
