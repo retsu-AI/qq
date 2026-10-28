@@ -2719,10 +2719,6 @@ mod tests {
                 session_id,
                 mode: ApprovalMode::Full,
             },
-            SessionCommandKind::SetApprovalDelegate => SessionCommand::SetApprovalDelegate {
-                session_id,
-                delegate: Some(qq_protocol::ApprovalDelegate::Off),
-            },
             SessionCommandKind::SetSessionModel => SessionCommand::SetSessionModel {
                 session_id,
                 model: qq_protocol::ModelSelection::default(),
@@ -3001,7 +2997,10 @@ mod tests {
             qq_core::catalog::MAX_CATALOG_TOOLS
         );
         assert_eq!(capabilities.tools.external_prefixes, ["mcp__", "ext__"]);
-        assert_eq!(body["approvals"][3], "deny");
+        assert_eq!(
+            body["approvals"],
+            serde_json::json!(["approve_once", "deny", "answer"])
+        );
 
         let (status, body) = post(
             &server,

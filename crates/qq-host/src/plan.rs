@@ -605,7 +605,6 @@ mod tests {
         PlanKey {
             configuration_workspace: workspace.to_owned(),
             workspace: workspace.to_owned(),
-            execution_workspace_identity: None,
             model: ModelSelection {
                 model_is_fallback: false,
                 model: Some(model.to_owned()),
