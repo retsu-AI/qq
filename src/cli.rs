@@ -539,11 +539,6 @@ pub enum RunFormat {
     Jsonl,
 }
 
-/// Splits one `--correlation KEY=VALUE` argument on its first `=`. Per-entry
-/// and aggregate bounds are the protocol's ([`qq_protocol::Correlation::new`])
-/// and are applied once every entry is collected, so an over-limit set is
-/// reported as one error naming the rule rather than failing on the ninth
-/// flag.
 fn removed_allow_tool(_: &str) -> Result<std::convert::Infallible, String> {
     Err(
         "--allow-tool was removed in v0.1.10: Auto and Full run tools without grants; \
@@ -568,6 +563,11 @@ fn removed_allow_host(_: &str) -> Result<std::convert::Infallible, String> {
     )
 }
 
+/// Splits one `--correlation KEY=VALUE` argument on its first `=`. Per-entry
+/// and aggregate bounds are the protocol's ([`qq_protocol::Correlation::new`])
+/// and are applied once every entry is collected, so an over-limit set is
+/// reported as one error naming the rule rather than failing on the ninth
+/// flag.
 fn parse_correlation_entry(argument: &str) -> Result<(String, String), String> {
     match argument.split_once('=') {
         Some((key, value)) if !key.is_empty() => Ok((key.to_owned(), value.to_owned())),

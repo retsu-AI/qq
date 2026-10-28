@@ -1507,7 +1507,7 @@ separate plan-cache keys, so a plan compiled without project authority
 cannot serve a trusted request, or vice versa.
 
 Settings removed in v0.1.10 (`allow_tools`, `allow_shell_prefixes`,
-`allow_hosts`, `shell_env`, `writable_roots`, `task_hosting`,
+`allow_hosts`, `shell_env`, `task_hosting`,
 `reviewer_model`, `approval_delegate`) fail to load with a message naming the
 replacement (`REMOVED_KEYS` in `qq-config`).
 

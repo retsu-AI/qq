@@ -36,6 +36,42 @@ pub(crate) fn parsed_shell_command(arguments: &str) -> Option<String> {
 #[cfg(test)]
 pub(crate) use dispatch::{execute, test_executions_started};
 
+/// Runs a goal's completion check through the shell runner: in the
+/// workspace, with the process tree killed on timeout or cancellation.
+/// Returns the terminal outcome and the bounded result text.
+#[cfg(not(unix))]
+pub(crate) async fn run_goal_check_shell(
+    workspace: &crate::workspace::Workspace,
+    command: String,
+    deadline: std::time::Instant,
+    cancelled: crate::RunCancellation,
+    producer: std::sync::Arc<crate::ProcessProducer>,
+    process: &mut ToolTaskLease,
+) -> (Option<dispatch::CommandOutcome>, String) {
+    let timeout_seconds = deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .as_secs()
+        .max(1);
+    let arguments = shell::ShellArgs {
+        command,
+        cwd: None,
+        timeout_seconds: Some(timeout_seconds),
+    };
+    let result = shell::run_shell(
+        workspace,
+        &crate::runtime::ShellPolicy::default(),
+        std::sync::Arc::default(),
+        producer,
+        None,
+        shell::Launch::Shell(&arguments),
+        &ToolCancellation::new(cancelled),
+        None,
+        process,
+    )
+    .await;
+    (result.native_outcome, result.model_text)
+}
+
 /// Entry points for the `search_walk` and `edit_batch` benches. Not a
 /// public API.
 pub mod bench_support {

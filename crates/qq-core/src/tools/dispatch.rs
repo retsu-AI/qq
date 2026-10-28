@@ -392,10 +392,6 @@ pub(crate) fn bounded_result(content: String, is_error: bool) -> ToolOutput {
     }
 }
 
-/// What one tool call produced. `model_text` is the only part that enters
-/// model context; `ui_payload` is persisted for clients and never sent back
-/// to the model. Constructors are the one bounding boundary: they mask
-/// secrets, then bound the text to the tool's [`Bounds`].
 /// Terminal process evidence, separate from the text shown to the model.
 /// `None` on a result means execution was refused or could not be observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,6 +411,10 @@ pub(crate) enum ResultDisposition {
     Interrupted,
 }
 
+/// What one tool call produced. `model_text` is the only part that enters
+/// model context; `ui_payload` is persisted for clients and never sent back
+/// to the model. Constructors are the one bounding boundary: they mask
+/// secrets, then bound the text to the tool's [`Bounds`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -763,6 +763,25 @@ mod tests {
             prepared.receipt.facts().verdict,
             ExecutionVerdict::VerifiedRead { .. }
         ));
+        // A verified read runs with only the base names, so no variable can
+        // point it at helpers; unverified work inherits the whole environment.
+        let explicit = |launch: &PreparedLaunch| {
+            let command = launch.command.as_ref().unwrap().as_std();
+            let mut names = command
+                .get_envs()
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let mut base = BASE_ENV
+            .iter()
+            .filter(|name| std::env::var_os(name).is_some())
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        base.sort();
+        assert_eq!(explicit(&prepared), base);
+        assert!(explicit(&unapproved).is_empty(), "unverified work inherits");
         std::fs::create_dir(root.join("work")).unwrap();
         let mut cwd_bound = prepare(
             workspace.clone(),

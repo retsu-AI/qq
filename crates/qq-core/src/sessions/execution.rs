@@ -167,7 +167,6 @@ pub(super) fn observe_execution_stop(run_id: RunId) -> oneshot::Receiver<()> {
 }
 
 impl RunResources {
-    #[cfg(unix)]
     pub(super) fn process_lease(&self) -> crate::tools::ToolTaskLease {
         self.tools.enter()
     }

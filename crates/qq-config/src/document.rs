@@ -668,7 +668,7 @@ pub const DOCUMENT_FIELD_NAMES: [&str; 15] = [
 /// replacement. A document that still sets one fails to load with that
 /// advice instead of a bare unknown-field error, so a configuration that
 /// relied on the key is never silently reinterpreted.
-pub const REMOVED_KEYS: [(&str, &str); 8] = [
+pub const REMOVED_KEYS: [(&str, &str); 7] = [
     (
         "allow_tools",
         "was removed in v0.1.10: Auto and Full run tools without grants and Ask asks every \
@@ -688,11 +688,6 @@ pub const REMOVED_KEYS: [(&str, &str); 8] = [
         "shell_env",
         "was removed in v0.1.10: commands inherit the full environment of the qq process; \
          delete the key",
-    ),
-    (
-        "writable_roots",
-        "was removed in v0.1.10: commands run in place as the user, so Auto writes anywhere \
-         the user can and Full is unrestricted; delete the key",
     ),
     (
         "task_hosting",

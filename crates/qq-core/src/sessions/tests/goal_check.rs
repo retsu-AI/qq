@@ -32,21 +32,13 @@ impl Provider for Model {
             assert!(
                 request_texts(&request)
                     .iter()
-                    .any(|text| text.contains(if cfg!(unix) {
-                        "exit 7"
-                    } else {
-                        "check execution failed"
-                    })),
+                    .any(|text| text.contains("exit 7")),
                 "failed check exit status must reach the next goal run"
             );
             assert_eq!(
                 request_texts(&request)
                     .join("\n")
-                    .matches(if cfg!(unix) {
-                        "check-output-unique"
-                    } else {
-                        "completion-check process supervision is unavailable on this platform"
-                    })
+                    .matches("check-output-unique")
                     .count(),
                 1,
                 "check-only result messages must not leak into model context alongside the goal notice"
@@ -115,29 +107,28 @@ impl WorkspacePolicyAuthority for Authority {
     }
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn goal_check_once_executes_without_a_model_and_achieves_durably() {
     once_check(true).await;
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn goal_check_consumed_once_failure_requires_new_authority_without_requeue_loop() {
     once_check(false).await;
 }
 
-#[cfg(not(unix))]
-#[tokio::test]
-async fn goal_check_unavailable_supervision_consumes_once_and_fails_closed_durably() {
-    once_check(false).await;
-}
-
 async fn once_check(success: bool) {
-    let command = if success {
-        "printf checked >> goal-check-marker"
-    } else {
-        "printf checked >> goal-check-marker; printf '%s%s' check-output- unique; exit 7"
+    // `cmd /C` on Windows, `sh -c` elsewhere; the output names are split so
+    // the command text itself never contains the expected tail.
+    let command = match (success, cfg!(windows)) {
+        (true, false) => "printf checked >> goal-check-marker",
+        (false, false) => {
+            "printf checked >> goal-check-marker; printf '%s%s' check-output- unique; exit 7"
+        }
+        (true, true) => "(echo|set /p=checked)>>goal-check-marker",
+        (false, true) => {
+            "(echo|set /p=checked)>>goal-check-marker& set a=check-output-& call echo %a%unique& exit 7"
+        }
     };
     let directory = TempDir::new().unwrap();
     let database = directory
@@ -234,15 +225,10 @@ async fn once_check(success: bool) {
     })
     .await
     .expect("authorized exit-zero check must execute and achieve the goal");
-    #[cfg(not(unix))]
-    assert!(!directory.path().join("goal-check-marker").exists());
-    #[cfg(unix)]
-    {
-        assert_eq!(
-            std::fs::read_to_string(directory.path().join("goal-check-marker")).unwrap(),
-            "checked"
-        );
-    }
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("goal-check-marker")).unwrap(),
+        "checked"
+    );
     assert_eq!(
         achieved.check_authorization,
         Some(qq_protocol::GoalCheckAuthorization::Consumed)
@@ -393,7 +379,6 @@ async fn goal_check_process_keeps_exit_status_and_only_a_four_kib_tail() {
     assert!(result.tail.ends_with("end"));
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn goal_check_process_expired_or_cancelled_before_start_never_spawns() {
     use super::super::goal_check::{ProcessOutcome, run_process};

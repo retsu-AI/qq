@@ -62,8 +62,8 @@ pub enum GoalCheckAuthorization {
     Consumed,
     /// Explicit consent to run this goal's check.
     ForGoal,
-    /// Derived Auto authority for this exact check inside the task boundary.
-    /// This never authorizes host execution, including after recovery.
+    /// Derived Auto authority for this exact check. It runs in the workspace
+    /// as the user, like any Auto command.
     TaskScoped,
 }
 

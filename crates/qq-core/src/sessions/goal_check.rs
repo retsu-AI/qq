@@ -70,18 +70,13 @@ pub(super) struct ProcessResult {
 
 #[derive(Debug, Error)]
 pub(super) enum ProcessError {
-    #[error("scoped completion checks require durable native command routing")]
+    #[error("the goal or its check authority changed before the check started")]
     ScopedExecutionUnavailable,
-    #[cfg(not(unix))]
-    #[error("completion-check process supervision is unavailable on this platform")]
-    UnsupportedPlatform,
-    #[cfg(unix)]
     #[error("check workspace could not open: {0}")]
     Workspace(#[source] std::io::Error),
     #[cfg(unix)]
     #[error("check preparation failed: {0}")]
     Preparation(#[source] process_context::PreparationError),
-    #[cfg(unix)]
     #[error("check preparation task stopped: {0}")]
     PreparationTask(#[source] tokio::task::JoinError),
     #[cfg(unix)]
@@ -350,8 +345,8 @@ fn confirm_linux_group_exit(
     }
 }
 
-/// A scoped task must never reach the legacy host launcher. Durable check
-/// identities and terminal outcomes must be persisted before enabling this path.
+/// Runs the check command in the workspace as the user, killing its process
+/// tree on timeout or cancellation.
 pub(super) async fn run_process(
     workspace: PathBuf,
     command: String,
@@ -1345,12 +1340,55 @@ fn recover_checks(
 
 #[cfg(not(unix))]
 async fn run_host_process(
-    _workspace: PathBuf,
-    _command: String,
-    _deadline: tokio::time::Instant,
-    _cancellation: RunCancellation,
-    _producer: Arc<crate::ProcessProducer>,
-    _resources: execution::RunResources,
+    workspace: PathBuf,
+    command: String,
+    deadline: tokio::time::Instant,
+    cancellation: RunCancellation,
+    producer: Arc<crate::ProcessProducer>,
+    resources: execution::RunResources,
 ) -> Result<ProcessResult, ProcessError> {
-    Err(ProcessError::UnsupportedPlatform)
+    let stopped = if cancellation.is_cancelled() {
+        Some(ProcessOutcome::Cancelled)
+    } else if tokio::time::Instant::now() >= deadline {
+        Some(ProcessOutcome::TimedOut)
+    } else {
+        None
+    };
+    if let Some(outcome) = stopped {
+        return Ok(ProcessResult {
+            outcome,
+            tail: String::new(),
+        });
+    }
+    let workspace =
+        tokio::task::spawn_blocking(move || crate::workspace::Workspace::open(&workspace))
+            .await
+            .map_err(ProcessError::PreparationTask)?
+            .map_err(ProcessError::Workspace)?;
+    let mut lease = resources.process_lease();
+    let (outcome, text) = crate::tools::run_goal_check_shell(
+        &workspace,
+        command,
+        deadline.into_std(),
+        cancellation,
+        producer,
+        &mut lease,
+    )
+    .await;
+    let outcome = match outcome {
+        Some(crate::tools::dispatch::CommandOutcome::Exited { code }) => {
+            ProcessOutcome::Exited { code }
+        }
+        Some(crate::tools::dispatch::CommandOutcome::TimedOut) => ProcessOutcome::TimedOut,
+        Some(crate::tools::dispatch::CommandOutcome::Cancelled) => ProcessOutcome::Cancelled,
+        None => ProcessOutcome::Failed,
+    };
+    let mut start = text.len().saturating_sub(OUTPUT_BYTES);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    Ok(ProcessResult {
+        outcome,
+        tail: text[start..].to_owned(),
+    })
 }

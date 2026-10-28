@@ -2396,10 +2396,6 @@ fn removed_keys_fail_to_load_naming_their_replacement() {
             r#"(version: 1, policy: (task_hosting: []))"#,
         ),
         (
-            "writable_roots",
-            r#"(version: 1, policy: (writable_roots: []))"#,
-        ),
-        (
             "approval_delegate",
             r#"(version: 1, approval_delegate: on)"#,
         ),
