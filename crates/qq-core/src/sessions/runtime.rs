@@ -10,24 +10,6 @@ pub type RuntimeLoadFuture =
     Pin<Box<dyn Future<Output = Result<LoadedRuntime, RuntimeLoadError>> + Send + 'static>>;
 pub type WorkerRuntimeLoadFuture =
     Pin<Box<dyn Future<Output = Result<ModelSelection, RuntimeLoadError>> + Send + 'static>>;
-/// Host-selected destination and an ephemeral credential. Never serialize this
-/// value into a job, transcript, or command journal.
-#[derive(Debug, Clone)]
-pub struct TaskHostingAuthorization {
-    pub owner: String,
-    pub repository: String,
-    pub base_branch: String,
-    pub credential: qq_provider::SecretLiteral,
-}
-
-pub type TaskHostingLoadFuture = Pin<
-    Box<
-        dyn Future<Output = Result<Option<TaskHostingAuthorization>, RuntimeLoadError>>
-            + Send
-            + 'static,
-    >,
->;
-
 pub type SpawnModelValidationFuture =
     Pin<Box<dyn Future<Output = Result<(), RuntimeLoadError>> + Send + 'static>>;
 
@@ -145,16 +127,6 @@ impl LoadedRuntime {
 
 pub trait RuntimeLoader: Send + Sync + 'static {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture;
-
-    /// Only the trusted application resolves hosting credentials. Embeddings
-    /// without a host policy grant no remote authority.
-    fn authorize_task_hosting(
-        &self,
-        workspace: crate::command_owner::NativeDirectoryGrant,
-    ) -> TaskHostingLoadFuture {
-        let _ = workspace;
-        Box::pin(std::future::ready(Ok(None)))
-    }
 
     /// Loads a runtime while reporting secret-free preparation progress and
     /// observing cooperative cancellation at phase boundaries. The default
@@ -301,9 +273,6 @@ impl RuntimeLoadProgress {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeLoadRequest {
-    /// Physical task files chosen by the trusted session owner. Configuration
-    /// continues to load from `workspace`; models and clients cannot set this.
-    pub execution_workspace: Option<crate::command_owner::NativeDirectoryGrant>,
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
     pub workspace: String,
     pub model: ModelSelection,
@@ -522,16 +491,6 @@ pub type PublishedEventStream =
 
 #[derive(Clone)]
 pub struct SessionRuntimeOptions {
-    /// Fixed host programs for root-task Git operations through the command worker.
-    pub task_git: Option<super::task_git::TaskGitPolicy>,
-    /// Import Auto work into private task trees and publish after teardown.
-    /// Native commands must enforce the returned task scope or refuse execution.
-    pub task_workspaces: Option<super::task_workspaces::TaskWorkspacePolicy>,
-    /// Host-authorized task workspaces. Registrations persist and are inherited
-    /// by all sessions/children using the store; an empty list restores them.
-    pub native_scopes: Vec<crate::command_owner::NativeCommandScope>,
-    /// Execute approved shell/exec calls through this trusted service.
-    pub native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
     pub database_path: PathBuf,
     pub max_active_runs: usize,
     /// May lower, but not raise, the independent derived side-query ceiling.
@@ -569,9 +528,6 @@ impl std::fmt::Debug for SessionRuntimeOptions {
             .field("delegate_timeout", &self.delegate_timeout)
             .field("grant_authority", &self.grant_authority.is_some())
             .field("approval_reviewer", &self.approval_reviewer.is_some())
-            .field("native_commands", &self.native_commands.is_some())
-            .field("native_scopes", &self.native_scopes.len())
-            .field("task_workspaces", &self.task_workspaces.is_some())
             .finish()
     }
 }
@@ -581,10 +537,6 @@ impl SessionRuntimeOptions {
     pub fn new(database_path: PathBuf) -> Self {
         Self {
             database_path,
-            native_commands: None,
-            native_scopes: Vec::new(),
-            task_workspaces: None,
-            task_git: None,
             max_active_runs: 8,
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
@@ -622,16 +574,10 @@ pub struct SessionRuntime {
 }
 
 pub(super) struct SessionRuntimeInner {
-    pub(super) task_git: Option<super::task_git::TaskGitPolicy>,
-    pub(super) task_workspaces: Option<super::task_workspaces::TaskWorkspacePolicy>,
-    pub(super) native_scopes: Option<Arc<super::native_scope::NativeScopes>>,
     pub(super) store: Store,
     pub(super) loader: Arc<dyn RuntimeLoader>,
     pub(super) grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
     pub(super) approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
-    pub(super) native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
-    pub(super) native_ack: Option<super::native_ack::Acknowledgements>,
-    native_recovery: std::sync::OnceLock<super::native_recovery::Observer>,
     pub(super) permits: Arc<Semaphore>,
     pub(super) side_permits: Arc<Semaphore>,
     pub(super) side_tasks: AtomicUsize,
@@ -780,24 +726,10 @@ impl SessionRuntime {
         }
         let side_limits = options.side_query_limits.resolve()?;
         let store = Store::open(options.database_path).await?;
-        let native_scopes = super::native_scope::load(&store, options.native_scopes).await?;
-        let pending = if options.native_commands.is_some() {
-            super::native_recovery::pending(&store).await?
-        } else {
-            Vec::new()
-        };
-        let observed = pending
-            .iter()
-            .map(|pending| pending.identity.run_id)
-            .collect::<Vec<_>>();
         let recovery_store_id = store.store_id();
         let recovered = store
             .call_write(store::Priority::AwaitControl, move |connection| {
-                settlement::recover_interrupted_runs_except(
-                    connection,
-                    recovery_store_id,
-                    &observed,
-                )
+                settlement::recover_interrupted_runs(connection, recovery_store_id)
             })
             .await?;
         let store_id = store.store_id();
@@ -830,20 +762,11 @@ impl SessionRuntime {
         let (scheduler_stopped, _) = watch::channel(false);
         let (grant_promotion_stopped, _) = watch::channel(false);
         let (settlements, _) = watch::channel(0_u64);
-        let native_ack = options.native_commands.as_ref().map(|service| {
-            super::native_ack::Acknowledgements::start(store.clone(), Arc::clone(service))
-        });
         let inner = Arc::new(SessionRuntimeInner {
-            task_workspaces: options.task_workspaces,
-            task_git: options.task_git,
-            native_scopes,
-            native_ack,
-            native_recovery: std::sync::OnceLock::new(),
             store,
             loader,
             grant_authority: options.grant_authority,
             approval_reviewer: options.approval_reviewer,
-            native_commands: options.native_commands,
             permits: Arc::new(Semaphore::new(options.max_active_runs)),
             side_permits: Arc::new(Semaphore::new(side_limit)),
             side_tasks: AtomicUsize::new(0),
@@ -871,12 +794,6 @@ impl SessionRuntime {
             lifecycle: RwLock::new(()),
             draining: AtomicBool::new(false),
         });
-        if !pending.is_empty() {
-            inner
-                .native_recovery
-                .set(super::native_recovery::start(&inner, pending))
-                .expect("native recovery starts once");
-        }
         for cursor in recovered {
             inner.notify(cursor);
         }
@@ -1064,8 +981,6 @@ impl SessionRuntime {
             Some(None) => Some(Ok(GoalPolicy::default())),
             None => None,
         };
-        let contained_goal_checks =
-            self.inner.native_commands.is_some() && self.inner.task_workspaces.is_some();
         let automatic_check = match &command {
             SessionCommand::SetGoal {
                 session_id,
@@ -1074,8 +989,7 @@ impl SessionRuntime {
                 ..
             } if !replayed_goal => {
                 let authority = self.inner.store.tool_approval_policy(*session_id).await?;
-                (check_approval.is_some()
-                    || (contained_goal_checks && authority.mode == ApprovalMode::Auto))
+                (check_approval.is_some() || authority.mode == ApprovalMode::Auto)
                     .then_some(check.command.as_str())
             }
             _ => None,
@@ -1123,7 +1037,6 @@ impl SessionRuntime {
                     pause_goal_only_if_active,
                     seed,
                     goal_check_policy,
-                    contained_goal_checks,
                     goal_policy,
                 },
                 Some(self.inner.grant_promotions.clone()),
@@ -1468,62 +1381,6 @@ impl SessionRuntime {
         }))
     }
 
-    /// Whether this run was inherited for command observation without a model executor.
-    #[must_use]
-    pub fn is_recovered_run(&self, run: RunId) -> bool {
-        self.inner
-            .native_recovery
-            .get()
-            .is_some_and(|recovery| recovery.contains(run))
-    }
-
-    /// Wait for inherited commands and unresolved native custody in this
-    /// workspace. No effects replay; original invocation deadlines remain fixed.
-    pub async fn await_recovered_commands(
-        &self,
-        workspace: WorkspaceId,
-        session: SessionId,
-    ) -> Result<(), SessionRuntimeError> {
-        let recovery = self.inner.native_recovery.get();
-        let mut settlements = self.inner.settlements.subscribe();
-        let mut shutdown = self.inner.shutdown.subscribe();
-        let mut failed = self.inner.failed.subscribe();
-        loop {
-            let (active, blocked) =
-                self.inner
-                    .store
-                    .call(store::Priority::Control, move |connection| {
-                        let run = connection.query_row(
-                    "SELECT active_run_id FROM sessions WHERE id=?1 AND workspace_id=?2",
-                    params![session.to_string(), workspace.to_string()],
-                    |row| row.get::<_, Option<String>>(0),
-                ).optional()?.ok_or(SessionRuntimeError::SessionNotFound)?;
-                        Ok((
-                            run.map(|run| parse_id::<RunId>(&run)).transpose()?,
-                            super::native_recovery::workspace_blocked(connection, workspace)?,
-                        ))
-                    })
-                    .await?;
-            if !blocked
-                && active.is_none_or(|run| recovery.is_none_or(|recovery| !recovery.contains(run)))
-            {
-                return Ok(());
-            }
-            if recovery.is_none() || *failed.borrow() || *shutdown.borrow() {
-                return Err(SessionRuntimeError::Unavailable);
-            }
-            // Shutdown can stop observation after its final database commit
-            // but before its settlement notification. Recheck durable state
-            // on lifecycle changes as well as completed observations.
-            tokio::select! {
-                changed = settlements.changed() => changed,
-                changed = shutdown.changed() => changed,
-                changed = failed.changed() => changed,
-            }
-            .map_err(|_| SessionRuntimeError::Unavailable)?;
-        }
-    }
-
     /// Stops accepting commands and new run claims, durably cancels every
     /// accepted queued or running prompt, and waits until no unfinished run
     /// remains. Snapshot and subscription reads stay available so callers can
@@ -1586,12 +1443,6 @@ impl SessionRuntime {
                 // cannot race this success boundary.
                 if *self.inner.failed.borrow() {
                     return Err(SessionRuntimeError::Unavailable);
-                }
-                if let Some(recovery) = self.inner.native_recovery.get() {
-                    recovery.stop().await;
-                }
-                if let Some(acknowledgements) = &self.inner.native_ack {
-                    acknowledgements.shutdown().await;
                 }
                 return Ok(());
             }
@@ -1888,12 +1739,6 @@ pub(super) fn validate_slash_prompt(prompt: &str) -> Result<(), SlashCommandErro
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SessionRuntimeError {
-    #[error(
-        "native command capacity reached: at most 10000 unresolved invocations may be retained; original worker completion is required"
-    )]
-    NativeCommandCapacity,
-    #[error("invalid native execution scope: {reason}")]
-    InvalidNativeScope { reason: String },
     #[error("goal identity or revision conflicts with the current goal")]
     GoalConflict {
         current: Option<qq_protocol::GoalIdentity>,

@@ -62,45 +62,6 @@ pub(super) fn append_tool_call_output(
     Ok(event)
 }
 
-/// Binds an invocation to its stable worker journal before admission can have effects.
-pub(super) fn set_native_owner(
-    connection: &mut Connection,
-    identity: RunIdentity,
-    id: ToolCallId,
-    owner: Option<StoreId>,
-) -> Result<(), SessionRuntimeError> {
-    let transaction = store::begin_unit(connection)?;
-    let Some(owner) = owner else {
-        transaction.execute(
-            "DELETE FROM native_command_owners WHERE tool_call_id=?1 AND result_saved=0
-             AND EXISTS(SELECT 1 FROM tool_calls WHERE id=?1 AND run_id=?2 AND state='running')",
-            params![id.to_string(), identity.run_id.to_string()],
-        )?;
-        transaction.commit()?;
-        return Ok(());
-    };
-    let full: bool = transaction.query_row(
-        "SELECT (SELECT COUNT(*) FROM native_command_owners WHERE result_saved=0)>=?2
-         AND NOT EXISTS(SELECT 1 FROM native_command_owners WHERE tool_call_id=?1)",
-        params![id.to_string(), super::native_recovery::MAX_PENDING],
-        |row| row.get(0),
-    )?;
-    if full {
-        return Err(SessionRuntimeError::NativeCommandCapacity);
-    }
-    let written = transaction.execute(
-        "INSERT INTO native_command_owners(tool_call_id, owner_id)
-         SELECT id, ?3 FROM tool_calls WHERE id=?1 AND run_id=?2 AND state='running' AND name IN ('shell','exec','task_commit','task_push','task_pr')
-         ON CONFLICT(tool_call_id) DO UPDATE SET owner_id=excluded.owner_id WHERE native_command_owners.owner_id=excluded.owner_id",
-        params![id.to_string(),identity.run_id.to_string(),owner.to_string()],
-    )?;
-    if written != 1 {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    }
-    transaction.commit()?;
-    Ok(())
-}
-
 /// Records native process evidence, including an unresolved invocation whose
 /// model run was interrupted. This grants no new execution authority.
 pub(super) fn record_tool_process(
@@ -113,9 +74,7 @@ pub(super) fn record_tool_process(
     let (name, arguments, previous): (String, String, Option<String>) = transaction
         .query_row(
             "SELECT name,arguments_json,execution_context_json FROM tool_calls
-         WHERE id=?1 AND run_id=?2 AND (state='running' OR (state IN ('interrupted','failed')
-             AND EXISTS(SELECT 1 FROM native_command_owners n JOIN runs r ON r.id=?2
-                 WHERE n.tool_call_id=?1 AND n.result_saved=0 AND r.outcome_json IS NOT NULL)))",
+         WHERE id=?1 AND run_id=?2 AND state='running'",
             params![id.to_string(), identity.run_id.to_string()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -140,14 +99,6 @@ pub(super) fn record_tool_process(
     Ok(())
 }
 
-/// Native results remain durable even when they cannot enter model context.
-/// An exhausted completion requires run settlement before another model turn.
-#[derive(Debug)]
-pub(super) struct ToolCallCommit {
-    pub(super) event: SessionEventEnvelope,
-    pub(super) context_exhausted: bool,
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "one persisted row update; bundling the columns adds nothing"
@@ -163,10 +114,9 @@ pub(super) fn finish_tool_call(
     display: Option<ToolCallDisplay>,
     spill: Option<crate::tools::SpillRecord>,
     execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
-    native_owner: Option<StoreId>,
-) -> Result<ToolCallCommit, SessionRuntimeError> {
+) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    let commit = finish_tool_call_in_transaction(
+    let event = finish_tool_call_in_transaction(
         &transaction,
         store_id,
         identity,
@@ -177,10 +127,9 @@ pub(super) fn finish_tool_call(
         display,
         spill,
         execution_context,
-        native_owner,
     )?;
     transaction.commit()?;
-    Ok(commit)
+    Ok(event)
 }
 
 #[expect(
@@ -198,61 +147,44 @@ pub(super) fn finish_tool_call_in_transaction(
     display: Option<ToolCallDisplay>,
     spill: Option<crate::tools::SpillRecord>,
     execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
-    native_owner: Option<StoreId>,
-) -> Result<ToolCallCommit, SessionRuntimeError> {
-    let (provider_call_id, tool_name, first_result_in_turn, recorded_context, settled) =
-        transaction
-            .query_row(
-                "SELECT current.provider_call_id, current.name,
+) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    let (provider_call_id, tool_name, first_result_in_turn, recorded_context) = transaction
+        .query_row(
+            "SELECT current.provider_call_id, current.name,
                     NOT EXISTS(
                         SELECT 1 FROM tool_calls previous
                         WHERE previous.run_id = current.run_id
                           AND previous.turn_ordinal = current.turn_ordinal
                           AND previous.result IS NOT NULL
-                    ), current.execution_context_json, r.outcome_json IS NOT NULL
-             FROM tool_calls current JOIN runs r ON r.id=current.run_id
-             WHERE current.id = ?1 AND current.run_id = ?2
-               AND (current.state='running' OR (current.state IN ('interrupted','failed')
-                   AND r.outcome_json IS NOT NULL AND EXISTS(
-                       SELECT 1 FROM native_command_owners n WHERE n.tool_call_id=current.id
-                           AND n.owner_id=?3 AND n.result_saved=0)))",
-                params![
-                    tool_call_id.to_string(),
-                    identity.run_id.to_string(),
-                    native_owner.map(|owner| owner.to_string())
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, bool>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, bool>(4)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or(SessionRuntimeError::ToolCallNotFound)?;
+                    ), current.execution_context_json
+             FROM tool_calls current
+             WHERE current.id = ?1 AND current.run_id = ?2 AND current.state='running'",
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(SessionRuntimeError::ToolCallNotFound)?;
     // The display payload is deliberately absent from the capacity check: it
     // never enters model context, so it cannot crowd the context budget. The
     // provider call id does enter the next ToolResult block and is counted.
     // Completion checks have no provider turn. Their bounded result is audit
     // evidence; only the goal notice may enter a later model context.
-    let context_exhausted = if settled || identity.kind == RunKind::GoalCheck {
-        false
-    } else {
-        match reserve_tool_result_capacity(
+    if identity.kind != RunKind::GoalCheck {
+        reserve_tool_result_capacity(
             transaction,
             identity.run_id,
             &provider_call_id,
             &result,
             first_result_in_turn,
-        ) {
-            Ok(()) => false,
-            Err(SessionRuntimeError::OutputTooLarge) if native_owner.is_some() => true,
-            Err(error) => return Err(error),
-        }
-    };
+        )?;
+    }
     let now = now_ms();
     let state = if is_error { "failed" } else { "completed" };
     let display_json = display.as_ref().map(serde_json::to_string).transpose()?;
@@ -284,9 +216,7 @@ pub(super) fn finish_tool_call_in_transaction(
     let updated = transaction.execute(
         "UPDATE tool_calls
              SET state = ?2, result = ?3, is_error = ?4, finished_at_ms = ?5, display_json = ?7, execution_context_json = COALESCE(?8, execution_context_json)
-             WHERE id = ?1 AND run_id = ?6 AND (state='running' OR (state IN ('interrupted','failed')
-                 AND EXISTS(SELECT 1 FROM runs r JOIN native_command_owners n ON n.tool_call_id=?1
-                     WHERE r.id=?6 AND r.outcome_json IS NOT NULL AND n.owner_id=?9 AND n.result_saved=0)))",
+             WHERE id = ?1 AND run_id = ?6 AND state='running'",
         params![
             tool_call_id.to_string(),
             state,
@@ -296,34 +226,16 @@ pub(super) fn finish_tool_call_in_transaction(
             identity.run_id.to_string(),
             display_json,
             execution_context_json,
-            native_owner.map(|owner| owner.to_string()),
         ],
     )?;
     if updated != 1 {
         return Err(SessionRuntimeError::Unavailable);
-    }
-    if let Some(owner) = native_owner {
-        let written = transaction.execute(
-            "UPDATE native_command_owners SET result_saved=?3 WHERE tool_call_id=?1 AND owner_id=?2",
-            params![tool_call_id.to_string(), owner.to_string(), settled || identity.kind != RunKind::GoalCheck],
-        )?;
-        if written != 1 {
-            return Err(SessionRuntimeError::CONSTRAINT);
-        }
     }
     for update in &file_states {
         record_session_file(transaction, identity.session_id, update, now)?;
     }
     // The complete output and the result whose marker cites it commit
     // together: a marker never names a handle the store does not hold.
-    if settled && native_owner.is_some() {
-        // A failed observation may already have spilled its placeholder. The
-        // original owner's actual output replaces it atomically with the row.
-        transaction.execute(
-            "DELETE FROM tool_spills WHERE tool_call_id=?1",
-            [tool_call_id.to_string()],
-        )?;
-    }
     if let Some(spill) = spill {
         store_tool_spill(transaction, identity, tool_call_id, &tool_name, spill, now)?;
     }
@@ -333,10 +245,7 @@ pub(super) fn finish_tool_call_in_transaction(
         EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolCallFinished { tool_call },
     )?;
-    Ok(ToolCallCommit {
-        event,
-        context_exhausted,
-    })
+    Ok(event)
 }
 
 /// Writes one complete output under its call. Past the per-session cap, the

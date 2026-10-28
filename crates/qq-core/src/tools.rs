@@ -5,17 +5,6 @@ mod edit;
 pub(crate) mod fetch;
 pub(crate) mod goal;
 mod lang;
-#[cfg(target_os = "linux")]
-pub(crate) mod linux_owner;
-#[cfg(any(target_os = "macos", all(test, target_os = "linux")))]
-#[cfg_attr(
-    all(test, target_os = "linux"),
-    allow(
-        dead_code,
-        reason = "compile shared Unix launch interfaces and validate grants without claiming macOS enforcement"
-    )
-)]
-pub(crate) mod macos_owner;
 mod matching;
 mod native_exit;
 pub(crate) mod network;
@@ -24,11 +13,7 @@ pub(crate) mod process_context;
 mod read;
 mod search;
 mod shell;
-#[cfg(windows)]
-pub(crate) mod windows_owner;
-pub(crate) use shell::forward_shell_chunk;
 mod specs;
-pub(crate) mod task_git;
 mod tree;
 pub(crate) mod walk;
 #[cfg(windows)]
@@ -36,7 +21,6 @@ pub(crate) mod windows_job;
 mod write;
 
 pub(crate) use dispatch::{ToolCancellation, ToolTaskLease};
-pub(crate) use shell::MAX_SHELL_OUTPUT_BYTES;
 #[cfg(unix)]
 pub(crate) use shell::ProcessGroupGuard;
 

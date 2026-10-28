@@ -499,13 +499,6 @@ pub(super) fn reserve_next_run_recoverable(
              LEFT JOIN session_goals g ON g.session_id = s.id AND g.live = 1
              WHERE r.status = 'queued' AND s.active_run_id IS NULL
                AND s.preparing_run_id IS NULL
-               AND NOT EXISTS(SELECT 1 FROM native_command_owners native
-                   JOIN tool_calls call ON call.id=native.tool_call_id
-                   JOIN runs previous ON previous.id=call.run_id
-                   JOIN sessions previous_session ON previous_session.id=previous.session_id
-                   WHERE previous_session.workspace_id=s.workspace_id AND native.result_saved=0
-                     AND (previous.outcome_json IS NOT NULL OR EXISTS(
-                         SELECT 1 FROM temp.native_observation_runs observed WHERE observed.run_id=previous.id)))
                AND NOT EXISTS(SELECT 1 FROM runs check_run JOIN sessions check_session ON check_session.id=check_run.session_id
                    WHERE check_session.workspace_id=s.workspace_id AND check_run.kind='goal_check' AND (check_run.status='running' OR check_run.check_acknowledgment_pending=1))
                AND s.depth = ?1
@@ -960,7 +953,6 @@ pub(super) fn prepared_context_bytes(
 
 #[derive(Debug)]
 pub(super) enum GoalStartRefusal {
-    NativeRecoveryPending,
     PerRunDuration,
     Reprepare {
         limits: Box<RunLimits>,
@@ -1073,14 +1065,6 @@ pub(super) fn start_reserved_run(
     let context_base_bytes = prepared_context_bytes(audit.weight)?;
     let now = now_ms();
     let transaction = store::begin_unit(connection)?;
-    if super::native_recovery::workspace_blocked(&transaction, identity.workspace_id)? {
-        transaction.execute(
-            "UPDATE sessions SET preparing_run_id=NULL WHERE id=?1 AND preparing_run_id=?2",
-            params![identity.session_id.to_string(), identity.run_id.to_string()],
-        )?;
-        transaction.commit()?;
-        return Ok(Err(GoalStartRefusal::NativeRecoveryPending));
-    }
     if goal.is_some() || goal_spend_owner.is_some() {
         let (refreshed, final_slot) =
             match refresh_goal_limits(&transaction, identity, &metadata, now)? {

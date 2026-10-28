@@ -178,7 +178,6 @@ struct RunEnvironment {
     spawner: Option<Arc<dyn SubagentSpawner>>,
     history: Option<Arc<dyn HistorySearcher>>,
     goal: Option<sessions::GoalRunInput>,
-    task_git: Option<Arc<sessions::TaskGitRunInput>>,
     goal_spend_tracking: bool,
     goal_paid: Option<sessions::GoalPaidInput>,
     spills: Option<Arc<dyn runtime::SpillReader>>,
@@ -535,7 +534,6 @@ impl plan::CompiledAgentPlan {
                        pricing,
                        history,
                        goal,
-                       task_git,
                        goal_spend_tracking,
                        goal_paid,
                        spills,
@@ -700,7 +698,6 @@ impl plan::CompiledAgentPlan {
                                spawn_agent: spawner.is_some(),
                                search_history: history.is_some(),
                                update_goal: goal.is_some(),
-                               task_git: task_git.is_some(),
                                read_tool_result: spills.is_some(),
                                load_skill: allow_guidance,
                                read_only,
@@ -895,7 +892,7 @@ impl plan::CompiledAgentPlan {
 
         yield TurnStep::Ready(RunState {
            messages, steering, run, window, slice, recovery,
-           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal_spend_tracking: goal_spend_tracking || goal.is_some(), goal_paid, goal, task_git, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy, cache_key },
+           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal_spend_tracking: goal_spend_tracking || goal.is_some(), goal_paid, goal, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy, cache_key },
         });
                }
     }
@@ -3038,7 +3035,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<ToolOutcomes>> + Send + '_ {
         stream! {
                     let Self { env, steering, run, .. } = self;
-                    let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal, task_git, spills, audit_hook, tool_tasks, output: _, limits, deadline, base_specs, static_filter, .. } = env;
+                    let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal, spills, audit_hook, tool_tasks, output: _, limits, deadline, base_specs, static_filter, .. } = env;
                     let limits = *limits;
                     let workspace = &plan.workspace;
                     let catalog = &plan.catalog;
@@ -3072,7 +3069,6 @@ impl RunState {
                         // parent's whole remainder, so overlapping children could
                         // overspend it, and those runs keep blocking spawns.
                         let detach_spawns = !bounded_child_spend;
-                        let task_git_deadline = run.budget.deadline();
                         let execute_one = |call: RuntimeToolCall,
                                            output: Option<
                             tokio::sync::mpsc::Sender<String>,
@@ -3087,7 +3083,6 @@ impl RunState {
                             let spawner = spawner.clone();
                             let tool_tasks = tool_tasks.clone();
                             let history = history.clone();
-                            let task_git = task_git.clone();
                             let spills = spills.clone();
                             let delegation = Arc::clone(delegation);
                             let shell_policy = Arc::clone(shell_policy);
@@ -3128,10 +3123,6 @@ impl RunState {
                                     });
                                 let result = match call.rejection.clone().or_else(|| strict_refusal.map(runtime::CallRejection::Runtime)) {
                                     Some(error) => tools::ToolOutput::verbatim_error(error.into_message()),
-                                    None if host == Some(catalog::ToolHost::TaskGit) => match &task_git {
-                                        Some(input) => input.execute(&call, &cancelled, task_git_deadline).await,
-                                        None => tools::ToolOutput::refused("task Git operations are unavailable in this run"),
-                                    },
                                     // spawn_agent dispatches to the session layer. A
                                     // run without a spawner rejects the call outright:
                                     // the declaration is already absent there, but a
@@ -3358,7 +3349,7 @@ impl RunState {
                                         }
                                     }
                                     None => {
-                                        tools::execute_with_images(None,
+                                        tools::execute_with_images(
                                             workspace,
                                             file_state,
                                             call.name.clone(),
@@ -3390,7 +3381,7 @@ impl RunState {
                         let overlaps = |call: &RuntimeToolCall| {
                             !(bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
                             && !catalog.lookup(&call.name).is_some_and(|entry| {
-                                matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent | catalog::ToolHost::UpdateGoal | catalog::ToolHost::TaskGit | catalog::ToolHost::SelectTools)
+                                matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent | catalog::ToolHost::UpdateGoal | catalog::ToolHost::SelectTools)
                             })
                             && matches!(
                                 approval::classify(call.effect, &call.name, &call.arguments, network_policy),
@@ -3471,15 +3462,7 @@ impl RunState {
                                 tokio::select! {
                                     biased;
                                     () = interrupt => None,
-                                    decision = async {
-                                        if catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::TaskGit) {
-                                            // Session capability revalidates task authority; this
-                                            // route never becomes a generic approval request.
-                                            GateDecision::Execute
-                                        } else {
-                                            gate.resolve(call).await
-                                        }
-                                    } => Some(decision),
+                                    decision = gate.resolve(call) => Some(decision),
                                 }
                             };
                             let Some(decision) = decision else {
@@ -3592,7 +3575,6 @@ impl RunState {
                                     display: result.ui_payload,
                                     spill: result.spill,
                                     execution_context: result.execution_context,
-                                    native_owner: result.native_owner,
                                 });
                             }
                             for index in batch_start..cursor {
@@ -3617,7 +3599,7 @@ impl RunState {
                                     run.tool_schema = catalog.schema_measurement(&run.tool_specs);
                                 }
                                 drop(tool_span);
-                                yield TurnStep::Emit(RuntimeEvent::ToolCallFinished { id: call.id, result: result.model_text, is_error: result.is_error, file_states: Vec::new(), display: result.ui_payload, spill: None, execution_context: None, native_owner: None, });
+                                yield TurnStep::Emit(RuntimeEvent::ToolCallFinished { id: call.id, result: result.model_text, is_error: result.is_error, file_states: Vec::new(), display: result.ui_payload, spill: None, execution_context: None, });
                                 continue;
                             }
 
@@ -3638,7 +3620,7 @@ impl RunState {
                                         yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
                                             id:call.id, result:INTERRUPTED_TOOL_RESULT.to_owned(), is_error:true,
                                             file_states:Vec::new(), display:None, spill:None,
-                                         execution_context: None, native_owner: None, });
+                                         execution_context: None, });
                                         break;
                                     }
                             let result = match serde_json::from_str::<tools::goal::UpdateGoalArgs>(&call.arguments) {
@@ -3707,7 +3689,7 @@ impl RunState {
                             yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
                                 id:call.id, result:result.model_text, is_error:result.is_error,
                                 file_states:Vec::new(), display:result.ui_payload, spill:None,
-                             execution_context: None, native_owner: None, });
+                             execution_context: None, });
                                     if tool_scope.interrupted {
                                         break;
                                     }
@@ -3803,7 +3785,6 @@ impl RunState {
                                     display: result.ui_payload,
                                     spill: result.spill,
                                     execution_context: result.execution_context,
-                                    native_owner: result.native_owner,
                                 });
                                 if interrupted_here {
                                     tool_scope.interrupted = true;
@@ -3832,8 +3813,7 @@ impl RunState {
                             for (index, call) in calls.iter().enumerate() {
                                 if results[index].is_none() {
                                     if started_calls[index] {
-                                        let result = tool_tasks.saved_native_result(call.id)
-                                            .unwrap_or_else(|| tools::ToolOutput::interrupted(INTERRUPTED_TOOL_RESULT.to_owned()));
+                                        let result = tools::ToolOutput::interrupted(INTERRUPTED_TOOL_RESULT.to_owned());
                                         let result = cite_spill(result, &call.name, call.id, spills.is_some());
                                         results[index] = Some(RetainedResult::retain(&result, &call.name, call.id));
                                         yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
@@ -3844,7 +3824,6 @@ impl RunState {
                                             display: result.ui_payload,
                                             spill: result.spill,
                                             execution_context: result.execution_context,
-                                            native_owner: result.native_owner,
                                         });
                                     } else {
                                         results[index] = Some(RetainedResult::interrupted(INTERRUPTED_TOOL_RESULT.to_owned()));

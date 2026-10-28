@@ -58,16 +58,6 @@ pub(crate) struct ExecutionContextProof {
     pub(crate) manifest: Arc<[crate::runtime::ApprovedReadImage]>,
     pub(crate) policy_sha256: ContentHash,
     pub(crate) producer: Arc<provenance::ProducerEvidence>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) task_git: Option<TaskGitReceiptBinding>,
-}
-
-/// Binds a logical task call while retaining the actual launch proof unchanged.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TaskGitReceiptBinding {
-    tool: String,
-    arguments_sha256: ContentHash,
 }
 
 pub(crate) fn policy_digest() -> ContentHash {
@@ -154,10 +144,7 @@ impl ExecutionContextReceipt {
                     let Ok(manifest) = ApprovedReadImages::new(proof.manifest.to_vec()) else {
                         return false;
                     };
-                    proof.task_git.as_ref().is_none_or(|binding| {
-                        super::task_git::is_tool(&binding.tool)
-                            && matches!(facts.verdict, ExecutionVerdict::Work { .. })
-                    }) && manifest.entries() == proof.manifest.as_ref()
+                    manifest.entries() == proof.manifest.as_ref()
                         && manifest.digest() == facts.manifest_sha256
                         && match facts.verdict {
                             ExecutionVerdict::VerifiedRead {
@@ -176,17 +163,6 @@ impl ExecutionContextReceipt {
         let Some((digest, requested_env)) = argument_identity(tool, arguments) else {
             return false;
         };
-        if let Self::V2(proof) = self
-            && let Some(binding) = &proof.task_git
-        {
-            return self.valid()
-                && proof.facts.context_id == call_id
-                && binding.tool == tool
-                && binding.arguments_sha256 == digest;
-        }
-        if super::task_git::is_tool(tool) {
-            return false;
-        }
         self.valid()
             && digest == self.facts().arguments_sha256
             && match self {
@@ -195,31 +171,6 @@ impl ExecutionContextReceipt {
                     proof.facts.context_id == call_id && proof.facts.requested_env == requested_env
                 }
             }
-    }
-    pub(crate) fn bind_task_git(
-        &mut self,
-        call_id: ToolCallId,
-        launch_arguments: &str,
-        call: &crate::command_owner::NativeTaskGitCall,
-    ) -> Result<(), ()> {
-        if !super::task_git::is_tool(&call.tool)
-            || !self.bound_to(call_id, "exec", launch_arguments)
-        {
-            return Err(());
-        }
-        let digest = arguments_digest(&call.tool, &call.arguments).ok_or(())?;
-        let Self::V2(proof) = self else {
-            return Err(());
-        };
-        if proof.task_git.is_some() || !matches!(proof.facts.verdict, ExecutionVerdict::Work { .. })
-        {
-            return Err(());
-        }
-        proof.task_git = Some(TaskGitReceiptBinding {
-            tool: call.tool.clone(),
-            arguments_sha256: digest,
-        });
-        Ok(())
     }
 }
 
@@ -240,10 +191,6 @@ fn argument_identity(tool: &str, arguments: &str) -> Option<(ContentHash, bool)>
             super::shell::Launch::Exec(&args).validate().ok()?;
             (serde_json::to_vec(&args).ok()?, !args.env.is_empty())
         }
-        name if super::task_git::is_tool(name) => {
-            let args = super::task_git::parse(name, arguments).ok()?;
-            (serde_json::to_vec(&args).ok()?, false)
-        }
         _ => return None,
     };
     Some((
@@ -258,13 +205,6 @@ pub(super) enum OwnedLaunch {
     Exec(ExecArgs),
 }
 
-pub(crate) struct NativeExecution {
-    pub environment: crate::command_owner::NativeEnvironment,
-    pub filesystem: crate::command_owner::NativeFilesystem,
-    pub network: crate::command_owner::NativeNetwork,
-    pub resources: crate::command_owner::NativeResources,
-}
-
 /// The command and its capabilities are prepared together. Keeping this value
 /// alive through reap prevents later path/env changes from replacing a verified
 /// image or working directory.
@@ -274,83 +214,9 @@ pub(crate) struct PreparedLaunch {
     _cwd: Option<cap_std::fs::Dir>,
     #[cfg(target_os = "linux")]
     _image: Option<(std::fs::File, String)>,
-    #[cfg(target_os = "linux")]
-    startup: Option<super::linux_owner::Startup>,
-    #[cfg(target_os = "macos")]
-    macos_startup: Option<super::macos_owner::Startup>,
-    #[cfg(windows)]
-    windows_startup: Option<super::windows_owner::Startup>,
 }
 
 impl PreparedLaunch {
-    #[cfg(target_os = "linux")]
-    pub(super) fn owned_linux(
-        mut self,
-        owner: &super::linux_owner::LinuxOwner,
-        native: Option<&NativeExecution>,
-    ) -> Result<Self, PreparationError> {
-        let command = self
-            .command
-            .take()
-            .expect("newly prepared launch has a command");
-        let (command, startup) = owner
-            .wrap(
-                command,
-                self._cwd.as_ref().expect("prepared cwd is held"),
-                self._image.as_ref(),
-                native,
-            )
-            .map_err(PreparationError::Custody)?;
-        self.command = Some(command);
-        self.startup = Some(startup);
-        Ok(self)
-    }
-    #[cfg(target_os = "macos")]
-    pub(super) fn owned_macos(
-        mut self,
-        owner: &super::macos_owner::MacosOwner,
-        native: Option<&NativeExecution>,
-        deadline: Instant,
-    ) -> Result<Self, PreparationError> {
-        let command = self
-            .command
-            .take()
-            .expect("newly prepared launch has a command");
-        let (command, startup) = owner
-            .wrap(
-                command,
-                self._cwd.as_ref().expect("prepared cwd is held"),
-                native,
-                deadline,
-            )
-            .map_err(PreparationError::Macos)?;
-        self.command = Some(command);
-        self.macos_startup = Some(startup);
-        Ok(self)
-    }
-    #[cfg(windows)]
-    pub(super) fn owned_windows(
-        mut self,
-        owner: &super::windows_owner::WindowsOwner,
-        native: Option<&NativeExecution>,
-        deadline: Instant,
-    ) -> Result<Self, PreparationError> {
-        let command = self
-            .command
-            .take()
-            .expect("newly prepared launch has a command");
-        let (command, startup) = owner
-            .wrap(
-                command,
-                self._cwd.as_ref().expect("prepared cwd is held"),
-                native,
-                deadline,
-            )
-            .map_err(PreparationError::Windows)?;
-        self.command = Some(command);
-        self.windows_startup = startup;
-        Ok(self)
-    }
     /// Only stream/process supervision settings may change after verification.
     pub(crate) async fn spawn(
         &mut self,
@@ -389,28 +255,14 @@ impl PreparedLaunch {
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
-        #[cfg(target_os = "macos")]
-        let child = if let Some(startup) = self.macos_startup.take() {
-            super::macos_owner::spawn(command, startup, process, cancelled, deadline).await?
-        } else {
-            command.spawn()?.into()
-        };
-        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+        #[cfg(not(windows))]
         let child = {
             let _ = process;
             command.spawn()?
         };
-        #[cfg(target_os = "linux")]
-        let child = if let Some(startup) = self.startup.take() {
-            super::linux_owner::spawn(command, startup, process, cancelled, deadline).await?
-        } else {
-            command.spawn()?.into()
-        };
         #[cfg(windows)]
-        let child = super::windows_owner::spawn(
+        let child = super::windows_job::spawn(
             command,
-            self.windows_startup.take(),
-            piped_stdin,
             self._cwd
                 .take()
                 .ok_or_else(|| std::io::Error::other("launch directory was already consumed"))?,
@@ -430,21 +282,6 @@ impl PreparedLaunch {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PreparationError {
-    #[error("resource enforcement is unavailable for this command launcher")]
-    ResourcesUnavailable,
-    #[error("network enforcement is unavailable for this command launcher")]
-    NetworkUnavailable,
-    #[error("filesystem enforcement is unavailable for this command launcher")]
-    FilesystemUnavailable,
-    #[cfg(target_os = "linux")]
-    #[error("could not establish Linux command custody: {0}")]
-    Custody(#[source] std::io::Error),
-    #[cfg(target_os = "macos")]
-    #[error("could not establish macOS command isolation: {0}")]
-    Macos(#[source] std::io::Error),
-    #[cfg(windows)]
-    #[error("could not establish Windows command isolation: {0}")]
-    Windows(#[source] std::io::Error),
     #[error("captured child environment exceeds 256 KiB")]
     EnvironmentBound,
     #[error("could not capture cwd: {0}")]
@@ -464,7 +301,6 @@ pub(crate) enum PreparationError {
     reason = "captured invocation values, image approvals, identity and cancellation are distinct inputs"
 )]
 pub(super) fn prepare(
-    captured: Option<&crate::command_owner::NativeEnvironment>,
     workspace: Workspace,
     launch: OwnedLaunch,
     approvals: Arc<ApprovedReadImages>,
@@ -478,42 +314,19 @@ pub(super) fn prepare(
     if cancelled.is_cancelled() || Instant::now() >= deadline {
         return Err(PreparationError::Cancelled);
     }
-    let (cwd, requested, encoded) = match &launch {
-        OwnedLaunch::Shell(args) => (
-            args.cwd.as_deref(),
-            args.env.as_slice(),
-            serde_json::to_vec(args),
-        ),
-        OwnedLaunch::Exec(args) => (
-            args.cwd.as_deref(),
-            args.env.as_slice(),
-            serde_json::to_vec(args),
-        ),
+    let (cwd, encoded) = match &launch {
+        OwnedLaunch::Shell(args) => (args.cwd.as_deref(), serde_json::to_vec(args)),
+        OwnedLaunch::Exec(args) => (args.cwd.as_deref(), serde_json::to_vec(args)),
     };
     let encoded = encoded.map_err(PreparationError::Arguments)?;
-    let mut environment =
-        Vec::<(OsString, OsString)>::with_capacity(BASE_ENV.len() + requested.len());
+    // Commands inherit the server's whole environment. A verified read runs
+    // with only these base names, so no variable can point it at helpers.
+    let mut environment = Vec::<(OsString, OsString)>::with_capacity(BASE_ENV.len());
     let mut bytes = 0_usize;
     let mut base_env_present = 0;
     let mut locale = Locale::Unset;
-    let names = match captured {
-        Some(captured) => captured.names().collect::<Vec<_>>(),
-        None => BASE_ENV
-            .iter()
-            .copied()
-            .chain(requested.iter().map(String::as_str))
-            .collect(),
-    };
-    #[cfg(target_os = "linux")]
-    let additional_environment = names.iter().any(|name| !BASE_ENV.contains(name));
-    for name in names {
-        if environment.iter().any(|(saved, _)| saved == name) {
-            continue;
-        }
-        if let Some(value) = match captured {
-            Some(captured) => captured.get(name),
-            None => std::env::var_os(name),
-        } {
+    for name in BASE_ENV {
+        if let Some(value) = std::env::var_os(name) {
             bytes = bytes
                 .saturating_add(name.len())
                 .saturating_add(value.as_encoded_bytes().len());
@@ -581,7 +394,6 @@ pub(super) fn prepare(
                 &approvals,
                 &environment,
                 &cwd_path,
-                !requested.is_empty() || additional_environment,
                 locale,
                 cancelled,
                 deadline,
@@ -610,7 +422,10 @@ pub(super) fn prepare(
             (command, verdict)
         }
     };
-    command.env_clear().envs(environment).current_dir(cwd_path);
+    if matches!(verdict, ExecutionVerdict::VerifiedRead { .. }) {
+        command.env_clear().envs(environment);
+    }
+    command.current_dir(cwd_path);
     let context_id = match call_id {
         Some(id) => id,
         None => ToolCallId::generate().map_err(PreparationError::Identity)?,
@@ -620,7 +435,7 @@ pub(super) fn prepare(
         arguments_sha256: ContentHash::from_bytes(Sha256::digest(encoded).into()),
         manifest_sha256: approvals.digest(),
         base_env_present,
-        requested_env: !requested.is_empty(),
+        requested_env: false,
         locale,
         cwd: cwd_identity,
         verdict,
@@ -628,7 +443,6 @@ pub(super) fn prepare(
     };
     let receipt = match call_id {
         Some(_) => ExecutionContextReceipt::V2(ExecutionContextProof {
-            task_git: None,
             facts,
             manifest: approvals.shared_entries(),
             policy_sha256: policy_digest(),
@@ -643,12 +457,6 @@ pub(super) fn prepare(
         _cwd: Some(directory),
         #[cfg(target_os = "linux")]
         _image: image,
-        #[cfg(target_os = "linux")]
-        startup: None,
-        #[cfg(target_os = "macos")]
-        macos_startup: None,
-        #[cfg(windows)]
-        windows_startup: None,
     })
 }
 
@@ -662,7 +470,6 @@ fn bind_read_image(
     approvals: &ApprovedReadImages,
     environment: &[(OsString, OsString)],
     cwd: &std::path::Path,
-    requested: bool,
     locale: Locale,
     cancelled: &ToolCancellation,
     deadline: Instant,
@@ -674,9 +481,6 @@ fn bind_read_image(
         io::{Read as _, Seek as _, Write as _},
         os::fd::AsRawFd as _,
     };
-    if requested {
-        return Err(UnverifiedReason::RequestedEnvironment);
-    }
     if locale == Locale::Other {
         return Err(UnverifiedReason::UnsupportedLocale);
     }
@@ -1238,7 +1042,6 @@ pub(crate) fn prepare_goal_check(
     deadline: Instant,
 ) -> Result<PreparedLaunch, PreparationError> {
     prepare(
-        None,
         workspace,
         OwnedLaunch::Shell(ShellArgs {
             command,

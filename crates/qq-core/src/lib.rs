@@ -37,8 +37,6 @@ use thiserror::Error;
 mod approval;
 mod cancellation;
 pub mod catalog;
-#[doc(hidden)]
-pub mod command_owner;
 pub mod context_source;
 pub mod hosts;
 mod input;
@@ -47,11 +45,6 @@ pub mod output;
 pub mod plan;
 mod runtime;
 mod sessions;
-mod task_git;
-mod task_git_helper_image;
-#[doc(hidden)]
-pub mod task_git_job;
-pub mod task_workspace;
 mod tools;
 pub mod undo;
 
@@ -67,7 +60,6 @@ pub use tools::bench_support as tool_bench;
 pub use tools::network::{NetworkPolicy, host_grant_matches};
 #[doc(hidden)]
 pub use tools::output::bench_support as tool_output_bench;
-mod storage;
 mod workspace;
 
 use runtime::{
@@ -109,8 +101,7 @@ pub use sessions::{
     ReviewSpend, ReviewVerdict, RunCompletion, RunResult, RuntimeLoadError, RuntimeLoadFuture,
     RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION,
     SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer,
-    SideQueryLimits, SlashCommandError, SpawnModelValidationFuture, TaskGitPolicy,
-    TaskHostingAuthorization, TaskHostingLoadFuture, TaskWorkspacePolicy, WorkerRuntimeLoadFuture,
+    SideQueryLimits, SlashCommandError, SpawnModelValidationFuture, WorkerRuntimeLoadFuture,
     WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 /// Merkle index over the workspace tree the tools see.
@@ -720,7 +711,6 @@ pub(crate) struct RunCapabilities {
     /// direct runs have no durable history to search.
     history: Option<Arc<dyn HistorySearcher>>,
     goal: Option<sessions::GoalRunInput>,
-    task_git: Option<Arc<sessions::TaskGitRunInput>>,
     goal_spend_tracking: bool,
     goal_paid: Option<sessions::GoalPaidInput>,
     /// Stored complete tool outputs for `read_tool_result`. Session runs
@@ -778,7 +768,6 @@ impl RunCapabilities {
             pricing: None,
             history: None,
             goal: None,
-            task_git: None,
             goal_spend_tracking: false,
             goal_paid: None,
             spills: None,
@@ -852,11 +841,6 @@ impl RunCapabilities {
 
     pub(crate) fn with_goal(mut self, goal: Option<sessions::GoalRunInput>) -> Self {
         self.goal = goal;
-        self
-    }
-
-    pub(crate) fn with_task_git(mut self, input: Option<sessions::TaskGitRunInput>) -> Self {
-        self.task_git = input.map(Arc::new);
         self
     }
 
@@ -954,7 +938,6 @@ impl RunCapabilities {
             pricing: None,
             history: None,
             goal: None,
-            task_git: None,
             goal_spend_tracking: false,
             goal_paid: None,
             spills: None,
@@ -2511,7 +2494,6 @@ mod tests {
                 spawn_agent: false,
                 search_history: false,
                 update_goal: false,
-                task_git: false,
                 read_tool_result: false,
                 load_skill: true,
                 read_only: false,
@@ -3060,7 +3042,6 @@ mod tests {
                 spawn_agent: false,
                 search_history: false,
                 update_goal: false,
-                task_git: false,
                 read_tool_result: false,
                 load_skill: true,
                 read_only: false,

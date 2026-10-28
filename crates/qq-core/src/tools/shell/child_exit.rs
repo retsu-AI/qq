@@ -18,11 +18,6 @@ impl ChildExit {
         child: &mut super::NativeChild,
         group: &mut super::ProcessGroupGuard,
     ) -> std::io::Result<std::process::ExitStatus> {
-        #[cfg(target_os = "macos")]
-        if child.owns_payload_group() {
-            group.disarm();
-            return child.wait().await;
-        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};

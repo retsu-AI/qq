@@ -164,7 +164,6 @@ impl StopReason {
 pub(crate) struct IgnoreStack {
     matchers: Vec<Option<Gitignore>>,
     include_ignored: bool,
-    tool_defaults: bool,
 }
 
 impl IgnoreStack {
@@ -176,7 +175,6 @@ impl IgnoreStack {
         let mut stack = Self {
             matchers: Vec::new(),
             include_ignored,
-            tool_defaults: true,
         };
         if include_ignored {
             return stack;
@@ -203,15 +201,6 @@ impl IgnoreStack {
         stack
     }
 
-    /// Task imports honor ignore rules while retaining ordinary dotfiles.
-    /// Publication includes newly created ignored outputs; the caller excludes
-    /// generated directories and private task control files independently.
-    pub(crate) fn for_task_files(workspace: &Workspace, inputs: bool) -> Self {
-        let mut stack = Self::open(workspace, ".", !inputs);
-        stack.tool_defaults = false;
-        stack
-    }
-
     fn is_ignored(&self, path: &str, name: &str, is_dir: bool) -> bool {
         if is_dir && name == ".git" {
             return true;
@@ -219,8 +208,7 @@ impl IgnoreStack {
         if self.include_ignored {
             return false;
         }
-        if self.tool_defaults
-            && (name.starts_with('.') || (is_dir && GENERATED_DIRECTORIES.contains(&name)))
+        if name.starts_with('.') || (is_dir && GENERATED_DIRECTORIES.contains(&name))
         {
             return true;
         }

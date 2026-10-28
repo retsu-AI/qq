@@ -378,7 +378,7 @@ pub fn validate_process_evidence(
     let Some(arguments) = arguments.filter(|value| value.len() <= 256 * 1024) else {
         return Status::MissingArguments;
     };
-    if (arguments.len() > 64 * 1024 && !super::super::task_git::is_tool(tool))
+    if arguments.len() > 64 * 1024
         || arguments_digest(tool, arguments).is_none()
     {
         return Status::InvalidArguments;
