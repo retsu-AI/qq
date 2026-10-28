@@ -5330,15 +5330,38 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_run_follows_a_yielded_command_and_stops_the_rest_when_it_ends() {
+        struct ReleaseOnSecondTurn {
+            script: TurnScript,
+            gate: std::fs::File,
+        }
+
+        impl Provider for ReleaseOnSecondTurn {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                // The second request means the first call already yielded:
+                // only then may the command finish.
+                if self.script.requests.lock().unwrap().len() == 1 {
+                    use std::io::Write as _;
+                    (&self.gate).write_all(b"go\n").unwrap();
+                }
+                self.script.stream(request)
+            }
+        }
+
         let directory = tempfile::tempdir().unwrap();
+        let release = directory.path().join("release");
+        tools::create_test_fifo(&release).await;
+        let gate = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&release)
+            .unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let tool_tasks = tools::ToolTasks::default();
-        let runtime = Runtime::new(
-            TurnScript {
+        let script = TurnScript {
                 turns: vec![
                     vec![(
                         "shell",
-                        r#"{"command":"echo building; sleep 2; echo built","yield_after_seconds":1}"#
+                        r#"{"command":"echo building; read token < release; echo built","yield_after_seconds":1}"#
                             .to_owned(),
                     )],
                     vec![(
@@ -5352,11 +5375,9 @@ mod tests {
                     )],
                 ],
                 requests: Arc::clone(&requests),
-            },
-            "test-model",
-            256,
-        )
-        .unwrap();
+            };
+        let runtime =
+            Runtime::new(ReleaseOnSecondTurn { script, gate }, "test-model", 256).unwrap();
         let events = tokio::time::timeout(
             std::time::Duration::from_secs(60),
             runtime
