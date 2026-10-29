@@ -195,6 +195,11 @@ pub(crate) fn names_context_overflow(message: &str) -> bool {
         || lowered.contains("exceeds the maximum")
 }
 
+pub(crate) fn names_transient_failure(message: &str) -> bool {
+    let lowered = message.to_lowercase();
+    lowered.contains("overloaded") || lowered.contains("internal error")
+}
+
 /// Maps an HTTP-shaped status embedded in an error payload to an error kind.
 pub(crate) fn status_error_kind(status: u16) -> ProviderErrorKind {
     match status {
