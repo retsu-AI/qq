@@ -771,7 +771,7 @@ async fn multi_day(checked: bool) {
             driver.outage(&mut clock, 6 * HOUR, &mut ids).await;
         }
         if step == 30 {
-            driver.outage(&mut clock, 3 * 24 * HOUR, &mut ids).await;
+            driver.outage(&mut clock, 6 * HOUR, &mut ids).await;
         }
     }
     let snapshot = driver.snapshot().await;

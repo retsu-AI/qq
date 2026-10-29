@@ -766,6 +766,17 @@ mod tests {
         assert_eq!(cache.superseded_len(), 0);
     }
 
+    fn write_newer(path: &std::path::Path, than: &std::path::Path, contents: &str) {
+        let previous = std::fs::metadata(than).unwrap().modified().unwrap();
+        std::fs::write(path, contents).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(previous + std::time::Duration::from_secs(1))
+            .unwrap();
+    }
+
     #[test]
     fn equivalent_refresh_admits_grown_source_evidence() {
         let directory = canonical_temp();
@@ -791,9 +802,8 @@ mod tests {
             .load::<std::convert::Infallible, _>(&key(directory.path(), "m"), || Ok(padded(0)))
             .unwrap();
         let touch = || {
-            thread::sleep(std::time::Duration::from_millis(20));
             let staged = directory.path().join("AGENTS.md.tmp");
-            std::fs::write(&staged, "be terse\n").unwrap();
+            write_newer(&staged, &instructions, "be terse\n");
             std::fs::rename(&staged, &instructions).unwrap();
         };
         // Same digest, much more watched evidence: the growth does not fit.
@@ -856,9 +866,8 @@ mod tests {
         let (first, _) = load().unwrap();
         // Touch the file with identical content: the fingerprint changes but
         // the compiled behavior does not.
-        thread::sleep(std::time::Duration::from_millis(20));
         let staged = directory.path().join("AGENTS.md.tmp");
-        std::fs::write(&staged, "be terse\n").unwrap();
+        write_newer(&staged, &instructions, "be terse\n");
         std::fs::rename(&staged, &instructions).unwrap();
         let (second, lookup) = load().unwrap();
         assert_eq!(lookup, PlanLookup::Revalidated);
@@ -1001,16 +1010,21 @@ mod tests {
         let directory = canonical_temp();
         let cache = PlanCache::new(PlanCacheLimits::default());
         let compiles = Arc::new(AtomicUsize::new(0));
+        let callers = Arc::new(AtomicUsize::new(0));
         let handles: Vec<_> = (0..16)
             .map(|_| {
                 let cache = cache.clone();
                 let compiles = Arc::clone(&compiles);
+                let callers = Arc::clone(&callers);
                 let workspace = directory.path().to_owned();
                 thread::spawn(move || {
+                    callers.fetch_add(1, Ordering::SeqCst);
                     cache
                         .load::<std::convert::Infallible, _>(&key(&workspace, "m"), || {
                             compiles.fetch_add(1, Ordering::SeqCst);
-                            thread::sleep(std::time::Duration::from_millis(10));
+                            while callers.load(Ordering::SeqCst) < 16 {
+                                thread::yield_now();
+                            }
                             Ok(compile(&workspace, "m"))
                         })
                         .unwrap()

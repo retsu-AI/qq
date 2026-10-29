@@ -1084,7 +1084,6 @@ impl Provider for DelayedProvider {
             .is_some_and(|text| text.starts_with("Summarize this conversation"));
         self.requests.lock().unwrap().push(request);
         Box::pin(async_stream! {
-            tokio::time::sleep(Duration::from_millis(20)).await;
             yield Ok(qq_provider::ProviderEvent::OutputTextDelta {
                 text: if summarizing { valid_summary("answer") } else { "answer".to_owned() },
             });
@@ -1798,6 +1797,7 @@ impl R4RssSampler {
             let mut peak = r4_current_rss_bytes();
             while !worker_stop.load(std::sync::atomic::Ordering::Acquire) {
                 peak = peak.max(r4_current_rss_bytes());
+                // lint: allow(sleep) RSS sampling period of the ignored R4 measurement
                 std::thread::sleep(Duration::from_millis(1));
             }
             peak.max(r4_current_rss_bytes())
@@ -1977,6 +1977,7 @@ fn run_r4_stream_diagnostic_child(
                 String::from_utf8_lossy(&output.stderr),
             );
         }
+        // lint: allow(sleep) polls a real child process of the ignored R4 measurement
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -7042,30 +7043,6 @@ async fn side_failure_with_a_request_in_flight_reports_unknown_spend_without_cha
 }
 
 #[tokio::test]
-async fn side_capture_latency_diagnostic() {
-    let directory = test_directory();
-    let (connection, session) = super::bench_support::seed_compacted_session(
-        &directory.path().join("capture.sqlite"),
-        256,
-        64,
-        1,
-        1024,
-    );
-    let mut samples = Vec::new();
-    for _ in 0..100 {
-        let start = std::time::Instant::now();
-        let context = transcript::capture_side_context(&connection, session).unwrap();
-        assert!(transcript::context_bytes(&context) <= 32 * 1024);
-        samples.push(start.elapsed().as_micros());
-    }
-    samples.sort_unstable();
-    eprintln!(
-        "side capture: 256 archived/64 retained runs, 100 samples; p50={}us p95={}us p99={}us",
-        samples[49], samples[94], samples[98]
-    );
-}
-
-#[tokio::test]
 async fn side_command_replay_launches_once_and_snapshot_matches_terminal_event() {
     let calls = Arc::new(AtomicUsize::new(0));
     let harness = spawn_harness_with_loader(
@@ -7218,34 +7195,6 @@ async fn side_submit_then_immediate_shutdown_settles_accepted_work() {
 }
 
 #[tokio::test]
-async fn side_capture_latency_relative_to_full_context_diagnostic() {
-    let directory = test_directory();
-    let (connection, session) = super::bench_support::seed_compacted_session(
-        &directory.path().join("capture.sqlite"),
-        256,
-        64,
-        1,
-        1024,
-    );
-    let mut full = Vec::new();
-    let mut bounded = Vec::new();
-    for _ in 0..100 {
-        let start = std::time::Instant::now();
-        transcript::load_model_context(&connection, session, u64::MAX).unwrap();
-        full.push(start.elapsed().as_micros());
-        let start = std::time::Instant::now();
-        transcript::capture_side_context(&connection, session).unwrap();
-        bounded.push(start.elapsed().as_micros());
-    }
-    full.sort_unstable();
-    bounded.sort_unstable();
-    eprintln!(
-        "capture comparison debug 100 samples: full p50={}us p95={}us; bounded p50={}us p95={}us",
-        full[49], full[94], bounded[49], bounded[94]
-    );
-}
-
-#[tokio::test]
 async fn side_partial_text_is_durable_before_completion_and_cancel_preserves_it() {
     struct PartialLoader;
     impl RuntimeLoader for PartialLoader {
@@ -7331,106 +7280,6 @@ async fn side_partial_text_is_durable_before_completion_and_cancel_preserves_it(
         .unwrap();
     assert_eq!(item.answer, "partial evidence");
     assert_eq!(item.state, qq_protocol::SideQuestionState::Cancelled);
-}
-
-#[tokio::test]
-async fn side_admission_concurrent_main_stream_latency_diagnostic() {
-    async fn trial(side: bool) -> Vec<u128> {
-        struct Loader {
-            loads: AtomicUsize,
-            times: Arc<StdMutex<Vec<std::time::Instant>>>,
-        }
-        impl RuntimeLoader for Loader {
-            fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-                let main = self.loads.fetch_add(1, Ordering::SeqCst) == 0;
-                let times = Arc::clone(&self.times);
-                Box::pin(async move {
-                    struct Ticker(Arc<StdMutex<Vec<std::time::Instant>>>);
-                    impl Provider for Ticker {
-                        fn stream(&self, _: ModelRequest) -> ProviderStream {
-                            let times = Arc::clone(&self.0);
-                            Box::pin(async_stream::stream! {
-                                for _ in 0..100 {
-                                    tokio::time::sleep(Duration::from_millis(2)).await;
-                                    times.lock().unwrap().push(std::time::Instant::now());
-                                    yield Ok(qq_provider::ProviderEvent::OutputTextDelta { text: "x".to_owned() });
-                                }
-                                yield Ok(qq_provider::ProviderEvent::Completed { usage: None });
-                            })
-                        }
-                    }
-                    let runtime = if main {
-                        Runtime::new(Ticker(times), "test-model", 256)
-                    } else {
-                        Runtime::new(ScriptedProvider, "test-model", 256)
-                    }
-                    .unwrap();
-                    Ok(loaded_runtime(runtime, &request.workspace, None))
-                })
-            }
-        }
-        let times = Arc::new(StdMutex::new(Vec::new()));
-        let harness = spawn_harness_with_loader(
-            Arc::new(Loader {
-                loads: AtomicUsize::new(0),
-                times: Arc::clone(&times),
-            }),
-            1,
-        )
-        .await;
-        harness
-            .runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id: harness.session_id,
-                    input: vec![InputPart::text("main")],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
-        while times.lock().unwrap().len() < 10 {
-            tokio::task::yield_now().await;
-        }
-        if side {
-            harness
-                .runtime
-                .answer_side_question(
-                    harness.session_id,
-                    "side".to_owned(),
-                    RunCancellation::new(),
-                )
-                .await
-                .unwrap();
-        }
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while times.lock().unwrap().len() < 100 {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .unwrap();
-        let deltas = {
-            let times = times.lock().unwrap();
-            times
-                .windows(2)
-                .map(|pair| pair[1].duration_since(pair[0]).as_micros())
-                .collect::<Vec<_>>()
-        };
-        harness.runtime.shutdown().await.unwrap();
-        deltas
-    }
-    let mut baseline = trial(false).await;
-    let mut side = trial(true).await;
-    baseline.sort_unstable();
-    side.sort_unstable();
-    eprintln!(
-        "main stream debug 99 gaps: baseline p50={}us p95={}us max={}us; with side p50={}us p95={}us max={}us",
-        baseline[49], baseline[94], baseline[98], side[49], side[94], side[98]
-    );
 }
 
 #[tokio::test]
@@ -7923,7 +7772,7 @@ async fn wait_side(
             if done(&item) {
                 return item;
             }
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -8003,7 +7852,7 @@ async fn side_cancel_drains_a_blocked_inspection_tool_before_settlement() {
     release.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         while harness.runtime.inner.side_tasks.load(Ordering::Acquire) != 0 {
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -8415,7 +8264,7 @@ async fn side_dropped_submit_future_still_settles_and_frees_the_session() {
             if let Some(id) = found {
                 return parse_id::<RunId>(&id).unwrap();
             }
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await

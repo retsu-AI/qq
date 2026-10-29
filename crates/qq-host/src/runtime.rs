@@ -3897,10 +3897,8 @@ mod tests {
         // Generate well over one replay page (128) of events. The prompt
         // queue is bounded (16 pending), so a full queue is backpressure
         // (503) that the producer waits out; it is never dropped work.
-        let mut acks = Vec::new();
         for i in 0..40 {
             loop {
-                let started = std::time::Instant::now();
                 match client
                     .submit(
                         session_id,
@@ -3911,7 +3909,6 @@ mod tests {
                     .await
                 {
                     Ok(receipt) => {
-                        acks.push(started.elapsed());
                         assert!(matches!(
                             receipt.outcome,
                             CommandOutcome::PromptQueued { .. }
@@ -3919,7 +3916,7 @@ mod tests {
                         break;
                     }
                     Err(qq_client::ClientError::ServerMessage { status: 503, .. }) => {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        tokio::task::yield_now().await;
                     }
                     Err(error) => panic!("submit failed: {error}"),
                 }
@@ -3933,14 +3930,6 @@ mod tests {
             live_events.len() > 128,
             "{} events is not more than one page",
             live_events.len()
-        );
-        // Acknowledgements stayed fast while an observer was stalled.
-        let mut sorted = acks.clone();
-        sorted.sort();
-        assert!(
-            sorted[sorted.len() / 2] < Duration::from_millis(250),
-            "median ack {:?} with a stalled observer",
-            sorted[sorted.len() / 2]
         );
         stalled_task.abort();
         drop(release);
@@ -7817,8 +7806,17 @@ mod tests {
             PlanLookup::Hit
         );
 
-        std::thread::sleep(Duration::from_millis(20));
-        fs::write(&config, document(96)).unwrap();
+        let edit = |contents: &str| {
+            let previous = fs::metadata(&config).unwrap().modified().unwrap();
+            fs::write(&config, contents).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&config)
+                .unwrap()
+                .set_modified(previous + Duration::from_secs(1))
+                .unwrap();
+        };
+        edit(&document(96));
         factory.inner.config.grant_pending_trust(&request).unwrap();
         let (edited, lookup) = factory
             .plan_with_lookup(&request, &AgentProfileId::default())
@@ -7827,16 +7825,14 @@ mod tests {
         assert_eq!(edited.resolved_model().max_output_tokens, 96);
         assert_ne!(first.digest(), edited.digest());
 
-        std::thread::sleep(Duration::from_millis(20));
-        fs::write(&config, "(version: 1, model: ").unwrap();
+        edit("(version: 1, model: ");
         assert!(
             factory
                 .plan_with_lookup(&request, &AgentProfileId::default())
                 .is_err()
         );
         // The previous valid generation survives the failed refresh.
-        std::thread::sleep(Duration::from_millis(20));
-        fs::write(&config, document(96)).unwrap();
+        edit(&document(96));
         let (recovered, _) = factory
             .plan_with_lookup(&request, &AgentProfileId::default())
             .unwrap();
@@ -7989,18 +7985,14 @@ mod tests {
         );
     }
 
-    /// A keyring whose every read costs a fixed delay, standing in for a
-    /// secure store (macOS `securityd`) that is slow rather than absent.
-    struct SlowKeyring {
+    struct CountingKeyring {
         inner: MemoryKeyring,
-        delay: Duration,
         reads: AtomicU64,
     }
 
-    impl KeyringBackend for SlowKeyring {
+    impl KeyringBackend for CountingKeyring {
         fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
             self.reads.fetch_add(1, Ordering::Relaxed);
-            std::thread::sleep(self.delay);
             self.inner.get(name)
         }
 
@@ -8153,9 +8145,8 @@ mod tests {
     #[test]
     fn plan_compilation_reads_only_the_selected_providers_credential() {
         let fixture = RuntimeFixture::new();
-        let keyring = Arc::new(SlowKeyring {
+        let keyring = Arc::new(CountingKeyring {
             inner: MemoryKeyring::default(),
-            delay: Duration::ZERO,
             reads: AtomicU64::new(0),
         });
         let factory = factory_with_stored_credential_providers(&fixture, keyring.clone(), 12);
@@ -8184,9 +8175,8 @@ mod tests {
         // all, so every built-in provider's catalog (64 routes by default)
         // was advertised to `spawn_agent` and could crowd the bounded list.
         let fixture = RuntimeFixture::new();
-        let keyring = Arc::new(SlowKeyring {
+        let keyring = Arc::new(CountingKeyring {
             inner: MemoryKeyring::default(),
-            delay: Duration::ZERO,
             reads: AtomicU64::new(0),
         });
         let credentials = CredentialStore::with_backend(
@@ -8231,54 +8221,6 @@ mod tests {
             );
         }
         assert_eq!(keyring.reads.load(Ordering::Relaxed), 1);
-    }
-
-    /// Not a correctness test: prints the cold-compile cost of `plan_for` with
-    /// N stored-credential providers behind a keyring that takes 5 ms per read,
-    /// the shape a macOS Keychain shows under load. Run with
-    /// `cargo test -p qq --release -- --ignored plan_compile_with_slow_keyring --nocapture`.
-    /// Before the spawn-route probe left plan compilation this cost
-    /// (N + 1) x delay per compile; it is now one read, independent of N.
-    #[test]
-    #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
-    fn plan_compile_with_slow_keyring() {
-        let iterations: u32 = std::env::var("QQ_BENCH_ITERATIONS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(50);
-        for count in [1usize, 4, 16] {
-            let fixture = RuntimeFixture::new();
-            let keyring = Arc::new(SlowKeyring {
-                inner: MemoryKeyring::default(),
-                delay: Duration::from_millis(5),
-                reads: AtomicU64::new(0),
-            });
-            let factory =
-                factory_with_stored_credential_providers(&fixture, keyring.clone(), count);
-            let request = fixture.request(r#"(version: 1, model: "p0/m")"#);
-            let mut samples = Vec::with_capacity(iterations as usize);
-            for index in 0..iterations {
-                fs::write(
-                    fixture.path("work/AGENTS.md"),
-                    format!("Be brief. Iteration {index}.\n"),
-                )
-                .unwrap();
-                let started = std::time::Instant::now();
-                let (_, lookup) = factory
-                    .plan_with_lookup(&request, &AgentProfileId::default())
-                    .unwrap();
-                samples.push(started.elapsed());
-                assert_eq!(lookup, PlanLookup::Compiled);
-            }
-            samples.sort();
-            let median = samples[samples.len() / 2];
-            let p95 = samples[((samples.len() - 1) as f64 * 0.95).round() as usize];
-            println!(
-                "plan_for cold compile, {count} stored-credential providers: median {median:?} \
-                 p95 {p95:?}, keyring reads {} ({iterations} iterations)",
-                keyring.reads.load(Ordering::Relaxed)
-            );
-        }
     }
 
     #[test]

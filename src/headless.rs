@@ -5643,11 +5643,8 @@ mod tests {
             // Wait until the run is executing (turn one is held open by the
             // provider), steer, wait for the steering to be durably queued,
             // then release the turn so the boundary applies it.
-            loop {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                if session_requests.lock().unwrap().len() == 1 {
-                    break;
-                }
+            while session_requests.lock().unwrap().len() != 1 {
+                tokio::task::yield_now().await;
             }
             tx.send("   ".to_owned()).await.unwrap();
             tx.send("also check the tests".to_owned()).await.unwrap();
@@ -5661,7 +5658,7 @@ mod tests {
                 panic!("unexpected receipt")
             };
             loop {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                tokio::task::yield_now().await;
                 let sessions_snapshot = sessions
                     .snapshot(SnapshotRequest {
                         workspace_id,
@@ -6401,7 +6398,7 @@ mod tests {
             // `RunStarted` precedes the first provider request; die only
             // once the provider is actually mid-turn.
             while requests.lock().unwrap().is_empty() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await
@@ -7287,11 +7284,17 @@ mod tests {
 
     #[tokio::test]
     async fn interrupt_sends_cancellation_and_leaves_no_active_run() {
-        let fixture = fixture(|| HangingProvider).await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let fixture = fixture({
+            let entered = entered.clone();
+            move || {
+                entered.notify_one();
+                HangingProvider
+            }
+        })
+        .await;
         let options = options(&fixture.workspace);
-        let interrupt = async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        };
+        let interrupt = entered.notified();
 
         let (status, stdout, _stderr) = run_to_end(&fixture, options, interrupt).await;
 
@@ -7303,71 +7306,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_budget_cancels_a_looping_run_as_budget_exhaustion() {
-        let fixture = fixture(ReadLoopProvider::new).await;
-        std::fs::write(fixture.workspace.join("note.txt"), "content\n").unwrap();
-        let mut options = options(&fixture.workspace);
-        options.max_turns = Some(2);
-
-        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
-
-        assert_eq!(
-            status,
-            HeadlessStatus::BudgetExhausted,
-            "stdout: {stdout}\nstderr: {_stderr}"
+    async fn budgets_settle_runs_as_budget_exhaustion() {
+        enum Expect {
+            Status,
+            CostAtLeast(u64),
+            CostAbove(u64),
+            UnknownCost,
+        }
+        type Case = (
+            &'static str,
+            fn() -> Box<dyn Provider>,
+            Option<u32>,
+            Option<u64>,
+            Expect,
         );
-        assert_eq!(status.code(), 3);
-        let records = parse_records(&stdout);
-        let outcome = records.last().unwrap();
-        assert_eq!(outcome["status"], "budget_exhausted");
-        assert_no_active_run(&fixture).await;
-    }
+        let cases: [Case; 5] = [
+            (
+                "turn limit",
+                || Box::new(ReadLoopProvider::new()),
+                Some(2),
+                None,
+                Expect::Status,
+            ),
+            (
+                "cost limit",
+                || Box::new(ReadLoopProvider::new()),
+                None,
+                Some(4_000),
+                Expect::CostAtLeast(6_000),
+            ),
+            (
+                "cost becomes unknown",
+                || Box::new(ReadLoopProvider::unmetered()),
+                None,
+                Some(4_000),
+                Expect::UnknownCost,
+            ),
+            (
+                "completed unmetered turn",
+                || Box::new(UnmeteredTextProvider),
+                None,
+                Some(4_000),
+                Expect::UnknownCost,
+            ),
+            (
+                "completed over-cost turn",
+                || Box::new(TextProvider),
+                None,
+                Some(10_000),
+                Expect::CostAbove(10_000),
+            ),
+        ];
+        for (name, make, max_turns, max_cost, expect) in cases {
+            let fixture = fixture(make).await;
+            std::fs::write(fixture.workspace.join("note.txt"), "content\n").unwrap();
+            let mut options = options(&fixture.workspace);
+            options.max_turns = max_turns;
+            options.max_cost_usd_nanos = max_cost;
 
-    #[tokio::test]
-    async fn cost_budget_cancels_a_looping_run_as_budget_exhaustion() {
-        let fixture = fixture(ReadLoopProvider::new).await;
-        std::fs::write(fixture.workspace.join("note.txt"), "content\n").unwrap();
-        let mut options = options(&fixture.workspace);
-        options.max_cost_usd_nanos = Some(4_000);
+            let (status, stdout, stderr) =
+                run_to_end(&fixture, options, std::future::pending()).await;
 
-        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
-
-        assert_eq!(
-            status,
-            HeadlessStatus::BudgetExhausted,
-            "stdout: {stdout}\nstderr: {_stderr}"
-        );
-        assert_eq!(status.code(), 3);
-        let records = parse_records(&stdout);
-        let outcome = records.last().unwrap();
-        assert_eq!(outcome["status"], "budget_exhausted");
-        assert!(
-            outcome["estimated_cost_usd_nanos"]
-                .as_u64()
-                .is_some_and(|cost| cost >= 6_000)
-        );
-        assert_no_active_run(&fixture).await;
-    }
-
-    #[tokio::test]
-    async fn hard_cost_budget_cancels_when_provider_usage_becomes_unknown() {
-        let fixture = fixture(ReadLoopProvider::unmetered).await;
-        std::fs::write(fixture.workspace.join("note.txt"), "content\n").unwrap();
-        let mut options = options(&fixture.workspace);
-        options.max_cost_usd_nanos = Some(4_000);
-
-        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
-
-        assert_eq!(status, HeadlessStatus::BudgetExhausted);
-        let records = parse_records(&stdout);
-        let outcome = records.last().unwrap();
-        assert_eq!(outcome["status"], "budget_exhausted");
-        assert!(
-            outcome["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("cost became unknown"))
-        );
-        assert_no_active_run(&fixture).await;
+            assert_eq!(
+                status,
+                HeadlessStatus::BudgetExhausted,
+                "{name}: stdout: {stdout}\nstderr: {stderr}"
+            );
+            assert_eq!(status.code(), 3, "{name}");
+            let records = parse_records(&stdout);
+            let outcome = records.last().unwrap();
+            assert_eq!(outcome["status"], "budget_exhausted", "{name}");
+            let cost = outcome["estimated_cost_usd_nanos"].as_u64();
+            let message = outcome["message"].as_str().unwrap_or_default();
+            match expect {
+                Expect::Status => {}
+                Expect::CostAtLeast(bound) => {
+                    assert!(cost.is_some_and(|cost| cost >= bound), "{name}: {cost:?}")
+                }
+                Expect::CostAbove(bound) => {
+                    assert!(cost.is_some_and(|cost| cost > bound), "{name}: {cost:?}")
+                }
+                Expect::UnknownCost => {
+                    assert!(message.contains("cost became unknown"), "{name}: {message}")
+                }
+            }
+            assert_no_active_run(&fixture).await;
+        }
     }
 
     #[tokio::test]
@@ -7412,51 +7436,11 @@ mod tests {
                 }) {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await
         .expect("parent cancellation must settle its in-flight child");
-        assert_no_active_run(&fixture).await;
-    }
-
-    #[tokio::test]
-    async fn completed_unmetered_turn_still_reports_cost_budget_exhaustion() {
-        let fixture = fixture(|| UnmeteredTextProvider).await;
-        let mut options = options(&fixture.workspace);
-        options.max_cost_usd_nanos = Some(4_000);
-
-        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
-
-        assert_eq!(status, HeadlessStatus::BudgetExhausted);
-        let records = parse_records(&stdout);
-        let outcome = records.last().unwrap();
-        assert_eq!(outcome["status"], "budget_exhausted");
-        assert!(
-            outcome["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("cost became unknown"))
-        );
-        assert_no_active_run(&fixture).await;
-    }
-
-    #[tokio::test]
-    async fn completed_over_cost_turn_still_reports_cost_budget_exhaustion() {
-        let fixture = fixture(|| TextProvider).await;
-        let mut options = options(&fixture.workspace);
-        options.max_cost_usd_nanos = Some(10_000);
-
-        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
-
-        assert_eq!(status, HeadlessStatus::BudgetExhausted);
-        let records = parse_records(&stdout);
-        let outcome = records.last().unwrap();
-        assert_eq!(outcome["status"], "budget_exhausted");
-        assert!(
-            outcome["estimated_cost_usd_nanos"]
-                .as_u64()
-                .is_some_and(|cost| cost > 10_000)
-        );
         assert_no_active_run(&fixture).await;
     }
 

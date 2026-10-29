@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(next(&mut requests).await["params"]["state"], "idle");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_burst_while_herdr_is_slow_sends_only_the_newest_state() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("herdr.sock");
@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(states, ["idle"]);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_absent_or_silent_herdr_never_blocks_the_caller() {
         let dir = tempfile::tempdir().unwrap();
         // Nothing listens: connect fails at once.
@@ -554,7 +554,7 @@ mod tests {
             send(&socket, &json!({})).await,
             Err(SendError::Timeout)
         ));
-        assert!(started.elapsed() < REQUEST_TIMEOUT * 3);
+        assert_eq!(started.elapsed(), REQUEST_TIMEOUT);
         // `update` never waits on the socket, and release is bounded too.
         let reporter = Reporter::spawn(HerdrPane {
             pane_id: "w1:p1".to_owned(),
@@ -566,7 +566,7 @@ mod tests {
         });
         let started = tokio::time::Instant::now();
         reporter.release().await;
-        assert!(started.elapsed() < REQUEST_TIMEOUT * 3);
+        assert!(started.elapsed() <= REQUEST_TIMEOUT);
     }
 
     #[tokio::test]

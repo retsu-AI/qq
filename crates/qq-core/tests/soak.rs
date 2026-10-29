@@ -508,7 +508,7 @@ async fn stopping_a_pending_summarizer_preserves_measured_turns_and_unknown_tota
             .await;
         tokio::time::timeout(Duration::from_secs(4), async {
             while fixture.observed.lock().unwrap().summary_requests < 2 {
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await
@@ -786,6 +786,7 @@ impl WorkerGuard {
                     ),
                 ));
             }
+            // lint: allow(sleep) polls a real worker process for reaping
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -817,6 +818,7 @@ fn worker_guard_reaps_an_already_exited_worker() {
     let deadline = Instant::now() + Duration::from_secs(30);
     while worker.child.try_wait().unwrap().is_none() {
         assert!(Instant::now() < deadline, "worker exit timed out");
+        // lint: allow(sleep) polls a real worker process for exit
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(worker.terminate().unwrap().success());
@@ -854,6 +856,7 @@ fn process_kill_preserves_the_side_effect_without_reexecution() {
                 panic!("worker exited before barrier: {status}");
             }
             assert!(Instant::now() < deadline, "durable barrier timed out");
+            // lint: allow(sleep) polls a real worker process and its file barrier
             std::thread::sleep(Duration::from_millis(5));
         }
         let status = worker.terminate().expect("kill and bounded reap of worker");
@@ -928,7 +931,7 @@ async fn process_kill_worker() {
         .await
         .is_err()
     {
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
     }
     tokio::fs::write(directory.join("ready"), b"ready")
         .await
@@ -969,6 +972,7 @@ fn process_kill_preserves_pending_summary_prefix_without_resending() {
                 Instant::now() < deadline,
                 "pending summary barrier timed out"
             );
+            // lint: allow(sleep) polls a real worker process and its file barrier
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(!worker.terminate().unwrap().success());
@@ -1078,7 +1082,7 @@ async fn pending_summary_kill_worker() {
     let fixture = support::Fixture::open(&directory, script).await;
     fixture.submit().await;
     while fixture.observed.lock().unwrap().summary_requests < 2 {
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
     }
     // The provider is polled only after both the prefix receipt and next
     // pending-unknown marker commit. The parent kills at this durable barrier.

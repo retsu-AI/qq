@@ -205,6 +205,7 @@ async fn duration_stops_shell_while_output_persistence_is_blocked() {
     let process = PathBuf::from(format!("/proc/{pid}"));
     let stopped = tokio::time::timeout(Duration::from_secs(2), async {
         while process.exists() {
+            // lint: allow(sleep) polls /proc for a real killed shell
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -887,7 +888,7 @@ impl Provider for DeadlineProvider {
                 ProviderEvent::ToolCallStarted { id: "sleep".to_owned(), name: "shell".to_owned() },
                 ProviderEvent::ToolCallArgumentsDelta {
                     id: "sleep".to_owned(),
-                    json: serde_json::json!({"command": "printf before-deadline; sleep 30; printf late > late.txt", "timeout_seconds": 1800}).to_string(),
+                    json: serde_json::json!({"command": "printf before-deadline; : > printed; sleep 30; printf late > late.txt", "timeout_seconds": 1800}).to_string(),
                 },
                 ProviderEvent::ToolCallCompleted { id: "sleep".to_owned() },
                 ProviderEvent::Completed { usage: None },
@@ -962,6 +963,15 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
         .await
         .expect("the process must reach actual spawn")
         .unwrap();
+    let printed = directory.path().join("printed");
+    let waited = std::time::Instant::now();
+    while !printed.exists() {
+        assert!(
+            waited.elapsed() < Duration::from_secs(5),
+            "shell never printed"
+        );
+        tokio::task::yield_now().await;
+    }
     tokio::time::advance(Duration::from_millis(300)).await;
     let mut tool_started = false;
     let terminal = tokio::time::timeout(Duration::from_secs(2), async {

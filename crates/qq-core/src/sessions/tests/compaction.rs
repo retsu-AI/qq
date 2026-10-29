@@ -4791,7 +4791,7 @@ async fn a_committed_step_survives_shutdown_and_the_next_prompt_folds_from_its_m
             tokio::time::Instant::now() < deadline,
             "the prompt never reached the provider"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
     }
     let workspace_id = harness.workspace_id;
     let session_id = harness.session_id;

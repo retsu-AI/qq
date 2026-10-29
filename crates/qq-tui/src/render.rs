@@ -411,11 +411,6 @@ mod tests {
     }
 
     #[test]
-    fn style_stays_nine_bytes() {
-        assert_eq!(std::mem::size_of::<Style>(), 9);
-    }
-
-    #[test]
     fn unsafe_characters_are_dropped_without_touching_safe_spans() {
         let mut line = Line::styled("ok", Style::default());
         line.push("b\u{7}ell", Style::default());

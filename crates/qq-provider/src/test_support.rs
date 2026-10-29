@@ -211,7 +211,6 @@ impl LoopbackServer {
                         .write_all(&chunk)
                         .expect("loopback response chunk must be written");
                     stream.flush().expect("loopback response chunk must flush");
-                    thread::sleep(Duration::from_millis(1));
                 }
                 captured.push(CapturedRequest {
                     wire: String::from_utf8(request).expect("captured request must be UTF-8"),
@@ -249,6 +248,7 @@ fn accept_before(listener: &TcpListener, timeout: Duration) -> TcpStream {
                 return stream;
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                // lint: allow(sleep) non-blocking accept on a real loopback socket
                 thread::sleep(Duration::from_millis(5));
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {

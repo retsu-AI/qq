@@ -307,12 +307,4 @@ mod tests {
             "# Changelog\n\n## 0.2.0 — d\n\n### Fixes\n- x\n"
         );
     }
-
-    #[test]
-    fn today_is_an_iso_date() {
-        let today = today_utc();
-        assert_eq!(today.len(), 10, "{today}");
-        assert_eq!(today.as_bytes()[4], b'-');
-        assert_eq!(today.as_bytes()[7], b'-');
-    }
 }

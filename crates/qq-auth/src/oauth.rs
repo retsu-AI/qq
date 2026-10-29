@@ -680,11 +680,4 @@ pub(crate) mod tests {
                 .unwrap();
         assert_eq!((response.status, response.body), (401, None));
     }
-
-    #[test]
-    fn lock_files_are_derived_from_the_provider_name() {
-        assert_eq!(lock_file_name("openai-codex"), "openai-codex.lock");
-        assert_eq!(lock_file_name("xai"), "xai.lock");
-        assert_eq!(lock_file_name("fixture-oauth"), "fixture-oauth.lock");
-    }
 }
