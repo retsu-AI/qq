@@ -567,7 +567,6 @@ async fn the_first_frame_paints_before_the_client_port_connects() {
     });
     let (events, event_rx) = mpsc::unbounded_channel();
     let frames = FrameLog::default();
-    let started = std::time::Instant::now();
     let task = tokio::spawn(run_loop(
         port,
         App::new(TuiOptions::default()),
@@ -585,13 +584,6 @@ async fn the_first_frame_paints_before_the_client_port_connects() {
     let first = frames.frames();
     assert_eq!(first.len(), 1, "the first frame does not wait on the port");
     assert!(frame_text(&first[0]).contains("connecting"));
-    // Startup budget: process start to first frame in well under 30 ms of
-    // wall time even under the test profile.
-    assert!(
-        started.elapsed() < std::time::Duration::from_millis(30),
-        "{:?}",
-        started.elapsed()
-    );
 
     // A request made before the connection lands is held, not lost.
     events

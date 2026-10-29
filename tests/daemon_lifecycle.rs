@@ -287,13 +287,11 @@ async fn a_second_foreground_host_reports_the_running_daemon_at_once() {
             format!("qq server already running at {}\n", connection.address()),
         ),
     ] {
-        let started = std::time::Instant::now();
         let output = tokio::time::timeout(Duration::from_secs(10), home.command(args).output())
             .await
             .unwrap_or_else(|_| panic!("`qq {}` waited on the running daemon", args.join(" ")))
             .unwrap();
         assert_eq!(stdout(&output), expected);
-        assert!(started.elapsed() < Duration::from_secs(10));
     }
     assert!(alive(pid));
     stdout(&home.run(&["daemon", "stop"]).await);

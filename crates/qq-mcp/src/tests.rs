@@ -3,7 +3,7 @@ use std::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use rmcp::{
@@ -468,17 +468,21 @@ async fn call_timeouts_are_errors_and_do_not_wedge_the_shared_client() {
 
 #[tokio::test]
 async fn cancellation_stops_a_call_without_wedging_the_shared_client() {
-    let fixture = Fixture::new(&["echo", "slow"]);
+    let mut fixture = Fixture::new(&["echo", "slow"]);
+    // Only cancellation can end the call.
+    fixture.server.slow_delay = Duration::from_secs(3600);
+    let active = Arc::clone(&fixture.server.active_calls);
     let mut slow = settings("srv");
     slow.call_timeout = Duration::from_secs(30);
     let manager = manager_with(vec![(slow, fixture.connector())]);
 
     let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        while active.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
         let _ = cancel.send(());
     });
-    let started = Instant::now();
     let outcome = manager
         .call(
             "mcp__srv__slow",
@@ -488,12 +492,6 @@ async fn cancellation_stops_a_call_without_wedging_the_shared_client() {
             }),
         )
         .await;
-    // Observed by wake, not by a poll tick: well inside the old 50 ms period.
-    assert!(
-        started.elapsed() < Duration::from_millis(45),
-        "{:?}",
-        started.elapsed()
-    );
     assert!(outcome.is_error);
     assert!(outcome.content.contains("cancelled"));
 

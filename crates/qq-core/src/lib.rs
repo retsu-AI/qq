@@ -6545,7 +6545,7 @@ mod tests {
         assert!(!message.contains("model ceiling"), "{message}");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn completed_limited_stream_stays_finished_when_polled_after_its_deadline() {
         let directory = tempfile::tempdir().unwrap();
         let runtime = Runtime::new(
@@ -6583,7 +6583,7 @@ mod tests {
                 _ => {}
             }
         }
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        tokio::time::advance(Duration::from_millis(600)).await;
         assert!(
             events.next().await.is_none(),
             "a finished stream must not produce a second terminal"

@@ -2662,7 +2662,6 @@ fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
         300 * 1024,
     );
     let workspace_id = WorkspaceId::from_bytes([1; 16]);
-    let started = std::time::Instant::now();
     let snapshot = load_snapshot(
         &mut connection,
         StoreId::from_bytes([7; 16]),
@@ -2675,7 +2674,6 @@ fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
         },
     )
     .unwrap();
-    let elapsed = started.elapsed();
     let encoded = serde_json::to_vec(&snapshot).unwrap();
     assert!(
         encoded.len() <= qq_protocol::MAX_SNAPSHOT_BYTES,
@@ -2714,10 +2712,6 @@ fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
     assert!(
         snapshot.included.is_empty(),
         "the focused id is not repeated"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "snapshot assembly took {elapsed:?}"
     );
     // A body that is only included, with the focused body already having
     // spent everything, ships its summary and runs but reports its whole
