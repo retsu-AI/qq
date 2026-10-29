@@ -688,6 +688,7 @@ fn describe(error: MatchError, _text: &str) -> String {
             "disproportionate: {} matched a {span_lines}-line block for a {old_lines}-line old; give more of the block",
             via.name()
         ),
+        MatchError::MixedGutter => "invalid_edit: old matched only without its read_file line numbers, but new mixes numbered and unnumbered lines; remove the N<TAB> line-number prefixes from new".to_owned(),
     }
 }
 
@@ -1637,6 +1638,40 @@ mod tests {
         assert_eq!(
             fs::read_to_string(directory.path().join("a.txt")).unwrap(),
             "alpha\ngamma\n"
+        );
+    }
+
+    #[test]
+    fn a_new_mixing_read_file_line_numbers_is_refused_and_writes_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        run(&workspace, &state, "read_file", r#"{"path":"a.txt"}"#);
+
+        let refused = run(
+            &workspace,
+            &state,
+            "edit_file",
+            &serde_json::json!({"edits":[{
+                "path":"a.txt",
+                "old":"  2\tbeta\n  3\tgamma\n",
+                "new":"  2\tBETA\nadded\n  3\tgamma\n"
+            }]})
+            .to_string(),
+        );
+        assert!(refused.is_error, "{}", refused.model_text);
+        assert_eq!(
+            refused.model_text,
+            "edit 0: invalid_edit: old matched only without its read_file line numbers, but new mixes numbered and unnumbered lines; remove the N<TAB> line-number prefixes from new"
+        );
+        assert_eq!(
+            qq_protocol::ToolErrorKind::of("edit_file", &refused.model_text),
+            qq_protocol::ToolErrorKind::Correction
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+            "alpha\nbeta\ngamma\n"
         );
     }
 

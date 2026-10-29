@@ -48,6 +48,7 @@ pub(super) enum MatchError {
         span_lines: usize,
         old_lines: usize,
     },
+    MixedGutter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,11 +76,16 @@ pub(super) fn exact_starts<'a>(text: &'a str, old: &'a str) -> impl Iterator<Ite
 pub(super) fn find(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Match, MatchError> {
     let found = match find_in(text, old, new, fuzzy) {
         Err(MatchError::NotFound { closest }) if fuzzy => {
-            let Some(stripped) = strip_gutter(old) else {
+            let Gutter::All(stripped) = gutter(old) else {
                 return Err(MatchError::NotFound { closest });
             };
-            let new = strip_gutter(new).unwrap_or_else(|| new.to_owned());
+            let (new, mixed) = match gutter(new) {
+                Gutter::All(stripped) => (stripped, false),
+                Gutter::None => (new.to_owned(), false),
+                Gutter::Mixed => (new.to_owned(), true),
+            };
             match find_in(text, &stripped, &new, fuzzy) {
+                Ok(_) if mixed => return Err(MatchError::MixedGutter),
                 Ok(found) => Match {
                     via: Strategy::LineNumbers,
                     ..found
@@ -93,10 +99,16 @@ pub(super) fn find(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Matc
     Ok(crlf_replacement(text, found))
 }
 
-fn strip_gutter(old: &str) -> Option<String> {
-    let mut out = String::with_capacity(old.len());
-    let mut any = false;
-    for line in old.split_inclusive('\n') {
+enum Gutter {
+    None,
+    All(String),
+    Mixed,
+}
+
+fn gutter(text: &str) -> Gutter {
+    let mut out = String::with_capacity(text.len());
+    let (mut numbered, mut plain) = (false, false);
+    for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches(['\n', '\r']);
         if body.trim().is_empty() {
             out.push_str(line);
@@ -104,14 +116,20 @@ fn strip_gutter(old: &str) -> Option<String> {
         }
         let digits = body.trim_start_matches(' ');
         let rest = digits.trim_start_matches(|ch: char| ch.is_ascii_digit());
-        if rest.len() == digits.len() {
-            return None;
+        match rest.strip_prefix('\t') {
+            Some(content) if rest.len() < digits.len() => {
+                numbered = true;
+                out.push_str(content);
+                out.push_str(&line[body.len()..]);
+            }
+            _ => plain = true,
         }
-        out.push_str(rest.strip_prefix('\t')?);
-        out.push_str(&line[body.len()..]);
-        any = true;
     }
-    any.then_some(out)
+    match (numbered, plain) {
+        (true, false) => Gutter::All(out),
+        (true, true) => Gutter::Mixed,
+        (false, _) => Gutter::None,
+    }
 }
 
 fn crlf_replacement(text: &str, mut found: Match) -> Match {
@@ -667,5 +685,55 @@ mod tests {
             find("beta\ngamma\n", "2\tbeta\ngamma\n", "x", true),
             Err(MatchError::NotFound { .. })
         ));
+    }
+
+    #[test]
+    fn a_new_that_mixes_gutter_and_plain_lines_is_refused() {
+        assert_eq!(
+            find(
+                "alpha\nbeta\ngamma\n",
+                "  2\tbeta\n  3\tgamma\n",
+                "  2\tBETA\nadded\n  3\tgamma\n",
+                true,
+            ),
+            Err(MatchError::MixedGutter)
+        );
+    }
+
+    #[test]
+    fn an_all_gutter_new_is_stripped_after_a_gutter_old() {
+        let found = find(
+            "alpha\nbeta\ngamma\n",
+            "  2\tbeta\n  3\tgamma\n",
+            "  2\tBETA\n\n  3\tgamma\n",
+            true,
+        )
+        .unwrap();
+        assert_eq!(found.via, Strategy::LineNumbers);
+        assert_eq!(found.replacement, "BETA\n\ngamma\n");
+    }
+
+    #[test]
+    fn a_plain_new_after_a_gutter_old_applies_as_is() {
+        let text = "alpha\nbeta\ngamma\n";
+        let found = find(
+            text,
+            "  2\tbeta\n  3\tgamma\n",
+            "BETA\nadded\ngamma\n",
+            true,
+        )
+        .unwrap();
+        assert_eq!(found.via, Strategy::LineNumbers);
+        assert_eq!(&text[found.start..found.end], "beta\ngamma\n");
+        assert_eq!(found.replacement, "BETA\nadded\ngamma\n");
+    }
+
+    #[test]
+    fn content_that_starts_with_digits_and_a_tab_matches_exactly() {
+        let text = "10\talpha\n20\tbeta\n";
+        let found = find(text, "20\tbeta\n", "20\tBETA\nplain\n", true).unwrap();
+        assert_eq!(found.via, Strategy::Exact);
+        assert_eq!(&text[found.start..found.end], "20\tbeta\n");
+        assert_eq!(found.replacement, "20\tBETA\nplain\n");
     }
 }
