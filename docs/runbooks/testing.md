@@ -130,9 +130,19 @@ Repository work conventions are in
 | `quick` | stops at the first failure |
 | `ci` | one diagnostic retry; flaky passes fail the gate; writes JUnit to `target/nextest/ci/junit.xml` |
 
-The long `qq-core` session suites are given priority so they start first and
-overlap the fast tests. nextest does not execute doctests; the full gate runs
-`cargo test --doc --workspace` separately, even when there are no doctests.
+The long tail (the goal-driver soaks, the deadline and compaction suites,
+the soak binary, and the perf fixtures) is given priority so it starts first
+and overlaps the fast tests. nextest does not execute doctests; the full gate
+runs `cargo test --doc --workspace` separately, even when there are no
+doctests.
+
+On Linux a setup script (`.config/nextest-tmpdir.sh`) points `TMPDIR` at
+`/dev/shm/qq-test-$UID`. The session store commits with
+`synchronous = FULL`, so on a disk-backed `TMPDIR` fsync is most of a session
+test's wall time and the suite runs about ten times slower. Set
+`QQ_TEST_DISK_TMPDIR=1` to keep the default `TMPDIR`; the script also keeps
+it when `/dev/shm` is missing, unwritable, or mounted `noexec`. Plain
+`cargo test` does not run the script.
 
 ## CI
 
