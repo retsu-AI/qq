@@ -13,7 +13,7 @@ written.
 | --- | --- | --- |
 | 0001 | [One `SessionRuntime` behind every execution surface](0001-single-session-runtime.md) | Accepted |
 | 0002 | [SQLite is the authoritative store, written by one worker with `synchronous=FULL`](0002-sqlite-authoritative-store.md) | Accepted |
-| 0003 | [Persist before publish; observers read committed events only](0003-persist-before-publish.md) | Accepted; superseded in part by ADR-0028 |
+| 0003 | [Persist before publish; observers read committed events only](0003-persist-before-publish.md) | Accepted |
 | 0004 | [Compile an immutable agent plan; no universal plugin trait](0004-compiled-agent-plan.md) | Accepted |
 | 0005 | [The provider is the single retry owner](0005-provider-owns-retry.md) | Accepted; superseded in part by ADR-0040 |
 | 0006 | [Serve live and warm replay from a sequence-indexed feed ring](0006-feed-ring.md) | Accepted; supersedes the H15 broadcast design |
@@ -27,8 +27,8 @@ written.
 | 0014 | [Typed final output: a per-run contract compiled at admission, judged at the completion boundary, repaired within a bounded allowance](0014-typed-final-output.md) | Accepted |
 | 0015 | [Enroll remote clients with a pairing code and issue per-client credentials](0015-pairing-code-client-enrollment.md) | Proposed (multi-surface S2) |
 | 0019 | [Spill handles are durable session state: cut tool outputs are stored with their result, cited by a content-addressed handle, masked inline and exact on explicit read](0019-spill-handles.md) | Accepted |
-| 0020 | [Shell `Forbidden` is a policy decision above every approval mode, produced by a CST classifier whose rules are self-tested data](0020-shell-forbidden-classifier.md) | Accepted |
-| 0021 | [`Interactive` and `Network` effect classes: a question is a hold, not a permission; a fetch is authority over the outside, not the workspace](0021-interactive-and-network-effect-classes.md) | Accepted (`Interactive` merged in #49, `Network` in #50) |
+| 0020 | [Shell `Forbidden` is a policy decision above every approval mode, produced by a CST classifier whose rules are self-tested data](0020-shell-forbidden-classifier.md) | Superseded: fixed stops (#483) |
+| 0021 | [`Interactive` and `Network` effect classes: a question is a hold, not a permission; a fetch is authority over the outside, not the workspace](0021-interactive-and-network-effect-classes.md) | Accepted; host grants removed (#487) |
 | 0022 | [One owner per session store: an advisory lock is taken before the database is opened and before recovery runs](0022-single-store-owner.md) | Accepted |
 | 0023 | [Headless JSONL records are protocol types, pinned by golden streams per `PROTOCOL_VERSION`](0023-headless-records-as-protocol.md) | Accepted |
 | 0024 | [Shared transcript, raw tool JSON, and a precompiled prompt prefix on the request path](0024-shared-transcript-raw-json-prompt-prefix.md) | Accepted |
@@ -43,7 +43,7 @@ written.
 | 0034 | [Route only among declared, authorized choices](0034-concrete-jev-routing.md) | Superseded: Jev removed |
 | 0035 | [Global configuration may be a leaf symlink to a regular file](0035-global-leaf-config-symlinks.md) | Accepted |
 | 0036 | [Designed truecolor default theme `ink` with `terminal` ANSI fallback](0036-truecolor-default-theme.md) | Accepted (ENG-851) |
-| 0038 | [Session retention: archive by session, never by row; receipts and cursors outlive their sessions](0038-session-retention.md) | Proposed (ENG-803) |
+| 0038 | [Session retention: archive by session, never by row; receipts and cursors outlive their sessions](0038-session-retention.md) | Superseded: `retention_days` (#502) |
 | 0039 | [A run compacts its own turns at a safe boundary with a run-scoped marker](0039-in-run-compaction.md) | Accepted (ENG-793, #92) |
 | 0040 | [Two-phase retry ownership: the provider owns sends, the run owns turns](0040-two-phase-retry-ownership.md) | Accepted (run-reliability RR4); supersedes ADR-0005 in part |
 | 0041 | [Jev as an approval delegate, for held calls only](0041-jev-delegated-approval.md) | Superseded: Jev removed |
@@ -78,13 +78,14 @@ historical reservations do not schedule work or require new ADRs:
 | 0037 | Reserved: responsive TUI layout tiers (tui-redesign U8) |
 | 0044, 0045 | Unused: reserved for session mode and strict verification (#187, closed unmerged) |
 | 0053 | Unused: reserved for #231's ADR, which was renumbered 0055 |
-| 0055 | Reserved: decision-model seam (open PR #249) |
+| 0055 | Unused: decision-model seam abandoned when #374 removed decision models |
+| 0057 | Unused: workflow-packs proposal (#277, closed unmerged) |
 
-ADR-0030–0034 predate the template and use a short form (status, date,
-prose); later ADRs follow [the template](0000-template.md).
+ADR-0030–0034 and 0059–0063 use a short form (status, date, prose); the
+others follow [the template](0000-template.md).
 
 Implementation/merge status is distinct from formal decision acceptance.
-ADRs 0054, 0056 and 0059–0061 have merged implementations but remain Proposed
+ADRs 0049, 0054, 0056, 0059–0061 and 0063 have merged implementations but remain Proposed
 in their decision records; live qualification and formal acceptance must not
 be inferred from the merge. This index preserves those statuses.
 

@@ -1,6 +1,6 @@
 # ADR-0038 — Session retention: archive by session, never by row; receipts and cursors outlive their sessions
 
-**Status:** Proposed
+**Status:** Superseded — not adopted; v0.1.10 bounds the store with `retention_days`, which deletes idle sessions (#502). Kept for history.
 **Date:** 2026-09-20
 **Deciders:** lead; second reviewer required (store and protocol surface)
 **Implements:** [ENG-803](https://linear.app/retsu-ai/issue/ENG-803) (audit F20 and the retention half of F07); unblocks the plan the issue will own once accepted

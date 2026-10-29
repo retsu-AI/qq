@@ -15,7 +15,7 @@ work.
 | Topic | Decision |
 |---|---|
 | UI stack | Shared Rust app core. **GPUI** for desktop, thin **SwiftUI/Compose** shells over **UniFFI** for mobile. |
-| Core freeze | Work runs in parallel with stabilization, but gated. Multi-agent *write* orchestration waits until the stabilization rows for permissions, containment and edits pass. |
+| Core freeze | Work runs in parallel with stabilization, but gated. Multi-agent *write* orchestration waits until v0.1.10's fixed stops, snapshots and edit recovery are in use. |
 | Topology | One **hub per project**. Workers are plain `qq` daemons. |
 | Scale | About 300 agents across 3–8 hosts. |
 | Network | Tailnet or LAN with pinned TLS. Push goes direct to APNs/FCM. |
@@ -46,7 +46,7 @@ All of these were checked against `main` at `b11092e8`.
 | `qq-tui` depends on `qq-core` (mentions, `MAX_GRANT_BYTES`). Slash commands are tied to crossterm. Queued drafts are client-local, so other surfaces can't see them and they are lost on quit. | `qq-tui/Cargo.toml`; `commands.rs:14`; `qq-client/src/state.rs:909-958` | TUI behavior can't be shared with other surfaces. |
 | `qq-client` handles one workspace on one server. `SessionStore` is `!Sync`. `TuiClient` takes a `PathBuf` and is tied to TUI ownership semantics. | `interactive.rs:33-48`, `384`; `state.rs:13` | No multi-server or multi-workspace model, and no FFI. |
 | The daemon's config depends on its launch directory and environment (`approval_timeout`, `QQ_*`, provider keys, `PATH`). | `main.rs:651-661`; `runtime.rs:933`, `2219-2270` | A daemon started from Finder behaves differently from one started in a shell. |
-| Version handling is fragile. The protocol must match exactly. Store migrations only go forward and an old binary fails with an untyped error. The command worker is locked to one build (`IncompatibleBuild` blocks shell tools). Desktop and CLI binaries share all locks and directories. | `qq-protocol/src/local.rs:36`; `schema.rs:395`; `command_owner/client.rs:176-181` | A desktop-bundled `qq` and a CLI-installed `qq` break each other. |
+| Version handling is fragile. The protocol must match exactly. Store migrations only go forward and an old binary fails with an untyped error. Desktop and CLI binaries share all locks and directories. | `qq-protocol/src/local.rs:36`; `schema.rs:395` | A desktop-bundled `qq` and a CLI-installed `qq` break each other. |
 | Remote access: loopback only, no TLS, single rotating token, no enrollment (ADR-0015 Proposed). | `qq-server/src/lib.rs:664-704` | No remote clients. |
 | Event streams are per workspace only: no feed across workspaces, a cap of 64 subscriptions, and `ToolCallOutputDelta` is sent to every subscriber. axum HTTP/2 is accidental (it arrives through the AWS SDK features). | `lib.rs:73-74`, `1097-1116`; `Cargo.toml:55` | Clients can't follow a fleet, and the mobile data budget is blown. |
 | A session has no execution root other than its workspace path. A worktree registered as its own workspace needs trust again (trust is keyed by path), takes a permanent workspace row (rows are never deleted; the cap is 1024), adds one SSE stream per worktree, and multiplies the plan-cache key. | `sessions/runtime.rs:271-278`; `loader.rs:1451`; `commands.rs:776` | Worktrees-as-workspaces doesn't scale and is unsafe. This needs a core change. |
@@ -108,7 +108,6 @@ Who starts it:
 - **Bare `qq`** (TUI): start-or-attach. It never embeds the server.
 - **Desktop:** start-or-attach using its **bundled `qq` binary**. The desktop doesn't link the runtime. Reasons:
   - One runtime implementation.
-  - `current_exe` dispatch for `_command-owner`/`_command-exec` keeps working.
   - A UI crash never kills agents.
   - The daemon upgrades independently of the UI.
 - **Service mode** (optional): `qq daemon install|uninstall` registers launchd, systemd `--user` or a Windows service for always-on hosts and workers.

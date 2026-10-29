@@ -540,3 +540,10 @@ a goal.
   - the run limits and the pause outcome,
     `qq-protocol/src/sessions.rs:919–961, 1135`;
   - `SteerRun` rejecting finished runs, `sessions/commands.rs:731`.
+
+## Implementation note (v0.1.10)
+
+There is no process sandbox, by design: commands run in the checkout
+(#487). Goal completion checks are refused by the fixed stops (#483) and
+managed `deny_shell_prefixes`, not by the shell classifier. Session approvals
+and approval delegates were removed in protocol 41.

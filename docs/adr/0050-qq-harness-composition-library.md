@@ -146,3 +146,9 @@ Codex solved the same problem with a facade crate (`codex-core-api`) and a
   (`SqliteCode`, typed `RuntimeLoadError`, `qq_core::limits`, a core
   `bench-support` feature). Those remain open work, not commitments with
   dates.
+
+## Implementation note (v0.1.10)
+
+The approval reviewer, the workspace grant authority and the command-worker
+client were deleted (#487). `tree-sitter-bash` stays mandatory because the
+fixed stops (#483) parse commands with it.

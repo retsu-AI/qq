@@ -86,3 +86,9 @@ only in-tree consumer is the root looks unused from inside the workspace.
 - `crates/qq-core/src/lib.rs` crate-root `pub use` block.
 - `docs/design/architecture.md` § Crate Ownership and § Extension Contract (the crate responsibility table).
 - Audit that prompted this: docs cleanup, 2026-09-16 (ledger `progress/root.md`).
+
+## Implementation note (v0.1.10)
+
+`ApprovalReviewer` and `WorkspaceGrantAuthority` were deleted with the
+reviewer and grants (#487). The remaining extension traits are
+`ContextSource`, `ExternalToolHost` and `RuntimeLoader`.
