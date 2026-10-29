@@ -205,6 +205,7 @@ async fn duration_stops_shell_while_output_persistence_is_blocked() {
     let process = PathBuf::from(format!("/proc/{pid}"));
     let stopped = tokio::time::timeout(Duration::from_secs(2), async {
         while process.exists() {
+            // lint: allow(sleep) polls /proc for a real killed shell
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

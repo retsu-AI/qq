@@ -825,6 +825,7 @@ pub(super) fn execute_blocking(
                 if cancelled.is_cancelled() {
                     return ToolOutput::interrupted("tool execution was cancelled");
                 }
+                // lint: allow(sleep) the test tool's work is its blocking delay
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
             ToolOutput::success(arguments.result)
@@ -840,6 +841,7 @@ pub(super) fn execute_blocking(
                 if cancelled.is_cancelled() {
                     return ToolOutput::interrupted("tool execution was cancelled");
                 }
+                // lint: allow(sleep) the test tool's work is its blocking delay
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
             ToolOutput::success(arguments.result.unwrap_or_else(|| "mutated".to_owned()))

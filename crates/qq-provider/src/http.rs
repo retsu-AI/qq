@@ -2116,6 +2116,7 @@ mod tests {
                         // scripted response is served as soon as the client
                         // gives up and resends.
                         thread::spawn(move || {
+                            // lint: allow(sleep) the scripted stall is the server behavior under test
                             thread::sleep(duration);
                             drop(stream);
                         });

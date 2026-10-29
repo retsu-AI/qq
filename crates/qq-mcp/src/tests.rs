@@ -110,6 +110,7 @@ impl rmcp::ServerHandler for FixtureServer {
                 if let Some(barrier) = &self.barrier {
                     barrier.wait().await;
                 }
+                // lint: allow(sleep) the slow tool's latency is the behavior under test
                 tokio::time::sleep(self.slow_delay).await;
                 self.active_calls.fetch_sub(1, Ordering::SeqCst);
                 Ok(CallToolResponse::Complete(CallToolResult::success(vec![
