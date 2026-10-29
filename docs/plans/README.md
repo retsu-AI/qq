@@ -186,7 +186,7 @@ task against the loopback fake provider in CI.
 
 ## Order
 
-1. E, F and G in parallel with disjoint owned paths.
+1. F and G in parallel with disjoint owned paths.
 2. H whenever there is room.
 
 Each PR:
