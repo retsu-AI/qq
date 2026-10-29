@@ -151,7 +151,7 @@ impl Commands {
             .retain(|(known, _)| known != id);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) async fn all_finished(&self) {
         let commands = self
             .0
