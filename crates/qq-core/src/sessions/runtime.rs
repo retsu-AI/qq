@@ -289,8 +289,8 @@ pub struct RuntimeLoadError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum GoalCheckPolicyError {
-    #[error("the check is denied by managed shell policy")]
-    ManagedDenied,
+    #[error("the check is denied by deny_tools or deny_shell_prefixes")]
+    ShellDenied,
     #[error("check policy could not be loaded: {0}")]
     Configuration(#[source] RuntimeLoadError),
     #[error("check policy validation stopped unexpectedly")]

@@ -7,7 +7,7 @@ use serde::Deserialize;
 use crate::catalog::EffectClass;
 
 pub use classify::goal_check_shell_denied;
-pub(crate) use classify::managed_shell_denied;
+pub(crate) use classify::shell_prefix_denied;
 pub(crate) use stops::{Stop, fixed_stop};
 
 /// Entry point for the `classify_command` bench. Not a public API.
@@ -107,9 +107,9 @@ pub(crate) const PARENT_DENIED_RESULT: &str = denial!(
     "this child action is outside its parent's permissions",
     "use an operation the parent allows, or report what you need"
 );
-pub(crate) const MANAGED_SHELL_DENIED_RESULT: &str = denial!(
+pub(crate) const SHELL_PREFIX_DENIED_RESULT: &str = denial!(
     "config",
-    "the command matches a managed deny_shell_prefixes entry",
+    "the command matches a deny_shell_prefixes entry",
     "continue with a command the configuration allows"
 );
 pub(crate) const UNATTENDED_QUESTION_RESULT: &str =
@@ -1537,7 +1537,7 @@ mod tests {
             ("mode", UNATTENDED_DENIED_RESULT.to_owned()),
             ("mode", AUTHORITY_CHANGED_RESULT.to_owned()),
             ("mode", PARENT_DENIED_RESULT.to_owned()),
-            ("config", MANAGED_SHELL_DENIED_RESULT.to_owned()),
+            ("config", SHELL_PREFIX_DENIED_RESULT.to_owned()),
             ("config", host),
             (
                 "config",

@@ -1233,7 +1233,7 @@ or one the parser can't read, is not a stop.
 Paths are normalized lexically (`~/x/..` is `~`) and never resolved, so a
 symlink or a relative path that climbs to home is not caught. A script, an
 interpreter or a dynamically built command can do any of these things
-without matching. Managed `deny_shell_prefixes` add literal prefixes that are
+without matching. `deny_shell_prefixes` add literal prefixes that are
 denied the same way, in every mode including `full`.
 
 The stops live in `approval/stops.rs`; the parse is in `approval/classify.rs`.
@@ -1250,7 +1250,7 @@ control, not that the model needs new verbs.
 - **Git commands follow ordinary shell policy.** `status`, `commit`,
   `rebase` and `push` run under Auto and Full and ask under Ask, like any
   other command. Force-pushes and remote ref deletion are fixed stops; a
-  managed `deny_shell_prefixes` (for example `git push`) refuses more.
+  `deny_shell_prefixes` entry (for example `git push`) refuses more.
 - **jj is a policy entry, not a dependency.** jj users overwhelmingly
   run colocated repos, so git-shaped harness features work for them
   unchanged. QQ takes no jj-lib
@@ -1516,7 +1516,7 @@ Write children inherit the parent's authority ceiling and revocation.
 | `Interactive` (`ask_user`) | Answer if attended | Answer if attended | Decide without human input | Answer if attended |
 | `Network` (`fetch`) | Deny | Human each call | Public hosts execute | Public hosts execute |
 
-Blocked fetch hosts and managed `deny_shell_prefixes` apply before the mode,
+Blocked fetch hosts and `deny_shell_prefixes` apply before the mode,
 in every mode. Prefix denies match literal commands at
 word granularity, including compound command components. They cannot catch
 equivalent behavior through Python, libraries or dynamically constructed
@@ -1553,8 +1553,9 @@ Restricting exposure grants no authority and needs no trust approval;
 `builtin_preference` is a scalar that may only tighten across layers
 (`off < hint < strict`), so a managed `strict` cannot be undone.
 
-`deny_tools`, `deny_shell_prefixes` and `deny_hosts` are managed/MDM-only and
-accumulate across administrator layers. Tool denies match exact names
+`deny_tools` and `deny_hosts` are managed/MDM-only and accumulate across
+administrator layers; `deny_shell_prefixes` may come from any layer and
+accumulates across all of them. Tool denies match exact names
 (built-ins or `mcp__<server>__<tool>`) and today apply to side questions and,
 for `shell`, to goal checks; shell prefixes are non-empty, without control
 characters or surrounding whitespace.

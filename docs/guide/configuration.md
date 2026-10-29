@@ -194,7 +194,6 @@ policy: (
     allow_custom_providers: true,
     allow_literal_secrets: false,
     deny_tools: ["write_file"],
-    deny_shell_prefixes: ["git push"],
     deny_hosts: ["*.internal.example.com"],
 )
 ```
@@ -208,7 +207,8 @@ policy: (
 | `require_https` | managed layers only | reject `http://` custom endpoints (loopback exempt); default `true` |
 | `allow_custom_providers` | managed layers only | allow `Custom`/`LiteLlm` declarations; default `true` |
 | `allow_literal_secrets` | managed layers only | allow `Value(...)`; default `false` |
-| `deny_tools`, `deny_shell_prefixes`, `deny_hosts` | managed layers only | `deny_shell_prefixes` (word-boundary prefixes) and `deny_hosts` (exact names or `*.suffix`, for `fetch`) are refused in every approval mode, Full included. `deny_tools` removes tools from side questions, and `shell` in it refuses goal checks |
+| `deny_shell_prefixes` | any; accumulates | shell commands refused in every approval mode, Full included, matched at word boundaries (`"git push"` refuses `git push origin main`) |
+| `deny_tools`, `deny_hosts` | managed layers only | `deny_hosts` (exact names or `*.suffix`, for `fetch`) is refused in every approval mode, Full included. `deny_tools` removes tools from side questions, and `shell` in it refuses goal checks |
 | `goals` | managed layers only | goal ceilings; fieldwise minimum across administrators, retained by `goals: Clear` |
 
 "Managed layers" are `managed.ron`, `managed.d/`, and MDM (rows 9 and 10

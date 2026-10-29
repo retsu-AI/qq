@@ -191,7 +191,7 @@ impl RuntimeLoader for ManagedShellDenyLoader {
 }
 
 #[tokio::test]
-async fn managed_shell_denial_precedes_auto_and_full_and_allows_continuation() {
+async fn shell_prefix_denial_precedes_auto_and_full_and_allows_continuation() {
     for mode in [ApprovalMode::Auto, ApprovalMode::Full] {
         for (tool, arguments) in [
             (
@@ -238,7 +238,7 @@ async fn managed_shell_denial_precedes_auto_and_full_and_allows_continuation() {
             )));
             assert!(observed.iter().any(|event| matches!(&event.event,
                 SessionEvent::ToolCallFinished { tool_call } if tool_call.name == tool && tool_call.is_error
-                    && tool_call.result.as_deref().is_some_and(|result| result == approval::MANAGED_SHELL_DENIED_RESULT)
+                    && tool_call.result.as_deref().is_some_and(|result| result == approval::SHELL_PREFIX_DENIED_RESULT)
             )));
             assert!(observed.iter().any(|event| matches!(&event.event,
                 SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "__test_mutate" && !tool_call.is_error

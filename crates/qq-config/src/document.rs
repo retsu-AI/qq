@@ -631,7 +631,7 @@ pub const POLICY_FIELD_NAMES: [&str; 12] = [
 /// The `policy` keys only managed and MDM sources may set; anywhere else is
 /// [`ConfigError::PolicyOutsideManaged`](crate::ConfigError). The user guide
 /// marks exactly these as administrator-only.
-pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 10] = [
+pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 9] = [
     "allowed_providers",
     "denied_providers",
     "max_output_tokens",
@@ -639,7 +639,6 @@ pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 10] = [
     "allow_custom_providers",
     "allow_literal_secrets",
     "deny_tools",
-    "deny_shell_prefixes",
     "deny_hosts",
     "goals",
 ];
@@ -748,8 +747,6 @@ pub(super) struct PolicyPatch {
     builtin_preference: Option<BuiltinPreference>,
     /// Managed-only: exact tool names refused under every approval mode.
     deny_tools: Option<Vec<String>>,
-    /// Managed-only: shell command prefixes refused under every approval
-    /// mode, matched at word granularity.
     deny_shell_prefixes: Option<Vec<String>>,
     /// Managed-only: hosts `fetch` is refused under every approval mode.
     /// Exact lowercase host names or `*.suffix` wildcards.
@@ -769,7 +766,6 @@ impl PolicyPatch {
             || self.allow_custom_providers.is_some()
             || self.allow_literal_secrets.is_some()
             || self.deny_tools.is_some()
-            || self.deny_shell_prefixes.is_some()
             || self.deny_hosts.is_some()
             || self.goals.is_some()
     }
@@ -1620,6 +1616,16 @@ impl MergeState {
                 None => incoming.into_iter().collect(),
             });
         }
+        if let Some(incoming) = document
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.deny_shell_prefixes.as_ref())
+        {
+            let mut combined: BTreeSet<_> =
+                self.policy.deny_shell_prefixes.iter().cloned().collect();
+            combined.extend(incoming.iter().cloned());
+            self.policy.deny_shell_prefixes = combined.into_iter().collect();
+        }
         if !sensitive {
             return;
         }
@@ -2014,12 +2020,6 @@ impl MergeState {
             let mut combined: BTreeSet<_> = self.policy.deny_tools.iter().cloned().collect();
             combined.extend(incoming.iter().cloned());
             self.policy.deny_tools = combined.into_iter().collect();
-        }
-        if let Some(incoming) = &patch.deny_shell_prefixes {
-            let mut combined: BTreeSet<_> =
-                self.policy.deny_shell_prefixes.iter().cloned().collect();
-            combined.extend(incoming.iter().cloned());
-            self.policy.deny_shell_prefixes = combined.into_iter().collect();
         }
         if let Some(incoming) = &patch.deny_hosts {
             let mut combined: BTreeSet<_> = self.policy.deny_hosts.iter().cloned().collect();

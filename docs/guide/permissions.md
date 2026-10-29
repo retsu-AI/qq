@@ -74,8 +74,8 @@ Every session runs under one mode. Set the default in a profile
 | `full` | run | run, fixed stops included |
 
 Every mode except Full denies the [fixed stops](#fixed-stops) without asking.
-Managed `deny_shell_prefixes` and `deny_hosts` apply in every mode, Full
-included.
+`deny_shell_prefixes` from any configuration layer, and managed
+`deny_hosts`, apply in every mode, Full included.
 
 Auto never asks a human, including for actions taken by write sub-agents.
 Auto questions return a result telling the agent to decide without human
@@ -134,7 +134,7 @@ subshells and `sh -c '…'`. Switch to Full if you mean it.
 
 This is an accident net, not a security boundary. It reads literal
 commands. A script, an interpreter, or a command built at run time can do any
-of these things without matching. Managed `deny_shell_prefixes` add literal
+of these things without matching. `deny_shell_prefixes` add literal
 prefixes that are denied in every mode, Full included.
 
 ## Undoing a run

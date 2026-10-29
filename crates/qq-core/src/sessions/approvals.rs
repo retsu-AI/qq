@@ -50,9 +50,9 @@ impl ToolGate for SessionToolGate {
             let ToolApprovalPolicy { mode, ancestors } = policy;
             let class = approval::classify(call.effect, &call.name, &call.arguments, &network);
             if let approval::ToolClass::Shell { command, .. } = &class
-                && approval::managed_shell_denied(command, &shell.deny_prefixes)
+                && approval::shell_prefix_denied(command, &shell.deny_prefixes)
             {
-                let message = approval::MANAGED_SHELL_DENIED_RESULT.to_owned();
+                let message = approval::SHELL_PREFIX_DENIED_RESULT.to_owned();
                 return match inner
                     .store
                     .deny_tool_call(&claimed, call.id, message.clone())

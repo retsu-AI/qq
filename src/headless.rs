@@ -4049,7 +4049,7 @@ mod tests {
             }
             fn validate_goal_check(&self, _: &Path, _: &str) -> qq_core::GoalCheckPolicyFuture {
                 Box::pin(std::future::ready(Err(
-                    qq_core::GoalCheckPolicyError::ManagedDenied,
+                    qq_core::GoalCheckPolicyError::ShellDenied,
                 )))
             }
         }

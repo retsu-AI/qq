@@ -135,9 +135,11 @@ account, and register that.
 
 ## Refuse commands with managed `deny_shell_prefixes`
 
-Inside the container you are the administrator. Managed policy is read
-from `/etc/qq/managed.ron` and must be owned by root, so bake it into an
-image built from QQ's. Save this as `managed.ron`:
+Any configuration layer may set `deny_shell_prefixes`, but an agent can
+edit your user or project config. Inside the container you are the
+administrator. Managed policy is read from `/etc/qq/managed.ron` and must
+be owned by root, so the agent cannot change it; bake it into an image
+built from QQ's. Save this as `managed.ron`:
 
 ```ron managed.ron
 (
