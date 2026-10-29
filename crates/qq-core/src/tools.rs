@@ -5288,6 +5288,31 @@ mod tests {
         assert!(!quiet.model_text.contains("hint:"), "{}", quiet.model_text);
     }
 
+    /// A command that is not its group's leader may leave the group without
+    /// forking; a timeout still stops it rather than waiting on it forever.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_command_that_leaves_its_group_still_stops_on_timeout() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run_shell_tool(
+                workspace,
+                r#"{"command":"exec setsid sleep 300","timeout_seconds":1}"#,
+                RunCancellation::new(),
+                None,
+            ),
+        )
+        .await
+        .expect("a command that left its group must not hang its timeout");
+        assert!(
+            result.model_text.contains("timed out"),
+            "{}",
+            result.model_text
+        );
+    }
+
     /// The command joins a group its watcher already leads, so nothing the
     /// command sends its group can reach a watcher still starting up.
     #[cfg(target_os = "linux")]

@@ -814,7 +814,8 @@ async fn stop_shell(
             "could not terminate the command process group: {error}"
         ));
     }
-    #[cfg(any(not(unix), target_os = "macos"))]
+    // The command leads no group, so it may have left this one without
+    // forking: stop it directly as well.
     if let Err(error) = child.start_kill() {
         return Err(format!("could not terminate the command: {error}"));
     }
