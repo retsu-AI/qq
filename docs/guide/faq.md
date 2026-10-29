@@ -73,9 +73,8 @@ credentials it needs. [Headless › In CI](headless.md#in-ci).
 
 ### Can I use it on a remote machine?
 
-Run `qq serve` there and attach clients over a private network; the wire
-protocol is documented. Authentication for non-loopback clients is being
-designed, so today keep it on loopback or a Tailscale-style private network.
+Run `qq` on that machine over SSH. `qq serve` binds only to loopback, and
+there is no remote client or remote authentication yet.
 
 ### How do I resume a conversation?
 

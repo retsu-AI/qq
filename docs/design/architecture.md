@@ -108,6 +108,9 @@ src/
   cli.rs         argument parsing and command dispatch
   headless.rs    `qq run` durable non-interactive execution
   goals.rs       `qq goal` authenticated server client; no store ownership
+  daemon.rs      `qq daemon`
+  undo.rs        `qq undo`: workspace snapshots and restore
+  logging.rs     opt-in structured tracing (`QQ_LOG`)
   doctor.rs      `qq doctor`
   environment.rs host or container, and the first-run and goal notes
   init.rs        `qq init`

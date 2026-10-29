@@ -1254,15 +1254,15 @@ control, not that the model needs new verbs.
   `rebase` and `push` run under Auto and Full and ask under Ask, like any
   other command. Force-pushes and remote ref deletion are fixed stops; a
   `deny_shell_prefixes` entry (for example `git push`) refuses more.
-- **jj is a policy entry, not a dependency.** jj users overwhelmingly
+- **jj needs no special support.** jj users overwhelmingly
   run colocated repos, so git-shaped harness features work for them
   unchanged. QQ takes no jj-lib
   dependency; revisit only if jj-native workspaces become a real ask.
 
 ## Network Tools
 
-`fetch` exists so the model stops reaching for `curl` through the shell
-classifier when it wants documentation or an API response. It is the one
+`fetch` exists so the model stops reaching for `curl` through `shell`
+when it wants documentation or an API response. It is the one
 built-in whose authority is over the outside world rather than the
 workspace, and it has its own effect class and refusal rules (ADR-0021).
 

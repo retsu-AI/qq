@@ -624,6 +624,8 @@ POST /v1/capabilities
 POST /v1/workspaces/resolve
 POST /v1/workspaces/snapshot
 POST /v1/workspaces/undo
+POST /v1/workspaces/list
+POST /v1/workspaces/check-interruptions/acknowledge
 POST /v1/models
 POST /v1/sessions
 POST /v1/sessions/prompts
@@ -637,6 +639,8 @@ POST /v1/sessions/delete
 POST /v1/sessions/prune
 POST /v1/sessions/compact
 POST /v1/sessions/compact/rollback
+POST /v1/sessions/goal
+POST /v1/sessions/goal/control
 POST /v1/runs/steer
 POST /v1/runs/cancel
 POST /v1/tools/approvals
@@ -692,12 +696,12 @@ optional-bodied:
 ```
 
 Response `ServerCapabilities` (abridged; see
-`crates/qq-protocol/tests/fixtures/v15/capabilities.json` for the full golden):
+`crates/qq-protocol/tests/fixtures/v42/capabilities.json` for the full golden):
 
 ```json
 {
   "version": 1,
-  "protocol_version": 16,
+  "protocol_version": 42,
   "server_version": "0.1.0",
   "input_parts": ["text", "workspace_file"],
   "commands": ["resolve_workspace", "create_session", "submit_prompt", "steer_run", "..."],

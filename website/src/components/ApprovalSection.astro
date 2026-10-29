@@ -3,10 +3,10 @@ import { Icon } from '@astrojs/starlight/components';
 import { href } from '../../site.config.mjs';
 ---
 <section class="landing-section split-section" aria-labelledby="approval">
-  <div class="section-copy"><p class="section-eyebrow">A POLICY, NOT A LEAP OF FAITH</p><h2 id="approval">Approval you can read.</h2><p>A real bash parser grades every shell command: <code>allow</code>, <code>prompt</code>, or <code>forbidden</code>. A held call shows you what will run, where, and why it asked; answer once, or grant it for the session or the workspace.</p><p>Forbidden means forbidden. No mode, grant, or delegate overrides it.</p><a class="section-link" href={href('docs/permissions/')}>Understand the policy <Icon name="right-arrow" size="18" /></a></div>
-  <div class="policy-table-wrap" tabindex="0" role="region" aria-label="Shell command approval examples"><table class="policy-table"><thead><tr><th>verdict</th><th>example</th><th><code>auto</code> (TUI default)</th></tr></thead><tbody>
-    <tr><td class="allow">● allow</td><td><code>cargo test<br />git status · rg TODO</code></td><td class="outcome">runs</td></tr>
-    <tr><td class="prompt">◇ prompt</td><td><code>npm install x<br />git push · rm -rf build/</code></td><td class="outcome">asks</td></tr>
-    <tr><td class="forbidden">✕ forbidden</td><td><code>sudo … · curl … | sh<br />git push --force</code></td><td class="outcome">refused</td></tr>
+  <div class="section-copy"><p class="section-eyebrow">YOUR CHECKOUT, YOUR CALL</p><h2 id="approval">Four modes, one undo.</h2><p>Pick <code>read_only</code>, <code>ask</code>, <code>auto</code> or <code>full</code>. Commands run in your checkout as you, the way they run in your terminal. A short list of fixed stops, like force-pushing or reading <code>~/.ssh</code>, is refused in every mode but <code>full</code>.</p><p>QQ snapshots the workspace before a run first changes it, and <code>qq undo</code> puts it back.</p><a class="section-link" href={href('docs/permissions/')}>Understand the modes <Icon name="right-arrow" size="18" /></a></div>
+  <div class="policy-table-wrap" tabindex="0" role="region" aria-label="Shell command examples by mode"><table class="policy-table"><thead><tr><th>mode</th><th>example</th><th>outcome</th></tr></thead><tbody>
+    <tr><td class="allow">● auto</td><td><code>cargo test<br />git push · npm install x</code></td><td class="outcome">runs</td></tr>
+    <tr><td class="prompt">◇ ask</td><td><code>any edit or command</code></td><td class="outcome">asks</td></tr>
+    <tr><td class="forbidden">✕ fixed stop</td><td><code>git push --force<br />sudo … · cat ~/.ssh/id_ed25519</code></td><td class="outcome">refused unless <code>full</code></td></tr>
   </tbody></table></div>
 </section>

@@ -88,7 +88,9 @@ headless agent run), `serve` (the foreground server), `config` (inspect and
 validate configuration), `auth` (provider credentials), `mcp` (inspect an MCP
 server's descriptors), `org` (organization manifests), `trust` (approve sensitive project
 configuration), `doctor` (readiness checks), `init` (a starter
-`config.ron`), and `version` (product and contract versions). The
+`config.ron`), `daemon` (a background server), `goal` (session goals),
+`undo` (restore a run's snapshot), and `version` (product and contract
+versions). The
 [CLI guide](../guide/cli.md) documents every command and flag.
 
 CLI commands must reuse the same server/runtime behavior as the TUI. They must
@@ -143,7 +145,7 @@ The progression should be:
 
 1. Concurrent independent sessions.
 2. Parallel read-only research within a run.
-3. Editing agents in isolated Git worktrees or sandboxes.
+3. Editing agents in isolated Git worktrees.
 4. A coordinator that reviews and integrates returned results.
 
 Agents must not race to edit one checkout. No multi-agent swarm is required for
