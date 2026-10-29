@@ -730,14 +730,12 @@ impl SigV4Authorizer {
 #[cfg(test)]
 mod tests {
     use std::{
-        hint::black_box,
         sync::{
             Condvar, Mutex as StdMutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc,
         },
         thread::{self, ThreadId},
-        time::Instant,
     };
 
     use aws_credential_types::provider::{ProvideCredentials, future};
@@ -1316,55 +1314,6 @@ mod tests {
         authorizer.credentials().await.unwrap_err();
 
         assert_eq!(calls.load(Ordering::Relaxed), 2);
-    }
-
-    #[tokio::test]
-    #[ignore = "focused timing harness"]
-    async fn ready_credential_acquisition_and_signing_timing_harness() {
-        const ITERATIONS: u32 = 25_000;
-
-        let calls = Arc::new(AtomicUsize::new(0));
-        let authorizer = RequestAuthorizer::with_sigv4_for_test(SigV4Authorizer::with_clock(
-            "us-east-1",
-            SharedCredentialsProvider::new(CountingCredentials {
-                calls: Arc::clone(&calls),
-                credentials: Credentials::new(
-                    "AKIDEXAMPLE",
-                    "test-secret-access-key",
-                    None,
-                    None,
-                    "test",
-                ),
-            }),
-            fixed_time,
-        ));
-        let client = reqwest::Client::new();
-        let mut warmup = client
-            .post("https://bedrock-mantle.us-east-1.api.aws/v1/responses")
-            .header(CONTENT_TYPE, "application/json")
-            .body(br#"{"input":"warmup"}"#.to_vec())
-            .build()
-            .unwrap();
-        authorizer.authorize(&mut warmup).await.unwrap();
-
-        let started = Instant::now();
-        for _ in 0..ITERATIONS {
-            let mut request = client
-                .post("https://bedrock-mantle.us-east-1.api.aws/v1/responses")
-                .header(CONTENT_TYPE, "application/json")
-                .body(br#"{"input":"benchmark"}"#.to_vec())
-                .build()
-                .unwrap();
-            authorizer.authorize(&mut request).await.unwrap();
-            black_box(&request);
-        }
-        let elapsed = started.elapsed();
-
-        println!(
-            "mantle_ready_credential_sign: {} ns/iteration ({ITERATIONS} iterations)",
-            elapsed.as_nanos() / u128::from(ITERATIONS)
-        );
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
     fn fixed_time() -> SystemTime {

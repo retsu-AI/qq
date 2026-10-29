@@ -966,7 +966,10 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
     let printed = directory.path().join("printed");
     let waited = std::time::Instant::now();
     while !printed.exists() {
-        assert!(waited.elapsed() < Duration::from_secs(5), "shell never printed");
+        assert!(
+            waited.elapsed() < Duration::from_secs(5),
+            "shell never printed"
+        );
         tokio::task::yield_now().await;
     }
     tokio::time::advance(Duration::from_millis(300)).await;
