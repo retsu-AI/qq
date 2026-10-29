@@ -16,9 +16,7 @@ reviewed with `review-diff`.
    `<eng-id>-` when there is no Linear issue), and not `main`. If you
    committed on `main`, run `git switch -c <type>/<short>` to carry the
    commits to a new branch. If the branch is another agent's, stop and
-   ask. If `git` reports no repository, you are in a QQ Auto task copy:
-   use `task_commit`, `task_push`, and `task_pr` for steps 3 to 5
-   instead.
+   ask.
 2. **Commits.** Small, ordered commits, each one building and passing its
    tests. Titles are Conventional Commits, `type(scope): subject`, with a
    lowercase imperative subject and no trailing period. Use the crate or

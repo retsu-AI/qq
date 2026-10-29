@@ -13,26 +13,20 @@
   | Network | `fetch` |
 
   Also: `spawn_agent`, `wait_agents`, `cancel_agent`, `search_history`,
-  `read_tool_result`, MCP tools named `mcp__<server>__<tool>`, and, in an
-  Auto root run inside a Git checkout, `task_commit`, `task_push`, `task_pr`.
+  `read_tool_result`, `command_status`, `load_skill`, and MCP tools named
+  `mcp__<server>__<tool>`.
 - **Policy** (`crates/qq-core/src/approval.rs`, `sessions/approvals.rs`):
 
   | Mode | Behavior |
   | --- | --- |
   | `read-only` | denies Mutating, Shell, External, and Network, and does not send those schemas |
   | `ask` | holds every non-read call for a human; headless denies it immediately |
-  | `auto` (default) | never holds; runs edits and any shell in the private task copy under the native sandbox, publishes on completion; out-of-bounds calls are denied as tool errors |
-  | `full` | never holds a root call; runs in the checkout without the task sandbox; shell still goes through the command worker |
-
-- **Sandbox:** shell needs the native backend in `ask`, `auto`, and `full`
-  (see `docs/guide/install.md#system-requirements`). On a host that blocks
-  user namespaces the first shell call fails the runtime (exit 4) and holds
-  the workspace.
+  | `auto` (default) | never holds; runs every call in the checkout except the fixed stops and managed denies, which are denied as tool errors |
+  | `full` | never holds a root call; runs everything in the checkout, fixed stops included |
 
 ## How to get to it (user POV)
 
-`/approval` in the TUI, or `--approval` on `qq run`. Session grants come from
-`--allow-tool`, `--allow-shell`, and `--allow-host`.
+`/approval` in the TUI, or `--approval` on `qq run`.
 
 ## Driving it headlessly
 
@@ -40,7 +34,8 @@
 | --- | --- | --- |
 | `{"tool":"write_file","args":{"path":"x.txt","content":"hi"}}` | `--approval read-only` | `tool_call_finished` with state `denied`; exit 0; no `x.txt` |
 | same | (default `auto`) | state `completed`; `workspace/x.txt` exists after the run |
-| `{"tool":"shell","args":{"command":"rm -f gone.txt"}}` | `--approval auto` | no approval events; state `completed`; `gone.txt` removed from `workspace/` after the run publishes |
+| `{"tool":"shell","args":{"command":"rm -f gone.txt"}}` | `--approval auto` | no approval events; state `completed`; `gone.txt` removed from `workspace/` |
+| `{"tool":"shell","args":{"command":"git push --force"}}` | `--approval auto` | state `denied`; the result starts `permission_denied: fixed_stop: ` |
 | same | `--approval ask` | `tool_approval_requested`, then `tool_approval_resolved` with `denied` |
 | `{"tool":"ask_user","args":{"questions":[{"prompt":"Which?","options":["a","b"]}]}}` | any | outcome `needs_input`, exit 5 |
 
@@ -60,9 +55,6 @@ The side effect is the proof. Check `workspace/` and
 ## Gotchas
 
 - Auto never emits `tool_approval_requested`. If you see one, the session
-  is not in Auto (check the mode) or the call is a child's supervised call.
-- Headless never waits on a held call. It denies it immediately, or after
-  a 20 s grace period when a reviewer is configured.
-- Auto edits land in a private task copy and are published only when the
-  run completes; check `workspace/` after the run exits, not mid-run.
+  is not in Auto (check the mode) or the call is from a child of an Ask parent.
+- Headless never waits on a held call. It denies it immediately.
 - `ask_user` needs 2–6 options.
