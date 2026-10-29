@@ -6,10 +6,6 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# `cargo binstall qq --git https://github.com/retsu-AI/qq` (and `cargo
-# binstall qq` once the crate is on crates.io) fetches the release archives
-# instead of compiling. The archive holds the binary under a
-# `qq-v{version}-{target}/` directory, mirroring release.yml's Package step.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/qq-v{ version }-{ target }{ archive-suffix }"
 bin-dir = "qq-v{ version }-{ target }/{ bin }{ binary-ext }"
@@ -81,9 +77,6 @@ qq-server = { path = "crates/qq-server" }
 qq-tui = { path = "crates/qq-tui" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rustix = { version = "1", default-features = false, features = ["process", "std"] }
-# reqwest 0.13.2 dropped the optional `webpki-roots` dependency (and with it
-# the implicit `webpki-roots` feature); the `rustls` feature verifies against
-# platform trust roots via rustls-platform-verifier instead.
 regex = "1"
 reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "form", "json", "rustls", "stream"] }
 htmd = "0.2"
@@ -138,30 +131,21 @@ tracing.workspace = true
 tracing-core.workspace = true
 webbrowser.workspace = true
 
-# `qq init` opens its target relative to a no-follow directory handle.
-# Already in the lock through qq-core; this only enables `fs` for the root.
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs"] }
 
 [profile.release]
-# The shipped binary is size- and latency-gated (`benchmarks/perf`). Symbols
-# are stripped because panics print locations, not backtraces, in release;
-# one codegen unit with full LTO removes duplicated code across crate boundaries.
 strip = "symbols"
 codegen-units = 1
 lto = "fat"
 
-# Optimize application glue for size; keep runtime/provider libraries at level 3.
 [profile.release.package.qq]
 opt-level = "s"
 strip = "symbols"
 
-# Exercise the runtime in H0 with the same final optimization as the shipped bin.
 [profile.release.package.xtask]
 opt-level = "s"
 strip = "symbols"
-
-# Keep configuration and authentication compact without changing streaming crates.
 
 [profile.release.package.qq-auth]
 opt-level = "s"
@@ -169,29 +153,16 @@ opt-level = "s"
 [profile.release.package.qq-config]
 opt-level = "s"
 
-# The edit/test loop is link-bound: full debuginfo made `target/debug/qq`
-# ~600 MB. Line tables keep file:line backtraces for workspace code; deps
-# carry none. For a debugger session: `CARGO_PROFILE_DEV_DEBUG=full`
-# (workspace crates) plus `--config 'profile.dev.package."*".debug="full"'`
-# (dependencies).
 [profile.dev]
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
 
-# Producer receipts hash the executable once. Unoptimized SHA-2 can keep a
-# clean debug worker's first command queued for seconds, especially under CI
-# contention. Preserve the identity check without slowing command admission.
 [profile.dev.package.sha2]
 opt-level = 3
 
 [features]
-# Feature manifests for the shipped binary. `default` is the full profile with
-# every supported provider family. The minimal embedding profile is
-# `--no-default-features`: HTTP provider families only, no AWS SDK closure.
-# Configured Bedrock providers then fail at compile time with a
-# configuration error rather than at request time.
 default = ["provider-bedrock"]
 provider-bedrock = ["qq-host/provider-bedrock", "qq-provider/provider-bedrock"]
 
@@ -204,6 +175,5 @@ tempfile.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
 win-custody.workspace = true
-# Shell-like jobs that permit breakaway, for the detached daemon test.
 win32job.workspace = true
 windows-permissions.workspace = true

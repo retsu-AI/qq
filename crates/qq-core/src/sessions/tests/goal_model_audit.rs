@@ -30,9 +30,6 @@ impl RuntimeLoader for Loader {
     ) -> RuntimeLoadFuture {
         let ordinal = self.prepared.load(Ordering::SeqCst);
         if ordinal >= 2 && self.scenario != "allowance" {
-            // Later goal runs never reach a provider. The driver may queue one
-            // before shutdown; shutdown awaits preparation, so it must stop
-            // when cancelled rather than hang.
             return Box::pin(async move {
                 progress.cancelled().await;
                 Err(RuntimeLoadError {
@@ -430,8 +427,6 @@ async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
                     revision: edited.revision,
                 };
                 edited_identity = Some(identity);
-                // Cancellation may already have drained the provider; resumption
-                // after the observed terminal event below is the stable boundary.
             }
         }
         gate.release.add_permits(1);

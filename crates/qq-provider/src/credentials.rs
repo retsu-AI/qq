@@ -5,9 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::ProviderError;
 
-/// A literal secret embedded in configuration.
-///
-/// Formatting is always redacted; callers must opt in to exposing the value.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SecretLiteral(String);
@@ -36,16 +33,10 @@ impl From<&str> for SecretLiteral {
     }
 }
 
-/// Authentication an adapter sends unchanged on every request.
-///
-/// One type serves every protocol: a protocol's API key is a [`Self::Header`]
-/// with its own name (`x-api-key`, `x-goog-api-key`) or a [`Self::Bearer`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StaticAuth {
     None,
-    /// `Authorization: Bearer <secret>`.
     Bearer(SecretLiteral),
-    /// The secret, verbatim, in the named header.
     Header(Cow<'static, str>, SecretLiteral),
 }
 
@@ -54,7 +45,6 @@ impl StaticAuth {
         Self::Header(name.into(), secret)
     }
 
-    /// The scheme, never the secret: `none`, `bearer`, or the header name.
     pub(crate) fn kind(&self) -> &str {
         match self {
             Self::None => "none",
@@ -64,9 +54,6 @@ impl StaticAuth {
     }
 }
 
-/// Builds a sensitive HTTP header value carrying a secret verbatim.
-///
-/// `label` names the secret in configuration errors, e.g. `"x-api-key secret"`.
 pub(crate) fn sensitive_header_value(
     secret: &SecretLiteral,
     label: &str,
@@ -74,7 +61,6 @@ pub(crate) fn sensitive_header_value(
     sensitive_value(non_empty_secret(secret, label)?, label)
 }
 
-/// Builds a sensitive `Authorization: Bearer` header value from a secret.
 pub(crate) fn sensitive_bearer_value(
     secret: &SecretLiteral,
     label: &str,
@@ -107,7 +93,6 @@ impl fmt::Debug for SecretLiteral {
     }
 }
 
-/// A provider-neutral reference to secret material.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SecretRef {
     Env(String),

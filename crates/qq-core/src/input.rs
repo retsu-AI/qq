@@ -1,19 +1,3 @@
-//! Structured input resolution.
-//!
-//! Admission validates input parts syntactically (see
-//! [`qq_protocol::validate_input`]); this module turns them into one user
-//! message when the run starts. Text parts are concatenated verbatim.
-//! Workspace file parts are read through the run's workspace capability,
-//! bounded, optionally hash-checked, and rendered as fenced attachments after
-//! the text. Each attached file is recorded in the session's file state so a
-//! later edit satisfies the read-before-write rule without a redundant read.
-//!
-//! The bytes the model saw are also returned as [`ResolvedAttachment`]s so
-//! the run can persist them when it starts. A later run reconstructs the
-//! prompt from those stored bytes with [`render_file_attachment`], never from
-//! the current file, so the assembled context stays byte-identical to the
-//! request the model actually saw even after the file changes or disappears.
-
 use std::sync::Arc;
 
 use qq_protocol::{
@@ -23,8 +7,6 @@ use thiserror::Error;
 
 use crate::workspace::{FileState, Workspace, content_hash};
 
-/// Why input parts could not become a message. Every variant fails the run
-/// before its first provider request as `RunFailureKind::InvalidCommand`.
 #[derive(Debug, Error)]
 pub(crate) enum InputResolutionError {
     #[error("{0}")]
@@ -61,10 +43,6 @@ impl InputResolutionError {
     }
 }
 
-/// The text a list of parts renders to without touching the filesystem: text
-/// parts verbatim, file parts as placeholders naming the path. Used for
-/// titles, transcript rows, and history search, where attachment bytes do
-/// not belong.
 pub(crate) fn render_text(parts: &[InputPart]) -> String {
     let mut text = String::new();
     for part in parts {
@@ -83,9 +61,6 @@ pub(crate) fn render_text(parts: &[InputPart]) -> String {
     text
 }
 
-/// One file the model saw in a prompt: the contained path as rendered, the
-/// whole-file content hash, the attached window (the whole file when there is
-/// no range), and its bytes. `window` is `(start, end, total)` in lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedAttachment {
     pub(crate) path: String,
@@ -94,16 +69,12 @@ pub(crate) struct ResolvedAttachment {
     pub(crate) content: String,
 }
 
-/// The provider-visible message text plus the attachments it embeds, in
-/// prompt order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedInput {
     pub(crate) text: String,
     pub(crate) attachments: Vec<ResolvedAttachment>,
 }
 
-/// The text parts of a prompt concatenated verbatim: the prefix of the
-/// provider-visible text before any attachment block.
 pub(crate) fn render_text_parts(parts: &[InputPart]) -> String {
     let mut text = String::new();
     for part in parts {
@@ -114,8 +85,6 @@ pub(crate) fn render_text_parts(parts: &[InputPart]) -> String {
     text
 }
 
-/// Reads every file part and renders the provider-visible message text.
-/// Blocking: call from `spawn_blocking` or a dedicated thread.
 pub(crate) fn resolve_blocking(
     parts: &[InputPart],
     workspace: &Workspace,
@@ -154,8 +123,6 @@ pub(crate) fn resolve_blocking(
                         });
                     }
                 };
-                // No metadata was read here before; a zero hint keeps that
-                // path to one open and one bounded read.
                 let bytes = match crate::workspace::read_bounded(file, MAX_INPUT_FILE_BYTES, 0) {
                     Ok(bytes) => bytes,
                     Err(crate::workspace::BoundedReadError::TooLarge { .. }) => {
@@ -185,8 +152,6 @@ pub(crate) fn resolve_blocking(
                 };
                 let recorded = contained.to_string_lossy().into_owned();
                 file_state.record(recorded.clone(), actual.clone());
-                // A range attaches only those lines; the whole file was
-                // hashed and recorded above, so an edit needs no re-read.
                 let attachment = match range {
                     None => ResolvedAttachment {
                         path: recorded,
@@ -243,10 +208,6 @@ pub(crate) fn resolve_blocking(
     })
 }
 
-/// Appends the placeholder-free prompt text for one message: `text` followed
-/// by each attachment rendered exactly as the model first saw it. Used by
-/// context reconstruction; the live run renders through `resolve_blocking`,
-/// which produces the same bytes for the same inputs.
 pub(crate) fn render_resolved_prompt<'a>(
     text: &str,
     attachments: impl IntoIterator<Item = (&'a str, Option<(usize, usize, usize)>, Option<&'a str>)>,
@@ -265,9 +226,6 @@ pub(crate) fn render_resolved_prompt<'a>(
     prompt
 }
 
-/// Renders one `<attached-file>` block. `None` content is a stored
-/// attachment whose bytes the per-session retention cap reclaimed; the block
-/// says so explicitly rather than reverting to the bare `@path` placeholder.
 fn render_file_attachment(
     into: &mut String,
     path: &str,
@@ -290,8 +248,6 @@ fn render_file_attachment(
         return;
     };
     into.push_str(">\n");
-    // A fence longer than any backtick run inside the file (and never shorter
-    // than four) keeps the content unambiguous for the model.
     let longest_run = content.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let fence = "`".repeat(longest_run.max(3) + 1);
     into.push_str(&fence);
@@ -349,7 +305,6 @@ mod tests {
             render_text(&parts),
             "Summarize:\n@notes.md\n@./sub/data.txt\n"
         );
-        // The attachments the run persists reproduce the live text exactly.
         assert_eq!(resolved.attachments.len(), 2);
         assert_eq!(resolved.attachments[0].path, "notes.md");
         assert_eq!(
@@ -404,7 +359,6 @@ mod tests {
         assert!(!text.contains("# Notes"));
         assert_eq!(resolved.attachments[0].window, Some((3, 3, 3)));
         assert_eq!(resolved.attachments[0].content, "use ``` fences\n");
-        // The hash is of the whole file: an edit after this needs no read.
         assert_eq!(
             state.recorded("notes.md").unwrap(),
             content_hash(b"# Notes\n\nuse ``` fences\n")

@@ -1,14 +1,3 @@
-//! Bounded cache of compiled agent plans with filesystem revalidation.
-//!
-//! Every durable run used to reload configuration, resolve credentials, and
-//! reopen the workspace. The cache keeps one live [`CompiledAgentPlan`]
-//! generation per (workspace, model selection, explicit config) key and
-//! revalidates it with a fixed list of `stat` calls — the paths the config
-//! loader probed, the credential index, the workspace instruction files, and
-//! the skill roots — plus one synchronous generation check per external tool
-//! host. Any observable change recompiles and atomically swaps in a new
-//! generation for later runs; runs already holding the old `Arc` keep it.
-
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -21,8 +10,6 @@ use qq_protocol::{AgentPlanDigest, AgentProfileId, CredentialEpoch, ModelSelecti
 use qq_provider::SecretRef;
 use thiserror::Error;
 
-/// Hard admission bounds. Active generations count toward `max_bytes` and are
-/// never evicted; when inactive eviction cannot make room, admission fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanCacheLimits {
     pub max_entries: usize,
@@ -30,9 +17,6 @@ pub struct PlanCacheLimits {
 }
 
 impl Default for PlanCacheLimits {
-    /// Sixteen generations and 64 MiB of estimated plan heap: enough for a
-    /// TUI switching among a handful of models and workspaces, small enough
-    /// that a runaway refresh cannot grow the process without bound.
     fn default() -> Self {
         Self {
             max_entries: 16,
@@ -41,16 +25,8 @@ impl Default for PlanCacheLimits {
     }
 }
 
-/// Identity of one cache slot. Two requests that would load configuration
-/// identically share a slot; anything that changes the load request itself is
-/// part of the key rather than a revalidated source.
-///
-/// The inline configuration document may carry credentials, so the key is
-/// compared exactly and privately: it is never hashed, and its `Debug` output
-/// redacts the document.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PlanKey {
-    /// Logical project supplying configuration, separate from task files.
     pub configuration_workspace: PathBuf,
     pub workspace: PathBuf,
     pub model: ModelSelection,
@@ -58,7 +34,6 @@ pub struct PlanKey {
     pub explicit_config_path: Option<PathBuf>,
     pub explicit_config_content: Option<String>,
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
-    /// Keep strict inspection separate from runtime loads withholding untrusted authority.
     pub ignore_untrusted_project_config: bool,
 }
 
@@ -83,35 +58,22 @@ impl std::fmt::Debug for PlanKey {
     }
 }
 
-/// Everything a compile produced that the cache needs to keep beside the plan.
 pub struct CompiledGeneration {
     pub plan: Arc<CompiledAgentPlan>,
     pub configuration_sources: Vec<qq_config::ConfigSources>,
-    /// Paths whose state decided this compile; re-stat'd on every lookup.
     pub sources: Vec<SourceFingerprint>,
     pub bindings: LiveBindings,
 }
 
-/// Equality of live configuration is distinct from durable plan identity.
-/// This root-only payload is neither hashed nor serialized; full endpoints,
-/// inline credentials, and header values must never enter diagnostics.
 #[derive(Default)]
 pub struct LiveBindings {
     pub provider: Option<ProviderAccess>,
     pub mcp: Option<Arc<crate::mcp::WiredMcpRegistry>>,
-    /// Behavior the compiled plan carries but deliberately keeps out of its
-    /// digest. A configuration edit that changes only one of these must
-    /// still replace the cached generation rather than be revalidated into
-    /// it.
     pub runtime: RuntimeSwitches,
 }
 
-/// Digest-excluded plan settings that must still invalidate a cached plan.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeSwitches {
-    /// The empty-truncation raise ceiling (catalog limit, policy-bounded):
-    /// a lowered managed ceiling must not keep serving a plan compiled
-    /// under the higher one.
     pub output_ceiling: Option<qq_core::OutputCeiling>,
 }
 
@@ -173,7 +135,6 @@ impl CompiledGeneration {
                         .headers()
                         .iter()
                         .map(|(name, value)| {
-                            // Estimated B-tree node overhead plus each owned string.
                             std::mem::size_of::<(String, qq_config::StaticHeaderValue)>()
                                 + 3 * std::mem::size_of::<usize>()
                                 + name.len()
@@ -230,16 +191,10 @@ pub enum PlanCacheError<E> {
     Poisoned,
 }
 
-/// Why a lookup produced the plan it did; surfaced for tests and diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanLookup {
-    /// Every recorded source fingerprint still matched.
     Hit,
-    /// A source changed, but the recompiled plan had the same digest and
-    /// epoch and live bindings; the existing generation was kept and its
-    /// fingerprints refreshed.
     Revalidated,
-    /// A new generation was compiled and published.
     Compiled,
 }
 
@@ -251,17 +206,11 @@ struct Slot {
 }
 
 struct State {
-    /// Most recently used at the back.
     slots: VecDeque<Slot>,
-    /// Generations replaced by a same-key refresh while a run still held
-    /// their `Arc`. They are never served again but count toward the limits
-    /// until their last holder settles.
     superseded: Vec<CompiledGeneration>,
     shut_down: bool,
 }
 
-/// Bounded, revalidating cache of compiled plans. Cheap to clone; all clones
-/// share one state.
 #[derive(Clone)]
 pub struct PlanCache {
     inner: Arc<Inner>,
@@ -270,11 +219,6 @@ pub struct PlanCache {
 struct Inner {
     limits: PlanCacheLimits,
     state: Mutex<State>,
-    /// One compile per key at a time. A refresh storm on one workspace
-    /// compiles once; other keys proceed independently. Guards are removed
-    /// when their last holder finishes, so the list is bounded by the number
-    /// of concurrent loads rather than by the number of keys ever seen. A
-    /// linear scan keeps the key unhashed.
     in_flight: Mutex<Vec<(PlanKey, Arc<Mutex<()>>)>>,
 }
 
@@ -294,12 +238,6 @@ impl PlanCache {
         }
     }
 
-    /// Returns the current generation for `key`, compiling one when none is
-    /// cached or a recorded source changed. `compile` runs on the calling
-    /// thread while this key's single-flight lock is held, so callers invoke
-    /// this from a blocking context. Returns the plan and how it was obtained.
-    /// The key is borrowed: a hit, the common case, allocates nothing. It is
-    /// cloned only into the in-flight guard list and into a new slot.
     pub fn load<E, F>(
         &self,
         key: &PlanKey,
@@ -327,10 +265,6 @@ impl PlanCache {
             let _flight = flight.lock().map_err(|_| PlanCacheError::Poisoned)?;
             self.load_under_flight(key, compile)
         };
-        // Reclaim the guard once nobody else waits on it: the list holds one
-        // reference and this call holds the other. A waiter that cloned the
-        // guard before removal still serializes on the same mutex, and a
-        // newcomer after removal only starts once this load has published.
         if let Ok(mut in_flight) = self.inner.in_flight.lock()
             && Arc::strong_count(&flight) == 2
             && let Some(index) = in_flight
@@ -384,7 +318,6 @@ impl PlanCache {
             }
         }
 
-        // Compile outside the state lock: other keys keep hitting meanwhile.
         let generation = compile().map_err(PlanCacheError::Compile)?;
         let digest = generation.plan.digest();
         let epoch = generation.plan.credential_epoch();
@@ -404,11 +337,6 @@ impl PlanCache {
                 && slot.epoch == epoch
                 && slot.generation.bindings == generation.bindings
             {
-                // Same behavior, same credentials: keep the live generation
-                // that active runs may hold and only refresh what we watch.
-                // The refreshed evidence may be larger than what was
-                // recorded; that growth is admitted like any other bytes and
-                // a rejection leaves the slot exactly as it was.
                 let growth = generation
                     .estimated_bytes()
                     .saturating_sub(slot.generation.estimated_bytes());
@@ -430,10 +358,6 @@ impl PlanCache {
             }
         }
 
-        // Admit the replacement while the previous generation is still in
-        // place, so a rejected refresh leaves the cache exactly as it was.
-        // An unpinned predecessor is about to be dropped and does not count;
-        // a pinned one moves to `superseded` and keeps counting.
         admit(
             &mut state,
             self.inner.limits,
@@ -459,8 +383,6 @@ impl PlanCache {
         Ok((plan, PlanLookup::Compiled))
     }
 
-    /// Drops every cached generation and refuses further loads. Active runs
-    /// keep the plans they hold.
     pub fn shutdown(&self) {
         if let Ok(mut state) = self.inner.state.lock() {
             state.shut_down = true;
@@ -479,7 +401,6 @@ impl PlanCache {
         self.len() == 0
     }
 
-    /// Superseded generations still held by a run.
     #[cfg(test)]
     fn superseded_len(&self) -> usize {
         self.inner.state.lock().map_or(0, |mut state| {
@@ -493,7 +414,6 @@ impl PlanCache {
         self.inner.in_flight.lock().map_or(0, |guards| guards.len())
     }
 
-    /// Estimated bytes held by cached and superseded generations.
     #[cfg(test)]
     fn estimated_bytes(&self) -> usize {
         self.inner.state.lock().map_or(0, |mut state| {
@@ -513,19 +433,12 @@ impl PlanCache {
     }
 }
 
-/// Drops superseded generations whose last run has settled.
 fn release_settled(state: &mut State) {
     state
         .superseded
         .retain(|generation| Arc::strong_count(&generation.plan) > 1);
 }
 
-/// Makes room for `requested_bytes` by evicting least-recently-used inactive
-/// generations. A generation is active while anything outside the cache holds
-/// its `Arc`; those are pinned and count toward the limit, as do superseded
-/// generations still held by a run. The slot at `replacing`, when present, is
-/// the one the caller is about to replace: it is never evicted here, and it
-/// only counts when pinned (an unpinned predecessor is dropped by the caller).
 fn admit<E>(
     state: &mut State,
     limits: PlanCacheLimits,
@@ -619,7 +532,6 @@ mod tests {
         }
     }
 
-    /// Compiles an embedded plan for `workspace`; `model` varies the digest.
     fn compile(workspace: &Path, model: &str) -> CompiledGeneration {
         let runtime = Runtime::new(SilentProvider, model, 256).unwrap();
         let plan = CompiledAgentPlan::compile_blocking(AgentProfile::embedded(
@@ -637,7 +549,6 @@ mod tests {
     }
 
     fn canonical_temp() -> tempfile::TempDir {
-        // Plans require canonical roots; macOS temp dirs are symlinks.
         let directory = tempfile::tempdir().unwrap();
         let canonical = std::fs::canonicalize(directory.path()).unwrap();
         assert_eq!(
@@ -667,8 +578,6 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(compiles.load(Ordering::SeqCst), 1);
 
-        // Creating AGENTS.md changes an instruction source: recompile, new
-        // digest, new generation; the old Arc stays valid for its holders.
         std::fs::write(directory.path().join("AGENTS.md"), "be terse\n").unwrap();
         let (third, lookup) = load().unwrap();
         assert_eq!(lookup, PlanLookup::Compiled);
@@ -676,8 +585,6 @@ mod tests {
         assert_ne!(first.digest(), third.digest());
         assert_eq!(compiles.load(Ordering::SeqCst), 2);
         assert_eq!(cache.len(), 1);
-        // The first generation is still usable by whoever holds it, and it
-        // stays in the accounting until they release it.
         assert_eq!(first.workspace_path(), directory.path());
         assert_eq!(cache.superseded_len(), 1);
         drop(first);
@@ -712,11 +619,9 @@ mod tests {
         let (second, lookup) = load("m").unwrap();
         assert_eq!(lookup, PlanLookup::Compiled);
         assert!(!Arc::ptr_eq(&first, &second));
-        // Live slot plus the superseded generation `first` still holds.
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.superseded_len(), 1);
         assert!(cache.estimated_bytes() > one_plan);
-        // Both count toward the entry limit, so a third key is refused.
         assert!(matches!(
             load("other"),
             Err(PlanCacheError::Capacity {
@@ -743,12 +648,9 @@ mod tests {
             })
         };
         let (first, _) = load().unwrap();
-        // A pinned predecessor plus its replacement would be two entries.
         std::fs::write(directory.path().join("AGENTS.md"), "be terse\n").unwrap();
         assert!(matches!(load(), Err(PlanCacheError::Capacity { .. })));
         assert_eq!(cache.len(), 1);
-        // Reverting the edit makes the recorded fingerprints current again
-        // and the untouched generation is served as before.
         std::fs::remove_file(directory.path().join("AGENTS.md")).unwrap();
         let (again, lookup) = cache
             .load::<std::convert::Infallible, _>(&key(directory.path(), "m"), || {
@@ -757,8 +659,6 @@ mod tests {
             .unwrap();
         assert_eq!(lookup, PlanLookup::Hit);
         assert!(Arc::ptr_eq(&first, &again));
-        // Once released, the same refresh is admitted and the old generation
-        // is simply dropped.
         drop(again);
         drop(first);
         std::fs::write(directory.path().join("AGENTS.md"), "be terse\n").unwrap();
@@ -806,21 +706,17 @@ mod tests {
             write_newer(&staged, &instructions, "be terse\n");
             std::fs::rename(&staged, &instructions).unwrap();
         };
-        // Same digest, much more watched evidence: the growth does not fit.
         touch();
         let grown = cache
             .load::<std::convert::Infallible, _>(&key(directory.path(), "m"), || Ok(padded(64)));
         assert!(matches!(grown, Err(PlanCacheError::Capacity { .. })));
         assert_eq!(cache.len(), 1);
         assert!(cache.estimated_bytes() <= one_plan + 2048);
-        // A rejected refresh left the old fingerprints in place: they are
-        // still stale, so the next load compiles again rather than hitting.
         let (again, lookup) = cache
             .load::<std::convert::Infallible, _>(&key(directory.path(), "m"), || Ok(padded(0)))
             .unwrap();
         assert_eq!(lookup, PlanLookup::Revalidated);
         assert!(Arc::ptr_eq(&first, &again));
-        // Growth within the limit is admitted and accounted.
         touch();
         let before = cache.estimated_bytes();
         let (_, lookup) = cache
@@ -864,8 +760,6 @@ mod tests {
         };
 
         let (first, _) = load().unwrap();
-        // Touch the file with identical content: the fingerprint changes but
-        // the compiled behavior does not.
         let staged = directory.path().join("AGENTS.md.tmp");
         write_newer(&staged, &instructions, "be terse\n");
         std::fs::rename(&staged, &instructions).unwrap();
@@ -892,7 +786,6 @@ mod tests {
         assert!(
             matches!(failed, Err(PlanCacheError::Compile(message)) if message.contains("broken"))
         );
-        // Reverting the edit makes the recorded fingerprints current again.
         std::fs::remove_file(directory.path().join("AGENTS.md")).unwrap();
         let (again, lookup) = cache
             .load::<String, _>(&key(directory.path(), "m"), || panic!("must not compile"))
@@ -919,14 +812,12 @@ mod tests {
 
         let pinned = load("a");
         drop(load("b"));
-        // Touch "a" so "b" is the least recently used.
         let (_, lookup) = cache
             .load::<std::convert::Infallible, _>(&key(directory.path(), "a"), || unreachable!())
             .unwrap();
         assert_eq!(lookup, PlanLookup::Hit);
         drop(load("c"));
         assert_eq!(cache.len(), 2);
-        // "b" was evicted; "a" is still cached (and pinned by `pinned`).
         let (_, lookup) = cache
             .load::<std::convert::Infallible, _>(&key(directory.path(), "a"), || unreachable!())
             .unwrap();
@@ -965,7 +856,6 @@ mod tests {
         ));
         assert!(cache.estimated_bytes() > 0);
         drop(pinned);
-        // Released, the entry is evictable and admission succeeds.
         let (_, lookup) = cache
             .load::<std::convert::Infallible, _>(&key(directory.path(), "b"), || {
                 Ok(compile(directory.path(), "b"))
@@ -1058,7 +948,6 @@ mod tests {
             ),
             Err(PlanCacheError::ShutDown)
         ));
-        // The plan a run holds is unaffected.
         assert_eq!(held.workspace_path(), directory.path());
     }
 }

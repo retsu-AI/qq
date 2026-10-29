@@ -1,20 +1,3 @@
-//! Merkle index for detecting changes in the workspace tree the tools see.
-//!
-//! [`WorkspaceIndex::build`] walks the workspace through the contained,
-//! ignore-aware lister `search` and `tree` use — so the index sees exactly
-//! the files those tools see, `.qqignore` included — hashes every regular
-//! file with SHA-256, and hashes every directory over its children. Two
-//! builds of an unchanged tree are equal; one changed byte changes that
-//! file's hash, every ancestor's, and the root's. [`WorkspaceIndex::refresh`]
-//! rebuilds against a previous index and reuses its hash for every file
-//! whose size and modification time are unchanged, so a checkpoint on a
-//! quiet tree costs a walk and no reads. [`WorkspaceIndex::diff`] turns two
-//! indexes into sorted added, modified, and deleted paths.
-//!
-//! A build is bounded by an [`IndexBudget`]. When the budget ends the walk
-//! the result is [`IndexOutcome::Partial`], which has no root hash and
-//! cannot be diffed: a prefix of a tree says nothing about the tree.
-
 use std::{
     io::Read as _,
     path::Path,
@@ -33,22 +16,14 @@ use crate::{
     workspace::Workspace,
 };
 
-/// Deepest directory the walk descends, matching `search`.
 const MAX_WALK_DEPTH: usize = 64;
-/// Domain separator for directory hashes; bump on any change to what a
-/// directory hash covers.
 const DIRECTORY_TAG: &[u8] = b"qq-workspace-index-v1\0";
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 
-/// Bounds on one index build. The defaults are `search`'s scan bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexBudget {
-    /// Directory entries (files and directories) visited before stopping.
     pub max_entries: usize,
-    /// File bytes read before stopping. Bytes a refresh reuses from the
-    /// previous index are not read and not charged.
     pub max_bytes: u64,
-    /// Wall-clock time before stopping.
     pub timeout: Duration,
 }
 
@@ -62,7 +37,6 @@ impl Default for IndexBudget {
     }
 }
 
-/// Why a build stopped before the tree was exhausted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexStop {
     Entries,
@@ -104,53 +78,35 @@ pub enum IndexError {
     },
 }
 
-/// One regular file in the index. `path` is workspace-relative with `/`
-/// separators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedFile {
     pub path: String,
     pub size: u64,
-    /// Modification time as the walk saw it; `None` when the filesystem
-    /// reports none, in which case a refresh always re-reads the file.
     pub modified: Option<SystemTime>,
     pub hash: ContentHash,
 }
 
-/// One directory in the index, root first (`"."`), then in walk order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedDirectory {
     pub path: String,
     pub hash: ContentHash,
 }
 
-/// A complete index: every file the walker admits, hashed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceIndex {
-    /// Hash of the root directory node; equal for two unchanged trees.
     pub root_hash: ContentHash,
-    /// Regular files in bytewise path order.
     pub files: Vec<IndexedFile>,
-    /// Directories that were listed, root first.
     pub directories: Vec<IndexedDirectory>,
-    /// Names that are not UTF-8 and entries the walk could not inspect.
     pub unreadable: usize,
-    /// Entries charged against the budget.
     pub entries: usize,
-    /// File bytes read. A refresh reads only files it could not reuse.
     pub bytes_read: u64,
-    /// Files whose hash a refresh carried over without reading them.
     pub reused: usize,
-    /// Wall clock when the walk began. A refresh re-reads any file whose
-    /// mtime is not strictly older than this, since an edit in the same
-    /// timestamp tick as the walk could leave size and mtime unchanged.
     started_at: SystemTime,
 }
 
-/// The prefix of a tree a build reached before its budget ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartialIndex {
     pub stopped: IndexStop,
-    /// Files hashed before the stop, in walk order.
     pub files: Vec<IndexedFile>,
     pub entries: usize,
     pub bytes_read: u64,
@@ -171,7 +127,6 @@ impl IndexOutcome {
     }
 }
 
-/// Paths whose hash differs between two indexes, each list sorted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IndexDiff {
     pub added: Vec<String>,
@@ -186,16 +141,11 @@ impl IndexDiff {
 }
 
 impl WorkspaceIndex {
-    /// Indexes the workspace at `root` (an absolute path) within `budget`,
-    /// reading every file. Blocking: call it off the async executor.
     pub fn build(root: &Path, budget: &IndexBudget) -> Result<IndexOutcome, IndexError> {
         let workspace = Workspace::open(root).map_err(|source| IndexError::Workspace { source })?;
         Self::build_in(&workspace, budget, None)
     }
 
-    /// Re-indexes the workspace, reusing `self`'s hash for every file whose
-    /// size and modification time match and whose mtime is older than the
-    /// previous walk. Everything else is read. Blocking.
     pub fn refresh(&self, root: &Path, budget: &IndexBudget) -> Result<IndexOutcome, IndexError> {
         let workspace = Workspace::open(root).map_err(|source| IndexError::Workspace { source })?;
         Self::build_in(&workspace, budget, Some(self))
@@ -253,7 +203,6 @@ impl WorkspaceIndex {
         }
     }
 
-    /// Files whose hash changed from `self` to `after`.
     pub fn diff(&self, after: &Self) -> IndexDiff {
         let mut diff = IndexDiff::default();
         let mut before = self.files.iter().peekable();
@@ -292,9 +241,6 @@ impl WorkspaceIndex {
     }
 }
 
-/// The previous index a refresh reads from. Both walks emit files in
-/// bytewise path order, so one forward cursor finds each candidate without
-/// a map.
 struct Previous<'a> {
     files: &'a [IndexedFile],
     cursor: usize,
@@ -302,9 +248,6 @@ struct Previous<'a> {
 }
 
 impl Previous<'_> {
-    /// The previous entry for `path`, when it exists and is safe to reuse:
-    /// same size, same mtime, and that mtime strictly older than the walk
-    /// that recorded it.
     fn reusable(&mut self, path: &str, size: u64, modified: SystemTime) -> Option<ContentHash> {
         while let Some(entry) = self.files.get(self.cursor) {
             match entry.path.as_str().cmp(path) {
@@ -336,11 +279,6 @@ struct Walker<'a> {
 }
 
 impl Walker<'_> {
-    /// Lists `dir`, indexes its children, and returns the directory hash:
-    /// SHA-256 over the tag and, per child in walk order,
-    /// `kind\0name\0digest\n` with the child's raw 32-byte digest. Names
-    /// rather than paths, so an unchanged subtree hashes identically
-    /// wherever it sits.
     fn visit_dir(&mut self, dir: &str, depth: usize) -> Result<ContentHash, ListError> {
         let position = self.directories.len();
         self.directories.push(IndexedDirectory {
@@ -370,9 +308,6 @@ impl Walker<'_> {
                     }
                     match self.visit_dir(&child.path, depth + 1) {
                         Ok(hash) => hash,
-                        // An unreadable subdirectory is absent from the
-                        // index, as it is from `search`; only the root
-                        // failing is the build's error.
                         Err(ListError::ReadDir { .. } | ListError::Inspect { .. }) => {
                             self.budget.unreadable += 1;
                             continue;
@@ -408,9 +343,6 @@ impl Walker<'_> {
         Ok(hash)
     }
 
-    /// Records one regular file, reusing the previous index's hash when it
-    /// is safe to, otherwise hashing the content. `None` when the file
-    /// vanished or could not be read, or the byte budget ended mid-file.
     fn index_file(
         &mut self,
         path: &str,
@@ -437,8 +369,6 @@ impl Walker<'_> {
             }
         };
         let hash = if size > MAX_FILE_SCAN_BYTES {
-            // Stream large files so the index still notices when they
-            // change without holding them in memory.
             let mut hasher = Sha256::new();
             self.buffer.resize(STREAM_BUFFER_BYTES, 0);
             loop {
@@ -518,8 +448,6 @@ mod tests {
             .hash
     }
 
-    /// Two indexes with the same tree content; `started_at` differs by
-    /// construction and is not part of the comparison.
     fn assert_same_tree(a: &WorkspaceIndex, b: &WorkspaceIndex) {
         assert_eq!(a.root_hash, b.root_hash);
         assert_eq!(a.files, b.files);
@@ -550,10 +478,6 @@ mod tests {
             .map(|directory| directory.path.as_str())
             .collect();
         assert_eq!(directories, [".", "docs", "src", "src/nested"]);
-        // Pinned: a function of the names and contents above under the
-        // `qq-workspace-index-v1` tag, recomputed independently (raw
-        // 32-byte child digests, `kind\0name\0digest\n` per child). A
-        // change here is a format change and needs a tag bump.
         assert_eq!(
             first.root_hash.to_string(),
             "18bdd6fd24585ed823937161a32e96454131f7d7f30a8a9bd51f001353155a23"
@@ -644,8 +568,6 @@ mod tests {
         );
     }
 
-    /// Sets every fixture file's mtime to `when`, so a test controls the
-    /// relation between mtimes and an index's walk clock.
     fn set_all_modified(root: &Path, when: SystemTime) {
         for path in [
             "README.md",
@@ -666,8 +588,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         fixture(directory.path());
         let root = fs::canonicalize(directory.path()).unwrap();
-        // Fixture mtimes well in the past: a real checkpoint runs seconds
-        // after the edits it observes, so the same-tick guard is idle.
         let past = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
         set_all_modified(&root, past);
         let first = build(&root);
@@ -681,7 +601,6 @@ mod tests {
         assert_eq!(quiet.reused, 5);
         assert_eq!(quiet.bytes_read, 0);
 
-        // Same size, different content, mtime moved: must be re-read.
         let later = past + Duration::from_secs(1);
         let target = root.join("README.md");
         fs::write(&target, "README\n").unwrap();
@@ -701,10 +620,6 @@ mod tests {
         assert_ne!(first.root_hash, second.root_hash);
         assert_eq!(second.root_hash, build(&root).root_hash);
 
-        // Same size and same mtime as the index recorded, but that mtime is
-        // not older than the index's own walk: an edit could have landed in
-        // the walk's timestamp tick, so the file is re-read rather than
-        // trusted. Only README.md is affected; the others are older still.
         second.started_at = later;
         let racy = second
             .refresh(&root, &IndexBudget::default())
@@ -715,7 +630,6 @@ mod tests {
         assert_eq!(racy.bytes_read, 7);
         assert_same_tree(&second, &racy);
 
-        // A file the filesystem reports no mtime for is never reused.
         let mut no_mtime = racy.clone();
         no_mtime.files[0].modified = None;
         let reread = no_mtime

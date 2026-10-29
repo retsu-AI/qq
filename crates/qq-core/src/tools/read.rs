@@ -19,16 +19,11 @@ use super::{
 pub(super) const MAX_READ_LINES: usize = 2_000;
 const MAX_READ_OFFSET: usize = 100_000;
 pub(super) const MAX_READ_SCAN_BYTES: u64 = 4 * 1024 * 1024;
-/// Model-facing default for one read; `Bounds::new` clamps to the ceiling.
 pub(super) const READ_BOUNDS: Bounds = Bounds::new(32 * 1024, 4_000);
 const MAX_RANGES: usize = 8;
 const MAX_OUTLINE_ITEMS: usize = 400;
-/// The short content hash carried by the header: `h:` + 12 hex digits.
 pub(super) const SHORT_HASH_LEN: usize = 12;
 
-/// The hex digits of an `h:<12 hex digits>` argument (`if_hash`,
-/// `if_changed_since`). `h:000000000000` is the placeholder models send when
-/// they have no hash, so it reads as absent rather than as a stale claim.
 pub(super) fn short_hash(value: Option<&str>) -> Result<Option<&str>, ()> {
     let Some(value) = value else {
         return Ok(None);
@@ -42,7 +37,6 @@ pub(super) fn short_hash(value: Option<&str>) -> Result<Option<&str>, ()> {
         _ => Err(()),
     }
 }
-/// Escaped bytes reserved for the header line ahead of the body.
 const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "gif"];
 const IMAGE_EXTENSIONS_EXTRA: [&str; 1] = ["webp"];
 const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
@@ -72,15 +66,11 @@ pub(super) enum ReadMode {
     Info,
 }
 
-/// A file read into memory with the facts every mode needs.
 struct Loaded {
     path: String,
     bytes: Vec<u8>,
     size: u64,
-    /// `Some` when the full content was scanned and may be recorded.
     hash: Option<String>,
-    /// Octal mode bits on Unix; `ro`/`rw` elsewhere, where that is all the
-    /// filesystem reports.
     perms: String,
 }
 
@@ -94,8 +84,6 @@ struct ReadHook {
 #[cfg(test)]
 static READ_HOOKS: std::sync::Mutex<Vec<ReadHook>> = std::sync::Mutex::new(Vec::new());
 
-/// Holds the next `read_file` in `workspace` on its blocking thread until
-/// released, ignoring cancellation, as a slow filesystem would.
 #[cfg(test)]
 pub(crate) fn hold_tool_read(
     workspace: &std::path::Path,
@@ -135,9 +123,6 @@ pub(super) fn read_file(
             let _ = hook.release.recv();
         }
     }
-    // Models that fill every optional field send `offset`/`limit` beside
-    // `ranges` (usually offset = the first range's start). `ranges` is the
-    // more specific request, so it wins and the header says so.
     let offset_ignored =
         !arguments.ranges.is_empty() && (arguments.offset.is_some() || arguments.limit.is_some());
     let ranges = match parse_ranges(&arguments) {
@@ -252,7 +237,6 @@ pub(super) fn read_file(
 #[derive(Clone, Copy)]
 struct Range {
     start: usize,
-    /// Inclusive; `usize::MAX` means "to the end".
     end: usize,
 }
 
@@ -283,8 +267,6 @@ fn parse_ranges(arguments: &ReadFileArgs) -> Result<Vec<Range>, String> {
         return Ok(ranges);
     }
     for text in &arguments.ranges {
-        // `"370,470"` is a range written with the wrong separator; a
-        // second range would be its own array element.
         let (start, end) = match text.split_once(['-', ',']) {
             Some((start, end)) => (start, Some(end)),
             None => (text.as_str(), None),
@@ -303,8 +285,6 @@ fn parse_ranges(arguments: &ReadFileArgs) -> Result<Vec<Range>, String> {
         };
         ranges.push(Range { start, end });
     }
-    // Merge overlapping and adjacent ranges so the output is ascending and
-    // every line appears once; the total window stays bounded.
     ranges.sort_by_key(|range| range.start);
     let mut merged: Vec<Range> = Vec::with_capacity(ranges.len());
     for range in ranges {
@@ -343,9 +323,6 @@ fn load(workspace: &Workspace, requested: &str) -> Result<Loaded, String> {
         Ok(file) => file,
         Err(error) => return Err(format!("could not open file: {error}")),
     };
-    // The whole content (bounded by the scan cap) is read so the session's
-    // file-state map can record a full-file hash for the staleness guard.
-    // Larger files record nothing: they are not editable anyway.
     let mut bytes = Vec::with_capacity(
         usize::try_from(metadata.len())
             .unwrap_or(0)
@@ -376,9 +353,6 @@ struct HeaderNotes {
     argument_note_bytes: usize,
 }
 
-/// Line-numbered content for the merged `ranges`. Numbers use one gutter
-/// width per call so columns align across ranges; ranges are separated by
-/// `--`. Lines past the end of the file are reported, not silently dropped.
 fn lines(
     loaded: &Loaded,
     short: &str,
@@ -390,8 +364,6 @@ fn lines(
 ) -> ReadSideOutput {
     let text = match std::str::from_utf8(&loaded.bytes) {
         Ok(text) => text,
-        // The scan cap (or the file itself) ended inside a multibyte
-        // character: keep the valid prefix, the marker names the cut.
         Err(error) if error.error_len().is_none() && loaded.hash.is_none() => {
             std::str::from_utf8(&loaded.bytes[..error.valid_up_to()])
                 .expect("the UTF-8 validator reported a valid prefix")
@@ -415,8 +387,6 @@ fn lines(
         .unwrap_or(0)
         .min(total_lines);
     let width = last_wanted.max(1).to_string().len();
-    // Render the largest header this window can produce, including its real path.
-    // The actual first line numbers have no more digits than their range ends.
     let mut header_window = String::with_capacity(ranges.len() * 16);
     for (index, range) in ranges.iter().enumerate() {
         if index > 0 {
@@ -433,9 +403,6 @@ fn lines(
         .field("scanned", MAX_READ_SCAN_BYTES)
         .field("note", "offset_ignored")
         .into_line();
-    // Keep ordinary-path windows stable; long headers reserve their full weight.
-    // Dispatch chooses note placement before masking, so a large raw header
-    // can require an extra row even when its masked rendering is short.
     let note_row = usize::from(notes.argument_note_bytes > 0);
     let header_bytes =
         (masked_escaped_len(&header_bound) + notes.argument_note_bytes + note_row).max(256);
@@ -446,8 +413,6 @@ fn lines(
         return ReadSideOutput::error("output_limit: read header exceeds the output bound");
     }
     let body_budget = READ_BOUNDS.max_bytes - header_bytes - MARKER_RESERVE_BYTES;
-    // Sized to the file, not the budget: most reads are small and a 32 KiB
-    // allocation per call is measurable on the tool loop.
     let mut body = String::with_capacity(
         text.len()
             .saturating_add(total_lines.saturating_mul(width + 1))
@@ -455,7 +420,6 @@ fn lines(
     );
     let mut identity = Sha256::new();
     identity.update(b"qq-read-lines-result-v1\0");
-    // Keep the header and a possible continuation marker inside the bound.
     let body_line_budget = READ_BOUNDS.max_lines - header_lines - 1;
     let mut body_lines = 0_usize;
     let mut line_stopped = false;
@@ -481,7 +445,6 @@ fn lines(
             if number < range.start {
                 continue;
             }
-            // Retain identity of the selected observed row before clipping.
             identity.update(b"row\0");
             identity.update((number as u64).to_le_bytes());
             identity.update((line.len() as u64).to_le_bytes());
@@ -495,16 +458,12 @@ fn lines(
             let _ = write!(number_buffer, "{number:>width$}\t");
             let before = body.len();
             body.push_str(&number_buffer);
-            // CRLF files render as LF; the hash still covers the bytes.
             let content = line.strip_suffix('\n').map_or(line, |content| {
                 content.strip_suffix('\r').unwrap_or(content)
             });
-            // A row is shown whole (clipped only at the per-line ceiling) or
-            // not at all: a partial last line would break edit anchors.
             let (_cost, clipped) =
                 push_line(&mut body, content, MAX_LINE_BYTES, usize::MAX).unwrap_or((0, false));
             body.push('\n');
-            // The gutter's tab and the newline each escape to two bytes.
             let row_cost = masked_escaped_len(&body[before..]);
             if body_escaped + row_cost > body_budget {
                 body.truncate(before);
@@ -565,7 +524,6 @@ fn lines(
     if loaded.hash.is_none() {
         header = header.field("scanned", MAX_READ_SCAN_BYTES);
     }
-    // In the header before bounding, so a spilled result stores it too.
     if notes.offset_ignored {
         header = header.field("note", "offset_ignored");
     }
@@ -618,8 +576,6 @@ fn lines(
     result
 }
 
-/// `L<line> <kind> <name>` per item with two-space nesting derived from the
-/// defining line's indentation, ≤ [`MAX_OUTLINE_ITEMS`] rows.
 fn outline(
     loaded: &Loaded,
     short: &str,
@@ -636,8 +592,6 @@ fn outline(
     let mut body = String::with_capacity(4 * 1024);
     let mut count = 0_usize;
     let mut total = 0_usize;
-    // Nesting is the position of the row's indentation in the stack of
-    // open indentations: a row indented past its parent nests one level.
     let mut stack: Vec<usize> = Vec::with_capacity(8);
     for item in items {
         total += 1;
@@ -779,7 +733,6 @@ mod tests {
 
     #[test]
     fn ab3_masked_long_header_keeps_room_for_a_separate_repair_note() {
-        // Valid Windows component/UTF-16 lengths can exceed the UTF-8 line cap.
         let path = format!(
             "SECRET={}/f.txt",
             std::iter::repeat_n("界".repeat(100), 110)

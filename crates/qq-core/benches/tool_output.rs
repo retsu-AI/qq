@@ -1,12 +1,3 @@
-//! Hot-path cost of the tool output boundary: head+tail bounding of a shell
-//! log at the 16 KiB shell bound and at the 128 KiB ceiling, the no-op path
-//! for text that already fits, and secret masking over clean text.
-//!
-//! Bounding should stay well under
-//! the cost of the work it bounds. Targets on a quiet host: `fits_no_op`
-//! ≤ 1 µs for 8 KiB, `shell_16k_from_128k` ≤ 100 µs, `mask_clean_128k`
-//! ≤ 200 µs.
-
 use std::{hint::black_box, time::Instant};
 
 use qq_core::tool_output_bench as bench;
@@ -42,12 +33,11 @@ fn main() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_ITERATIONS);
 
-    let small = lines(128, 63); // 8 KiB, fits every bound
-    let shell_log = lines(2_048, 63); // 128 KiB, the shell capture cap
-    let huge = lines(8_192, 127); // 1 MiB, an oversized MCP result
+    let small = lines(128, 63);
+    let shell_log = lines(2_048, 63);
+    let huge = lines(8_192, 127);
     let one_line = "s".repeat(128 * 1024);
     let clean = lines(2_048, 63);
-    // Source-like text: every trigger byte appears at a natural frequency.
     let prose = include_str!("../src/tools/output.rs")
         .repeat(4)
         .chars()

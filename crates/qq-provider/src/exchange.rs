@@ -1,12 +1,3 @@
-//! Shared SSE request/stream driver for the HTTP protocol adapters.
-//!
-//! [`sse_exchange`] owns the request/response prologue every SSE adapter
-//! repeats: build the JSON request, execute it through [`HttpExchange`]
-//! (retry, wire limits, bounded rejection buffering), gate the success
-//! Content-Type, and decode the body into [`SseEvent`]s. Adapters keep
-//! ownership of their error body schema (via [`SseExchangeError::Rejected`])
-//! and of folding events into `ProviderEvent`s.
-
 use std::sync::Arc;
 
 use futures_util::StreamExt;
@@ -22,14 +13,9 @@ use crate::{
     sse::{SseDecoder, SseEvent},
 };
 
-/// How a success response's Content-Type is validated before streaming.
 #[derive(Clone, Copy)]
 pub(crate) enum ContentTypeGate {
-    /// The response must declare `text/event-stream`.
     Strict,
-    /// ChatGPT Codex streams valid SSE frames but often omits Content-Type
-    /// entirely. A present non-SSE Content-Type is still rejected so a JSON
-    /// success body cannot be misread.
     AllowMissingContentType,
 }
 
@@ -42,17 +28,13 @@ impl ContentTypeGate {
     }
 }
 
-/// Protocol-owned strings and policies for one SSE exchange.
 pub(crate) struct SseExchangeSpec {
     pub(crate) messages: ExchangeMessages,
     pub(crate) non_sse_response: &'static str,
     pub(crate) content_type_gate: ContentTypeGate,
 }
 
-/// Why an SSE exchange could not begin streaming.
 pub(crate) enum SseExchangeError {
-    /// The provider rejected the request. The adapter interprets the buffered
-    /// error body against its own error schema.
     Rejected(HttpRejection),
     Provider(ProviderError),
 }
@@ -64,8 +46,6 @@ impl From<ProviderError> for SseExchangeError {
 }
 
 impl SseExchangeError {
-    /// Collapses the error into a `ProviderError`, delegating rejected
-    /// requests to the adapter's error-body interpreter.
     pub(crate) fn into_provider_error(
         self,
         interpret_rejection: impl FnOnce(HttpRejection) -> ProviderError,
@@ -77,29 +57,23 @@ impl SseExchangeError {
     }
 }
 
-/// Decoded SSE events from an accepted exchange.
 pub(crate) struct SseExchangeStream {
     redactions: Arc<[String]>,
     chunks: futures_core::stream::BoxStream<'static, Result<bytes::Bytes, ProviderError>>,
     decoder: SseDecoder,
-    /// Events framed from the last chunk, yielded in order; the framer
-    /// appends straight into this buffer so a chunk costs no extra list.
     pending: Vec<SseEvent>,
     next: usize,
     decoded_any: bool,
 }
 
 impl SseExchangeStream {
-    /// Values echoed by the provider that must never appear in errors.
     pub(crate) fn redactions(&self) -> &Arc<[String]> {
         &self.redactions
     }
 
-    /// Returns the next decoded SSE event, or `None` when the body ends.
     pub(crate) async fn next_event(&mut self) -> Result<Option<SseEvent>, ProviderError> {
         loop {
             if self.next < self.pending.len() {
-                // Take without shifting; the buffer is reused once drained.
                 let event = std::mem::replace(
                     &mut self.pending[self.next],
                     SseEvent {
@@ -120,10 +94,6 @@ impl SseExchangeStream {
         }
     }
 
-    /// The error for a body that ended before the protocol's terminal event.
-    /// A body that carried no event at all is a dropped connection
-    /// (`Transport`, retryable under the attempt policy); one that ended
-    /// mid-conversation is the provider's protocol violation.
     pub(crate) fn ended_early(&self, message: &str) -> ProviderError {
         if self.decoded_any {
             ProviderError::Protocol(message.to_owned())
@@ -133,9 +103,6 @@ impl SseExchangeStream {
     }
 }
 
-/// Encodes a request body into a buffer sized from the payload. The hint is a
-/// lower bound on the body, so the writer grows at most once instead of
-/// doubling from empty through a megabyte of transcript.
 pub(crate) fn encode_body(
     body: &impl Serialize,
     size_hint: usize,
@@ -145,9 +112,6 @@ pub(crate) fn encode_body(
     Ok(encoded)
 }
 
-/// Executes one SSE request and prepares its decoded event stream. Pre-body
-/// retries draw from `ledger`; the caller keeps it so a restart after the
-/// body has begun draws from the same count.
 pub(crate) async fn sse_exchange(
     exchange: &HttpExchange,
     (endpoint, headers): (reqwest::Url, HeaderMap),
@@ -189,9 +153,6 @@ pub(crate) async fn sse_exchange(
     })
 }
 
-/// A provider failure the policy may spend another attempt on: the request
-/// never reached the model, or the model never answered. Rejections,
-/// authentication, and protocol violations are the caller's to see.
 pub(crate) const fn is_transient(kind: ProviderErrorKind) -> bool {
     matches!(
         kind,
@@ -201,15 +162,6 @@ pub(crate) const fn is_transient(kind: ProviderErrorKind) -> bool {
     )
 }
 
-/// Wraps an adapter's stream factory in the provider's restart loop.
-///
-/// `attempt` builds one full attempt: request, exchange, decode, fold. The
-/// wrapper polls it and, while the attempt has yielded no semantic event,
-/// treats a transient error or an end-of-stream as a failed send and restarts
-/// under `ledger`. Once one event has been yielded the attempt is committed:
-/// its errors and its end pass through unchanged, because a resend could
-/// duplicate output the caller already observed. The final error records the
-/// attempts spent.
 pub(crate) fn with_restart<F>(exchange: &HttpExchange, attempt: F) -> ProviderStream
 where
     F: Fn(SharedLedger) -> ProviderStream + Send + Sync + 'static,
@@ -247,10 +199,6 @@ where
                         });
                         return;
                     }
-                    // A body that ends without any event is a dropped
-                    // connection: the adapter's `ended_early` already turned
-                    // it into a transient error above. A body that ends
-                    // after events is the adapter's own terminal event.
                     None => return,
                 }
             };
@@ -400,7 +348,6 @@ mod tests {
         ));
     }
 
-    /// A scripted stream factory: each call consumes the next script entry.
     fn scripted(
         policy: AttemptPolicy,
         scripts: Vec<Vec<Result<crate::ProviderEvent, ProviderError>>>,
@@ -411,8 +358,6 @@ mod tests {
         let scripts = Arc::new(std::sync::Mutex::new(scripts.into_iter()));
         let observed = Arc::clone(&calls);
         let stream = with_restart(&exchange, move |ledger| {
-            // Every factory call is one send against the shared ledger, the
-            // way `sse_exchange` records it.
             ledger.lock().begin_attempt();
             calls.fetch_add(1, Ordering::SeqCst);
             let script = scripts
@@ -613,8 +558,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_body_that_ends_before_any_event_costs_one_attempt() {
-        // The adapter reports an empty body through `ended_early`, which is
-        // transport-class before the first event and protocol-class after.
         let empty = SseExchangeStream {
             redactions: Arc::from(Vec::<String>::new()),
             chunks: Box::pin(futures_util::stream::empty()),
@@ -649,8 +592,6 @@ mod tests {
 
     #[tokio::test]
     async fn never_restarts_after_an_event_has_been_yielded() {
-        // Duplicating "a" would be visible to the caller, so the transient
-        // error after it passes straight through and nothing is resent.
         let (stream, calls) = scripted(
             fast(4),
             vec![vec![

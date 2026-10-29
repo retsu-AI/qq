@@ -46,7 +46,7 @@ async fn managed_goal_prompt_limits_are_clamped_at_claim_and_start() {
         if explicit {
             requested = caps;
             requested.max_model_turns = Some(100);
-            requested.max_output_tokens = Some(2); // A stricter caller limit survives.
+            requested.max_output_tokens = Some(2);
         }
         store
             .command(
@@ -321,7 +321,6 @@ async fn replayed_sponsored_child_cancel_wakes_the_goal_scheduler() {
     let command = SessionCommand::CancelRun {
         run_id: child.run_id,
     };
-    // Persist cancellation without the command waiter's post-commit schedule signal.
     let first = store.command(command_id, command.clone()).await.unwrap();
     let replay = store.command(command_id, command).await.unwrap();
     assert!(replay.replayed);

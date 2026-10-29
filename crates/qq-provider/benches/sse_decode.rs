@@ -1,21 +1,3 @@
-//! SSE decoding cost: the bytes a provider streams back pass through
-//! `SseDecoder` and then the adapter's JSON parse before anything else sees
-//! them. This measures how much of that path is framing.
-//!
-//! Fixture: a realistic text-delta stream in each protocol's event shape
-//! (OpenAI Responses `response.output_text.delta`, Anthropic
-//! `content_block_delta`), at 64 KiB / 512 KiB / 1 MiB of body, delivered in
-//! 16 KiB chunks the way a TCP body arrives. Each size reports:
-//!
-//! - `frame`: `SseDecoder::push` alone — the SSE state machine and the
-//!   per-event `name`/`data` strings it allocates.
-//! - `frame+parse`: the same plus the adapter's `decode_event`, which is the
-//!   work the run loop actually waits on per event.
-//! - allocation counts and bytes for each, from a counting allocator.
-//!
-//! D10 rewrites the framer only if `frame` is a material share of
-//! `frame+parse`; this bench is the evidence either way.
-
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     hint::black_box,
@@ -33,8 +15,6 @@ static BYTES: AtomicUsize = AtomicUsize::new(0);
 
 struct Counting;
 
-// SAFETY: every method forwards to `System` unchanged; the counters are
-// bookkeeping around the delegated call and never touch the returned memory.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
@@ -97,7 +77,6 @@ fn main() {
     }
 }
 
-/// Median-of-iterations microseconds plus per-iteration allocations/bytes.
 fn measure(iterations: u64, mut run: impl FnMut() -> usize) -> (u128, usize, usize) {
     for _ in 0..5 {
         run();
@@ -114,9 +93,6 @@ fn measure(iterations: u64, mut run: impl FnMut() -> usize) -> (u128, usize, usi
     (elapsed, allocs, bytes)
 }
 
-/// A stream of small text deltas, the common case: ~20-40 bytes of text per
-/// event wrapped in the protocol's envelope, terminated by the protocol's
-/// completion event.
 fn body(protocol: HttpProtocol, target: usize) -> Vec<u8> {
     let words = [
         "the ",

@@ -1,14 +1,3 @@
-//! Cost of the Merkle workspace index over the same synthetic 10k-file
-//! workspace `search_walk` uses.
-//!
-//! Three numbers matter for a per-turn checkpoint: `build_10k` is the cold
-//! cost (walk + read + SHA-256 of every file); `refresh_10k_quiet` is the
-//! steady-state cost on an unchanged tree (walk only, every hash reused);
-//! `refresh_10k_one_edit` is the common case (walk plus one file read).
-//! `diff_10k` is reported alongside because a checkpoint calls it once.
-//! A refresh that reads is the regression this bench exists to catch:
-//! `reused` must equal the file count on the quiet run.
-
 use std::{hint::black_box, time::Instant};
 
 use qq_core::{IndexBudget, IndexOutcome, WorkspaceIndex};
@@ -53,8 +42,6 @@ fn main() {
             panic!("the 10k fixture must fit the default budget: {partial:?}")
         }
     };
-    // Let the fixture's mtimes fall strictly behind the first index's clock
-    // so the quiet refresh measures reuse, not the same-tick guard.
     std::thread::sleep(std::time::Duration::from_millis(20));
 
     let mut last = None;

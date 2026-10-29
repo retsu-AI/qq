@@ -89,7 +89,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     };
-    // Runtime teardown drops remaining task spans before draining diagnostics.
     drop(executor);
     if let Some(logger) = logging
         && let Err(error) = logger.finish()
@@ -179,9 +178,6 @@ fn validate_tui_qa_invocation(root: &Option<PathBuf>, has_command: bool) -> Resu
     Ok(())
 }
 
-/// The product version plus the compatibility contracts this build speaks.
-/// The contracts, not the product version, decide whether a client can talk
-/// to a server or open a store; see `docs/runbooks/release.md`.
 fn version_report() -> String {
     format!(
         "qq {}\nprotocol {}, capabilities {}, descriptor {}, store schema {}\n",
@@ -242,10 +238,6 @@ async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Err
     render_events(plan.run(RunCommand::new(prompt))).await
 }
 
-/// Runs one autonomous headless task through the durable session runtime and
-/// maps every failure to a distinguishable exit code: 0 success, 1 task or
-/// model failure, 2 invalid configuration, 3 timeout or budget exhaustion,
-/// 4 harness or persistence failure, 130 interrupted.
 async fn close_headless(
     sessions: &qq_core::SessionRuntime,
     goal: bool,
@@ -288,9 +280,6 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
             let interrupt = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
-            // Steering lines come from stdin only when asked for, so a run
-            // launched from a script with an inherited stdin never blocks on
-            // it or swallows it.
             let steering = if steer_stdin {
                 let (tx, rx) = tokio::sync::mpsc::channel(headless::MAX_PENDING_STEER_LINES);
                 tokio::spawn(async move {
@@ -345,7 +334,6 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
             drop(stdout);
             drop(stderr);
             let closed = close_headless(&sessions, is_goal, async {
-                // Losing signal control also requests cleanup of this owned runtime.
                 let _ = tokio::signal::ctrl_c().await;
             })
             .await;
@@ -360,8 +348,6 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
 
 type HeadlessSetupError = (headless::HeadlessStatus, String);
 
-/// Resolves configuration for a headless run. Every rejection happens here,
-/// before a session exists or the prompt is submitted.
 async fn prepare_headless(
     args: cli::RunArgs,
     overrides: &CliOverrides,
@@ -414,8 +400,6 @@ async fn prepare_headless(
         ));
     }
 
-    // Pure argument validation runs before any filesystem or configuration
-    // work so a malformed label never costs a config load.
     let correlation = args
         .correlation()
         .map_err(|error| invalid(format!("invalid --correlation: {error}")))?;
@@ -453,10 +437,6 @@ async fn prepare_headless(
         }
     };
 
-    // The output contract is read and compiled here, before the runtime
-    // opens, so an unenforceable schema is a configuration error and never a
-    // run outcome. The read is bounded to the schema byte ceiling plus one
-    // so an oversized file is refused by size, not parsed.
     let output = match args.output_schema {
         None => None,
         Some(path) => {
@@ -521,8 +501,6 @@ async fn prepare_headless(
         .get(snapshot.model().provider())
         .and_then(|provider| provider.models().get(snapshot.model().model()));
 
-    // A dollar limit without model pricing cannot be enforced; reject it now
-    // rather than pretend.
     if max_cost_usd_nanos.is_some()
         && model_metadata
             .and_then(qq_config::ModelMetadata::pricing)
@@ -534,8 +512,6 @@ async fn prepare_headless(
         )));
     }
 
-    // An unknown profile fails here, before a session exists, and names
-    // what would have worked.
     let profile = match args.profile {
         None => qq_protocol::AgentProfileId::default(),
         Some(name) => {
@@ -555,8 +531,6 @@ async fn prepare_headless(
     let model = qq_protocol::ModelSelection {
         model_is_fallback,
         model: Some(snapshot.model().as_str().to_owned()),
-        // A `--max-output-tokens` or configured cap is the session's pin; the
-        // compiled default is not recorded as one.
         max_output_tokens: runtime::chosen_max_output_tokens(
             snapshot.max_output_tokens(),
             snapshot.provenance(),
@@ -720,22 +694,14 @@ async fn interactive(
     let server_paths = environment.server_paths;
     let workspace = environment.workspace;
     let config_factory = factory.clone();
-    // Read once, here: neither `qq-config` nor `qq-tui` consults the
-    // environment, they take the answer as a value.
     let truecolor = truecolor_support(std::env::var_os("COLORTERM").as_deref());
-    // One `git rev-parse`, alongside the config load rather than after it.
     let snapshots = {
         let workspace = workspace.clone();
         tokio::spawn(async move { qq_core::undo::covers(&workspace).await })
     };
     let (model_state, tui, themes) = tokio::task::spawn_blocking(move || {
-        // The client load tolerates a missing model: the TUI opens and
-        // routes to `/models`. Headless paths keep `load`. Untrusted project
-        // authority stays disabled without stopping startup.
         let snapshot = config_factory.load_for_client(&request)?;
         let model_state = config_factory.tui_model_state(&snapshot, &request);
-        // TUI settings and themes are not trust-gated: `.qq/tui.ron` and
-        // `.qq/themes/` declare nothing sensitive.
         let (tui_snapshot, tui) = load_tui_config(&loader, request.cwd())?;
         let themes = load_tui_themes(
             &loader,
@@ -764,17 +730,12 @@ async fn interactive(
         .map(tui_provider_remedy)
         .collect();
     let workspace_root = workspace.clone();
-    // A failed probe reads as "no snapshots": the screen must not claim undo
-    // works when it cannot tell.
     let snapshots = matches!(snapshots.await, Ok(Ok(true)));
     let environment_lines = environment::first_run_lines(
         &environment::Environment::detect_off_workers().await,
         snapshots,
     );
 
-    // The TUI paints its first frame before the server is reserved or the
-    // embedded runtime opened; the port connects on the loop's first recv
-    // and the embedded handle comes back through the channel for shutdown.
     let (embedded_tx, mut embedded_rx) = tokio::sync::oneshot::channel::<EmbeddedRuntime>();
     let connect = {
         let model = model.clone();
@@ -786,10 +747,6 @@ async fn interactive(
                 .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?;
             let options =
                 server::ServerOptions::new(server_paths.clone()).with_version(cli::BUILD_VERSION);
-            // Which session to show first. `--session` opens that one. Bare
-            // `qq` starts a new conversation when this process owns the
-            // server and the configured model is usable; a client attaching
-            // to a server it does not own shows what is already there.
             let initial = |owns_server: bool| match (session, owns_server, &model) {
                 (Some(id), _, _) => qq_client::InitialSession::Open(id),
                 (None, true, Some(model)) => qq_client::InitialSession::New(model.clone()),
@@ -819,7 +776,6 @@ async fn interactive(
                         }
                     };
                     let connection = server.connection().clone();
-                    // The receiver only drops when the TUI already exited.
                     let _ = embedded_tx.send(EmbeddedRuntime { server, handler });
                     (connection, initial(true))
                 }
@@ -863,7 +819,6 @@ async fn interactive(
     if let Ok(embedded) = embedded_rx.try_recv() {
         embedded.shutdown().await?;
     }
-    // The terminal is already restored; this lands on the normal screen.
     let focused = result?;
     if let Some(session_id) = focused {
         eprint!("{}", cli::resume_hint(session_id));
@@ -1416,9 +1371,6 @@ fn load_tui_config(
     Ok((snapshot, settings))
 }
 
-/// Whether the terminal advertises 24-bit color: `COLORTERM` is `truecolor`
-/// or `24bit`, case-insensitive. Takes the variable's value so callers read
-/// the environment exactly once at startup and tests never touch it.
 fn truecolor_support(colorterm: Option<&std::ffi::OsStr>) -> config::TruecolorSupport {
     match colorterm.and_then(|value| value.to_str()) {
         Some(value)
@@ -1430,12 +1382,6 @@ fn truecolor_support(colorterm: Option<&std::ffi::OsStr>) -> config::TruecolorSu
     }
 }
 
-/// The selected theme first, then every other discoverable theme so the
-/// in-TUI picker can preview them. `selected` may be the `qq` alias, which
-/// the loader resolves to `ink` or `terminal` from `truecolor`; the resolved
-/// document's own name is what the picker marks active. Selecting an unknown
-/// or invalid theme is a configuration error; a broken *unselected* theme
-/// file is skipped.
 fn load_tui_themes(
     loader: &config::ConfigLoader,
     cwd: &Path,
@@ -1548,8 +1494,6 @@ fn trust_command(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
     if pending.is_empty() {
         println!("no project configuration requires trust");
     } else {
-        // Show what each file admits: trust is a decision about content, and
-        // the user should see the sections that content declares.
         for item in pending {
             println!("trusted {}", item.source());
             println!("  declares: {}", item.sections().join(", "));
@@ -1558,9 +1502,6 @@ fn trust_command(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// `qq doctor`. A failing check is part of the report and sets the exit
-/// status; only the doctor's own inability to run (no home directory, no
-/// current directory) is an error.
 async fn doctor_command(
     args: cli::DoctorArgs,
     overrides: &CliOverrides,
@@ -1590,8 +1531,6 @@ async fn doctor_command(
     })
 }
 
-/// `qq init`. Runs on a blocking thread: it reads one line from stdin when
-/// choosing interactively and writes one file.
 fn init_command(args: cli::InitArgs) -> Result<(), Box<dyn Error>> {
     let paths = config::ConfigPaths::system()?;
     let cwd = std::env::current_dir()?;
@@ -1611,10 +1550,6 @@ fn init_command(args: cli::InitArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {
-    // `auth login` stores under `PROVIDER/PROFILE` and binds the built-in
-    // endpoint; a name outside the built-in set would store a credential
-    // nothing can resolve. Arbitrary names go through `auth set`. Checked
-    // before the store opens so a typo never touches the keyring.
     let login_method = match &command {
         cli::AuthCommand::Login(arguments) => {
             let Some(provider) = login_provider(&arguments.provider) else {
@@ -1727,8 +1662,6 @@ fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Checks a `qq auth login` invocation's mode flags against the provider
-/// table before the credential store is opened.
 #[cfg(test)]
 fn validate_login_mode(arguments: &cli::LoginArgs) -> Result<(), Box<dyn Error>> {
     let provider = login_provider(&arguments.provider)
@@ -1736,10 +1669,6 @@ fn validate_login_mode(arguments: &cli::LoginArgs) -> Result<(), Box<dyn Error>>
     login_method(arguments, &provider).map(drop)
 }
 
-/// The login method a `qq auth login` invocation selects for `provider`:
-/// `--device-auth` and `--oauth` each name one device-code method, and with
-/// neither the provider's default (its first listed method) applies. A flag
-/// the provider's row does not offer is rejected.
 fn login_method(
     arguments: &cli::LoginArgs,
     provider: &config::BuiltinProvider,
@@ -1840,21 +1769,16 @@ fn read_secret(prompt: &str) -> Result<auth::Secret, Box<dyn Error>> {
     Ok(auth::Secret::from_secret_bytes(value.into_bytes()))
 }
 
-/// The built-in provider `qq auth login` names, from the provider table.
 fn login_provider(id: &str) -> Option<config::BuiltinProvider> {
     config::builtin_provider(id)
 }
 
-/// Providers `qq auth login` accepts, in the order the error lists them.
 fn login_providers() -> Vec<&'static str> {
     config::builtin_providers()
         .map(|provider| provider.id)
         .collect()
 }
 
-/// The audience a credential stored by `qq auth login <provider>` is bound
-/// to: the table's for an API-key preset, `qq-auth`'s for a provider whose
-/// credential it owns (ADR-0064 §1).
 fn built_in_endpoint(provider: &str) -> Option<&'static str> {
     Some(builtin_auth::BuiltinAuth::of(&login_provider(provider)?).audience())
 }
@@ -2054,9 +1978,6 @@ mod tests {
         }
     }
 
-    /// Every table row's login methods are reachable through the CLI flags
-    /// and nothing else: the default with no flag, and each device-code
-    /// method through its flag. A method the row lacks is rejected.
     #[test]
     fn login_methods_come_from_the_provider_table() {
         for provider in config::builtin_providers() {
@@ -2088,9 +2009,6 @@ mod tests {
         }
     }
 
-    /// The audiences `qq auth login` binds: the table's for API-key presets,
-    /// `qq-auth`'s for the providers it owns, and the same values as before
-    /// the table existed.
     #[test]
     fn login_audiences_match_the_table_and_qq_auth() {
         assert_eq!(built_in_endpoint("openai"), Some("https://api.openai.com"));
@@ -2583,9 +2501,6 @@ mod tests {
         *args
     }
 
-    /// The output schema is read and compiled before any configuration or
-    /// runtime work, so every defect is `invalid_configuration` (exit 2) and
-    /// names the path, independent of the machine's configuration.
     #[tokio::test]
     async fn an_unenforceable_output_schema_is_invalid_configuration_before_config_loads() {
         let directory = tempfile::tempdir().unwrap();
@@ -2622,7 +2537,6 @@ mod tests {
             assert!(message.contains(&schema_path), "{message}");
         }
 
-        // Oversized by one byte is refused by size before parsing.
         let filler = "x".repeat(qq_protocol::MAX_OUTPUT_SCHEMA_BYTES);
         std::fs::write(&schema, format!("{{\"description\":\"{filler}\"}}")).unwrap();
         let args = run_args(
@@ -2752,7 +2666,6 @@ mod tests {
                 qq_tui::ThemeColor::Rgb(0x40, 0x3d, 0x52),
             ],
         );
-        // The two overridden roles differ from derivation; nothing else does.
         assert_ne!(custom.palette.syn_keyword, derived.palette.syn_keyword);
         assert_ne!(
             custom.palette.syn_punctuation,
@@ -2766,9 +2679,6 @@ mod tests {
             },
             derived.palette
         );
-        // Shipped themes with a `syntax` block and the compiled `terminal`
-        // theme ride the same adapter; the picker list carries them all and
-        // never the `qq` alias.
         assert!(themes.iter().any(|theme| theme.name == "terminal"));
         assert!(themes.iter().any(|theme| theme.name == "ink"));
         assert!(themes.iter().all(|theme| theme.name != "qq"));
@@ -2805,8 +2715,6 @@ mod tests {
         let workspace = directory.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let loader = config::ConfigLoader::new(config::ConfigPaths::new(global, data, managed));
-        // `selected` is what the layered `tui.ron` produced: the `qq` alias
-        // when unset, otherwise the user's literal choice.
         let table = [
             (config::DEFAULT_THEME, Advertised, "ink"),
             (config::DEFAULT_THEME, NotAdvertised, "terminal"),
@@ -2822,7 +2730,6 @@ mod tests {
                 themes[0].name, expected,
                 "theme {selected:?} with {truecolor:?}"
             );
-            // The active theme leads and appears once; the alias never does.
             assert_eq!(
                 themes.iter().filter(|theme| theme.name == expected).count(),
                 1,
@@ -2833,7 +2740,6 @@ mod tests {
             assert!(themes.iter().any(|theme| theme.name == "ink"));
             assert!(themes.iter().any(|theme| theme.name == "terminal"));
         }
-        // The two defaults are the palettes they claim to be.
         let ink = &load_tui_themes(&loader, &workspace, "qq", Advertised).unwrap()[0];
         let terminal = &load_tui_themes(&loader, &workspace, "qq", NotAdvertised).unwrap()[0];
         let declared = |palette: qq_tui::Palette| {

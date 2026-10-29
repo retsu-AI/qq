@@ -15,21 +15,14 @@ const MAX_GUIDANCE_BYTES: usize = 64 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GuidanceRequest {
     name: String,
-    /// Text after `/name`, substituted for `$ARGUMENTS`.
     arguments: String,
 }
 
-/// What the model or user handed a skill to work on.
 pub(crate) const ARGUMENTS_PLACEHOLDER: &str = "$ARGUMENTS";
-/// Bytes of arguments one invocation may carry.
 pub(crate) const MAX_ARGUMENT_BYTES: usize = 4 * 1024;
-/// Bytes a body may grow to once `$ARGUMENTS` is substituted.
 const MAX_RENDERED_GUIDANCE_BYTES: usize = 2 * MAX_GUIDANCE_BYTES;
-/// Files beside a skill listed when it loads.
 const MAX_LISTED_FILES: usize = 32;
-/// Directory levels below the skill's directory that are listed.
 const MAX_LISTED_DEPTH: usize = 2;
-/// Entries read from one directory while listing a skill's files.
 const MAX_LISTED_ENTRIES_PER_DIRECTORY: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,14 +50,10 @@ pub(crate) struct SelectedGuidance {
     kind: GuidanceKind,
     name: String,
     source: String,
-    /// The skill's directory as the model should use it; empty for commands.
     directory: String,
-    /// Files beside the document, already joined onto `directory`.
     files: Vec<String>,
     files_truncated: bool,
-    /// The body with `$ARGUMENTS` substituted.
     content: String,
-    /// SHA-256 of the document as stored, before substitution.
     hash: [u8; 32],
 }
 
@@ -162,8 +151,6 @@ pub(crate) enum GuidanceError {
     Cancelled,
 }
 
-/// Parses the newest user message. `//` is the one client-independent escape
-/// and removes one slash before the provider sees the message.
 pub(crate) fn parse_invocation(
     messages: &mut [Message],
 ) -> Result<ParsedInvocation, GuidanceError> {
@@ -207,7 +194,6 @@ pub(crate) fn parse_invocation(
     })
 }
 
-/// Cuts arguments to [`MAX_ARGUMENT_BYTES`] on a character boundary.
 pub(crate) fn bounded_arguments(arguments: &str) -> String {
     let mut end = arguments.len().min(MAX_ARGUMENT_BYTES);
     while !arguments.is_char_boundary(end) {
@@ -216,9 +202,6 @@ pub(crate) fn bounded_arguments(arguments: &str) -> String {
     arguments[..end].to_owned()
 }
 
-/// Resolves `/name` against the plan's compiled index and reads the body of
-/// the one document it names. The index decided which root wins at compile
-/// time; this reads, bounds, and hashes the content at invocation.
 pub(crate) fn load(
     workspace: &Workspace,
     roots: &[Workspace],
@@ -245,9 +228,6 @@ pub(crate) fn load(
     load_entry(workspace, roots, entry, &request.arguments, cancelled)
 }
 
-/// Reads one indexed document's body with the guidance bounds, from the
-/// workspace or the extra root the index recorded for it, substitutes
-/// `$ARGUMENTS`, and lists the files beside a skill.
 pub(crate) fn load_entry(
     workspace: &Workspace,
     roots: &[Workspace],
@@ -342,9 +322,6 @@ pub(crate) fn load_entry(
     })
 }
 
-/// Replaces every `$ARGUMENTS` with `arguments`. A body without the
-/// placeholder is unchanged: the caller already holds the arguments, in the
-/// user's `/name` message or the model's own `load_skill` call.
 fn substitute_arguments(content: String, arguments: &str) -> String {
     if !content.contains(ARGUMENTS_PLACEHOLDER) {
         return content;
@@ -353,14 +330,9 @@ fn substitute_arguments(content: String, arguments: &str) -> String {
     if substituted.len() <= MAX_RENDERED_GUIDANCE_BYTES {
         return substituted;
     }
-    // Many placeholders times long arguments: keep the body bounded and
-    // state the arguments once instead.
     format!("{content}\n\nIn the text above, {ARGUMENTS_PLACEHOLDER} stands for:\n{arguments}\n")
 }
 
-/// Lists regular files under the skill's directory, sorted, at most
-/// [`MAX_LISTED_FILES`] and [`MAX_LISTED_DEPTH`] levels deep, skipping the
-/// document itself and hidden entries. Paths are joined onto `display`.
 fn list_files(workspace: &Workspace, relative: &str, display: &str) -> (Vec<String>, bool) {
     let mut files = Vec::new();
     let mut truncated = false;
@@ -436,8 +408,6 @@ impl Candidate {
 }
 
 impl SelectedGuidance {
-    /// Renders a model-loaded document as a tool result: same framing as the
-    /// system-prompt form so the subordination notice travels with the body.
     pub(crate) fn render_for_tool(&self) -> String {
         let mut text = String::with_capacity(self.content.len() + 256);
         self.append_to_prompt(&mut text);

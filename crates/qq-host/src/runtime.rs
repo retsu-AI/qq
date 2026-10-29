@@ -1,5 +1,3 @@
-//! Application configuration to model-runtime composition.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::IpAddr,
@@ -54,15 +52,10 @@ use crate::{
 const MAX_MODEL_OPTIONS: usize = 4_096;
 const MAX_DISCOVERY_PROVIDERS: usize = 4;
 
-/// The configuration fields the served model catalog is built from, borrowed
-/// from either snapshot shape so one builder serves plan compilation (which
-/// always has a model) and the interactive client (which may not).
 #[derive(Clone, Copy)]
 struct CatalogSource<'a> {
     model: Option<&'a qq_config::ModelRoute>,
     organization: Option<&'a str>,
-    /// The cap a new session should pin: `None` while it is the compiled
-    /// default, so the row records a choice, never the default of its day.
     max_output_tokens: Option<u32>,
     providers: &'a BTreeMap<String, ProviderConfig>,
     policy: &'a qq_config::EffectivePolicy,
@@ -98,11 +91,6 @@ impl<'a> From<&'a ClientSnapshot> for CatalogSource<'a> {
     }
 }
 
-/// The `max_output_tokens` a session row should pin. A cap that came from
-/// the compiled default is not a choice: persisting it would turn the default
-/// of the day into an explicit override on every later load (and, for
-/// reasoning routes, defeat the effort-aware lift). Any other provenance —
-/// a configuration layer, the CLI, a profile, a picker — is kept.
 pub fn chosen_max_output_tokens(
     effective: u32,
     provenance: &qq_config::ConfigProvenance,
@@ -113,32 +101,20 @@ pub fn chosen_max_output_tokens(
         .then_some(effective)
 }
 
-/// A built-in provider the configuration admits but that has no resolvable
-/// credential, with the command or environment variable that would supply
-/// one. The TUI shows it where the provider's models would otherwise appear.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderRemedy {
     pub provider: String,
-    /// Imperative, ready to follow `<provider> needs a credential: `.
     pub remedy: String,
 }
 
-/// Everything the interactive client derives from one loaded configuration.
-/// See [`RuntimeFactory::tui_model_state`].
 #[derive(Clone, Debug)]
 pub struct TuiModelState {
     pub goals: qq_config::GoalsConfig,
-    /// The configured route as a selection, or the default when none.
     pub configured_model: ModelSelection,
-    /// `configured_model` when the catalog lists it, so bare `qq` can create
-    /// the first session with it.
     pub model: Option<ModelSelection>,
-    /// The TUI's client default: `model`, or the configured route when only
-    /// its credential is missing (so the remedy can be named), or none.
     pub tui_model: ModelSelection,
     pub models: Vec<ModelDescriptor>,
     pub unauthenticated_providers: Vec<ProviderRemedy>,
-    /// The server-side approval wait the configuration sets, if any.
     pub approval_timeout: Option<std::time::Duration>,
 }
 
@@ -317,10 +293,6 @@ impl RuntimeFactory {
         })
     }
 
-    /// What the interactive client needs from a loaded configuration: the
-    /// configured route (if any), whether it is usable as the client default,
-    /// the catalog, the credential remedies, and the server's approval wait.
-    /// Blocking: probes credentials. Computed once at startup.
     pub fn tui_model_state(
         &self,
         snapshot: &ClientSnapshot,
@@ -328,9 +300,6 @@ impl RuntimeFactory {
     ) -> TuiModelState {
         let models = self.client_model_options(snapshot);
         let unauthenticated_providers = self.unauthenticated_providers(snapshot);
-        // Without a configured model there is no client default: the TUI
-        // shows `no model`, the composer notice points at `/models`, and the
-        // first session is created from the picker.
         let configured_model = snapshot
             .model()
             .map_or_else(ModelSelection::default, |route| ModelSelection {
@@ -347,9 +316,6 @@ impl RuntimeFactory {
                 .iter()
                 .any(|option| option.selection.model == configured_model.model))
         .then(|| configured_model.clone());
-        // The TUI's client default. An unusable route is normally withheld so
-        // Alt-N asks for a model; a route whose provider merely lacks a
-        // credential is kept so the empty state and Alt-N can name it.
         let configured_provider_unauthenticated = configured_model
             .model
             .as_deref()
@@ -385,10 +351,6 @@ impl RuntimeFactory {
         Ok(snapshot)
     }
 
-    /// [`Self::load`] for the interactive client: the configuration may lack
-    /// a model, in which case the TUI opens and asks for one. The isolated
-    /// TUI QA profile still requires its pinned route because the fixture's
-    /// safety checks are about that route.
     pub fn load_for_client(
         &self,
         request: &LoadRequest,
@@ -402,7 +364,6 @@ impl RuntimeFactory {
         Ok(self.inner.config.load_for_client(request)?)
     }
 
-    /// The authenticated configured catalog; tests assert on it directly.
     #[cfg(any(test, feature = "test-support"))]
     pub fn configured_model_options(&self, snapshot: &ConfigSnapshot) -> Vec<ModelDescriptor> {
         if self.is_isolated_tui_qa() {
@@ -415,9 +376,6 @@ impl RuntimeFactory {
         }
     }
 
-    /// [`Self::configured_model_options`] for the interactive client, whose
-    /// configuration may lack a model. The isolated TUI QA profile always has
-    /// one (its fixture pins the route) and never probes other providers.
     pub fn client_model_options(&self, snapshot: &ClientSnapshot) -> Vec<ModelDescriptor> {
         if self.is_isolated_tui_qa() {
             return snapshot
@@ -431,12 +389,6 @@ impl RuntimeFactory {
         )
     }
 
-    /// Built-in providers the policy admits that have no resolvable
-    /// credential, each with the command or environment variable that would
-    /// supply one. Custom and gateway providers are not listed: their
-    /// credential is whatever `auth` references. The isolated TUI QA profile
-    /// lists nothing because it never consults the credential store for
-    /// providers it does not select.
     pub fn unauthenticated_providers(&self, snapshot: &ClientSnapshot) -> Vec<ProviderRemedy> {
         if self.is_isolated_tui_qa() {
             return Vec::new();
@@ -462,8 +414,6 @@ impl RuntimeFactory {
                         }
                         None => format!("run qq auth login {provider_id}"),
                     },
-                    // An operator-supplied reference is the credential; the
-                    // built-in remedy would point at the wrong place.
                     HttpCredential::Builtin {
                         api_key: Some(_), ..
                     }
@@ -494,9 +444,6 @@ impl RuntimeFactory {
         remedies
     }
 
-    /// Returns only the already-validated selected model without probing any
-    /// other provider's authentication. The isolated TUI QA profile uses this
-    /// after restricting the route to a loopback Custom/NoAuth fixture.
     pub fn isolated_tui_qa_model_option(snapshot: &ConfigSnapshot) -> ModelDescriptor {
         Self::isolated_tui_qa_model_option_for(CatalogSource::from(snapshot), snapshot.model())
     }
@@ -544,18 +491,10 @@ impl RuntimeFactory {
         self.model_options_with_discovery_impl(snapshot, discovered, RouteAdmission::Authenticated)
     }
 
-    /// The `spawn_agent` routes for a plan. It must not read secure
-    /// storage (a keyring read per configured provider on every compile is
-    /// a `securityd` round trip each on macOS), so providers are admitted on
-    /// whether a credential is present in the index or environment, not on
-    /// resolving it. A present-but-unusable credential fails at the child's
-    /// own request, where it is read anyway.
     pub(super) fn model_options_for_plan(&self, snapshot: &ConfigSnapshot) -> Vec<ModelDescriptor> {
         if self.is_isolated_tui_qa() {
             return vec![Self::isolated_tui_qa_model_option(snapshot)];
         }
-        // An unreadable index admits no stored credential, as resolving
-        // each one would have.
         let registered: BTreeSet<String> = match self.inner.credentials.list() {
             Ok(records) => records.into_iter().map(|record| record.name).collect(),
             Err(_) => BTreeSet::new(),
@@ -663,8 +602,6 @@ impl RuntimeFactory {
                 }
             }
         }
-        // The configured route is selectable even when the catalog does not
-        // list it, provided its provider is authenticated.
         if let Some(route) = snapshot.model
             && options.len() < MAX_MODEL_OPTIONS
             && !options
@@ -758,9 +695,6 @@ impl RuntimeFactory {
         Ok(())
     }
 
-    /// Revalidates the isolated fixture immediately before each lifecycle
-    /// operation. This prevents a caller from replacing an initially-safe
-    /// config or database path with a symlink or hard link after startup.
     pub fn validate_isolated_tui_qa_state(&self) -> Result<(), RuntimeBuildError> {
         let RuntimeMode::IsolatedTuiQa { root, workspace } = &self.inner.mode else {
             return Ok(());
@@ -820,13 +754,6 @@ impl RuntimeFactory {
     ) -> Result<LoadRequest, RuntimeBuildError> {
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(workspace)?;
-        // A session created before the default rose to 16 384 persisted the
-        // then-default (2 048, later 4 096) and would pin every later run to
-        // it, costing continuation turns on each long answer (RR8). Exactly
-        // those historical defaults are treated as unset so the configured
-        // value applies; any other persisted value is a choice and is kept.
-        // (Sessions created now never persist the compiled default: see
-        // `chosen_max_output_tokens`.)
         let max_output_tokens =
             max_output_tokens.filter(|limit| !LEGACY_DEFAULT_MAX_OUTPUT_TOKENS.contains(limit));
         let request = if self.is_isolated_tui_qa() {
@@ -910,9 +837,6 @@ impl RuntimeFactory {
         Ok(())
     }
 
-    /// The agent profiles a workspace's configuration declares, `default`
-    /// first, each with its effective model and approval mode. Blocking:
-    /// loads configuration.
     pub fn profiles_for(
         &self,
         workspace: &str,
@@ -929,8 +853,6 @@ impl RuntimeFactory {
         for (name, profile) in snapshot.profiles() {
             let id = match AgentProfileId::new(name.clone()) {
                 Ok(id) => id,
-                // The configuration loader validates names with the same rule;
-                // a disagreement is a bug worth surfacing, not skipping.
                 Err(error) => {
                     return Err(RuntimeBuildError::Config(ConfigError::InvalidProfileName(
                         format!("{name}: {error}"),
@@ -961,9 +883,6 @@ impl RuntimeFactory {
         Ok(profiles)
     }
 
-    /// The delegation roster a workspace's configuration declares, translated
-    /// into the secret-free protocol shape the plan compiles with and the
-    /// capability document advertises. Blocking: loads configuration.
     pub fn delegation_for(
         &self,
         workspace: &str,
@@ -995,8 +914,6 @@ impl RuntimeFactory {
             overrides = overrides.with_organization(organization.clone());
         }
         load = load.with_overrides(overrides);
-        // The catalog answers "what could I choose?", so it must not require
-        // a choice already: a client without a model lists what is available.
         let snapshot = self.load_for_client(&load)?;
         Ok(self.discovered_model_options(&snapshot))
     }
@@ -1039,9 +956,6 @@ impl RuntimeFactory {
         }
     }
 
-    /// Loads the workspace configuration with `selection` applied as
-    /// overrides, exactly as ordinary runtime loading would: the same
-    /// canonical-workspace requirement, layering, and policy validation.
     fn snapshot_for_selection(
         &self,
         workspace: &str,
@@ -1071,15 +985,6 @@ impl RuntimeFactory {
         self.load(&load)
     }
 
-    /// The spawn-time model gate: accepts exactly the routes the served
-    /// model list (`POST /v1/models` and the pickers) serves, plus routes
-    /// retained by the parent's compiled catalog.
-    /// Route syntax, provider existence, and provider policy were already
-    /// rejected by the configuration load that produced `snapshot`; this
-    /// adds the authentication check that gates the served list and the
-    /// model-id membership check against the builtin catalog union the
-    /// cached discovery list, or the workspace's configured route. A requested
-    /// selection cannot add itself to that list.
     fn validate_spawn_snapshot(
         &self,
         snapshot: &ConfigSnapshot,
@@ -1115,9 +1020,6 @@ impl RuntimeFactory {
         if configured.model() == Some(snapshot.model()) {
             return Ok(());
         }
-        // Only an unknown route needs fresh discovery. A known fallback
-        // route must not be invalidated by a different snapshot fetched
-        // during admission itself.
         let discovered = cached.or_else(|| {
             self.inner
                 .discovery
@@ -1132,10 +1034,6 @@ impl RuntimeFactory {
         })
     }
 
-    /// The blocking body of [`RuntimeLoader::validate_spawn_model`]: load
-    /// (route syntax, provider existence, policy), then gate on the served
-    /// model list, naming the failed check and listing the provider's
-    /// routes when the list is small.
     fn validate_spawn_selection(
         &self,
         workspace: &str,
@@ -1164,8 +1062,6 @@ impl RuntimeFactory {
             })
     }
 
-    /// A short listing of the selected provider's served routes for
-    /// rejection messages, omitted when the list is large or empty.
     fn served_route_hint(&self, snapshot: &ConfigSnapshot) -> Option<String> {
         const MAX_LISTED_ROUTES: usize = 12;
         let provider_id = snapshot.model().provider();
@@ -1190,9 +1086,6 @@ impl RuntimeFactory {
         )
     }
 
-    /// Compiles (or returns the cached) plan for a load request. Blocking:
-    /// performs configuration, credential, provider, and workspace work on
-    /// the calling thread.
     pub fn plan_for(
         &self,
         request: &LoadRequest,
@@ -1201,9 +1094,6 @@ impl RuntimeFactory {
             .map(|(plan, _)| plan)
     }
 
-    /// [`Self::plan_for`] under a configured agent profile. The request's
-    /// overrides win over the profile, which wins over the top-level
-    /// configuration.
     #[cfg(test)]
     fn plan_for_profile(
         &self,
@@ -1224,8 +1114,6 @@ impl RuntimeFactory {
             .map(|(plan, _)| plan)
     }
 
-    /// [`Self::plan_for`] plus how the plan was obtained, for tests and
-    /// benchmarks that assert cache behavior.
     pub fn plan_with_lookup(
         &self,
         request: &LoadRequest,
@@ -1272,15 +1160,10 @@ impl RuntimeFactory {
         }
     }
 
-    /// Stops the plan cache. Active runs keep the plans they hold.
     pub fn shutdown_plans(&self) {
         self.inner.plans.shutdown();
     }
 
-    /// One full compile: configuration load, credential epoch, resolved
-    /// model, provider recipe and descriptor, MCP registry, spawn routes, and
-    /// the workspace itself. Also returns every filesystem source whose state
-    /// decided the result so the cache can revalidate without repeating it.
     fn compile_generation(
         &self,
         request: &LoadRequest,
@@ -1288,8 +1171,6 @@ impl RuntimeFactory {
         workspace: &Path,
         progress: Option<&qq_core::RuntimeLoadProgress>,
     ) -> Result<CompiledGeneration, RuntimeBuildError> {
-        // The credential index is fingerprinted before secrets are read so a
-        // rotation racing this compile is observed on the next lookup.
         preparation_phase(
             progress,
             qq_core::RuntimeLoadStage::ReadingCredentialMetadata,
@@ -1300,14 +1181,7 @@ impl RuntimeFactory {
         preparation_phase(progress, qq_core::RuntimeLoadStage::LoadingConfiguration)?;
         let snapshot = self.load(request)?;
         let mut configuration_sources = vec![snapshot.sources().clone()];
-        // A named profile supplies defaults beneath the request's explicit
-        // overrides. Resolving it needs the merged configuration, so the load
-        // repeats with the profile's values applied where the request left a
-        // gap. Both loads retain their pre-read observations because the
-        // first selected the profile and the second supplied runtime values.
         let selected_profile = snapshot.profile(profile_id.as_str());
-        // A pack-declared profile brings its pack's resources and, when it
-        // names MCP servers, restricts which declared servers join this plan.
         let pack_selection = match selected_profile.as_ref().and_then(|p| p.pack()) {
             None => None,
             Some(reference) => {
@@ -1382,8 +1256,6 @@ impl RuntimeFactory {
         };
         preparation_phase(progress, qq_core::RuntimeLoadStage::CompilingProvider)?;
         let resolved_model = self.resolved_model_for_snapshot(&snapshot)?;
-        // How far the empty-truncation recovery may raise a turn's cap: the
-        // catalog limit, never past a managed policy ceiling.
         let output_ceiling = snapshot
             .providers()
             .get(snapshot.model().provider())
@@ -1467,9 +1339,6 @@ impl RuntimeFactory {
                 advertised: levels.clone(),
             });
         }
-        // A pin outside the route's advertised ladder is a configuration error
-        // here, not a provider 400 mid-turn. An empty ladder advertises nothing
-        // and is not checked: unknown is not the same as unsupported.
         if let Some(effort) = snapshot
             .reasoning_effort()
             .filter(|effort| *effort != qq_provider::ReasoningEffort::Default)
@@ -1547,8 +1416,6 @@ impl RuntimeFactory {
             None => None,
         };
         if let Some(names) = snapshot.policy().exposed_tools() {
-            // A profile-excluded configured server is outside discovery.
-            // Unknown namespaces stay in the list and fail core validation.
             let names = names
                 .iter()
                 .filter(|name| {
@@ -1580,9 +1447,6 @@ impl RuntimeFactory {
             &snapshot,
             mcp_subset.as_deref(),
         )? {
-            // The catalog is snapshotted here, on the blocking compile
-            // thread, so the plan holds an immutable tool list and the cache
-            // can revalidate it against the manager's generation.
             bindings.mcp = Some(Arc::clone(&wired.registry));
             profile = profile
                 .with_host(HostSnapshot::capture_blocking(wired.registry))
@@ -1593,7 +1457,6 @@ impl RuntimeFactory {
         let mut sources = Vec::with_capacity(plan.instruction_sources().len() + 1);
         sources.push(credential_index);
         sources.extend(plan.instruction_sources().iter().cloned());
-        // Fail inside the cache's compile closure, before publishing a generation.
         preparation_phase(progress, qq_core::RuntimeLoadStage::Complete)?;
         Ok(CompiledGeneration {
             plan,
@@ -1618,16 +1481,6 @@ impl RuntimeFactory {
         let metadata = provider.models().get(snapshot.model().model());
         let api = effective_provider_api(provider, snapshot.model().model(), access);
         let model_limit = metadata.and_then(qq_config::ModelMetadata::max_output_tokens);
-        // The compiled default (16 384) is sized for visible output. Where a
-        // reasoning effort is set and the model's thinking is carved out of
-        // the same `max_tokens` (Anthropic models on the Messages wire or
-        // behind an OpenAI-compatible gateway), that default strangles the
-        // turn: `max` effort spends it all on hidden reasoning and the run
-        // sees an empty truncation. Lift the wire cap to the catalog ceiling
-        // unless the operator set `max_output_tokens` themselves; a managed
-        // policy ceiling still binds. Run budgets bound spend either way.
-        // Bedrock Converse is not listed: effort is unsupported on that
-        // wire and rejected at load, so the case cannot arise.
         let configured_explicitly = snapshot
             .provenance()
             .max_output_tokens()
@@ -1664,16 +1517,10 @@ impl RuntimeFactory {
                 limit: max_output_tokens,
             });
         }
-        // The codec, not the credential, decides whether the output limit
-        // reaches the wire: the Codex body omits `max_output_tokens`.
         let codex = matches!(
             access,
             ProviderAccess::Http(access) if responses_body_shape(access) == ResponsesBodyShape::Codex
         );
-        // Explicit cache breakpoints exist only where the wire has them: the
-        // Anthropic Messages and Bedrock Converse codecs mark the system
-        // prompt, the last tool, and the last message block. OpenAI and
-        // Google cache the prefix implicitly and expose no control.
         let (cache_read_usage, cache_write_usage, cache_control) = match api {
             ProviderApi::OpenAiResponses
             | ProviderApi::OpenAiChatCompletions
@@ -1797,12 +1644,6 @@ impl RuntimeFactory {
                         api_key.as_ref(),
                         profile.as_deref(),
                     )?;
-                    // Built-in providers try the explicit reference, then the
-                    // stored name, then the environment variable; the
-                    // descriptor names the source that actually applies. An
-                    // alias variable (`GOOGLE_API_KEY`) is reported under the
-                    // canonical name so the plan digest does not depend on
-                    // which spelling is set.
                     let credential = match api_key {
                         Some(reference) => credential_reference(reference),
                         None => {
@@ -1837,8 +1678,6 @@ impl RuntimeFactory {
                 }
                 BuiltinAuth::XAi => {
                     let profile_name = builtin_auth::profile_name(profile.as_deref());
-                    // An explicit `api_key:` is the credential; otherwise the
-                    // profile names it.
                     let credential = api_key.as_ref().map_or_else(
                         || CredentialReference::Profile(profile_name.to_owned()),
                         credential_reference,
@@ -2018,15 +1857,8 @@ impl RuntimeFactory {
     }
 }
 
-/// `max_output_tokens` defaults of earlier releases. A session row carrying
-/// one of these recorded the default of its day, not an operator's choice.
 const LEGACY_DEFAULT_MAX_OUTPUT_TOKENS: [u32; 2] = [2_048, 4_096];
 
-/// Whether a model served over an OpenAI-compatible wire is an Anthropic
-/// model, whose extended thinking is billed inside `max_tokens`. The catalog's
-/// canonical id decides when present; a configured gateway model (LiteLLM,
-/// Bedrock proxies) is recognised by the vendor segment in its own id
-/// (`us.anthropic.claude-…`, `anthropic/claude-…`, `claude-…`).
 fn anthropic_model_behind_a_gateway(wire_id: &str, canonical_id: Option<&str>) -> bool {
     match canonical_id {
         Some(canonical) => canonical.starts_with("anthropic/"),
@@ -2056,7 +1888,6 @@ fn effective_provider_api(
     }
 }
 
-/// Shared membership rule for discovery, delegation and spawn admission.
 fn model_in_catalog(
     provider: &ProviderConfig,
     model: &str,
@@ -2069,20 +1900,12 @@ fn model_in_catalog(
     }) || discovered.is_some_and(|models| models.iter().any(|candidate| candidate.id == model))
 }
 
-/// How a model catalog admits a provider's routes.
 #[derive(Clone, Copy)]
 enum RouteAdmission<'a> {
-    /// Resolve the credential (reads secure storage): the catalog a client
-    /// is shown.
     Authenticated,
-    /// A credential is present in the index (these names) or environment;
-    /// nothing is read from secure storage.
     CredentialPresent(&'a BTreeSet<String>),
 }
 
-/// [`RuntimeFactory::provider_authenticated`] without the secret read: the
-/// same credential sources, checked for presence. Endpoint binding is not
-/// checked; a mismatch fails at the request that reads the credential.
 fn provider_credential_present(provider: &ProviderConfig, registered: &BTreeSet<String>) -> bool {
     let reference_present = |reference: &qq_config::SecretRef| match reference {
         qq_config::SecretRef::Env(variable) => environment_variable_set(variable),
@@ -2097,8 +1920,6 @@ fn provider_credential_present(provider: &ProviderConfig, registered: &BTreeSet<
                 | ProviderAuth::Bearer(reference)
                 | ProviderAuth::Header(_, reference) => reference_present(reference),
             },
-            // An API key, a stored credential (`<id>/<profile>`, OAuth or
-            // key) or one of the row's variables; OAuth-only rows read none.
             HttpCredential::Builtin {
                 provider,
                 api_key,
@@ -2131,8 +1952,6 @@ fn environment_variable_set(variable: &str) -> bool {
     std::env::var_os(variable).is_some_and(|value| !value.is_empty())
 }
 
-/// Which input the AWS default credential chain would pick up locally,
-/// without calling AWS or probing IMDS.
 pub fn aws_default_chain_source() -> Option<&'static str> {
     if std::env::var_os("AWS_ACCESS_KEY_ID").is_some()
         && std::env::var_os("AWS_SECRET_ACCESS_KEY").is_some()
@@ -2458,7 +2277,6 @@ enum ResolvedAuth {
     Header(String, Secret),
 }
 
-/// The secret-free reference a configured secret resolves through.
 fn credential_reference(reference: &SecretRef) -> CredentialReference {
     match reference {
         SecretRef::Env(name) => CredentialReference::Environment(name.clone()),
@@ -2467,9 +2285,6 @@ fn credential_reference(reference: &SecretRef) -> CredentialReference {
     }
 }
 
-/// An endpoint reduced to scheme, host, port, and path. Userinfo, query, and
-/// fragment can carry credentials and are dropped; an unparseable endpoint is
-/// described only by its scheme so no raw bytes leak into a descriptor.
 pub use crate::describe_endpoint;
 
 impl ResolvedAuth {
@@ -2492,24 +2307,17 @@ pub struct RuntimeHandler {
 }
 
 impl RuntimeHandler {
-    /// [`Self::open_with`] with no server-side approval deadline: the
-    /// interactive default.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn open(factory: RuntimeFactory) -> Result<Self, RuntimeHandlerError> {
         Self::open_with(factory, None).await
     }
 
-    /// Opens the durable runtime with the server-side approval wait chosen
-    /// by the caller: `None` is no deadline (the interactive default); a
-    /// headless supervisor passes what its configuration asked for.
     pub async fn open_owned(
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
     ) -> Result<Self, RuntimeHandlerError> {
         factory.validate_isolated_tui_qa_state()?;
         let database_path = factory.inner.config.session_database_path()?;
-        // The factory is both the runtime loader and the workspace policy
-        // authority that resolves goal settings and managed check denies.
         let options = SessionRuntimeOptions::new(database_path)
             .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()));
@@ -2525,40 +2333,27 @@ impl RuntimeHandler {
         Self::open_owned(factory, approval_timeout).await
     }
 
-    /// The durable session runtime this handler serves. Headless `qq run`
-    /// drives it directly through the same command/snapshot/subscribe
-    /// interface the server exposes over HTTP.
     pub fn sessions(&self) -> &SessionRuntime {
         &self.durable
     }
 
-    /// The identity the HTTP server advertises for this runtime: the store's
-    /// durable id plus a display label (configured, else the host name).
     #[must_use]
     pub fn server_identity(&self, display_name: Option<&str>) -> ServerIdentity {
         ServerIdentity::new(self.durable.store_id(), display_name)
     }
 
-    /// Gracefully stops the durable runtime after its serving adapter has
-    /// stopped accepting new requests.
     pub async fn shutdown(&self) -> Result<(), RuntimeHandlerError> {
-        // Runs settle first so every active plan is released before the
-        // cache stops admitting; a plan a run still holds stays valid.
         self.durable.shutdown().await?;
         self.factory.shutdown_plans();
         Ok(())
     }
 
-    /// Finalizes the runtime after every serving adapter has drained its
-    /// snapshot and event responses.
     pub async fn close(&self) -> Result<(), RuntimeHandlerError> {
         self.durable.close().await?;
         Ok(())
     }
 }
 
-/// The capability document's workspace tool section, read off a compiled
-/// plan: nothing is fetched, so a warm plan answers from memory.
 fn workspace_tool_capabilities(plan: &CompiledAgentPlan) -> qq_protocol::WorkspaceToolCapabilities {
     let catalog = plan.catalog();
     let skills = plan.skills();
@@ -2813,10 +2608,6 @@ pub enum RuntimeHandlerError {
     Sessions(#[from] SessionRuntimeError),
 }
 
-/// Translates the configured roster into the protocol shape, decorating each
-/// entry with catalog metadata and its blended price relative to the spawning
-/// model (`current`). Relative cost is observational guidance for the model;
-/// `None` when either side has no pricing.
 fn delegation_roster(
     snapshot: &ConfigSnapshot,
     current: &qq_config::ModelRoute,
@@ -2827,8 +2618,6 @@ fn delegation_roster(
             .get(route.provider())
             .and_then(|provider| provider.models().get(route.model()))
     };
-    // A blended per-token price: three input tokens per output token is a
-    // rough coding-agent mix and only needs to rank routes, not bill them.
     let blended = |pricing: &qq_config::ModelPricing| -> u128 {
         u128::from(pricing.input_usd_nanos_per_token) * 3
             + u128::from(pricing.output_usd_nanos_per_token)
@@ -2866,14 +2655,6 @@ fn delegation_roster(
                         _ => None,
                     },
                 };
-                // An effort the role derives is fitted to the route here,
-                // where the catalog is known, so a default role never makes
-                // its child unspawnable: a model without reasoning takes
-                // `Default` (nothing is sent); a model with an advertised
-                // ladder takes the highest level at or below the derived one,
-                // or its lowest. A route the catalog does not know is left to
-                // derive at spawn. An operator's explicit `effort` is kept
-                // verbatim and validated at the child's load like any pin.
                 if roster_entry.effort.is_none()
                     && let Some(derived) =
                         qq_protocol::child_reasoning_effort(&roster_entry, parent_effort)
@@ -2909,7 +2690,6 @@ fn delegation_roster(
     }
 }
 
-/// Translates the managed host denies into the runtime's network policy.
 fn network_policy(policy: &qq_config::EffectivePolicy) -> qq_core::NetworkPolicy {
     qq_core::NetworkPolicy {
         deny_hosts: policy.deny_hosts().to_vec().into(),
@@ -2928,7 +2708,6 @@ fn shell_policy(policy: &qq_config::EffectivePolicy) -> qq_core::ShellPolicy {
     }
 }
 
-/// Translates the configured audit section into the runtime policy.
 const fn audit_policy(audit: &qq_config::AuditConfig) -> qq_core::AuditPolicy {
     qq_core::AuditPolicy {
         mode: match audit.mode() {
@@ -2978,10 +2757,6 @@ fn provider_api_name(api: ProviderApi) -> &'static str {
     }
 }
 
-/// Builds the durable provider identity only from validated, non-secret
-/// deployment inputs. Custom endpoint provenance, static header values, and
-/// URL credential channels are intentionally not hashed: those configurations
-/// remain explicitly unknown for cross-run occupancy reuse.
 fn provider_request_shape_identity(
     provider_id: &str,
     provider: &ProviderConfig,
@@ -2997,9 +2772,6 @@ fn provider_request_shape_identity(
     update_digest(&mut digest, provider_api_name(api).as_bytes());
     match access {
         ProviderAccess::Http(access) => {
-            // The provider compiler rejects userinfo and fragments. Exact
-            // endpoints may otherwise contain a query, so apply the stricter
-            // durable-identity rule here before reading any endpoint bytes.
             let endpoint = reqwest::Url::parse(access.endpoint()).ok()?;
             if !endpoint.username().is_empty()
                 || endpoint.password().is_some()
@@ -3032,8 +2804,6 @@ fn provider_request_shape_identity(
                     update_digest(&mut digest, b"configured-header");
                     update_digest(&mut digest, name.as_bytes());
                 }
-                // Each row keeps the marker its pre-ADR-0064 credential
-                // variant wrote, so every version 1 identity stands.
                 HttpCredential::Builtin { provider, .. } => {
                     let auth = BuiltinAuth::of(provider);
                     update_digest(&mut digest, auth.digest_marker());
@@ -3042,11 +2812,6 @@ fn provider_request_shape_identity(
                     }
                 }
             }
-            // The body shape is digested in its own right, so two routes that
-            // send different Responses bodies can never share an identity.
-            // The `request-time-codex` marker above already implies the Codex
-            // body, so only a Codex body on any other credential adds bytes:
-            // every existing route keeps its version 1 digest.
             digest_body_shape(&mut digest, access.auth(), responses_body_shape(access));
         }
         ProviderAccess::AmazonBedrock { region, auth } => {
@@ -3069,11 +2834,6 @@ fn provider_request_shape_identity(
     })
 }
 
-/// How a route sends a session's cache key. Only built-in endpoints, which a
-/// configuration cannot redirect, get one: OpenAI and Codex route Responses
-/// by `prompt_cache_key`, xAI routes Chat Completions by `x-grok-conv-id`.
-/// Custom and LiteLLM endpoints may reject an unknown field, and the
-/// Anthropic-family, Google and Bedrock APIs have no such routing.
 fn cache_routing(access: &HttpAccess, api: ProviderApi) -> CacheRouting {
     let HttpCredential::Builtin { provider, .. } = access.auth() else {
         return CacheRouting::None;
@@ -3085,15 +2845,10 @@ fn cache_routing(access: &HttpAccess, api: ProviderApi) -> CacheRouting {
     }
 }
 
-/// The Responses body a configured HTTP route sends. Only the built-in OpenAI
-/// Codex route uses the Codex body. The recipe, the output-limit capability
-/// and the request-shape identity all read the shape from here.
 fn responses_body_shape(access: &HttpAccess) -> ResponsesBodyShape {
     implied_body_shape(access.auth())
 }
 
-/// The body shape a credential has always implied: Codex for the OpenAI
-/// Codex credential, standard for every other.
 fn implied_body_shape(auth: &HttpCredential) -> ResponsesBodyShape {
     match auth {
         HttpCredential::Builtin { provider, .. }
@@ -3107,11 +2862,6 @@ fn implied_body_shape(auth: &HttpCredential) -> ResponsesBodyShape {
     }
 }
 
-/// Adds the Responses body shape to a request-shape digest. A Codex body on
-/// the OpenAI Codex credential is already implied by its `request-time-codex`
-/// marker, and a standard body on any other credential is the version 1
-/// default, so neither adds bytes and every existing digest is unchanged;
-/// any other pairing is digested explicitly.
 fn digest_body_shape(digest: &mut Sha256, auth: &HttpCredential, shape: ResponsesBodyShape) {
     let implied = implied_body_shape(auth);
     if shape != implied {
@@ -3151,7 +2901,6 @@ fn update_digest(digest: &mut Sha256, value: &[u8]) {
     digest.update(value);
 }
 
-/// Checks cancellation before starting the next blocking preparation phase.
 fn preparation_phase(
     progress: Option<&qq_core::RuntimeLoadProgress>,
     stage: qq_core::RuntimeLoadStage,
@@ -3343,8 +3092,6 @@ mod tests {
     #[derive(Default)]
     pub(super) struct MemoryKeyring(Mutex<BTreeMap<String, Vec<u8>>>);
 
-    /// A stored Codex login for `account_id` that parses as a request would
-    /// read it: an ID token whose claims name the account.
     pub(super) fn stored_codex_login(account_id: &str) -> Vec<u8> {
         let claims = serde_json::to_vec(&serde_json::json!({
             "https://api.openai.com/auth": {
@@ -3450,9 +3197,6 @@ mod tests {
                 "qq-runtime-test-{}-{nanos}-{sequence}",
                 std::process::id()
             ));
-            // Tests may deliberately place TMPDIR below a real checkout. A
-            // local VCS boundary keeps config discovery inside this fixture
-            // instead of inheriting that checkout's untrusted `.qq` sources.
             for directory in [".git", "global", "data", "managed", "work"] {
                 fs::create_dir_all(root.join(directory)).unwrap();
             }
@@ -3768,8 +3512,6 @@ mod tests {
             let event = event.clone();
             Box::pin(async move {
                 if let Some(gate) = self.stall_first.take() {
-                    // Hold the first delivery until the test says the store
-                    // has kept committing without us.
                     let _ = gate.await;
                 }
                 let sequence = event.cursor.sequence;
@@ -3792,9 +3534,6 @@ mod tests {
         }
     }
 
-    /// An observer that falls behind by more than a replay page, stops, and
-    /// restarts from its cursor receives exactly the committed sequence a
-    /// live subscriber received; a stalled observer never delays commits.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn observers_fall_behind_restart_and_converge_without_delaying_commits() {
         let fixture = RuntimeFixture::new();
@@ -3861,7 +3600,6 @@ mod tests {
             panic!("unexpected receipt")
         };
 
-        // A live subscriber records the authoritative sequence as it happens.
         let live_client = client.clone();
         let live_origin = origin;
         let live = tokio::spawn(async move {
@@ -3878,8 +3616,6 @@ mod tests {
             seen
         });
 
-        // A stalled observer holds its first delivery while the store keeps
-        // committing: commits must not wait for it.
         let (release, gate) = tokio::sync::oneshot::channel();
         let mut stalled = CollectingSink {
             seen: Vec::new(),
@@ -3894,9 +3630,6 @@ mod tests {
                 .await
         });
 
-        // Generate well over one replay page (128) of events. The prompt
-        // queue is bounded (16 pending), so a full queue is backpressure
-        // (503) that the producer waits out; it is never dropped work.
         for i in 0..40 {
             loop {
                 match client
@@ -3934,9 +3667,6 @@ mod tests {
         stalled_task.abort();
         drop(release);
 
-        // A fresh observer replays from the origin, stops partway (as if it
-        // crashed), and a second observer resumes from the acknowledged
-        // cursor. Together they reproduce the live sequence exactly.
         let midpoint = live_events[live_events.len() / 2].cursor.sequence;
         let mut first = CollectingSink {
             seen: Vec::new(),
@@ -3951,7 +3681,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(exit, qq_client::observer::ObserverExit::Stopped);
-        // The event being delivered when the sink stopped is not acknowledged.
         assert_eq!(resume_from.sequence, midpoint - 1);
         first.seen.pop();
         let last_live = live_events.last().unwrap().cursor.sequence;
@@ -3980,7 +3709,6 @@ mod tests {
         }
         assert_eq!(first.disconnects + second.disconnects, 0);
 
-        // A cursor from another store is rejected, not silently resumed.
         let foreign = qq_protocol::EventCursor {
             store_id: qq_protocol::StoreId::generate().unwrap(),
             workspace_id,
@@ -4005,9 +3733,6 @@ mod tests {
         handler.shutdown().await.unwrap();
     }
 
-    /// The interactive client delivers the workspace-scoped capability
-    /// document (profiles included) after bootstrap and again on request, so
-    /// a TUI can list profiles without a restart after a pack is added.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tui_client_delivers_workspace_capabilities_and_refreshes_them() {
         use qq_client::{ClientPort as _, ClientRequest, ClientUpdate};
@@ -4062,9 +3787,6 @@ mod tests {
             StartOutcome::Started(server) => server,
             StartOutcome::Existing(_) => panic!("test unexpectedly found a running server"),
         };
-        // Project configuration is sensitive: capabilities for an untrusted
-        // workspace fail as configuration, and the client leaves the document
-        // unadvertised. Trust it up front, as `qq trust` would.
         let request = LoadRequest::new(fixture.path("work"));
         handler
             .factory
@@ -4107,8 +3829,6 @@ mod tests {
             .expect("workspace-scoped document");
         assert_eq!(profiles.len(), 1);
         assert!(profiles[0].id.is_default());
-        // The skill index is listed entry by entry so a client can complete
-        // and describe the workspace's guidance.
         let skills = &initial.workspace_tools.as_ref().unwrap().skills;
         assert_eq!(skills.indexed, 1);
         assert_eq!(skills.entries.len(), 1);
@@ -4119,7 +3839,6 @@ mod tests {
         assert!(skills.entries[0].disclosed);
         assert!(initial.steering.boundary);
 
-        // A pack dropped into the trusted workspace appears on refresh.
         fs::create_dir_all(fixture.path("work/.qq/packs/kit")).unwrap();
         fs::write(
             fixture.path("work/.qq/packs/kit/pack.ron"),
@@ -4208,7 +3927,6 @@ mod tests {
             )
             .unwrap()
         };
-        /// The first snapshot, or the failure that replaced it.
         async fn first_snapshot(
             tui: &mut qq_client::TuiClient,
         ) -> Result<qq_protocol::WorkspaceSnapshot, String> {
@@ -4227,7 +3945,6 @@ mod tests {
             }
         }
 
-        // Bare `qq`: every launch creates a session and focuses it.
         let mut first = start("work", InitialSession::New(selection.clone()));
         let one = first_snapshot(&mut first).await.unwrap();
         let first_id = one.focused.as_ref().expect("focused").summary.id;
@@ -4240,22 +3957,18 @@ mod tests {
         assert_eq!(two.sessions.len(), 2);
         drop(second);
 
-        // `qq --session ID`: focuses exactly that one and creates nothing.
         let mut opened = start("work", InitialSession::Open(first_id));
         let snapshot = first_snapshot(&mut opened).await.unwrap();
         assert_eq!(snapshot.focused.as_ref().unwrap().summary.id, first_id);
         assert_eq!(snapshot.sessions.len(), 2);
         drop(opened);
 
-        // A client attached to a server it does not own shows the newest.
         let mut attached = start("work", InitialSession::Existing);
         let snapshot = first_snapshot(&mut attached).await.unwrap();
         assert_eq!(snapshot.focused.as_ref().unwrap().summary.id, second_id);
         assert_eq!(snapshot.sessions.len(), 2);
         drop(attached);
 
-        // Unknown id, and an id that lives in another workspace, fail before
-        // any snapshot is shown, with the same message.
         let unknown = qq_protocol::SessionId::from_bytes([9; 16]);
         let mut bad = start("work", InitialSession::Open(unknown));
         let failure = first_snapshot(&mut bad).await.unwrap_err();
@@ -4319,10 +4032,6 @@ mod tests {
         );
     }
 
-    /// The request-shape identity of every built-in HTTP preset, recorded
-    /// before the built-in credentials collapsed into one variant
-    /// (ADR-0064 §4). A change here invalidates every durable occupancy
-    /// record for that provider.
     #[test]
     fn builtin_request_shape_identities_are_pinned() {
         let fixture = RuntimeFixture::new();
@@ -4377,10 +4086,6 @@ mod tests {
 
     #[test]
     fn a_new_session_pins_the_output_cap_only_when_it_was_chosen() {
-        // RR8.3 review: materialising the compiled default into every new
-        // session row made it an explicit override on the next load, which
-        // defeated the reasoning-aware lift. A configured or CLI cap is a
-        // choice and is still pinned, whatever its value.
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
         let config = r#"(
@@ -4408,7 +4113,6 @@ mod tests {
             chosen_max_output_tokens(snapshot.max_output_tokens(), snapshot.provenance())
         };
         assert_eq!(chosen(RuntimeOverrides::new()), None);
-        // Even the default's own value is a pin when the operator asked for it.
         assert_eq!(
             chosen(
                 RuntimeOverrides::new()
@@ -4430,8 +4134,6 @@ mod tests {
             (Some(2_048), None),
             (Some(4_096), None),
             (Some(123), Some(123)),
-            // A persisted 16 384 is an operator's pick (a fresh row never
-            // records the compiled default: `chosen_max_output_tokens`).
             (
                 Some(qq_config::DEFAULT_MAX_OUTPUT_TOKENS),
                 Some(qq_config::DEFAULT_MAX_OUTPUT_TOKENS),
@@ -4452,9 +4154,6 @@ mod tests {
 
     #[test]
     fn reasoning_effort_lifts_the_default_output_cap_where_thinking_shares_it() {
-        // RR8.3: with effort set on a model whose thinking budget is carved
-        // out of `max_tokens`, the compiled 16 384 default is the model
-        // ceiling; an explicit operator value is honoured as before.
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
         let resolve = |api: &str, effort: &str, models: &str, overrides: RuntimeOverrides| {
@@ -4486,7 +4185,6 @@ mod tests {
         let anthropic = "name: \"Claude\", max_output_tokens: 128000";
         let none = RuntimeOverrides::new;
 
-        // Effort + Anthropic wire + compiled default → catalog ceiling.
         assert_eq!(
             resolve(
                 "AnthropicMessages",
@@ -4496,8 +4194,6 @@ mod tests {
             ),
             128_000
         );
-        // Same model behind a Chat Completions gateway, recognised by the
-        // vendor segment of the gateway's own model id.
         let gateway = |effort: &str, overrides| {
             let request = LoadRequest::new(fixture.path("work"))
                 .with_explicit_content(format!(
@@ -4526,8 +4222,6 @@ mod tests {
         };
         assert_eq!(gateway("reasoning_effort: max,", none()), 128_000);
         assert_eq!(gateway("", none()), qq_config::DEFAULT_MAX_OUTPUT_TOKENS);
-        // No effort → the default still caps. `none` disables thinking, so
-        // there is no hidden budget to make room for either.
         assert_eq!(
             resolve("AnthropicMessages", "", anthropic, none()),
             qq_config::DEFAULT_MAX_OUTPUT_TOKENS
@@ -4536,7 +4230,6 @@ mod tests {
             gateway("reasoning_effort: none,", none()),
             qq_config::DEFAULT_MAX_OUTPUT_TOKENS
         );
-        // An explicit operator value wins over the lift.
         assert_eq!(
             resolve(
                 "AnthropicMessages",
@@ -4555,7 +4248,6 @@ mod tests {
             ),
             8_192
         );
-        // Responses-wire models keep reasoning out of `max_output_tokens`.
         assert_eq!(
             resolve(
                 "OpenAiResponses",
@@ -4565,7 +4257,6 @@ mod tests {
             ),
             qq_config::DEFAULT_MAX_OUTPUT_TOKENS
         );
-        // Without a catalog ceiling there is nothing to lift to.
         assert_eq!(
             resolve(
                 "AnthropicMessages",
@@ -4575,8 +4266,6 @@ mod tests {
             ),
             qq_config::DEFAULT_MAX_OUTPUT_TOKENS
         );
-        // A managed policy ceiling still binds the lifted cap. (Written last:
-        // the managed layer applies to every load in this fixture.)
         fs::write(
             fixture.path("managed/managed.ron"),
             r#"(version: 1, policy: (max_output_tokens: 32000))"#,
@@ -4595,9 +4284,6 @@ mod tests {
 
     #[test]
     fn a_plan_carries_the_catalog_output_ceiling_bounded_by_policy() {
-        // ENG-973: the resolved cap stays the configured 16 384, but the
-        // empty-truncation raise may reach the catalog limit, never past a
-        // managed policy ceiling, and nothing when the catalog is silent.
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
         let plan = |models: &str| {
@@ -4633,9 +4319,6 @@ mod tests {
             })
         );
 
-        // Review (#216): lowering only the managed ceiling (still above the
-        // 16 384 request cap, so the digest is unchanged) must replace the
-        // cached plan, not revalidate the one compiled under 32 000.
         let before = plan("name: \"M\", max_output_tokens: 128000");
         fs::write(
             fixture.path("managed/managed.ron"),
@@ -4981,9 +4664,6 @@ mod tests {
             "a dynamic AWS region chain cannot produce a durable exact identity"
         );
 
-        // Built-in deployments also stay unknown when the endpoint or static
-        // headers could carry a secret. Custom/LiteLLM return before these
-        // guards run, so exercise them through a trusted provider kind.
         let guarded = [
             http(
                 "https://user:credential@example.test/v1",
@@ -5171,7 +4851,6 @@ mod tests {
         assert_eq!(fast.note.as_deref(), Some("lookups"));
         assert_eq!(fast.context_window, Some(400_000));
         assert_eq!(fast.max_output_tokens, None);
-        // Blended 3:1 price: fast (10*3+20)=50 vs main (100*3+200)=500.
         assert_eq!(fast.relative_cost_permille, Some(100));
         let main = &roster.roster[1];
         assert_eq!(main.relative_cost_permille, Some(1000));
@@ -5180,8 +4859,6 @@ mod tests {
         assert_eq!(unpriced.relative_cost_permille, None);
         assert_eq!(unpriced.context_window, None);
 
-        // The compiled plan records the roster in its descriptor and the
-        // spawn_agent schema offers roles.
         let plan = factory
             .plan_for(&fixture.request(
                 r#"(
@@ -5212,9 +4889,6 @@ mod tests {
 
     #[test]
     fn a_derived_roster_effort_is_fitted_to_the_child_route() {
-        // RR8.4 review: the role's derived effort (fast → low, balanced →
-        // medium) must be one the child's route accepts, or the default role
-        // makes the child unspawnable. An explicit entry effort is untouched.
         use qq_provider::ReasoningEffort;
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
@@ -5258,15 +4932,10 @@ mod tests {
         assert_eq!(
             efforts,
             vec![
-                // A model without reasoning: nothing is sent on the wire.
                 Some(ReasoningEffort::Default),
-                // `medium` is not advertised; the highest rung below it is.
                 Some(ReasoningEffort::Low),
-                // Advertised as derived.
                 Some(ReasoningEffort::Medium),
-                // Not in the catalog: left to derive at spawn (low).
                 None,
-                // An explicit entry effort is kept verbatim.
                 Some(ReasoningEffort::Medium),
             ]
         );
@@ -5596,7 +5265,6 @@ mod tests {
         .unwrap();
         let factory = fixture.factory();
 
-        // A malformed route fails the syntax check.
         let error = validate_route(&factory, &workspace, "not-a-route")
             .await
             .unwrap_err();
@@ -5607,7 +5275,6 @@ mod tests {
             error.message
         );
 
-        // An unknown provider fails the provider check.
         let error = validate_route(&factory, &workspace, "ghost/model")
             .await
             .unwrap_err();
@@ -5617,9 +5284,6 @@ mod tests {
             error.message
         );
 
-        // An unknown model id on a known provider is rejected — never
-        // defaulted to the provider's API — and the rejection lists the
-        // served routes while they are few.
         let error = validate_route(&factory, &workspace, "custom/typo")
             .await
             .unwrap_err();
@@ -5637,8 +5301,6 @@ mod tests {
             error.message
         );
 
-        // A catalog-less custom provider serves nothing without an
-        // explicitly configured id...
         let error = validate_route(&factory, &workspace, "bare/anything")
             .await
             .unwrap_err();
@@ -5653,7 +5315,6 @@ mod tests {
             error.message
         );
 
-        // ...while an explicitly configured id passes.
         validate_route(&factory, &workspace, "custom/known")
             .await
             .unwrap();
@@ -5684,8 +5345,6 @@ mod tests {
         .unwrap();
         let factory = fixture.factory_with_credentials(credentials.clone());
 
-        // A missing static key rejects the spawn even though the model id
-        // is in the builtin catalog.
         let error = validate_route(&factory, &workspace, "openai/gpt-5.6")
             .await
             .unwrap_err();
@@ -5701,8 +5360,6 @@ mod tests {
             error.message
         );
 
-        // Request-time-auth providers must have resolvable credentials at
-        // spawn time, not merely at first request.
         let error = validate_route(&factory, &workspace, "openai-codex/gpt-test")
             .await
             .unwrap_err();
@@ -5712,8 +5369,6 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind, RunFailureKind::Authentication);
 
-        // Adding the static key makes the builtin-catalog route spawnable
-        // without any discovery round trip.
         credentials
             .set("openai/default", "test-secret", false)
             .unwrap();
@@ -5721,8 +5376,6 @@ mod tests {
             .await
             .unwrap();
 
-        // A stored Codex profile becomes resolvable and the configured
-        // model id passes.
         let id_payload = serde_json::to_vec(&serde_json::json!({
             "https://api.openai.com/auth": {
                 "chatgpt_account_id": "workspace-test-id",
@@ -5758,10 +5411,6 @@ mod tests {
             .unwrap();
     }
 
-    /// A stored OAuth login counts as authenticated only if a request could
-    /// use it: unreadable stored bytes fail the spawn gate up front instead
-    /// of failing the first request. An expired login still passes, because
-    /// a request refreshes it, and the gate itself never refreshes.
     #[tokio::test]
     async fn spawn_validation_rejects_unreadable_stored_oauth_logins() {
         let fixture = RuntimeFixture::new();
@@ -5918,9 +5567,6 @@ mod tests {
         .unwrap();
         let factory = fixture.factory();
 
-        // The first validation faults the discovery list into the cache and
-        // accepts the discovered id — exactly what the served model list
-        // would show.
         validate_route(&factory, &workspace, "custom/live-model")
             .await
             .unwrap();
@@ -5935,8 +5581,6 @@ mod tests {
             "{routes:?}"
         );
 
-        // The endpoint is gone: a second validation can only succeed from
-        // the warm cache, proving no network round trip is required.
         validate_route(&factory, &workspace, "custom/live-model")
             .await
             .unwrap();
@@ -5974,7 +5618,6 @@ mod tests {
         let held = Arc::clone(slots).acquire_many_owned(4).await.unwrap();
         let mut waiting = WorkspacePolicyAuthority::goal_policy(&factory, &workspace);
         assert!(futures_util::poll!(waiting.as_mut()).is_pending());
-        // Dropping a waiter must not leak a pool slot.
         drop(waiting);
         let mut waiting = WorkspacePolicyAuthority::goal_policy(&factory, &workspace);
         assert!(futures_util::poll!(waiting.as_mut()).is_pending());
@@ -6138,8 +5781,6 @@ mod tests {
         let snapshot = factory.load(&request).unwrap();
 
         assert_eq!(factory.configured_model_options(&snapshot).len(), 1);
-        // The compiled plan advertises the same single fixture route to
-        // `spawn_agent`, not the unused credential-bearing provider.
         let plan = factory.plan_for(&request).unwrap();
         assert_eq!(
             plan.descriptor().tools.spawn_model_routes,
@@ -6231,9 +5872,6 @@ mod tests {
 
     #[test]
     fn served_catalog_does_not_require_a_configured_model() {
-        // OB1: `ListModels` answers "what could I choose?", so a workspace
-        // whose configuration lacks `model` still lists every authenticated
-        // built-in instead of failing with `ModelRequired`.
         let fixture = RuntimeFixture::new();
         let credentials = CredentialStore::with_backend(
             CredentialPaths::new(fixture.path("data")),
@@ -6268,8 +5906,6 @@ mod tests {
 
     #[test]
     fn unauthenticated_builtins_carry_a_remedy_and_authenticated_ones_do_not() {
-        // OB2: the TUI names the missing credential for the configured
-        // provider and lists the other built-ins as `needs credential`.
         let fixture = RuntimeFixture::new();
         let credentials = CredentialStore::with_backend(
             CredentialPaths::new(fixture.path("data")),
@@ -6316,8 +5952,6 @@ mod tests {
             remedy("openai-codex"),
             Some("run qq auth login openai-codex")
         );
-        // Denied providers are not offered a remedy: the policy, not a
-        // credential, keeps them out.
         assert_eq!(remedy("bedrock"), None);
         assert_eq!(remedy("bedrock-mantle"), None);
 
@@ -6364,9 +5998,6 @@ mod tests {
 
     #[test]
     fn durable_trust_recompiles_a_plan_that_withheld_untrusted_authority() {
-        // Runtime loads withhold the untrusted route; once `qq
-        // trust` records the file, the cached plan from before must not be
-        // served again.
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
         fs::write(
@@ -6389,7 +6020,6 @@ mod tests {
             .plan_with_lookup(&before, &AgentProfileId::default())
             .unwrap();
         assert_eq!(lookup, PlanLookup::Compiled);
-        // Non-sensitive settings apply even while authority is withheld.
         assert_eq!(untrusted_plan.resolved_model().max_output_tokens, 64);
         assert_eq!(untrusted_plan.resolved_model().route, "custom/test-model");
         let request = LoadRequest::new(&workspace);
@@ -6398,7 +6028,6 @@ mod tests {
             Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
         ));
 
-        // What `qq trust` does.
         let granted = factory.inner.config.grant_pending_trust(&request).unwrap();
         assert_eq!(granted.len(), 1);
 
@@ -6417,7 +6046,6 @@ mod tests {
                 .1,
             PlanLookup::Hit
         );
-        // Strict inspection now loads too.
         assert!(factory.plan_for(&request).is_ok());
     }
 
@@ -6683,9 +6311,6 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
     }
 
-    /// The plan descriptor names the credential that applies: an explicit
-    /// xAI `api_key:` reference when one is configured, otherwise the
-    /// profile `qq-auth` resolves.
     #[test]
     fn xai_descriptor_names_an_explicit_reference_over_the_profile() {
         let fixture = RuntimeFixture::new();
@@ -6980,8 +6605,6 @@ mod tests {
             .plan_for(&document("anthropic-model"))
             .expect("provider default AnthropicMessages must construct");
 
-        // The per-model API must reach Mantle preparation: an unsupported
-        // override fails even though the provider default is supported.
         let error = factory
             .plan_for(&document("rejected-model"))
             .expect_err("unsupported per-model API must fail");
@@ -7061,7 +6684,6 @@ mod tests {
             .unwrap();
 
         assert_ne!(first.digest(), second.digest());
-        // The header value is a secret: rotating it must not change behavior.
         assert_eq!(first.digest(), rotated.digest());
         assert_eq!(first.descriptor().provider.auth_scheme, "header:x-first");
         assert_eq!(
@@ -7123,9 +6745,6 @@ mod tests {
 
     #[test]
     fn google_is_authenticated_by_the_google_api_key_alias() {
-        // Process environment is shared across the test binary, so the alias
-        // is injected into a child that runs the `_child` test below with
-        // nothing else in its environment but what this test provides.
         let fixture = RuntimeFixture::new();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -7165,15 +6784,12 @@ mod tests {
 
         assert!(factory.provider_authenticated("google", provider));
         let plan = factory.plan_for(&request).unwrap();
-        // The descriptor names the canonical variable whichever spelling
-        // supplied the secret, so the plan digest does not depend on it.
         assert_eq!(
             plan.descriptor().provider.credential,
             CredentialReference::Environment("GEMINI_API_KEY".to_owned())
         );
         let canonical = String::from_utf8(plan.descriptor().canonical_bytes().unwrap()).unwrap();
         assert!(!canonical.contains("alias-secret-for-test"));
-        // The parent owns the fixture directory.
         std::mem::forget(fixture);
     }
 
@@ -7197,8 +6813,6 @@ mod tests {
         };
         let factory = fixture.factory();
         let default = factory.plan_for(&fixture.request(document(""))).unwrap();
-        // wait_agents and cancel_agent follow spawn_agent, and command_status
-        // follows shell and exec; none is a policy name.
         let names: Vec<_> = default
             .catalog()
             .names()
@@ -7557,7 +7171,6 @@ mod tests {
             .unwrap();
         assert_eq!(lookup, PlanLookup::Compiled);
         let (review_plan, lookup) = factory.plan_with_lookup(&request, &review).unwrap();
-        // A different profile is a different cache slot and a different plan.
         assert_eq!(lookup, PlanLookup::Compiled);
         assert_ne!(review_plan.digest(), default_plan.digest());
         assert_eq!(review_plan.resolved_model().provider_model, "big-model");
@@ -7575,7 +7188,6 @@ mod tests {
             PlanLookup::Hit
         );
 
-        // Profile values sit beneath explicit request overrides.
         let tight = AgentProfileId::new("tight").unwrap();
         let tight_plan = factory.plan_for_profile(&request, &tight).unwrap();
         assert_eq!(tight_plan.resolved_model().max_output_tokens, 16);
@@ -7590,7 +7202,6 @@ mod tests {
         assert!(matches!(&error, RuntimeBuildError::UnknownProfile(name) if *name == unknown));
         assert_eq!(error.failure_kind(), RunFailureKind::Configuration);
 
-        // The capability document lists default first with effective values.
         let profiles = factory
             .profiles_for(fixture.path("work").to_str().unwrap())
             .unwrap();
@@ -7685,7 +7296,6 @@ mod tests {
         );
         assert_eq!(pack.tool_deny, ["shell", "write_file"]);
         assert!(pack.persona_hash.is_some());
-        // Only the referenced MCP server joins this plan.
         assert_eq!(descriptor.mcp_servers.len(), 1);
         assert_eq!(descriptor.mcp_servers[0].name, "notes");
         let names: Vec<&str> = plan.catalog().names().collect();
@@ -7701,7 +7311,6 @@ mod tests {
                 .source,
             "pack:review-kit/skills/audit/SKILL.md"
         );
-        // The default profile sees both servers and every static tool.
         let default_plan = factory.plan_for(&request).unwrap();
         assert_eq!(default_plan.descriptor().mcp_servers.len(), 2);
         assert!(default_plan.descriptor().pack.is_none());
@@ -7712,12 +7321,10 @@ mod tests {
         assert_eq!(descriptor.protected_pack_roots, ["vendor/review-kit"]);
         assert!(default_plan.catalog().names().any(|n| n == "shell"));
 
-        // Warm lookups do no discovery and hit the cache.
         assert_eq!(
             factory.plan_with_lookup(&request, &reviewer).unwrap().1,
             PlanLookup::Hit
         );
-        // Editing the persona recompiles; the old plan stays valid for holders.
         fs::write(
             fixture.path("work/vendor/review-kit/persona.md"),
             "Persona v2.\n",
@@ -7728,7 +7335,6 @@ mod tests {
         assert_ne!(edited.digest(), plan.digest());
         assert_eq!(plan.descriptor().pack.as_ref().unwrap().version, "1.0.0");
 
-        // The capability document names the pack behind the profile.
         let profiles = factory
             .profiles_for(fixture.path("work").to_str().unwrap())
             .unwrap();
@@ -7736,14 +7342,12 @@ mod tests {
         assert_eq!(summary.pack.as_ref().unwrap().id, "review-kit");
         assert_eq!(summary.approval_mode, ApprovalMode::ReadOnly);
 
-        // A pack that needs a newer protocol fails as configuration.
         fs::write(
             fixture.path("work/vendor/review-kit/pack.ron"),
             r#"(schema: 1, id: "review-kit", version: "9", requires: (protocol: 999),
                 profiles: { "reviewer": Profile(max_output_tokens: 8) })"#,
         )
         .unwrap();
-        // The edited manifest is new content and is reviewed again first.
         assert!(matches!(
             factory.plan_for_profile(&request, &reviewer),
             Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
@@ -7764,7 +7368,6 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            // Trust state lives under the data directory, which must be private.
             fs::set_permissions(fixture.path("data"), fs::Permissions::from_mode(0o700)).unwrap();
         }
         let config = fixture.path("work/.qq/config.ron");
@@ -7789,7 +7392,6 @@ mod tests {
             )
         };
         fs::write(&config, document(64)).unwrap();
-        // No explicit content: the project file is the source under test.
         let request = LoadRequest::new(fixture.path("work"));
         factory.inner.config.grant_pending_trust(&request).unwrap();
 
@@ -7831,7 +7433,6 @@ mod tests {
                 .plan_with_lookup(&request, &AgentProfileId::default())
                 .is_err()
         );
-        // The previous valid generation survives the failed refresh.
         edit(&document(96));
         let (recovered, _) = factory
             .plan_with_lookup(&request, &AgentProfileId::default())
@@ -7919,11 +7520,6 @@ mod tests {
         assert_eq!(describe_endpoint("http://exa mple"), "http://<unparseable>");
     }
 
-    /// Not a correctness test: prints cold-compile versus warm-lookup cost of
-    /// `plan_for` through the full configuration and credential path. Run with
-    /// `cargo test -p qq --release -- --ignored plan_cache_cold_versus_warm --nocapture`.
-    /// The root package has no library target, so this lives beside the unit
-    /// tests instead of under `benches/`.
     #[test]
     #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
     fn plan_cache_cold_versus_warm() {
@@ -7943,8 +7539,6 @@ mod tests {
             .and_then(|value| value.parse().ok())
             .unwrap_or(200);
 
-        // Cold: force a miss each time by editing an instruction source. This
-        // is the per-run cost every prompt paid before plans were cached.
         let mut cold_compile = Vec::with_capacity(iterations as usize);
         for index in 0..iterations {
             fs::write(
@@ -8005,8 +7599,6 @@ mod tests {
         }
     }
 
-    /// Writes a config with `count` custom providers, each authenticated by a
-    /// stored bearer credential, and returns the factory over `keyring`.
     fn factory_with_stored_credential_providers(
         fixture: &RuntimeFixture,
         keyring: Arc<dyn KeyringBackend>,
@@ -8093,8 +7685,6 @@ mod tests {
         assert_eq!(lookup, PlanLookup::Compiled);
         assert_eq!(keyring.reads.load(Ordering::Relaxed), 1);
 
-        // Credential reuse does not publish a cancelled plan. A durable
-        // rotation must still force both a fresh read and a fresh compilation.
         factory
             .inner
             .credentials
@@ -8106,7 +7696,6 @@ mod tests {
         assert_eq!(lookup, PlanLookup::Compiled);
         assert_eq!(keyring.reads.load(Ordering::Relaxed), 2);
 
-        // Pre-cancelled loads do not even attempt configuration or credential reads.
         let result = factory.plan_for_profile_with_progress(
             &fixture.request("invalid"),
             &AgentProfileId::default(),
@@ -8153,15 +7742,10 @@ mod tests {
         let plan = factory
             .plan_for(&fixture.request(r#"(version: 1, model: "p0/m")"#))
             .unwrap();
-        // Every configured route is still offered to `spawn_agent` (alongside
-        // the built-in catalog); a child naming one that is not authenticated
-        // fails at its own request.
         let routes = &plan.descriptor().tools.spawn_model_routes;
         for index in 0..12 {
             assert!(routes.iter().any(|route| route == &format!("p{index}/m")));
         }
-        // One read: the selected provider's own credential, which its
-        // compiled recipe needs. The other eleven are not probed.
         assert_eq!(
             keyring.reads.load(Ordering::Relaxed),
             1,
@@ -8171,9 +7755,6 @@ mod tests {
 
     #[test]
     fn plan_spawn_routes_offer_only_providers_with_a_credential_present() {
-        // Regression: routes were briefly built with no credential check at
-        // all, so every built-in provider's catalog (64 routes by default)
-        // was advertised to `spawn_agent` and could crowd the bounded list.
         let fixture = RuntimeFixture::new();
         let keyring = Arc::new(CountingKeyring {
             inner: MemoryKeyring::default(),
@@ -8398,9 +7979,6 @@ mod tests {
         );
     }
 
-    /// A pin outside a route's advertised ladder fails at plan time with the
-    /// accepted set named; a route that advertises nothing accepts any pin
-    /// (unknown is not unsupported), and a pin inside the ladder compiles.
     #[test]
     fn reasoning_effort_outside_the_advertised_ladder_is_a_plan_error() {
         use qq_provider::ReasoningEffort;
@@ -8458,8 +8036,6 @@ mod tests {
         );
     }
 
-    /// The model catalog the TUI receives carries each route's advertised
-    /// ladder so `/effort` can be shaped before a run is claimed.
     #[test]
     fn model_options_carry_the_advertised_effort_ladder() {
         use qq_provider::ReasoningEffort;
@@ -8491,10 +8067,6 @@ mod tests {
         assert!(efforts("silent").is_empty());
     }
 
-    /// The recipe body shape and the output-limit capability come from one
-    /// function of the route, so they cannot disagree: only the OpenAI Codex
-    /// route sends the Codex body, and every other credential sends the
-    /// standard body whatever its auth scheme.
     #[test]
     fn responses_body_shape_follows_the_route_not_the_auth_scheme() {
         let access = |auth| {
@@ -8534,10 +8106,6 @@ mod tests {
         }
     }
 
-    /// Only the built-in routes whose endpoints honor a cache key get one:
-    /// OpenAI and Codex Responses by `prompt_cache_key`, xAI Chat Completions
-    /// by `x-grok-conv-id`. A configured endpoint may be a strict proxy and
-    /// gets none, whatever its protocol.
     #[test]
     fn cache_routing_follows_the_builtin_route() {
         let access = |auth, api| {
@@ -8600,9 +8168,6 @@ mod tests {
         }
     }
 
-    /// The body shape reaches the request-shape digest: the same route with
-    /// a different body never shares an identity, while the shape each
-    /// credential has always used adds nothing, so version 1 digests stand.
     #[test]
     fn the_responses_body_shape_is_part_of_the_request_shape_digest() {
         let digest = |auth: &HttpCredential, shape| {

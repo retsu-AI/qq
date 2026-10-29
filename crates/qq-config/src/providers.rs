@@ -1,5 +1,3 @@
-//! Built-in provider access routes.
-
 use std::{collections::BTreeMap, sync::LazyLock};
 
 use crate::{
@@ -17,18 +15,9 @@ pub(crate) const GOOGLE_CREDENTIAL_ENDPOINT: &str = "https://generativelanguage.
 pub(crate) const XAI_ENDPOINT: &str = "https://api.x.ai/v1";
 const CODEX_RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 
-/// One built-in HTTP provider: everything that differs between them, as
-/// data. Adding a preset adds a row here (ADR-0064); `ProviderKind`, the
-/// configuration patch syntax, `builtin()`, the credential-variable list and
-/// patch application read the table.
 pub(crate) struct BuiltinHttpProvider {
-    /// The provider id configuration documents use (`providers: {"<id>": ..}`).
     pub(crate) id: &'static str,
-    /// The configuration patch variant (`OpenAi(api_key: ..)`) and the name
-    /// `qq config` prints for the kind.
     config_name: &'static str,
-    /// The patch fields this provider accepts, in serialisation order. Any
-    /// other field is a parse error (ADR-0064 §2).
     pub(crate) patch_fields: &'static [&'static str],
     endpoint: &'static str,
     endpoint_mode: EndpointMode,
@@ -36,96 +25,60 @@ pub(crate) struct BuiltinHttpProvider {
     usage: UsageType,
     catalog: BuiltinCatalog,
     discovery: ModelDiscoveryShape,
-    /// Who defines the credential's audience, and so which resolver reads it.
     audience: BuiltinAudience,
-    /// The variables read when nothing is stored, in precedence order.
     variables: &'static [&'static str],
-    /// How `qq auth login <id>` may obtain this provider's credential, in
-    /// the order the CLI documents them; the first is the default.
     login: &'static [LoginMethod],
-    /// The model `qq init` proposes for this provider.
     init_model: &'static str,
-    /// Position in `qq auth login`, its error message and `qq init`:
-    /// API-key providers first, the subscription last.
     display_order: u8,
 }
 
-/// One way `qq auth login` obtains a built-in provider's credential.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoginMethod {
-    /// Prompt for an API key and store it bound to the provider's audience.
     ApiKey,
-    /// The OpenAI Codex loopback browser sign-in.
     OpenAiCodexBrowser,
-    /// The OpenAI Codex device-code sign-in (`--device-auth`).
     OpenAiCodexDevice,
-    /// The xAI device-code OAuth sign-in (`--oauth`).
     XAiOAuth,
 }
 
-/// How model discovery treats a built-in provider's listing endpoint, beyond
-/// what its protocol already implies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelDiscoveryShape {
-    /// The listing supplements the bundled catalog.
     Supplementary,
-    /// The listing is authoritative: bundled models it omits are hidden
-    /// unless configured explicitly, and a malformed listing is rejected.
     Authoritative,
-    /// The OpenAI Codex listing: authoritative, under `models`, with a
-    /// client version and per-model visibility.
     Codex,
 }
 
 impl ModelDiscoveryShape {
-    /// Whether the discovered list replaces the bundled one.
     #[must_use]
     pub const fn is_authoritative(self) -> bool {
         matches!(self, Self::Authoritative | Self::Codex)
     }
 }
 
-/// The public view of one built-in HTTP provider's row: what the CLI, `qq
-/// init`, the doctor and credential resolution need, with no
-/// configuration types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuiltinProvider {
     pub id: &'static str,
-    /// The configuration patch variant name, e.g. `OpenAi`.
     pub config_name: &'static str,
-    /// Where this provider's credential audience comes from.
     pub audience: BuiltinAudience,
-    /// The variables read when nothing is stored, in precedence order: the
-    /// canonical name first, then any aliases the vendor's SDKs also read.
     pub variables: &'static [&'static str],
     pub login: &'static [LoginMethod],
     pub init_model: &'static str,
     pub discovery: ModelDiscoveryShape,
-    /// The endpoint requests go to, and whether it is a base or exact URL.
     pub endpoint: &'static str,
     pub endpoint_mode: EndpointMode,
 }
 
 impl BuiltinProvider {
-    /// The canonical variable read when nothing is stored, if any.
     #[must_use]
     pub fn environment_variable(&self) -> Option<&'static str> {
         self.variables.first().copied()
     }
 
-    /// The stored credential name for `profile`: `<id>/<profile>`, with
-    /// `default` when none is configured. `qq auth login <id>` writes it.
     #[must_use]
     pub fn stored_name(&self, profile: Option<&str>) -> String {
         format!("{}/{}", self.id, profile.unwrap_or("default"))
     }
 }
 
-/// Where a built-in provider's credential audience is defined. API-key
-/// presets carry theirs in the provider table. Providers whose credential
-/// `qq-auth` owns (an OAuth flow, even one that also accepts an API key)
-/// name that owner, and the composition root maps it to the `qq-auth`
-/// constant (ADR-0064 §1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuiltinAudience {
     Table(&'static str),
@@ -133,16 +86,12 @@ pub enum BuiltinAudience {
     XAi,
 }
 
-/// Every built-in HTTP provider, in the order the CLI lists them (each
-/// row's `display_order`). Every table row appears: there is no separate
-/// registry to keep in step with the table.
 pub fn builtin_providers() -> impl Iterator<Item = BuiltinProvider> {
     let mut rows: Vec<&'static BuiltinHttpProvider> = BUILTIN_HTTP_PROVIDERS.iter().collect();
     rows.sort_by_key(|row| row.display_order);
     rows.into_iter().map(BuiltinHttpProvider::public)
 }
 
-/// The built-in HTTP provider `id` names, if any.
 #[must_use]
 pub fn builtin_provider(id: &str) -> Option<BuiltinProvider> {
     BUILTIN_HTTP_PROVIDERS
@@ -167,14 +116,12 @@ impl BuiltinHttpProvider {
     }
 }
 
-/// The table row whose configuration patch variant is `config_name`.
 pub(crate) fn builtin_by_config_name(config_name: &str) -> Option<&'static BuiltinHttpProvider> {
     BUILTIN_HTTP_PROVIDERS
         .iter()
         .find(|row| row.config_name == config_name)
 }
 
-/// The table row for built-in provider `id`.
 pub(crate) fn builtin_row(id: &str) -> &'static BuiltinHttpProvider {
     BUILTIN_HTTP_PROVIDERS
         .iter()
@@ -182,8 +129,6 @@ pub(crate) fn builtin_row(id: &str) -> &'static BuiltinHttpProvider {
         .expect("a BuiltinProvider always names a table row")
 }
 
-/// The built-in HTTP providers, in the order credential variables are
-/// published.
 pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
     BuiltinHttpProvider {
         id: "openai",
@@ -270,10 +215,6 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
     },
 ];
 
-/// Every environment variable a built-in provider reads for its credential
-/// when no stored credential exists, in table order. The AWS default chain
-/// reads the SDK's own variables; they are the SDK's contract, not QQ's, and
-/// documented as a family.
 pub fn provider_credential_variables() -> Vec<&'static str> {
     BUILTIN_HTTP_PROVIDERS
         .iter()
@@ -281,10 +222,6 @@ pub fn provider_credential_variables() -> Vec<&'static str> {
         .collect()
 }
 
-/// The built-in preset for `kind`, cloned from a table built once per process.
-/// Every configuration load merges all seven presets, so building them (and
-/// filtering the model table into each) per load was the largest fixed cost
-/// of a load; a clone of the finished map is a fraction of that.
 pub(crate) fn builtin(kind: ProviderKind) -> ProviderConfig {
     static HTTP: LazyLock<Vec<ProviderConfig>> =
         LazyLock::new(|| BUILTIN_HTTP_PROVIDERS.iter().map(build_http).collect());
@@ -376,8 +313,6 @@ fn http(
 mod tests {
     use super::*;
 
-    /// Every table row reaches the CLI and `qq init`, exactly once, in
-    /// display order: adding a row is enough to list a provider.
     #[test]
     fn every_table_row_is_listed_once_in_display_order() {
         let listed: Vec<&str> = builtin_providers().map(|provider| provider.id).collect();
@@ -402,9 +337,6 @@ mod tests {
         );
     }
 
-    /// An API-key row resolves its key from a variable when nothing is
-    /// stored, and the plan descriptor names that variable, so every row
-    /// whose audience the table owns lists at least one.
     #[test]
     fn every_api_key_row_names_a_variable() {
         for row in &BUILTIN_HTTP_PROVIDERS {
@@ -416,8 +348,6 @@ mod tests {
         assert_eq!(builtin_provider("bedrock"), None);
     }
 
-    /// Configuration names are unique and every patch field is one the
-    /// built-in patch parser knows, ending in `models`.
     #[test]
     fn every_row_has_a_unique_config_name_and_known_patch_fields() {
         for row in &BUILTIN_HTTP_PROVIDERS {

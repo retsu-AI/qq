@@ -1,16 +1,3 @@
-//! `cargo xtask smoke`: drive the real `qq` binary end to end with no network.
-//!
-//! Each scenario builds an isolated home (`HOME` and `XDG_*` under one temp
-//! directory, a scratch git workspace) and points `QQ_CONFIG_CONTENT` at an
-//! in-process fake OpenAI Responses endpoint on loopback. The fake answers a
-//! fixed script per scenario and records every request, so a scenario checks
-//! what the user sees (stdout, exit code, the JSONL event stream, the server
-//! API) and what the provider received. Nothing fake ships in `qq`.
-//!
-//! On failure the scenario's directory is kept under
-//! `target/qq-smoke/<scenario>/` with `stdout`, `stderr`, the provider
-//! requests, and the session store, and the report names it.
-
 use std::{
     collections::BTreeMap,
     env, fmt, fs, io,
@@ -35,7 +22,6 @@ use tokio::{
 };
 
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(60);
-/// One `qq` invocation; shorter than a scenario so its message wins.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 
@@ -66,7 +52,6 @@ pub enum SmokeError {
     Failed { failed: usize, total: usize },
 }
 
-/// One scripted provider reply.
 #[derive(Clone)]
 enum Reply {
     Text(&'static str),
@@ -128,9 +113,6 @@ impl Reply {
 const COMPLETED: &str =
     r#"{"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}}"#;
 
-/// Loopback fake for the OpenAI Responses API. Replies follow `script` in
-/// order; once it is exhausted the last reply repeats, so a retry or an
-/// extra turn is visible in the request log instead of hanging.
 struct FakeProvider {
     base_url: String,
     requests: Arc<Mutex<Vec<String>>>,
@@ -138,8 +120,6 @@ struct FakeProvider {
 }
 
 impl FakeProvider {
-    /// Serves `script` and appends every request to `log_path` as it
-    /// arrives, so a failing scenario's evidence shows what qq sent.
     async fn start(log_path: PathBuf, script: Vec<Reply>) -> io::Result<Self> {
         if script.is_empty() {
             return Err(io::Error::new(
@@ -182,7 +162,6 @@ impl FakeProvider {
                         }
                         retained.push(request);
                     }
-                    // Evidence only; a failed append loses detail, not the result.
                     if let Ok(mut file) = tokio::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -191,8 +170,6 @@ impl FakeProvider {
                     {
                         let _ = file.write_all(entry.as_bytes()).await;
                     }
-                    // A client that hung up early is the scenario's failure to
-                    // report, not the fake's; the write result is irrelevant.
                     let _ = stream.write_all(&reply.http()).await;
                     let _ = stream.shutdown().await;
                 });
@@ -255,12 +232,10 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> String {
     String::from_utf8_lossy(&request).into_owned()
 }
 
-/// An isolated QQ home: nothing outside `root` is read or written.
 struct Home {
     root: PathBuf,
     workspace: PathBuf,
     binary: PathBuf,
-    /// Numbers each `qq` invocation's evidence files (`1-run.stdout`, …).
     invocations: std::sync::atomic::AtomicUsize,
 }
 
@@ -320,11 +295,8 @@ impl Home {
         FakeProvider::start(self.root.join("provider-requests.txt"), script).await
     }
 
-    /// Runs git in the workspace with a fixture identity and no user config.
     async fn git(&self, args: &[&str]) -> Result<String, String> {
         let mut command = Command::new("git");
-        // An inherited repository override (a hook's GIT_DIR, GIT_INDEX_FILE)
-        // would aim the fixture's commits at some other repository.
         for (name, _) in env::vars_os() {
             if name.to_string_lossy().starts_with("GIT_") {
                 command.env_remove(name);
@@ -358,8 +330,6 @@ impl Home {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    /// Every file under the workspace except `.git`, with its bytes. The walk
-    /// is synchronous, so it runs off the Tokio workers.
     async fn files(&self) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
         fn walk(
             root: &Path,
@@ -413,8 +383,6 @@ impl Home {
         if let Some(path) = env::var_os("PATH") {
             command.env("PATH", path);
         }
-        // Windows ignores XDG_*: without QQ_HOME every concurrent scenario
-        // shares the runner's real data directory and session store.
         #[cfg(windows)]
         {
             command.env("QQ_HOME", self.root.join("qq-home"));
@@ -457,14 +425,12 @@ impl Home {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         let name = format!("{invocation}-{}", args.first().copied().unwrap_or("qq"));
-        // Evidence for the failure report; a write failure only loses detail.
         let _ = fs::write(self.root.join(format!("{name}.stdout")), &output.stdout);
         let _ = fs::write(self.root.join(format!("{name}.stderr")), &output.stderr);
         Ok(output)
     }
 }
 
-/// JSONL records from `qq run --format jsonl`, as `(type, value)`.
 fn jsonl(stdout: &str) -> Result<Vec<serde_json::Value>, String> {
     stdout
         .lines()
@@ -682,8 +648,6 @@ async fn permission_dispatch(home: &Home) -> Result<(), String> {
 }
 
 async fn run_then_undo(home: &Home) -> Result<(), String> {
-    // The user's state: a commit, a stash entry, a staged change, and an
-    // untracked draft. Undo must bring the files back and leave the rest.
     tokio::fs::write(home.workspace.join("notes.txt"), "base notes\n")
         .await
         .map_err(|e| e.to_string())?;
@@ -770,7 +734,6 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
         "qq undo changed the stash"
     );
 
-    // The undo is itself undoable.
     let reverse = undo
         .stdout
         .lines()
@@ -789,7 +752,6 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
     Ok(())
 }
 
-/// One Auto run whose commands each report through their tool result.
 async fn run_commands(home: &Home, replies: Vec<Reply>) -> Result<Vec<String>, String> {
     let provider = home
         .provider(replies)
@@ -868,7 +830,6 @@ async fn run_in_place(home: &Home) -> Result<(), String> {
     server.abort();
     let results = results?;
     ensure!(results.len() == 6, "expected six results: {results:?}");
-    // The workspace's own repository: only its untracked `.gitignore`.
     ensure!(
         results[0].contains("?? .gitignore") && !results[0].contains("cache.bin"),
         "git status did not see the workspace's repository: {}",
@@ -900,7 +861,6 @@ async fn run_in_place(home: &Home) -> Result<(), String> {
             == home.git(&["rev-parse", "HEAD"]).await?,
         "the bare remote does not hold the pushed commit"
     );
-    // A second run sees what the first left in `target/`.
     let second = run_commands(
         home,
         vec![Reply::ReadFile("target/cache.bin"), Reply::Text("done")],
@@ -1231,7 +1191,6 @@ async fn run_skill(home: &Home) -> Result<(), String> {
 }
 
 async fn run_goal_check_consent(home: &Home) -> Result<(), String> {
-    // No provider is started: the unapproved goal must stop before any model work.
     let base_url = "http://127.0.0.1:1/v1";
     let first = home
         .run(
@@ -1321,8 +1280,6 @@ async fn run_goal_budget(home: &Home) -> Result<(), String> {
         output.status,
         output.stderr
     );
-    // On the host the goal starts with one note pointing at the guide; in a
-    // container (this harness inside the devcontainer) there is none.
     let in_container = in_container().await;
     let notes: Vec<&str> = output
         .stderr
@@ -1489,8 +1446,6 @@ async fn run_resume_session(home: &Home) -> Result<(), String> {
     Ok(())
 }
 
-/// Collects one run's streamed text until its `RunFinished`, and the last
-/// cursor seen.
 async fn follow_run(
     events: &mut qq_client::SessionEventStream,
     run_id: qq_protocol::RunId,
@@ -1532,7 +1487,6 @@ async fn serve_sse(home: &Home) -> Result<(), String> {
         ])
         .await
         .map_err(|error| format!("start fake provider: {error}"))?;
-    // Logs go to files: an unread pipe would block `qq serve` once full.
     let stderr = fs::File::create(home.root.join("serve.stderr"))
         .map_err(|error| format!("create serve.stderr: {error}"))?;
     let mut command = home.command(&provider.base_url);
@@ -1556,7 +1510,6 @@ async fn serve_sse(home: &Home) -> Result<(), String> {
         );
         let stdout_log = home.root.join("serve.stdout");
         tokio::spawn(async move {
-            // Drain stdout to a file so later output never hits a closed pipe.
             if let Ok(mut file) = tokio::fs::File::create(stdout_log).await {
                 let _ = tokio::io::copy(&mut reader, &mut file).await;
             }
@@ -1622,9 +1575,6 @@ async fn serve_sse(home: &Home) -> Result<(), String> {
             "run outcome {outcome:?}"
         );
         ensure!(text.contains("served over sse"), "streamed text {text:?}");
-        // Reconnect from the last cursor, as a client does after a drop:
-        // the next run's events arrive and nothing at or before the cursor
-        // is replayed.
         drop(events);
         let mut resumed = client
             .events(workspace_id, last)
@@ -1645,13 +1595,11 @@ async fn serve_sse(home: &Home) -> Result<(), String> {
         Ok(())
     }
     .await;
-    // Kill only the process this scenario started.
     let _ = child.start_kill();
     let _ = child.wait().await;
     result
 }
 
-/// Whether this harness runs inside a container, by the markers `qq` reads.
 async fn in_container() -> bool {
     for marker in ["/.dockerenv", "/run/.containerenv"] {
         if tokio::fs::try_exists(marker).await.unwrap_or(false) {
@@ -1787,13 +1735,10 @@ pub async fn run(args: SmokeArgs) -> Result<(), SmokeError> {
                 .join(if cfg!(windows) { "qq.exe" } else { "qq" })
         }
     };
-    // Evidence stays in this checkout even when `CARGO_TARGET_DIR` is shared.
     let evidence_root = root.join("target/qq-smoke");
     if let Err(error) = fs::create_dir_all(&evidence_root) {
         return Err(SmokeError::Prepare(evidence_root, error));
     }
-    // Run a private copy: another worktree sharing the target directory may
-    // relink `debug/qq` while the scenarios run.
     let private = evidence_root.join(if cfg!(windows) { "qq.exe" } else { "qq" });
     if let Err(error) = fs::copy(&binary, &private) {
         return Err(SmokeError::Prepare(binary, error));
@@ -1846,7 +1791,6 @@ pub async fn run(args: SmokeArgs) -> Result<(), SmokeError> {
             ),
         };
         if result.is_ok() {
-            // Passing scenarios leave nothing behind.
             let _ = fs::remove_dir_all(&evidence);
         } else {
             failed += 1;

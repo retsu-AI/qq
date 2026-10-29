@@ -1,12 +1,5 @@
-//! Bounded, resumable reads of the original transcript, independent of the
-//! summaries used to assemble model context.
-
 use super::*;
 
-/// Search one page. Each step uses an indexed keyset seek, never a collection
-/// of all prompts/runs. The byte budget is checked between persisted units;
-/// one unit may exceed it, but is still examined so a large row cannot hide
-/// older history or trap pagination on the same cursor forever.
 pub(super) fn search_session_history(
     connection: &Connection,
     session_id: SessionId,

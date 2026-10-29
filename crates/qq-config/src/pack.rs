@@ -1,13 +1,3 @@
-//! Agent packs: declarative, versioned bundles of profiles, prompts, skills,
-//! and MCP declarations discovered from `.qq/packs/<id>/pack.ron` and the
-//! global `packs/<id>/pack.ron`, or named explicitly in configuration.
-//!
-//! Discovery reads manifests only. The manifest is data: it may reference
-//! resources inside its own directory (a prompt file, skill and command
-//! roots) and declare MCP servers exactly as `config.ron` does, but it cannot
-//! carry executable code. Which resources are actually read is decided later,
-//! when a plan selects one of the pack's profiles.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -24,26 +14,18 @@ use crate::{
     loader::Probes,
 };
 
-/// Most packs one load admits across every root.
 pub const MAX_PACKS: usize = 32;
-/// Largest manifest file.
 pub const MAX_PACK_MANIFEST_BYTES: usize = 64 * 1024;
-/// Largest pack prompt file, read when a pack profile is selected.
 pub const MAX_PACK_PROMPT_BYTES: usize = 64 * 1024;
-/// Most profiles one pack declares.
 pub const MAX_PACK_PROFILES: usize = 16;
-/// Most skill or command roots one profile lists.
 pub const MAX_PACK_ROOTS: usize = 8;
-/// Most tool names one allow or deny list holds.
 pub const MAX_PACK_TOOL_RULES: usize = 128;
 const MAX_PACK_ID_BYTES: usize = 64;
 const MAX_PACK_VERSION_BYTES: usize = 64;
 const MAX_PACK_NAME_BYTES: usize = 128;
-/// The only manifest schema this build reads.
 pub const PACK_SCHEMA_VERSION: u32 = 1;
 pub const PACK_MANIFEST_FILE: &str = "pack.ron";
 
-/// The manifest as written.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PackManifest {
@@ -60,11 +42,9 @@ struct PackManifest {
     mcp: UniqueMap<String, McpServerPatch>,
 }
 
-/// Minimum runtime the pack expects.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackRequirements {
-    /// Minimum protocol version.
     #[serde(default)]
     pub protocol: Option<u16>,
 }
@@ -80,25 +60,18 @@ struct PackProfileDeclaration {
     max_output_tokens: Option<u32>,
     #[serde(default)]
     approval_mode: Option<ProfileApprovalMode>,
-    /// Pack-relative path of a prompt appended after workspace instructions.
     #[serde(default)]
     prompt: Option<String>,
-    /// Pack-relative directories of `<name>/SKILL.md` documents.
     #[serde(default)]
     skills: Vec<String>,
-    /// Pack-relative directories of `<name>.md` documents.
     #[serde(default)]
     commands: Vec<String>,
     #[serde(default)]
     tools: Option<PackToolPolicy>,
-    /// Names of MCP servers (declared by this pack or the configuration)
-    /// this profile exposes. Absent means every declared server.
     #[serde(default)]
     mcp: Option<Vec<String>>,
 }
 
-/// Which catalog entries a pack profile exposes. Rules are exact tool names
-/// (`shell`, `mcp__srv__tool`) or a `prefix*` glob. `deny` wins.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackToolPolicy {
@@ -109,7 +82,6 @@ pub struct PackToolPolicy {
 }
 
 impl PackToolPolicy {
-    /// Whether `tool` is exposed under this policy.
     #[must_use]
     pub fn permits(&self, tool: &str) -> bool {
         if self.deny.iter().any(|rule| rule_matches(rule, tool)) {
@@ -131,7 +103,6 @@ fn rule_matches(rule: &str, tool: &str) -> bool {
     }
 }
 
-/// One profile a pack declares, resolved against the pack directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackProfile {
     model: Option<String>,
@@ -166,7 +137,6 @@ impl PackProfile {
         self.approval_mode
     }
 
-    /// Absolute path of the prompt file, inside the pack directory.
     #[must_use]
     pub fn prompt(&self) -> Option<&Path> {
         self.prompt.as_deref()
@@ -187,14 +157,12 @@ impl PackProfile {
         &self.tools
     }
 
-    /// MCP server names this profile exposes, or `None` for all.
     #[must_use]
     pub fn mcp(&self) -> Option<&[String]> {
         self.mcp.as_deref()
     }
 }
 
-/// A discovered, validated pack.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentPack {
     id: String,
@@ -224,7 +192,6 @@ impl AgentPack {
         self.name.as_deref()
     }
 
-    /// Canonical absolute pack directory.
     #[must_use]
     pub fn directory(&self) -> &Path {
         &self.directory
@@ -235,7 +202,6 @@ impl AgentPack {
         &self.source
     }
 
-    /// Hex SHA-256 of the manifest bytes.
     #[must_use]
     pub fn manifest_digest(&self) -> &str {
         &self.manifest_digest
@@ -255,8 +221,6 @@ impl AgentPack {
         &self.mcp
     }
 
-    /// The sensitive sections this manifest declares, as `qq trust` lists
-    /// them: always `packs`, plus `profiles` and `mcp` when present.
     pub(crate) fn sensitive_sections(&self) -> Vec<&'static str> {
         let mut sections = vec!["packs"];
         if !self.profiles.is_empty() {
@@ -269,13 +233,6 @@ impl AgentPack {
     }
 }
 
-/// Discovers packs under `directory/<id>/pack.ron`. Absent or empty
-/// directories contribute nothing; every path inspected is recorded.
-/// `loaded` counts every entry inspected in this load (packs admitted or
-/// withheld, directories without a manifest, stray files), so a repository
-/// cannot make every load list and probe an unbounded number of entries.
-/// Links are rejected before anything is recorded: recording follows a
-/// link's target, and project packs are read before the user consents.
 pub(crate) fn discover(
     directory: &Path,
     kind: SourceKind,
@@ -337,8 +294,6 @@ pub(crate) fn discover(
         }
         probes.record(&manifest_path);
         if !manifest_path.is_file() {
-            // A directory without a manifest is not a pack; ignore it so
-            // unrelated content under `packs/` cannot fail configuration.
             continue;
         }
         packs.push(load_pack(&pack_directory, &id, kind)?);
@@ -346,10 +301,6 @@ pub(crate) fn discover(
     Ok(packs)
 }
 
-/// Loads one explicitly declared pack directory. `expected_id` is the
-/// configuration key it was declared under. Explicit entries share the
-/// `loaded` bound with discovery: an untrusted project file's entries are
-/// read for review before consent, so their count must not be unbounded.
 pub(crate) fn load_explicit(
     directory: &Path,
     expected_id: &str,
@@ -526,10 +477,6 @@ fn load_pack(
                 });
             }
         }
-        // Pack-relative MCP references must name a server the pack itself
-        // declares or one the configuration is expected to; only the former
-        // is checkable here, so names outside the pack are accepted and
-        // resolved at merge.
         let _ = &declared_mcp;
         profiles.insert(
             name,
@@ -559,9 +506,6 @@ fn load_pack(
     })
 }
 
-/// Resolves a pack-relative path and requires it to stay inside the pack
-/// directory. The target need not exist yet; existence is checked when the
-/// resource is read.
 fn contained(
     directory: &Path,
     relative: &str,

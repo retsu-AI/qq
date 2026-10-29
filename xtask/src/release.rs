@@ -1,13 +1,3 @@
-//! `cargo xtask release`: bump the workspace version, then tag the merged
-//! result.
-//!
-//! `main` only accepts pull requests and merges rewrite commit SHAs, so a
-//! release is two steps: `cargo xtask release X.Y.Z` commits the bump and a
-//! new `CHANGELOG.md` section on the current branch for a PR, and `cargo
-//! xtask release --tag` on the merged `main` creates `vX.Y.Z` from the
-//! manifest. The release workflow refuses a tag whose version differs from
-//! the manifest or whose commit is not on `main`. Nothing is pushed here.
-
 use std::{
     env, fmt, io,
     path::{Path, PathBuf},
@@ -105,8 +95,6 @@ pub struct Version {
 }
 
 impl Version {
-    /// Accepts only `MAJOR.MINOR.PATCH`; pre-release and build metadata are
-    /// out of scope for this tool.
     pub fn parse(text: &str) -> Option<Self> {
         let mut parts = text.split('.');
         let major = parts.next()?.parse().ok()?;
@@ -177,12 +165,8 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
         source,
     })?;
 
-    // Every member inherits `version.workspace = true`; refresh their lock
-    // entries without touching dependency resolution.
     cargo(&root, &["update", "--workspace", "--offline"])?;
 
-    // The changelog is read from git before anything is committed, so the
-    // bump commit itself is never listed.
     let subjects = changelog::subjects_since_last_tag(&root)?;
     let section = changelog::render_section(requested, &changelog::today_utc(), &subjects);
     let changelog_path = root.join(changelog::FILE_NAME);
@@ -238,11 +222,6 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
     Ok(())
 }
 
-/// Moves every whole token of the previous release (the newest
-/// `CHANGELOG.md` release below the manifest version) in [`VERSIONED_DOCS`]
-/// to the manifest version. The bump PR leaves the pins alone, because the
-/// site deploys on merge before the tag's assets exist; docs-truth accepts
-/// either version until this runs.
 fn move_doc_pins(root: &Path, manifest: &str) -> Result<(), ReleaseError> {
     let (_, current) = bump_workspace_version(manifest, Version::parse("0.0.0").unwrap())?;
     let changelog_path = root.join(changelog::FILE_NAME);
@@ -277,7 +256,6 @@ fn move_doc_pins(root: &Path, manifest: &str) -> Result<(), ReleaseError> {
     Ok(())
 }
 
-/// The newest `## X.Y.Z — date` release in `changelog` below `current`.
 fn previous_release(changelog: &str, current: Version) -> Option<Version> {
     changelog
         .lines()
@@ -286,20 +264,10 @@ fn previous_release(changelog: &str, current: Version) -> Option<Version> {
         .max()
 }
 
-/// Files whose QQ version strings follow the release: the user guide and the
-/// README. The root crate's docs-truth test fails when any of them names a
-/// version other than the manifest's or the previous release's, and
-/// `--docs` moves them.
 const VERSIONED_DOCS: [&str; 2] = ["docs/guide", "README.md"];
 
-/// Marks a line whose version strings are not QQ's (an upstream client, an
-/// example pack): the release leaves the line alone and docs-truth does not
-/// hold it to the workspace version. Shared with `src/docs_truth.rs`.
 pub const NOT_QQ_VERSION: &str = "<!-- not-qq-version -->";
 
-/// The tracked Markdown files under [`VERSIONED_DOCS`], sorted. Only what
-/// `git ls-files` reports is rewritten, and only regular files: an
-/// untracked draft or a symlink is never read, written, or committed.
 fn versioned_doc_paths(root: &Path) -> Result<Vec<PathBuf>, ReleaseError> {
     let mut args = vec!["ls-files", "-z", "--"];
     args.extend(VERSIONED_DOCS);
@@ -340,11 +308,6 @@ fn versioned_doc_paths(root: &Path) -> Result<Vec<PathBuf>, ReleaseError> {
     Ok(paths)
 }
 
-/// Replaces every whole `current` version token in `text` with `requested`
-/// and returns the new text with the number replaced. A token is whole when
-/// it is not part of a longer dotted number: `0.1.4` matches in `v0.1.4` and
-/// `qq 0.1.4 (`, never inside `10.1.4` or `0.1.4.1`. Lines carrying
-/// [`NOT_QQ_VERSION`] are left unchanged.
 pub fn rewrite_version_tokens(text: &str, current: Version, requested: Version) -> (String, usize) {
     let current = current.to_string();
     let requested = requested.to_string();
@@ -376,9 +339,6 @@ pub fn rewrite_version_tokens(text: &str, current: Version, requested: Version) 
     (out, replaced)
 }
 
-/// Creates `vX.Y.Z` from the manifest version on a clean `main` that matches
-/// `origin/main`, so the tag always names a commit the release workflow will
-/// find on the default branch.
 fn tag_main(root: &Path, manifest: &str) -> Result<(), ReleaseError> {
     let status = git(root, &["diff", "--quiet", "HEAD", "--"], Stdio::inherit())?;
     if !status.success() {
@@ -427,8 +387,6 @@ fn git_output(root: &Path, args: &[&str]) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// Rewrites the `version` line inside `[workspace.package]` and returns the
-/// new manifest with the version it replaced.
 pub fn bump_workspace_version(
     manifest: &str,
     requested: Version,
@@ -571,7 +529,6 @@ mod tests {
         let (unchanged, none) = rewrite_version_tokens("no versions here", current, requested);
         assert_eq!((unchanged.as_str(), none), ("no versions here", 0));
 
-        // A marked line keeps a foreign version even when it equals QQ's.
         let marked = format!("pack version: \"0.1.4\", {NOT_QQ_VERSION}\nqq 0.1.4\n");
         let (updated, count) = rewrite_version_tokens(&marked, current, requested);
         assert_eq!(count, 1);
@@ -652,15 +609,10 @@ mod tests {
         assert!(paths.iter().all(|path| path.is_file()), "{paths:?}");
     }
 
-    /// `main` carries the version of the last release until the next bump PR.
-    /// A branch cut before a release and merged after it can quietly carry the
-    /// old manifest back onto `main` (this happened in #46: 0.1.0 → 0.0.0), so
-    /// the workspace version must never be below the newest `v*` tag.
     #[test]
     fn workspace_version_is_not_behind_the_newest_release_tag() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let Some(tags) = git_output(&root, &["tag", "--list", "v*"]) else {
-            // A shallow or tagless checkout has nothing to compare against.
             return;
         };
         let newest = tags

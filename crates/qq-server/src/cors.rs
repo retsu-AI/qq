@@ -1,14 +1,3 @@
-//! Cross-origin resource sharing for browser clients hosted on another
-//! origin. Off unless the operator lists origins; a request from an origin
-//! that is not listed receives no CORS headers, so the browser refuses it.
-//!
-//! The policy is deliberately narrow: exact-origin allow list, the request
-//! headers a `qq-client` browser transport sends (`Authorization`,
-//! `Content-Type`, `Last-Event-ID`), no credentials mode (the credential
-//! travels in `Authorization`, never in a cookie), and a positive answer to
-//! Chrome's Private Network Access preflight so a public-origin page may
-//! reach a server on a private address.
-
 use axum::{
     body::Body,
     extract::Request,
@@ -25,9 +14,7 @@ use axum::{
 };
 use thiserror::Error;
 
-/// Longest origin accepted, in bytes.
 pub const MAX_ORIGIN_BYTES: usize = 256;
-/// Most origins one server allows.
 pub const MAX_ALLOWED_ORIGINS: usize = 32;
 
 const ALLOWED_HEADERS: &str = "authorization, content-type, last-event-id";
@@ -38,17 +25,12 @@ const PRIVATE_NETWORK_REQUEST: HeaderName =
 const PRIVATE_NETWORK_ALLOW: HeaderName =
     HeaderName::from_static("access-control-allow-private-network");
 
-/// Exact browser origins (`scheme://host[:port]`) permitted to call the API.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AllowedOrigins {
     origins: Vec<HeaderValue>,
 }
 
 impl AllowedOrigins {
-    /// Validates and normalizes each origin. `https` is required except for
-    /// loopback hosts, mirroring the client-side connection rule: a page
-    /// served over plain HTTP from another machine has no business holding a
-    /// credential.
     pub fn new<I, S>(origins: I) -> Result<Self, AllowedOriginError>
     where
         I: IntoIterator<Item = S>,
@@ -147,10 +129,6 @@ fn valid_port(port: &str) -> bool {
     !port.is_empty() && port != "0" && port.parse::<u16>().is_ok()
 }
 
-/// Middleware: answers preflights and decorates responses for allowed
-/// origins. Runs before authentication so a preflight (which carries no
-/// credential by design) is not refused with 401. With an empty allow list
-/// every request passes through untouched.
 pub(crate) async fn apply(allowed: AllowedOrigins, request: Request<Body>, next: Next) -> Response {
     if allowed.is_empty() {
         return next.run(request).await;
@@ -163,8 +141,6 @@ pub(crate) async fn apply(allowed: AllowedOrigins, request: Request<Body>, next:
             .headers()
             .contains_key(ACCESS_CONTROL_REQUEST_METHOD);
     if !allowed.matches(&origin) {
-        // Not ours to serve: no CORS headers, and a preflight gets a plain
-        // refusal rather than reaching the API surface.
         if is_preflight {
             return StatusCode::FORBIDDEN.into_response();
         }

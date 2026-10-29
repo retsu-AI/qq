@@ -2,9 +2,6 @@ use super::*;
 
 #[tokio::test]
 async fn unresolvable_slash_prompts_are_refused_at_admission_without_a_run_row() {
-    // Regression: `/clear`, `/agents`, and a malformed name each used to
-    // create a run that failed inside the loop with `InvalidCommand`, and the
-    // next real prompt then opened with "The previous run failed".
     let (_directory, runtime) = test_runtime().await;
     let (workspace_id, _) = resolve_workspace(&runtime, _directory.path()).await;
     let created = create_session(&runtime, workspace_id, None).await;
@@ -59,7 +56,6 @@ async fn unresolvable_slash_prompts_are_refused_at_admission_without_a_run_row()
             }
         ))
     );
-    // Not a slash prompt, so nothing to validate; the escape reaches the run.
     let literal = submit("//clear the table").await.unwrap();
     assert!(matches!(
         literal.outcome,
@@ -67,8 +63,6 @@ async fn unresolvable_slash_prompts_are_refused_at_admission_without_a_run_row()
     ));
     let observed = collect_through_finished(&mut events).await;
     runtime.shutdown().await.unwrap();
-    // Exactly one run exists, and it saw no failure notice from the refused
-    // prompts because none of them left a row.
     let started: Vec<_> = observed
         .iter()
         .filter(|event| matches!(event.event, SessionEvent::RunStarted { .. }))
@@ -294,9 +288,6 @@ async fn attachment_ranges_preserve_lines_clip_eof_and_reject_nonexistent_starts
 
 #[tokio::test]
 async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
-    // Two tool turns then a text turn. The approval wait on turn one is
-    // the hold point: steering queued there must enter the request for
-    // turn two, after turn one's tool result.
     let mut harness = approval_harness(
         ApprovalMode::Ask,
         "__test_shell",
@@ -317,8 +308,6 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
     let CommandOutcome::SteeringQueued { message_id, .. } = receipt.outcome else {
         panic!("steering must be queued")
     };
-    // Replaying the exact command returns the same receipt and queues
-    // nothing new.
     respond_approval(
         &harness.runtime,
         harness.run_id,
@@ -327,7 +316,6 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
     )
     .await
     .unwrap();
-    // Ask requires a fresh response for the second tool turn as well.
     let (mut observed, second_call) = collect_until_approval_requested(&mut harness.events).await;
     respond_approval(
         &harness.runtime,
@@ -375,8 +363,6 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
         .unwrap();
     assert_eq!(finished, RunOutcome::Completed);
 
-    // The provider saw the steering as a user message after turn one's
-    // tool result and before turn two's request; turn three carries it too.
     let requests = harness.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 3);
     let second = requests[1].messages();
@@ -401,8 +387,6 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
         )
     }));
 
-    // Durable context assembly for the next run interleaves it the same
-    // way, and the snapshot shows the row complete.
     let snapshot = harness
         .runtime
         .snapshot(SnapshotRequest::new(
@@ -422,7 +406,6 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
     assert!(row.steering);
     assert_eq!(row.state, MessageState::Complete);
     assert_eq!(row.turn_ordinal, 2);
-    // The runtime owns the store exclusively; read through it.
     let store = harness.runtime.inner.store.clone();
     let session_id = harness.session_id;
     let context = store
@@ -457,11 +440,6 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
 
 #[tokio::test]
 async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
-    // T12 follow-up: steering carried `@path` placeholders to the model and
-    // into every later request. A steering message's file parts are now read
-    // when it is applied at the boundary, persisted as that message's
-    // attachments, and re-rendered from the store afterwards — so the model
-    // sees the bytes as they were, even after the file changes or vanishes.
     let mut harness = approval_harness(
         ApprovalMode::Ask,
         "__test_shell",
@@ -503,7 +481,6 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
     )
     .await
     .unwrap();
-    // Ask requires a fresh response for the second tool turn as well.
     let (mut observed, second_call) = collect_until_approval_requested(&mut harness.events).await;
     respond_approval(
         &harness.runtime,
@@ -518,8 +495,6 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
         &event.event,
         SessionEvent::SteeringApplied { message_id: applied, .. } if *applied == message_id
     )));
-    // The durable row keeps the placeholder (titles, snapshots, history
-    // search); the provider request carried the bytes.
     let queued = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -551,7 +526,6 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
     assert!(live.contains("<attached-file path=\"notes.txt\""), "{live}");
     assert!(!live.contains("@notes.txt"), "{live}");
 
-    // The file changes; the next run must still see what the model saw.
     std::fs::write(workspace.join("notes.txt"), "STEER_MODIFIED\n").unwrap();
     let store = harness.runtime.inner.store.clone();
     let session_id = harness.session_id;
@@ -638,8 +612,6 @@ async fn interrupting_steer_withdraws_the_pending_approval_and_continues() {
         })
         .unwrap();
     assert_eq!(finished, RunOutcome::Completed);
-    // Answering the withdrawn approval afterwards is refused: it is no
-    // longer pending.
     let late = respond_approval(
         &harness.runtime,
         harness.run_id,
@@ -657,7 +629,6 @@ async fn interrupting_steer_withdraws_the_pending_approval_and_continues() {
     let requests = harness.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 2);
     let second = requests[1].messages();
-    // Assistant call, interrupted tool result, then the steering.
     let last = second.last().unwrap();
     assert_eq!(last.role(), Role::User);
     assert!(second[second.len() - 2]
@@ -700,7 +671,6 @@ async fn steering_bounds_and_refusals_are_typed() {
         steer(&harness.runtime, RunId::from_bytes([9; 16]), "x", false).await,
         Err(SessionRuntimeError::RunNotFound)
     );
-    // A queued (not yet running) run cannot be steered.
     let queued = harness
         .runtime
         .command(
@@ -725,7 +695,6 @@ async fn steering_bounds_and_refusals_are_typed() {
         steer(&harness.runtime, queued_run, "too early", false).await,
         Err(SessionRuntimeError::RunNotSteerable)
     );
-    // Cancelling the run supersedes everything still queued.
     harness
         .runtime
         .command(
@@ -750,7 +719,6 @@ async fn steering_bounds_and_refusals_are_typed() {
         &event.event,
         SessionEvent::RunFinished { outcome: RunOutcome::Cancelled, run_id, .. } if *run_id == harness.run_id
     )));
-    // Steering a finished run reports the terminal outcome, idempotently.
     let done = steer(&harness.runtime, harness.run_id, "late", false)
         .await
         .unwrap();
@@ -848,7 +816,6 @@ async fn plan_identity_correlation_and_profile_persist_and_survive_refresh() {
         started_plan.descriptor_version,
         crate::plan::DESCRIPTOR_VERSION
     );
-    // The loader received the session's profile.
     let requests_seen = loader.requests.lock().unwrap().len();
     assert_eq!(requests_seen, 1);
 
@@ -869,8 +836,6 @@ async fn plan_identity_correlation_and_profile_persist_and_survive_refresh() {
     assert_eq!(run.plan.as_deref(), Some(&*started_plan));
     assert_eq!(run.correlation, run_correlation);
 
-    // Refresh the configuration: a later run compiles a new plan with a
-    // new digest, and the earlier run's identity is untouched.
     configured.lock().unwrap().provider_model = "wire-b".to_owned();
     let second = submit_prompt_to(&runtime, session_id, "again").await;
     let observed = collect_through_finished(&mut events).await;
@@ -919,10 +884,6 @@ async fn plan_identity_correlation_and_profile_persist_and_survive_refresh() {
     reopened.shutdown().await.unwrap();
 }
 
-/// F05 regression: the bytes a prompt attached are what every later request
-/// replays, whatever happened to the file since. Also covers dedup of a
-/// re-attached file, reopen, the reference-assembly oracle, and the delete
-/// cascade.
 #[tokio::test]
 async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
     let directory = tempfile::tempdir().unwrap();
@@ -986,7 +947,6 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
             .unwrap()
     };
 
-    // Turn 1: whole file plus a range of another.
     runtime
         .command(
             CommandId::generate().unwrap(),
@@ -1005,11 +965,9 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
         "{first_prompt}"
     );
 
-    // The files change underneath the session before the follow-up.
     std::fs::write(directory.path().join("a.txt"), "ALPHA_MODIFIED\n").unwrap();
     std::fs::remove_file(directory.path().join("b.txt")).unwrap();
 
-    // Turn 2: a plain follow-up sees turn 1 exactly as it was sent.
     runtime
         .command(
             CommandId::generate().unwrap(),
@@ -1027,8 +985,6 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
         assert_eq!(prompt_text(&captured[1], 1), "continue");
     }
 
-    // Turn 3: attaching the modified file stores a second blob (different
-    // digest) while turn 1 still renders the original.
     runtime
         .command(
             CommandId::generate().unwrap(),
@@ -1037,7 +993,6 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
         .await
         .unwrap();
     collect_through_finished(&mut events).await;
-    // Turn 4: re-attaching the same bytes dedups against turn 3's blob.
     runtime
         .command(
             CommandId::generate().unwrap(),
@@ -1087,7 +1042,6 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
     drop(events);
     drop(runtime);
 
-    // Reopen: a fresh runtime assembles the same context from the store.
     let reopened =
         SessionRuntime::open(SessionRuntimeOptions::new(database.clone()), loader.clone())
             .await
@@ -1114,11 +1068,8 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
     reopened.shutdown().await.unwrap();
     drop(events);
     drop(reopened);
-    // The joined loader and the per-message reference agree on the
-    // reconstructed attachments.
     assert_assembly_matches_reference(&database, session_id);
 
-    // Deleting the session removes its attachments with the rest of its rows.
     let reopened = SessionRuntime::open(SessionRuntimeOptions::new(database.clone()), loader)
         .await
         .unwrap();
@@ -1142,8 +1093,6 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
     }
 }
 
-/// Past the per-session attachment cap the oldest blob loses its bytes; the
-/// prompt that carried it says so explicitly instead of reverting to `@path`.
 #[tokio::test]
 async fn evicted_attachments_render_an_explicit_stub_not_the_placeholder() {
     let directory = tempfile::tempdir().unwrap();
@@ -1195,7 +1144,6 @@ async fn evicted_attachments_render_an_explicit_stub_not_the_placeholder() {
         .await
         .unwrap();
     collect_through_finished(&mut events).await;
-    // Simulate the cap reclaiming the blob: the row stays, the bytes go.
     runtime
         .inner
         .store
@@ -1310,7 +1258,6 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
             _ => None,
         })
         .unwrap();
-    // The transcript row carries the placeholder, never file bytes.
     assert_eq!(queued_message.output, "Summarize\n@notes.md");
     assert!(observed.iter().any(|event| matches!(
         &event.event,
@@ -1331,7 +1278,6 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
         assert!(text.starts_with("Summarize\n\n<attached-file path=\"notes.md\">"));
         assert!(text.contains("remember the tests"));
     }
-    // The attachment recorded the file so an edit is not "unread".
     let files: Vec<(String, String)> = runtime
         .inner
         .store
@@ -1354,7 +1300,6 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
         they are not durable session rows until a tool records them"
     );
 
-    // A stale hash fails the run with a typed outcome and no provider call.
     let stale = runtime
         .command(
             CommandId::generate().unwrap(),
@@ -1399,7 +1344,6 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
         "no provider request for the failed run"
     );
 
-    // Malformed parts never reach durable admission.
     let escaped = runtime
         .command(
             CommandId::generate().unwrap(),
@@ -2063,8 +2007,6 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    // Saturate the control lane before the supervisor settles the policy
-    // rejection: settlement waits for capacity instead of spinning.
     let saturated = saturate_control_lane(&runtime).await;
     let mut events = runtime
         .subscribe(SubscribeRequest {
@@ -2284,7 +2226,6 @@ async fn set_session_model_applies_to_the_next_run_but_not_the_active_one() {
     let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
         panic!("unexpected receipt")
     };
-    // The run is now claimed and parked at its tool approval.
     let (before_switch, tool_call) = collect_until_approval_requested(&mut harness.events).await;
     assert!(before_switch.iter().any(|event| matches!(
         event.event,
@@ -2394,8 +2335,6 @@ async fn set_session_model_applies_to_the_next_run_but_not_the_active_one() {
     .unwrap();
     collect_through_finished(&mut harness.events).await;
 
-    // The active run kept its claimed model; only the next run loads the
-    // repointed one.
     assert_eq!(
         *harness.models.lock().unwrap(),
         vec![
@@ -2416,7 +2355,6 @@ async fn set_session_model_applies_to_the_next_run_but_not_the_active_one() {
         .unwrap();
     assert_eq!(snapshot.focused.unwrap().summary.context_tokens, Some(7));
 
-    // The same validation as CreateSession applies.
     assert_eq!(
         harness
             .runtime
@@ -2612,7 +2550,6 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
     };
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
 
-    // Refused while the run is active; the client cancels first.
     assert_eq!(
         harness
             .runtime
@@ -2651,14 +2588,11 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
         receipt.outcome,
         CommandOutcome::SessionDeleted { session_id } if session_id == harness.session_id
     ));
-    // Idempotent: the retry returns the original durable receipt.
     assert_eq!(
         harness.runtime.command(command_id, command).await.unwrap(),
         receipt
     );
 
-    // Every session-owned row is gone in one transaction; the event log
-    // keeps its rows so replays stay gapless.
     for table in [
         "sessions",
         "runs",
@@ -2696,7 +2630,6 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
         .unwrap();
     assert!(snapshot.sessions.is_empty());
 
-    // A replay across the deletion stays contiguous and ends deleted.
     let mut replay = harness
         .runtime
         .subscribe(SubscribeRequest {
@@ -2724,7 +2657,6 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
         }
     }
 
-    // Deleting again with a fresh command is an ordinary not-found.
     assert_eq!(
         harness
             .runtime
@@ -2740,9 +2672,6 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
     );
 }
 
-/// F07: a store at `MAX_COMMANDS` refuses new work but still admits the
-/// commands that stop, resolve, or remove what it holds; otherwise a full
-/// store could neither be cancelled nor cleaned up to make room.
 #[tokio::test]
 async fn control_and_cleanup_commands_are_admitted_past_the_command_limit() {
     let mut harness = approval_harness(
@@ -2754,7 +2683,6 @@ async fn control_and_cleanup_commands_are_admitted_past_the_command_limit() {
     )
     .await;
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    // A receipt recorded before the cap, for the replay check below.
     let pre_cap_id = CommandId::generate().unwrap();
     let pre_cap = harness
         .runtime
@@ -2767,7 +2695,6 @@ async fn control_and_cleanup_commands_are_admitted_past_the_command_limit() {
         )
         .await
         .unwrap();
-    // Fill the counter, not the table: the bound reads `metadata.command_count`.
     harness
         .runtime
         .inner
@@ -2782,7 +2709,6 @@ async fn control_and_cleanup_commands_are_admitted_past_the_command_limit() {
         .await
         .unwrap();
 
-    // New work is refused ...
     let refused = harness
         .runtime
         .command(
@@ -2814,7 +2740,6 @@ async fn control_and_cleanup_commands_are_admitted_past_the_command_limit() {
         refused,
         Err(SessionRuntimeError::CommandLimitReached)
     ));
-    // ... a pre-cap receipt still replays exactly ...
     let replayed = harness
         .runtime
         .command(
@@ -2827,8 +2752,6 @@ async fn control_and_cleanup_commands_are_admitted_past_the_command_limit() {
         .await
         .unwrap();
     assert_eq!(replayed, pre_cap);
-    // ... and control still lands: the held approval resolves and the run
-    // completes.
     respond_approval(
         &harness.runtime,
         harness.run_id,
@@ -2845,8 +2768,6 @@ async fn control_and_cleanup_commands_are_admitted_past_the_command_limit() {
             ..
         }
     ));
-    // Cleanup lands too: the idle session can be deleted and the workspace
-    // pruned, then the runtime shuts down.
     harness
         .runtime
         .command(
@@ -2870,8 +2791,6 @@ async fn control_and_cleanup_commands_are_admitted_past_the_command_limit() {
     harness.runtime.shutdown().await.unwrap();
 }
 
-/// The control lane has its own ceiling: past the headroom it is refused too,
-/// so the receipt table stays bounded.
 #[tokio::test]
 async fn control_commands_are_bounded_by_the_headroom() {
     let harness = approval_harness(

@@ -63,8 +63,6 @@ async fn snapshots_include_extra_session_bodies_without_evicting_the_focus() {
         .snapshot(SnapshotRequest {
             workspace_id,
             focused_session_id: Some(ids[0]),
-            // The focused id is skipped in `included`; foreign and unknown
-            // sessions are dropped rather than failing the request.
             include_sessions: vec![ids[2], ids[0], foreign, missing, ids[1]],
             session_limit: 8,
             message_limit: 8,
@@ -282,8 +280,6 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
             .all(|message| !message.output.contains("private rationale"))
     );
 
-    // A fresh subscription reads the same reasoning transitions from the
-    // durable event log, in the same positions as the live subscriber.
     let mut replay = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
@@ -978,7 +974,6 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
     let focused = snapshot.focused.unwrap();
     assert_eq!(focused.runs.len(), 1);
     assert_eq!(focused.runs[0].outcome, Some(RunOutcome::Completed));
-    // The snapshot carries the newest window; the rest stay reachable as older.
     assert_eq!(
         focused.tool_calls.len(),
         crate::sessions::MAX_SNAPSHOT_TOOL_CALLS
@@ -1027,8 +1022,6 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
             continuation.messages().last(),
             Some(&Message::user(crate::SLICE_CONTINUATION_NOTICE))
         );
-        // The seam no longer changes the system prompt, so the provider's
-        // cached prefix survives it.
         assert_eq!(checkpoint.system(), recorded_requests[0].system());
         assert_eq!(continuation.system(), recorded_requests[0].system());
         assert!(continuation.messages().iter().any(|message| {
@@ -1080,9 +1073,6 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
             )
         })
     }));
-    // Replay after a restart is the live context: the first run's final
-    // request plus its final answer, followed by the new prompt. The report
-    // and continuation notices sit exactly where the live run put them.
     let live = requests[requests.len() - 2].messages();
     let replayed = replay_request.messages();
     assert_eq!(&replayed[..live.len()], live);
@@ -1216,8 +1206,6 @@ async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_b
     let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
 
     let observed = collect_until(&mut events, finished_for(run_id)).await;
-    // Used to fail with "provider returned an empty slice checkpoint"; the
-    // empty reply is now a missed report and the run finishes its task.
     assert!(matches!(
         observed.last().map(|event| &event.event),
         Some(SessionEvent::RunFinished {
@@ -1227,9 +1215,6 @@ async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_b
         }) if *finished == run_id
     ));
 
-    // Sixteen metered tool turns (1 in, 1 out), the empty checkpoint
-    // (3 + 1 + 2 in, 5 out) and the final answer (7 in, 3 out): the missed
-    // report is billed like any turn.
     let expected_usage = TokenUsage {
         input_tokens: 26,
         cache_read_input_tokens: 1,
@@ -1258,8 +1243,6 @@ async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_b
     assert!(focused.messages.iter().any(|message| {
         message.role == MessageRole::Assistant && message.output == "task complete"
     }));
-    // The live context filled the empty report with the placeholder; a
-    // follow-up assembles that same context from the store.
     let live = requests.lock().unwrap().last().unwrap().messages().to_vec();
     let window = &live[live.len() - 3..];
     assert_eq!(
@@ -1745,8 +1728,6 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
     let run_id = submit("write a long answer").await;
     let observed = collect_through_finished(&mut events).await;
 
-    // Persisted before published: the truncation event names the partial
-    // turn and the continuation count, and the run completes.
     let truncated = observed
         .iter()
         .filter_map(|event| match &event.event {
@@ -1778,8 +1759,6 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
         "the truncated turn's usage is charged"
     );
 
-    // The transcript shows both halves as separate turns; the first is
-    // flagged so clients can join them.
     let snapshot = runtime
         .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 32))
         .await
@@ -1804,7 +1783,6 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
     let run = focused.runs.iter().find(|run| run.id == run_id).unwrap();
     assert_eq!(run.status, RunStatus::Completed);
 
-    // The counter is durable on the run row.
     let store = runtime.inner.store.clone();
     let continuations: u16 = store
         .call(Priority::Control, move |connection| {
@@ -1820,9 +1798,6 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
         .unwrap();
     assert_eq!(continuations, 1);
 
-    // The next run's assembled context replays the partial turn, the
-    // continuation notice, and the resumed turn, exactly as the live
-    // request saw them.
     let _ = submit("and now summarize").await;
     let _ = collect_through_finished(&mut events).await;
     let requests = requests.lock().unwrap().clone();
@@ -1853,9 +1828,6 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
 
 #[tokio::test]
 async fn a_raised_output_cap_is_what_the_retried_turn_records() {
-    // Review (#216): the empty-truncation raise sends the retry with a larger
-    // cap, but every model_turns row and model_turn_completed event recorded
-    // the claim-time cap. Each turn's durable model must name the cap sent.
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let directory = tempfile::tempdir().unwrap();
     let runtime = SessionRuntime::open(
@@ -2542,8 +2514,6 @@ async fn multi_turn_runs_emit_one_assistant_message_per_turn() {
     assert_eq!(started[0].turn_ordinal, 1);
     assert_eq!(started[1].turn_ordinal, 2);
     assert_ne!(started[0].id, started[1].id);
-    // The second turn's message starts only after the first turn's tool
-    // call finished: text and calls replay in true execution order.
     let first_started = observed
         .iter()
         .position(|event| {
@@ -2645,15 +2615,9 @@ async fn call_only_turns_persist_no_message_row() {
     assert_eq!(focused.tool_calls[0].turn_ordinal, 1);
 }
 
-/// F11: a session whose retained transcript is far larger than the 8 MiB
-/// snapshot wire cap still snapshots — the body is trimmed newest-first to a
-/// byte budget during assembly and says so, instead of materializing a
-/// response the transport must refuse.
 #[test]
 fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
     let directory = tempfile::tempdir().unwrap();
-    // 40 runs x 1 turn x 300 KiB tool results = ~12 MiB of tool results
-    // alone, all retained (no compaction), past the 8 MiB cap.
     let (mut connection, session_id) = bench_support::seed_compacted_session(
         &directory.path().join("sessions.sqlite3"),
         0,
@@ -2682,9 +2646,6 @@ fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
         qq_protocol::MAX_SNAPSHOT_BYTES
     );
     let focused = snapshot.focused.unwrap();
-    // The focused body spends the budget first: it keeps the newest results
-    // (about 20 of 40 fit in 6 MiB) and says older ones exist so the client
-    // can page or recall them. Messages are small and all fit.
     assert!(
         focused.has_older_tool_calls,
         "trimmed tool calls are reported"
@@ -2701,8 +2662,6 @@ fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
         newest_run,
         "the kept tail ends at the newest run"
     );
-    // The kept tail is contiguous in transcript order: each run's call
-    // appears once and runs stay in creation order.
     let kept_runs: Vec<RunId> = focused.tool_calls.iter().map(|call| call.run_id).collect();
     let run_order: Vec<RunId> = focused.runs.iter().map(|run| run.id).collect();
     assert_eq!(
@@ -2713,10 +2672,6 @@ fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
         snapshot.included.is_empty(),
         "the focused id is not repeated"
     );
-    // A body that is only included, with the focused body already having
-    // spent everything, ships its summary and runs but reports its whole
-    // transcript as older: the client fetches it cold on demand, as it
-    // already does for sessions it never prewarmed.
     let snapshot = load_snapshot(
         &mut connection,
         StoreId::from_bytes([7; 16]),
@@ -2733,7 +2688,6 @@ fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
     assert!(included.has_older_tool_calls);
     assert!((15..=25).contains(&included.tool_calls.len()));
     assert!(serde_json::to_vec(&snapshot).unwrap().len() <= qq_protocol::MAX_SNAPSHOT_BYTES);
-    // A user-only body with no large results is unaffected.
     let (mut small, small_session) =
         bench_support::seed_compacted_session(&directory.path().join("small.sqlite3"), 0, 3, 1, 64);
     let snapshot = load_snapshot(
@@ -2753,16 +2707,9 @@ fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
     assert_eq!(focused.tool_calls.len(), 3);
 }
 
-/// The TUI's startup snapshot focuses one session and pre-warms the next few
-/// in a single request whose byte budget they share. Tool results are the
-/// heavy rows; sending thousands of them per body (the client keeps 64)
-/// spent the budget on the first body and left the later ones with no
-/// messages, which the TUI showed as an empty "Ask QQ to begin" session.
 #[test]
 fn prewarmed_bodies_keep_their_messages_when_an_earlier_body_has_many_tool_results() {
     let directory = tempfile::tempdir().unwrap();
-    // 120 runs x 1 turn x 96 KiB results: ~11 MiB of results in one session,
-    // more than the whole 6 MiB body budget.
     let (mut connection, heavy) = bench_support::seed_compacted_session(
         &directory.path().join("sessions.sqlite3"),
         0,
@@ -2771,8 +2718,6 @@ fn prewarmed_bodies_keep_their_messages_when_an_earlier_body_has_many_tool_resul
         96 * 1024,
     );
     let workspace_id = WorkspaceId::from_bytes([1; 16]);
-    // Real stores pre-warm several busy sessions together: give two more
-    // sessions a copy of the heavy one's history before the light one.
     let mut include_sessions = Vec::new();
     for byte in [11_u8, 12] {
         let busy = SessionId::from_bytes([byte; 16]);
@@ -2890,10 +2835,6 @@ fn prewarmed_bodies_keep_their_messages_when_an_earlier_body_has_many_tool_resul
     }
 }
 
-/// Steering queued while the slice report is in flight joins at the next
-/// boundary: after the report and before the continuation notice, in the
-/// live request and in every later assembly. An empty report gets the
-/// placeholder in the same position. (AP3a acceptance (l).)
 #[tokio::test]
 async fn steering_during_a_slice_report_lands_before_the_continuation_notice() {
     for (reply, expected_report) in [
@@ -2983,10 +2924,6 @@ async fn steering_during_a_slice_report_lands_before_the_continuation_notice() {
     }
 }
 
-/// A slice report cut at the output limit keeps its notice: the report
-/// notice is placed once, the truncation notice follows the partial report,
-/// the finished report and the continuation follow, and a later assembly
-/// reproduces the live order exactly. (AP3a acceptance (k).)
 #[tokio::test]
 async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
     for with_goal in [false, true] {
@@ -3102,11 +3039,6 @@ async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
     }
 }
 
-/// A slice report whose stream fails partway is retried: the partial turn is
-/// durable, the retry notice and the finished report follow, and the report
-/// notice is placed and stored once. Replay reproduces the live order for
-/// every message the store records; the retry notice is live-only, as it was
-/// before this slice. (AP3a review gap G5.)
 #[tokio::test]
 async fn a_faulted_slice_report_is_retried_under_one_notice() {
     let directory = tempfile::tempdir().unwrap();
@@ -3185,8 +3117,6 @@ async fn a_faulted_slice_report_is_retried_under_one_notice() {
     collect_until(&mut events, finished_for(follow_up)).await;
     let replayed = requests.lock().unwrap().last().unwrap().messages().to_vec();
     assert_eq!(report_notices(&replayed), 1);
-    // Every stored message replays in live order; only the retry notice,
-    // which was never persisted, is absent.
     let without_retry_notice = live
         .iter()
         .filter(|message| {

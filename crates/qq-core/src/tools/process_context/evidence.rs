@@ -6,7 +6,6 @@ use super::{
     provenance::SourceRevision,
 };
 
-/// Explicit deployed producer pin, independent of the exporter executable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessProducerPin {
@@ -263,7 +262,6 @@ mod tests {
             ),
             ProcessEvidenceStatus::UnsupportedV1
         );
-        // `env` is no longer an exec argument: such arguments bind no receipt.
         let contradictory_args = r#"{"program":"/usr/bin/grep","args":["x","f"],"env":["LANG"]}"#;
         assert_eq!(arguments_digest("exec", contradictory_args), None);
         let contradictory = proof.clone();
@@ -341,8 +339,6 @@ pub enum ProcessEvidenceStatus {
     VerifiedRead,
 }
 
-/// A recorded accounting verdict, independent of producer qualification. It
-/// establishes neither mutation nor historical execution provenance.
 pub fn recorded_work_receipt(state: ToolCallState, receipt: Option<&str>) -> bool {
     if !matches!(state, ToolCallState::Completed | ToolCallState::Failed) {
         return false;

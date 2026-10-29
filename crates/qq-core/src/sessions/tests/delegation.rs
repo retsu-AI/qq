@@ -12,8 +12,6 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
         )],
         turn: StdMutex::new(0),
     });
-    // The child attempts a mutation first; read-only mode must deny it
-    // without prompting, and the child then completes with "done".
     let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::clone(&child_requests),
         script: vec![(
@@ -45,8 +43,6 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
     assert_eq!(child_session.status, SessionStatus::Queued);
     assert_eq!(child_session.queued_prompts, 1);
     assert_eq!(child_session.title, "/review Survey the widget inventory");
-    // The child names the parent run and the exact `spawn_agent` call that
-    // created it, so clients can render it under that call.
     let spawn_call = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -66,7 +62,6 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
             depth: 1,
         })
     );
-    // A snapshot taken later reports the same origin from the persisted row.
     let snapshot = harness
         .runtime
         .snapshot(SnapshotRequest::new(
@@ -106,14 +101,12 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
     assert_eq!(created_event.caused_by, queued_event.caused_by);
     assert!(created_event.caused_by.is_some());
     assert_eq!(created_event.run_id, queued_event.run_id);
-    // The task's first line names the child at prompt submission.
     assert!(observed.iter().any(|event| matches!(
         &event.event,
             SessionEvent::PromptQueued { session, .. }
             if session.id == child_session.id
                 && session.title == "/review Survey the widget inventory"
     )));
-    // spawn_agent is read-only: no approval round trip in Ask mode.
     assert!(
         !observed
             .iter()
@@ -138,8 +131,6 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
             .any(|spec| spec.name() == "spawn_agent"),
         "child sessions must not have spawn_agent declared"
     );
-    // A read-only child is never offered the schemas its policy would
-    // deny; the denial below covers a model that guesses the name anyway.
     let child_tools: Vec<&str> = child_reqs[0]
         .tools()
         .iter()
@@ -175,8 +166,6 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
             .contains("User-selected guidance only."),
         "an explicit user prompt in a child session may select runtime guidance"
     );
-    // The spawned task answers its parent; the user's own follow-up in the
-    // same child session is a user run and gets the ordinary prompt.
     let spawned_system = child_reqs[0].system().unwrap();
     assert!(
         spawned_system.contains("\n\nSub-agent:\n"),
@@ -204,7 +193,6 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
             .any(|spec| spec.name() == "spawn_agent")
     );
     assert!(!parent_reqs[0].system().unwrap().contains("Sub-agent:"));
-    // The read spawn returned on admission; the answer was delivered.
     assert!(matches!(
         parent_reqs[1].messages()[2].content(),
         [ContentBlock::ToolResult { content, is_error: false, .. }]
@@ -217,9 +205,6 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
         Some(RunOutcome::Completed)
     ));
 
-    // A client cannot raise the child above what its parent granted; the
-    // refusal is typed and leaves the row untouched. Lowering (a no-op
-    // here) and root sessions remain free to change.
     let escalate = harness
         .runtime
         .command(
@@ -274,9 +259,6 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
 
 #[tokio::test]
 async fn a_child_sessions_summarizer_uses_the_childs_own_prompt_prefix() {
-    // ADR-0056 § 5: compacting a read child sends the child's system prompt
-    // (with its sub-agent section, without skills) and its read-only tool
-    // list, the prefix its own prompt runs cached, not a root's.
     let parent_requests = Arc::new(StdMutex::new(Vec::new()));
     let child_requests = Arc::new(StdMutex::new(Vec::new()));
     let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
@@ -499,10 +481,6 @@ async fn parent_cancellation_linearizes_with_in_flight_child_creation() {
     let store = Store::open(database_path).await.unwrap();
     let (_, _, parent) = create_claimed_parent(&store, directory.path()).await;
 
-    // Hold the database operation after Store::call has handed it to the
-    // worker, then drop its awaiting task. The worker must still commit,
-    // reproducing the handoff window where no CancelChildOnDrop guard can
-    // be installed by the cancelled spawn future.
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let (created_tx, created_rx) = tokio::sync::oneshot::channel();
@@ -592,8 +570,6 @@ async fn parent_cancellation_linearizes_with_in_flight_child_creation() {
         .unwrap();
     assert!(store.unfinished_run_ids().await.unwrap().is_empty());
 
-    // The reverse database ordering rejects creation once cancellation is
-    // durable, so no child can appear after its parent starts settling.
     let (_, _, cancelling_parent) = create_claimed_parent(&store, directory.path()).await;
     store
         .command(
@@ -866,9 +842,6 @@ async fn parallel_spawn_accounting_is_ordered_exact_and_survives_restart() {
         .find(|session| session.id == parent_id)
         .unwrap();
     let accounting = parent.accounting.unwrap();
-    // The parent spawned both children (2/3) and answered (5/7) after each
-    // reply that found children still running waited for the next answer
-    // (ADR-0054 § 4): one to three text turns, by when the children settle.
     let direct = accounting.direct.usage.unwrap();
     let text_turns = (direct.input_tokens - 2) / 5;
     assert!((1..=3).contains(&text_turns), "{direct:?}");
@@ -877,8 +850,6 @@ async fn parallel_spawn_accounting_is_ordered_exact_and_survives_restart() {
         accounting.direct.estimated_cost_usd_nanos,
         Some(5 + 12 * text_turns)
     );
-    // The children's spend (28/32 tokens, 60 nanos) is in the inclusive
-    // figure exactly once.
     let inclusive = accounting.inclusive.usage.unwrap();
     assert_eq!(inclusive.input_tokens - direct.input_tokens, 28);
     assert_eq!(inclusive.output_tokens - direct.output_tokens, 32);
@@ -1145,7 +1116,6 @@ async fn rejected_spawn_validation_creates_no_child_state_and_names_the_check() 
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "spawn a ghost").await;
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
 
-    // The explicit argument passed through the spawn-time choke point...
     assert_eq!(
         validations
             .lock()
@@ -1155,7 +1125,6 @@ async fn rejected_spawn_validation_creates_no_child_state_and_names_the_check() 
             .collect::<Vec<_>>(),
         [Some("test/ghost".to_owned())]
     );
-    // ...was rejected before any child runtime load...
     assert_eq!(
         loads
             .lock()
@@ -1166,8 +1135,6 @@ async fn rejected_spawn_validation_creates_no_child_state_and_names_the_check() 
         [Some("test/model".to_owned())],
         "a rejected route must never reach runtime loading"
     );
-    // ...and created no durable child state: no session, no prompt, no
-    // run.
     assert!(observed.iter().all(|event| !matches!(
         &event.event,
         SessionEvent::SessionCreated { session }
@@ -1195,8 +1162,6 @@ async fn rejected_spawn_validation_creates_no_child_state_and_names_the_check() 
             .iter()
             .all(|session| session.parent_id.is_none())
     );
-    // The parent sees a bounded tool error naming the failed check and
-    // continues to completion.
     let parent_reqs = requests.lock().unwrap();
     assert!(matches!(
         parent_reqs[1].messages()[2].content(),
@@ -1249,9 +1214,6 @@ async fn spawn_validation_covers_worker_and_parent_fallback_routes() {
         let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
         let observed = collect_until_run_finished(&mut harness.events, run_id).await;
 
-        // The resolved route — configured worker or parent fallback —
-        // passed through the same spawn-time choke point the explicit
-        // argument uses, and the child was created on it.
         assert_eq!(
             validations
                 .lock()
@@ -1291,10 +1253,6 @@ async fn explicit_route_outside_the_advertised_list_spawns_when_validation_accep
         )],
         turn: StdMutex::new(0),
     });
-    // QueueLoader advertises only "test/child" in the schema route list;
-    // "test/discovered" must still spawn because enforcement lives at
-    // the spawn-time choke point (the served model list), not in the
-    // schema enum.
     let child: Arc<dyn Provider> = Arc::new(StaticTextProvider);
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
 
@@ -1403,13 +1361,11 @@ async fn a_failed_child_returns_a_tool_error_and_the_parent_continues() {
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
 
-    // The child run paused on its own session after retrying the fault.
     assert!(observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::RunFinished { run_id: done, outcome: RunOutcome::Paused { .. }, .. }
             if *done != run_id
     )));
-    // The parent saw a tool error and still completed.
     let parent_reqs = parent_requests.lock().unwrap();
     assert!(matches!(
         delivered_answers(&parent_reqs).as_slice(),
@@ -1428,7 +1384,6 @@ async fn cancelling_the_parent_run_cancels_its_in_flight_child() {
     let parent_requests = Arc::new(StdMutex::new(Vec::new()));
     let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::clone(&parent_requests),
-        // No model override: the child must inherit the parent's model.
         script: vec![("spawn_agent", r#"{"task":"long research"}"#.to_owned())],
         turn: StdMutex::new(0),
     });
@@ -1437,8 +1392,6 @@ async fn cancelling_the_parent_run_cancels_its_in_flight_child() {
     let parent_run =
         submit_prompt_to(&harness.runtime, harness.session_id, "delegate forever").await;
 
-    // Wait until the child run is actually executing, then cancel the
-    // parent.
     let mut observed = Vec::new();
     let (child_session, child_run) = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -2118,7 +2071,6 @@ async fn a_write_child_executes_authorized_edits() {
         std::fs::read_to_string(harness._directory.path().join("child.txt")).unwrap(),
         "written by the child"
     );
-    // Child retains mutating schemas and executes within parent authority.
     let child_reqs = child_requests.lock().unwrap().clone();
     assert!(
         child_reqs[0]
@@ -2126,14 +2078,10 @@ async fn a_write_child_executes_authorized_edits() {
             .iter()
             .any(|spec| spec.name() == "write_file")
     );
-    // A write child is told a parent waits on it, and keeps the line that
-    // tells it to implement the change rather than describe it.
     let child_system = child_reqs[0].system().unwrap();
     assert!(child_system.contains("\n\nSub-agent:\n"), "{child_system}");
     assert!(child_system.contains("- Do the work."));
     assert!(!child_system.contains("You cannot change files or run commands"));
-    // The spawn itself was a mutating call under the parent's Auto policy
-    // and executed without a prompt.
     assert!(!observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::ToolApprovalRequested { tool_call, .. } if tool_call.run_id == run_id
@@ -2151,7 +2099,6 @@ async fn a_write_child_executes_authorized_edits() {
 
 #[tokio::test]
 async fn write_children_require_the_roster_flag() {
-    // The roster forbids writers: QueueLoader plans carry the default roster.
     let child: Arc<dyn Provider> = Arc::new(StaticTextProvider);
     let parent_requests = Arc::new(StdMutex::new(Vec::new()));
     let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
@@ -2198,7 +2145,6 @@ async fn write_children_require_the_roster_flag() {
     ));
     runtime.shutdown().await.unwrap();
 
-    // The roster permits writers.
     let child: Arc<dyn Provider> = Arc::new(StaticTextProvider);
     let (mut harness, parent_requests) = write_child_harness(
         child,
@@ -2226,7 +2172,6 @@ async fn write_children_require_the_roster_flag() {
 
 #[tokio::test]
 async fn a_write_spawn_is_a_mutating_call_under_the_parents_policy() {
-    // Under ReadOnly the delegation itself is denied without a prompt.
     let child: Arc<dyn Provider> = Arc::new(StaticTextProvider);
     let (mut harness, parent_requests) = write_child_harness(
         child,
@@ -2243,8 +2188,6 @@ async fn a_write_spawn_is_a_mutating_call_under_the_parents_policy() {
         &event.event,
         SessionEvent::SessionCreated { session } if session.parent_id.is_some()
     )));
-    // A read-only root is not even offered spawn_agent's write authority
-    // ... but a guessed call is still denied by policy, never executed.
     let parent_reqs = parent_requests.lock().unwrap().clone();
     assert!(matches!(
         parent_reqs[1].messages()[2].content(),
@@ -2252,7 +2195,6 @@ async fn a_write_spawn_is_a_mutating_call_under_the_parents_policy() {
             if content == approval::POLICY_DENIED_RESULT
     ));
 
-    // Under Ask the human approves the delegation itself.
     let child: Arc<dyn Provider> = Arc::new(StaticTextProvider);
     let (mut harness, _) = write_child_harness(
         child,
@@ -2362,7 +2304,6 @@ async fn steering_charges_a_completed_but_unconsumed_child_exactly_once() {
     )
     .await
     .unwrap();
-    // The interrupt wins the biased select even though the reply is ready.
     let _ = release.send(());
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
     let exhaustion = exhaustion_of(&observed, run_id);
@@ -2521,8 +2462,6 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
             parent_run
         };
         if deadline {
-            // Both inherited child and parent deadlines must expire while the
-            // write is held; neither terminal may release the checkout early.
             tokio::time::advance(Duration::from_millis(1_200)).await;
         } else if interruption != 2 {
             tokio::time::timeout(Duration::from_secs(2), stopping.take().unwrap())
@@ -2534,9 +2473,7 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
             tokio::time::resume();
             keep_clock.abort();
         }
-        // The real write is past its cancellation check and holds the
 
-        // apply lock. Completion must remain unavailable until it exits.
         let premature = tokio::time::timeout(Duration::from_millis(50), async {
             loop {
                 let event = harness.events.next().await.unwrap().unwrap();
@@ -2738,8 +2675,6 @@ async fn store_saturation_does_not_release_a_running_write_child() {
         .unwrap()
         .unwrap();
 
-    // Hold the real worker and fill its control lane. The child is live;
-    // only the parent's outcome read is released into this saturation.
     let blocked_store = harness.runtime.inner.store.clone();
     let (worker_entered, worker_started) = oneshot::channel();
     let (release_worker, worker_release) = std::sync::mpsc::channel();
@@ -2953,8 +2888,6 @@ async fn unreadable_child_outcome_fails_the_runtime_before_parent_continuation()
         .await
         .unwrap()
         .unwrap();
-    // Corrupt just the child accounting payload: the database still
-    // accepts parent events, so an ordinary error result would resume it.
     harness
         .runtime
         .inner
@@ -2997,7 +2930,6 @@ async fn unreadable_child_outcome_fails_the_runtime_before_parent_continuation()
     .await
     .unwrap();
     if !unavailable {
-        // Clean up the still-running child on the failing implementation.
         harness.runtime.inner.cancel(child_run);
     }
     assert!(
@@ -3083,8 +3015,6 @@ async fn write_children_serialize_on_the_per_run_write_permit() {
         1,
         "two writers never share the checkout"
     );
-    // Write children stay blocking (ADR-0054 § 4): each answer is its spawn
-    // call's result, and none was admitted for delivery.
     let delivery_rows: u32 = runtime
         .inner
         .store
@@ -3140,8 +3070,6 @@ async fn concurrent_children_per_run_queue_behind_the_cap() {
         results.len(),
         usize::from(MAX_CONCURRENT_CHILDREN_PER_RUN) + 1
     );
-    // Every spawn returned on admission (the one beyond the cap after a
-    // slot freed), and every answer was delivered once.
     for block in results {
         assert!(matches!(
             block,
@@ -3185,7 +3113,6 @@ async fn spawns_beyond_the_per_run_budget_return_a_tool_error() {
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "fan out wide").await;
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
 
-    // Exactly the budget's worth of children were created.
     assert_eq!(
         observed
             .iter()
@@ -3227,9 +3154,6 @@ async fn spawns_beyond_the_per_run_budget_return_a_tool_error() {
 
 #[tokio::test]
 async fn saturated_parents_awaiting_children_never_deadlock() {
-    // Two parents fill the entire root permit pool and then both await a
-    // child. If children drew from the same pool nothing could ever run
-    // them; the separate child pool must let every run complete.
     let spawn_script = || -> Arc<dyn Provider> {
         Arc::new(ScriptedRunProvider {
             requests: Arc::new(StdMutex::new(Vec::new())),
@@ -3290,7 +3214,6 @@ async fn nested_spend_reduces_the_next_root_child_allowance() {
         })
         .expect("the remaining budget can fund a later child");
     let limits = later.limits.as_ref().unwrap();
-    // Two root turns, two child turns, and the 60-token grandchild.
     assert_eq!(limits.max_total_tokens, Some(36));
     assert_eq!(limits.max_cost_usd_nanos, Some(36_000));
     assert!(matches!(
@@ -3566,7 +3489,6 @@ async fn nested_spend_receipt_rejects_incomplete_or_overflowing_descendants() {
             ),
             "{corruption}"
         );
-        // Restore the simulated unfinished row before ordinary shutdown.
         if corruption == "unfinished" {
             harness
                 .runtime
@@ -3641,7 +3563,6 @@ async fn depth_two_lets_children_spawn_read_only_grandchildren_that_cannot_spawn
     let grandchild_requests = Arc::new(StdMutex::new(Vec::new()));
     let grandchild: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::clone(&grandchild_requests),
-        // A grandchild guessing spawn_agent is refused at dispatch.
         script: vec![("spawn_agent", r#"{"task":"deeper still"}"#.to_owned())],
         turn: StdMutex::new(0),
     });
@@ -3687,8 +3608,6 @@ async fn depth_two_lets_children_spawn_read_only_grandchildren_that_cannot_spawn
     assert_eq!(child.spawned_by.as_ref().unwrap().depth, 1);
     assert_eq!(grandchild.spawned_by.as_ref().unwrap().depth, 2);
     assert_eq!(grandchild.approval_mode, ApprovalMode::ReadOnly);
-    // The grandchild sits at the effective depth: no spawner, and its
-    // guessed spawn call is refused at dispatch.
     let requests = grandchild_requests.lock().unwrap().clone();
     assert!(
         !requests[0]
@@ -3705,7 +3624,6 @@ async fn depth_two_lets_children_spawn_read_only_grandchildren_that_cannot_spawn
         finished_outcome(&observed, run_id),
         Some(RunOutcome::Completed)
     ));
-    // Inclusive accounting and the snapshot see the whole tree.
     let snapshot = harness
         .runtime
         .snapshot(SnapshotRequest::new(
@@ -3721,8 +3639,6 @@ async fn depth_two_lets_children_spawn_read_only_grandchildren_that_cannot_spawn
 
 #[tokio::test]
 async fn depth_one_keeps_children_from_spawning_and_the_ceiling_is_enforced() {
-    // Default max_depth = 1: the child has no spawner even though the
-    // grandchild route is configured.
     let child_requests = Arc::new(StdMutex::new(Vec::new()));
     let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::clone(&child_requests),
@@ -3767,7 +3683,6 @@ async fn depth_one_keeps_children_from_spawning_and_the_ceiling_is_enforced() {
             .any(|spec| spec.name() == "spawn_agent")
     );
 
-    // A publicly created session tree cannot exceed the runtime ceiling.
     let mut parent_id = harness.session_id;
     for _ in 0..MAX_CHILD_DEPTH {
         let created = create_session(&harness.runtime, harness.workspace_id, Some(parent_id)).await;
@@ -3804,8 +3719,6 @@ async fn depth_one_keeps_children_from_spawning_and_the_ceiling_is_enforced() {
 
 #[tokio::test]
 async fn max_depth_zero_disables_delegation_for_the_root_itself() {
-    // The A0 control arm: the root is never offered spawn_agent, and a
-    // guessed call is refused at dispatch without creating a child.
     let root_requests = Arc::new(StdMutex::new(Vec::new()));
     let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::clone(&root_requests),
@@ -3848,8 +3761,6 @@ async fn max_depth_zero_disables_delegation_for_the_root_itself() {
 
 #[tokio::test]
 async fn a_tree_is_capped_at_the_descendant_limit() {
-    // Each child spawns as many grandchildren as the per-run cap allows;
-    // the tree still stops at MAX_DESCENDANTS_PER_ROOT sessions total.
     let fan_out: Arc<dyn Provider> = Arc::new(StatelessFanOut {
         spawns: usize::from(MAX_SPAWNED_CHILDREN_PER_RUN),
         route: "test/leaf",
@@ -3891,9 +3802,6 @@ async fn a_tree_is_capped_at_the_descendant_limit() {
 
 #[tokio::test]
 async fn saturated_parents_at_every_depth_never_deadlock() {
-    // Two roots fill the root pool and each spawns a child that spawns a
-    // grandchild. Depth-one children fill their pool while awaiting
-    // grandchildren; grandchildren must still run from their own pool.
     let spawn_child = || -> Arc<dyn Provider> {
         Arc::new(ScriptedRunProvider {
             requests: Arc::new(StdMutex::new(Vec::new())),
@@ -3985,8 +3893,6 @@ async fn cancelling_the_root_settles_the_whole_subtree() {
         )
         .await
         .unwrap();
-    // Descendants settle in their own tasks; keep draining until both
-    // child runs have finished.
     let mut observed = Vec::new();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -4147,9 +4053,6 @@ async fn a_mutating_run_is_audited_by_a_read_only_child_and_passes() {
     assert!(completed[0].findings.is_empty());
     assert_eq!(completed[0].revisions, 0);
     assert_eq!(completed[0].usage.map(|usage| usage.input_tokens), Some(50));
-    // The audit child is a read-only session with purpose audit, at the
-    // strong role's route, and its brief carries the prompt, answer, and
-    // actions but not the transcript.
     let child = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -4173,11 +4076,7 @@ async fn a_mutating_run_is_audited_by_a_read_only_child_and_passes() {
             .iter()
             .any(|spec| spec.name() == "write_file")
     );
-    // The audit child keeps its fixed one-line JSON contract; the sub-agent
-    // section's "answer, then evidence" shape would contradict it.
     assert!(!brief[0].system().unwrap().contains("Sub-agent:"));
-    // The parent completed with the audit ordered before RunFinished,
-    // and the snapshot carries the record.
     assert!(matches!(
         finished_outcome(&observed, run_id),
         Some(RunOutcome::Completed)
@@ -4212,8 +4111,6 @@ async fn a_mutating_run_is_audited_by_a_read_only_child_and_passes() {
         run.audit.as_deref().map(|audit| audit.outcome),
         Some(AuditOutcome::Pass)
     );
-    // The audit child's own run carries its usage; the scripted parent
-    // reports none, so the parent's total is unknown rather than partial.
     let child_run = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -4226,18 +4123,12 @@ async fn a_mutating_run_is_audited_by_a_read_only_child_and_passes() {
         .expect("the audit child reports usage");
     assert_eq!(child_run.input_tokens, 50);
     assert_eq!(run.usage, None);
-    // The parent's own model saw no audit notice.
     let parent_reqs = parent_requests.lock().unwrap().clone();
     assert_eq!(parent_reqs.len(), 2);
 }
 
 #[tokio::test]
 async fn the_contract_judges_the_audited_revision_and_a_revision_does_not_reset_repairs() {
-    // Turn 1 mutates (audit trigger); turn 2 answers validly; the auditor
-    // says revise; turn 3 (the revision) is invalid JSON; the contract
-    // spends its one repair on turn 4, which validates. A second revise
-    // cannot happen (max_revisions 1), so the order is
-    // answer → audit → revision → repair.
     let parent_requests = Arc::new(StdMutex::new(Vec::new()));
     let parent: Arc<dyn Provider> = Arc::new(MutateThenScriptProvider {
         requests: Arc::clone(&parent_requests),
@@ -4299,7 +4190,6 @@ async fn the_contract_judges_the_audited_revision_and_a_revision_does_not_reset_
             "{repair}"
         );
     }
-    // The audit record and the verdict are both durable on the row.
     let snapshot = harness
         .runtime
         .snapshot(SnapshotRequest {
@@ -4347,8 +4237,6 @@ async fn a_revise_verdict_sends_the_run_back_once_and_the_revision_stands() {
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
 
     let (_, completed) = audit_events(&observed, run_id);
-    // One audit, one revision; the revised answer is not re-audited when
-    // the cap is reached.
     assert_eq!(completed.len(), 1);
     assert_eq!(completed[0].outcome, AuditOutcome::Revised);
     assert_eq!(completed[0].findings.len(), 2);
@@ -4361,7 +4249,6 @@ async fn a_revise_verdict_sends_the_run_back_once_and_the_revision_stands() {
         finished_outcome(&observed, run_id),
         Some(RunOutcome::Completed)
     ));
-    // The transcript shows two assistant answers.
     let turns = observed
         .iter()
         .filter(|event| {
@@ -4373,7 +4260,6 @@ async fn a_revise_verdict_sends_the_run_back_once_and_the_revision_stands() {
 
 #[tokio::test]
 async fn audit_triggers_and_suppressions_follow_the_heuristic() {
-    // A read-only run under Heuristic is not audited ...
     let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::new(StdMutex::new(Vec::new())),
         script: vec![("read_file", r#"{"path":"AGENTS.md"}"#.to_owned())],
@@ -4396,7 +4282,6 @@ async fn audit_triggers_and_suppressions_follow_the_heuristic() {
     assert!(audit_events(&observed, run_id).0.is_none());
     assert!(auditor_requests.lock().unwrap().is_empty());
 
-    // ... but under Always it is; and Off never audits even a mutation.
     for (mode, mutate, expect_audit) in [
         (crate::runtime::AuditMode::Always, false, true),
         (crate::runtime::AuditMode::Off, true, false),
@@ -4428,7 +4313,6 @@ async fn audit_triggers_and_suppressions_follow_the_heuristic() {
         );
     }
 
-    // A child run is never audited, even when it mutates under Always.
     let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::new(StdMutex::new(Vec::new())),
         script: vec![("read_file", r#"{"path":"AGENTS.md"}"#.to_owned())],
@@ -4480,7 +4364,6 @@ async fn an_unavailable_auditor_fails_open_and_is_recorded() {
         )],
         turn: StdMutex::new(0),
     });
-    // The auditor answers prose, not a verdict.
     let auditor: Arc<dyn Provider> = Arc::new(VerdictProvider {
         reply: "Looks fine to me!",
         requests: Arc::new(StdMutex::new(Vec::new())),
@@ -4496,7 +4379,6 @@ async fn an_unavailable_auditor_fails_open_and_is_recorded() {
         Some(RunOutcome::Completed)
     ));
 
-    // A failing audit child is also fail-open.
     let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::new(StdMutex::new(Vec::new())),
         script: vec![(
@@ -4605,7 +4487,6 @@ async fn owned_compaction_receipt_preserves_bounds_unknown_and_exact_ownership()
                     params![last.to_string(), owner.to_string(), outcome],
                 )?;
             }
-            // Manual and another prompt's summaries never enter this receipt.
             for unrelated_owner in [None, Some(RunId::generate().unwrap().to_string())] {
                 let unrelated = insert_accounting_run(connection, session, "running", None, None);
                 connection.execute(
@@ -4659,8 +4540,6 @@ async fn child_compaction_spend_reduces_the_next_child_allowance() {
         served: StdMutex::new(0),
         script: AutoCompactScript::Measured {
             script: Box::new(AutoCompactScript::WritesRepeatedlyWithSummaries {
-                // The smaller minimal-profile tool catalog must also cross
-                // a compaction boundary before this child finishes.
                 turns: 16,
                 text: "child done".to_owned(),
                 summary: valid_summary("child work"),
@@ -4677,8 +4556,6 @@ async fn child_compaction_spend_reduces_the_next_child_allowance() {
     )
     .await;
     let limits = RunLimits {
-        // Two 24-turn children must finish; this test checks exact spend
-        // inheritance rather than exhausting the parent on prompt growth.
         max_total_tokens: Some(2_000_000),
         max_cost_usd_nanos: Some(5_000_000_000),
         ..RunLimits::default()
@@ -4793,7 +4670,6 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
             Some(16 * 1024),
         )
         .await;
-        // Keep the deadline frozen while real store/tool work admits the summary.
         let keep_clock = if deadline {
             tokio::time::pause();
             Some(tokio::spawn(async {
@@ -4927,10 +4803,6 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
 
 #[tokio::test]
 async fn a_balanced_child_of_a_max_effort_parent_is_admitted_at_medium() {
-    // RR8.4 regression: children inherited the parent's pin verbatim, so a
-    // read-only worker under `max` spent ~14 k reasoning tokens per read.
-    // The roster entry's role now caps the child's effort; the pin is on the
-    // child's own session row so the loader, replay, and clients agree.
     let parent: Arc<dyn Provider> = Arc::new(MultiSpawnProvider {
         requests: Arc::new(StdMutex::new(Vec::new())),
         spawns: 1,
@@ -5116,8 +4988,6 @@ async fn audits_inherit_remaining_limits_and_charge_inclusive_spend_once() {
         .expect("auditor must inherit a budget");
     assert_eq!(limits.max_total_tokens, Some(90));
     assert_eq!(limits.max_cost_usd_nanos, Some(90_000));
-    // The auditor is bounded on its own as well: a turn cap and a deadline
-    // the parent did not impose, so an audit is never a second open-ended run.
     assert_eq!(
         limits.max_model_turns,
         Some(crate::runtime::MAX_AUDIT_CHILD_TURNS)
@@ -5376,9 +5246,6 @@ async fn child_duration_is_reduced_by_preflight_and_prior_children() {
     }
 }
 
-/// A text-only slice report is not the run's answer: it never completes the
-/// run and is never audited. With `audit: always`, the one audit judges the
-/// real final answer after the continuation. (AP3a acceptance (j).)
 #[tokio::test]
 async fn a_text_only_slice_report_is_never_audited_or_treated_as_the_answer() {
     let parent_requests = Arc::new(StdMutex::new(Vec::new()));
@@ -5396,8 +5263,6 @@ async fn a_text_only_slice_report_is_never_audited_or_treated_as_the_answer() {
     std::fs::write(harness._directory.path().join("note.txt"), "tool result\n").unwrap();
     std::fs::write(harness._directory.path().join("slice-effects.txt"), "seed").unwrap();
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "long task").await;
-    // This fixture executes a complete 256-call slice. Its hang guard is the
-    // nextest process watchdog, not the short shared helper's wall clock.
     let mut observed = Vec::new();
     loop {
         let event = harness.events.next().await.unwrap().unwrap();
@@ -5420,8 +5285,6 @@ async fn a_text_only_slice_report_is_never_audited_or_treated_as_the_answer() {
     let brief = request_texts(&auditor_requests[0]).join("\n");
     assert!(brief.contains("task complete"), "{brief}");
     assert!(!brief.contains("slice checkpoint"), "{brief}");
-    // The run kept going after its report: the continuation request
-    // followed it, and the answer came after that.
     let parent_requests = parent_requests.lock().unwrap();
     let report_at = parent_requests
         .iter()
@@ -5683,7 +5546,6 @@ async fn a_late_child_approval_runs_once_after_the_parent_switches_to_auto() {
                 )
                 .await
                 .unwrap();
-            // A late Ask response must respect a subsequent parent change.
             release_child.send(()).unwrap();
             let (_, call) = collect_until_approval_requested(&mut harness.events).await;
             assert_eq!(call.name, "shell");
@@ -5698,7 +5560,6 @@ async fn a_late_child_approval_runs_once_after_the_parent_switches_to_auto() {
                 )
                 .await
                 .unwrap();
-            // The child explicitly selected Ask: the approval covers only this call.
             let expected = ApprovalResolution::ApprovedOnce;
             let receipt = respond_approval(&harness.runtime, call.run_id, call.id, decision)
                 .await

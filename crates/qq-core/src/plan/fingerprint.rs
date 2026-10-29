@@ -1,5 +1,3 @@
-//! Cheap filesystem identity for revalidating cached plans.
-
 use std::{
     fmt,
     io::ErrorKind,
@@ -7,12 +5,6 @@ use std::{
     time::SystemTime,
 };
 
-/// What one `stat` observed about a path a plan depends on. Comparing a fresh
-/// fingerprint against the recorded one detects creation, deletion, rewrite,
-/// and replacement without opening or reading the file. It says nothing about
-/// content: equal fingerprints mean "nothing observable changed", not "the
-/// bytes are identical", which is the right contract for a cache whose miss
-/// path recompiles from the real content anyway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFingerprint {
     path: PathBuf,
@@ -25,23 +17,15 @@ enum SourceState {
     Present {
         len: u64,
         modified: Option<SystemTime>,
-        /// Inode (Unix) or file index where available, so an atomic
-        /// rename-over with identical size and timestamp is still visible.
         identity: Option<u64>,
         is_dir: bool,
     },
-    /// The path could not be inspected for a reason other than absence.
-    /// Distinct from both other states so an intermittent permission error
-    /// never masquerades as "unchanged".
     Unreadable {
         kind: ErrorKind,
     },
 }
 
 impl SourceFingerprint {
-    /// Records the current state of `path` with a single `symlink_metadata`
-    /// call. Symlinks are fingerprinted as themselves, matching the loaders
-    /// that reject them as sources.
     #[must_use]
     pub fn capture(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
@@ -59,9 +43,6 @@ impl SourceFingerprint {
         matches!(self.state, SourceState::Present { .. })
     }
 
-    /// Re-observes this path and reports whether anything observable changed.
-    /// One `symlink_metadata` call and no allocation; the cache asks this of
-    /// every source on every plan lookup.
     #[must_use]
     pub fn is_current(&self) -> bool {
         observe(&self.path) == self.state
@@ -125,7 +106,6 @@ mod tests {
         assert!(present.is_present());
         assert!(present.is_current());
 
-        // Same length, different content: a rewrite changes mtime or inode.
         let previous = std::fs::metadata(&path).unwrap().modified().unwrap();
         std::fs::write(&path, "two").unwrap();
         std::fs::File::options()
@@ -136,7 +116,6 @@ mod tests {
             .unwrap();
         assert!(!present.is_current());
 
-        // Atomic replacement with equal bytes still changes the inode.
         let replacement = SourceFingerprint::capture(&path);
         let staged = directory.path().join("AGENTS.md.tmp");
         std::fs::write(&staged, "two").unwrap();

@@ -1,5 +1,3 @@
-//! The `tool_dispatch` bench's run, once, to completion (ENG-1003).
-
 #[path = "support/read_tool.rs"]
 mod support;
 

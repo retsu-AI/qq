@@ -1,7 +1,5 @@
-//! Immutable terminal receipts, independent of the delivery journal.
 use super::*;
 
-/// A committed terminal event and its durable run metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunCompletion {
     pub receipt: SessionEventEnvelope,
@@ -66,8 +64,6 @@ pub(super) fn read(
 }
 
 pub(super) fn migrate(connection: &Connection) -> Result<(), SessionRuntimeError> {
-    // One archive scan, indexed run updates. Missing legacy evidence remains
-    // absent; a terminal status alone cannot reconstruct its original receipt.
     let mut statement = connection.prepare(
         "SELECT workspace_id,sequence,CASE WHEN length(CAST(envelope_json AS BLOB))<=1048576
             THEN envelope_json END FROM events
@@ -158,7 +154,6 @@ fn decode(
     Ok(RunCompletion { receipt, run })
 }
 
-/// A terminal run's exact reply and accounting, independent of delivery history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunResult {
     pub completion: RunCompletion,
@@ -215,8 +210,6 @@ pub(super) fn result(
 }
 
 fn reply(connection: &Connection, run_id: RunId) -> Result<String, SessionRuntimeError> {
-    // Message rows are lazy: tool-only turns have none. A truncation anywhere
-    // between two text messages continues the same reply, as live delivery does.
     let mut statement = connection.prepare_cached(
         "SELECT id,turn_ordinal,chunks_ordered,length(CAST(output AS BLOB)) + COALESCE((SELECT SUM(length(CAST(text AS BLOB))) FROM message_chunks WHERE message_id=m.id),0)
          FROM messages m WHERE run_id=?1 AND role='assistant' ORDER BY turn_ordinal DESC LIMIT 4097",

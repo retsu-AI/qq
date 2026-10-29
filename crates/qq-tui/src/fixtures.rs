@@ -1,10 +1,3 @@
-//! Deterministic protocol fixtures shared by unit tests and the render
-//! benchmark. Every builder returns a fully-populated value with neutral
-//! defaults; callers override fields with struct-update syntax.
-//!
-//! Identifiers are derived from a single byte so tests can name them
-//! (`session(2)`, `tool_call(7)`) and assert on them without ceremony.
-
 use qq_protocol::{
     ApprovalMode, Correlation, EventCapabilities, EventCursor, LimitCapabilities, MessageId,
     MessageRole, MessageSnapshot, MessageState, RunId, RunSnapshot, RunStatus, ServerCapabilities,
@@ -15,7 +8,6 @@ use qq_protocol::{
 
 pub const WORKSPACE: WorkspaceId = WorkspaceId::from_bytes([1; 16]);
 pub const STORE: StoreId = StoreId::from_bytes([3; 16]);
-/// The session `workspace_snapshot` focuses.
 pub const SESSION: SessionId = SessionId::from_bytes([2; 16]);
 
 #[must_use]
@@ -47,7 +39,6 @@ pub fn cursor(sequence: u64) -> EventCursor {
     }
 }
 
-/// An idle root session titled `Session` with a test model.
 #[must_use]
 pub fn session_summary(id: SessionId) -> SessionSummary {
     SessionSummary {
@@ -77,7 +68,6 @@ pub fn session_summary(id: SessionId) -> SessionSummary {
     }
 }
 
-/// A complete assistant message in turn 1 of `run_id(2)`.
 #[must_use]
 pub fn message(id: MessageId, session_id: SessionId, output: &str) -> MessageSnapshot {
     MessageSnapshot {
@@ -95,7 +85,6 @@ pub fn message(id: MessageId, session_id: SessionId, output: &str) -> MessageSna
     }
 }
 
-/// A completed tool call in turn 1 with an empty JSON argument object.
 #[must_use]
 pub fn tool_call(id: ToolCallId, session_id: SessionId, name: &str) -> ToolCallSnapshot {
     ToolCallSnapshot {
@@ -136,7 +125,6 @@ pub fn run(id: RunId, session_id: SessionId, status: RunStatus) -> RunSnapshot {
     }
 }
 
-/// A body for `summary` with no messages, runs, or tool calls.
 #[must_use]
 pub fn session_snapshot(summary: SessionSummary) -> SessionSnapshot {
     SessionSnapshot {
@@ -152,7 +140,6 @@ pub fn session_snapshot(summary: SessionSummary) -> SessionSnapshot {
     }
 }
 
-/// A one-session workspace at sequence 1 with `SESSION` focused and empty.
 #[must_use]
 pub fn workspace_snapshot() -> WorkspaceSnapshot {
     let summary = session_summary(SESSION);
@@ -182,8 +169,6 @@ pub fn envelope(sequence: u64, session_id: SessionId, event: SessionEvent) -> Se
     }
 }
 
-/// A capability document with steering and every approval mode enabled and
-/// no profiles beyond `default`; tests that need profiles set `profiles`.
 #[must_use]
 pub fn capabilities(steering: SteeringCapabilities) -> ServerCapabilities {
     ServerCapabilities {
@@ -245,7 +230,6 @@ pub fn capabilities(steering: SteeringCapabilities) -> ServerCapabilities {
     }
 }
 
-/// Steering fully supported: the document most tests want.
 #[must_use]
 pub fn steering_capabilities() -> ServerCapabilities {
     capabilities(SteeringCapabilities {
@@ -255,7 +239,6 @@ pub fn steering_capabilities() -> ServerCapabilities {
     })
 }
 
-/// Bounded durable goal data shared by navigation and renderer tests.
 pub fn goal_snapshot(session: SessionId) -> Box<qq_protocol::GoalSnapshot> {
     Box::new(serde_json::from_value(serde_json::json!({
         "session_id":session,"goal_id":qq_protocol::GoalId::from_bytes([0x61;16]),"revision":7,

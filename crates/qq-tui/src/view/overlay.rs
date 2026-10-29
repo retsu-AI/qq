@@ -8,21 +8,14 @@ use crate::{
     picker::{Picker, PickerItem},
 };
 
-/// Static text around a picker's rows.
 struct PickerChrome<'a> {
     title: &'a str,
     hint: &'a str,
     placeholder: &'a str,
-    /// One line under the search row: a pending yes/no question, or a note
-    /// about what the list cannot show.
     question: Option<Line>,
-    /// Shown instead of rows when nothing matches.
     empty: &'a str,
 }
 
-/// The frame every picker shares: a section header with hints, the search
-/// row, an optional question, then the filtered rows scrolled so the cursor
-/// stays visible. `row` draws one item; the bool marks the cursor.
 fn picker_frame<T: PickerItem>(
     picker: &Picker<T>,
     chrome: PickerChrome<'_>,
@@ -65,7 +58,6 @@ fn picker_frame<T: PickerItem>(
     fit_height(lines, height)
 }
 
-/// The `search:` row shared by every picker.
 pub(super) fn search_line(query: &str, placeholder: &str) -> Line {
     Line::styled(
         format!(
@@ -80,8 +72,6 @@ fn cursor_prefix(selected: bool) -> Line {
     Line::styled(if selected { "  > " } else { "    " }, muted())
 }
 
-/// Finish a picker row: pad to `width` and, when selected, paint the whole
-/// row on the selection background so it reads without the `>` alone.
 fn finish_row(mut line: Line, selected: bool, width: usize) -> Line {
     line = truncate_line(line, width);
     if selected {
@@ -184,8 +174,6 @@ pub(super) fn model_picker(app: &App, width: usize, height: usize) -> Vec<Line> 
         width,
         height,
         |row: &ModelRow, selected, out| {
-            // A provider without a credential is one greyed row: its name,
-            // `needs credential`, and the remedy, in place of its models.
             if row.index.is_none() {
                 let mut line = cursor_prefix(selected);
                 line.push(row.provider.clone(), muted());
@@ -214,9 +202,6 @@ pub(super) fn model_picker(app: &App, width: usize, height: usize) -> Vec<Line> 
     )
 }
 
-/// Profile picker: every profile the server advertises for this workspace
-/// with its approval mode, model override, and declaring pack. The row in
-/// effect (the focused session's, or the default for new sessions) is marked.
 pub(super) fn profile_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(Overlay::Profiles(picker)) = &app.overlay else {
         return fit_height(Vec::new(), height);
@@ -264,8 +249,6 @@ pub(super) fn profile_picker(app: &App, width: usize, height: usize) -> Vec<Line
     )
 }
 
-/// Approval-mode picker: every mode the server accepts with what it holds
-/// for approval. The mode in effect is marked.
 pub(super) fn approval_mode_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(Overlay::ApprovalModes(picker)) = &app.overlay else {
         return fit_height(Vec::new(), height);
@@ -301,9 +284,6 @@ pub(super) fn approval_mode_picker(app: &App, width: usize, height: usize) -> Ve
     )
 }
 
-/// Effort picker: `default` (restore config/profile) plus the levels the
-/// focused model advertises, or every level when the catalog is silent. The
-/// pin in effect is marked.
 pub(super) fn effort_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(Overlay::Effort(picker)) = &app.overlay else {
         return fit_height(Vec::new(), height);
@@ -353,10 +333,6 @@ pub(super) fn effort_picker(app: &App, width: usize, height: usize) -> Vec<Line>
     )
 }
 
-/// Skills picker: the workspace's indexed commands and skills with their
-/// source and description. Commands are grouped before skills. A degraded
-/// MCP host's reason sits under the search row, since its tools are what the
-/// picker cannot show.
 pub(super) fn skill_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(Overlay::Skills(picker)) = &app.overlay else {
         return fit_height(Vec::new(), height);
@@ -408,9 +384,6 @@ pub(super) fn skill_picker(app: &App, width: usize, height: usize) -> Vec<Line> 
     )
 }
 
-/// Theme picker. Each row shows the theme name and a swatch of its roles,
-/// painted in that theme's own colors so the list doubles as a preview
-/// strip; the whole frame is already drawn in the highlighted theme.
 pub(super) fn theme_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(Overlay::Themes { picker, .. }) = &app.overlay else {
         return fit_height(Vec::new(), height);
@@ -453,8 +426,6 @@ pub(super) fn theme_picker(app: &App, width: usize, height: usize) -> Vec<Line> 
     )
 }
 
-/// The command palette and the help overlay: every command with its chord
-/// and slash name. Help groups rows under category headers.
 pub(super) fn command_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some((picker, help)) = app.command_picker() else {
         return fit_height(Vec::new(), height);
@@ -505,15 +476,9 @@ pub(super) fn command_picker(app: &App, width: usize, height: usize) -> Vec<Line
     )
 }
 
-/// The approval block drawn under a tool call awaiting an answer: the
-/// command or the diff head, then the four choices. Rendered inline in the
-/// transcript so the decision is made with the run's context on screen.
 pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
     let mut lines = Vec::new();
     if let Some(question) = app.pending_question() {
-        // A question, not a permission: the current question with numbered
-        // options; earlier answers stay visible so a multi-question hold
-        // reads as a form being filled in.
         let answered = app.question_answers.len();
         let mut title = Line::styled("     ◇ ", warning());
         title.push("question", warning().bold());
@@ -568,9 +533,6 @@ pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
     let mut title = Line::styled("     ◇ ", warning());
     title.push("approval needed", warning().bold());
     lines.push(truncate_line(title, width));
-    // Both previews come from the approval event: the server states exactly
-    // what it will run or write, so the client never re-derives it from the
-    // call's arguments.
     let preview = app.pending_approval_preview();
     if let Some(shell) = preview.and_then(|preview| preview.shell.as_ref()) {
         let mut line = Line::styled("       $ ", muted());
@@ -618,10 +580,8 @@ pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
     lines
 }
 
-/// Diff rows an inline approval shows before offering to scroll.
 const MAX_APPROVAL_DIFF_ROWS: usize = 12;
 
-/// Prompt-history search: newest first, fuzzy filtered by what the user types.
 pub(super) fn history_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(picker) = app.history_picker() else {
         return fit_height(Vec::new(), height);

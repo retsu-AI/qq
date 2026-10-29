@@ -3,15 +3,10 @@ use super::*;
 #[cfg(test)]
 pub(super) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// One spinner for every running thing on screen, at the animation tick.
 pub(super) fn spinner(tick: usize) -> &'static str {
     TOOL_SPINNER[tick % TOOL_SPINNER.len()]
 }
 
-/// The single top row: brand mark, breadcrumb of the focused session, then
-/// right-aligned model, context occupancy, cost, and the connection state
-/// only when it is degraded. `local` and the version are not shown; they
-/// are in `/status`.
 pub(super) fn top_row(app: &App, width: usize) -> Line {
     let mut left = Line::styled(" qq", brand().bold());
     if let Some(focused) = app.focused() {
@@ -50,9 +45,6 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
         .map(|session| &session.summary);
     for item in app.settings.status_line() {
         let part: Option<(String, Style)> = match item {
-            // Without a session or a client default there is nothing to
-            // route to; say so where the model would be so `/models` is the
-            // obvious next step.
             StatusItem::Model => Some(
                 focused
                     .and_then(|session| session.model.as_deref())
@@ -62,14 +54,10 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
                         |model| (model.to_owned(), accent()),
                     ),
             ),
-            // The default profile is the unremarkable case; the badge appears
-            // only when a session (or the next one) runs as something else.
             StatusItem::Profile => {
                 let profile = focused.map_or(&app.profile, |session| &session.profile);
                 (!profile.is_default()).then(|| (format!("as {}", profile.as_str()), accent()))
             }
-            // `auto` is the default; the badge names anything stricter or
-            // looser so the user always knows what a held call means.
             StatusItem::ApprovalMode => {
                 let mode = focused.map_or(app.approval_mode, |session| session.approval_mode);
                 (mode != ApprovalMode::Auto).then(|| {
@@ -81,7 +69,6 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
                     (approval_mode_label(mode).to_owned(), style)
                 })
             }
-            // Omission is the unremarkable case; the badge names an explicit pin.
             StatusItem::Effort => {
                 let effort =
                     focused.map_or(app.reasoning_effort, |session| session.reasoning_effort);
@@ -130,12 +117,6 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
     align_sides(left, right, width)
 }
 
-/// The rule between transcript and composer carries the status the user
-/// needs while typing. A transient notice takes the left side while it
-/// lasts; otherwise a running session shows its activity, elapsed time, and
-/// time to first token. Approvals waiting in other sessions are named here
-/// too so they never stall silently. Context-sensitive key hints from the
-/// command table sit right, so the composer needs no hint row of its own.
 pub(super) fn composer_rule(app: &App, width: usize) -> Line {
     let mut left = Line::default();
     if let Some((status, level)) = app.visible_status() {
@@ -147,10 +128,6 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
         left.push(format!(" {prefix}{status} "), style.bold());
         return rule_with(left, Line::default(), width);
     }
-    // Standing guidance for a client that cannot create a session yet: it
-    // occupies the notice slot for as long as nothing is focused, so the
-    // first frame already says what to do instead of waiting for Alt-N to
-    // fail. A transient notice above takes precedence while it lasts.
     if app.focused().is_none()
         && let Some(guidance) = app.startup_guidance()
     {
@@ -235,8 +212,6 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
             },
             info(),
         );
-        // Elapsed and time to first token answer "is it stuck?" without a
-        // glance at the transcript.
         if let Some(stats) = session
             .summary
             .active_run_id
@@ -259,8 +234,6 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
                     muted(),
                 );
             }
-            // Committed turns and their cost so far, so a long agentic run
-            // shows it is progressing and what it has spent.
             if stats.turns > 0 {
                 left.push(format!("  turn {}", stats.turns), muted());
             }
@@ -278,7 +251,6 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
     let waiting: Vec<&str> = app
         .sessions_awaiting_approval()
         .into_iter()
-        // A side view hides its source transcript's approval block.
         .filter(|id| Some(*id) != app.view().transcript())
         .filter_map(|id| app.sessions.get(&id))
         .map(|session| session.summary.title.as_str())
@@ -311,9 +283,6 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
 
     let mut right = Line::default();
     for (command, label) in hints_for(app) {
-        // `?` on an empty composer opens help too, and is the cheaper key
-        // to discover; the hint names it while it works and falls back to
-        // the chord once typing has started.
         let chord = if command == crate::commands::Command::OpenHelp
             && app.mode() == Mode::Compose
             && app.composer.text.is_empty()
@@ -344,9 +313,6 @@ pub(super) fn goal_duration(ms: u64) -> String {
     }
 }
 
-/// A rule of `─` with `left` laid over its start and `right` over its end.
-/// Status on the left outranks hints on the right: when both do not fit
-/// with a visible run of rule, the hints go first.
 fn rule_with(left: Line, mut right: Line, width: usize) -> Line {
     const MIN_RULE: usize = 4;
     if !right.is_empty() {
@@ -358,8 +324,6 @@ fn rule_with(left: Line, mut right: Line, width: usize) -> Line {
     if left.width() + right.width() + MIN_RULE > width {
         right = Line::default();
     }
-    // The separating space after a truncated left side must not eat into
-    // the minimum rule.
     let mut rule = truncate_line(left, width.saturating_sub(right.width() + MIN_RULE + 1));
     if !rule.is_empty() {
         rule.push(" ", muted());
@@ -372,7 +336,6 @@ fn rule_with(left: Line, mut right: Line, width: usize) -> Line {
     truncate_line(rule, width)
 }
 
-/// The three or four most useful commands for the current state, in order.
 fn hints_for(app: &App) -> Vec<(crate::commands::Command, &'static str)> {
     use crate::commands::Command;
     let mut hints = Vec::with_capacity(4);
@@ -410,8 +373,6 @@ fn hints_for(app: &App) -> Vec<(crate::commands::Command, &'static str)> {
     hints
 }
 
-/// `Ctrl-K` as `^K`, `Alt-N` as `M-N`, function and plain keys unchanged:
-/// the footer has room for four hints only in the short form.
 fn compact_chord(chord: &str) -> String {
     let mut out = String::with_capacity(chord.len());
     let mut rest = chord;
@@ -433,16 +394,11 @@ fn compact_chord(chord: &str) -> String {
     out
 }
 
-/// What Enter does right now, shown as the composer's prompt glyph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ComposerMode {
-    /// Enter sends a new prompt.
     Send,
-    /// Enter steers the active run at its next boundary.
     Steer,
-    /// Enter holds the draft until the run finishes.
     Queue,
-    /// An approval owns input; the composer is disabled.
     Approval,
 }
 
@@ -465,23 +421,17 @@ impl ComposerMode {
         }
     }
 
-    /// Whether the composer accepts text at all.
     const fn disabled(self) -> bool {
         matches!(self, Self::Approval)
     }
 }
 
-/// Where the terminal cursor belongs after a frame, in frame coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CursorPosition {
     pub column: u16,
     pub row: u16,
 }
 
-/// The composer block: a rule carrying the approval-mode chip, then the
-/// draft rows with the mode glyph in the gutter of the first. Returns the
-/// rows and the caret's position relative to the block's first row, or
-/// `None` when the composer does not own the cursor.
 pub(super) fn composer(
     app: &App,
     width: usize,
@@ -489,7 +439,6 @@ pub(super) fn composer(
 ) -> (Vec<Line>, Option<(usize, usize)>) {
     let max_rows = max_rows.max(1);
     let mode = app.composer_mode();
-    // An armed amendment turns the composer into the steering note field.
     if let Some(choice) = &app.approval_amendment {
         let mut line = Line::styled(" ✎ ", warning().bold());
         line.push(
@@ -525,8 +474,6 @@ pub(super) fn composer(
         ComposerMode::Approval => muted(),
     };
     let gutter = format!(" {} ", mode.glyph());
-    // A free-text question uses the composer for the answer, so its caret
-    // shows; a permission hold has nothing to type.
     let answering = app
         .pending_question()
         .and_then(|question| question.questions.get(app.question_answers.len()))
@@ -545,8 +492,6 @@ pub(super) fn composer(
         return (vec![truncate_line(line, width)], caret);
     }
 
-    // Lay the draft out with the same wrapping the caret is measured by so
-    // both agree on where each character lands.
     let content_width = width.saturating_sub(3).max(1);
     let cursor = app.composer.cursor();
     let mut wrapped: Vec<Line> = Vec::new();
@@ -596,8 +541,6 @@ pub(super) fn composer(
         consumed += part.len() + 1;
     }
 
-    // When the draft outgrows the reserved composer region, keep the rows
-    // around the caret so the cursor and newest typing stay visible.
     if wrapped.len() > max_rows {
         let caret_row = caret.map_or(wrapped.len() - 1, |(_, row)| row);
         let skip = caret_row
@@ -628,8 +571,6 @@ pub(super) fn composer(
     (wrapped, caret)
 }
 
-/// Drafts held locally while the focused session runs, oldest first. Each
-/// takes one row; the newest is the one Alt-Up brings back.
 pub(super) fn queued_drafts(app: &App, width: usize) -> Vec<Line> {
     let Some(session_id) = app.focused() else {
         return Vec::new();
@@ -661,8 +602,6 @@ pub(super) fn queued_drafts(app: &App, width: usize) -> Vec<Line> {
         .collect()
 }
 
-/// One logical composer line with paste placeholders styled as tokens so the
-/// user can tell them from typed text.
 pub(super) fn composer_row(part: &str) -> Line {
     let mut line = Line::default();
     let mut rest = part;
@@ -678,13 +617,8 @@ pub(super) fn composer_row(part: &str) -> Line {
     line
 }
 
-/// Rows the slash menu wants to show. The rule stays within `MAX_SLASH_ROWS`
-/// so it never hides more than a few transcript rows.
 const MAX_SLASH_ROWS: usize = 8;
 
-/// The slash-command menu: a boxed list anchored to the bottom of the body,
-/// drawn over the transcript. Rows are the matching commands with the cursor
-/// kept visible; the box has a top rule so it reads as a menu, not as text.
 pub(super) fn slash_autocomplete(app: &App, width: usize, height: usize) -> Vec<Line> {
     let commands = app.filtered_slash_commands();
     if commands.is_empty() || height < 2 {
@@ -727,8 +661,6 @@ pub(super) fn slash_autocomplete(app: &App, width: usize, height: usize) -> Vec<
     lines
 }
 
-/// The `@` completion menu: workspace paths for the token at the cursor,
-/// same box as the slash menu so the two read as one affordance.
 pub(super) fn mention_autocomplete(app: &App, width: usize, height: usize) -> Vec<Line> {
     let candidates = &app.mention.candidates;
     if candidates.is_empty() || app.composer.mention_token().is_none() || height < 2 {

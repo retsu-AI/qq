@@ -1,8 +1,4 @@
 #![forbid(unsafe_code)]
-//! The daemon lifecycle, driven through the real binary in an isolated home:
-//! a detached start returns once the daemon serves, a second start attaches,
-//! status reports it, stop waits until the store is closed, restart replaces
-//! the process, and SIGTERM settles it like a stop request.
 #![cfg(unix)]
 
 use std::{
@@ -97,8 +93,6 @@ fn alive(pid: u32) -> bool {
     .is_ok()
 }
 
-/// Whether some process still owns the session store. The daemon holds this
-/// lock from opening the store until closing it.
 fn store_held(path: &Path) -> bool {
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -125,8 +119,6 @@ async fn detached_daemon_starts_once_reports_status_and_stops_after_closing_its_
     );
     let pid = pid_in(started.trim_end());
     assert!(alive(pid));
-    // The start returned only once the daemon served: discovery finds it
-    // without waiting, and it owns the store.
     let connection = qq_server::discover_at(&home.server_paths())
         .await
         .unwrap()
@@ -154,8 +146,6 @@ async fn detached_daemon_starts_once_reports_status_and_stops_after_closing_its_
 
     let stopped = stdout(&home.run(&["daemon", "stop"]).await);
     assert_eq!(stopped, format!("qq daemon stopped (pid {pid})\n"));
-    // `stop` returns once the store is closed, not merely once the listener
-    // went away: the next owner can open it immediately.
     assert!(!store_held(&home.store_lock()));
     assert!(
         qq_server::discover_at(&home.server_paths())
@@ -241,8 +231,6 @@ async fn sigterm_stops_a_foreground_daemon_and_releases_the_store() {
 
 #[tokio::test]
 async fn an_interactive_server_refuses_to_be_stopped_by_the_daemon_commands() {
-    // An embedded server has no stop route; `stop` names who owns it rather
-    // than stopping runs out from under an open TUI.
     let home = Home::new();
     let paths = home.server_paths();
     struct Unavailable;
@@ -299,8 +287,6 @@ async fn a_second_foreground_host_reports_the_running_daemon_at_once() {
 
 #[tokio::test]
 async fn stop_waits_for_a_host_that_is_already_closing() {
-    // A host that stopped listening but still holds its runtime: discovery
-    // finds nothing, yet the store is not free until the host lock drops.
     let home = Home::new();
     let paths = home.server_paths();
     let closing = qq_server::acquire_host_lock(&paths, Duration::ZERO)
@@ -321,8 +307,6 @@ async fn stop_waits_for_a_host_that_is_already_closing() {
     assert_eq!(stdout(&output), "qq daemon stopped\n");
 }
 
-/// Rewrites the running daemon's discovery file as if a qq build speaking
-/// `protocol` had written it, which is what an upgraded binary finds.
 fn advertise_protocol(home: &Home, protocol: u16) {
     let path = home.server_paths().metadata_file().to_path_buf();
     let current = std::fs::read_to_string(&path).unwrap();
@@ -337,9 +321,6 @@ fn advertise_protocol(home: &Home, protocol: u16) {
 
 #[tokio::test]
 async fn restart_replaces_a_daemon_from_another_protocol_version() {
-    // After an upgrade the running daemon speaks the previous protocol. The
-    // stop request is the one route every version shares, so `restart` must
-    // still stop it and start this build, not fail on the version check.
     let home = Home::new();
     let first = pid_in(stdout(&home.run(&["daemon", "run", "--detach"]).await).trim_end());
     let before = qq_server::discover_at(&home.server_paths())
@@ -373,8 +354,6 @@ async fn restart_replaces_a_daemon_from_another_protocol_version() {
         format!("qq daemon stopped (pid {second})\n")
     );
     assert!(!store_held(&home.store_lock()));
-    // The stopped daemon left the file it did not write. It names a server
-    // that no longer answers, so it is stale, exactly like one of ours.
     assert!(home.server_paths().metadata_file().exists());
     assert_eq!(
         stdout(&home.run(&["daemon", "stop"]).await),

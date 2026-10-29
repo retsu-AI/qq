@@ -1,11 +1,3 @@
-//! Cost of classifying one shell command: parse to a CST, collect simple
-//! commands through wrappers and constructs, judge each against the rule
-//! table. Runs on every shell call before policy, so it sits on the tool
-//! hot path.
-//!
-//! Measurement target: parse + classify ≤ 200 µs
-//! for a 1 KiB command.
-
 use std::{hint::black_box, time::Instant};
 
 use qq_core::classify_bench::classify;
@@ -44,14 +36,12 @@ fn main() {
         iterations,
         "env -i nice -n 5 timeout 30 sudo rm -rf / ",
     );
-    // ~1 KiB: a realistic long one-liner with a subshell, a loop, and quoting.
     let mut long = String::from("set -e; for f in src/*.rs crates/*/src/*.rs; do ");
     while long.len() < 900 {
         long.push_str("rg -n 'fn main' \"$f\" | head -n 3 && wc -l \"$f\" && ");
     }
     long.push_str("echo \"$f\"; done; (cd target && ls -la) | tail -5");
     measure("classify_1kib", iterations, &long);
-    // 16 KiB ceiling: skips parsing.
     let huge = "echo x && ".repeat(1_700);
     measure("classify_over_limit", iterations, &huge);
 }

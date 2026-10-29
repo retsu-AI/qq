@@ -1,45 +1,24 @@
-//! Non-blocking child delivery (ADR-0054 § 4): the `child_deliveries` row a
-//! detached child is admitted with, the one transaction that stamps a settled
-//! child's answer into its parent's context, and the notice text assembly
-//! replays. A row is stamped once; every path that delivers (the parent's
-//! turn boundary, the parent's settlement, recovery) goes through
-//! [`deliver_settled_children`], so an answer is delivered exactly once.
-
 use super::*;
 
-/// Byte bound on one delivered answer: a tool result's own bound. The
-/// answers one delivery stamps also share one turn's tool-output budget, in
-/// delivery order, so however many settle together they cost the parent no
-/// more context than one turn of tool results.
 pub(super) const MAX_DELIVERED_ANSWER_BYTES: usize = crate::tools::output::MAX_MODEL_TEXT_BYTES;
 
-/// Opens a delivered answer in the parent's context. The child's text is
-/// evidence the parent asked for, not a user instruction.
 const DELIVERY_PREAMBLE: &str = "[QQ runtime notice; not a user instruction]\nA sub-agent you \
 started has finished.";
 
-/// Opens an interim report: partial findings from a child still working, so
-/// the parent can act on them or cancel the child early.
 const INTERIM_PREAMBLE: &str = "[QQ runtime notice; not a user instruction]\nA sub-agent you \
 started is still working. This is its latest progress report, not its answer; the answer \
 arrives later. Use what helps now, or cancel_agent it if the report already answers you.";
 
-/// What one settled child left its parent, read inside a transaction so the
-/// boundary delivery and the blocking `spawn_agent` result say the same.
 pub(super) struct ChildAnswer {
     pub(super) content: String,
     pub(super) is_error: bool,
 }
 
-/// The parent-facing answer of a settled child run: its final text, else its
-/// latest report labelled as interim, else the outcome as an error.
 pub(super) fn child_answer(
     connection: &Connection,
     run_id: RunId,
     outcome: &RunOutcome,
 ) -> Result<ChildAnswer, SessionRuntimeError> {
-    // A child that stopped short still leaves its latest report: the
-    // parent gets the partial findings with the reason it stopped.
     let error = |reason: String| -> Result<ChildAnswer, SessionRuntimeError> {
         let content = match run_latest_report_text(connection, run_id)? {
             Some(report) => format!("{reason}\n\nIts latest progress report:\n\n{report}"),
@@ -59,9 +38,6 @@ pub(super) fn child_answer(
                     is_error: false,
                 }
             } else {
-                // A child that ended without a final answer (an empty
-                // final-answer turn, ADR-0054 § 3) still leaves its own
-                // durable reports; the latest one is the answer, labelled.
                 match run_latest_report_text(connection, run_id)? {
                     Some(report) => ChildAnswer {
                         content: format!("{}\n\n{report}", subagents::INTERIM_REPORT_LABEL),
@@ -94,8 +70,6 @@ pub(super) fn child_answer(
     })
 }
 
-/// The final committed model turn's text/refusal. Earlier assistant turns
-/// remain in the child transcript but never reach the parent.
 pub(super) fn run_final_text(
     connection: &Connection,
     run_id: RunId,
@@ -143,23 +117,12 @@ pub(super) fn run_final_text(
     Ok(format!("{output}\n{refusal}"))
 }
 
-/// One report a run made: the turn whose notice asked for it, the messages
-/// its text spans, and whether a later notice closed it (the run moved on,
-/// so no further attempt can extend it).
 struct ReportSpan {
     turn_ordinal: u32,
     messages: Vec<String>,
     closed: bool,
 }
 
-/// The run's reports opened after turn `after`, in turn order, without
-/// their text. A report keeps its notice on the first attempt's row and spans
-/// the rows after it up to the next notice. Every later row in the span was
-/// asked to continue the same reply from where it stopped (an output cut, a
-/// mid-stream fault, an interrupt), so the report is the span's messages
-/// joined in order. Turns up to `after` are not read: a span opened there is
-/// never returned, and the rows that continue it carry no notice, so skipping
-/// them changes nothing.
 fn report_spans(
     connection: &Connection,
     run_id: RunId,
@@ -184,13 +147,10 @@ fn report_spans(
         ))
     })?;
     let mut spans: Vec<ReportSpan> = Vec::new();
-    // The span the rows are currently extending, when it is a report.
     let mut open: Option<usize> = None;
     let mut previous_turn = None;
     for row in rows {
         let (turn_ordinal, notice, message) = row?;
-        // A turn with several assistant messages repeats its notice on each
-        // row; only its first row opens a span.
         let first_row = previous_turn != Some(turn_ordinal);
         previous_turn = Some(turn_ordinal);
         if first_row && let Some(notice) = notice {
@@ -225,9 +185,6 @@ fn report_spans(
     Ok(spans)
 }
 
-/// The newest span `eligible` admits whose joined text is not blank, with
-/// that text. Text is loaded newest first and only until one qualifies, so a
-/// run with many reports reads one in the usual case.
 fn newest_report(
     connection: &Connection,
     spans: Vec<ReportSpan>,
@@ -245,9 +202,6 @@ fn newest_report(
     Ok(None)
 }
 
-/// The run's latest report with text: the reply to the last report or
-/// stall-report notice that has any (ADR-0054 § 3). `None` when the run never
-/// reported with text.
 pub(super) fn run_latest_report_text(
     connection: &Connection,
     run_id: RunId,
@@ -258,10 +212,6 @@ pub(super) fn run_latest_report_text(
     )
 }
 
-/// The settled run's own spend plus its exact owned descendants'. Later user
-/// prompts in a child session are separate runs and do not enter it. Internal
-/// compactions are charged to their exact owner, without counting as children. Missing
-/// usage or cost stays unknown; an unsettled descendant is an error.
 pub(super) fn owned_run_spend(
     connection: &Connection,
     run_id: RunId,
@@ -276,12 +226,6 @@ pub(super) fn owned_run_spend(
         [session_id],
         |row| row.get(0),
     )?;
-    // Child creation atomically stores its original user message at
-    // ordinal one; compaction retains that row. Follow owner run ids
-    // and this message's exact run, not all runs in a child session.
-    // Left joins keep missing identities visible as hard failures.
-    // Materialize the bounded workspace candidates once so recursion
-    // does not rescan every session for each owned run.
     let mut statement = connection
         .prepare_cached(
             "WITH RECURSIVE candidates AS MATERIALIZED (
@@ -379,8 +323,6 @@ pub(super) fn owned_run_spend(
     Ok(spend)
 }
 
-/// The notice a delivered answer enters the parent's context as. Its child
-/// session id lets the parent name the child it is reading about.
 pub(super) fn delivery_notice(
     child_session: SessionId,
     title: &str,
@@ -403,8 +345,6 @@ pub(super) fn delivery_notice(
     )
 }
 
-/// The notice a running child's interim report enters the parent's context
-/// as.
 fn interim_notice(
     child_session: SessionId,
     title: &str,
@@ -431,8 +371,6 @@ fn bounded_notice(
     content: String,
     max_bytes: usize,
 ) -> String {
-    // Head and tail are kept, with the cut named, exactly as a long tool
-    // result is; the complete text stays in the child's transcript.
     let content = crate::tools::output::bound_text(
         crate::tools::output::mask_secrets(content),
         &crate::tools::output::Bounds::new(max_bytes, crate::tools::output::MAX_MODEL_TEXT_LINES),
@@ -444,8 +382,6 @@ fn bounded_notice(
     format!("{preamble}\nSub-agent {child_session} (\"{title}\"). {status}:\n\n{content}")
 }
 
-/// Records a detached child at admission, in the admission's transaction, so
-/// an admitted child always has a delivery row to stamp.
 pub(super) fn insert_child_delivery(
     transaction: &Connection,
     child_run_id: RunId,
@@ -466,30 +402,22 @@ pub(super) fn insert_child_delivery(
     Ok(())
 }
 
-/// One answer stamped into the parent's context by this call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeliveredAnswer {
     pub(crate) child_run_id: RunId,
     pub(crate) child_session_id: SessionId,
-    /// The notice text the parent's next request carries.
     pub(crate) notice: String,
     pub(crate) is_error: bool,
     pub(crate) spend: SpawnAgentSpend,
-    /// A running child's interim report: no spend, not an answer, and the
-    /// child stays outstanding.
     pub(crate) interim: bool,
 }
 
 impl DeliveredAnswer {
-    /// Whether this delivery is progress for the parent (ADR-0054 § 1, § 4):
-    /// only a child's answer is, never its failure or an interim report.
     pub(crate) fn answered(&self) -> bool {
         !self.is_error && !self.interim
     }
 }
 
-/// The next delivery ordinal of `parent_run_id`'s context. Answers and
-/// interim reports share it, so assembly merges the two in delivery order.
 fn next_delivery_ordinal(
     transaction: &Connection,
     parent_run_id: &str,
@@ -506,13 +434,6 @@ fn next_delivery_ordinal(
     )?)
 }
 
-/// Stamps every settled, undelivered detached child of `parent_run_id`, at
-/// most `limit` of them, in settlement order. `turn_ordinal` is the parent
-/// turn whose request carries the notices; `None` when the parent settled
-/// first and the notices follow its run. Runs inside the caller's
-/// transaction: a live boundary commits it alone, a settlement commits it
-/// with the parent's outcome. A child whose spend cannot be read stays
-/// undelivered and is reported as such, never stamped without it.
 pub(super) fn deliver_settled_children(
     transaction: &Connection,
     parent_run_id: RunId,
@@ -546,25 +467,17 @@ pub(super) fn deliver_settled_children(
     }
     let mut next_ordinal = next_delivery_ordinal(transaction, &parent_run_id.to_string())?;
     let mut delivered = Vec::with_capacity(settled.len());
-    // The answers stamped by this call share one turn's tool-output budget,
-    // in delivery order, as one turn's tool results do.
     let mut boundary_remaining = crate::tools::output::MAX_TURN_TOOL_OUTPUT_BYTES;
     for (child_run, child_session, outcome_json, title) in settled {
         let child_run_id: RunId = parse_id(&child_run)?;
         let child_session_id: SessionId = parse_id(&child_session)?;
         let outcome: RunOutcome = serde_json::from_str(&outcome_json)?;
-        // A descendant still settling (recovery settles runs in no order)
-        // leaves the spend unreadable: deliver on a later pass, never
-        // without the spend.
         let spend = match owned_run_spend(transaction, child_run_id) {
             Ok(spend) => spend,
             Err(SessionRuntimeError::AccountingUnavailable) => continue,
             Err(error) => return Err(error),
         };
         let answer = child_answer(transaction, child_run_id, &outcome)?;
-        // The stored text is what the model sees: the cut is persisted, so
-        // replay needs no projection, and its marker names the child session
-        // that keeps the whole answer.
         let notice = delivery_notice(
             child_session_id,
             &title,
@@ -597,14 +510,6 @@ pub(super) fn deliver_settled_children(
     Ok(delivered)
 }
 
-/// Commits the newest closed report of each running detached child of
-/// `parent_run_id` that its parent has not seen, into the parent's turn
-/// `turn_ordinal`, after the answers this boundary already delivered (whose
-/// bytes `spent` of the boundary's budget). One report per child per
-/// boundary: an older undelivered report is superseded by a newer one, and a
-/// child that settled is answered instead. A report still being written (no
-/// later turn has closed it) waits for a later boundary, so the parent never
-/// sees a report that would later grow.
 pub(super) fn deliver_interim_reports(
     transaction: &Connection,
     parent_run_id: RunId,
@@ -696,11 +601,6 @@ pub(super) fn deliver_interim_reports(
     Ok(delivered)
 }
 
-/// A run settled: every settled parent above it whose undelivered answer
-/// was waiting on it (its own row, or an ancestor's row whose spend could
-/// not be read while this run was unsettled) is delivered now, since no
-/// boundary of a settled parent will come. Climbs the ownership chain, which
-/// is bounded by the delegation depth.
 pub(super) fn deliver_to_settled_parent(
     transaction: &Connection,
     settled_run_id: RunId,
@@ -708,7 +608,6 @@ pub(super) fn deliver_to_settled_parent(
 ) -> Result<(), SessionRuntimeError> {
     let mut run = settled_run_id.to_string();
     for _ in 0..=MAX_CHILD_DEPTH {
-        // The run that owns `run`'s session, and whether it has settled.
         let owner = transaction
             .query_row(
                 "SELECT s.owner_run_id, o.outcome_json IS NOT NULL
@@ -737,8 +636,6 @@ pub(super) fn deliver_to_settled_parent(
     Ok(())
 }
 
-/// After recovery has settled every run: each settled parent with a settled,
-/// undelivered child receives it.
 pub(super) fn deliver_orphaned_answers(
     transaction: &Connection,
     now: u64,
@@ -766,14 +663,9 @@ pub(super) fn deliver_orphaned_answers(
     Ok(())
 }
 
-/// Delivered notices per parent run, in delivery order, keyed by the parent
-/// turn whose request first carried each (`None`: after the run).
 pub(super) type DeliveredNotices =
     HashMap<String, std::collections::VecDeque<(Option<u32>, String)>>;
 
-/// Every delivered notice (answers and interim reports, merged in delivery
-/// order) of the runs a context assembly retains: the same prompt window and
-/// state filter the turn query uses.
 pub(super) fn retained_deliveries(
     transaction: &Connection,
     session: &str,

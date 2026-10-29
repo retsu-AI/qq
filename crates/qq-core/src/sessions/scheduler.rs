@@ -48,8 +48,6 @@ pub(super) async fn schedule_runs(
         if *shutdown.borrow() || *inner.failed.borrow() {
             break;
         }
-        // Serialize the last autonomous admission with the host's drain
-        // boundary. Already accepted work and its children remain claimable.
         next_goal_wake = if inner.store.has_goals() {
             let _lifecycle = inner.lifecycle.read().await;
             if inner.draining.load(Ordering::Acquire) {
@@ -71,9 +69,6 @@ pub(super) async fn schedule_runs(
         } else {
             None
         };
-        // Each depth is claimed from its own queue against its own permit
-        // pool; see `child_permits` for why sharing a pool between a depth
-        // and its parents would deadlock parents awaiting their children.
         for depth in 0..=MAX_CHILD_DEPTH {
             let pool = if depth == 0 {
                 &inner.permits
@@ -172,10 +167,6 @@ async fn supervise_reserved_run(
         .await;
         return;
     }
-    // A cancel recorded before the claim rides the claim. One recorded
-    // between the claim and the registration above would have found no
-    // watch to signal, so the flag is re-read once now that the watch
-    // exists; every later cancel reaches it through `cancel`.
     if claimed.cancel_requested {
         cancel.send_replace(true);
     } else {

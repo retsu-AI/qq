@@ -1,15 +1,7 @@
-//! A client port that comes online after the first frame. The composition
-//! root hands the TUI a future that resolves to the real port once the server
-//! is reserved or discovered; until then the TUI paints `Connecting` and
-//! buffers a bounded number of requests instead of blocking startup on the
-//! network.
-
 use std::{collections::VecDeque, future::Future, pin::Pin, sync::Mutex};
 
 use crate::{ClientFailure, ClientPort, ClientRequest, ClientUpdate};
 
-/// Requests accepted before the inner port exists. More than this while the
-/// server is still coming up is a stuck startup, not a burst to absorb.
 const PENDING_REQUEST_LIMIT: usize = 64;
 
 type Connecting<P> = Pin<Box<dyn Future<Output = Result<P, ClientFailure>> + Send>>;
@@ -17,24 +9,18 @@ type Connecting<P> = Pin<Box<dyn Future<Output = Result<P, ClientFailure>> + Sen
 enum State<P> {
     Connecting(Connecting<P>),
     Ready(P),
-    /// The connect failed. `reported` flips once the failure has been
-    /// delivered as an update; after that the stream reads as closed.
     Failed {
         error: ClientFailure,
         reported: bool,
     },
 }
 
-/// A `ClientPort` whose inner port arrives later. `recv` drives the connect
-/// future first, so the loop's first `recv` completes the connection while
-/// the initial frame is already on screen.
 pub struct LazyPort<P> {
     state: State<P>,
     pending: Mutex<VecDeque<ClientRequest>>,
 }
 
 impl<P: ClientPort> LazyPort<P> {
-    /// Wrap `connect`; nothing runs until the loop first awaits `recv`.
     pub fn new(connect: impl Future<Output = Result<P, ClientFailure>> + Send + 'static) -> Self {
         Self {
             state: State::Connecting(Box::pin(connect)),
@@ -42,9 +28,6 @@ impl<P: ClientPort> LazyPort<P> {
         }
     }
 
-    /// Drive the connect future to completion, then replay buffered requests
-    /// into the real port. Failures are reported once and then repeated on
-    /// every send so the app can surface them.
     async fn ready(&mut self) -> Result<&mut P, ClientFailure> {
         if let State::Connecting(connect) = &mut self.state {
             match connect.await {
@@ -100,8 +83,6 @@ impl<P: ClientPort> ClientPort for LazyPort<P> {
         match self.ready().await {
             Ok(port) => port.recv().await,
             Err(error) => {
-                // Report the failure once through the update stream; the
-                // loop then treats the closed stream as the client stopping.
                 if let State::Failed { reported, .. } = &mut self.state
                     && !*reported
                 {

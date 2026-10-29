@@ -1,5 +1,3 @@
-//! Authenticated, single-instance HTTP and SSE server adapter.
-
 #![forbid(unsafe_code)]
 
 use std::{
@@ -100,7 +98,6 @@ pub type WorkspaceToolsFuture = Pin<
 pub type DelegationFuture =
     Pin<Box<dyn Future<Output = Result<DelegationRoster, ServerHandlerError>> + Send + 'static>>;
 
-/// Root-supplied application seam for durable session requests.
 pub trait ServerHandler: Send + Sync + 'static {
     fn command(&self, _request: CommandRequest) -> CommandFuture {
         Box::pin(async { Err(ServerHandlerError::Unavailable) })
@@ -121,28 +118,18 @@ pub trait ServerHandler: Send + Sync + 'static {
         Box::pin(async { Err(ServerHandlerError::Unavailable) })
     }
 
-    /// The agent profiles a workspace's configuration declares, for the
-    /// capability document. Everything else in that document is owned by the
-    /// transport and the protocol crate.
     fn profiles(&self, _workspace_id: WorkspaceId) -> ProfilesFuture {
         Box::pin(async { Err(ServerHandlerError::Unavailable) })
     }
 
-    /// The external tool hosts and skill index of a workspace's default plan,
-    /// for the capability document. The default returns nothing rather than
-    /// failing: a handler without plans still serves the static sections.
     fn workspace_tools(&self, _workspace_id: WorkspaceId) -> WorkspaceToolsFuture {
         Box::pin(async { Err(ServerHandlerError::Unavailable) })
     }
 
-    /// The delegation roster and bounds a workspace's configuration declares,
-    /// for the capability document.
     fn delegation(&self, _workspace_id: WorkspaceId) -> DelegationFuture {
         Box::pin(async { Err(ServerHandlerError::Unavailable) })
     }
 
-    /// Committed events after the request cursor, each with the JSON the
-    /// store persisted. The server writes that JSON to the SSE frame as-is.
     fn subscribe(
         &self,
         _request: SubscribeRequest,
@@ -151,7 +138,6 @@ pub trait ServerHandler: Send + Sync + 'static {
     }
 }
 
-/// Sanitized failures a root handler may return before streaming starts.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ServerHandlerError {
     #[error("{0}")]
@@ -162,7 +148,6 @@ pub enum ServerHandlerError {
     Internal,
 }
 
-/// Stable filesystem locations used for instance coordination.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerPaths {
     directory: PathBuf,
@@ -172,7 +157,6 @@ pub struct ServerPaths {
 }
 
 impl ServerPaths {
-    /// Uses `directory` as an injectable private state directory.
     #[must_use]
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         let directory = directory.into();
@@ -184,7 +168,6 @@ impl ServerPaths {
         }
     }
 
-    /// Uses QQ_HOME/data/runtime when set, otherwise the user's platform runtime directory.
     pub fn for_user() -> Result<Self, ServerError> {
         Self::for_user_with_home(std::env::var_os("QQ_HOME").as_deref())
     }
@@ -211,8 +194,6 @@ impl ServerPaths {
         &self.directory
     }
 
-    /// Creates the state directory as private (`0700` on Unix) if it is
-    /// missing, and rejects one that is a symlink or readable by others.
     pub fn create_directory(&self) -> Result<(), ServerError> {
         ensure_private_directory(&self.directory)
     }
@@ -228,7 +209,6 @@ impl ServerPaths {
     }
 }
 
-/// Server startup settings.
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
     paths: ServerPaths,
@@ -240,8 +220,6 @@ pub struct ServerOptions {
 }
 
 impl ServerOptions {
-    /// Creates session-server options using the default ephemeral IPv4
-    /// loopback address, this crate's version, and no cross-origin access.
     #[must_use]
     pub fn new(paths: ServerPaths) -> Self {
         Self {
@@ -254,29 +232,18 @@ impl ServerOptions {
         }
     }
 
-    /// Serves `POST /v1/daemon/shutdown`, which asks the host to stop
-    /// (observed through [`ServerHandle::stop_requested`]). Only a host that
-    /// waits on that signal enables it; without it the route answers `404`,
-    /// so a server embedded in a client cannot be stopped from outside.
     #[must_use]
     pub fn with_stop_route(mut self) -> Self {
         self.stop_route = true;
         self
     }
 
-    /// Overrides the version reported by health probes and discovery, and by
-    /// session-server capabilities. The binary passes its build string (version plus source
-    /// revision) so a client can tell two servers of the same version apart.
-    /// Must be non-empty, at most 256 bytes, and printable ASCII without
-    /// spaces; anything else is rejected at start as `InvalidVersion`.
     #[must_use]
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = version.into();
         self
     }
 
-    /// Permits browser pages from these exact origins to call the API. Empty
-    /// (the default) adds no CORS headers at all.
     #[must_use]
     pub fn with_allowed_origins(mut self, allowed_origins: AllowedOrigins) -> Self {
         self.allowed_origins = allowed_origins;
@@ -288,12 +255,10 @@ impl ServerOptions {
         &self.allowed_origins
     }
 
-    /// Creates options for the current user's state directory.
     pub fn for_user() -> Result<Self, ServerError> {
         Ok(Self::new(ServerPaths::for_user()?))
     }
 
-    /// Overrides the listener address. Only loopback addresses are accepted.
     #[must_use]
     pub fn with_bind_address(mut self, bind_address: SocketAddr) -> Self {
         self.bind_address = bind_address;
@@ -313,12 +278,6 @@ impl ServerOptions {
 
 pub type ServerConnection = LocalServerConnection;
 
-/// The durable identity a started server advertises in `ServerInfo`.
-///
-/// `server_id` is the store's identity so it matches every cursor the server
-/// issues; it is known only after the runtime opens, which is why the
-/// reservation carries no connection until `start`. `display_name` is a
-/// bounded printable label with no identity meaning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerIdentity {
     server_id: StoreId,
@@ -326,8 +285,6 @@ pub struct ServerIdentity {
 }
 
 impl ServerIdentity {
-    /// Labels the server with `display_name`, falling back to the host name
-    /// and then to a fixed label when the candidate has nothing printable.
     #[must_use]
     pub fn new(server_id: StoreId, display_name: Option<&str>) -> Self {
         let display_name = display_name
@@ -352,9 +309,6 @@ impl ServerIdentity {
 }
 
 fn host_display_name() -> Option<String> {
-    // `rustix::system::uname` is unavailable without another feature; the
-    // environment names every major platform exports are sufficient for a
-    // label that carries no identity.
     ["HOSTNAME", "COMPUTERNAME", "HOST"]
         .into_iter()
         .filter_map(|key| std::env::var(key).ok())
@@ -427,8 +381,6 @@ impl MetadataFile {
             return Err(ServerError::MetadataCorrupt);
         }
 
-        // `LocalServerConnection::new` validates the process metadata and the
-        // display name; a corrupt file maps to `MetadataCorrupt` below.
         LocalServerConnection::new(
             address,
             self.token,
@@ -481,24 +433,18 @@ impl fmt::Display for MetadataFile {
     }
 }
 
-/// Result of attempting to become the user-scoped server.
 #[derive(Debug)]
 pub enum StartOutcome {
     Started(ServerHandle),
     Existing(ServerConnection),
 }
 
-/// Result of claiming the local-instance lock before constructing the runtime
-/// that will serve it.
 #[derive(Debug)]
 pub enum ReserveOutcome {
     Reserved(Box<ServerReservation>),
     Existing(ServerConnection),
 }
 
-/// Exclusive local-server ownership. Keeping reservation separate from
-/// handler construction prevents a losing startup race from opening a second
-/// durable runtime against the same store.
 pub struct ServerReservation {
     listener: TcpListener,
     address: SocketAddr,
@@ -520,17 +466,11 @@ impl fmt::Debug for ServerReservation {
 }
 
 impl ServerReservation {
-    /// The bound listener address, known before the runtime opens.
     #[must_use]
     pub const fn address(&self) -> SocketAddr {
         self.address
     }
 
-    /// Starts serving with the handler constructed after ownership was won.
-    /// The identity comes from that handler's store, so the advertised
-    /// `server_id` matches every cursor the server will issue. Publishing the
-    /// discovery metadata here, not at reservation, keeps a losing starter
-    /// from attaching to a server that has no identity yet.
     pub fn start(
         self,
         handler: Arc<dyn ServerHandler>,
@@ -609,25 +549,19 @@ impl ServerReservation {
     }
 }
 
-/// Reports a stop request to the host; see [`ServerHandle::stop_requests`].
 #[derive(Debug, Clone)]
 pub struct StopRequests(watch::Receiver<bool>);
 
 impl StopRequests {
-    /// Resolves once a stop was requested. If the server is dropped first,
-    /// it resolves too: there is nothing left to stop.
     pub async fn wait(mut self) {
         let _ = self.0.wait_for(|requested| *requested).await;
     }
 }
 
-/// Owns a running server task and its graceful shutdown signal.
 pub struct ServerHandle {
     connection: ServerConnection,
     shutdown: Option<watch::Sender<bool>>,
     task: Option<JoinHandle<Result<(), ServerError>>>,
-    /// Keeps the stop channel open for the handle's life, so a server without
-    /// the stop route waits forever instead of observing a closed channel.
     _stop_sender: watch::Sender<bool>,
     stop_requests: watch::Receiver<bool>,
 }
@@ -638,30 +572,21 @@ impl ServerHandle {
         &self.connection
     }
 
-    /// Resolves once an authenticated client asked this server to stop
-    /// through `POST /v1/daemon/shutdown`. Never resolves unless the server
-    /// was started with [`ServerOptions::with_stop_route`]. The host decides
-    /// what stopping means; this only reports the request.
     pub async fn stop_requested(&self) {
         self.stop_requests().wait().await;
     }
 
-    /// A waiter for [`Self::stop_requested`] that does not borrow the
-    /// handle, so a host can wait for it alongside [`Self::finished`].
     #[must_use]
     pub fn stop_requests(&self) -> StopRequests {
         StopRequests(self.stop_requests.clone())
     }
 
-    /// Stops accepting connections and ends event streams without waiting for other responses.
     pub fn begin_shutdown(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(true);
         }
     }
 
-    /// Waits for the listener to stop. Cancelling this wait retains the task
-    /// handle, so the caller can still request and await graceful shutdown.
     pub async fn finished(&mut self) -> Result<(), ServerError> {
         let result = self
             .task
@@ -672,13 +597,10 @@ impl ServerHandle {
         result.map_err(|_| ServerError::ServerTaskStopped)?
     }
 
-    /// Requests graceful shutdown and waits for bounded metadata and lock cleanup.
     pub async fn shutdown(self) -> Result<(), ServerError> {
         self.shutdown_with_grace(DEFAULT_SHUTDOWN_GRACE).await
     }
 
-    /// Requests graceful shutdown and bounds the wait for response draining to
-    /// `grace`; aborts the serving task on expiry.
     pub async fn shutdown_with_grace(mut self, grace: Duration) -> Result<(), ServerError> {
         self.begin_shutdown();
         let mut task = self.task.take().ok_or(ServerError::ServerTaskStopped)?;
@@ -686,17 +608,13 @@ impl ServerHandle {
             Ok(result) => result.map_err(|_| ServerError::ServerTaskStopped)?,
             Err(_) => {
                 task.abort();
-                // Await the aborted task so its instance guard is dropped and
-                // releases metadata and the ownership lock before returning.
                 let _ = task.await;
                 Err(ServerError::ShutdownTimedOut)
             }
         }
     }
 
-    /// Runs in the foreground until the server stops or this future is cancelled.
     pub async fn wait(mut self) -> Result<(), ServerError> {
-        // Keeping the sender alive prevents the receiver from treating this as shutdown.
         let shutdown = self.shutdown.take();
         let result = self.join().await;
         drop(shutdown);
@@ -727,9 +645,6 @@ impl Drop for ServerHandle {
     }
 }
 
-/// Starts the server or returns the authenticated connection for the existing
-/// instance. Callers that must open their runtime after winning ownership use
-/// `reserve` and `ServerReservation::start` instead.
 pub async fn start(
     handler: Arc<dyn ServerHandler>,
     identity: ServerIdentity,
@@ -743,15 +658,10 @@ pub async fn start(
     }
 }
 
-/// Claims the local-instance lock and listener before a caller constructs its
-/// durable runtime. Dropping a reservation releases the lock and removes its
-/// metadata.
 pub async fn reserve(options: ServerOptions) -> Result<ReserveOutcome, ServerError> {
     if !options.bind_address.ip().is_loopback() {
         return Err(ServerError::NonLoopbackBind(options.bind_address));
     }
-    // Checked before the lock is taken so a bad version never claims the
-    // instance and then fails as generic metadata corruption.
     if !valid_process_version(&options.version) {
         return Err(ServerError::InvalidVersion(options.version));
     }
@@ -806,10 +716,6 @@ pub async fn reserve(options: ServerOptions) -> Result<ReserveOutcome, ServerErr
     })))
 }
 
-/// Held by a serving process from before its runtime opens until after the
-/// runtime closes, so other processes can tell when it has fully stopped.
-/// The instance lock alone is released as soon as the listener stops, while
-/// the runtime may still be closing its store.
 pub struct HostLock {
     _file: File,
 }
@@ -820,8 +726,6 @@ impl fmt::Debug for HostLock {
     }
 }
 
-/// Takes the host lock at `paths`, waiting up to `timeout` for a previous
-/// host that is still closing.
 pub async fn acquire_host_lock(
     paths: &ServerPaths,
     timeout: Duration,
@@ -848,9 +752,6 @@ pub async fn acquire_host_lock(
     }
 }
 
-/// Waits until no process holds the host lock at `paths`, or until `timeout`
-/// passes, and returns whether it was released. The probe takes the lock and
-/// drops it at once, so it never holds up a host that starts next.
 pub async fn wait_until_released(
     paths: &ServerPaths,
     timeout: Duration,
@@ -890,8 +791,6 @@ fn router(
         subscriptions: Arc::new(Semaphore::new(MAX_CONCURRENT_SUBSCRIPTIONS)),
         stop,
     };
-    // Command routes come from the protocol table so the client and server
-    // agree by construction; `command_routes_match_the_protocol_table` pins it.
     let mut router = Router::new();
     for (kind, path) in COMMAND_ROUTES {
         router = router.route(
@@ -914,8 +813,6 @@ fn router(
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
-        // Outermost so a preflight is answered before the fallbacks and before
-        // authentication; every other request passes straight through.
         .layer(middleware::from_fn(move |request, next| {
             cors::apply(allowed_origins.clone(), request, next)
         }))
@@ -946,9 +843,6 @@ async fn health(State(state): State<AppState>) -> Json<ServerInfo> {
     Json(state.connection.server_info().clone())
 }
 
-/// Asks the host to stop. The response names the server that will stop, so
-/// the caller can wait for that process; stopping itself happens after the
-/// response is sent.
 async fn daemon_shutdown(State(state): State<AppState>) -> Response {
     let Some(stop) = state.stop else {
         return api_error(
@@ -964,9 +858,6 @@ async fn daemon_shutdown(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// The admission preamble shared by every bounded JSON route: one request
-/// permit, the transport body limit, then a strict decode. The permit is
-/// returned so the handler holds it for the rest of the request.
 fn decode_bounded<T: serde::de::DeserializeOwned>(
     state: &AppState,
     body: Result<Bytes, BytesRejection>,
@@ -999,9 +890,6 @@ async fn session_command(
     if request.command.kind() != kind {
         return api_error(StatusCode::BAD_REQUEST, "invalid request");
     }
-    // Structured input is bounded at the transport, before the handler can
-    // admit anything durably: an oversized or malformed part is a client
-    // error, never a queued run.
     let input = match &request.command {
         SessionCommand::SubmitPrompt { input, .. } | SessionCommand::SteerRun { input, .. } => {
             Some(input.as_slice())
@@ -1039,7 +927,6 @@ async fn capabilities(
     State(state): State<AppState>,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    // An empty body is the protocol-1 capabilities probe; it decodes as default.
     let body = body.map(|body| {
         if body.is_empty() {
             Bytes::from_static(b"{}")
@@ -1058,14 +945,11 @@ async fn capabilities(
                 Ok(profiles) => Some(profiles),
                 Err(error) => return handler_error_response(error),
             };
-            // A workspace whose plan cannot compile still reports its
-            // profiles; the tool section is simply absent.
             let tools = match state.handler.workspace_tools(workspace_id).await {
                 Ok(tools) => Some(tools),
                 Err(ServerHandlerError::Unavailable | ServerHandlerError::Internal) => None,
                 Err(ServerHandlerError::InvalidRequest(_)) => None,
             };
-            // Delegation follows the same rule: absent when it cannot load.
             let delegation = state.handler.delegation(workspace_id).await.ok();
             (profiles, tools, delegation)
         }
@@ -1079,9 +963,6 @@ async fn capabilities(
     .into_response()
 }
 
-/// The capability document this server build advertises. Every bound is the
-/// constant the transport or runtime actually enforces, so a client that
-/// formats behavior from this document never trips a limit it was not told.
 fn server_capabilities(
     connection: &ServerConnection,
     profiles: Option<Vec<AgentProfileSummary>>,
@@ -1281,8 +1162,6 @@ async fn workspace_events(
                 }
                 Err(_) => return,
             };
-            // The store already encoded this event once, on commit; the
-            // frame carries those bytes and never re-serializes.
             if event.json.len() > MAX_EVENT_BYTES {
                 return;
             }
@@ -1356,8 +1235,6 @@ fn map_connection_error(error: LocalConnectionError) -> ServerError {
 struct InstanceGuard {
     _lock: File,
     paths: ServerPaths,
-    /// Set once `start` has published metadata; an unstarted reservation
-    /// owns no metadata file to remove.
     connection: Option<ServerConnection>,
     cleaned: bool,
 }
@@ -1398,37 +1275,21 @@ fn read_connection(paths: &ServerPaths) -> Result<Option<ServerConnection>, Serv
         .transpose()
 }
 
-/// Discovers and probes the current user's running QQ server.
 pub async fn discover() -> Result<Option<ServerConnection>, ServerError> {
     discover_at(&ServerPaths::for_user()?).await
 }
 
-/// Discovers and probes a QQ server rooted at explicit instance paths.
-///
-/// This is intended for isolated embeddings and test fixtures. Ordinary
-/// callers should use [`discover`], which retains the user-scoped default.
 pub async fn discover_at(paths: &ServerPaths) -> Result<Option<ServerConnection>, ServerError> {
     discover_at_endpoint(paths, "/v1/health").await
 }
 
-/// What [`request_stop_at`] found at the discovery path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopRequest {
-    /// No server advertised itself, or the one advertised did not answer.
     NotRunning,
-    /// The advertised server accepted the request and will stop.
     Stopping(ServerInfo),
-    /// The advertised server answered but cannot be stopped remotely: it is
-    /// embedded in an interactive client.
     Refused,
 }
 
-/// Asks the advertised server to stop, whatever protocol it speaks.
-///
-/// Discovery refuses a server of another protocol, since no other request
-/// would be understood. Stopping is the exception: every daemon serves
-/// [`DAEMON_SHUTDOWN_PATH`] with the same token and answer, so a newer binary
-/// can still replace the daemon an older one started.
 pub async fn request_stop_at(paths: &ServerPaths) -> Result<StopRequest, ServerError> {
     let Some((address, token)) = advertised_endpoint(paths)? else {
         return Ok(StopRequest::NotRunning);
@@ -1467,8 +1328,6 @@ async fn discover_at_endpoint(
         let connection = match connection_for_discovery(read_connection(paths)) {
             Ok(Some(connection)) => connection,
             Ok(None) => return Ok(None),
-            // Metadata of another protocol is only an error while its server
-            // answers; one it left behind is stale, like one of ours.
             Err(ServerError::ProtocolMismatch { expected, found }) => {
                 if other_protocol_answers(&client, paths, health_path).await? {
                     return Err(ServerError::ProtocolMismatch { expected, found });
@@ -1498,8 +1357,6 @@ async fn discover_at_endpoint(
     Ok(None)
 }
 
-/// Whether the server named by metadata of another protocol still answers
-/// its health route. Its body is not decoded: that shape is versioned too.
 async fn other_protocol_answers(
     client: &reqwest::Client,
     paths: &ServerPaths,
@@ -1517,8 +1374,6 @@ async fn other_protocol_answers(
         .is_ok_and(|response| response.status() == StatusCode::OK))
 }
 
-/// The address and token of whatever server the metadata names, without
-/// checking its protocol. `None` when no metadata exists.
 fn advertised_endpoint(paths: &ServerPaths) -> Result<Option<(SocketAddr, String)>, ServerError> {
     let metadata = match read_metadata_file(paths) {
         Ok(Some(metadata)) => metadata,
@@ -1582,9 +1437,7 @@ fn write_metadata_atomically(
     paths: &ServerPaths,
     metadata: &MetadataFile,
 ) -> Result<(), ServerError> {
-    if open_private_read_file(&paths.metadata_file)?.is_some() {
-        // Opening validates that an existing destination is neither a symlink nor insecure.
-    }
+    open_private_read_file(&paths.metadata_file)?;
     let encoded = ron::ser::to_string(metadata).map_err(|_| ServerError::MetadataCorrupt)?;
     if encoded.len() > MAX_METADATA_BYTES {
         return Err(ServerError::MetadataTooLarge);
@@ -2034,8 +1887,6 @@ mod tests {
         let home_b = directory.root.join("home-b");
         let a = ServerPaths::for_user_with_home(Some(home_a.as_os_str())).unwrap();
         let b = ServerPaths::for_user_with_home(Some(home_b.as_os_str())).unwrap();
-        // Establish isolation before touching any server state, including on
-        // a build without QQ_HOME support: never reserve the real user path.
         assert_eq!(a.directory(), home_a.join("data").join("runtime"));
         assert_eq!(b.directory(), home_b.join("data").join("runtime"));
         assert_ne!(a, b);
@@ -2200,7 +2051,6 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let app_origin = "https://app.example.com";
 
-        // Default: no allow list, no CORS headers, preflight is just a 405.
         let directory = TestDirectory::new();
         let server = start_test_server(directory.paths(), unavailable_handler()).await;
         let health = server.connection().endpoint("/v1/health");
@@ -2234,7 +2084,6 @@ mod tests {
         );
         server.shutdown().await.unwrap();
 
-        // Configured: exact origin echoed, preflight answered before auth.
         let directory = TestDirectory::new();
         let options = ServerOptions::new(directory.paths())
             .with_allowed_origins(AllowedOrigins::new([app_origin]).unwrap());
@@ -2272,9 +2121,6 @@ mod tests {
         assert_eq!(headers["access-control-allow-private-network"], "true");
         assert!(headers.get_all(VARY).iter().any(|value| value == "origin"));
 
-        // An actual cross-origin request: allowed origin decorated, still
-        // authenticated, and a 401 carries the CORS headers so the page can
-        // read the failure.
         let response = http
             .get(server.connection().endpoint("/v1/health"))
             .header(ORIGIN, app_origin)
@@ -2296,8 +2142,6 @@ mod tests {
             app_origin
         );
 
-        // A foreign origin gets nothing: no headers on a request, 403 on a
-        // preflight. Same-origin or non-browser requests are untouched.
         let foreign = http
             .get(server.connection().endpoint("/v1/health"))
             .header(ORIGIN, "https://evil.example.com")
@@ -2394,8 +2238,6 @@ mod tests {
             server.connection().server_info().version,
             "0.0.1+abc1234.2026-09-09"
         );
-        // The discovery file carries the same string, so a second process
-        // sees the running server's build, not its own.
         let metadata = read_metadata_file(&directory.paths()).unwrap().unwrap();
         assert_eq!(metadata.version, "0.0.1+abc1234.2026-09-09");
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -2491,10 +2333,6 @@ mod tests {
         server.shutdown().await.unwrap();
     }
 
-    /// A handler with a command journal: identical replays return the stored
-    /// receipt, a reused id with a different body is a conflict. Mirrors the
-    /// durable runtime's contract so route-level idempotency is testable
-    /// without SQLite.
     struct JournalHandler {
         journal: Mutex<Vec<(CommandRequest, CommandReceipt)>>,
         handled: Arc<Mutex<Vec<SessionCommand>>>,
@@ -2639,7 +2477,6 @@ mod tests {
         (status, body)
     }
 
-    /// One command of every kind, so a route test can drive the whole table.
     fn command_of_kind(kind: SessionCommandKind) -> SessionCommand {
         let session_id = SessionId::from_bytes([3; 16]);
         let run_id = qq_protocol::RunId::from_bytes([4; 16]);
@@ -2740,8 +2577,6 @@ mod tests {
         }
     }
 
-    /// Accepts every command kind with a fixed cancellation receipt and records
-    /// the kinds it saw, so a route test is about routing, not outcomes.
     struct KindRecordingHandler {
         kinds: Mutex<Vec<SessionCommandKind>>,
     }
@@ -2764,10 +2599,6 @@ mod tests {
         }
     }
 
-    /// The H22 acceptance gate: the server routes exactly the protocol table
-    /// the client posts to. Every kind is accepted at its own path and refused
-    /// at its neighbour's, so a route added to one side without the other
-    /// fails here rather than in the field.
     #[tokio::test]
     async fn command_routes_match_the_protocol_table() {
         let directory = TestDirectory::new();
@@ -2859,7 +2690,6 @@ mod tests {
             let (status, replay) = post(&server, path, &request).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(replay, first, "{path}: a retry must replay the receipt");
-            // Same id, different body: rejected, and the handler never ran it.
             let conflicting = CommandRequest {
                 command_id: request.command_id,
                 command: SessionCommand::CancelRun {
@@ -2876,7 +2706,6 @@ mod tests {
             "each command ran exactly once"
         );
 
-        // A body on the wrong route never reaches the handler.
         let misrouted = CommandRequest {
             command_id: qq_protocol::CommandId::generate().unwrap(),
             command: SessionCommand::CancelRun { run_id },
@@ -2919,8 +2748,6 @@ mod tests {
             let (status, _) = post(&server, "/v1/runs/steer", &body).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         }
-        // Unknown command fields and a bad profile id are rejected by the
-        // strict decoder before the handler too.
         for command in [
             serde_json::json!({"type": "submit_prompt", "session_id": session_id, "input": [{"type":"text","text":"x"}], "prompt": "legacy"}),
             serde_json::json!({"type": "set_session_profile", "session_id": session_id, "profile": "Not Valid"}),
@@ -2938,7 +2765,6 @@ mod tests {
             let (status, _) = post(&server, path, &body).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         }
-        // Oversized bodies are refused at the transport.
         let response = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -3032,8 +2858,6 @@ mod tests {
         let (status, _) = post(&server, "/v1/capabilities", &serde_json::json!({"nope": 1})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
-        // Version skew: a client built against an older struct still reads a
-        // newer server's health and capabilities documents.
         let health: serde_json::Value = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -3168,8 +2992,6 @@ mod tests {
         server.shutdown().await.unwrap();
     }
 
-    /// Republishes a live server's metadata as if a build of `protocol` had
-    /// written it.
     fn advertise_protocol(paths: &ServerPaths, connection: &ServerConnection, protocol: u16) {
         let mut metadata = MetadataFile::new(connection);
         metadata.protocol_version = protocol;
@@ -3213,9 +3035,6 @@ mod tests {
         let connection = embedded.connection().clone();
         embedded.shutdown().await.unwrap();
 
-        // What a stopped server of another version leaves behind: its
-        // metadata, naming a listener that is gone. That is stale, not a
-        // mismatch, so the next start replaces it.
         advertise_protocol(&embedded_paths, &connection, PROTOCOL_VERSION + 1);
         assert_eq!(
             request_stop_at(&embedded_paths).await.unwrap(),
@@ -3289,8 +3108,6 @@ mod tests {
         let ReserveOutcome::Reserved(reservation) = outcome else {
             panic!("test unexpectedly found an existing server");
         };
-        // Metadata carries the server identity, which only the started
-        // runtime knows; a bare reservation must not advertise itself.
         assert!(!paths.metadata_file().exists());
         assert!(reservation.address().ip().is_loopback());
         assert_ne!(reservation.address().port(), 0);
@@ -3494,7 +3311,6 @@ mod tests {
 
         impl Drop for DropSignal {
             fn drop(&mut self) {
-                // A failed test may have already dropped its receiver.
                 let _ = self.0.try_send(());
             }
         }
@@ -3628,8 +3444,6 @@ mod tests {
         let stopping: ServerInfo = accepted.json().await.unwrap();
         assert_eq!(&stopping, server.connection().server_info());
         server.stop_requested().await;
-        // Signalling is all the route does: the listener keeps serving until
-        // the host shuts it down.
         let health = http
             .get(server.connection().endpoint("/v1/health"))
             .bearer_auth(server.connection().expose_bearer_token())
@@ -3668,7 +3482,6 @@ mod tests {
         let host = acquire_host_lock(&paths, Duration::ZERO).await.unwrap();
         let server = start_test_server(paths.clone(), unavailable_handler()).await;
         server.shutdown().await.unwrap();
-        // The listener is gone, but the host is still closing its runtime.
         assert!(
             !wait_until_released(&paths, Duration::from_millis(50))
                 .await
@@ -3684,7 +3497,6 @@ mod tests {
         });
         drop(host);
         assert!(waiter.await.unwrap().unwrap());
-        // The waiter dropped its probe, so the next host takes the lock.
         drop(acquire_host_lock(&paths, Duration::ZERO).await.unwrap());
     }
 

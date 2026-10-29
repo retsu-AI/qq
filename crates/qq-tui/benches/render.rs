@@ -1,17 +1,3 @@
-//! TUI render-path benchmark.
-//!
-//! Measures the cost of building and diffing one frame in the situations the
-//! TUI rearchitecture plan budgets: a steady transcript, one streaming message,
-//! many background streaming sessions, and a keystroke echo. Every case runs
-//! fully in memory; no TTY or client transport is involved. Run with
-//! `cargo bench -p qq-tui --bench render`.
-//!
-//! The legacy scenes use a 160x48 terminal with the rail and inspector held
-//! off so they measure one transcript column at a fixed geometry across
-//! slices; `compact_80x24`, `wide_160x48_full`, `resize_ultra`, and
-//! `tool_calls_32_expanded_inspector` measure the responsive tiers as a user
-//! sees them, including the inspector pane.
-
 use std::{hint::black_box, time::Instant};
 
 use qq_tui::bench_support::BenchHarness;
@@ -21,12 +7,8 @@ const DEFAULT_ITERATIONS: u32 = 2_000;
 const WARMUP: u32 = 200;
 const STEADY_MESSAGES: u8 = 64;
 const BACKGROUND_SESSIONS: u8 = 8;
-/// Prose with paragraph breaks, as models actually emit it. Every ~100 bytes a
-/// blank line settles the preceding block.
 const DELTA: &str = "streamed text that keeps arriving in small pieces and eventually forms a paragraph of prose.\n\n";
-/// Worst case: one paragraph with no block boundary, so no prefix ever settles.
 const RUN_ON_DELTA: &str = "streamed text that keeps arriving in small pieces ";
-/// Deltas appended before measuring so the live message is already long.
 const LIVE_PREFILL: usize = 340;
 
 fn main() {
@@ -34,8 +16,6 @@ fn main() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_ITERATIONS);
-    // Highlighting schedules onto the Tokio blocking pool exactly as the
-    // event loop does; the frame path itself stays synchronous.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -61,10 +41,6 @@ fn main() {
     resize_ultra(iterations);
 }
 
-/// Sixty-four completed messages, no changes between frames. Measures the
-/// fixed per-frame cost of rebuilding the frame model and diffing it. The
-/// first frame is drawn plain; highlighting lands off-tick and is settled
-/// before the steady samples so they reflect the highlighted cache.
 fn steady_state(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
     harness.hide_sidebar();
@@ -80,8 +56,6 @@ fn steady_state(iterations: u32) {
             frames += 1;
         }
         if !harness.highlights_pending() && applied == 0 {
-            // Idle: request any highlights that were skipped while the
-            // pool was saturated by drawing once more, then re-check.
             black_box(harness.draw());
             if !harness.highlights_pending() {
                 break;
@@ -97,7 +71,6 @@ fn steady_state(iterations: u32) {
     report_samples("steady_state_frame", &samples);
 }
 
-/// Steady state with the sidebar visible and eight idle sessions listed.
 fn steady_state_with_sidebar(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 9, STEADY_MESSAGES);
     harness.show_sidebar();
@@ -107,9 +80,6 @@ fn steady_state_with_sidebar(iterations: u32) {
     report_samples("steady_state_with_sidebar_frame", &samples);
 }
 
-/// One long streaming message in the focused session receiving one delta per
-/// frame. Measures the settled-prefix cache: cost should track the open block,
-/// not the message.
 fn streaming_focused(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
     harness.hide_sidebar();
@@ -126,8 +96,6 @@ fn streaming_focused(iterations: u32) {
     report_samples("streaming_focused_delta_to_frame", &samples);
 }
 
-/// Same as above with a run-on paragraph that never settles, so every frame
-/// re-lays-out the whole 32 KiB live tail. This is the ceiling, not the norm.
 fn streaming_run_on(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
     harness.hide_sidebar();
@@ -144,10 +112,6 @@ fn streaming_run_on(iterations: u32) {
     report_samples("streaming_run_on_32kb_delta_to_frame", &samples);
 }
 
-/// Eight unfocused sessions each receiving one delta per frame while the
-/// focused session is idle. Each delta updates that session's live status
-/// (sidebar hidden here, so the frame itself does not change); the plan
-/// requires this to stay within 1.2x of the steady single-session frame.
 fn streaming_background(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, BACKGROUND_SESSIONS + 1, STEADY_MESSAGES);
     harness.hide_sidebar();
@@ -165,9 +129,6 @@ fn streaming_background(iterations: u32) {
     report_samples("streaming_background_8_delta_to_frame", &samples);
 }
 
-/// Twenty child sessions of the focused root streaming concurrently with the
-/// sidebar visible. Every delta updates a live tail that the sidebar renders,
-/// so this is the many-agents case the plan is for.
 fn children_with_sidebar(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 21, STEADY_MESSAGES);
     harness.show_sidebar();
@@ -185,8 +146,6 @@ fn children_with_sidebar(iterations: u32) {
     report_samples("children_20_with_sidebar_delta_to_frame", &samples);
 }
 
-/// One typed character followed by a frame. This is the latency a user feels
-/// most directly.
 fn keystroke_echo(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
     harness.hide_sidebar();
@@ -201,9 +160,6 @@ fn keystroke_echo(iterations: u32) {
     report_samples("keystroke_to_frame", &samples);
 }
 
-/// Thirty-two completed tool calls in the visible run: one row each (the
-/// default), folded to a summary row, and with every body expanded. The
-/// refinement plan budgets the expanded case at 60 µs p95.
 fn tool_calls_32(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, 4);
     harness.hide_sidebar();
@@ -220,16 +176,12 @@ fn tool_calls_32(iterations: u32) {
     black_box(harness.draw());
     let samples = collect(iterations, || harness.draw().len());
     report_samples("tool_calls_32_expanded_frame", &samples);
-    // The Wide tier's default: the same expanded bodies render in the
-    // inspector beside a transcript of summary rows.
     harness.show_inspector();
     black_box(harness.draw());
     let samples = collect(iterations, || harness.draw().len());
     report_samples("tool_calls_32_expanded_inspector_frame", &samples);
 }
 
-/// Two hundred sessions listed with the sidebar shown; the frame must scale
-/// with visible rows, not sessions.
 fn sessions_200_with_sidebar(iterations: u32) {
     let mut harness = BenchHarness::with_sessions(SIZE, 200);
     harness.show_sidebar();
@@ -239,8 +191,6 @@ fn sessions_200_with_sidebar(iterations: u32) {
     report_samples("sessions_200_with_sidebar_frame", &samples);
 }
 
-/// Open and dismiss the session picker over a steady transcript. Any cache
-/// invalidation on overlay open shows up here as a relayout on close.
 fn picker_open_close(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 4, STEADY_MESSAGES);
     harness.hide_sidebar();
@@ -253,8 +203,6 @@ fn picker_open_close(iterations: u32) {
     report_samples("picker_open_close_cycle", &samples);
 }
 
-/// Alternate the width by one column and draw the full frame, as a user
-/// dragging a terminal edge does.
 fn resize_horizontal(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
     harness.hide_sidebar();
@@ -268,8 +216,6 @@ fn resize_horizontal(iterations: u32) {
     report_samples("resize_horizontal_full_frame", &samples);
 }
 
-/// A laptop-sized terminal in the Compact tier: one column, an agent strip,
-/// no rail or inspector. Steady frames with three sessions.
 fn compact_80x24(iterations: u32) {
     let mut harness = BenchHarness::new((80, 24), 3, STEADY_MESSAGES);
     harness.settle_highlights();
@@ -278,9 +224,6 @@ fn compact_80x24(iterations: u32) {
     report_samples("compact_80x24_frame", &samples);
 }
 
-/// The Wide tier as laid out by default: transcript, inspector, and rail all
-/// on. The same content as `steady_state_with_sidebar` so the difference is
-/// the inspector column and the wider diff.
 fn wide_160x48_full(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 9, STEADY_MESSAGES);
     harness.show_inspector();
@@ -290,9 +233,6 @@ fn wide_160x48_full(iterations: u32) {
     report_samples("wide_160x48_full_frame", &samples);
 }
 
-/// A full repaint of a 480x120 frame in the Ultra tier, alternating one
-/// column of width so every row is rewritten. The largest frame a real
-/// display produces today.
 fn resize_ultra(iterations: u32) {
     let mut harness = BenchHarness::new((480, 120), 3, STEADY_MESSAGES);
     harness.settle_highlights();
@@ -351,9 +291,6 @@ fn micros(nanos: u128) -> String {
     format!("{:.1} us", nanos as f64 / 1_000.0)
 }
 
-/// One wheel notch over a long transcript, alternating direction so the
-/// viewport never pins at either end. The whole body is re-laid from cache
-/// and the visible window re-diffed: this is the cost of reading back.
 fn wheel_scroll(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
     harness.hide_sidebar();
@@ -375,10 +312,6 @@ fn wheel_scroll(iterations: u32) {
     report_samples("wheel_scroll_4_rows_to_frame", &samples);
 }
 
-/// The first minute of a session from an empty transcript: prompt accepted,
-/// run started, a read, a failing test, an edit in flight, and the model's
-/// streaming explanation, drawn after every event. Measures the path a user
-/// actually waits on when they start work, end to end through the reducer.
 fn golden_path_first_minute(iterations: u32) {
     let samples = collect(iterations, || {
         let mut harness = BenchHarness::new(SIZE, 3, 0);

@@ -21,13 +21,11 @@ impl Action {
         Self::InterruptRun,
     ];
 
-    /// Every bindable action.
     pub fn all() -> impl Iterator<Item = Self> {
         Self::ALL.into_iter()
     }
 }
 
-/// The compiled default chords for `action`, in `KeyChord` syntax.
 pub(crate) const fn default_chords(action: Action) -> &'static [&'static str] {
     match action {
         Action::ToggleNavigator => &["Ctrl-T"],
@@ -50,7 +48,6 @@ impl KeyChord {
         Self { code, modifiers }
     }
 
-    /// The key event this chord describes, for tests that drive the app.
     #[cfg(test)]
     pub(crate) fn to_event(self) -> KeyEvent {
         KeyEvent::new(self.code, self.modifiers)
@@ -71,8 +68,6 @@ impl FromStr for KeyChord {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let mut modifiers = KeyModifiers::NONE;
         let mut code = None;
-        // A trailing `-` names the minus key itself (`Alt--`), which a plain
-        // split would read as an empty token.
         let (value_parts, literal_minus) = match value.strip_suffix("--") {
             Some(prefix) => (format!("{prefix}-"), true),
             None => (value.to_owned(), false),
@@ -167,15 +162,11 @@ fn parse_key_code(value: &str) -> Result<KeyCode, SettingsError> {
     }
 }
 
-/// One item of the top row's right-hand status, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusItem {
     Model,
-    /// The agent profile in effect, shown only when it is not `default`.
     Profile,
-    /// The approval mode in effect, shown only when it is not `auto`.
     ApprovalMode,
-    /// The reasoning effort pin in effect, shown only when one is set.
     Effort,
     Context,
     Cost,
@@ -184,8 +175,6 @@ pub enum StatusItem {
 }
 
 impl StatusItem {
-    /// The default status line: model, profile, approval mode, context
-    /// occupancy, cost.
     pub const DEFAULT: [Self; 6] = [
         Self::Model,
         Self::Profile,
@@ -227,7 +216,6 @@ impl Settings {
         &self.bindings
     }
 
-    /// Items shown at the right of the top row, in order.
     #[must_use]
     pub fn status_line(&self) -> &[StatusItem] {
         &self.status_line
@@ -267,7 +255,6 @@ impl Default for SettingsBuilder {
 }
 
 impl SettingsBuilder {
-    /// Replace the top-row status items.
     #[must_use]
     pub fn status_line(mut self, items: Vec<StatusItem>) -> Self {
         self.status_line = items;

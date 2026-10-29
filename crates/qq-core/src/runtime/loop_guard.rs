@@ -1,11 +1,8 @@
-//! Exact bounded observation of executed tool results (ADR-0049 § 8).
-
 use sha2::{Digest, Sha256};
 
 const WINDOW_ATTEMPTS: u16 = 256;
 const QUIET_LIMIT: u16 = 512;
 
-/// Identity after the streaming parser has canonicalized JSON arguments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CallKey([u8; 32]);
 
@@ -44,8 +41,6 @@ impl LoopGuard {
         })
     }
 
-    /// Observe the actual result before spill citations or output projection.
-    /// Only calls that really executed can introduce a triple or repeat streak.
     #[cfg(test)]
     fn executed(&mut self, call: CallKey, result: &str, is_error: bool) -> bool {
         self.executed_digest(call, Sha256::digest(result.as_bytes()).into(), is_error)
@@ -87,22 +82,17 @@ impl LoopGuard {
         self.no_progress()
     }
 
-    /// An eligible denial, malformed call or guard refusal has no executed
-    /// triple. Report/final/over-cap refusals and interruptions never enter here.
     pub(crate) fn unexecuted(&mut self) -> bool {
         self.advance_window();
         self.quiet = self.quiet.saturating_add(1);
         self.no_progress()
     }
 
-    /// Unknown completion cannot prove a consecutive executed repeat streak.
     pub(crate) fn unobserved(&mut self) -> bool {
         self.last = None;
         self.unexecuted()
     }
 
-    /// Successful non-read-only work, checklist changes and applied steering.
-    /// This does not erase the run's lifetime eligible-attempt count.
     pub(crate) fn mutation(&mut self) {
         self.current.clear();
         self.previous.clear();

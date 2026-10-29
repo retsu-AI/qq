@@ -1,13 +1,3 @@
-//! Tool catalog compilation and progressive selection cost.
-//!
-//! `catalog_compile_512` compiles a catalog from the static tools plus two
-//! hosts contributing 512 external declarations with realistic schemas: the
-//! validation, deduplication, ordering, digest, exposure decision, and index
-//! rendering a plan pays once per generation. `select_tools_rank` is one
-//! ranking query against that catalog, the per-call cost of progressive
-//! disclosure. `plan_compile_with_host` is a full plan compile with a 64-tool
-//! host attached, for comparison with the host-less `plan_compile` bench.
-
 use std::{hint::black_box, sync::Arc, time::Instant};
 
 use futures_util::stream;

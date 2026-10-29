@@ -5,11 +5,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::sessions::{PersistenceFault, SessionRuntimeError};
 
-/// Current session store schema, stored as `metadata.schema_version`. Bump it
-/// with every migration step appended to `open_database`.
 pub const STORE_SCHEMA_VERSION: u16 = 65;
 
-// Also a reclamation outbox: pending acknowledgements survive session pruning.
 const NATIVE_COMMAND_OWNERS: &str = "CREATE TABLE native_command_owners (
     tool_call_id TEXT NOT NULL PRIMARY KEY CHECK(length(tool_call_id)=32),
     owner_id TEXT NOT NULL CHECK(length(owner_id)=32),
@@ -19,29 +16,16 @@ const NATIVE_COMMAND_OWNERS: &str = "CREATE TABLE native_command_owners (
 const GOAL_POLICY_COLUMN: &str = "policy_json TEXT CHECK(policy_json IS NULL OR (json_valid(policy_json) AND length(policy_json)<=8192))";
 const GOAL_SPECIFICATION_COLUMN: &str = "specification_at_ms INTEGER CHECK(specification_at_ms IS NULL OR (specification_at_ms>=0 AND policy_json IS NOT NULL))";
 
-/// Suffix of the sibling file whose advisory lock marks the store's owner.
 pub const OWNER_LOCK_SUFFIX: &str = ".lock";
 
-/// Exclusive ownership of one store. An OS advisory lock on a sibling
-/// `<store>.lock` file: a process that exits or crashes releases it without
-/// cleanup, and dropping the guard releases it deliberately. The file carries
-/// no data; the database itself is opened only after the lock is held.
 pub(in crate::sessions) struct StoreOwnership {
     _file: std::fs::File,
 }
 
-/// How long an opener waits for a departing owner to release the store
-/// before reporting it busy. Covers the ordinary handoff (the previous owner
-/// is closing its connection as the next one starts) without turning a
-/// genuinely busy store into a hang. Blocking: runs on the store's own
-/// thread, never on an executor.
 pub(in crate::sessions) const OWNERSHIP_WAIT: std::time::Duration =
     std::time::Duration::from_millis(1_500);
 const OWNERSHIP_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
-/// Takes exclusive ownership of the store at `path` or reports that another
-/// process holds it. Runs before SQLite is opened so a busy store sees no
-/// I/O beyond this probe.
 pub(in crate::sessions) fn acquire_ownership(
     path: &std::path::Path,
 ) -> Result<StoreOwnership, SessionRuntimeError> {
@@ -100,7 +84,6 @@ pub(in crate::sessions) fn open_database(
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    // Hot statements on the output lane are prepared once per connection.
     connection.set_prepared_statement_cache_capacity(128);
     #[cfg(unix)]
     {
@@ -1678,9 +1661,6 @@ pub(in crate::sessions) fn open_database(
         return Err(SessionRuntimeError::CONSTRAINT);
     }
 
-    // 33: an in-run compaction marker names the run whose earlier turns its
-    // summary replaces and the last turn ordinal it covers. Between-run
-    // markers leave both NULL and keep their prompt-ordinal semantics.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -1719,8 +1699,6 @@ pub(in crate::sessions) fn open_database(
         )
     ) {
         let transaction = connection.transaction()?;
-        // Test fixtures for very old versions never created the table; the
-        // ≥10 branch above is a no-op for them. Create before altering.
         if !has_table(&transaction, "session_compactions")? {
             create_session_compactions_table(&transaction)?;
         }
@@ -1749,8 +1727,6 @@ pub(in crate::sessions) fn open_database(
             return Err(SessionRuntimeError::CONSTRAINT);
         }
     }
-    // 34: optional per-session reasoning effort pin. NULL means the compiled
-    // plan's configured or profile choice; a stored value is applied at claim.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -1802,12 +1778,6 @@ pub(in crate::sessions) fn open_database(
     {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
-    // 35: who recorded a session grant, and for a delegate, which run. `human`
-    // is every grant that existed before (approve-for-session,
-    // approve-for-workspace, config seed) and stays NULL for `run_id`.
-    // `delegate` is a reviewer's exact-command or exact-host grant: it
-    // matches only the exact string, never lifts `Forbidden`, is capped per
-    // run by `run_id`, and is never promoted to workspace config.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -1862,10 +1832,6 @@ pub(in crate::sessions) fn open_database(
         )?;
         transaction.commit()?;
     }
-    // 36: a per-session override of who settles held calls
-    // (`set_approval_delegate`). NULL means the configured `approval_delegate`
-    // applies; a stored value (`by_mode`, `on`, `off`) is read by the gate at
-    // each held call and inherited by spawned children.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -1910,7 +1876,6 @@ pub(in crate::sessions) fn open_database(
         )?;
         transaction.commit()?;
     }
-    // 37: persisted `max` effort requires a reader that understands it.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -1949,7 +1914,6 @@ pub(in crate::sessions) fn open_database(
             [],
         )?;
     }
-    // 38: model turns may contain a provider continuation envelope.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -1987,7 +1951,6 @@ pub(in crate::sessions) fn open_database(
             [],
         )?;
     }
-    // 39: explicit provider-default effort is distinct from inheritance.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -2024,9 +1987,6 @@ pub(in crate::sessions) fn open_database(
             [],
         )?;
     }
-    // 40: a model turn records the runtime notice its request first carried
-    // (ADR-0054 § 2): `report` or `continuation`, NULL for none. Assembly
-    // replays it before the turn.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -2070,9 +2030,6 @@ pub(in crate::sessions) fn open_database(
     if column_shape(&connection, "model_turns", "notice")? != ("TEXT".to_owned(), false, None, 0) {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
-    // 41: a non-blocking child's answer is delivered into its parent's
-    // context once (ADR-0054 § 4). One row per delivery, keyed by the child
-    // run, so a second delivery of the same answer is a constraint failure.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -2111,9 +2068,6 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_child_deliveries_table(&connection)?;
-    // 42: a running child's interim reports reach its parent, each once
-    // (ADR-0054 § 4). A row is written only when a report is delivered, keyed
-    // by the child's report turn.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -2151,10 +2105,6 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_child_reports_table(&connection)?;
-    // 43: assembly stubs stale read-only results only up to a durable
-    // watermark (ADR-0056 § 6). An upgraded session's watermark is its
-    // newest committed turn, so it assembles exactly as before the upgrade
-    // and then holds still until the next seam.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -2213,8 +2163,6 @@ pub(in crate::sessions) fn open_database(
             return Err(SessionRuntimeError::CONSTRAINT);
         }
     }
-    // 44: isolated side questions (SQ1; docs/design/side-questions.md). Rows never enter
-    // the main transcript; at most one runs per session.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -2276,8 +2224,6 @@ pub(in crate::sessions) fn open_database(
             return Err(SessionRuntimeError::CONSTRAINT);
         }
     }
-    // 45: who a held call waits on. Existing schema-45 stores already
-    // contain this flag; never recreate or reset their delegated authority.
     let has_tool_calls = has_table(&connection, "tool_calls")?;
     if !matches!(
         schema_version.as_deref(),
@@ -2317,8 +2263,6 @@ pub(in crate::sessions) fn open_database(
         )?;
         transaction.commit()?;
     }
-    // 46: owned internal compaction attempts belong to their prompt's spend
-    // receipt. Add the bounded owner lookup after main's schema-45 migration.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -2357,8 +2301,6 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_owned_compaction_index(&connection)?;
-    // 47: evidence captured by the process executor, independent of output.
-    // Historical calls remain NULL and cannot qualify execution effects.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -2398,8 +2340,6 @@ pub(in crate::sessions) fn open_database(
     {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
-    // 49: exact model-facing tool replies and checkpoint correction notice.
-    // Published experimental schema 48 belongs to the later root-stall slice.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -2430,8 +2370,6 @@ pub(in crate::sessions) fn open_database(
         {
             return Err(SessionRuntimeError::CONSTRAINT);
         }
-        // Schema48 already contains notices that a schema49 reader cannot decode.
-        // Publish its projection storage and compatible version in one transaction.
         let projection_version = if schema_version.as_deref() == Some("48") {
             "50"
         } else {
@@ -2449,8 +2387,6 @@ pub(in crate::sessions) fn open_database(
     {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
-    // 50: root_stall_report is a replay value. Experimental48 already used
-    // it; this reader retains its codec and adds projection storage first.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -2479,7 +2415,6 @@ pub(in crate::sessions) fn open_database(
         )?;
         transaction.commit()?;
     }
-    // 51: durable session goals retain history and fence client generations.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -2541,7 +2476,6 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_goal_schema(&connection)?;
-    // 52: exact request and helper-work evidence.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -2578,7 +2512,6 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_goal_request_schema(&connection)?;
-    // 53: immutable initial delegated paid-owner anchors.
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -2611,7 +2544,6 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_goal_paid_owner_schema(&connection)?;
-    // 54: recover work evidence omitted by the nullable schema52 migration.
     if !matches!(
         schema_version.as_deref(),
         Some("54" | "55" | "56" | "57" | "58" | "59" | "60" | "61" | "62" | "63" | "64" | "65")
@@ -2625,7 +2557,6 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
 
-    // 55: preserve legacy admissions that have no completed model-turn row.
     if !matches!(
         schema_version.as_deref(),
         Some("55" | "56" | "57" | "58" | "59" | "60" | "61" | "62" | "63" | "64" | "65")
@@ -2639,7 +2570,6 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
 
-    // 56: GoalCheck is a persisted run kind. Older readers cannot recover it.
     if !matches!(
         schema_version.as_deref(),
         Some("56" | "57" | "58" | "59" | "60" | "61" | "62" | "63" | "64" | "65")
@@ -2705,8 +2635,6 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
 
-    // Additive projection index: assembling human answers must not revisit
-    // every historical shell/read call after each automatic compaction.
     if has_tool_calls {
         connection.execute_batch(
             "CREATE INDEX IF NOT EXISTS tool_calls_answered_inputs
@@ -2716,8 +2644,6 @@ pub(in crate::sessions) fn open_database(
         )?;
     }
 
-    // 60: persisted native scopes are an execution boundary. Older runtimes
-    // must refuse this store rather than ignore its authority metadata.
     if !matches!(
         schema_version.as_deref(),
         Some("60" | "61" | "62" | "63" | "64" | "65")
@@ -2728,7 +2654,6 @@ pub(in crate::sessions) fn open_database(
         )?;
     }
 
-    // 61: recovery evidence survives independently of delivery replay.
     if !matches!(
         schema_version.as_deref(),
         Some("61" | "62" | "63" | "64" | "65")
@@ -2738,9 +2663,6 @@ pub(in crate::sessions) fn open_database(
             transaction.execute_batch("ALTER TABLE model_turns ADD COLUMN legacy_checkpoint_required INTEGER NOT NULL DEFAULT 0 CHECK(legacy_checkpoint_required IN (0,1));")?;
         }
         if has_tool_calls {
-            // Read the archive once, rather than probing its JSON for every
-            // retained turn on every context assembly. This is only legacy
-            // evidence: current runtimes do not emit checkpoint events.
             let legacy: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM runs WHERE CASE WHEN json_valid(plan_descriptor_json)
                  THEN json_extract(plan_descriptor_json,'$.checkpoint') END IS NOT NULL)",
@@ -2788,7 +2710,6 @@ pub(in crate::sessions) fn open_database(
         return Err(SessionRuntimeError::CONSTRAINT);
     }
 
-    // 62: terminal receipts belong to runs, independently of delivery replay.
     if !matches!(schema_version.as_deref(), Some("62" | "63" | "64" | "65")) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "runs", "completion_sequence")? {
@@ -2796,7 +2717,6 @@ pub(in crate::sessions) fn open_database(
                 ALTER TABLE runs ADD COLUMN completion_json TEXT CHECK((completion_json IS NULL AND completion_sequence=0) OR (completion_json IS NOT NULL AND completion_sequence>0 AND json_valid(completion_json) AND length(CAST(completion_json AS BLOB))<=1048576));
                 CREATE INDEX runs_completion ON runs(session_id,completion_sequence) WHERE completion_sequence>0;")?;
         }
-        // The backfill decodes journaled summaries; see migrations 64 and 65.
         retire_supervised_mode(&transaction)?;
         retire_approval_delegate_fields(&transaction)?;
         crate::sessions::completions::migrate(&transaction)?;
@@ -2815,7 +2735,6 @@ pub(in crate::sessions) fn open_database(
         return Err(SessionRuntimeError::CONSTRAINT);
     }
 
-    // 63: snapshots carry the original hold details and delegate escalation.
     if !matches!(schema_version.as_deref(), Some("63" | "64" | "65")) {
         let transaction = connection.transaction()?;
         if has_tool_calls {
@@ -2847,8 +2766,6 @@ pub(in crate::sessions) fn open_database(
         return Err(SessionRuntimeError::CONSTRAINT);
     }
 
-    // 64: retire the `supervised` approval mode (see `retire_supervised_mode`).
-    // Stores from before 62 already did so ahead of the receipt backfill.
     if !matches!(schema_version.as_deref(), Some("64" | "65")) {
         let transaction = connection.transaction()?;
         retire_supervised_mode(&transaction)?;
@@ -2859,11 +2776,6 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
 
-    // 65: protocol 41 removed the approval reviewer, `approval_delegate`
-    // and session/workspace approval grants, and shell commands no longer
-    // have a native owner. Drop their storage and strip the removed fields
-    // from journaled summaries and recorded hold inputs, whose decoders
-    // reject unknown fields.
     if schema_version.as_deref() != Some("65") {
         let transaction = connection.transaction()?;
         retire_approval_delegate_fields(&transaction)?;
@@ -2932,12 +2844,6 @@ pub(in crate::sessions) fn open_database(
     Ok((connection, store_id))
 }
 
-/// v0.1.3 through v0.1.8 recorded write sub-agents as `supervised`, a mode
-/// protocol 37 retired. Those children now run as `auto`, so the row and
-/// every journaled summary of it say `auto`;
-/// nothing else in the store ever held the value. Runs once `runs` has
-/// completion receipts, and before anything decodes journaled summaries:
-/// such readers skip what they cannot decode.
 fn retire_supervised_mode(connection: &Connection) -> Result<(), SessionRuntimeError> {
     connection.execute_batch(
         "UPDATE sessions SET approval_mode='auto' WHERE approval_mode='supervised';
@@ -2951,11 +2857,6 @@ fn retire_supervised_mode(connection: &Connection) -> Result<(), SessionRuntimeE
     Ok(())
 }
 
-/// Protocol 41 removed `SessionSummary::approval_delegate`,
-/// `PendingHold::delegated` and the recorded hold's `delegated` flag; their
-/// decoders reject unknown fields, so journaled summaries, completion
-/// receipts and pending hold inputs drop them. Runs before anything decodes
-/// journaled summaries, like [`retire_supervised_mode`].
 fn retire_approval_delegate_fields(connection: &Connection) -> Result<(), SessionRuntimeError> {
     let holds = (0..qq_protocol::MAX_PENDING_HOLDS)
         .map(|index| format!(",'$.event.session.pending_holds[{index}].delegated'"))
@@ -3026,7 +2927,6 @@ fn validate_goal_schema(connection: &Connection) -> Result<(), SessionRuntimeErr
         let valid = sql.as_deref().is_some_and(|sql| {
             let mut actual: String = sql.split_whitespace().collect();
             if kind == "table" {
-                // The base constraints survive schema58's private columns.
                 for definition in [GOAL_POLICY_COLUMN, GOAL_SPECIFICATION_COLUMN] {
                     let addition =
                         format!(",{}", definition.split_whitespace().collect::<String>());
@@ -3068,8 +2968,6 @@ fn add_run_limits_storage(connection: &Connection) -> Result<(), SessionRuntimeE
     Ok(())
 }
 
-/// Historical runs carry NULL: they were admitted without caller limits and
-/// must never be reinterpreted under current defaults.
 fn validate_run_limits_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if column_shape(connection, "runs", "limits_json")? != ("TEXT".to_owned(), false, None, 0) {
         return Err(SessionRuntimeError::CONSTRAINT);
@@ -3225,8 +3123,6 @@ fn column_shape(
         .unwrap_or(Err(SessionRuntimeError::CONSTRAINT))
 }
 
-/// Existing runs remain explicitly unknown: no current configuration is
-/// guessed for historical work.
 fn add_runs_resolved_model_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "resolved_model_json")? {
         connection.execute("ALTER TABLE runs ADD COLUMN resolved_model_json TEXT", [])?;
@@ -3264,8 +3160,6 @@ fn add_linear_streaming_storage(connection: &Connection) -> Result<(), SessionRu
     Ok(())
 }
 
-/// SQLite treats `TEXT PRIMARY KEY` as nullable. Stores created before the
-/// explicit `NOT NULL` declaration fail the later shape check unless rewritten.
 fn normalize_promotion_outbox(connection: &Connection) -> Result<(), SessionRuntimeError> {
     let command_id = column_shape(
         connection,
@@ -3504,9 +3398,6 @@ fn validate_model_turn_audit_schema(connection: &Connection) -> Result<(), Sessi
     Ok(())
 }
 
-/// Adds `messages.turn_ordinal` for stores created before per-turn assistant
-/// messages. Existing rows keep 0: legacy runs render as one message with the
-/// run's calls grouped after it.
 fn add_messages_turn_ordinal_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "messages", "turn_ordinal")? {
         connection.execute(
@@ -3517,9 +3408,6 @@ fn add_messages_turn_ordinal_column(connection: &Connection) -> Result<(), Sessi
     Ok(())
 }
 
-/// Adds `tool_calls.display_json` for stores created before tool calls
-/// carried a UI display payload. Existing rows keep NULL: legacy results
-/// render from their bounded result string alone.
 fn add_tool_calls_display_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "tool_calls", "display_json")? {
         connection.execute("ALTER TABLE tool_calls ADD COLUMN display_json TEXT", [])?;
@@ -3557,9 +3445,6 @@ fn create_session_files_table(connection: &Connection) -> Result<(), SessionRunt
         .map_err(|_| SessionRuntimeError::CONSTRAINT)
 }
 
-/// One committed compaction: the structured summary and the message-ordinal
-/// cutoff it replaces. Assembly reads the newest row; older rows are bounded
-/// history retained for a future rollback command.
 fn create_session_compactions_table(connection: &Connection) -> Result<(), SessionRuntimeError> {
     connection
         .execute_batch(
@@ -3580,8 +3465,6 @@ fn create_session_compactions_table(connection: &Connection) -> Result<(), Sessi
         .map_err(|_| SessionRuntimeError::CONSTRAINT)
 }
 
-/// Adds `runs.kind` for stores created before internal compaction runs.
-/// Existing rows keep 'prompt'.
 fn add_runs_kind_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "kind")? {
         connection.execute(
@@ -3592,9 +3475,6 @@ fn add_runs_kind_column(connection: &Connection) -> Result<(), SessionRuntimeErr
     Ok(())
 }
 
-/// Adds `runs.context_tokens` for stores created before the last model
-/// turn's input-token total was persisted separately from the run's summed
-/// billing usage. Existing rows keep NULL: clients fall back to the sum.
 fn add_runs_context_tokens_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "context_tokens")? {
         connection.execute("ALTER TABLE runs ADD COLUMN context_tokens INTEGER", [])?;
@@ -3602,9 +3482,6 @@ fn add_runs_context_tokens_column(connection: &Connection) -> Result<(), Session
     Ok(())
 }
 
-/// Adds authoritative session occupancy without guessing from historical
-/// run billing totals. Existing sessions remain unknown until a prompt turn
-/// reports usage.
 fn add_sessions_context_tokens_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "sessions", "context_tokens")? {
         connection.execute("ALTER TABLE sessions ADD COLUMN context_tokens INTEGER", [])?;
@@ -3612,8 +3489,6 @@ fn add_sessions_context_tokens_column(connection: &Connection) -> Result<(), Ses
     Ok(())
 }
 
-/// Records the parent `spawn_agent` tool call that created a child, so clients
-/// can place the child under its call. Historical children stay NULL.
 fn add_sessions_spawned_by_tool_call_column(
     connection: &Connection,
 ) -> Result<(), SessionRuntimeError> {
@@ -3626,12 +3501,6 @@ fn add_sessions_spawned_by_tool_call_column(
     Ok(())
 }
 
-/// Schema 21: the protocol-13 backend contract. Sessions carry a selected
-/// agent profile and opaque correlation; runs carry their structured input,
-/// correlation, and the secret-free plan identity and descriptor fixed at
-/// start; user messages carry their structured input and a steering flag.
-/// Every column is additive and nullable so historical rows read back as
-/// `default` profile, empty correlation, and no plan identity.
 fn add_contract_columns(connection: &Connection) -> Result<(), SessionRuntimeError> {
     const COLUMNS: [(&str, &str, &str); 8] = [
         ("sessions", "profile", "TEXT"),
@@ -3654,8 +3523,6 @@ fn add_contract_columns(connection: &Connection) -> Result<(), SessionRuntimeErr
     Ok(())
 }
 
-/// Records output truncation state. Historical rows read back as never
-/// truncated and zero continuations, which is what they were.
 fn add_output_truncation_columns(connection: &Connection) -> Result<(), SessionRuntimeError> {
     for (table, column) in OUTPUT_TRUNCATION_COLUMNS {
         if !has_column(connection, table, column)? {
@@ -3685,8 +3552,6 @@ fn validate_output_truncation_schema(connection: &Connection) -> Result<(), Sess
     Ok(())
 }
 
-/// Records the parent run that owns a spawned child. Publicly created child
-/// sessions and historical rows remain unowned (NULL).
 fn add_sessions_owner_run_id_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "sessions", "owner_run_id")? {
         connection.execute("ALTER TABLE sessions ADD COLUMN owner_run_id TEXT", [])?;
@@ -3694,9 +3559,6 @@ fn add_sessions_owner_run_id_column(connection: &Connection) -> Result<(), Sessi
     Ok(())
 }
 
-/// Adds `runs.auto_compaction` for stores created before threshold-triggered
-/// compaction. 1 marks a compaction run the runtime claimed automatically at
-/// a context threshold; 0 (every existing row) is a user-requested run.
 fn add_runs_auto_compaction_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "auto_compaction")? {
         connection.execute(
@@ -3707,9 +3569,6 @@ fn add_runs_auto_compaction_column(connection: &Connection) -> Result<(), Sessio
     Ok(())
 }
 
-/// Adds the stable prompt and workspace-instruction identity prepared before
-/// provider work. Existing runs remain unknown rather than being assigned the
-/// current prompt after the fact.
 fn add_runs_prompt_identity_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "prompt_identity_json")? {
         connection.execute("ALTER TABLE runs ADD COLUMN prompt_identity_json TEXT", [])?;
@@ -3729,11 +3588,6 @@ pub(in crate::sessions) fn has_column(
     Ok(columns.iter().any(|candidate| candidate == column))
 }
 
-/// Records where a session sits in its delegation tree: `depth` (0 for a
-/// root, 1 for a child, ...) and `root_run_id`, the root run whose subtree it
-/// belongs to. Historical children are backfilled at depth 1 under their
-/// owner run, which is exactly what they were when depth was structurally
-/// one; deeper history does not exist.
 fn add_session_depth_columns(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "sessions", "depth")? {
         connection.execute(
@@ -3764,9 +3618,6 @@ fn validate_session_depth_schema(connection: &Connection) -> Result<(), SessionR
     Ok(())
 }
 
-/// Records why a session exists (`task` or `audit`) and how a run's final
-/// answer was audited. Historical rows are ordinary task sessions with no
-/// audit, which is what they were.
 fn add_audit_columns(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "sessions", "purpose")? {
         connection.execute(
@@ -3792,14 +3643,6 @@ fn validate_audit_schema(connection: &Connection) -> Result<(), SessionRuntimeEr
     Ok(())
 }
 
-/// Schema 25: the command-acknowledgement fast path.
-///
-/// `runs.activity` is the run's latest `RunActivityChanged` value, written in
-/// the same transaction as the event so the session summary reads a column
-/// instead of scanning the event log. It is null for runs recorded before
-/// this version and for runs that have not reported activity, which clients
-/// already tolerate. `metadata.command_count` replaces the per-command
-/// `COUNT(*)` over `commands`; it is backfilled from the table once.
 fn add_fast_path_columns(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "activity")? {
         connection.execute("ALTER TABLE runs ADD COLUMN activity TEXT", [])?;
@@ -3812,15 +3655,7 @@ fn add_fast_path_columns(connection: &Connection) -> Result<(), SessionRuntimeEr
     Ok(())
 }
 
-/// Schema 26: `tool_calls.effect` is the catalog effect class the call was
-/// admitted with (`read_only`, `mutating`, `shell`, `external`), so context
-/// assembly decides what it may prune from the stored kind rather than from
-/// the tool name. Null for calls recorded before this version; assembly falls
-/// back to the built-in read-only names for those rows.
 fn add_tool_call_effect_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
-    // Every store created since schema 10 has the table; the guard keeps the
-    // migration a no-op on partial historical stores that never recorded a
-    // tool call (test fixtures), where there is nothing to annotate.
     if has_table(connection, "tool_calls")? && !has_column(connection, "tool_calls", "effect")? {
         connection.execute("ALTER TABLE tool_calls ADD COLUMN effect TEXT", [])?;
     }
@@ -3836,13 +3671,6 @@ fn validate_tool_call_effect_schema(connection: &Connection) -> Result<(), Sessi
     Ok(())
 }
 
-/// Complete tool outputs whose model-facing text was cut. One row per tool
-/// call, keyed by the call so the result row and its spill are written in
-/// the same transaction and deleted together. `digest` is the SHA-256 of
-/// `content`; the handle the marker carries is `t:<tool>:<call8>:<digest8>`.
-/// `evicted_at_ms` marks a row whose content the per-session cap reclaimed;
-/// the row stays so a read of the handle answers `spill_evicted`, not
-/// `spill_missing`.
 fn create_tool_spills_table(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if has_table(connection, "tool_spills")? {
         return Ok(());
@@ -3881,14 +3709,6 @@ fn validate_tool_spills_schema(connection: &Connection) -> Result<(), SessionRun
     Ok(())
 }
 
-/// The file bytes a prompt attached, exactly as the model saw them, so a
-/// later run reconstructs the same request after the file changes or
-/// disappears. `message_attachments` has one row per `<attached-file>`
-/// block in prompt order; `attachment_blobs` holds the bytes once per
-/// `(session, digest, window)` so a file attached to several prompts is
-/// stored once. `evicted_at_ms` marks a blob the per-session cap reclaimed;
-/// the row stays so reconstruction renders an explicit evicted block rather
-/// than the bare `@path` placeholder.
 fn create_attachment_tables(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if has_table(connection, "attachment_blobs")? && has_table(connection, "message_attachments")? {
         return Ok(());
@@ -3950,12 +3770,6 @@ fn validate_attachment_schema(connection: &Connection) -> Result<(), SessionRunt
     Ok(())
 }
 
-/// Every per-run message lookup — the steering rows context assembly joins
-/// to each retained prompt, the queued prompt a run start completes, the
-/// streaming assistant row settlement finalizes — filtered `messages` by
-/// `run_id` through a table scan before schema 30. Scan cost grew with the
-/// whole session's message count, which made assembly of a fixed retained
-/// context slow down as the archive behind the compaction cutoff grew (F06).
 fn create_messages_run_index(connection: &Connection) -> Result<(), SessionRuntimeError> {
     connection
         .execute_batch(
@@ -3979,12 +3793,6 @@ fn validate_messages_run_index(connection: &Connection) -> Result<(), SessionRun
     }
 }
 
-/// One non-blocking child (ADR-0054 § 4), inserted atomically with the
-/// child's admission. Delivery stamps the row exactly once: the notice text
-/// the parent's context replays, and the parent turn whose request first
-/// carried it (`turn_ordinal`; NULL when the parent settled first, so the
-/// notice follows that run). `child_run_id` has no foreign key: a delivered
-/// answer is the parent's context and outlives the child session.
 fn create_child_deliveries_table(connection: &Connection) -> Result<(), SessionRuntimeError> {
     connection
         .execute_batch(
@@ -4020,7 +3828,6 @@ fn validate_child_deliveries_table(connection: &Connection) -> Result<(), Sessio
             return Err(SessionRuntimeError::CONSTRAINT);
         }
     }
-    // Delivery and assembly read by parent run in delivery order.
     let indexed: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master
                        WHERE type = 'index' AND name = 'child_deliveries_parent_run')",
@@ -4108,12 +3915,6 @@ fn validate_fast_path_schema(connection: &Connection) -> Result<(), SessionRunti
     Ok(())
 }
 
-/// Schema 27: the typed-output contract. `runs.output_contract_json` is the
-/// `OutputContract` a prompt was submitted with, so a claim (including one
-/// after restart) enforces the contract the caller accepted;
-/// `runs.final_output_json` is the durable `FinalOutput` verdict, written in
-/// the settlement transaction before `run_finished` is published. Both are
-/// null for runs without a contract and for every historical row.
 fn add_output_contract_columns(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "output_contract_json")? {
         connection.execute("ALTER TABLE runs ADD COLUMN output_contract_json TEXT", [])?;
@@ -4257,7 +4058,6 @@ fn restore_pending_paid_owners(connection: &Connection) -> Result<(), SessionRun
                 [child, owner],
             )?;
         }
-        // Validate the restored chain with the same rules used for claims and settlement.
         let seed: String = row.get(0)?;
         let seed: RunId = seed.parse().map_err(|_| SessionRuntimeError::CONSTRAINT)?;
         crate::sessions::goals::paid_goal_owners(connection, seed)?;
@@ -4282,7 +4082,6 @@ fn restore_unfinished_model_work(connection: &Connection) -> Result<(), SessionR
             .get_ref(2)?
             .as_str_or_null()
             .map_err(|_| SessionRuntimeError::CONSTRAINT)?;
-        // Match the durable transcript's 64 MiB envelope budget before decoding.
         if content.len().saturating_add(usage.map_or(0, str::len)) > 64 * 1024 * 1024 {
             return Err(SessionRuntimeError::CONSTRAINT);
         }
@@ -4310,8 +4109,6 @@ fn restore_unfinished_model_work(connection: &Connection) -> Result<(), SessionR
     Ok(())
 }
 
-/// Reconstruct unresolved sends without retaining a transcript-sized event
-/// buffer or rescanning all events for every unfinished run.
 fn restore_unfinished_goal_dispatch(connection: &Connection) -> Result<(), SessionRuntimeError> {
     use qq_protocol::{RunActivity, SessionEvent, SessionEventEnvelope};
     connection.execute_batch(
@@ -4337,8 +4134,6 @@ fn restore_unfinished_goal_dispatch(connection: &Connection) -> Result<(), Sessi
         connection.execute_batch("DROP TABLE goal_dispatch_repair")?;
         return Ok(());
     }
-    // The subsequent scan is global so mismatched-workspace evidence cannot
-    // silently disappear. Bound every scanned envelope before JSON parsing.
     let oversized: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM events WHERE length(CAST(envelope_json AS BLOB))>1048576)",
         [],

@@ -16,14 +16,9 @@ struct ChildDeliveryHook {
 #[cfg(test)]
 static CHILD_DELIVERY_HOOKS: Mutex<Vec<ChildDeliveryHook>> = Mutex::new(Vec::new());
 
-/// Parents (by session) whose next detached child a test holds between its
-/// detachment and the receipt the spawn call returns.
 #[cfg(test)]
 static RECEIPT_HOOKS: Mutex<Vec<ChildDeliveryHook>> = Mutex::new(Vec::new());
 
-/// Holds `session_id`'s next detached spawn after the child is detached and
-/// before its receipt is offered: the window in which a dropped spawn call
-/// must not cancel the child.
 #[cfg(test)]
 pub(super) fn hold_child_receipt(
     session_id: SessionId,
@@ -38,12 +33,9 @@ pub(super) fn hold_child_receipt(
     (entered_rx, release)
 }
 
-/// Parents (by session) a test is watching enter their wait for answers.
 #[cfg(test)]
 static WAIT_HOOKS: Mutex<Vec<(SessionId, oneshot::Sender<()>)>> = Mutex::new(Vec::new());
 
-/// Resolves when `session_id`'s run next enters its wait for sub-agent
-/// answers (ADR-0054 § 4).
 #[cfg(test)]
 pub(super) fn observe_parent_wait(session_id: SessionId) -> oneshot::Receiver<()> {
     let (entered, receiver) = oneshot::channel();
@@ -68,8 +60,6 @@ pub(super) fn hold_child_delivery(
     (entered_rx, release)
 }
 
-/// Holds a parent's delivery of a settled child (blocking result or detached
-/// notice) while a test observes the state between settlement and delivery.
 #[cfg(test)]
 async fn hold_delivery_for_test(parent_session: SessionId) {
     let hook = {
@@ -88,31 +78,18 @@ async fn hold_delivery_for_test(parent_session: SessionId) {
 struct ChildTask {
     cancel: watch::Sender<bool>,
     completed: watch::Receiver<Option<ChildReceipt>>,
-    /// The parent did not wait for this child: its spend is charged by the
-    /// durable delivery, so a drain stops it but never returns its receipt.
-    /// Set together with `run_id` and `session_id` once the child is
-    /// durably admitted.
     detached: bool,
     run_id: Option<RunId>,
-    /// The child session the parent names it by (`wait_agents`,
-    /// `cancel_agent`).
     session_id: Option<SessionId>,
-    /// Its answer is durably delivered, but its owner task had not finished
-    /// when the delivery committed (the store settles a child before its
-    /// owner task reads the answer). It is kept until that task finishes,
-    /// so a drain still awaits it, and is no longer outstanding.
     delivered: bool,
 }
 
 impl ChildTask {
-    /// A detached child whose answer the parent has not yet received.
     fn outstanding(&self) -> bool {
         self.detached && !self.delivered
     }
 }
 
-/// One background child a `wait_agents` call names, with its settlement
-/// watch; `None` when the id names no outstanding child.
 struct NamedChild {
     id: SessionId,
     completed: Option<watch::Receiver<Option<ChildReceipt>>>,
@@ -130,12 +107,8 @@ impl NamedChild {
     }
 }
 
-/// Owners and unconsumed receipts stay here even if a tool or a cleanup await
-/// is interrupted. Only a charged receipt or a fully drained batch is removed.
 pub(super) struct ChildTasks {
     tasks: Mutex<HashMap<ToolCallId, ChildTask>>,
-    /// Bumped whenever a detached child settles; the parent's wait for its
-    /// next answer observes it.
     settled: watch::Sender<u64>,
 }
 
@@ -156,19 +129,12 @@ impl ChildTasks {
             .remove(&call_id);
     }
 
-    /// Detached children not yet delivered: running, or settled and
-    /// awaiting the parent's next boundary. A poisoned registry counts as one
-    /// outstanding child, so the parent waits and the next delivery reports
-    /// the poison instead of the run settling past undelivered work.
     fn outstanding_detached(&self) -> usize {
         self.tasks.lock().map_or(1, |tasks| {
             tasks.values().filter(|task| task.outstanding()).count()
         })
     }
 
-    /// Marks an admitted child detached: from here on the parent does not
-    /// wait for it, and only a delivery or a drain removes it. `false` when
-    /// the registry is unavailable: the child then stays blocking.
     fn detach(&self, call_id: ToolCallId, run_id: RunId, session_id: SessionId) -> bool {
         let Ok(mut tasks) = self.tasks.lock() else {
             return false;
@@ -184,8 +150,6 @@ impl ChildTasks {
         }
     }
 
-    /// The outstanding detached children `ids` names (every one when
-    /// `None`, ordered by id), in request order.
     fn outstanding_children(
         &self,
         ids: Option<&[SessionId]>,
@@ -220,11 +184,6 @@ impl ChildTasks {
         })
     }
 
-    /// Stops one outstanding detached child and waits for its owner task to
-    /// settle it. Its answer stays undelivered for the next boundary. The
-    /// result follows the child's durable outcome: a child whose run had
-    /// already settled when the cancel arrived (its owner task was still
-    /// reading the answer) finished on its own, and is reported so.
     async fn cancel_detached(
         &self,
         store: &Store,
@@ -255,8 +214,6 @@ impl ChildTasks {
         match store.run_outcome(run_id).await {
             Ok(Some((RunOutcome::Cancelled, _))) => Ok(crate::runtime::CancelOutcome::Cancelled),
             Ok(Some(_)) => Ok(crate::runtime::CancelOutcome::AlreadyFinished),
-            // A finished owner task left its run settled unless the runtime
-            // failed on the way (and that failure is already raised).
             Ok(None) => Err(crate::runtime::DeliveryError::Store(
                 SessionRuntimeError::CONSTRAINT,
             )),
@@ -264,10 +221,6 @@ impl ChildTasks {
         }
     }
 
-    /// Forgets the delivered children: their answers are durable and the
-    /// delivery charged their spend. A child whose owner task is still
-    /// finishing stays, marked delivered, until a drain or the next call
-    /// finds it finished: the run's teardown must still await that task.
     fn forget_delivered(&self, delivered: &[RunId]) -> Result<(), crate::runtime::DeliveryError> {
         let mut tasks = self
             .tasks
@@ -282,8 +235,6 @@ impl ChildTasks {
         Ok(())
     }
 
-    /// A detached child has settled and awaits delivery. A poisoned
-    /// registry reads as one, so the next delivery reports it.
     fn settled_detached(&self) -> bool {
         self.tasks.lock().map_or(true, |tasks| {
             tasks
@@ -296,9 +247,6 @@ impl ChildTasks {
         self.drain_matching(|_| true).await
     }
 
-    /// Stops and awaits the children `select` picks (blocking ones only, or
-    /// all) and returns the attached receipts among them. Detached receipts
-    /// are never returned: the delivery charges them.
     async fn drain_matching(
         &self,
         select: impl Fn(&ChildTask) -> bool,
@@ -321,13 +269,10 @@ impl ChildTasks {
                 }
             }
         }
-        // Nothing is removed before the last await: a cancelled drain can be
-        // resumed by the session owner without losing any child's accounting.
         let mut tasks = self.tasks.lock().map_err(|_| ChildCleanupError)?;
         let mut spend = Vec::with_capacity(tasks.len());
         for task in tasks.values().filter(|task| select(task)) {
             match *task.completed.borrow() {
-                // The delivery charges a detached child's spend.
                 Some(Ok(_)) if task.detached => {}
                 Some(Ok(receipt)) => spend.push(receipt),
                 Some(Err(error)) => return Err(error),
@@ -339,8 +284,6 @@ impl ChildTasks {
     }
 }
 
-/// Cancels the child when the spawn call awaiting it is dropped, unless the
-/// child was detached: then no call awaits it and the registry owns it.
 struct CancelChildWaiter {
     cancel: watch::Sender<bool>,
     call_id: ToolCallId,
@@ -368,25 +311,14 @@ async fn child_cancelled(cancel: &mut watch::Receiver<bool>) {
     }
 }
 
-/// Executes `spawn_agent` calls for one parent run: creates an authority-limited child
-/// session and queued task atomically (while preserving the ordinary durable
-/// event stream), then resolves with the child run's final assistant text.
 pub(super) struct SessionSubagentSpawner {
     inner: Arc<SessionRuntimeInner>,
     parent: ClaimedRun,
     advertised_models: Arc<[String]>,
-    /// Bounds this run's children in flight; excess spawn calls in one turn
-    /// wait here rather than erroring.
     slots: Arc<Semaphore>,
-    /// One write child at a time per parent run: two writers must never
-    /// share the checkout. Held in addition to a `slots` permit.
     write_slot: Arc<Semaphore>,
-    /// Whether the plan's roster permits write children at all.
     write_children: bool,
-    /// Children this run has spawned so far, capped at `max_children`.
     spawned: Arc<AtomicUsize>,
-    /// The effective total-children bound: the caller's `max_children` when
-    /// imposed (admission already capped it), else the runtime ceiling.
     max_children: usize,
     tasks: Arc<ChildTasks>,
 }
@@ -421,7 +353,6 @@ impl SessionSubagentSpawner {
         }
     }
 
-    /// Permits `authority: write` spawns. Set from the compiled plan's roster.
     pub(super) fn with_write_children(mut self, write_children: bool) -> Self {
         self.write_children = write_children;
         self
@@ -483,8 +414,6 @@ impl SubagentSpawner for SessionSubagentSpawner {
         let tasks = Arc::clone(&self.tasks);
         let mut settled = tasks.settled.subscribe();
         Box::pin(async move {
-            // Resolve at once when a settled child awaits delivery; else
-            // wait for the next settlement while any child still runs.
             loop {
                 if tasks.settled_detached() {
                     return;
@@ -510,9 +439,6 @@ impl SubagentSpawner for SessionSubagentSpawner {
         Box::pin(async move {
             #[cfg(test)]
             hold_delivery_for_test(parent.identity.session_id).await;
-            // Settled owner tasks first: their runs are durably settled, so
-            // the store delivers every one of them (and any that settled
-            // after this read, which is harmless: they are delivered too).
             let delivered = inner
                 .store
                 .deliver_children(
@@ -523,7 +449,6 @@ impl SubagentSpawner for SessionSubagentSpawner {
                 )
                 .await
                 .map_err(crate::runtime::DeliveryError::Store)?;
-            // An interim report leaves its child outstanding.
             tasks.forget_delivered(
                 &delivered
                     .iter()
@@ -553,7 +478,6 @@ impl SubagentSpawner for SessionSubagentSpawner {
             use crate::runtime::{ChildStatus, WaitReport};
             let named = ids.is_some();
             let children = tasks.outstanding_children(ids.as_deref())?;
-            // Named children: every one settles. Otherwise: any one does.
             let done = |children: &[NamedChild]| {
                 let mut statuses = children.iter().map(NamedChild::status);
                 if named {
@@ -588,7 +512,6 @@ impl SubagentSpawner for SessionSubagentSpawner {
     }
 }
 
-/// The per-run child bookkeeping one spawn call draws from.
 pub(super) struct SpawnBudget {
     pub(super) advertised_models: Arc<[String]>,
     pub(super) slots: Arc<Semaphore>,
@@ -599,8 +522,6 @@ pub(super) struct SpawnBudget {
     pub(super) tasks: Arc<ChildTasks>,
 }
 
-/// A child that never ran spent nothing. Failed children report their real
-/// spend through `spawn_error_with_spend` so the parent budget still sees it.
 fn spawn_error(content: impl Into<String>) -> SpawnAgentOutcome {
     spawn_error_with_spend(content, SpawnAgentSpend::NONE)
 }
@@ -615,9 +536,6 @@ fn spawn_error_with_spend(content: impl Into<String>, spend: SpawnAgentSpend) ->
     }
 }
 
-/// One owned `spawn_agent` execution. Ordinary admission errors and settled
-/// child failures become tool results. Uncertain ownership or teardown fails
-/// the session runtime closed.
 pub(super) async fn spawn_child_run(
     inner: Arc<SessionRuntimeInner>,
     parent: ClaimedRun,
@@ -662,8 +580,6 @@ pub(super) async fn spawn_child_run(
         call_id: request.call_id,
         tasks: Arc::clone(&budget.tasks),
     };
-    // A detached spawn returns once the child is durably admitted; the owner
-    // task keeps running it and signals its settlement to the parent.
     let (admitted, admission) = oneshot::channel::<SessionId>();
     let admitted = request.detached.then_some(admitted);
     let settled = budget.tasks.settled.clone();
@@ -690,10 +606,6 @@ pub(super) async fn spawn_child_run(
                 biased;
                 () = expires => {
                     deadline_cancel.send_replace(true);
-                    // Cancellation keeps the child's owner (the parent run's
-                    // retained ownership record) through accepted creation,
-                    // started loader work, and execution teardown, so a
-                    // deadline can never orphan a child that was admitted.
                     let mut outcome = execution.await;
                     outcome.content = "the sub-agent could not finish: its duration budget is spent".to_owned();
                     outcome.is_error = true;
@@ -717,26 +629,16 @@ pub(super) async fn spawn_child_run(
             Ok(outcome.spend)
         };
         completed.send_replace(Some(receipt));
-        // Also bumped for a child already delivered (its owner finished
-        // after the store had settled it): waiters re-check and find
-        // nothing new, so the wake is harmless.
         settled.send_modify(|generation| *generation = generation.wrapping_add(1));
-        // A detached spawn's caller is gone; nothing waits for this reply.
         let _ = reply.send(outcome);
     });
     let mut response = response;
     let admission = async {
         match admission.await {
             Ok(session_id) => session_id,
-            // A blocking spawn never detaches; an admission that failed
-            // reports through `response`.
             Err(_) => std::future::pending().await,
         }
     };
-    // The admission receipt wins whenever the child was detached, even when
-    // its answer is also ready: a detached child has a delivery row, so its
-    // answer must reach the parent through that row alone, never twice.
-    // The owner task signals admission strictly before it replies.
     let detached = tokio::select! {
         biased;
         session_id = admission => Ok(session_id),
@@ -799,11 +701,6 @@ async fn run_owned_child(
         purpose,
         detached,
     } = request;
-    // Authority attenuates strictly: a read child is ReadOnly; a write child
-    // uses Auto within its parent's authority and needs the roster's explicit
-    // write permission. Only depth one may write (children have no
-    // spawner at all, so this is structural). A ReadOnly parent cannot grant
-    // write: its own policy already denied the mutating spawn call.
     let child_mode = match authority {
         ChildAuthority::Read => ApprovalMode::ReadOnly,
         ChildAuthority::Write => {
@@ -816,26 +713,16 @@ async fn run_owned_child(
             ApprovalMode::Auto
         }
     };
-    // The budget counts attempts, so a failing spawn also consumes it. A
-    // refused spawn is a tool error the model can act on, never a terminal
-    // outcome: ending the parent because it asked for one child too many
-    // would discard the work it already did.
     if spawned.fetch_add(1, Ordering::AcqRel) >= max_children {
         return spawn_error(format!(
             "this run already spawned {max_children} sub-agents; \
              continue with what they returned"
         ));
     }
-    // Preparation and execution share the same child bounds. A started loader
-    // may own blocking work, so cancellation retains its permit until it exits.
     let acquire = async {
-        // Wait for a child slot before creating anything: spawn calls queued
-        // behind the concurrency cap must not pile up sessions they cannot run.
         let Ok(_slot) = Arc::clone(&slots).acquire_owned().await else {
             return Err(spawn_error("the sub-agent scheduler is unavailable"));
         };
-        // Writers serialize behind the read slot too: a second write spawn in the
-        // same turn waits here until the first child settles.
         let _write_slot = if child_mode == ApprovalMode::Auto {
             match Arc::clone(&write_slot).acquire_owned().await {
                 Ok(permit) => Some(permit),
@@ -884,9 +771,6 @@ async fn run_owned_child(
         if *prepare_cancel.borrow() {
             return Err(spawn_error("the sub-agent admission was cancelled"));
         }
-        // The spawn-time choke point: every resolved route — explicit argument,
-        // configured worker, or parent fallback — must pass current policy,
-        // authentication and catalog admission before durable child state exists.
         if let Err(error) = inner
             .loader
             .validate_spawn_model(
@@ -904,10 +788,6 @@ async fn run_owned_child(
         if *prepare_cancel.borrow() {
             return Err(spawn_error("the sub-agent admission was cancelled"));
         }
-        // Validate and construct the selected runtime before creating durable
-        // child state. A bad explicit/configured route must leave no orphan
-        // session (and this runtime will be reused from the loader cache when the
-        // queued child is claimed).
         if let Err(error) = inner
             .loader
             .load(RuntimeLoadRequest {
@@ -937,10 +817,6 @@ async fn run_owned_child(
             Err(outcome) => return outcome,
         },
     };
-    // Shutdown owns the write side of this gate. Hold the read side across
-    // the durable child transaction so shutdown observes either no child run
-    // or the fully queued run it must settle; child admission can never cross
-    // the shutdown scan.
     let lifecycle = tokio::select! {
         biased;
         () = child_cancelled(&mut cancellation) => return spawn_error("the sub-agent admission was cancelled"),
@@ -971,8 +847,6 @@ async fn run_owned_child(
                 limits: child_limits,
                 approval_mode: child_mode,
                 purpose,
-                // Only a read task child detaches: a write child holds the
-                // parent's one write slot and an audit is awaited inline.
                 detached: detached && child_mode == ApprovalMode::ReadOnly,
             },
         )
@@ -994,19 +868,12 @@ async fn run_owned_child(
         inner: Arc::clone(&inner),
         run_id: Some(run_id),
     };
-    // The run cannot start until scheduling below, so subscribing after the
-    // atomic commit and before that signal cannot miss its completion.
     let Ok(mut wakeup) = inner.subscribe(parent.identity.workspace_id, committed_through.sequence)
     else {
         return spawn_error("the sub-agent could not be awaited");
     };
     drop(lifecycle);
     let _ = inner.schedule.try_send(());
-    // Detaching happens here, in the owner task, before the receipt is
-    // offered: once the registry marks the child detached, a dropped spawn
-    // call no longer cancels it (`CancelChildWaiter`), so a receipt the parent
-    // never saw cannot leave a cancelled child behind. A registry that cannot
-    // record the detachment keeps the child blocking.
     if let Some(admitted) = admitted
         && child_mode == ApprovalMode::ReadOnly
         && tasks.detach(call_id, run_id, child_session_id)
@@ -1054,9 +921,6 @@ async fn run_owned_child(
             Ok(Some(settled)) => break settled,
             Ok(None) => {}
             Err(error) => {
-                // Outcome admission waits for capacity. A remaining error
-                // means ownership can no longer be established durably;
-                // the parent must not resume ordinary tool execution.
                 inner.failed.send_replace(true);
                 inner.cancel(run_id);
                 guard.disarm();
@@ -1078,9 +942,6 @@ async fn run_owned_child(
         }
     };
     guard.disarm();
-    // Every settled child charges its real spend to the parent, whatever
-    // its outcome; the parent's budgets must see failed work too. Every
-    // settled child also names its session so callers can point at it.
     let mut settled = match inner.store.child_answer(run_id, outcome).await {
         Ok(answer) => SpawnAgentOutcome {
             content: answer.content,
@@ -1098,13 +959,9 @@ async fn run_owned_child(
     settled
 }
 
-/// Heads a child's latest report when it ended without a final answer, so
-/// the parent knows the text is partial.
 pub(crate) const INTERIM_REPORT_LABEL: &str = "[interim report: the sub-agent ended without \
 a final answer; this is its latest progress report]";
 
-/// Cancels a still-running child run when the spawn future awaiting it is
-/// dropped before the child finished.
 struct CancelChildOnDrop {
     inner: Arc<SessionRuntimeInner>,
     run_id: Option<RunId>,
@@ -1119,16 +976,12 @@ impl CancelChildOnDrop {
 impl Drop for CancelChildOnDrop {
     fn drop(&mut self) {
         if let Some(run_id) = self.run_id.take() {
-            // The owned task only abandons an admitted child on a panic.
-            // Stop the runtime rather than permit further parent mutation.
             self.inner.failed.send_replace(true);
             self.inner.cancel(run_id);
         }
     }
 }
 
-/// Read-only evidence for one session. History cursors and spill handles
-/// cannot select another session; the reader supplies that scope.
 pub(super) struct SessionEvidenceReader {
     inner: Arc<SessionRuntimeInner>,
     session_id: SessionId,
@@ -1159,9 +1012,6 @@ impl HistorySearcher for SessionEvidenceReader {
     }
 }
 
-/// `read_tool_result` over the run's own session: the store answers only for
-/// spills this session wrote, so a handle copied from another session reads
-/// as foreign rather than as data.
 impl SpillReader for SessionEvidenceReader {
     fn read(&self, handle: SpillHandle) -> SpillReadFuture {
         let inner = Arc::clone(&self.inner);
@@ -1176,17 +1026,10 @@ impl SpillReader for SessionEvidenceReader {
     }
 }
 
-/// Audits a root run's candidate answer by spawning a read-only child marked
-/// `purpose: audit` at the configured roster role. The child inherits every
-/// bound of an ordinary child (remaining budget, depth, accounting,
-/// cancellation) and its final text is parsed as the verdict. Any failure is
-/// `Unavailable`: the audit never fails the audited run.
 pub(super) struct SessionAuditHook {
     inner: Arc<SessionRuntimeInner>,
     parent: ClaimedRun,
     delegation: qq_protocol::DelegationRoster,
-    /// Audits are one at a time per run and never count against the
-    /// parent's ordinary child slots.
     slots: Arc<Semaphore>,
     tasks: Arc<ChildTasks>,
     pending: Arc<Mutex<Option<ToolCallId>>>,
@@ -1210,8 +1053,6 @@ impl SessionAuditHook {
     }
 }
 
-/// The fixed brief an audit child receives. The auditor verifies claims with
-/// its own read-only tools rather than trusting the run's account.
 const AUDIT_BRIEF_HEADER: &str = "You are auditing another agent's final answer to a user \
 request in this workspace. You have read-only tools. Verify the answer's factual claims \
 against the actual workspace state: open the files it says it changed, run the read-only \
@@ -1228,11 +1069,6 @@ impl crate::runtime::AuditHook for SessionAuditHook {
         }
     }
 
-    /// Stops the audit child alone: the parent's detached read children
-    /// share the registry and keep running (ADR-0054 § 4). An audit starts
-    /// only once no detached child is outstanding (the parent waits for its
-    /// answers first), so in practice this drains the auditor alone either
-    /// way; the filter keeps that true if the order ever changes.
     fn drain(&self) -> ChildDrainFuture {
         let tasks = Arc::clone(&self.tasks);
         Box::pin(async move { tasks.drain_matching(|task| !task.detached).await })
@@ -1282,9 +1118,6 @@ impl crate::runtime::AuditHook for SessionAuditHook {
                     brief.push('\n');
                 }
             }
-            // The audit child is admitted with the parent's remaining budget
-            // like any child; the parent's meter already accounts for this
-            // spend when the verdict returns.
             let call_id = match ToolCallId::generate() {
                 Ok(call_id) => call_id,
                 Err(_) => {
@@ -1350,7 +1183,6 @@ impl crate::runtime::AuditHook for SessionAuditHook {
                         .take(crate::runtime::MAX_AUDIT_FINDINGS)
                         .collect();
                     if verdict.findings.is_empty() {
-                        // A revise with nothing to fix is not actionable.
                         verdict.outcome = AuditOutcome::Pass;
                     }
                 }
@@ -1365,10 +1197,6 @@ impl crate::runtime::AuditHook for SessionAuditHook {
 mod registry_tests {
     use super::*;
 
-    /// The store can deliver a child's answer before the child's owner task
-    /// has finished (it settles the run, then reads the answer). The
-    /// registry then keeps the task, no longer outstanding, so the parent's
-    /// teardown drain still awaits it; it is forgotten once it finishes.
     #[tokio::test]
     async fn a_child_delivered_before_its_owner_finishes_is_still_drained() {
         let tasks = Arc::new(ChildTasks::default());
@@ -1394,7 +1222,6 @@ mod registry_tests {
             1,
             "its owner is still running"
         );
-        // The drain cancels and awaits the owner task.
         let drain = tokio::spawn({
             let tasks = Arc::clone(&tasks);
             async move { tasks.drain().await }
@@ -1410,9 +1237,6 @@ mod registry_tests {
         assert!(tasks.tasks.lock().unwrap().is_empty());
     }
 
-    /// A poisoned child registry never lets the parent settle past detached
-    /// work it cannot see: it reads as an outstanding, settled child, and the
-    /// delivery that follows reports the poison instead of succeeding.
     #[test]
     fn a_poisoned_registry_reads_as_outstanding_and_fails_delivery() {
         let tasks = Arc::new(ChildTasks::default());

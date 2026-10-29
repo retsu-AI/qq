@@ -34,14 +34,10 @@ tempfile.workspace = true
 unicode-width = "0.2"
 
 [features]
-# Exposes deterministic fixtures and a frame driver to this package's own
-# render benchmark via the self dev-dependency below. Not a public API.
 bench-support = []
 
 [dev-dependencies]
 qq-tui = { path = ".", features = ["bench-support"] }
-# Compiled theme documents for the gallery dump; already in the graph via
-# qq-core, so no new closure.
 qq-config.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

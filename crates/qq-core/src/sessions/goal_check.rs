@@ -139,8 +139,6 @@ async fn confirm_group_exit(pgid: rustix::process::Pid) -> std::io::Result<()> {
 pub(super) async fn confirm_reaped_group_exit(pgid: rustix::process::Pid) -> std::io::Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            // The leader was reaped after the last kill. A reused pgid can
-            // only delay confirmation: signal zero never affects that group.
             match rustix::process::test_kill_process_group(pgid) {
                 Err(rustix::io::Errno::SRCH) => return Ok(()),
                 Err(error) => return Err(error.into()),
@@ -157,8 +155,6 @@ pub(super) async fn confirm_reaped_group_exit(pgid: rustix::process::Pid) -> std
     })?
 }
 
-/// Runs the check command in the workspace as the user, killing its process
-/// tree on timeout or cancellation.
 pub(super) async fn run_process(
     workspace: PathBuf,
     command: String,
@@ -178,8 +174,6 @@ pub(super) async fn run_process(
     .await
 }
 
-/// The caller holds workspace exclusion and has committed exact check
-/// authorization. This task retains process ownership until confirmed reap.
 #[cfg(unix)]
 async fn run_host_process(
     workspace: PathBuf,
@@ -261,9 +255,6 @@ async fn run_host_process(
     )
     .expect("spawned child has positive pid");
     let pgid = group.group().expect("spawned command has a process group");
-    // Observe without reaping: the leader pins the process-group id until
-    // the group is terminated, even when a background descendant closed
-    // its pipes. Reaping first would permit pgid reuse before the kill.
     let mut exited = tokio::task::spawn_blocking(move || {
         let _permit = observer_permit;
         loop {
@@ -364,8 +355,6 @@ async fn run_host_process(
     };
     if !matches!(outcome, Ok(ProcessOutcome::Exited { .. })) {
         let group_error = group.kill().err();
-        // Even a group-kill failure must not skip the leader's reap. A
-        // cleanup error forbids releasing the caller's workspace exclusion.
         let leader_error = child.start_kill().err();
         let observer_error = if !observed {
             match exited.await {
@@ -429,8 +418,6 @@ async fn run_host_process(
     }
     let bytes: Vec<u8> = tail.into();
     let text = crate::tools::output::mask_secrets(String::from_utf8_lossy(&bytes).into_owned());
-    // Replacement characters may expand invalid UTF-8; preserve a bounded
-    // valid UTF-8 suffix even for binary process output.
     let mut start = text.len().saturating_sub(OUTPUT_BYTES);
     while !text.is_char_boundary(start) {
         start += 1;

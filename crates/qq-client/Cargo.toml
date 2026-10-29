@@ -8,12 +8,7 @@ publish = false
 
 [features]
 default = ["native"]
-# Tokio-driven transport: request timeouts, the interactive `TuiClient`
-# loop, and the durable `observer`. The default for every in-tree consumer.
 native = ["dep:tokio", "reqwest/rustls"]
-# Browser transport over the platform `fetch` API. The HTTP client, SSE
-# decoder, cursor validation, and `ClientPort` types compile; timeouts are
-# the browser's and the reconnect loops are the embedding app's.
 wasm = ["qq-protocol/wasm", "dep:wasm-bindgen-futures", "dep:gloo-timers"]
 
 [dependencies]

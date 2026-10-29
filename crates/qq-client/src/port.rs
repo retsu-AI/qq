@@ -9,14 +9,7 @@ use qq_protocol::{
 pub enum ClientRequest {
     Command(CommandRequest),
     Snapshot(SnapshotRequest),
-    /// Re-read the workspace-scoped capability document. Profiles and skills
-    /// compile lazily from workspace files, so a client asks again after an
-    /// edit rather than restarting.
     Capabilities,
-    /// Re-read the model catalog for this workspace with `selection` as the
-    /// client default, exactly as bootstrap does. Delivered as
-    /// [`ClientUpdate::Models`]; a client asks after its configuration
-    /// becomes loadable (a trusted project) rather than restarting.
     Models(qq_protocol::ModelSelection),
 }
 
@@ -29,10 +22,6 @@ pub enum ClientUpdate {
         models: Vec<ModelDescriptor>,
         selected: Option<qq_protocol::ModelSelection>,
     },
-    /// The server's workspace-scoped capability document. Arrives once per
-    /// connection after bootstrap and again per `ClientRequest::Capabilities`;
-    /// absent until then, so the TUI treats steering, profiles, and approval
-    /// modes as unavailable. Shared because pickers hold it while it renders.
     Capabilities(Arc<ServerCapabilities>),
     Event(SessionEventEnvelope),
     CommandResult {

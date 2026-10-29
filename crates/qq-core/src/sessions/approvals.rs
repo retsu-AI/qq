@@ -1,9 +1,6 @@
 use super::runtime::SessionRuntimeInner;
 use super::*;
 
-/// Applies the session's approval policy to each requested tool call,
-/// persisting approval state before publishing it and holding the run open
-/// while a client decides.
 pub(super) struct SessionToolGate {
     inner: Arc<SessionRuntimeInner>,
     claimed: ClaimedRun,
@@ -62,8 +59,6 @@ impl ToolGate for SessionToolGate {
                     Err(error) => approval_persistence_failure(error),
                 };
             }
-            // Auto is an unattended ceiling for the entire descendant tree,
-            // even if a child session later selects a different mode.
             let auto_ceiling =
                 mode == ApprovalMode::Auto || ancestors.contains(&ApprovalMode::Auto);
             if auto_ceiling
@@ -90,8 +85,6 @@ impl ToolGate for SessionToolGate {
                     approval::PolicyDecision::RequireApproval
                         if parent_mode == ApprovalMode::Ask && !auto_ceiling =>
                     {
-                        // Ask applies to each child action too. Auto children
-                        // deny instead of inheriting a human approval wait.
                         if mode != ApprovalMode::ReadOnly {
                             mode = ApprovalMode::Ask;
                         }
@@ -112,8 +105,6 @@ impl ToolGate for SessionToolGate {
                 };
             }
             let decision = approval::evaluate(mode, &class);
-            // Auto never starts a human wait, so it cannot authorize what it
-            // would otherwise hold.
             let decision =
                 if auto_ceiling && matches!(decision, approval::PolicyDecision::RequireApproval) {
                     approval::PolicyDecision::Deny {
@@ -136,8 +127,6 @@ impl ToolGate for SessionToolGate {
                     }
                 }
                 approval::PolicyDecision::AskUser { question } => {
-                    // A question is a hold without a permission: same
-                    // registration, persistence, and wait as an approval.
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
                     match inner
                         .store
@@ -203,8 +192,6 @@ impl ToolGate for SessionToolGate {
                         _ => None,
                     };
                     let edit = approval::edit_preview(&call.name, &call.arguments);
-                    // Register before publishing the request so a client
-                    // response can never race past the waiting run.
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
                     match inner
                         .store
@@ -233,8 +220,6 @@ impl ToolGate for SessionToolGate {
                             return approval_persistence_failure(error);
                         }
                     };
-                    // The configured human deadline, also bounded by the
-                    // goal's fixed deadline.
                     let deadline = human_deadline(inner.approval_timeout)
                         .into_iter()
                         .chain(goal_deadline)
@@ -242,8 +227,6 @@ impl ToolGate for SessionToolGate {
                     let timed_out = tokio::select! {
                         biased;
                         changed = cancellation.changed() => {
-                            // The gate can observe cancellation before the
-                            // session loop; retain an expired goal hold first.
                             let _ = changed;
                             return cancelled_hold(&inner, &claimed, call.id,
                                 "The run stopped before this approval was resolved.").await;
@@ -259,9 +242,6 @@ impl ToolGate for SessionToolGate {
     }
 }
 
-// The gate and the session loop race on the same cancellation signal. Settle
-// an expired goal's unanswered hold before yielding a denied/interrupted call:
-// the outer loop can no longer find the awaiting row once it persists that call.
 async fn cancelled_hold(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
@@ -296,14 +276,10 @@ async fn goal_approval_deadline(
     Ok(timeout.map(|timeout| at + timeout))
 }
 
-/// When the human's wait ends, counted from now. `None` is no server
-/// deadline: the hold waits for the client, the run deadline, or cancellation.
 fn human_deadline(timeout: Option<Duration>) -> Option<tokio::time::Instant> {
     timeout.map(|timeout| tokio::time::Instant::now() + timeout)
 }
 
-/// Resolves at `deadline`, or never when there is none. Used as a select arm
-/// so an unbounded wait is expressed by the arm simply not firing.
 async fn sleep_until_or_never(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -311,8 +287,6 @@ async fn sleep_until_or_never(deadline: Option<tokio::time::Instant>) {
     }
 }
 
-/// Reads the durable outcome of a hold once the wait ended and turns it into
-/// the gate's decision; a timeout is written here if nothing else resolved.
 async fn conclude(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
@@ -358,22 +332,12 @@ fn approval_persistence_failure(error: SessionRuntimeError) -> GateDecision {
 
 pub(super) enum ConcludedApproval {
     Approved,
-    GoalStopped {
-        run_ids: Vec<RunId>,
-    },
-    Denied {
-        message: String,
-    },
-    /// The user answered an `ask_user` hold; `result` is the settled call's
-    /// persisted result text.
-    Answered {
-        result: String,
-    },
+    GoalStopped { run_ids: Vec<RunId> },
+    Denied { message: String },
+    Answered { result: String },
     StillWaiting,
 }
 
-/// The run-duration clock may win the select against a goal hold's deadline.
-/// Settle that still-unanswered hold before terminal goal exhaustion is applied.
 pub(super) async fn expire_goal_hold(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
@@ -382,7 +346,6 @@ pub(super) async fn expire_goal_hold(
     if claimed.goal.is_none() && claimed.goal_spend_owner.is_none() {
         return Ok(());
     }
-    // Capture on the executor: Tokio's simulated clock is runtime-local.
     let expired_owners = inner
         .goal_deadlines
         .lock()

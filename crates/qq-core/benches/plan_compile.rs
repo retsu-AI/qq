@@ -1,11 +1,3 @@
-//! Plan compilation and identity cost.
-//!
-//! `plan_compile` is one full compile of an embedded profile against a small
-//! workspace with an `AGENTS.md`: workspace open, instruction read, static
-//! tool catalog, descriptor encoding, and digest. `plan_descriptor_digest`
-//! isolates the canonical encoding plus SHA-256 of a realistic descriptor.
-//! Both report nanoseconds per iteration like the provider compiler bench.
-
 use std::{hint::black_box, sync::Arc, time::Instant};
 
 use futures_util::stream;

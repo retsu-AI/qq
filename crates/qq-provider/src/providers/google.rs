@@ -1,5 +1,3 @@
-//! Google Gemini GenerateContent API adapter.
-
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_stream::try_stream;
@@ -34,7 +32,6 @@ const SSE_SPEC: SseExchangeSpec = SseExchangeSpec {
     content_type_gate: ContentTypeGate::Strict,
 };
 
-/// A client for Google GenerateContent-compatible endpoints.
 pub(crate) struct GoogleGenerateContent {
     pub(crate) exchange: HttpExchange,
     endpoint: reqwest::Url,
@@ -44,8 +41,6 @@ pub(crate) struct GoogleGenerateContent {
 
 #[cfg(test)]
 impl GoogleGenerateContent {
-    /// One attempt per request, so a scripted single-response server is
-    /// observed exactly once.
     fn single_shot(mut self) -> Self {
         self.exchange
             .set_attempt_policy(crate::http::AttemptPolicy::disabled());
@@ -160,8 +155,6 @@ impl Provider for GoogleGenerateContent {
                     "Google GenerateContent stream reported usage more than once",
                 );
                 let mut reasoning_open = false;
-                // Gemini assigns no tool-call ids; a per-stream ordinal keeps the
-                // synthesized ids deterministic.
                 let mut tool_call_ordinal = 0_u64;
 
                 while let Some(frame) = sse.next_event().await? {
@@ -280,9 +273,6 @@ struct SystemInstruction<'a> {
 }
 
 impl<'a> GenerateContentRequest<'a> {
-    /// Builds the wire request, resolving each tool result back to the name of
-    /// the call it answers. Gemini identifies function responses by name, so a
-    /// result whose `call_id` matches no earlier tool call cannot be sent.
     pub(crate) fn new(
         request: &'a ModelRequest,
         max_output_tokens: i32,
@@ -602,8 +592,6 @@ fn decode_event(
                         redactions,
                     ))
                 })?;
-                // Gemini assigns no call ids; synthesize a deterministic one
-                // from the per-stream ordinal and the function name.
                 let id = format!("call_{tool_call_ordinal}_{name}", name = call.name);
                 *tool_call_ordinal += 1;
                 events.push(DecodedEvent::ToolCall {
@@ -942,10 +930,6 @@ mod tests {
         );
     }
 
-    /// ENG-897: Gemini's `Schema` rejects JSON Schema keywords such as
-    /// `additionalProperties` (HTTP 400 `Unknown name`), which every built-in
-    /// tool declares. The Google body must carry the reduced schema while
-    /// other codecs keep the declaration verbatim.
     #[tokio::test]
     async fn reduces_tool_schemas_to_the_gemini_subset_without_touching_other_codecs() {
         let body = "data: {\"candidates\":[{\"finishReason\":\"STOP\",\"index\":0}]}\n\n";

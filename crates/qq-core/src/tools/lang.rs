@@ -1,15 +1,7 @@
-//! Per-language regex tables behind `search mode=definition|references` and
-//! `read_file mode=outline`. Tables are data keyed by file extension;
-//! a language qq does not know falls back to a generic word match. This is
-//! deliberately not a parser: it answers "where is X" cheaply and
-//! deterministically, and `search mode=content regex=true` is always there
-//! for the cases it misses.
-
 use std::sync::OnceLock;
 
 use regex::bytes::{Regex, RegexBuilder};
 
-/// Ceiling on a compiled program so a pathological query cannot pin memory.
 pub(super) const REGEX_SIZE_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -43,11 +35,6 @@ impl Language {
         }
     }
 
-    /// The pattern (with `<S>` holes for the escaped symbol) that matches a
-    /// line defining the symbol in this language: anchored at line start
-    /// after optional indentation and the language's modifier keywords.
-    /// Patterns run multi-line over a whole file, so whitespace classes are
-    /// `[ \t]`, never `\s`, and negated classes exclude `\n`.
     const fn definition_template(self) -> &'static str {
         match self {
             Self::Rust => {
@@ -65,8 +52,6 @@ impl Language {
             Self::Zig => {
                 r"^[ \t]*(?:pub[ \t]+)?(?:export[ \t]+)?(?:inline[ \t]+)?(?:fn|const|var)[ \t]+<S>\b"
             }
-            // Function definitions and prototypes start at column 0 in C;
-            // requiring that keeps `return parse(x);` out.
             Self::C => {
                 r"^(?:(?:static|inline|extern|const|unsigned|signed|struct|enum|union|volatile|register)[ \t]+)*[A-Za-z_][A-Za-z0-9_:<>*& \t]*?[ \t*&]<S>[ \t]*\(|^[ \t]*(?:struct|enum|union|class|namespace)[ \t]+<S>\b|^[ \t]*#[ \t]*define[ \t]+<S>\b|^[ \t]*typedef[ \t]+[^\n;]*\b<S>[ \t]*;"
             }
@@ -75,11 +60,6 @@ impl Language {
         }
     }
 
-    /// The outline pattern: alternatives with an optional `i<n>` indentation
-    /// group, an optional `k<n>` kind group (else the alternative's default
-    /// kind in the returned array), a `n<n>` name group, and for Go an
-    /// optional `r<n>` receiver group. It is the definition table without the
-    /// bare assignment forms, which would list every local binding.
     fn outline_table(self) -> Option<(&'static str, [&'static str; 4])> {
         Some(match self {
             Self::Rust => (
@@ -146,10 +126,6 @@ impl Language {
             .as_ref()
     }
 
-    /// Items defined in `buffer` in file order, or `None` when the language
-    /// has no table. Kinds are the source keywords (`fn`, `class`, `h2`, …);
-    /// `indent` is the defining line's leading whitespace (heading level for
-    /// Markdown) so a caller can nest rows without parsing.
     pub(super) fn outline<'b>(
         self,
         buffer: &'b [u8],
@@ -188,9 +164,6 @@ impl Language {
                 .map_or(buffer.len(), |offset| whole.start() + offset);
             let line_text = &buffer[whole.start()..line_end];
             match self {
-                // Indented bindings are locals unless they hold a function or
-                // type; a C "function" whose name is a statement keyword is
-                // filtered above, a `return f(x)` line has no type before it.
                 Self::TypeScript | Self::Zig
                     if matches!(kind, "const" | "let" | "var")
                         && indent > 0
@@ -229,8 +202,6 @@ impl Language {
     }
 }
 
-/// One outline row: the defining line, its indentation (for nesting), the
-/// item kind, and its name.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct OutlineItem<'a> {
     pub(super) line: u32,
@@ -276,7 +247,6 @@ const OUTLINE_GROUPS: [OutlineGroups; 4] = [
 
 const HEADING_KINDS: [&str; 6] = ["h1", "h2", "h3", "h4", "h5", "h6"];
 
-/// Names the C function pattern can capture that are statements, not items.
 const NOT_ITEMS: &[&str] = &[
     "if", "for", "while", "switch", "catch", "return", "else", "do", "sizeof", "try", "defer",
     "select", "go",
@@ -296,10 +266,6 @@ pub(super) enum SymbolError {
     Invalid,
 }
 
-/// Compiled matchers for one symbol: a word-boundary reference matcher and a
-/// definition matcher per language, built lazily as files of that language
-/// are seen so an all-Rust walk compiles one table. Patterns are multi-line
-/// (`^` is a line start) so a whole file buffer is scanned in one pass.
 pub(super) struct SymbolMatchers {
     escaped: String,
     case_insensitive: bool,
@@ -336,7 +302,6 @@ impl SymbolMatchers {
         })
     }
 
-    /// Byte offsets where a reference to the symbol starts.
     pub(super) fn reference_matches<'b>(
         &'b self,
         buffer: &'b [u8],
@@ -344,10 +309,6 @@ impl SymbolMatchers {
         self.reference.find_iter(buffer).map(|found| found.start())
     }
 
-    /// Byte offsets (within the line) of definitions of the symbol in
-    /// `language`. A line can define the symbol only if it mentions it, so
-    /// the cheap word-boundary scan finds candidates and the anchored table
-    /// pattern runs on those lines alone.
     pub(super) fn definition_matches<'b>(
         &'b self,
         language: Language,

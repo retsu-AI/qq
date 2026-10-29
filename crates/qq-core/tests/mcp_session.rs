@@ -1,7 +1,3 @@
-//! End-to-end MCP dispatch through the durable session runtime: a scripted
-//! model requests an `mcp__` tool, the session's approval flow gates it in
-//! Ask mode; each call needs fresh human approval.
-
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -74,7 +70,6 @@ impl ExternalToolHost for PingRegistry {
     }
 }
 
-/// Each run's first model turn requests the MCP tool; the second completes.
 struct McpTurnProvider {
     turn: Mutex<usize>,
 }
@@ -173,7 +168,6 @@ async fn submit_prompt(runtime: &SessionRuntime, session_id: qq_protocol::Sessio
     run_id
 }
 
-/// Collects this run's events through `RunFinished`, returning them.
 async fn collect_run(events: &mut SessionEventStream, run_id: RunId) -> Vec<SessionEvent> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut observed = Vec::new();
@@ -246,8 +240,6 @@ async fn ask_mode_requires_fresh_human_approval_for_each_mcp_call() {
         })
         .unwrap();
 
-    // First run: ask mode must hold the MCP call for approval, and the
-    // approval applies only to that call.
     let first_run = submit_prompt(&runtime, session_id).await;
     let requested = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -301,7 +293,6 @@ async fn ask_mode_requires_fresh_human_approval_for_each_mcp_call() {
     ));
     assert_eq!(calls.lock().unwrap().len(), 1);
 
-    // Ask cannot turn the previous approval into standing authority.
     let second_run = submit_prompt(&runtime, session_id).await;
     let requested = tokio::time::timeout(Duration::from_secs(5), async {
         loop {

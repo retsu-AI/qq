@@ -3,17 +3,13 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_GOAL_RUN_MODEL_TURNS: u32 = 256;
 
-/// An uncertain check still holds its workspace after host recovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckInterruption {
-    /// Session whose completion check was interrupted.
     pub session_id: SessionId,
-    /// Exact interrupted run whose uncertain effects need acknowledgment.
     pub run_id: RunId,
 }
 
-/// A client specification/control generation; model data writes retain it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalIdentity {
@@ -52,18 +48,13 @@ const fn default_check_timeout() -> u64 {
     600_000
 }
 
-/// Authority belongs to this goal's exact check and workspace, never an
-/// ordinary tool approval. The row retains consumed one-shot authorization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalCheckAuthorization {
     Pending,
     Once,
     Consumed,
-    /// Explicit consent to run this goal's check.
     ForGoal,
-    /// Derived Auto authority for this exact check. It runs in the workspace
-    /// as the user, like any Auto command.
     TaskScoped,
 }
 
@@ -78,7 +69,6 @@ pub enum GoalCheckScope {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GoalControl {
     Pause,
-    /// Stop for an unanswered held question belonging to this goal's paid family.
     PauseForInput {
         tool_call_id: ToolCallId,
     },
@@ -164,7 +154,6 @@ pub struct GoalWait {
     pub reason: String,
 }
 
-/// The accepted proposal remains distinct from independently verified achievement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalAchievementClaim {
@@ -173,7 +162,6 @@ pub struct GoalAchievementClaim {
     pub evidence: String,
 }
 
-/// Usage and cost preserve uncertainty independently, as run accounting does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalCounters {

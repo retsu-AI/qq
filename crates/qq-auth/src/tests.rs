@@ -218,10 +218,6 @@ impl WindowsProtectedBackend for FakeWindowsProtected {
     }
 }
 
-/// The three per-provider client shapes the fakes below were written
-/// against, now test-only. [`FakeOAuth`] adapts any of them to the one
-/// [`oauth::OAuthTransport`] contract a store holds, by decoding the request
-/// it receives and encoding the answer each provider's endpoint would send.
 mod fake_clients {
     use super::*;
 
@@ -270,7 +266,6 @@ mod fake_clients {
 
 use fake_clients::{CodexDeviceClient, CodexTokenClient, XaiTokenClient};
 
-/// Routes each OAuth request a store makes to the fake for its endpoint.
 #[derive(Clone, Default)]
 pub(super) struct FakeOAuth {
     codex_tokens: Option<Arc<dyn CodexTokenClient>>,
@@ -285,9 +280,6 @@ fn response(status: u16, body: serde_json::Value) -> oauth::OAuthResponse {
     }
 }
 
-/// The answer a failed fake call becomes: the transport error or HTTP
-/// status the real endpoint returns for it, so the provider's response
-/// mapping produces the same error the fake named.
 fn codex_failure(
     error: codex::CodexAuthError,
 ) -> Result<oauth::OAuthResponse, oauth::TransportError> {
@@ -414,7 +406,6 @@ impl oauth::OAuthTransport for FakeOAuth {
     }
 }
 
-/// Installs `fake`'s clients on `store`, keeping any it already has.
 fn install(store: &mut CredentialStore, update: impl FnOnce(&mut FakeOAuth)) {
     let mut fake = store.test_oauth.lock().unwrap().clone();
     update(&mut fake);
@@ -916,8 +907,6 @@ fn a_built_in_provider_without_any_credential_names_both_remedies() {
          environment variable `QQ_TEST_OPENAI_KEY_THAT_DOES_NOT_EXIST_3F2A`"
     );
 
-    // An explicit Env(...) reference is the user's own choice of variable;
-    // it keeps the plain environment error.
     let explicit = store
         .resolve(&SecretRef::Env(
             "QQ_TEST_OPENAI_KEY_THAT_DOES_NOT_EXIST_3F2A".to_owned(),
@@ -1174,8 +1163,6 @@ fn credential_epoch_advances_on_every_durable_mutation_and_survives_reload() {
     let after_set = store.epoch().unwrap();
     assert!(after_set > CredentialEpoch::NONE);
 
-    // Reading secrets does not move the epoch, and a resolve reports the
-    // epoch of the index it read from, for either reference kind.
     store
         .resolve(&SecretRef::Stored("openai".to_owned()))
         .unwrap();
@@ -1198,7 +1185,6 @@ fn credential_epoch_advances_on_every_durable_mutation_and_survives_reload() {
     let after_remove = store.epoch().unwrap();
     assert!(after_remove > after_rotation);
 
-    // A second store over the same files observes the persisted revision.
     let reopened =
         CredentialStore::with_backend(store.paths().clone(), Arc::new(FakeKeyring::default()));
     assert_eq!(reopened.epoch().unwrap(), after_remove);
@@ -2288,9 +2274,6 @@ fn codex_login_routes_a_realistic_oversized_bundle_to_windows_protection() {
     );
 }
 
-/// The browser login's token exchange carries no device deadline, so a
-/// token endpoint whose body stalls past the transport cap fails it as an
-/// ordinary exchange failure, never as a device-authorization timeout.
 #[test]
 fn a_stalled_browser_exchange_is_an_exchange_failure_not_a_device_timeout() {
     let (mut store, _keyring, _directory) = test_store();
@@ -2309,7 +2292,6 @@ fn a_stalled_browser_exchange_is_an_exchange_failure_not_a_device_timeout() {
         "{browser:?}"
     );
 
-    // The device flow's exchange carries its remaining time and reaches it.
     let device = codex::exchange(
         &store,
         "code",
@@ -2536,8 +2518,6 @@ async fn xai_request_credentials_name_the_provider_and_both_remedies_when_nothin
         error,
         qq_provider::RequestCredentialError::Missing { .. }
     ));
-    // Depends on `XAI_API_KEY` being unset in the test environment, which
-    // the suite requires for the plain-resolution tests above as well.
     assert_eq!(
         error.to_string(),
         "no credential for provider `xai`: run `qq auth login xai --oauth` or \
@@ -3059,8 +3039,6 @@ fn xai_resolution_refreshes_once_and_persists_the_rotated_token() {
     assert_eq!(persisted["access_token"], "refreshed-access-token");
 }
 
-/// Blocks inside the first refresh until the test releases it, so the test
-/// can observe what the refreshing store holds meanwhile.
 struct CoordinatedXaiRefreshClient {
     entered: Arc<Barrier>,
     release: Arc<Barrier>,
@@ -3097,7 +3075,6 @@ fn oauth_operations_lock_the_published_per_provider_files() {
     }
     let directory = TestDirectory::new();
     let paths = CredentialPaths::new(directory.path());
-    // Concurrently running QQ versions coordinate through these exact names.
     assert_eq!(
         paths.provider_lock_file(OAuthProvider::OPENAI_CODEX.name()),
         directory.path().join("openai-codex.lock")
@@ -3153,8 +3130,6 @@ fn an_xai_refresh_holds_xai_lock_against_a_second_store_rotation() {
     let refresh = thread::spawn(move || refreshing.resolve_xai_oauth("work"));
     entered.wait();
 
-    // The refreshing store holds `xai.lock` itself, as another process would
-    // see it; the Codex lock stays free.
     let xai_lock = File::open(directory.path().join("xai.lock")).unwrap();
     assert!(matches!(
         xai_lock.try_lock(),
@@ -3176,9 +3151,6 @@ fn an_xai_refresh_holds_xai_lock_against_a_second_store_rotation() {
         rotated.send(()).unwrap();
         result
     });
-    // The rotation must still be waiting on `xai.lock`. This can only pass
-    // spuriously, never fail spuriously: correct code never sends while the
-    // refresh is paused.
     assert_eq!(
         rotation_done.recv_timeout(Duration::from_millis(200)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout),
@@ -3196,20 +3168,12 @@ fn an_xai_refresh_holds_xai_lock_against_a_second_store_rotation() {
         "refreshed-access-token"
     );
     rotation.join().unwrap().unwrap();
-    // Never the refreshed token: a rotation that reached the keyring while the
-    // refresh was paused would have been overwritten by the refresh write.
     let persisted: serde_json::Value =
         serde_json::from_slice(&keyring.value("xai/work").unwrap()).unwrap();
     assert_eq!(persisted["access_token"], "rotated-by-second-store");
     xai_lock.try_lock().unwrap();
 }
 
-/// A provider that is only a row of `OAuthProvider::ALL`, with no legacy
-/// lock file, gets interprocess exclusion through its derived
-/// `{provider}.lock` on the generic mutation paths: while one store holds
-/// its operation lock (as a refresh does), a second store over the same
-/// directory cannot `set` one of its credentials, and the legacy locks stay
-/// free.
 #[test]
 fn a_new_provider_serialises_independent_stores_through_its_derived_lock() {
     let directory = TestDirectory::new();
@@ -3244,8 +3208,6 @@ fn a_new_provider_serialises_independent_stores_through_its_derived_lock() {
         stored.send(()).unwrap();
         result
     });
-    // This can only pass spuriously, never fail spuriously: correct code
-    // never stores while the first store holds the provider's lock.
     assert_eq!(
         storing.recv_timeout(Duration::from_millis(200)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout),
@@ -3808,8 +3770,6 @@ fn stored_keyring_resolution_revalidates_after_capacity_wait() {
     capacity_waiters.wait_for(1);
     assert_eq!(keyring.read_count("provider/target"), 0);
 
-    // Rotate the index while the request is waiting. Releasing one flight must
-    // cause the public call to reload the current epoch before reading.
     store.set("provider/target", "rotated", false).unwrap();
     let (key, flight) = held.pop().unwrap();
     {
@@ -3907,9 +3867,6 @@ fn stored_keyring_active_result_poison_notifies_and_allows_retry() {
     });
     let flight = active_resolution_flight(&store);
     flight.followers.wait_for(1);
-    // The active owner is the 64th reserved flight. A distinct request must
-    // reach the actual capacity condvar before the owner's poisoned result
-    // frees its slot. No test-side notification releases this waiter.
     {
         let mut state = store.stored_resolution.0.lock().unwrap();
         for index in 0..MAX_STORED_RESOLUTION_CACHE_ENTRIES - 1 {
@@ -4022,9 +3979,6 @@ fn hour_from_now() -> u64 {
         + 3_600
 }
 
-/// Requests a credential and returns the token the provider served. The
-/// served `RequestCredential` is opaque outside qq-provider, so the token is
-/// read from the cache entry that request just used or filled.
 async fn served_xai_token(provider: &request::CachedRequestCredentials<xai::XaiSource>) -> String {
     qq_provider::RequestCredentialProvider::credential(provider)
         .await
@@ -4177,7 +4131,6 @@ async fn xai_api_key_resolutions_are_never_cached() {
             .unwrap();
         assert!(provider.cache.lock().await.is_none());
     }
-    // The store's own short read memo still applies, as before AP5.
     assert_eq!(keyring.read_count("xai/work"), 1);
 }
 
@@ -4190,12 +4143,6 @@ async fn warm_request_credentials_do_not_wait_behind_a_fill() {
         .await
         .unwrap();
 
-    // Hold the fill lock as an in-progress refresh would. A warm request
-    // must still complete without it; before AP5, Codex held one cache
-    // mutex across the whole load, so every request waited behind it. A
-    // request that tried the fill lock would block here until the guard
-    // drops, so completing proves the warm path; the attempt counter proves
-    // it never even asked.
     let fill = provider.fill.lock().await;
     let attempts = provider
         .fill_attempts
@@ -4213,11 +4160,6 @@ async fn warm_request_credentials_do_not_wait_behind_a_fill() {
     drop(fill);
 }
 
-/// Uncacheable sources (here a stored xAI API key) never queue on the fill
-/// lock: two first-use requests both miss, the first resolves under `fill`
-/// and finds the source uncacheable, and the second, already queued on
-/// `fill`, gives it up and resolves on the bounded worker pool instead of
-/// resolving serially under the lock.
 #[tokio::test]
 async fn uncacheable_resolutions_release_the_fill_lock_they_were_queued_on() {
     let (store, keyring, _directory) = test_store();
@@ -4240,7 +4182,6 @@ async fn uncacheable_resolutions_release_the_fill_lock_they_were_queued_on() {
             qq_provider::RequestCredentialProvider::credential(provider.as_ref()).await
         })
     };
-    // The first request takes `fill` and blocks inside the gated keyring read.
     let first = spawn(&provider);
     tokio::task::spawn_blocking({
         let gate = Arc::clone(&gate);
@@ -4248,7 +4189,6 @@ async fn uncacheable_resolutions_release_the_fill_lock_they_were_queued_on() {
     })
     .await
     .unwrap();
-    // The second misses too and queues on `fill`.
     let second = spawn(&provider);
     while provider
         .fill_attempts
@@ -4261,9 +4201,6 @@ async fn uncacheable_resolutions_release_the_fill_lock_they_were_queued_on() {
     first.await.unwrap().unwrap();
     second.await.unwrap().unwrap();
 
-    // The second request must have released `fill` without resolving under
-    // it: holding the lock now, a third uncacheable request still completes
-    // without trying it.
     let held = provider.fill.lock().await;
     let attempts = provider
         .fill_attempts
@@ -4285,9 +4222,6 @@ async fn uncacheable_resolutions_release_the_fill_lock_they_were_queued_on() {
     );
 }
 
-/// A failed first resolution leaves nothing cached, so it must not leave
-/// every later request queuing on the fill lock; once a cacheable OAuth
-/// credential resolves again, it is cached as before.
 #[tokio::test]
 async fn failed_resolutions_do_not_serialise_later_requests_and_oauth_recovers() {
     let (store, keyring, _directory) = test_store();
@@ -4298,8 +4232,6 @@ async fn failed_resolutions_do_not_serialise_later_requests_and_oauth_recovers()
     qq_provider::RequestCredentialProvider::credential(provider.as_ref())
         .await
         .unwrap_err();
-    // With the fill lock held, the next (still failing) request completes
-    // without trying it.
     let held = provider.fill.lock().await;
     let attempts = provider
         .fill_attempts
@@ -4326,9 +4258,6 @@ async fn failed_resolutions_do_not_serialise_later_requests_and_oauth_recovers()
     );
 }
 
-/// The same holds when the load never reaches the resolver: a worker-level
-/// failure (here the loader's permit pool is closed, as when the store shuts
-/// down) also leaves later requests off the fill lock.
 #[tokio::test]
 async fn worker_level_load_failures_do_not_serialise_later_requests() {
     let (store, _keyring, _directory) = test_store();
@@ -4385,8 +4314,6 @@ async fn explicit_xai_references_never_take_the_fill_lock() {
     drop(held);
 }
 
-/// Moves a cached request credential past its refresh deadline, as time
-/// would, without waiting for it.
 async fn expire_cached<C: Clone>(cache: &tokio::sync::Mutex<Option<Arc<request::Cached<C>>>>) {
     let mut cache = cache.lock().await;
     let cached = cache.as_ref().unwrap();

@@ -1,8 +1,5 @@
 use super::*;
 
-/// Every settlement path shares one null guard: a run that already carries
-/// an outcome is never re-settled, no second `RunFinished` is appended,
-/// and the session's ownership of a *newer* run is not cleared.
 #[tokio::test]
 async fn settling_a_settled_run_is_a_no_op_on_every_path() {
     let directory = tempfile::tempdir().unwrap();
@@ -26,8 +23,6 @@ async fn settling_a_settled_run_is_a_no_op_on_every_path() {
             ..
         }
     ));
-    // A newer run now owns the session; a stale settlement of the first
-    // run must not steal that ownership.
     store
         .command(
             CommandId::generate().unwrap(),
@@ -54,7 +49,6 @@ async fn settling_a_settled_run_is_a_no_op_on_every_path() {
         .await
         .unwrap();
 
-    // Path 1: the started-run settlement, replayed.
     let replayed = store
         .finish_run(
             &first,
@@ -65,8 +59,6 @@ async fn settling_a_settled_run_is_a_no_op_on_every_path() {
         .await
         .unwrap();
     assert!(replayed.is_empty(), "replayed finish_run published events");
-    // Path 2: the recovery / panic settlement path, which previously had
-    // no `outcome_json IS NULL` guard.
     let first_claim = first.clone();
     store
         .call_write(Priority::Control, move |connection| {
@@ -85,7 +77,6 @@ async fn settling_a_settled_run_is_a_no_op_on_every_path() {
         })
         .await
         .unwrap();
-    // Path 3: the queued-run settlement, replayed against a started row.
     let first_identity = first.identity;
     store
         .call_write(Priority::Control, move |connection| {
@@ -145,9 +136,6 @@ async fn settling_a_settled_run_is_a_no_op_on_every_path() {
     store.close().await.unwrap();
 }
 
-/// An auto-compaction that already committed its marker is not re-settled
-/// by the original prompt's later teardown: exactly one marker, one
-/// `RunFinished` for the compaction, and the committed outcome stands.
 #[tokio::test]
 async fn a_committed_compaction_is_not_resettled_by_the_prompts_teardown() {
     let directory = tempfile::tempdir().unwrap();
@@ -155,8 +143,6 @@ async fn a_committed_compaction_is_not_resettled_by_the_prompts_teardown() {
         .await
         .unwrap();
     let (_, session_id, original) = create_claimed_parent(&store, directory.path()).await;
-    // Reset the claim to a reservation so an auto-compaction can start on
-    // the prompt's behalf.
     store
         .finish_run(
             &original,
@@ -216,9 +202,6 @@ async fn a_committed_compaction_is_not_resettled_by_the_prompts_teardown() {
         .await
         .unwrap();
 
-    // The prompt's teardown fails the compaction again (the shape of the
-    // `finish_run(compaction); finish_prepared_run(original)` pairs in
-    // execution.rs) and then the panic path sweeps the session.
     let replayed = store
         .finish_run(
             &compaction,
@@ -233,8 +216,6 @@ async fn a_committed_compaction_is_not_resettled_by_the_prompts_teardown() {
         .settle_panicked_execution(&original, execution::internal_failure("late panic sweep"))
         .await
         .unwrap();
-    // The sweep settles only the still-queued original, never the
-    // compaction.
     assert!(swept.events.iter().all(|event| !matches!(
         &event.event,
         SessionEvent::RunFinished { run_id, .. } if *run_id == compaction.identity.run_id
@@ -277,8 +258,6 @@ async fn a_committed_compaction_is_not_resettled_by_the_prompts_teardown() {
         })
         .await
         .unwrap();
-    // Only the original's own settlement (and its parent update, if any)
-    // may have been appended by the sweep.
     assert!(
         swept.events.len() as u64 == events_after - events_before,
         "sweep appended {} events but {} were persisted",
@@ -342,8 +321,6 @@ async fn recovery_interrupts_only_the_current_turns_message() {
         .await
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
-    // Turn one: streamed text, then a completed tool call; the turn
-    // committed, finalizing its message.
     let first_message = MessageId::generate().unwrap();
     store
         .begin_assistant_message(
@@ -414,7 +391,6 @@ async fn recovery_interrupts_only_the_current_turns_message() {
         )
         .await
         .unwrap();
-    // Turn two starts streaming, then the server crashes.
     let second_message = MessageId::generate().unwrap();
     store
         .begin_assistant_message(
@@ -521,8 +497,6 @@ async fn recovery_interrupts_running_tools_without_reexecuting_them() {
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     let tool_call_id = ToolCallId::generate().unwrap();
-    // A mutating call crashed mid-execution: replay must surface an
-    // explicit interrupted result, never re-run the side effect.
     let call = RuntimeToolCall {
         id: tool_call_id,
         turn_ordinal: 1,
@@ -692,8 +666,6 @@ async fn orphaned_tool_call_blocks_replay_with_synthesized_interrupted_results()
         .await
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
-    // Simulate the pre-fix crash window: the model turn committed with a
-    // ToolCall block, but no tool_calls rows were ever written.
     store
         .persist_model_turn(
             &claimed,
@@ -1279,9 +1251,6 @@ async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime(
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    // Hold the worker on the cancellation read and saturate the control
-    // lane behind it. The supervisor's reserved start must wait for a
-    // capacity wake rather than be told to retry or fail the run.
     let (read_entered, release_read) = store::hold_cancellation_read(run_id);
     let mut events = runtime
         .subscribe(SubscribeRequest {
@@ -1296,8 +1265,6 @@ async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime(
         .unwrap();
     let saturated = saturate_control_lane(&runtime).await;
     release_read.send(()).unwrap();
-    // The start attempt is now queued behind a full lane and cannot make
-    // progress until capacity returns.
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(matches!(
         runtime
@@ -2560,9 +2527,6 @@ async fn recovery_ignores_legacy_overflow_evidence_without_spending_a_second_att
     };
     let original = store.reserve_next_run(false).await.unwrap().unwrap();
     let audit = test_prepared_audit(&original);
-    // Version 17 stored only a resolved model here. It lacks the exact
-    // static-prefix/request-byte basis required by version 18 and must
-    // not suppress a provider request after recovery.
     let mut legacy_model = test_resolved_model("test/model", "test-model", 256, None);
     legacy_model.version = qq_protocol::ResolvedModelVersion::new(1).unwrap();
     legacy_model.request_shape = None;
@@ -3393,8 +3357,6 @@ async fn schedules_ready_sessions_fairly() {
         .await
         .unwrap();
     entered.notified().await;
-    // Keep the first run active until both competing sessions are queued.
-    // A timed provider delay cannot establish that condition under load.
     for (session_id, prompt) in [(first_session, "first-b"), (second_session, "second-a")] {
         runtime
             .command(

@@ -1,7 +1,3 @@
-//! Compaction runs: summary validation, auto-compaction start and reload, the
-//! transaction that swaps a summary in for the transcript span, and the
-//! record QQ renders into it.
-
 mod inputs;
 mod record;
 
@@ -13,12 +9,7 @@ pub(super) use record::{RecordScope, record_budget, render_compaction_record};
 
 use super::*;
 
-/// The model's narrative alone. A reply that echoes a compaction record (for
-/// example, one copied from the prior summary) is cut at the record header,
-/// so the stored record is always the one rendered from rows.
 pub(super) fn narrative_of(mut summary: String) -> String {
-    // Only a header at the start of a line opens a record; prose that
-    // mentions it does not.
     let at = [COMPACTION_RECORD_HEADER, inputs::EXACT_INPUTS_HEADER]
         .into_iter()
         .flat_map(|header| summary.match_indices(header).map(|(at, _)| at))
@@ -32,7 +23,6 @@ pub(super) fn narrative_of(mut summary: String) -> String {
     summary
 }
 
-/// The stored summary: the narrative, then the record when there is one.
 fn with_record(mut narrative: String, record: &str) -> String {
     if !record.is_empty() {
         narrative.reserve(record.len() + 2);
@@ -42,15 +32,10 @@ fn with_record(mut narrative: String, record: &str) -> String {
     narrative
 }
 
-/// Structural validation of a summarizer narrative (the reply without any
-/// echoed record). Shrinkage is measured separately against the real
-/// assembly inside the compaction transaction.
 pub(super) fn validate_compaction_summary(summary: &str) -> Result<(), String> {
     if summary.trim().is_empty() {
         return Err("compaction produced an empty summary".to_owned());
     }
-    // The stored summary is the narrative plus a record of at most
-    // `COMPACTION_RECORD_BYTES`, so both must fit together.
     let replacement_bytes = COMPACTION_SUMMARY_PREAMBLE
         .len()
         .saturating_add(2)
@@ -60,11 +45,6 @@ pub(super) fn validate_compaction_summary(summary: &str) -> Result<(), String> {
     if replacement_bytes > MAX_CONTEXT_BYTES {
         return Err("compaction summary exceeds the 4 MiB session context limit".to_owned());
     }
-    // A heading is a line that starts with the section name (optionally
-    // numbered or marked up) and then either a colon or nothing else: both
-    // `1. Intent: ...` and a markdown `## 1. Intent` line with the body
-    // below it count. Matching is per line so body text mentioning
-    // "errors:" cannot satisfy the requirement.
     let missing = COMPACTION_REQUIRED_SECTIONS
         .iter()
         .filter(|section| {
@@ -113,8 +93,6 @@ pub(super) fn start_auto_compaction(
     let context_base_bytes = prepared_context_bytes(audit.weight)?;
     let now = now_ms();
     let transaction = store::begin_unit(connection)?;
-    // One step per call; the column counts summarizer requests spent on this
-    // prompt so a restart resumes the fold where it stopped.
     let attempted = transaction.execute(
         "UPDATE runs SET context_compaction_attempted = context_compaction_attempted + 1
              WHERE id = ?1 AND session_id = ?2 AND status = 'queued'
@@ -219,9 +197,6 @@ pub(super) fn start_auto_compaction(
             plan: Some(Box::new(audit.plan_identity.clone())),
         },
     )?;
-    // A compaction run reports `compacting` for its whole life, from the
-    // transaction that starts it, so even a run cancelled before its first
-    // poll said what it was.
     append_event(
         &transaction,
         EventContext::for_run_ids(
@@ -283,8 +258,6 @@ pub(super) fn start_auto_compaction(
             depth: original.depth,
             root_run_id: original.root_run_id,
             purpose: original.purpose,
-            // A compaction run starts inside this transaction: nothing can have
-            // cancelled it yet, and it steers and edits no files.
             cancel_requested: false,
             file_state: Vec::new(),
             pending_steering: Vec::new(),
@@ -294,28 +267,12 @@ pub(super) fn start_auto_compaction(
     )))
 }
 
-/// What one summarizer request reads: the assembled context up to a unit
-/// boundary plus the instruction, and the ordinal its summary will cover.
-/// Whether that is everything the session holds is re-read from the store
-/// after the step commits, so a fold resumes correctly after a restart.
 pub(super) struct SummarizerInput {
     pub(super) messages: Vec<Message>,
-    /// The prompt ordinal the summary will cover; `None` when nothing new
-    /// follows the current marker, so the commit keeps its span.
     pub(super) cutoff_ordinal: Option<u64>,
-    /// Bytes of the first unit when even it alone exceeds the budget. The
-    /// request is still sent — the estimate is conservative and the provider
-    /// adjudicates — but a rejection then names an irreducible unit, not an
-    /// exhausted retry.
     pub(super) oversized_unit_bytes: Option<u64>,
 }
 
-/// Assembles the summarizer's request from the session's context after its
-/// current cutoff. With a byte budget, the longest prefix of whole
-/// prompt/run units that fits is taken — never fewer than one — so the
-/// request fits the model window by construction and the summary it
-/// produces replaces exactly that span. Without a budget (no declared
-/// window) the whole context is read, as before.
 pub(super) fn load_summarizer_input(
     connection: &mut Connection,
     session_id: SessionId,
@@ -336,7 +293,6 @@ pub(super) fn load_summarizer_input(
             let mut cutoff = everything;
             let mut oversized = None;
             for (index, unit) in units.iter().enumerate() {
-                // The leading summary, if any, is charged to the first unit.
                 let unit_bytes = crate::measure_messages(&messages[taken..unit.end]);
                 let total = spent.saturating_add(unit_bytes);
                 if total > budget && index > 0 {
@@ -361,11 +317,6 @@ pub(super) fn load_summarizer_input(
     })
 }
 
-/// Commits a compaction: the summary row and cutoff marker persist in the
-/// same transaction that settles the internal run, so a crash anywhere
-/// before the commit leaves no marker and the command can simply be retried.
-/// Events (RunFinished, then SessionCompacted) are appended before commit —
-/// persist-before-publish like every other event.
 pub(super) fn complete_compaction(
     connection: &mut Connection,
     store_id: StoreId,
@@ -376,13 +327,9 @@ pub(super) fn complete_compaction(
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let summary = narrative_of(summary);
     let transaction = store::begin_unit(connection)?;
-    // A settled compaction already committed (or rejected) its marker; a
-    // replay must not insert a second one.
     if run_is_settled(&transaction, claimed.identity.run_id)? {
         return Ok(Vec::new());
     }
-    // A cancel that raced the summarizer's completion wins: the run settles
-    // cancelled and no marker is committed.
     let mut outcome =
         cancellation_wins(&transaction, claimed.identity.run_id, RunOutcome::Completed)?;
     if matches!(outcome, RunOutcome::Completed)
@@ -399,12 +346,6 @@ pub(super) fn complete_compaction(
     if matches!(outcome, RunOutcome::Completed) {
         let now = now_ms();
         let before_bytes = assembled_context_bytes(&transaction, claimed.identity.session_id)?;
-        // The cutoff covers exactly the span the summary replaced: the
-        // messages assembly showed the summarizer. A bounded step carries
-        // its unit boundary; an unbounded one read everything settled. A
-        // prompt still queued behind an auto-compaction has an ordinal but
-        // was not summarized — it must stay after the marker so its run
-        // still sends it.
         let cutoff_ordinal: u64 = match claimed.compaction_cutoff_ordinal {
             Some(cutoff) => cutoff,
             None => transaction.query_row(
@@ -414,7 +355,6 @@ pub(super) fn complete_compaction(
                 |row| row.get(0),
             )?,
         };
-        // Measure the actual replacement, including protected source inputs.
         let record = render_compaction_record(
             &transaction,
             claimed.identity.session_id,
@@ -442,11 +382,6 @@ pub(super) fn complete_compaction(
                 Err(SessionRuntimeError::ContextTooLarge) => None,
                 Err(error) => return Err(error),
             };
-        // Shrinkage is the point of compaction. A short transcript is the one
-        // exception: the structured summary's fixed framing can exceed it,
-        // yet compacting it is still correct when the provider reported
-        // overflow. Above that floor a narrative that fails to shrink the
-        // assembly is rejected outright.
         let shrinkage_required = before_bytes > COMPACTION_SHRINKAGE_FLOOR_BYTES;
         if candidate_bytes.is_none()
             || (shrinkage_required && candidate_bytes.is_some_and(|bytes| bytes >= before_bytes))
@@ -504,9 +439,6 @@ pub(super) fn complete_compaction(
             ],
         )?;
         prune_compaction_history(&transaction, claimed.identity.session_id)?;
-        // The compaction request measured the context that was just
-        // replaced, not the summary now occupying the session. Keep the
-        // session unknown until its next prompt turn reports exact usage.
         transaction.execute(
             "UPDATE sessions
                  SET context_tokens = NULL,
@@ -557,21 +489,11 @@ pub(super) fn complete_compaction(
     Ok(events)
 }
 
-/// One persisted between-run compaction: the summary that replaces every
-/// prompt at or before `cutoff_ordinal`, and their runs, in assembly.
 pub(super) struct CompactionRow {
     pub(super) summary: String,
     pub(super) cutoff_ordinal: u64,
 }
 
-/// Keep recent rollback checkpoints plus the projection they build on. A
-/// marker is live state, not just rollback history: dropping a session marker
-/// or a retained run's marker resurrects raw turns the live request replaced.
-///
-/// Before the oldest recent checkpoint, retain the session prefix and one
-/// in-run marker per prompt after that prefix's cutoff. Those baseline rows
-/// reconstruct every view reached by undoing the recent checkpoints. Older
-/// versions and runs covered by the baseline prefix are no longer needed.
 pub(super) fn prune_compaction_history(
     connection: &Connection,
     session_id: SessionId,
@@ -604,9 +526,6 @@ pub(super) fn prune_compaction_history(
     Ok(())
 }
 
-/// The newest between-run marker. In-run markers (`scope_run_id` set) are
-/// not candidates: they replace turns inside one run and are read per run
-/// by `in_run_compactions`.
 pub(super) fn latest_compaction(
     connection: &Connection,
     session_id: SessionId,
@@ -628,18 +547,12 @@ pub(super) fn latest_compaction(
         .map_err(|_| SessionRuntimeError::CODEC)
 }
 
-/// One persisted in-run compaction: within the run it names, the summary
-/// replaces every model turn with ordinal `<= turn_cutoff` (and their tool
-/// results and applied steering). Turns after it stay verbatim.
 pub(super) struct InRunCompaction {
     pub(super) summary: String,
     pub(super) turn_cutoff: u32,
     pub(super) goal_notice: Option<String>,
 }
 
-/// The newest in-run marker of each run whose prompt is retained. Keyed by
-/// run id. Runs with no marker are absent; the query is bounded by the
-/// retained prompt window like every other assembly query.
 pub(super) fn in_run_compactions(
     connection: &Connection,
     session: &str,
@@ -687,12 +600,6 @@ pub(super) fn in_run_compactions(
     Ok(markers)
 }
 
-/// Starts an in-run compaction for a prompt run that is `running`. Unlike a
-/// between-run step it never takes the session's active-run slot — the
-/// prompt run holds it — so `settle_run`'s slot release is a no-op for it.
-/// The row carries the prompt run as its owner and the cutoff it will cover.
-/// `None` when the prompt run is no longer running (cancelled or settled
-/// while the loop was at the boundary).
 pub(super) fn start_in_run_compaction(
     connection: &mut Connection,
     store_id: StoreId,
@@ -724,10 +631,6 @@ pub(super) fn start_in_run_compaction(
     if !running {
         return Ok(None);
     }
-    // In-run steps do not draw on `MAX_COMPACTION_STEPS`: that budget bounds
-    // one between-run fold. An in-run step must still shrink the context and
-    // is charged to the caller's token and cost limits like any turn, which is
-    // what bounds how many can run (ADR-0048 § 1).
     transaction.execute(
         "INSERT INTO runs(
                  id, session_id, command_id, user_message_id, assistant_message_id,
@@ -771,7 +674,6 @@ pub(super) fn start_in_run_compaction(
             plan: None,
         },
     )?;
-    // Reported from the start transaction, as for a between-run step.
     append_event(
         &transaction,
         EventContext::for_run_ids(
@@ -796,9 +698,6 @@ pub(super) fn start_in_run_compaction(
     } else {
         None
     };
-    // A summary-only admission may omit rows after the latest marker. Read
-    // the complete span this new cutoff will cover in the same transaction;
-    // the live request is not evidence that those rows were summarized.
     let inherited_messages = match inherited_cutoff {
         Some(cutoff) => load_model_context(&transaction, prompt_run.identity.session_id, cutoff)?,
         None => Vec::new(),
@@ -821,11 +720,6 @@ pub(super) fn start_in_run_compaction(
     Ok(Some((claimed, started)))
 }
 
-/// Commits an in-run summary: validates the narrative, appends the record,
-/// inserts the scoped marker, checks that the prompt run's assembled context
-/// shrank, settles the compaction run, and publishes `SessionCompacted`.
-/// Returns the events and, when the marker stands, the stored summary the
-/// live splice must use. All in one transaction, like `complete_compaction`.
 pub(super) struct InRunSummaryCommit<'a> {
     pub(super) summary: String,
     pub(super) accounting: Option<RunAccounting>,
@@ -959,19 +853,11 @@ pub(super) fn complete_in_run_compaction(
                 ],
             )?;
             prune_compaction_history(&transaction, session)?;
-            // The prompt run's measured occupancy described the context it
-            // just replaced; the next turn's usage re-seeds it.
             transaction.execute(
                 "UPDATE sessions SET context_tokens = NULL, context_occupancy_json = NULL
                      WHERE id = ?1",
                 [session.to_string()],
             )?;
-            // A new window: the prompt run's reservation is re-based to what
-            // its next request carries, the retained weight plus the framed
-            // summary committed here, in the marker's transaction. A crash
-            // leaves the old marker with the old reservation or the new marker
-            // with the new one (ADR-0048 § 1). The summary is framed exactly
-            // as the live splice frames it.
             let framed_summary_bytes = crate::measure_message(&Message::user(format!(
                 "{}\n\n{visible_summary}",
                 if claimed.compaction_cutoff_ordinal.is_some() {
@@ -983,10 +869,6 @@ pub(super) fn complete_in_run_compaction(
             let context_base_bytes =
                 i64::try_from(retained_bytes.saturating_add(framed_summary_bytes))
                     .map_err(|_| SessionRuntimeError::OutputTooLarge)?;
-            // A prompt run that settled while this commit was queued (its task
-            // dropped at a deadline or cancel) has no window left to re-base:
-            // zero rows updated is expected then, and the marker still records
-            // the summary its replay renders.
             transaction.execute(
                 "UPDATE runs SET context_base_bytes = ?2, context_increment_bytes = 0
                      WHERE id = ?1 AND status = 'running'",
@@ -1007,8 +889,6 @@ pub(super) fn complete_in_run_compaction(
                 SessionEvent::SessionCompacted {
                     session: Box::new(session_summary),
                     summary: Some({
-                        // Copy only the excerpt; the whole text goes back to
-                        // the live splice.
                         let mut end = summary.len().min(MAX_EVENT_SUMMARY_BYTES);
                         while !summary.is_char_boundary(end) {
                             end -= 1;

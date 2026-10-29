@@ -31,12 +31,6 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [features]
-# The HTTP adapter families (OpenAI Responses and Chat Completions, Anthropic
-# Messages, Google GenerateContent) are always built: they share one reqwest
-# transport and add no dependency of their own. Only the Amazon Bedrock family
-# (Bedrock Runtime Converse and Bedrock Mantle SigV4) is optional because it
-# alone pulls the AWS SDK closure. `default` is the full binary profile;
-# embedders that compile only HTTP families disable default features.
 default = ["provider-bedrock"]
 provider-bedrock = [
     "dep:aws-config",
@@ -48,8 +42,6 @@ provider-bedrock = [
     "dep:aws-smithy-runtime-api",
     "dep:aws-smithy-types",
 ]
-# Exposes the loopback test harness (`test_support`) to this package's own
-# integration tests via the self dev-dependency below. Not a public API.
 test-support = []
 
 [dev-dependencies]

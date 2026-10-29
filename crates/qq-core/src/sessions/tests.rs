@@ -1,7 +1,3 @@
-//! Shared harness for the session tests: scripted loaders and providers,
-//! runtime and store fixtures, and the event collectors. Tests live in the
-//! theme modules below.
-
 use std::sync::atomic::AtomicBool;
 
 use super::*;
@@ -85,17 +81,11 @@ fn loaded_runtime_for_route(
     loaded_runtime_with_model(runtime, workspace, resolved)
 }
 
-/// Compiles a test plan. Test loaders run inside the runtime's async
-/// context, where the blocking compile is acceptable for the tiny
-/// temporary workspaces tests use.
 fn loaded_runtime_with_model(
     runtime: Runtime,
     workspace: &str,
     resolved: ResolvedModel,
 ) -> LoadedRuntime {
-    // Session tests exercise recovery through outcomes, not wall time: the
-    // real minute-scale backoff would turn every transient-fault fixture
-    // into a multi-minute test.
     let runtime = runtime.with_turn_recovery(crate::TurnRecoveryPolicy::new(
         Duration::from_millis(1),
         Duration::from_millis(1),
@@ -225,9 +215,6 @@ struct ScriptedProvider;
 
 impl Provider for ScriptedProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
-        // A compaction request ends with the summarization instruction;
-        // answer it with a structurally valid summary so validation
-        // passes, and everything else with "hello".
         let summarizing = request_texts(&request)
             .last()
             .is_some_and(|text| text.starts_with("Summarize this conversation"));
@@ -687,10 +674,6 @@ struct RenewableSliceLoader {
     metered_empty_checkpoint: bool,
 }
 
-/// A `RenewableSliceProvider` whose first checkpoint reply is cut: with
-/// `fault`, the stream streams partial text and then fails transiently (the
-/// run retries the report); otherwise it stops at the output limit (the run
-/// continues it). The next attempt finishes the report.
 struct TruncatedReportProvider {
     inner: RenewableSliceProvider,
     truncated: StdMutex<bool>,
@@ -778,9 +761,6 @@ impl RuntimeLoader for TruncatedReportLoader {
     }
 }
 
-/// Holds the checkpoint request until the test releases it, then answers
-/// with `reply` (empty: a missed report). The test can act while the report
-/// is in flight.
 #[derive(Clone)]
 struct CheckpointGate {
     reached: Arc<tokio::sync::Notify>,
@@ -788,7 +768,6 @@ struct CheckpointGate {
     reply: &'static str,
 }
 
-/// A `RenewableSliceLoader` whose checkpoint request waits on `gate`.
 struct GatedSliceLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
     gate: CheckpointGate,
@@ -904,8 +883,6 @@ impl Provider for RenewableSliceProvider {
         drop(requests);
 
         let tool_turns = crate::MAX_TOOL_CALLS_PER_SLICE / crate::MAX_TOOL_CALLS_PER_TURN;
-        // The report notice is the request's last message; the system prompt
-        // is unchanged across the seam (ADR-0054 § 2).
         let checkpoint_request =
             request.messages().last() == Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE));
         if checkpoint_request {
@@ -936,8 +913,6 @@ impl Provider for RenewableSliceProvider {
             ]));
         }
         if current > tool_turns {
-            // Metered in the empty-checkpoint mode so the run's usage stays
-            // known through the turn after the missed report.
             return Box::pin(stream::iter([
                 Ok(qq_provider::ProviderEvent::OutputTextDelta {
                     text: "task complete".to_owned(),
@@ -967,9 +942,6 @@ impl Provider for RenewableSliceProvider {
                     r#"{"edits":[{"path":"slice-effects.txt","old":"seed","new":"seedx"}]}"#,
                 )
             } else if index == crate::MAX_TOOL_CALLS_PER_TURN - 1 {
-                // One write per turn is progress (ADR-0054 § 1), so these
-                // slice fixtures reach the 256-call checkpoint, not the
-                // 64-call stall report.
                 ("write_file", r#"{"path":"progress.txt","content":"x"}"#)
             } else {
                 ("read_file", r#"{"path":"note.txt"}"#)
@@ -980,8 +952,6 @@ impl Provider for RenewableSliceProvider {
             }));
             events.push(Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
                 id: id.clone(),
-                // Varied page requests keep this a slice/persistence workload,
-                // rather than a proved identical-read execution loop.
                 json: if name == "read_file" && json == r#"{"path":"note.txt"}"# {
                     serde_json::json!({"path":"note.txt","limit":current*crate::MAX_TOOL_CALLS_PER_TURN+index+1}).to_string()
                 } else {
@@ -1005,8 +975,6 @@ impl Provider for RenewableSliceProvider {
     }
 }
 
-/// Turn one streams text and then requests a tool call; turn two streams
-/// closing text. Exercises per-turn assistant messages around calls.
 struct TurnTextLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
 }
@@ -1092,7 +1060,6 @@ impl Provider for DelayedProvider {
     }
 }
 
-/// Requests `tool` once per tool turn, then completes with text.
 struct ApprovalLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
     tool: &'static str,
@@ -1163,8 +1130,6 @@ impl Provider for ApprovalProvider {
     }
 }
 
-/// Replays a fixed tool-call script per run: run N issues its scripted
-/// calls one per model turn, then completes with text.
 struct ScriptedRunsLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
     runs: Vec<Vec<(&'static str, String)>>,
@@ -1514,9 +1479,6 @@ async fn test_runtime() -> (TempDir, SessionRuntime) {
     (directory, runtime)
 }
 
-/// Records the model each run is loaded with, then behaves like a
-/// one-tool-turn approval run: the run parks at a `__test_mutate`
-/// approval, which gives tests a deterministic "run is active" point.
 struct RecordingApprovalLoader {
     models: Arc<StdMutex<Vec<Option<String>>>>,
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
@@ -1576,8 +1538,6 @@ async fn session_management_harness() -> SessionManagementHarness {
     .await
     .unwrap();
     let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    // These management tests park a run at its tool approval, so the
-    // session must ask rather than auto-execute the scripted mutation.
     let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Ask).await;
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
@@ -1600,8 +1560,6 @@ async fn session_management_harness() -> SessionManagementHarness {
     }
 }
 
-/// Drives one `read_file` call through the store with a spill attached
-/// and returns the store, the session, the call id, and the digest.
 async fn store_with_one_spill(
     directory: &std::path::Path,
     text: &str,
@@ -1648,8 +1606,6 @@ async fn store_with_one_spill(
     (store, session_id, tool_call_id, digest)
 }
 
-/// Submits a prompt, claims the run, records one `read_file` call whose
-/// result cites a spill of `text`, and finishes the run.
 async fn spill_one_call(
     store: &Store,
     session_id: SessionId,
@@ -2282,10 +2238,6 @@ async fn streaming_transaction_state(store: &Store, run_id: RunId) -> (u64, u64,
         .unwrap()
 }
 
-/// Blocks the store worker on one job and fills every control-lane slot
-/// behind it. The returned guard owns the queued filler calls; releasing
-/// the worker drains them. Fresh `Priority::Control` calls are refused
-/// while the guard is held.
 struct SaturatedControlLane {
     release: std::sync::mpsc::Sender<()>,
     blocked: tokio::task::JoinHandle<Result<(), SessionRuntimeError>>,
@@ -2317,13 +2269,10 @@ async fn saturate_control_lane(runtime: &SessionRuntime) -> SaturatedControlLane
             .await
     });
     entered_rx.await.unwrap();
-    // Other work may already hold control slots; fill whatever remains.
     let mut fillers = Vec::new();
     for _ in 0..store::CONTROL_QUEUE_CAPACITY {
         let store = runtime.inner.store.clone();
         let mut call = Box::pin(async move { store.call(Priority::Control, |_| Ok(())).await });
-        // Polling once takes the permit and enqueues the job synchronously,
-        // or is refused because the lane is already full.
         match futures_util::poll!(call.as_mut()) {
             std::task::Poll::Pending => fillers.push(tokio::spawn(call)),
             std::task::Poll::Ready(Err(SessionRuntimeError::Overloaded)) => break,
@@ -2400,9 +2349,6 @@ async fn create_session_with_mode(
         .unwrap()
 }
 
-/// The pre-D7 assembly, one query per message and per turn, kept as the
-/// oracle for the joined loader. Any divergence between the two on a
-/// seeded store is a regression in the joined query.
 mod reference_assembly {
     use super::*;
 
@@ -2415,7 +2361,6 @@ mod reference_assembly {
         let cutoff_ordinal = compaction
             .as_ref()
             .map_or(0, |compaction| compaction.cutoff_ordinal);
-        // SQLite integers are i64; `u64::MAX` means "everything".
         let through_ordinal = through_ordinal.min(u64::try_from(i64::MAX).unwrap_or(u64::MAX));
         let mut statement = transaction.prepare(
             "SELECT id FROM messages
@@ -2451,7 +2396,6 @@ mod reference_assembly {
             |row| row.get(0),
         )?;
         let watermark = watermark.filter(|_| watermark_ordinal.is_some());
-        // Pruning reads only the context through the watermark turn.
         let mut prune_limit = 0_usize;
         let mut context = Vec::new();
         if let Some(compaction) = compaction {
@@ -2482,10 +2426,6 @@ mod reference_assembly {
                 &id,
                 snapshot.output,
             )?));
-            // Reconstruct each run immediately after its prompt rather than
-            // following message-row ordinals. Follow-up prompts can be queued
-            // while the prior run is active, so its later committed output still
-            // belongs before the follow-up in model context.
             let status: String = transaction.query_row(
                 "SELECT status FROM runs WHERE id = ?1",
                 [snapshot.run_id.to_string()],
@@ -2547,8 +2487,6 @@ mod reference_assembly {
                 prune_limit = context.len();
             }
         }
-        // The reference predates the stored effect column and prunes by
-        // name alone; the differential fixtures use built-in tools only.
         let context_rewritten =
             prune_stale_tool_results(&mut context[..prune_limit], &HashMap::new());
         Ok((context, context_rewritten))
@@ -2580,9 +2518,6 @@ mod reference_assembly {
         }
         Ok(())
     }
-    /// Per-message attachment lookup, for prompts and steering alike: a row
-    /// with stored attachments is rebuilt from its text parts plus each stored
-    /// block; one without keeps the transcript text.
     fn render_message(
         transaction: &Connection,
         id: &str,
@@ -2662,9 +2597,6 @@ mod reference_assembly {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
-        // Applied steering carries the ordinal of the turn whose request first
-        // included it; it is replayed as a user message immediately before that
-        // turn, after the preceding turn's tool results.
         let mut statement = transaction.prepare(
             "SELECT turn_ordinal, output, id FROM messages
                  WHERE run_id = ?1 AND steering = 1 AND state = 'complete'
@@ -2684,10 +2616,6 @@ mod reference_assembly {
             .into_iter()
             .map(|(turn, output, id)| Ok((turn, render_message(transaction, &id, output)?)))
             .collect::<Result<std::collections::VecDeque<_>, SessionRuntimeError>>()?;
-        // Delivered sub-agent answers and interim reports, per run, in
-        // delivery order: before the turn whose request first carried them,
-        // after its steering; a NULL turn (the run settled first) after the
-        // run.
         let mut statement = transaction.prepare(
             "SELECT turn_ordinal, text, delivery_ordinal FROM child_deliveries
                  WHERE parent_run_id = ?1 AND delivered_at_ms IS NOT NULL
@@ -2702,8 +2630,6 @@ mod reference_assembly {
             })?
             .collect::<Result<std::collections::VecDeque<_>, _>>()?;
         drop(statement);
-        // The newest in-run marker scoped to this run replaces its turns
-        // through `turn_cutoff`, plus the steering applied before them.
         let marker: Option<(String, u32)> = transaction
             .query_row(
                 "SELECT summary, turn_cutoff FROM session_compactions
@@ -2720,9 +2646,6 @@ mod reference_assembly {
                 .count();
             if replaced > 0 {
                 turns.drain(..replaced);
-                // The live run's summary replaced every message up to the
-                // first kept assistant turn: that turn's steering and its
-                // runtime notice went with the summarized span.
                 let first_kept = turns.first().map_or(turn_cutoff, |turn| turn.0);
                 if let Some(first) = turns.first_mut() {
                     first.3 = None;
@@ -2762,8 +2685,6 @@ mod reference_assembly {
                 let (_, text) = delivered.pop_front().expect("front was just checked");
                 context.push(Message::user(text));
             }
-            // The runtime notice (report, stall report, continuation, or
-            // final answer) the live run placed before this turn's request.
             match notice.as_deref() {
                 None => {}
                 Some("report") => context.push(Message::user(crate::SLICE_CHECKPOINT_NOTICE)),
@@ -2805,12 +2726,6 @@ mod reference_assembly {
                 })?
                 .collect::<Result<HashMap<String, (String, bool, String, Option<String>)>, _>>()?;
             drop(statement);
-            // Emit exactly one result per ToolCall block, in block order,
-            // through the same per-turn output budget the live run applied.
-            // A block without a recorded result (a crash between the
-            // turn commit and its tool_calls rows in an older store)
-            // gets an explicit interrupted result so replayed context
-            // stays provider-valid instead of poisoning the session.
             let mut turn_output =
                 crate::tools::TurnOutputBudget::for_results(content.iter().filter_map(|block| {
                     match block {
@@ -2867,9 +2782,6 @@ mod reference_assembly {
             if !results.is_empty() {
                 context.push(Message::tool_results(results));
             }
-            // A truncated turn was followed in the live run by the continuation
-            // notice; replaying it keeps the assembled context identical to the
-            // request the model actually saw (and preserves role alternation).
             if truncated {
                 context.push(Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE));
             }
@@ -2879,9 +2791,6 @@ mod reference_assembly {
                 **limit = context.len();
             }
         }
-        // Steering applied for a turn that never committed (the run settled
-        // first) still reached the model's request; keep it so the transcript
-        // the user saw is the transcript the next run continues from.
         for (_, text) in steering {
             context.push(Message::user(text));
         }
@@ -2892,9 +2801,6 @@ mod reference_assembly {
     }
 }
 
-/// Moves the session's prune watermark to its newest committed turn, as a
-/// seam would: assembly then stubs every stale read-only result, which is
-/// what tests of the stubbing itself need.
 fn mark_prune_seam(database: &std::path::Path, session_id: SessionId) {
     let connection = Connection::open(database).unwrap();
     connection
@@ -2910,8 +2816,6 @@ fn mark_prune_seam(database: &std::path::Path, session_id: SessionId) {
         .unwrap();
 }
 
-/// Asserts the joined context loader assembles exactly what the reference
-/// (per-message, per-turn) loader assembles for `session_id`.
 fn assert_assembly_matches_reference(database: &std::path::Path, session_id: SessionId) {
     let mut connection = Connection::open(database).unwrap();
     let transaction = connection.transaction().unwrap();
@@ -2926,8 +2830,6 @@ fn assert_assembly_matches_reference(database: &std::path::Path, session_id: Ses
         assert_eq!(joined.role(), reference.role(), "role at {index}");
         assert_eq!(joined.content(), reference.content(), "content at {index}");
     }
-    // A bounded prefix must agree too: `through_ordinal` scoping is part
-    // of the contract the reload path depends on.
     let (joined, _) = load_model_context_with_rewrite_status(&transaction, session_id, 1).unwrap();
     let (reference, _) =
         reference_assembly::reference_load_model_context(&transaction, session_id, 1).unwrap();
@@ -2935,8 +2837,6 @@ fn assert_assembly_matches_reference(database: &std::path::Path, session_id: Ses
 }
 
 async fn collect_through_finished(events: &mut SessionEventStream) -> Vec<SessionEventEnvelope> {
-    // Generous upper bound: the auto-compaction tests stream multi-MiB
-    // outputs concurrently, which can starve lighter tests of CPU.
     tokio::time::timeout(Duration::from_secs(30), async {
         let mut observed = Vec::new();
         while let Some(event) = events.next().await {
@@ -2953,8 +2853,6 @@ async fn collect_through_finished(events: &mut SessionEventStream) -> Vec<Sessio
     .unwrap()
 }
 
-/// Collects events until the compaction commits (`SessionCompacted`),
-/// which is published after the internal run's `RunFinished`.
 async fn collect_through_compacted(events: &mut SessionEventStream) -> Vec<SessionEventEnvelope> {
     tokio::time::timeout(Duration::from_secs(30), async {
         let mut observed = Vec::new();
@@ -2972,10 +2870,6 @@ async fn collect_through_compacted(events: &mut SessionEventStream) -> Vec<Sessi
     .unwrap()
 }
 
-/// A structurally valid summarizer reply carrying `body` under every
-/// required section, so validation passes and tests can still grep for it.
-/// Turns a prior in-run summary in `request` says were already done, read
-/// back from the `turns_done=N` line the scripted summarizer wrote.
 fn summarized_turns(request: &ModelRequest) -> usize {
     request
         .messages()
@@ -3001,8 +2895,6 @@ fn valid_summary(body: &str) -> String {
     )
 }
 
-/// A summary in the six-section format stored before ADR-0056. It is never
-/// re-validated, and the next compaction folds it into the new sections.
 fn old_format_summary(body: &str) -> String {
     format!(
         "1. Intent: {body}\n2. Decisions and constraints: {body}\n3. Work state: {body}\n\
@@ -3024,9 +2916,6 @@ async fn compact_session(runtime: &SessionRuntime, session_id: SessionId) -> Run
     run_id
 }
 
-/// The answers delivered into a parent's requests (ADR-0054 § 4), in the
-/// order they arrived: each `(answer text, the child answered)`. The answer
-/// text is what follows the notice's header line.
 fn delivered_answers(requests: &[ModelRequest]) -> Vec<(String, bool)> {
     let mut seen = Vec::new();
     for request in requests {
@@ -3046,7 +2935,6 @@ fn delivered_answers(requests: &[ModelRequest]) -> Vec<(String, bool)> {
     seen
 }
 
-/// The concatenated text of each message in a captured provider request.
 fn request_texts(request: &ModelRequest) -> Vec<String> {
     request
         .messages()
@@ -3099,53 +2987,32 @@ fn assert_tool_results_are_exact(messages: &[Message]) {
     }
 }
 
-/// One scripted model load for the auto-compaction tests: what the
-/// provider streams for that run.
 #[derive(Clone)]
 enum AutoCompactScript {
-    /// Streams the text and completes.
     Text(String),
-    /// Streams the text and stops at the output token limit, so the runtime
-    /// continues the turn with the next scripted request.
     Truncated(String),
-    /// Streams visible text before a recoverable transport fault.
     TextThenTransportFault(String),
-    /// Reads `note.txt` on the first turn, then streams the text: seeds a
-    /// prunable read-only result into the transcript.
     ReadNoteThenText(String),
-    /// Reads `note.txt` once per turn for `turns` turns, then streams the
-    /// text: grows one run's own transcript with prunable results.
-    ReadNoteRepeatedly { turns: usize, text: String },
-    /// Calls `tool` with `arguments` on the first turn, then streams the
-    /// text.
+    ReadNoteRepeatedly {
+        turns: usize,
+        text: String,
+    },
     CallThenText {
         tool: String,
         arguments: String,
         text: String,
     },
-    /// Runs `shell` (a mutating effect, so never stubbed) once per turn for
-    /// `turns` turns, then streams the text. Any request ending with the
-    /// summarizer instruction is answered with `summary` instead, so one
-    /// loaded provider serves both the run and its in-run compactions. The
-    /// turn count is taken from the request's own tool results plus the
-    /// turns a summary in context says were already done.
     ShellRepeatedlyWithSummaries {
         turns: usize,
         text: String,
         summary: String,
     },
 
-    /// Grows the transcript with native writes instead of spawning shell processes.
     WritesRepeatedlyWithSummaries {
         turns: usize,
         text: String,
         summary: String,
     },
-    /// `ShellRepeatedlyWithSummaries` whose provider rejects the request as
-    /// exceeding its window once the transcript holds `overflow_at` results,
-    /// unless the request carries an in-run summary: a provider whose
-    /// tokenizer disagrees with the estimate. Summarizer requests still
-    /// answer with the summary.
     ShellRepeatedlyWithProviderOverflow {
         turns: usize,
         overflow_at: usize,
@@ -3153,11 +3020,6 @@ enum AutoCompactScript {
         summary: String,
         overflows: Arc<AtomicUsize>,
     },
-    /// `ShellRepeatedlyWithSummaries` whose provider fails the request with a
-    /// transient 529 once, when `fault_at` results are in context and
-    /// nothing has been summarized: an empty faulted attempt that is stored
-    /// as a turn row but never joins the live transcript, inside the span
-    /// the first in-run compaction replaces (ENG-991).
     ShellRepeatedlyWithEarlyFault {
         turns: usize,
         fault_at: usize,
@@ -3165,56 +3027,36 @@ enum AutoCompactScript {
         summary: String,
         faults: Arc<AtomicUsize>,
     },
-    /// Sixteen `write_file` calls per turn, so a slice checkpoint arrives after
-    /// sixteen turns; the checkpoint is answered with a text report, and the
-    /// task ends once `calls` results are in context or summarized. The
-    /// summarizer instruction is answered with a valid summary carrying
-    /// `turns_done`, so in-run compactions after the checkpoint keep going.
-    ShellBatchesAcrossACheckpoint { calls: usize, text: String },
-    /// One turn that writes `text` (when not empty) and then calls `tool`
-    /// with empty arguments.
-    ToolCallWithText { text: String, tool: String },
-    /// `ShellRepeatedlyWithSummaries` whose summarizer reply is cut at the
-    /// output limit after `cut` bytes on the first request and completed on
-    /// the continuation, so an in-run summary exercises the truncation join.
+    ShellBatchesAcrossACheckpoint {
+        calls: usize,
+        text: String,
+    },
+    ToolCallWithText {
+        text: String,
+        tool: String,
+    },
     ShellRepeatedlyWithTruncatedSummaries {
         turns: usize,
         text: String,
         summary: String,
         cut: usize,
     },
-    /// Calls `search_history` with the query on the first turn, then
-    /// streams the text.
     SearchHistoryThenText(String, String),
-    /// Runs `shell` with the command on the first turn; on the next turn
-    /// calls `read_tool_result` with the `t:` handle found in that
-    /// result's marker and the given JSON arguments, then streams the
-    /// text. The handle is discovered the way a model would.
     #[cfg(unix)]
     ShellThenRecall {
         command: String,
         recall: serde_json::Value,
         text: String,
     },
-    /// Like `ReadNoteThenText`, reporting the given input-token usage on
-    /// every completion so the session persists a measured occupancy.
-    ReadNoteThenTextMeasured { text: String, input_tokens: u64 },
-    /// Fails the model stream with a transport error.
+    ReadNoteThenTextMeasured {
+        text: String,
+        input_tokens: u64,
+    },
     Fail,
-    /// Fails the model stream with a context-window overflow.
     ContextOverflow,
-    /// Never yields: the run parks until cancelled.
     Stall,
-    /// Panics synchronously when the provider stream is created.
     Panic,
-    /// One script per provider request within the same load, in order; the
-    /// last repeats. A prompt whose admission folds several summarizer steps
-    /// shares one loaded runtime across all of them and its own request.
     Sequence(Vec<AutoCompactScript>),
-    /// Runs the inner script and stamps every terminal event with usage of
-    /// `request bytes / bytes_per_token` input tokens: a provider whose
-    /// tokenizer is denser than the four-bytes-per-token default, so the
-    /// measured chain says a request is bigger than the raw estimate does.
     Measured {
         script: Box<AutoCompactScript>,
         bytes_per_token: u64,
@@ -3227,8 +3069,6 @@ struct AutoCompactLoader {
     loads: StdMutex<usize>,
     context_window: Option<u32>,
     max_output_tokens: u32,
-    /// Whether the resolved model carries a secret-free provider identity.
-    /// Custom/LiteLLM deployments and dynamic AWS region chains do not.
     provider_identity: bool,
 }
 
@@ -3339,16 +3179,12 @@ impl Provider for AutoCompactProvider {
             };
             return step.stream(request);
         }
-        // The turn following this run's own tool call ends with the
-        // tool result; earlier runs' results sit before the new prompt.
         let already_read = request.messages().last().is_some_and(|message| {
             message
                 .content()
                 .iter()
                 .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
         });
-        // Every tool result so far, oldest first, for scripts that
-        // discover a handle the way a model would.
         let prior_results: Vec<String> = request
             .messages()
             .iter()
@@ -3496,8 +3332,6 @@ impl Provider for AutoCompactProvider {
                 summary,
                 cut,
             } => {
-                // A continuation request ends with the truncation notice; the
-                // summarizer request proper ends with the instruction.
                 if last_text.contains("cut off at the output token limit") {
                     let summarized = prior_results.len() + summarized_before;
                     let full = format!("{summary}\nturns_done={summarized}");
@@ -3559,8 +3393,6 @@ impl Provider for AutoCompactProvider {
                     if summary == "__STALL__" {
                         return Box::pin(stream::pending());
                     }
-                    // Fold the count of turns already summarized into the
-                    // summary so the next request can resume the count.
                     let summarized = prior_results.len() + summarized_before;
                     return Box::pin(stream::iter([
                         Ok(qq_provider::ProviderEvent::OutputTextDelta {
@@ -3638,8 +3470,6 @@ impl Provider for AutoCompactProvider {
                 let mut events = Vec::new();
                 for index in done..done + crate::MAX_TOOL_CALLS_PER_TURN {
                     let id = format!("call_batch_{index}");
-                    // A mutating built-in, not a process spawn: never stubbed
-                    // by pruning, and cheap enough for 384 calls in one test.
                     events.push(Ok(qq_provider::ProviderEvent::ToolCallStarted {
                         id: id.clone(),
                         name: "write_file".to_owned(),
@@ -3721,9 +3551,6 @@ impl Provider for AutoCompactProvider {
                         Ok(qq_provider::ProviderEvent::Completed { usage: None }),
                     ]));
                 }
-                // The provider's own tokenizer says the window is full once
-                // the verbatim results reach `overflow_at`; a compacted
-                // request (summary in context, fewer results) fits again.
                 if prior_results.len() >= *overflow_at && summarized_before == 0 {
                     overflows.fetch_add(1, Ordering::SeqCst);
                     return Box::pin(stream::iter([Err(
@@ -3770,8 +3597,6 @@ impl Provider for AutoCompactProvider {
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
                             id: id.clone(),
-                            // Preserve the complete8KiB result while varying the requested
-                            // page size: this fixture tests pruning, not repeat refusal.
                             json: serde_json::json!({"path":"note.txt","limit":64+prior_results.len()}).to_string(),
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
@@ -3967,8 +3792,6 @@ async fn queue_prompt(runtime: &SessionRuntime, session_id: SessionId, prompt: S
     run_id
 }
 
-/// Collects events until `stop` matches (inclusive), with a generous
-/// timeout: the auto-compaction tests stream multi-MiB outputs.
 async fn collect_until(
     events: &mut SessionEventStream,
     stop: impl Fn(&SessionEvent) -> bool,
@@ -4002,9 +3825,6 @@ fn position_of(
         .unwrap()
 }
 
-/// A large prior answer that still fits its originating run, while a
-/// maximum-sized queued prompt pushes the next request past the storage
-/// backstop. The compaction request omits that queued prompt and fits.
 fn over_threshold_output() -> String {
     "x".repeat(MAX_CONTEXT_BYTES - 100 * 1024)
 }
@@ -4259,13 +4079,9 @@ async fn project_terminal_run_with_tool_boundaries(
     )
 }
 
-/// Truncates the first turn of every run at the output limit, then
-/// completes on the second turn.
 struct TruncatingLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
-    /// The truncated turn streams nothing visible (all hidden reasoning).
     empty: bool,
-    /// The plan's empty-truncation raise ceiling (`None`: cannot raise).
     output_ceiling: Option<u32>,
 }
 
@@ -4314,7 +4130,6 @@ impl Provider for TruncatingProvider {
             output_tokens: 2,
             reasoning_tokens: None,
         });
-        // Even-numbered requests (the first of each run) truncate.
         if turn.is_multiple_of(2) {
             let mut events = Vec::new();
             if !self.empty {
@@ -4366,8 +4181,6 @@ impl Provider for ContextBudgetProvider {
     }
 }
 
-/// Like `collect_through_finished`, with a deadline generous enough for
-/// tests that spawn real child processes.
 async fn collect_through_finished_generously(
     events: &mut SessionEventStream,
 ) -> Vec<SessionEventEnvelope> {
@@ -4387,18 +4200,12 @@ async fn collect_through_finished_generously(
     .unwrap()
 }
 
-/// Loads providers for spawn tests: model-routed entries first (children
-/// given an explicit model route), then a per-load queue (deterministic
-/// for the single-parent tests: the parent always loads first), then a
-/// fallback that completes with "done".
 struct QueueLoader {
     routed: Vec<(&'static str, Arc<dyn Provider>)>,
     queue: StdMutex<Vec<Arc<dyn Provider>>>,
 }
 
 impl QueueLoader {
-    /// The routed provider for the request's model, else the next queued
-    /// one, else static text.
     fn next_provider(&self, request: &RuntimeLoadRequest) -> Arc<dyn Provider> {
         self.routed
             .iter()
@@ -4517,9 +4324,6 @@ impl RuntimeLoader for RejectingWorkerLoader {
     }
 }
 
-/// Records every spawn-time validation and either accepts or rejects
-/// it; loads route the parent model to `parent` and everything else to
-/// `child`.
 struct ValidatingLoader {
     parent: Arc<dyn Provider>,
     child: Arc<dyn Provider>,
@@ -4581,7 +4385,6 @@ impl RuntimeLoader for ValidatingLoader {
     }
 }
 
-/// Completes immediately with the text "done".
 struct StaticTextProvider;
 
 impl Provider for StaticTextProvider {
@@ -4730,7 +4533,6 @@ impl RuntimeLoader for AccountingSpawnLoader {
     }
 }
 
-/// Fails every stream with a transport error.
 struct FailingProvider;
 
 impl Provider for FailingProvider {
@@ -4741,7 +4543,6 @@ impl Provider for FailingProvider {
     }
 }
 
-/// Never yields: the run only ends by cancellation.
 struct HangingProvider;
 
 impl Provider for HangingProvider {
@@ -4779,8 +4580,6 @@ impl Provider for SpawnThenHangProvider {
     }
 }
 
-/// Tracks how many of its streams are concurrently active before
-/// completing with text, to observe the child concurrency cap.
 struct GaugedTextProvider {
     active: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
@@ -4803,8 +4602,6 @@ impl Provider for GaugedTextProvider {
     }
 }
 
-/// Requests `spawns` spawn_agent calls in one turn, then completes with
-/// "done" on the next.
 struct MultiSpawnProvider {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
     spawns: usize,
@@ -5004,8 +4801,6 @@ async fn completed_instruction_hash(
         .to_string()
 }
 
-/// Collects events until `run_id` finishes, with a timeout generous
-/// enough for a parent run that awaits child runs.
 async fn collect_until_run_finished(
     events: &mut SessionEventStream,
     run_id: RunId,
@@ -5040,7 +4835,6 @@ fn finished_outcome(events: &[SessionEventEnvelope], run_id: RunId) -> Option<Ru
     })
 }
 
-/// Answers each turn with the next scripted text and records requests.
 struct TextScriptLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
     answers: Arc<StdMutex<std::collections::VecDeque<&'static str>>>,
@@ -5219,7 +5013,6 @@ async fn run_snapshot(harness: &OutputContractHarness, run_id: RunId) -> RunSnap
         .unwrap()
 }
 
-/// `QueueLoader` whose plans permit write children.
 struct WriteChildLoader {
     inner: QueueLoader,
 }
@@ -5298,8 +5091,6 @@ async fn write_child_harness(
     )
 }
 
-/// `QueueLoader` whose plans permit nesting to `max_depth` and, when set,
-/// write children.
 struct DepthLoader {
     inner: QueueLoader,
     max_depth: u16,
@@ -5363,8 +5154,6 @@ async fn depth_harness(
     .await
 }
 
-/// A child that itself delegates once (to `test/grandchild`) and then
-/// answers "child done".
 fn delegating_child() -> Arc<dyn Provider> {
     Arc::new(ScriptedRunProvider {
         requests: Arc::new(StdMutex::new(Vec::new())),
@@ -5429,8 +5218,6 @@ async fn nested_spend_harness(grandchild_usage: Option<TokenUsage>) -> SpawnHarn
             "spawn_agent",
             r#"{"task":"look deeper","model":"test/grandchild"}"#.to_owned(),
         )],
-        // A later user prompt in this same child session spends 900 tokens;
-        // it is not part of the original delegated run's receipt.
         vec![Some(usage(1, 0)), Some(usage(1, 0)), Some(usage(900, 0))],
     );
     spawn_harness_with_loader(
@@ -5483,8 +5270,6 @@ async fn submit_nested_budget(harness: &SpawnHarness, cost_bound: bool) -> RunId
     run_id
 }
 
-/// Spawns `spawns` children on a request without tool results, then
-/// answers. Stateless, so one instance serves many concurrent runs.
 struct StatelessFanOut {
     spawns: usize,
     route: &'static str,
@@ -5525,8 +5310,6 @@ impl Provider for StatelessFanOut {
     }
 }
 
-/// `QueueLoader` whose plans audit under the given mode; the roster names
-/// `test/auditor` as the strong role so the audit child is routable.
 struct AuditLoader {
     inner: QueueLoader,
     mode: crate::runtime::AuditMode,
@@ -5589,7 +5372,6 @@ impl RuntimeLoader for AuditLoader {
     }
 }
 
-/// Answers with a fixed JSON verdict, recording every request.
 struct VerdictProvider {
     reply: &'static str,
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
@@ -5659,8 +5441,6 @@ fn audit_events(
     (started, completed)
 }
 
-/// A provider that runs one mutating tool turn (to trigger the heuristic
-/// audit) and then answers with the next scripted text.
 struct MutateThenScriptProvider {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
     answers: StdMutex<std::collections::VecDeque<&'static str>>,
@@ -5701,9 +5481,6 @@ impl Provider for MutateThenScriptProvider {
     }
 }
 
-/// Loops one `read_file` call per turn until stopped; each turn reports
-/// the configured usage (or none). Text turns (when the request declares
-/// no tools) stream a final status line.
 struct BudgetLoopLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
     entered: Option<Arc<tokio::sync::Notify>>,
@@ -7020,8 +6797,6 @@ async fn side_failure_with_a_request_in_flight_reports_unknown_spend_without_cha
         })
         .await
         .unwrap();
-    // Turn 1 committed, but turn 2's request was sent and failed: its spend
-    // is unknown, so the total is unknown rather than turn 1's figure.
     assert_eq!(row.0, "failed");
     assert_eq!(row.2, 1);
     assert_eq!(row.1, None);
@@ -7637,8 +7412,6 @@ async fn side_expired_admission_does_not_enter_worker_queue() {
     assert_eq!(count, 0);
 }
 
-/// A side provider driven by a per-request script. Each request pops the next
-/// script; an exhausted script hangs, so a test can hold a request in flight.
 type SideScript = Vec<Result<qq_provider::ProviderEvent, qq_provider::ProviderError>>;
 
 struct SideScriptLoader {
@@ -7647,7 +7420,6 @@ struct SideScriptLoader {
 }
 
 impl SideScriptLoader {
-    /// `(events, then_hang)` per request.
     fn new(scripts: Vec<(SideScript, bool)>, priced: bool) -> Arc<Self> {
         Arc::new(Self {
             scripts: Arc::new(StdMutex::new(scripts.into())),
@@ -7837,7 +7609,6 @@ async fn side_cancel_drains_a_blocked_inspection_tool_before_settlement() {
         )
         .await
         .unwrap();
-    // The read ignores cancellation: the executor must still own it.
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(harness.runtime.inner.side_tasks.load(Ordering::Acquire), 1);
     assert!(
@@ -7866,8 +7637,6 @@ async fn side_cancel_drains_a_blocked_inspection_tool_before_settlement() {
 
 #[tokio::test(start_paused = true)]
 async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns() {
-    // Store admission and the native read use real I/O; keep fake time
-    // fixed until the blocking read reaches the phase this test exercises.
     let keep_clock = tokio::spawn(async {
         loop {
             tokio::task::yield_now().await;
@@ -7907,7 +7676,6 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
             panic!("side question completed before the blocked inspection entered: {result:?}");
         }
     }
-    // Past the deadline with the read still blocked, nothing has settled.
     tokio::time::advance(Duration::from_millis(400)).await;
     keep_clock.abort();
     tokio::time::timeout(Duration::from_secs(1), deadline_cancelled.cancelled())
@@ -7983,8 +7751,6 @@ async fn side_settlement_tolerates_a_session_deleted_after_cancel() {
         .side_source(harness.session_id, id, "x".to_owned(), true)
         .await
         .unwrap();
-    // A cancel releases the row, so the session may be deleted while the
-    // executor is still tearing down; its late writes must not fail.
     harness
         .runtime
         .inner
@@ -8076,15 +7842,12 @@ async fn side_running_question_survives_a_snapshot_over_the_body_budget() {
     let harness = spawn_harness_with_loader(SideScriptLoader::new(Vec::new(), false), 4).await;
     let id = submit_side(&harness, "still running").await;
     let session = harness.session_id;
-    // A transcript far larger than the whole snapshot body budget.
     harness
         .runtime
         .inner
         .store
         .call(Priority::Control, move |connection| {
             let transaction = connection.transaction()?;
-            // 256 messages of 24 KiB exceed the 6 MiB body budget and leave
-            // less than one row's overhead for anything loaded after them.
             let big = "m".repeat(24 * 1024);
             for index in 0..128_u64 {
                 let run_id = RunId::generate().unwrap().to_string();
@@ -8190,7 +7953,6 @@ fn side_capture_reads_streamed_chunks_of_active_run_assistant_turns() {
         format!("{context:?}").contains("streamed assistant evidence"),
         "{context:?}"
     );
-    // An oversized chunked turn is skipped before it is loaded.
     connection
         .execute(
             "INSERT INTO message_chunks(message_id, channel, chunk_ordinal, text)
@@ -8216,7 +7978,6 @@ async fn side_dropped_submit_future_still_settles_and_frees_the_session() {
         4,
     )
     .await;
-    // Hold the store worker so the submission is queued, not yet committed.
     let (entered, held) = tokio::sync::oneshot::channel();
     let (release, wait) = std::sync::mpsc::channel();
     let worker = harness
@@ -8275,7 +8036,6 @@ async fn side_dropped_submit_future_still_settles_and_frees_the_session() {
     .await;
     assert_eq!(settled.state, qq_protocol::SideQuestionState::Completed);
     assert_eq!(settled.answer, "answer");
-    // The session is not stuck busy.
     let next = submit_side(&harness, "next").await;
     wait_side(&harness, next, |item| {
         item.state != qq_protocol::SideQuestionState::Running
@@ -8312,7 +8072,6 @@ async fn side_turns_stream_separately_and_never_concatenate() {
         .map(|item| item.answer)
         .collect::<Vec<_>>();
     assert!(answers.contains(&one));
-    // Turn 2 streams from an empty buffer: its first delta is published.
     assert!(answers.iter().filter(|answer| **answer == two).count() >= 2);
     for answer in &answers {
         assert!(
@@ -8346,7 +8105,6 @@ async fn side_long_stream_persists_logarithmically_many_partial_updates() {
             item.state == qq_protocol::SideQuestionState::Running && item.model_turns == 0
         })
         .count();
-    // Admission plus geometric checkpoints: ~log1.5(128) ≈ 12, not 128.
     assert!((2..=16).contains(&partial), "{partial} partial updates");
     harness.runtime.shutdown().await.unwrap();
 }
@@ -8396,8 +8154,6 @@ async fn side_query_limits_validate_and_a_lowered_turn_limit_applies() {
     else {
         panic!("session")
     };
-    // One permitted turn is the reserved tool-free final response; a tool
-    // call there cannot continue, so the side query ends without a second.
     let result = tokio::time::timeout(
         Duration::from_secs(10),
         runtime.answer_side_question(session_id, "inspect".to_owned(), RunCancellation::new()),
@@ -8450,7 +8206,6 @@ async fn side_replacement_waits_for_the_cancelled_owner_to_tear_down() {
         )
         .await
         .unwrap();
-    // The old execution still owns the session while its read drains.
     let replacement = submit_side(&harness, "replacement").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
@@ -8596,7 +8351,6 @@ async fn workspace_catalog_pages_registered_roots_and_preserves_identity_after_r
     let store_id = runtime.store_id();
     runtime.shutdown().await.unwrap();
     drop(runtime);
-    // Listing metadata neither opens a root nor depends on its availability.
     std::fs::remove_dir(directory.path().join("worker")).unwrap();
     let reopened = SessionRuntime::open(
         SessionRuntimeOptions::new(database),

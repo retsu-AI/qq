@@ -1,9 +1,3 @@
-//! Typed final output: a bounded JSON Schema subset compiled once per run at
-//! admission and evaluated against the final answer at the completion
-//! boundary. No references, no remote fetches, no regular expressions: every
-//! accepted keyword validates in time linear in the instance.
-
-/// Applies the runtime secret masking policy to outgoing text evidence.
 pub use crate::tools::output::mask_secrets;
 
 use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
@@ -15,12 +9,8 @@ use qq_protocol::{
 use serde_json::Value;
 use thiserror::Error;
 
-/// Most validation failures reported for one answer.
 pub const MAX_OUTPUT_ERRORS: usize = 16;
 
-/// Keywords the subset understands. Anything else in a schema object is a
-/// compile error so a caller learns at admission, not from an answer that
-/// "validated" against a keyword the runtime ignored.
 const SUPPORTED_KEYWORDS: &[&str] = &[
     "$schema",
     "$id",
@@ -128,9 +118,7 @@ impl JsonType {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Node {
-    /// `true` or `{}`: accepts everything.
     Any,
-    /// `false`: rejects everything.
     Never,
     Schema(Box<SchemaNode>),
 }
@@ -161,22 +149,14 @@ struct SchemaNode {
     not: Option<Node>,
 }
 
-/// A compiled, bounded output schema. Cheap to share across the claim and the
-/// runtime loop; immutable once built.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledOutputSchema {
     root: Node,
     repair_turns: u8,
-    /// Compact canonical encoding of the source schema, shown to the model
-    /// in the system prompt. Serialized once here, never per turn.
     schema_json: Box<str>,
 }
 
 impl CompiledOutputSchema {
-    /// Compiles and bounds a contract. Fails before any model work when the
-    /// schema is too large, too deep, holds too many values, uses references
-    /// or unsupported keywords, or asks for more repair turns than the
-    /// runtime permits.
     pub fn compile(contract: &OutputContract) -> Result<Arc<Self>, OutputSchemaError> {
         if contract.repair_turns > MAX_OUTPUT_REPAIR_TURNS {
             return Err(OutputSchemaError::TooManyRepairTurns {
@@ -184,8 +164,6 @@ impl CompiledOutputSchema {
                 limit: MAX_OUTPUT_REPAIR_TURNS,
             });
         }
-        // Byte size is measured on the canonical compact encoding so the
-        // bound does not depend on the caller's whitespace.
         let encoded =
             serde_json::to_vec(&contract.schema).map_err(|error| OutputSchemaError::Invalid {
                 pointer: String::new(),
@@ -223,9 +201,6 @@ impl CompiledOutputSchema {
         &self.schema_json
     }
 
-    /// Validates a final answer. The answer must be one JSON document,
-    /// optionally wrapped in a single ```` ```json ```` fence, which models
-    /// emit even when told not to.
     pub fn validate(&self, answer: &str) -> Result<Value, Vec<String>> {
         let document = strip_fence(answer.trim());
         let value: Value = match serde_json::from_str(document) {
@@ -246,8 +221,6 @@ impl CompiledOutputSchema {
     }
 }
 
-/// Counts values and depth while walking the schema. Both are bounded so a
-/// hostile schema cannot make compilation or validation expensive.
 #[derive(Default)]
 struct Budget {
     values: usize,
@@ -479,7 +452,6 @@ fn number(
     }
 }
 
-/// Appends one RFC 6901 reference token.
 fn push_segment(pointer: &mut String, segment: &str) {
     pointer.push('/');
     for character in segment.chars() {
@@ -498,7 +470,6 @@ fn strip_fence(answer: &str) -> &str {
     let Some(body) = rest.strip_suffix("```") else {
         return answer;
     };
-    // Drop the info string (`json`) on the opening line.
     match body.find('\n') {
         Some(newline) => body[newline + 1..].trim(),
         None => body.trim(),
@@ -506,8 +477,6 @@ fn strip_fence(answer: &str) -> &str {
 }
 
 fn bounded_error(mut message: String) -> String {
-    // Errors are rendered into a notice and persisted on the run; both are
-    // bounded, so a single error can never exceed the payload limit alone.
     const PER_ERROR_BYTES: usize = MAX_OUTPUT_ERROR_BYTES / MAX_OUTPUT_ERRORS;
     if message.len() > PER_ERROR_BYTES {
         let mut cut = PER_ERROR_BYTES.saturating_sub(1);
@@ -528,7 +497,6 @@ fn report(errors: &mut Vec<String>, pointer: &str, message: impl std::fmt::Displ
     errors.push(bounded_error(format!("{location}: {message}")));
 }
 
-/// Evaluates `node` against `value` without reporting, for combinators.
 fn accepts(node: &Node, value: &Value, pointer: &mut String) -> bool {
     let mut scratch = Vec::new();
     validate_node(node, value, pointer, &mut scratch);
@@ -556,8 +524,6 @@ fn validate_node(node: &Node, value: &Value, pointer: &mut String, errors: &mut 
             pointer,
             format!("expected {expected}, found {}", type_name(value)),
         );
-        // Type-specific keywords cannot apply; stop here to keep the
-        // feedback focused.
         return;
     }
     if let Some(constant) = &schema.constant
@@ -768,14 +734,10 @@ final answer must be exactly one JSON document that satisfies the required outpu
 previous answer failed validation with the errors below. Reply with only the corrected JSON \
 document, with no prose before or after it.";
 
-/// The system-prompt paragraph a run with an output contract carries so the
-/// model knows the shape before its first turn.
 pub(crate) const OUTPUT_CONTRACT_SYSTEM_NOTICE: &str = "## Output contract\n\nYour final answer \
 (the message in which you call no tools) must be exactly one JSON document, with no prose before \
 or after it, that satisfies this JSON Schema:\n\n```json\n";
 
-/// Renders the repair notice for one failed validation, bounded to
-/// `MAX_OUTPUT_ERROR_BYTES` of error detail.
 pub(crate) fn repair_notice(errors: &[String]) -> String {
     let mut notice = String::from(OUTPUT_REPAIR_NOTICE);
     let mut detail = 0_usize;
@@ -792,7 +754,6 @@ pub(crate) fn repair_notice(errors: &[String]) -> String {
     notice
 }
 
-/// Bounds a validation-failure list for the durable `FinalOutput::Invalid`.
 pub(crate) fn bounded_errors(mut errors: Vec<String>) -> Vec<String> {
     let mut total = 0_usize;
     errors.retain(|error| {
@@ -805,7 +766,6 @@ pub(crate) fn bounded_errors(mut errors: Vec<String>) -> Vec<String> {
     errors
 }
 
-/// Builds the durable verdict from a validation result.
 pub(crate) fn final_output(result: Result<Value, Vec<String>>, repair_turns: u8) -> FinalOutput {
     match result {
         Ok(value) => FinalOutput::Valid {

@@ -1,13 +1,3 @@
-//! Agent-state reporting to [herdr](https://herdr.dev), a terminal
-//! multiplexer for coding agents. Inside a herdr pane the TUI reports one
-//! semantic state for everything it follows (`idle`, `working`, `blocked`)
-//! and the command that reopens the focused session, so herdr shows QQ like
-//! any agent it supports and restores it after a herdr restart.
-//!
-//! Reports are best-effort and never slow the TUI: a single background task
-//! sends only the latest state over herdr's socket with a short timeout and
-//! ignores failures. Outside herdr nothing is spawned.
-
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::time::Duration;
@@ -17,23 +7,14 @@ use qq_protocol::SessionId;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-/// Stable integration id. herdr reserves the `herdr:` prefix for its own.
 const SOURCE: &str = "qq";
-/// The name herdr shows for the pane's agent.
 const AGENT: &str = "qq";
-/// Bound on one request: connect, write, and read the acknowledgement.
 #[cfg(unix)]
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
-/// Bytes of acknowledgement read before giving up on a newline. The answer's
-/// content is ignored; this only bounds what a misbehaving peer can make us
-/// buffer.
 #[cfg(unix)]
 const MAX_ANSWER_BYTES: u64 = 4096;
-/// herdr caps `message` presentation text; longer text is cut client-side.
 const MAX_MESSAGE_CHARS: usize = 80;
 
-/// The pane this process runs in, from the variables herdr gives every
-/// process it starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HerdrPane {
     pane_id: String,
@@ -41,7 +22,6 @@ pub(crate) struct HerdrPane {
 }
 
 impl HerdrPane {
-    /// `None` unless this process runs inside herdr.
     pub(crate) fn from_env() -> Option<Self> {
         Self::from_vars(|name| std::env::var(name).ok())
     }
@@ -59,18 +39,12 @@ impl HerdrPane {
     }
 }
 
-/// What the pane should show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Report {
     pub(crate) activity: StoreActivity,
-    /// The root session herdr reopens with `qq --session <id>` after a
-    /// restart. `--session` opens roots only, so callers pass the focused
-    /// session's root.
     pub(crate) session: Option<SessionId>,
 }
 
-/// Handle to the background reporter. Dropping it stops the task without
-/// releasing the pane; call [`Reporter::release`] on a deliberate exit.
 pub(crate) struct Reporter {
     latest: watch::Sender<Option<Report>>,
     task: tokio::task::JoinHandle<()>,
@@ -86,15 +60,11 @@ impl Reporter {
             let pane = pane.clone();
             let seq = seq.clone();
             tokio::spawn(async move {
-                // `changed` coalesces: a burst of updates while a request is
-                // in flight is seen once, as its newest value.
                 while changes.changed().await.is_ok() {
                     let Some(report) = changes.borrow_and_update().clone() else {
                         continue;
                     };
                     let request = report_request(&pane.pane_id, &report, seq.next());
-                    // Best-effort by contract: herdr may be gone, restarting,
-                    // or older than this request. Nothing to do on failure.
                     let _ = send(&pane.socket, &request).await;
                 }
             })
@@ -107,13 +77,10 @@ impl Reporter {
         }
     }
 
-    /// A cheap handle the event loop publishes through.
     pub(crate) fn sink(&self) -> ReportSink {
         ReportSink(self.latest.clone())
     }
 
-    /// Stop reporting and release the pane, waiting at most one request
-    /// timeout. Called when the user quits.
     pub(crate) async fn release(self) {
         self.task.abort();
         let request = json!({
@@ -130,20 +97,16 @@ impl Reporter {
     }
 }
 
-/// Publishes to a [`Reporter`]'s task. Never waits on the socket.
 #[derive(Debug, Clone)]
 pub(crate) struct ReportSink(watch::Sender<Option<Report>>);
 
 impl ReportSink {
-    /// A sink with no reporter behind it, and the receiver that sees what
-    /// the loop publishes.
     #[cfg(test)]
     pub(crate) fn detached() -> (Self, watch::Receiver<Option<Report>>) {
         let (sender, receiver) = watch::channel(None);
         (Self(sender), receiver)
     }
 
-    /// Publish `report` if it differs from the last one.
     pub(crate) fn update(&self, report: Report) {
         self.0.send_if_modified(|current| {
             if current.as_ref() == Some(&report) {
@@ -155,11 +118,6 @@ impl ReportSink {
     }
 }
 
-/// herdr ignores a report whose `seq` is not above the last one it accepted
-/// from this source, including across QQ restarts. Each value is the later
-/// of wall-clock microseconds and one past the previous value, so it always
-/// increases within a process and a restarted QQ starts above everything
-/// an earlier one sent once the wall clock has passed it.
 #[derive(Debug, Clone, Default)]
 struct SeqClock(std::sync::Arc<std::sync::atomic::AtomicU64>);
 
@@ -175,7 +133,6 @@ impl SeqClock {
 
     fn next_at(&self, now_micros: u64) -> u64 {
         let mut issued = 0;
-        // The closure always returns `Some`, so the update cannot fail.
         let _ = self.0.fetch_update(
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
@@ -223,8 +180,6 @@ fn report_request(pane_id: &str, report: &Report, seq: u64) -> Value {
     })
 }
 
-/// Why one request did not complete. Callers drop it: reporting is
-/// best-effort, and the type exists so tests can tell the outcomes apart.
 #[derive(Debug, thiserror::Error)]
 enum SendError {
     #[cfg(unix)]
@@ -241,8 +196,6 @@ enum SendError {
     Unsupported,
 }
 
-/// One request: connect, write one JSON line, wait for one line back. The
-/// read is bounded in time and bytes.
 #[cfg(unix)]
 async fn send(socket: &std::path::Path, request: &Value) -> Result<(), SendError> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -285,7 +238,6 @@ mod tests {
         SessionId::from_bytes([7; 16])
     }
 
-    /// A herdr stand-in: records each request and answers like herdr does.
     fn fake_herdr(dir: &tempfile::TempDir) -> (HerdrPane, mpsc::UnboundedReceiver<Value>) {
         let socket = dir.path().join("herdr.sock");
         let listener = UnixListener::bind(&socket).unwrap();
@@ -412,7 +364,6 @@ mod tests {
         assert!(message.starts_with("fix]0;evil x"), "{message}");
         assert_eq!(message.chars().count(), MAX_MESSAGE_CHARS);
         assert!(!message.chars().any(char::is_control));
-        // No session yet: nothing to resume, and herdr must not be told one.
         assert!(blocked["params"].get("resume_argv").is_none());
         assert!(blocked["params"].get("agent_session_id").is_none());
 
@@ -432,15 +383,10 @@ mod tests {
     fn the_sequence_follows_wall_clock_and_strictly_increases() {
         let clock = SeqClock::default();
         assert_eq!(clock.next_at(1_000), 1_000);
-        // Reports faster than the clock ticks, or a clock stepped back,
-        // still increase.
         assert_eq!(clock.clone().next_at(1_000), 1_001);
         assert_eq!(clock.next_at(10), 1_002);
         assert_eq!(clock.next_at(5_000), 5_000);
-        // A restarted QQ continues above what this one sent once the wall
-        // clock has moved past it.
         assert!(SeqClock::default().next_at(5_001) > 5_000);
-        // The real clock is in microseconds since the epoch.
         let before = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -491,7 +437,6 @@ mod tests {
             activity: StoreActivity::Idle,
             session: None,
         });
-        // The repeats were dropped: the next request herdr sees is `idle`.
         assert_eq!(next(&mut requests).await["params"]["state"], "idle");
     }
 
@@ -508,7 +453,6 @@ mod tests {
             activity: StoreActivity::Working,
             session: None,
         });
-        // Hold the first request unanswered while three more states arrive.
         let (held, _) = listener.accept().await.unwrap();
         for activity in [
             StoreActivity::Blocked {
@@ -540,13 +484,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_absent_or_silent_herdr_never_blocks_the_caller() {
         let dir = tempfile::tempdir().unwrap();
-        // Nothing listens: connect fails at once.
         let missing = dir.path().join("missing.sock");
         assert!(matches!(
             send(&missing, &json!({})).await,
             Err(SendError::Io(_))
         ));
-        // A listener that accepts and never answers: bounded by the timeout.
         let socket = dir.path().join("silent.sock");
         let _listener = UnixListener::bind(&socket).unwrap();
         let started = tokio::time::Instant::now();
@@ -555,7 +497,6 @@ mod tests {
             Err(SendError::Timeout)
         ));
         assert_eq!(started.elapsed(), REQUEST_TIMEOUT);
-        // `update` never waits on the socket, and release is bounded too.
         let reporter = Reporter::spawn(HerdrPane {
             pane_id: "w1:p1".to_owned(),
             socket,
@@ -579,8 +520,6 @@ mod tests {
             let chunk = [b'x'; 1024];
             while stream.write_all(&chunk).await.is_ok() {}
         });
-        // The read stops at the byte bound, well before the timeout; the
-        // answer's content is ignored either way.
         let started = tokio::time::Instant::now();
         assert!(send(&socket, &json!({})).await.is_ok());
         assert!(started.elapsed() < REQUEST_TIMEOUT);

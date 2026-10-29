@@ -1,14 +1,5 @@
-//! Run reservation and identity: `RunIdentity`/`ClaimedRun`, admission of the
-//! next queued run, its prepared-turn audit, and the context-occupancy basis
-//! that lets a restart reuse the last measured window.
-
 use super::*;
 
-/// What a run row exists for. Prompt runs answer a user message and their
-/// output joins the transcript; compaction runs are internal — their request
-/// and streamed output never become session messages, and their product is a
-/// summary row. Goal checks verify an exact authorized command without a
-/// model or transcript message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RunKind {
     Prompt,
@@ -16,8 +7,6 @@ pub(super) enum RunKind {
     GoalCheck,
 }
 
-/// A zero limit is a caller mistake, not "no work": rejecting it keeps every
-/// accepted bound meaningful and avoids a run that settles before starting.
 pub(super) fn validate_run_limits(limits: &RunLimits) -> Result<(), SessionRuntimeError> {
     let zero = limits.max_duration_ms == Some(0)
         || limits.max_model_turns == Some(0)
@@ -32,9 +21,6 @@ pub(super) fn validate_run_limits(limits: &RunLimits) -> Result<(), SessionRunti
     if zero {
         return Err(SessionRuntimeError::InvalidRunLimits);
     }
-    // Child bounds above the runtime ceiling are a caller mistake too: the
-    // capability document advertises the ceilings, so silently clamping
-    // would hide a misconfigured client.
     if limits
         .max_children
         .is_some_and(|limit| limit > MAX_SPAWNED_CHILDREN_PER_RUN)
@@ -47,10 +33,6 @@ pub(super) fn validate_run_limits(limits: &RunLimits) -> Result<(), SessionRunti
     Ok(())
 }
 
-/// The durable identity of one claimed run: everything a store write needs
-/// to scope an event or settle a row, and nothing that costs to copy. Store
-/// wrappers take this by value instead of cloning the whole claim (with its
-/// transcript and model selections) per streamed event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RunIdentity {
     pub(super) workspace_id: WorkspaceId,
@@ -58,8 +40,6 @@ pub(super) struct RunIdentity {
     pub(super) run_id: RunId,
     pub(super) command_id: CommandId,
     pub(super) kind: RunKind,
-    /// Whether the run belongs to a child (sub-agent) session. Guaranteed by
-    /// the claim query's parent filter.
     pub(super) child: bool,
 }
 
@@ -72,103 +52,44 @@ pub(super) enum HistoryAdmissionFailure {
 #[derive(Clone)]
 pub(super) struct ClaimedRun {
     pub(super) identity: RunIdentity,
-    /// Captured attribution for owned summaries; grants no goal tool authority.
     pub(super) goal_spend_owner: Option<qq_protocol::GoalId>,
-    /// Immutable active goal captured at reservation, never reloaded during preparation.
     pub(super) goal: Option<Arc<qq_protocol::GoalSnapshot>>,
     pub(super) goal_initial_notice: Option<Arc<str>>,
     pub(super) goal_admission: Option<goals::GoalAdmission>,
-    /// Shared acquisition/process deadline captured at reservation, before
-    /// the executor task can wait for its first poll.
     pub(super) check_deadline: Option<(u64, tokio::time::Instant)>,
     pub(super) origin: Option<qq_protocol::RunOrigin>,
     pub(super) workspace: String,
-    /// Nesting depth of the run's session: 0 for a root, 1 for a child. A
-    /// run may spawn only while `depth < effective_max_depth`.
     pub(super) depth: u16,
-    /// The root run whose delegation tree this run belongs to; the run itself
-    /// for a root. Descendant caps and cascades key on it.
     pub(super) root_run_id: RunId,
-    /// Why the run's session exists; audit children are never audited.
     pub(super) purpose: SessionPurpose,
-    /// True only when this run's command is present in the durable command
-    /// journal. Runtime- and model-created runs use generated command ids but
-    /// intentionally have no command row.
     pub(super) user_initiated: bool,
-    /// The durable command used `//` to escape runtime slash semantics. Its
-    /// message was normalized before `PromptQueued`, so preparation must not
-    /// reinterpret the resulting leading slash.
     pub(super) literal_slash: bool,
-    /// Exact optional selection read from the session row at reservation.
-    /// `model` becomes the effective resolved selection before provider work.
     pub(super) session_model: ModelSelection,
     pub(super) model: ModelSelection,
     pub(super) messages: Vec<Message>,
-    /// The stored effect of each tool result in `messages`, in block order,
-    /// so the run's live prune classifies them as assembly did.
     pub(super) message_effects: ResultEffects,
-    /// An unusable history blocks only this reservation, before loading.
     pub(super) history_admission_failure: Option<HistoryAdmissionFailure>,
-    /// Summarizer steps already spent admitting this prompt. Zero until the
-    /// first automatic compaction starts.
     pub(super) context_compaction_attempted: u32,
-    /// A step for this prompt settled failed: its input was rejected or did
-    /// not shrink the assembly, so an identical step must never be resent.
     pub(super) context_compaction_failed: bool,
-    /// The latest compaction covers fewer settled prompts than the session
-    /// holds, so a further step reads new input rather than repeating one.
     pub(super) context_compaction_remaining: bool,
-    /// For a bounded compaction step, the prompt ordinal its summary covers.
-    /// `None` reads everything settled (manual `/compact`, no declared
-    /// window).
     pub(super) compaction_cutoff_ordinal: Option<u64>,
-    /// Set in memory when a step that read a single over-budget unit was
-    /// rejected: that unit cannot be reduced by any cut, and the prompt's
-    /// failure names it. Never persisted; a restart re-derives the fold.
     pub(super) context_compaction_oversized_unit_bytes: Option<u64>,
-    /// For an in-run compaction step: the prompt run whose turns the summary
-    /// replaces and the last turn ordinal it covers. `None` for every other
-    /// run, including between-run steps.
     pub(super) in_run_turn_cutoff: Option<(RunId, u32)>,
     pub(super) context_overflow_basis: Option<ContextOccupancyBasis>,
     pub(super) context_occupancy: Option<ContextOccupancy>,
-    /// Caller-imposed budgets persisted with the run row. Compaction runs and
-    /// historical rows carry the empty set.
     pub(super) limits: RunLimits,
-    /// The session's policy at claim time. Only shapes the offered tool
-    /// list; the gate re-reads the live mode for every held call.
     pub(super) approval_mode: ApprovalMode,
-    /// Structured input of the prompt that created this run. Resolved (files
-    /// read) when the run starts; empty for compaction and historical runs,
-    /// whose message text is already final.
     pub(super) input: Vec<InputPart>,
-    /// `input` after its files were read, kept for the run's lifetime so an
-    /// in-run compaction retry sends the same bytes (never a re-read) and
-    /// run start persists them for later reconstruction. Shared because the
-    /// tool gate clones the claim per call.
     pub(super) resolved_input: Option<Arc<crate::input::ResolvedInput>>,
-    /// Agent profile the session selected at claim time.
     pub(super) profile: AgentProfileId,
-    /// Explicit reasoning effort pin at claim time. `None` leaves the compiled
-    /// plan's configured or profile choice.
     pub(super) reasoning_effort: Option<qq_provider::ReasoningEffort>,
-    /// State the executor needs before its first provider request, read in
-    /// the claim transaction so it needs no further store round trips: the
-    /// cancellation flag as of the claim, the session's known file hashes,
-    /// and steering queued before the run started.
     pub(super) cancel_requested: bool,
     pub(super) file_state: Vec<(String, String)>,
     pub(super) pending_steering: Vec<crate::runtime::SteeringMessage>,
-    /// The typed-output contract the prompt was submitted with, compiled
-    /// from the persisted JSON at claim time. Absent for compaction runs,
-    /// children, and every prompt without a contract.
     pub(super) output: Option<Arc<crate::output::CompiledOutputSchema>>,
 }
 
 impl ClaimedRun {
-    /// Panic settlement needs durable ownership identity, never the assembled
-    /// transcript. Keeping this clone scalar avoids retaining a second copy
-    /// of up to 4 MiB for every active execution task.
     pub(super) fn panic_settlement_claim(&self) -> Self {
         Self {
             identity: self.identity,
@@ -218,7 +139,6 @@ pub(super) struct PreparedRunAudit {
     pub(super) prompt_identity: Arc<RunPromptIdentity>,
     pub(super) resolved_model: Arc<ResolvedModel>,
     pub(super) plan_identity: RunPlanIdentity,
-    /// Secret-free canonical descriptor JSON, persisted beside the identity.
     pub(super) plan_descriptor_json: Arc<str>,
     pub(super) context_shape: ContextRequestShape,
     pub(super) weight: PreparedRequestWeight,
@@ -227,14 +147,6 @@ pub(super) struct PreparedRunAudit {
 
 pub(super) const CONTEXT_OCCUPANCY_BASIS_VERSION: u16 = 1;
 
-/// The wire-affecting identity of one run's provider requests.
-///
-/// With a known secret-free provider identity the digest names the exact
-/// codec/endpoint/adapter shape, which is enough to reuse a measured token
-/// count. Without one (custom or LiteLLM endpoints, dynamic AWS region
-/// chains, historical descriptors) the digest covers only the route-level
-/// fields; that still proves a previously overflowing request repeats, but
-/// cannot prove tokenization-compatible wire shape for occupancy reuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ContextRequestShape {
     pub(super) digest: ContentHash,
@@ -261,8 +173,6 @@ pub(super) fn context_request_shape(model: &ResolvedModel) -> ContextRequestShap
         .request_shape
         .filter(|provider| model.version.get() == 2 && provider.version.get() == 1);
     let mut digest = Sha256::new();
-    // Distinct domains keep an exact identity from ever matching a
-    // route-level fallback for the same route.
     match provider {
         Some(provider) => {
             context_shape_update(&mut digest, b"qq-context-request-shape-v1");
@@ -309,11 +219,6 @@ pub(super) fn context_occupancy_basis(
     }
 }
 
-/// Seeds the next request's occupancy from a measured one. Requires a known
-/// provider identity and the exact shape and static prefix; the byte delta
-/// since the measured request (growth from the new prompt, shrinkage from
-/// assembly-time pruning) follows the byte-ratio estimate in either
-/// direction.
 pub(super) fn compatible_context_tokens(
     occupancy: ContextOccupancy,
     shape: ContextRequestShape,
@@ -330,10 +235,6 @@ pub(super) fn compatible_context_tokens(
     })
 }
 
-/// Whether a request with this shape and static prefix repeats the request
-/// that produced `basis`. Deliberately independent of request bytes: the
-/// transcript only shrinks through assembly-time pruning, and an uncertain
-/// repeat of a provider-reported overflow must compact rather than poll.
 pub(super) fn repeats_context_basis(
     basis: ContextOccupancyBasis,
     shape: ContextRequestShape,
@@ -447,11 +348,6 @@ pub(super) fn reserve_next_run(
     store_id: StoreId,
     depth: u16,
 ) -> Result<Option<ClaimedRun>, SessionRuntimeError> {
-    // A preparation reservation is unpublished coordination: the prompt,
-    // message, and queued run were already committed under FULL. In WAL mode,
-    // NORMAL keeps this transaction consistent and process-crash durable while
-    // allowing an OS/power loss to discard only the recoverable pointer. FULL
-    // is restored before any authoritative start or terminal transaction.
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     let reserved = reserve_next_run_recoverable(connection, store_id, depth);
     let restored = connection
@@ -607,9 +503,6 @@ pub(super) fn reserve_next_run_recoverable(
     else {
         return Ok(None);
     };
-    // A stored contract that no longer compiles is a persistence fault: it
-    // was compiled at admission, so only corruption or a bounds change can
-    // make it fail here.
     let output = match output_contract_json {
         None => None,
         Some(encoded) => {
@@ -743,10 +636,6 @@ pub(super) fn reserve_next_run_recoverable(
             (context, effects)
         }
         RunKind::Compaction => {
-            // The summarization request is the session's assembled context —
-            // latest summary plus verbatim span, with result pruning — and
-            // the fixed instruction as the final user message. A prior
-            // summary therefore folds into the next one naturally.
             let (mut context, effects) =
                 match load_model_context_with_effects(&transaction, session_id, u64::MAX) {
                     Ok(context) => context,
@@ -766,16 +655,11 @@ pub(super) fn reserve_next_run_recoverable(
             (context, effects)
         }
     };
-    // Malformed or foreign-version state is treated as absent and cleared
-    // below rather than failing the run: both columns are advisory caches of
-    // a measurement, never authoritative history.
     let decode_basis = |encoded: &str| {
         serde_json::from_str::<ContextOccupancyBasis>(encoded)
             .ok()
             .filter(|basis| basis.version == CONTEXT_OCCUPANCY_BASIS_VERSION)
     };
-    // Overflow evidence survives assembly-time pruning: a shrunken request
-    // might fit, but an uncertain repeat must compact rather than poll.
     let context_overflow_basis = if kind == RunKind::Prompt {
         pending_context_overflow_basis_json
             .as_deref()
@@ -783,9 +667,6 @@ pub(super) fn reserve_next_run_recoverable(
     } else {
         None
     };
-    // Occupancy reuse survives it too: the seed credits the pruned bytes at
-    // the estimate ratio instead of restarting from a raw byte estimate over
-    // the whole history, which after a few turns it always would.
     let context_occupancy = if kind == RunKind::Prompt {
         context_tokens
             .zip(context_occupancy_json.as_deref())
@@ -820,9 +701,6 @@ pub(super) fn reserve_next_run_recoverable(
             )
             ?;
     }
-    // Everything the executor reads before its first provider request rides
-    // the claim transaction, so claim-to-send is two store hops: this one and
-    // the `RunStarted` publication.
     let cancel_requested = run_cancel_requested(&transaction, run_id)?;
     let file_state = session_file_state_rows(&transaction, session_id)?;
     let pending_steering = pending_steering_rows(&transaction, run_id)?;
@@ -859,7 +737,6 @@ pub(super) fn reserve_next_run_recoverable(
         )?);
     }
     if goal.is_some() && kind != RunKind::GoalCheck {
-        // Control commands must see preparing ownership before loading can wait.
         goals::freeze_goal_claim(
             &transaction,
             RunIdentity {
@@ -962,7 +839,6 @@ pub(super) enum GoalStartRefusal {
     Cancelled,
 }
 
-/// Storage failure, goal refusal and lost reservation are distinct outcomes.
 pub(super) type RunStart = Result<Option<SessionEventEnvelope>, GoalStartRefusal>;
 
 pub(super) struct RunStartMetadata<'a> {
@@ -1092,11 +968,6 @@ pub(super) fn start_reserved_run(
     } else {
         None
     };
-    // Plan identity and its descriptor are fixed in the same statement that
-    // starts the run: a later configuration or credential refresh compiles a
-    // new plan for later runs and never touches this row.
-    // A compaction run reports `compacting` from the transaction that
-    // starts it; a prompt run reports its activity as it goes.
     let compacting = identity.kind == RunKind::Compaction;
     let run_started = transaction.execute(
         "UPDATE runs
@@ -1161,9 +1032,6 @@ pub(super) fn start_reserved_run(
              WHERE run_id = ?1 AND role = 'user' AND state = 'queued'",
         [identity.run_id.to_string()],
     )?;
-    // The bytes the model is about to see become durable in the same unit
-    // that marks the run started, so a follow-up never reconstructs a prompt
-    // whose attachments were read but not kept.
     if let Some(resolved) = resolved_input.filter(|resolved| !resolved.attachments.is_empty()) {
         let user_message_id: String = transaction.query_row(
             "SELECT user_message_id FROM runs WHERE id = ?1",
@@ -1203,8 +1071,6 @@ pub(super) fn start_reserved_run(
     Ok(Ok(Some(started)))
 }
 
-/// Where a prompt's automatic compaction stands, re-read from the store
-/// after each step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CompactionProgress {
     pub(super) steps: u32,
@@ -1323,8 +1189,6 @@ pub(super) fn reserve_context_capacity(
     }
 }
 
-/// The run row's persisted context occupancy: the input-token total of its
-/// last committed model turn, NULL until a turn reports usage.
 pub(super) fn run_context_tokens(
     connection: &Connection,
     run_id: RunId,

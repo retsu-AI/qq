@@ -1,18 +1,3 @@
-//! Bounded pre-turn context retrieval.
-//!
-//! A [`ContextSource`] supplies extra context for one run before its first
-//! provider request: memory, retrieval, environment facts. It is fetched
-//! once per run, under a byte/item/time budget, and its output is appended
-//! to that run's system prompt as a provenance-tagged block. It never writes
-//! to the durable transcript and never sees a token stream; products that
-//! want to ingest events do so through the post-commit subscription like any
-//! other observer.
-//!
-//! Failure policy is explicit per source. Ordinary retrieval fails open: the
-//! run proceeds without the block and the run's prompt identity records the
-//! skip. A source that must succeed (fail closed) settles the run with a
-//! typed `context_source` failure before any provider work.
-
 use std::{
     collections::VecDeque,
     future::Future,
@@ -26,28 +11,19 @@ use qq_protocol::{ContentHash, ContextSourceOutcome, ContextSourceRecord};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-/// Most sources one runtime may register.
 pub const MAX_CONTEXT_SOURCES: usize = 8;
-/// Hard ceiling on one source's budget, whatever it requests.
 pub const MAX_CONTEXT_SOURCE_BYTES: usize = 64 * 1024;
 pub const MAX_CONTEXT_SOURCE_ITEMS: usize = 64;
 pub const MAX_CONTEXT_SOURCE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Default cache bounds for the runtime-wide context cache.
 pub const DEFAULT_CONTEXT_CACHE_ENTRIES: usize = 256;
 pub const DEFAULT_CONTEXT_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
-/// What happens when a source fails, times out, or returns an invalid bundle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailPolicy {
-    /// Proceed without the source's context; record the skip.
     Open,
-    /// Settle the run with a `context_source` failure before provider work.
     Closed,
 }
 
-/// The per-fetch budget a source must respect. The runtime enforces it
-/// regardless: an oversized bundle is truncated by item until it fits, and
-/// the deadline aborts the fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextBudget {
     pub max_bytes: usize,
@@ -75,22 +51,16 @@ impl Default for ContextBudget {
     }
 }
 
-/// What the runtime tells a source about the run it is fetching for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextRequest {
-    /// The configured agent profile.
     pub profile: String,
-    /// Canonical workspace root.
     pub workspace: String,
-    /// The newest user message's text, or empty for tool-result turns.
     pub latest_user_text: String,
     pub budget: ContextBudget,
 }
 
-/// One retrieved item with where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextItem {
-    /// Source-defined provenance: a path, URL, memory id, or label.
     pub provenance: String,
     pub content: String,
 }
@@ -113,34 +83,21 @@ pub enum ContextSourceError {
 pub type ContextFetchFuture =
     Pin<Box<dyn Future<Output = Result<ContextBundle, ContextSourceError>> + Send + 'static>>;
 
-/// A bounded pre-turn context supplier. Implementations own their transport
-/// and must return within the budget's deadline; the runtime enforces it.
 pub trait ContextSource: Send + Sync {
-    /// Stable identity, recorded on every run that consulted the source.
     fn name(&self) -> &str;
     fn version(&self) -> &str;
 
-    /// Deterministic cache key for `request`, or `None` to fetch every time.
-    /// The runtime caches bundles by (name, version, key) so identical
-    /// requests within the cache's lifetime do not refetch.
     fn cache_key(&self, request: &ContextRequest) -> Option<[u8; 32]>;
 
-    /// Fetches the bundle for `request`. `cancelled` is the run's token; a
-    /// source that does network or blocking work should await
-    /// [`RunCancellation::cancelled`] alongside it, or check
-    /// [`RunCancellation::is_cancelled`] between steps.
     fn fetch(&self, request: ContextRequest, cancelled: RunCancellation) -> ContextFetchFuture;
 
     fn fail_policy(&self) -> FailPolicy;
 
-    /// The budget this source wants; the runtime clamps it to the hard
-    /// ceilings.
     fn budget(&self) -> ContextBudget {
         ContextBudget::default()
     }
 }
 
-/// A source with its clamped budget, as the runtime holds it.
 #[derive(Clone)]
 pub(crate) struct RegisteredSource {
     pub(crate) source: Arc<dyn ContextSource>,
@@ -154,7 +111,6 @@ impl RegisteredSource {
     }
 }
 
-/// The bundle that reached the prompt, rendered once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RenderedContext {
     pub(crate) text: String,
@@ -167,7 +123,6 @@ struct CacheEntry {
     bytes: usize,
 }
 
-/// Bounded LRU of fetched bundles, shared by every run of a runtime.
 pub struct ContextCache {
     entries: Mutex<VecDeque<CacheEntry>>,
     max_entries: usize,
@@ -239,11 +194,6 @@ fn bundle_bytes(bundle: &ContextBundle) -> usize {
         .sum()
 }
 
-/// Fetches every registered source for one run. Sources run concurrently,
-/// each under its own deadline; the output is one rendered block per source
-/// that produced items, plus a record per source consulted. A fail-closed
-/// source's failure is returned as `Err` with its record so the caller can
-/// settle the run.
 pub(crate) async fn fetch_all(
     sources: &[RegisteredSource],
     cache: &ContextCache,
@@ -343,7 +293,6 @@ async fn fetch_one(
             (bundle, false)
         }
     };
-    // Enforce the budget by item: whole items until the next would overflow.
     let mut text = String::new();
     let mut items = 0_usize;
     let mut bytes = 0_usize;
@@ -516,7 +465,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rendered.len(), 3);
-        // Budget: 5 items of ~48 bytes each against 200 bytes / 3 items.
         assert_eq!(rendered[0].record.items, 3);
         assert_eq!(
             rendered[0].record.outcome,
@@ -534,7 +482,6 @@ mod tests {
         assert!(rendered[1].text.is_empty());
         assert_eq!(rendered[2].record.outcome, ContextSourceOutcome::Invalid);
 
-        // Same request: cached, one fetch.
         let again = fetch_all(&sources, &cache, request("hello"), cancelled.clone())
             .await
             .unwrap();
@@ -553,7 +500,6 @@ mod tests {
         );
         assert_eq!(memory.fetches.load(Ordering::SeqCst), 2);
 
-        // Fail-closed failure settles with the record.
         let closed = recorder(
             "must",
             FailPolicy::Closed,
@@ -566,7 +512,6 @@ mod tests {
         assert!(error.0.contains("fail-closed"));
         assert_eq!(error.1.outcome, ContextSourceOutcome::Unavailable);
 
-        // Budgets are clamped and the cache is bounded.
         let huge = RegisteredSource::new(recorder("h", FailPolicy::Open, Behavior::Items(1, 1)));
         assert!(huge.budget.max_bytes <= MAX_CONTEXT_SOURCE_BYTES);
         let small = ContextCache::new(2, 1024);

@@ -1,6 +1,3 @@
-//! The event journal: `EventContext`, the single `append_event` every publisher
-//! goes through, and the replay/page readers subscribers use.
-
 use super::*;
 
 #[cfg(test)]
@@ -18,8 +15,6 @@ pub(super) fn read_events(
     )
 }
 
-/// `read_events` keeping the stored encoding beside the parsed envelope, for
-/// subscriber catch-up: the same bytes a live delivery would have carried.
 pub(super) fn read_published_events(
     connection: &mut Connection,
     workspace_id: WorkspaceId,
@@ -30,8 +25,6 @@ pub(super) fn read_published_events(
     read_published_event_page(connection, workspace_id, after, limit)
 }
 
-/// Reads a page after workspace validation, including when attachment and
-/// catch-up share a store job.
 pub(super) fn read_published_event_page(
     connection: &mut Connection,
     workspace_id: WorkspaceId,
@@ -62,8 +55,6 @@ pub(super) fn read_published_event_page(
         .map(|row| {
             let encoded = row?;
             let envelope: SessionEventEnvelope = serde_json::from_str(&encoded)?;
-            // A row from a removed feature decodes as `retired`; forward the
-            // normalized form, never the legacy bytes clients cannot parse.
             let json = if matches!(envelope.event, SessionEvent::Retired) {
                 Arc::from(serde_json::to_string(&envelope)?)
             } else {
@@ -85,7 +76,6 @@ pub(super) struct EventContext {
 }
 
 impl EventContext {
-    /// An event scoped to a run and caused by the command that queued it.
     pub(super) const fn for_run(
         store_id: StoreId,
         identity: RunIdentity,
@@ -101,8 +91,6 @@ impl EventContext {
         }
     }
 
-    /// An event scoped to a run by explicit ids: cascades and settlements of
-    /// rows other than the claimed run.
     pub(super) const fn for_run_ids(
         store_id: StoreId,
         workspace_id: WorkspaceId,
@@ -121,7 +109,6 @@ impl EventContext {
         }
     }
 
-    /// A session-level event with no run.
     pub(super) const fn for_session(
         store_id: StoreId,
         workspace_id: WorkspaceId,
@@ -139,7 +126,6 @@ impl EventContext {
         }
     }
 
-    /// The same context with no causing command (recovery, timeouts).
     pub(super) const fn uncaused(self) -> Self {
         Self {
             caused_by: None,
@@ -207,8 +193,6 @@ pub(super) fn append_event(
         }
     }
     prune(transaction, EVENT_JOURNAL_BYTES, EVENT_JOURNAL_ROWS)?;
-    // The encoding is kept, not dropped: after commit the worker publishes
-    // it to live subscribers and the server writes it to the wire as-is.
     feed::stage(Arc::new(feed::PublishedEvent {
         envelope: envelope.clone(),
         json: Arc::from(encoded),
@@ -216,7 +200,6 @@ pub(super) fn append_event(
     Ok(envelope)
 }
 
-/// Global delivery window; canonical session state has its own lifetime.
 pub(super) const EVENT_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const EVENT_JOURNAL_ROWS: u64 = 65_536;
 

@@ -1,14 +1,3 @@
-//! The seam between the run loop and external tool hosts.
-//!
-//! `qq-core` never speaks MCP or any embedder's callback protocol itself: the
-//! composition root wires a concrete host (the `qq-mcp` manager, or an
-//! application's [`EmbeddedToolHost`](crate::EmbeddedToolHost)) through this
-//! trait, exactly as providers arrive through [`qq_provider::Provider`].
-//!
-//! A host contributes an immutable catalog snapshot at plan compile time and
-//! executes one selected call at a time under its own bounds. Hosts perform
-//! no implicit retry: an ambiguous outcome is returned as such.
-
 use std::{future::Future, pin::Pin};
 
 use qq_provider::ToolSpec;
@@ -17,15 +6,9 @@ use thiserror::Error;
 
 use crate::RunCancellation;
 
-/// Namespace prefix for MCP tool names: `mcp__<server>__<tool>`.
 pub const MCP_TOOL_PREFIX: &str = "mcp__";
-/// Namespace prefix for embedded host tool names: `ext__<host>__<tool>`.
 pub const EMBEDDED_TOOL_PREFIX: &str = "ext__";
 
-/// Advisory hints a host attaches to a tool, in MCP's vocabulary. Hints
-/// never grant authority: approval policy treats every external tool alike
-/// regardless of what its host claims, and the hints are recorded for
-/// diagnosis and advertised to clients only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolHints {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -38,30 +21,20 @@ pub struct ToolHints {
     pub open_world: bool,
 }
 
-/// One tool an external host declares.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostTool {
     pub spec: ToolSpec,
     pub hints: ToolHints,
 }
 
-/// Why a host is not currently serving calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostReadiness {
     Ready,
-    /// Some or all backends are unavailable; the message names them.
-    Degraded {
-        message: String,
-    },
-    Unavailable {
-        message: String,
-    },
+    Degraded { message: String },
+    Unavailable { message: String },
     ShutDown,
 }
 
-/// A host's tool declarations at one instant, with the generation the
-/// snapshot was taken under. The plan compiles the tools in; the generation
-/// lets the plan cache notice a later change without refetching.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostCatalog {
     pub generation: u64,
@@ -80,9 +53,6 @@ impl HostCatalog {
     }
 }
 
-/// A typed failure of one host call. Every variant becomes an ordinary
-/// `is_error` tool result for the model, never a run failure; the type exists
-/// so the runtime, traces, and conformance tests can tell them apart.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum HostCallError {
     #[error("the tool call exceeded its deadline")]
@@ -103,8 +73,6 @@ pub enum HostCallError {
     ShutDown,
 }
 
-/// A successful host call. `is_error` carries the tool's own error
-/// signalling (the server ran the tool and it reported failure).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostToolResult {
     pub content: String,
@@ -113,7 +81,6 @@ pub struct HostToolResult {
 
 pub type HostCallFuture =
     Pin<Box<dyn Future<Output = Result<HostToolResult, HostCallError>> + Send + 'static>>;
-/// Transient producer evidence, excluded from model text and durable spill identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedHostToolResult {
     pub result: HostToolResult,
@@ -123,7 +90,6 @@ pub struct ObservedHostToolResult {
 pub type ObservedHostCallFuture =
     Pin<Box<dyn Future<Output = Result<ObservedHostToolResult, HostCallError>> + Send + 'static>>;
 
-/// Legacy hosts return their original future without another allocation.
 pub enum HostCallObservation {
     Rendered(HostCallFuture),
     Observed(ObservedHostCallFuture),
@@ -131,43 +97,17 @@ pub enum HostCallObservation {
 
 pub type HostShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-/// An external source of tools as the plan compiler and run loop see them.
-///
-/// Implementations own connection management and must keep every call
-/// bounded in time. The run loop awaits `call` once per dispatched call; the
-/// plan compiler calls `catalog_blocking` once per compile from a blocking
-/// context; the plan cache calls `catalog_is_current` on every lookup and it
-/// must be cheap and synchronous.
 pub trait ExternalToolHost: Send + Sync {
-    /// Stable host identity, used in diagnostics and capabilities. Tool names
-    /// carry their own namespace prefix independent of this.
     fn name(&self) -> &str;
 
-    /// Fetches the current declarations, connecting if necessary. May block
-    /// the calling thread for a bounded time; never called on an async
-    /// worker. An unavailable backend contributes no tools and is reported
-    /// through the catalog's readiness rather than an error.
     fn catalog_blocking(&self) -> HostCatalog;
 
-    /// Whether a catalog taken under `generation` still describes this host.
-    /// Returning `false` makes the next plan lookup recompile; a host whose
-    /// backends failed may return `false` after a bounded retry interval so
-    /// a plan does not stay degraded forever.
     fn catalog_is_current(&self, generation: u64) -> bool;
 
-    /// Exact namespaced tool names granted by configuration allowlists,
-    /// merged into policy evaluation as session-style grants.
     fn config_grants(&self) -> Vec<String>;
 
-    /// Executes one namespaced call. `cancelled` is the run's cancellation
-    /// token; a host awaits [`RunCancellation::cancelled`] alongside its work
-    /// and returns [`HostCallError::Cancelled`] as soon as it resolves,
-    /// without wedging shared state. Dropping the future must be safe.
     fn call(&self, name: String, arguments: String, cancelled: RunCancellation) -> HostCallFuture;
 
-    /// Carries identity of a complete observed representation before preview
-    /// conversion. Hosts with lossy previews override this; legacy hosts use
-    /// their rendered content, retaining their original future allocation.
     fn call_observed(
         &self,
         name: String,
@@ -179,13 +119,9 @@ pub trait ExternalToolHost: Send + Sync {
 
     fn readiness(&self) -> HostReadiness;
 
-    /// Stops serving calls and releases backends. Calls in flight settle as
-    /// [`HostCallError::ShutDown`] or their own outcome; new calls are
-    /// refused. Bounded.
     fn shutdown(&self) -> HostShutdownFuture;
 }
 
-/// Renders a host failure as the bounded tool error the model sees.
 pub(crate) fn host_error_result(error: &HostCallError) -> crate::tools::ToolOutput {
     let mut result = crate::tools::bounded_result(error.to_string(), true);
     result.disposition = match error {

@@ -1,5 +1,3 @@
-//! Request-time HTTP authorization.
-
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
@@ -44,24 +42,13 @@ impl PartialEq for SharedRequestCredentialProvider {
 
 impl Eq for SharedRequestCredentialProvider {}
 
-/// Most headers one request-time credential may set. Codex, the largest
-/// built-in intent, sets four.
 const MAX_CREDENTIAL_HEADERS: usize = 8;
-/// Most header-value bytes one request-time credential may set.
 const MAX_CREDENTIAL_HEADER_BYTES: usize = 64 * 1_024;
 
 const CHATGPT_ACCOUNT_ID: HeaderName = HeaderName::from_static("chatgpt-account-id");
 const ORIGINATOR: HeaderName = HeaderName::from_static("originator");
 const X_OPENAI_FEDRAMP: HeaderName = HeaderName::from_static("x-openai-fedramp");
 
-/// The headers one request-time credential places on an attempt.
-///
-/// Values are validated when the credential is built, so applying it per
-/// attempt only clones prebuilt `HeaderValue`s. Each header records whether
-/// its value is secret: secret values are redacted from every diagnostic the
-/// attempt can produce, while non-secret metadata (`originator: qq`,
-/// `x-openai-fedramp: true`) is sent but never registered for redaction,
-/// which would otherwise rewrite every matching substring of a diagnostic.
 #[derive(Clone)]
 pub struct RequestCredential {
     headers: Vec<CredentialHeader>,
@@ -71,15 +58,12 @@ pub struct RequestCredential {
 struct CredentialHeader {
     name: HeaderName,
     value: HeaderValue,
-    /// The secret part of `value`, redacted from diagnostics; `None` for
-    /// non-secret metadata.
     secret: Option<String>,
 }
 
 impl RequestCredential {
     pub fn bearer(token: impl Into<String>) -> Result<Self, RequestCredentialError> {
         let token = token.into();
-        // `Bearer ` plus the token.
         check_credential_size(7 + token.len())?;
         let mut credential = Self::empty();
         credential.push_bearer(token)?;
@@ -93,8 +77,6 @@ impl RequestCredential {
     ) -> Result<Self, RequestCredentialError> {
         let access_token = access_token.into();
         let account_id = account_id.into();
-        // `Bearer ` plus the token, the account ID, `qq`, and `true` only
-        // when the FedRAMP header is sent.
         let fedramp = if is_fedramp { 4 } else { 0 };
         check_credential_size(7 + access_token.len() + account_id.len() + 2 + fedramp)?;
         let mut credential = Self::empty();
@@ -183,10 +165,6 @@ fn validate_credential_value(value: &str) -> Result<(), RequestCredentialError> 
     Ok(())
 }
 
-/// Rejects a credential whose header values would exceed the per-credential
-/// bound before any of them is built. Application re-checks as defence in
-/// depth, but an oversized stored or environment credential is invalid, not
-/// a configuration mismatch.
 fn check_credential_size(value_bytes: usize) -> Result<(), RequestCredentialError> {
     if value_bytes > MAX_CREDENTIAL_HEADER_BYTES {
         return Err(RequestCredentialError::Invalid);
@@ -202,10 +180,6 @@ fn sensitive_value(raw: &str) -> Result<HeaderValue, RequestCredentialError> {
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RequestCredentialError {
-    /// No credential could be loaded. `remedy` is opaque text authored by
-    /// the [`RequestCredentialProvider`] (which knows the provider, profile,
-    /// and how the user stores a credential); it is precomputed when the
-    /// provider is constructed so the request path never formats it.
     #[error("{}", .remedy.as_deref().unwrap_or(MISSING_CREDENTIAL_MESSAGE))]
     Missing { remedy: Option<Arc<str>> },
     #[error("request credentials are invalid")]
@@ -227,14 +201,10 @@ pub enum RequestCredentialError {
 const MISSING_CREDENTIAL_MESSAGE: &str = "request credentials are missing";
 
 impl RequestCredentialError {
-    /// A missing credential with no provider-specific guidance.
     pub const fn missing() -> Self {
         Self::Missing { remedy: None }
     }
 
-    /// A missing credential whose message tells the user what to do. The
-    /// text is shared, not copied, so a provider can attach the same remedy
-    /// to every failure without allocating.
     pub fn missing_with_remedy(remedy: Arc<str>) -> Self {
         Self::Missing {
             remedy: Some(remedy),
@@ -242,14 +212,6 @@ impl RequestCredentialError {
     }
 }
 
-/// The headers a recipe's request-time auth intent lets a credential set.
-///
-/// Only credential-owned names appear here: request-controlled names
-/// (`http::is_request_controlled_header`) and protocol constants such as
-/// `anthropic-version` are never allowed, and every allowed name is also in
-/// the adapter's protected list, so a configured static header cannot carry
-/// it. A credential must set every `required` name and nothing outside
-/// `allowed`, or the attempt fails before any header is applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RequestCredentialKindExpected {
     Bearer,
@@ -281,8 +243,6 @@ impl RequestCredentialKindExpected {
     }
 }
 
-/// How each attempt of a request is authorized at send time. Exactly one
-/// mechanism applies to a compiled provider; static headers need none.
 #[derive(Clone, Default)]
 pub(crate) enum RequestAuthorizer {
     #[default]
@@ -312,8 +272,6 @@ impl RequestAuthorizer {
         Self::request_credentials(credentials, RequestCredentialKindExpected::Codex)
     }
 
-    /// The headers this authorizer sets on each attempt, which static
-    /// configuration therefore may not set.
     pub(crate) fn owned_headers(&self) -> &'static [HeaderName] {
         match self {
             Self::Credential(_, expected) => expected.allowed(),
@@ -333,8 +291,6 @@ impl RequestAuthorizer {
         Self::SigV4(Arc::new(authorizer))
     }
 
-    /// Authorizes one attempt and returns any secret bytes it placed on the
-    /// request, for redaction. Empty for the static and SigV4 cases.
     pub(crate) async fn authorize(
         &self,
         request: &mut reqwest::Request,
@@ -360,11 +316,6 @@ impl RequestAuthorizer {
 
 fn request_credential_error(error: RequestCredentialError) -> ProviderError {
     let kind = match error {
-        // A load that timed out or found no loader capacity already waited
-        // its full bound; resending would wait it again before the first
-        // event, so it is terminal like a rejected credential. It stays a
-        // `ResponseFailed` rather than `CredentialsUnavailable`, which means
-        // "no credential configured" to the live-provider canary.
         RequestCredentialError::TimedOut
         | RequestCredentialError::CapacityUnavailable
         | RequestCredentialError::Missing { .. }
@@ -415,9 +366,6 @@ fn apply_request_credential(
         ));
     }
 
-    // Each attempt starts from a clone of the unauthorized request, so this
-    // only matters for an intent's optional names: a credential that omits
-    // `x-openai-fedramp` must not inherit one.
     for name in allowed {
         request.headers_mut().remove(name);
     }
@@ -645,8 +593,6 @@ mod tests {
     fn codex_credentials_redact_secrets_but_not_metadata() {
         for (is_fedramp, expected_fedramp) in [(true, Some("true")), (false, None)] {
             let mut request = request();
-            // A header left from an earlier attempt must not survive a
-            // credential that no longer sets it.
             request.headers_mut().insert(
                 HeaderName::from_static("x-openai-fedramp"),
                 HeaderValue::from_static("true"),
@@ -670,8 +616,6 @@ mod tests {
             );
             assert!(request.headers()[AUTHORIZATION].is_sensitive());
             assert!(request.headers()["chatgpt-account-id"].is_sensitive());
-            // Only secret values are redacted: registering `true` or `qq`
-            // would rewrite every matching substring of a diagnostic.
             assert_eq!(redactions, ["codex-token", "codex-account"]);
         }
     }
@@ -742,14 +686,11 @@ mod tests {
             RequestCredential::bearer("x".repeat(MAX_CREDENTIAL_HEADER_BYTES - 6)),
             Err(RequestCredentialError::Invalid)
         ));
-        // Neither Codex value is too large alone; together they are.
         let half = "x".repeat(MAX_CREDENTIAL_HEADER_BYTES / 2);
         assert!(matches!(
             RequestCredential::codex(half.clone(), half, false),
             Err(RequestCredentialError::Invalid)
         ));
-        // Exactly at the limit: `Bearer ` + token + account + `qq`, and the
-        // FedRAMP `true` counts only when that header is sent.
         let token = "t".repeat(MAX_CREDENTIAL_HEADER_BYTES - 7 - 1 - 2);
         assert!(RequestCredential::codex(token.clone(), "a", false).is_ok());
         assert!(matches!(

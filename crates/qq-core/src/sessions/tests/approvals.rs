@@ -558,7 +558,6 @@ async fn responding_twice_returns_the_recorded_outcome_without_side_effects() {
     .unwrap();
     let _ = collect_through_finished(&mut harness.events).await;
 
-    // A retry with a different decision returns the recorded denial.
     let retry = respond_approval(
         &harness.runtime,
         harness.run_id,
@@ -748,14 +747,8 @@ async fn auto_settles_a_fixed_stop_before_any_hold() {
 
 #[tokio::test]
 async fn an_interactive_hold_has_no_server_deadline_by_default() {
-    // DA2 / RR9: `approval_timeout: None` (the default) means the server
-    // never denies a held call on its own clock. The hold outlives what the
-    // old 300 s default would have been in miniature, the run stays open,
-    // and the human's late answer stands. Cancellation and the run deadline
-    // remain the only things that end an unanswered interactive hold.
     let mut harness = approval_harness(ApprovalMode::Ask, "__test_mutate", "{}", 1, None).await;
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    // Nothing arrives while the hold waits: no timeout, no resolution.
     let quiet = tokio::time::timeout(Duration::from_millis(400), harness.events.next()).await;
     assert!(
         quiet.is_err(),
@@ -819,7 +812,6 @@ async fn auto_shell_calls_stream_output_before_they_finish() {
         assert!(result.contains("approved-output"), "{result}");
         assert!(result.starts_with("shell exit=0 "), "{result}");
     }
-    // Live output was published, and before the call's terminal event.
     let first_delta = observed
         .iter()
         .position(|event| {
@@ -907,8 +899,6 @@ async fn cancelling_a_run_interrupts_the_running_shell_call() {
     .await
     .unwrap();
 
-    // The first live chunk proves the command is running before the run
-    // is cancelled; no sleeps are used to sequence the race.
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let event = harness.events.next().await.unwrap().unwrap();
@@ -934,8 +924,6 @@ async fn cancelling_a_run_interrupts_the_running_shell_call() {
         .await
         .unwrap();
     let observed = collect_through_finished_generously(&mut harness.events).await;
-    // The command ran, so its real result settles the call: what it
-    // printed before the cancel, not an interrupted placeholder.
     assert!(
         observed.iter().any(|event| matches!(
             &event.event,
@@ -1134,7 +1122,6 @@ async fn file_state_survives_restart_and_auto_mode_applies_the_edit_without_prom
         ..
     } = harness;
     runtime.shutdown().await.unwrap();
-    // The subscription keeps the store (and its ownership) alive.
     drop(events);
     drop(runtime);
 
@@ -1158,8 +1145,6 @@ async fn file_state_survives_restart_and_auto_mode_applies_the_edit_without_prom
         })
         .unwrap();
 
-    // The restarted runtime edits without re-reading: the read-before-write
-    // rule is satisfied by the durable file-state map recorded by run one.
     let queued = reopened
         .command(
             CommandId::generate().unwrap(),
@@ -1228,8 +1213,6 @@ async fn completed_edits_persist_a_display_diff_the_model_context_never_carries(
     };
     let edited = finished_call("edit_file");
     assert_eq!(edited.state, ToolCallState::Completed);
-    // The model-facing result stays the compact summary; the diff rides
-    // in the display payload only.
     assert!(
         edited
             .result
@@ -1247,7 +1230,6 @@ async fn completed_edits_persist_a_display_diff_the_model_context_never_carries(
     );
     assert_eq!(finished_call("read_file").display, None);
 
-    // The payload persists with the call and replays in snapshots.
     let (workspace_id, _) = resolve_workspace(&harness.runtime, &harness.workspace_path).await;
     let snapshot = harness
         .runtime
@@ -1268,8 +1250,6 @@ async fn completed_edits_persist_a_display_diff_the_model_context_never_carries(
         .unwrap();
     assert_eq!(persisted.display, edited.display);
 
-    // A follow-up run reassembles model context from the store: the
-    // summary result replays, the display diff never does.
     submit_prompt(&harness, "what changed?").await;
     let _ = collect_through_finished(&mut harness.events).await;
     let requests = harness.requests.lock().unwrap();
@@ -1307,7 +1287,6 @@ async fn auto_mode_executes_mutating_tools_after_a_mode_change() {
         DEFAULT_APPROVAL_TIMEOUT,
     )
     .await;
-    // The first run is denied by read-only policy.
     let _ = collect_through_finished(&mut harness.events).await;
 
     let receipt = harness
@@ -1328,9 +1307,6 @@ async fn auto_mode_executes_mutating_tools_after_a_mode_change() {
             mode: ApprovalMode::Auto,
         }
     );
-    // The change is published as a summary update carrying the new mode,
-    // so every connected client renders it, and the receipt commits
-    // through that event.
     let updated = harness.events.next().await.unwrap().unwrap();
     assert_eq!(updated.cursor, receipt.committed_through);
     assert!(matches!(
@@ -1539,8 +1515,6 @@ const ASK_ARGUMENTS: &str =
 
 #[tokio::test]
 async fn ask_user_holds_under_read_only_and_the_answers_become_the_result() {
-    // Read-only would deny any other non-read call; a question is not an
-    // action, so it is put to the user under every mode.
     let mut harness = approval_harness(
         ApprovalMode::ReadOnly,
         "ask_user",
@@ -1590,7 +1564,6 @@ async fn ask_user_holds_under_read_only_and_the_answers_become_the_result() {
             ..
         } if tool_call.state == ToolCallState::Completed && !tool_call.is_error
     )));
-    // Nothing executed: no start, no finish beyond the resolution.
     assert!(!observed.iter().any(|event| matches!(
         event.event,
         SessionEvent::ToolCallStarted { .. } | SessionEvent::ToolCallFinished { .. }
@@ -1652,7 +1625,6 @@ async fn declining_a_question_settles_it_as_answered_with_the_decline_text() {
             ..
         } if tool_call.result.as_deref() == Some(approval::DECLINED_QUESTION_RESULT)
     )));
-    // A second answer is the idempotent replay of the first.
     let receipt = respond_approval(
         &harness.runtime,
         harness.run_id,
@@ -1931,8 +1903,6 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
             .unwrap();
         let (_, call) = collect_until_approval_requested(&mut events).await;
         if expire_goal {
-            // Expire only after the actual approval exists. A slow provider or
-            // store must not exhaust the fixture deadline before reaching it.
             tokio::time::pause();
             epoch.advance(start + 60_001);
             tokio::time::advance(Duration::from_millis(60_001)).await;
@@ -1970,8 +1940,6 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
         runtime.close().await.unwrap();
         drop(runtime);
 
-        // Reopen the durable state with enough approval time to inspect and
-        // explicitly deny a fresh action, without racing another timeout.
         options.approval_timeout = None;
         options.grant_authority = Some(Arc::new(Authority(300_000)));
         let runtime = SessionRuntime::open(
@@ -2127,8 +2095,6 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
     }
 }
 
-// Poll the gate independently of the session's outer cancellation select: both
-// consume the same watch signal, so either may observe cancellation first.
 #[tokio::test]
 async fn an_expired_goal_hold_survives_the_gate_winning_cancellation() {
     for question in [true, false] {
@@ -2445,8 +2411,6 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
         assert_eq!(owner, parent.to_string());
         assert_eq!(parent_requests.lock().unwrap().len(), 1);
         assert_eq!(child_requests.lock().unwrap().len(), 1);
-        // The finite token allowance keeps the read child blocking. Both model
-        // requests and the actual held call precede the only time advance.
         tokio::time::pause();
         if !wall_clock_lags {
             epoch.advance(start + 3_600_001);

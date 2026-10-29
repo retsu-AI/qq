@@ -10,7 +10,6 @@ package=${2:-qq-core}
 test_log=$(mktemp)
 trap 'rm -f -- "$test_log"' EXIT
 
-# pipefail preserves Cargo failures; normalize Windows line endings for receipts.
 cargo test --locked -p "$package" --lib "$selector" -- --exact --color never 2>&1 |
   tr -d '\r' | tee "$test_log"
 

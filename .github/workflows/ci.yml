@@ -1,10 +1,5 @@
 name: CI
 
-# Pull requests get the affected-only gate (`cargo xtask check`): the
-# packages a change can reach, plus smoke. The merge queue and `main` run
-# the full gate (`cargo xtask check --full`) and every platform job. Make
-# `checks`, `client-wasm`, and `windows-teardown` required for the merge
-# queue in branch protection.
 on:
   push:
     branches: [main]
@@ -44,10 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The affected-package selection diffs against the merge-base.
           fetch-depth: 0
-      # rustup resolves the pinned toolchain and components from
-      # rust-toolchain.toml on first cargo invocation.
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -70,8 +62,6 @@ jobs:
         run: cargo xtask smoke
       - name: Evidence
         if: always()
-        # check deletes the previous report at start, so a present report is
-        # this run's; --evidence also refuses one for another commit.
         run: cargo xtask check --evidence >> "$GITHUB_STEP_SUMMARY" || true
       - uses: actions/upload-artifact@v4
         if: failure()
@@ -87,8 +77,6 @@ jobs:
         run: cargo run --locked -p qq-core --example embed
       - name: Minimal core profile
         if: github.event_name != 'pull_request'
-        # nextest, like the gates above: qq-core tests exhaust process-wide
-        # filesystem capacity and need a process each. qq-core has no doctests.
         run: |
           cargo nextest run --locked --profile ci -p qq-core --no-default-features
           cargo clippy --locked -p qq-core --no-default-features --all-targets -- -D warnings
@@ -105,8 +93,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and start the devcontainer
         run: npx --yes @devcontainers/cli@0.90.0 up --workspace-folder .
-      # Inside the container, so the scenarios also check that `qq doctor`
-      # reports a container and a goal prints no host note.
       - name: Smoke inside the devcontainer
         run: >-
           npx --yes @devcontainers/cli@0.90.0 exec --workspace-folder .
@@ -122,8 +108,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-wasm
-      # The browser transport: library plus the transport-neutral decoder
-      # tests. The `wasm32-unknown-unknown` target comes from rust-toolchain.toml.
       - name: Build
         run: cargo build --locked -p qq-client --target wasm32-unknown-unknown --no-default-features --features wasm
       - name: Test build
@@ -323,8 +307,6 @@ jobs:
           if len(artifacts) != 1:
               raise SystemExit('expected one optimized benchmark artifact')
           artifact = artifacts[0]
-          # Cargo reports the bench profile before trailing rustc overrides.
-          # The effective final opt-level is retained separately for each arm.
           profile = artifact['profile']
           manifest = tomllib.loads(Path('Cargo.toml').read_text())
           release = manifest.get('profile', {}).get('release', {})
@@ -340,8 +322,6 @@ jobs:
           (root / f'{arm}-artifact.json').write_text(json.dumps(artifact, indent=2))
           if arm == 'candidate':
               baseline = json.loads((root / 'baseline-artifact.json').read_text())
-              # Optimization changes are the treatment; safety/debug settings
-              # must still match between the two separately built arms.
               for key in ('debug_assertions', 'overflow_checks', 'test', 'debuginfo'):
                   if baseline['profile'].get(key) != profile.get(key):
                       raise SystemExit(f'benchmark profile setting differs: {key}')
@@ -414,18 +394,16 @@ jobs:
                   raise SystemExit('matched qualification requires unchanged budgets')
               if baseline['fixture_version'] != 4:
                   raise SystemExit('baseline fixture version changed; review the comparison contract')
-              baseline['fixture_version'] = 5  # Exact per-run retry recovery receipt.
+              baseline['fixture_version'] = 5
               retry = next(row for row in baseline['metrics'] if row['metric'] == 'provider_retry_amplification_milli')
               if retry['maximum_p95'] != 1050:
                   raise SystemExit('baseline retry budget changed; review the comparison contract')
-              retry['maximum_p95'] = 6300  # ADR-0040: six sends, with the existing 5% allowance.
+              retry['maximum_p95'] = 6300
               if baseline != candidate:
                   raise SystemExit('only the approved retry-contract/version correction may change budgets')
           PYTHON
           channel=$(python3 -c 'import tomllib; print(tomllib.load(open("baseline/rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
-          # The recorder clears toolchain overrides before native builds.
           rustup default "$channel"
-          # Dependency-local toolchain files must not redirect rustc proxies.
           dirname "$(rustup which rustc --toolchain "$channel")" >> "$GITHUB_PATH"
           mkdir -p "$RUNNER_TEMP/h0-recording"
           cp candidate/benchmarks/perf/budgets-v1.json "$RUNNER_TEMP/h0-recording/budgets.json"
@@ -451,7 +429,6 @@ jobs:
                   cwd=workspace / arm, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
               try:
                   while chunk := result.stdout.read1(64 * 1024):
-                      # Drain after a sink failure so the recorder can finish its bounded work.
                       if log_enabled:
                           try:
                               log.write(chunk)

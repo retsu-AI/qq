@@ -1,14 +1,8 @@
-//! Deterministic provider fixtures for tests and embedding examples.
-//!
-//! Available behind the `test-support` feature; never uses credentials or a live service.
-
-/// A finite script of provider turns. Exhaustion is an error, never an implicit answer.
 pub struct ScriptedProvider {
     turns: std::sync::Mutex<std::collections::VecDeque<Vec<crate::ProviderEvent>>>,
 }
 
 impl ScriptedProvider {
-    /// One tool call followed by a text answer, for approval/dispatch examples.
     pub fn tool_then_text(name: &str, arguments: &str, answer: &str) -> Self {
         use crate::ProviderEvent;
         Self::new(vec![
@@ -112,9 +106,6 @@ impl LoopbackServer {
         Self::respond(200, "text/event-stream", body)
     }
 
-    /// Serves an SSE response whose body arrives as the given wire chunks,
-    /// flushed one at a time — for byte-boundary and UTF-8 frame-splitting
-    /// tests. Chunks may split multi-byte characters.
     pub fn sse_chunks(chunks: Vec<Vec<u8>>) -> Self {
         Self::respond_chunks(200, Some("text/event-stream"), chunks)
     }
@@ -123,9 +114,6 @@ impl LoopbackServer {
         Self::respond_chunks(status, Some(content_type), vec![body.into().into_bytes()])
     }
 
-    /// The general form: arbitrary status, optional `Content-Type` (omitted
-    /// entirely when `None`, so missing-header behavior is testable), and a
-    /// scripted body written chunk by chunk.
     pub fn respond_chunks(
         status: u16,
         content_type: Option<&'static str>,
@@ -134,7 +122,6 @@ impl LoopbackServer {
         Self::respond_sequence(vec![(status, content_type, chunks)])
     }
 
-    /// One response with explicit headers, for server-directed retry advice.
     pub fn respond_with_headers(
         status: u16,
         content_type: &'static str,
@@ -151,12 +138,10 @@ impl LoopbackServer {
         )
     }
 
-    /// Serves several responses on one listener and captures each request.
     pub fn respond_sequence(responses: Vec<LoopbackResponse>) -> Self {
         Self::respond_sequence_with_timeout(responses, Duration::from_secs(5))
     }
 
-    /// Sets the idle acceptance deadline for fixtures that execute work between turns.
     pub fn respond_sequence_with_timeout(
         responses: Vec<LoopbackResponse>,
         timeout: Duration,
@@ -286,15 +271,6 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
     request
 }
 
-/// Encodes the HTTP body an adapter for `protocol` would send for `request`,
-/// exactly as `sse_exchange` serializes it, without a transport. For the
-/// `provider_encode` benchmark and body-shape tests.
-///
-/// # Panics
-///
-/// Panics when the request cannot be encoded for the protocol (a Google
-/// tool result whose call is not in the transcript, or a body serde_json
-/// refuses); both are programming errors in a fixture.
 #[must_use]
 pub fn encode_body(protocol: crate::HttpProtocol, request: &crate::ModelRequest) -> Vec<u8> {
     use crate::{
@@ -322,14 +298,6 @@ pub fn encode_body(protocol: crate::HttpProtocol, request: &crate::ModelRequest)
     encoded.expect("a wire request body must serialize")
 }
 
-/// Frames one SSE body chunk-by-chunk through a provider decoder and parses
-/// every event as its adapter would, without a transport. For the
-/// `sse_decode` benchmark. Returns the number of events parsed.
-///
-/// # Panics
-///
-/// Panics when the body is not a well-formed stream for the protocol; the
-/// bench fixtures are.
 pub fn decode_sse_body(protocol: crate::HttpProtocol, chunks: &[&[u8]], parse: bool) -> usize {
     use crate::providers::{anthropic, openai};
     let redactions: [String; 0] = [];
@@ -371,8 +339,6 @@ pub fn decode_sse_body(protocol: crate::HttpProtocol, chunks: &[&[u8]], parse: b
 mod tests {
     use super::*;
 
-    /// Raw TCP client so assertions run against the exact wire bytes the
-    /// harness emits, independent of any HTTP client's normalization.
     fn raw_exchange(base_url: &str, body: &str) -> (String, String) {
         let authority = base_url
             .strip_prefix("http://")

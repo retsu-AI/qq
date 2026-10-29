@@ -7,8 +7,6 @@ use qq_provider::{
     ProviderRecipe, test_support::LoopbackServer,
 };
 
-/// Compiles an HTTP recipe against a loopback base URL, exactly as runtime
-/// configuration does.
 pub fn compile_http(base_url: String, protocol: HttpProtocol, auth: HttpAuth) -> Arc<dyn Provider> {
     ProviderCompiler::new()
         .expect("compiler must construct")
@@ -20,8 +18,6 @@ pub fn compile_http(base_url: String, protocol: HttpProtocol, auth: HttpAuth) ->
         .expect("loopback recipe must compile")
 }
 
-/// Streams one request and asserts the provider surfaces a 401 rejection as
-/// an authentication-classified API error.
 pub async fn assert_401_classifies_as_authentication(
     protocol: HttpProtocol,
     base_path: &str,
@@ -58,9 +54,6 @@ pub async fn assert_401_classifies_as_authentication(
     server.capture();
 }
 
-/// Streams a response whose output text exceeds the smallest output byte
-/// limit and asserts the stream ends in a protocol error instead of
-/// buffering without bound.
 pub async fn assert_output_limit_ends_the_stream(protocol: HttpProtocol, sse_body: String) {
     let server = LoopbackServer::sse(sse_body);
     let provider = compile_http(
@@ -69,7 +62,6 @@ pub async fn assert_output_limit_ends_the_stream(protocol: HttpProtocol, sse_bod
         HttpAuth::ApiKey("interface-test-secret".into()),
     );
 
-    // max_output_tokens = 1 clamps the output budget to its 64 KiB floor.
     let events = provider
         .stream(ModelRequest::new(
             "test-model",
@@ -90,14 +82,10 @@ pub async fn assert_output_limit_ends_the_stream(protocol: HttpProtocol, sse_bod
     server.capture();
 }
 
-/// A single output-text payload one byte past the 64 KiB output floor.
 pub fn oversized_text() -> String {
     "a".repeat(64 * 1_024 + 1)
 }
 
-/// Streams a response the provider cut at its output token limit and asserts
-/// the partial text arrives followed by a terminal `Incomplete` event carrying
-/// the reason and any reported usage, never an error.
 pub async fn assert_output_truncation_is_typed(
     protocol: HttpProtocol,
     sse_body: String,

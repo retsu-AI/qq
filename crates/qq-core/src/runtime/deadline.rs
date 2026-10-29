@@ -8,7 +8,6 @@ use tokio::time::Instant;
 use super::{AuditHook, RuntimeEvent, SubagentSpawner};
 use crate::{RunCancellation, RuntimeStream, tools::ToolTasks};
 
-/// Execution and preparation share this clock; cleanup may outlive it.
 #[derive(Clone, Copy)]
 pub(crate) struct RunDeadline {
     started: Instant,
@@ -67,9 +66,6 @@ impl RunDeadline {
         audit_hook: Option<Arc<dyn AuditHook>>,
     ) -> RuntimeStream {
         Box::pin(stream! {
-            // Persistence may suspend the consumer between polls while a
-            // shell continues on its owned task. Wake cancellation independently
-            // of that consumer; unlimited runs never allocate this task.
             let signal = cancelled.clone();
             let mut alarm = DeadlineAlarm(tokio::spawn(async move {
                 tokio::time::sleep_until(self.expires).await;
@@ -100,8 +96,6 @@ impl RunDeadline {
                 }
             };
             cancelled.expire();
-            // Dropping dispatch cancels per-call waiters. Draining before that
-            // drop could wait forever on work still owned by the stream.
             drop(events);
             let (tools, children) = tokio::join!(tools.drain(), async {
                 if let Some(spawner) = spawner {

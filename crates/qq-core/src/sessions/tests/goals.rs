@@ -1929,7 +1929,6 @@ async fn queued_prompt_claim_pins_only_the_active_goal_before_start() {
             "active ownership is visible to controls during preparation"
         );
         assert_eq!(claimed.goal.as_deref(), goal.as_deref(), "{state}");
-        // A replacement or new goal during preparation never changes this claim.
         let expected = goal.as_ref().map(|goal| qq_protocol::GoalIdentity {
             goal_id: goal.goal_id,
             revision: goal.revision,
@@ -2434,7 +2433,6 @@ async fn paid_preparation_freezes_the_optional_goal_before_main_start() {
                     .as_ref(),
                 goal.as_deref()
             );
-            // Preparation admission is idempotent, and cannot rebind this run.
             let expected = goal.as_ref().map(|goal| qq_protocol::GoalIdentity {
                 goal_id: goal.goal_id,
                 revision: goal.revision,
@@ -2459,7 +2457,6 @@ async fn paid_preparation_freezes_the_optional_goal_before_main_start() {
                 crate::sessions::goals::freeze_goal_claim(connection, identity, original.as_deref(), initial_notice.as_deref())?;
                 assert_eq!(crate::sessions::goals::freeze_goal_claim(connection, identity, Some(&replacement), Some(&replacement_notice)), Err(SessionRuntimeError::CONSTRAINT));
                 if !routed {
-                    // Successful compaction, then death before the queued owner starts.
                     connection.execute(
                         "UPDATE runs SET status = 'completed', outcome_json = ?2, finished_at_ms = 1
                          WHERE auto_compaction_for_run_id = ?1",
@@ -6965,7 +6962,6 @@ async fn common_goal_reservation_clamps_current_remainders_and_preserves_prompt_
                 )
                 .await
                 .unwrap();
-            // Spend changes after queue admission must affect reservation.
             store
                 .call(Priority::Control, move |connection| {
                     let mut goal =
@@ -8761,7 +8757,6 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
             let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
                 .await
                 .unwrap();
-            // This test covers admission; execution is held.
             let held = Arc::clone(&runtime.inner.permits)
                 .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
                 .await

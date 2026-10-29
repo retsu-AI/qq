@@ -1,19 +1,10 @@
-//! Command application inside the store transaction: `execute_command` for
-//! every `SessionCommand`, child-run creation, steering, session deletion, and
-//! workspace/session bookkeeping.
-
 use super::*;
 
 pub(super) struct AppliedCommand {
     pub(super) side_launch: Option<side_questions::SideLaunch>,
     pub(super) receipt: CommandReceipt,
     pub(super) schedule: bool,
-    /// Other runs whose in-memory cancellation must be signalled with this
-    /// command: an auto-compaction made unnecessary by its queued prompt, or
-    /// running child work durably owned by a cancelled parent.
     pub(super) cascade_cancels: Vec<RunId>,
-    /// The receipt was replayed from the command journal; in-memory signals
-    /// that already fired the first time (steering hand-off) must not repeat.
     pub(super) replayed: bool,
 }
 
@@ -31,39 +22,27 @@ pub(super) struct CreatedChildRun {
     pub(super) committed_through: EventCursor,
 }
 
-/// The durable identity of the run that owns a new child.
 #[derive(Clone, Copy)]
 pub(super) struct ChildRunParent {
     pub(super) workspace_id: WorkspaceId,
     pub(super) session_id: SessionId,
     pub(super) run_id: RunId,
-    /// The `spawn_agent` call that requested the child, when known.
     pub(super) tool_call_id: Option<ToolCallId>,
-    /// The parent's own depth; the child is one deeper.
     pub(super) depth: u16,
-    /// The root run of the tree the child joins.
     pub(super) root_run_id: RunId,
 }
 
-/// What a new child is admitted with: its model, task, remaining budget, and
-/// the authority and purpose its parent granted.
 pub(super) struct ChildAdmission {
     pub(super) profile: AgentProfileId,
     pub(super) model: ModelSelection,
-    /// The child's own effort pin. `None` inherits the parent session's.
     pub(super) reasoning_effort: Option<qq_provider::ReasoningEffort>,
     pub(super) task: String,
     pub(super) limits: RunLimits,
     pub(super) approval_mode: ApprovalMode,
     pub(super) purpose: SessionPurpose,
-    /// The parent keeps working and receives the answer at a later turn
-    /// boundary (ADR-0054 § 4); the delivery row is admitted with the child.
     pub(super) detached: bool,
 }
 
-/// Most sessions one root run's delegation tree may hold across every depth.
-/// Bounds fan-out where per-run child caps alone would not (eight children
-/// each spawning eight).
 pub const MAX_DESCENDANTS_PER_ROOT: u16 = 24;
 
 pub(super) fn create_child_run(
@@ -82,8 +61,6 @@ pub(super) fn create_child_run(
         purpose,
         detached,
     } = admission;
-    // Children start ReadOnly or Auto within their ancestors' ceilings. The
-    // spawner cannot give a child Full authority.
     if !matches!(approval_mode, ApprovalMode::ReadOnly | ApprovalMode::Auto) {
         return Err(SessionRuntimeError::ChildAuthorityEscalation);
     }
@@ -149,9 +126,6 @@ pub(super) fn create_child_run(
 
     let session_id = SessionId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
     let run_id = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
-    // This is one internal operation rather than a replayable client command;
-    // a generated id satisfies the run's uniqueness contract and links both
-    // child events to the same atomic cause.
     let command_id = CommandId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
     let user_message_id = MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
     let assistant_message_id =
@@ -263,9 +237,6 @@ pub(super) fn create_child_run(
             queue_position: 1,
         },
     )?;
-    // An audit child announces itself on the parent run too, atomically with
-    // its creation, so a client watching the parent learns which session is
-    // the audit before any of its events arrive.
     let committed_through = if purpose == SessionPurpose::Audit {
         append_event(
             &transaction,
@@ -295,18 +266,9 @@ pub(super) fn create_child_run(
     })
 }
 
-/// `canonical_workspace` is the resolved path for `ResolveWorkspace`, computed
-/// by the caller on a blocking thread; the command itself is journaled as
-/// submitted so idempotency compares what the client sent.
-/// Who is asking, for the receipt bound. A store admits new work up to
-/// `MAX_COMMANDS`; a client's control and cleanup commands up to the headroom
-/// above it; and a cancel the runtime itself issues while settling (shutdown,
-/// a parent settling its child) always, because refusing it would leave a run
-/// unsettleable, which no capacity bound may do.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CommandOrigin {
     Client,
-    /// A `CancelRun` the runtime issues on its own behalf during settlement.
     RuntimeSettlement,
 }
 
@@ -378,18 +340,11 @@ pub(super) fn execute_command(
             },
         });
     }
-    // The counter is maintained beside every insert (schema 25) so the bound
-    // costs one row read instead of a table scan per command.
     let command_count: u32 = connection
         .prepare_cached("SELECT value FROM metadata WHERE key = 'command_count'")
         .and_then(|mut statement| statement.query_row([], |row| row.get::<_, String>(0)))?
         .parse()
         .map_err(|_| SessionRuntimeError::CODEC)?;
-    // Control and cleanup commands are admitted past the new-work bound so a
-    // store at the cap can still stop, resolve, and remove what it holds;
-    // their own bound is the headroom above it. A settlement cancel the
-    // runtime issues for itself is never refused: the alternative is a run
-    // that can never settle.
     let bound = match (origin, command.kind().creates_work()) {
         (CommandOrigin::RuntimeSettlement, _) => None,
         (CommandOrigin::Client, true) => Some(MAX_COMMANDS),
@@ -710,8 +665,6 @@ pub(super) fn execute_command(
             let item = side_questions::find_side_snapshot(&transaction, side_question_id)?
                 .ok_or(SessionRuntimeError::SideQuestionNotFound)?;
             if item.state == qq_protocol::SideQuestionState::Running {
-                // In-flight spend already reads unknown: the executor nulls it
-                // before each request it sends.
                 transaction.execute(
                     "UPDATE side_questions SET state = 'cancelled', finished_at_ms = ?2
                      WHERE id = ?1 AND state = 'running'",
@@ -852,9 +805,6 @@ pub(super) fn execute_command(
             if session_count >= MAX_SESSIONS_PER_WORKSPACE {
                 return Err(SessionRuntimeError::SessionLimitReached);
             }
-            // A publicly parented session sits one level below its parent and
-            // shares its parent's tree, so depth caps and cascades treat it
-            // like a spawned child even though no run owns it.
             let mut depth = 0_u16;
             let mut root_run_id: Option<String> = None;
             if let Some(parent_id) = parent_id {
@@ -938,9 +888,6 @@ pub(super) fn execute_command(
             correlation,
             output,
         } => {
-            // Syntactic bounds only: file parts are read when the run starts,
-            // so admission never performs I/O and a stale attachment fails
-            // the run, not the command.
             match validate_input(&input) {
                 Ok(()) => {}
                 Err(qq_protocol::InputError::Empty | qq_protocol::InputError::Blank) => {
@@ -952,10 +899,6 @@ pub(super) fn execute_command(
                 Err(error) => return Err(SessionRuntimeError::InvalidInput(error)),
             }
             validate_run_limits(&limits)?;
-            // The contract is compiled here only to reject it: a schema the
-            // runtime cannot enforce must fail the command, not the run. The
-            // claim recompiles from the persisted JSON so a restart enforces
-            // exactly what the caller accepted.
             let output_contract_json = match &output {
                 None => None,
                 Some(contract) => {
@@ -966,21 +909,13 @@ pub(super) fn execute_command(
             };
             let correlation_json = encode_correlation(&correlation)?;
             let input_json = serde_json::to_string(&input)?;
-            // The transcript row carries the rendered text: text parts
-            // verbatim, attachments as `@path` placeholders. Slash escaping
-            // applies to the rendered text exactly as it did to the string.
             let prompt = crate::input::render_text(&input).trim().to_owned();
-            // Slash names the runtime can never resolve fail the command, not
-            // the run: a run row would only add a "previous run failed"
-            // notice to the next prompt.
             runtime::validate_slash_prompt(&prompt)
                 .map_err(SessionRuntimeError::InvalidSlashCommand)?;
             let prompt = prompt
                 .strip_prefix("//")
                 .map_or(prompt.clone(), |literal| format!("/{literal}"));
             if admission.goal_work_present {
-                // A user prompt replaces autonomous work that has not claimed the
-                // session slot. Settlement and prompt admission must commit together.
                 let workspace = session_workspace(&transaction, session_id)?;
                 let mut unclaimed = transaction.prepare(
                     "SELECT r.id FROM runs r JOIN sessions s ON s.id=r.session_id
@@ -1024,18 +959,9 @@ pub(super) fn execute_command(
             if queued >= MAX_PENDING_PROMPTS {
                 return Err(SessionRuntimeError::QueueFull);
             }
-            // An over-budget prompt is admitted rather than rejected: claiming
-            // it auto-compacts the session first and re-checks, so the hard
-            // budget fails the run only after one compaction attempt could
-            // not shrink the assembly under it (the last resort, not the
-            // policy).
             let workspace_id = parse_id(&workspace_id)?;
             let run_id = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
             let message_id = MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
-            // Assistant message rows are created lazily, one per model turn,
-            // at each turn's first text delta. The run row's
-            // assistant_message_id starts as a placeholder and is updated to
-            // the current turn's message as the run advances.
             let assistant_message_id =
                 MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
             let ordinal: u64 = transaction.query_row(
@@ -1043,9 +969,6 @@ pub(super) fn execute_command(
                 [session_id.to_string()],
                 |row| row.get(0),
             )?;
-            // Limits are persisted with the run row so a restart enforces the
-            // bound the caller accepted, never a later default. An empty
-            // set stores NULL, matching historical unlimited runs.
             let limits_json = if limits.is_empty() {
                 None
             } else {
@@ -1182,9 +1105,6 @@ pub(super) fn execute_command(
                     false,
                 )
             } else {
-                // Only an executing prompt run has a boundary to steer at. A
-                // queued run has not started: the client submits a new prompt
-                // or cancels instead. Compaction runs take no user input.
                 if status != "running" || parse_run_kind(&kind)? != RunKind::Prompt {
                     return Err(SessionRuntimeError::RunNotSteerable);
                 }
@@ -1288,8 +1208,6 @@ pub(super) fn execute_command(
             } else {
                 None
             } {
-                // A user stop pauses the same durable goal even if its progress
-                // revision advanced; shutdown and replacement goals stay separate.
                 let (goal, _) = goals::control(
                     &transaction,
                     session_id,
@@ -1367,11 +1285,6 @@ pub(super) fn execute_command(
                         run_id,
                         now,
                     )?;
-                    // Cancelling the session's last queued prompt cascades to
-                    // the auto-compaction running on its behalf: with nothing
-                    // left to run after it, the summarization is pure cost. A
-                    // manual compaction (auto_compaction = 0) is never
-                    // cascaded — the user asked for it directly.
                     match cascade_auto_compaction_cancel(
                         &transaction,
                         store_id,
@@ -1392,10 +1305,6 @@ pub(super) fn execute_command(
                         }
                     }
                 } else {
-                    // A running prompt may own an in-run compaction that is
-                    // summarizing on its behalf right now; cancelling the
-                    // prompt cancels that too, so neither waits on a stalled
-                    // summarizer.
                     match cascade_in_run_compaction_cancel(
                         &transaction,
                         store_id,
@@ -1473,8 +1382,6 @@ pub(super) fn execute_command(
                 .and_then(|session| parse_id(&session))?;
             let workspace_id = session_workspace(&transaction, session_id)?;
             if let Some(resolution) = resolution {
-                // Idempotent: a second response returns the recorded outcome
-                // without touching the call again.
                 let resolution = parse_approval_resolution(&resolution)?;
                 let sequence = workspace_sequence(&transaction, workspace_id)?;
                 (
@@ -1496,10 +1403,6 @@ pub(super) fn execute_command(
                 if state != "awaiting_approval" {
                     return Err(SessionRuntimeError::ApprovalNotPending);
                 }
-                // A pending prompt is not a lasting grant. Re-evaluate every
-                // ancestor ceiling in this transaction before any approval
-                // write; a child approval cannot widen its parent's current
-                // authority. Questions still accept their answers.
                 let own_mode = load_approval_mode(&transaction, session_id)?;
                 let ancestors = load_ancestor_approval_modes(&transaction, session_id)?;
                 let approving = matches!(decision, ApprovalDecision::ApproveOnce);
@@ -1518,8 +1421,6 @@ pub(super) fn execute_command(
                         refusal = match approval::evaluate(*mode, &class) {
                             approval::PolicyDecision::Execute
                             | approval::PolicyDecision::AskUser { .. } => continue,
-                            // The pending response supplies the fresh human
-                            // approval required by an Ask ancestor.
                             approval::PolicyDecision::RequireApproval
                                 if *mode == ApprovalMode::Ask =>
                             {
@@ -1583,9 +1484,6 @@ pub(super) fn execute_command(
                             ],
                         )?;
                     }
-                    // An answer settles the call as completed: the rendered
-                    // questions and answers are its result. Answering a call
-                    // that asked nothing (or an empty answer set) declines.
                     ApprovalDecision::Answer { answers } => {
                         let preview = crate::tools::ask::parse(&arguments)
                             .map_err(|_| SessionRuntimeError::ApprovalNotPending)?;
@@ -1648,10 +1546,6 @@ pub(super) fn execute_command(
         }
         SessionCommand::SetApprovalMode { session_id, mode } => {
             let workspace_id = session_workspace(&transaction, session_id)?;
-            // A model-spawned child holds exactly the authority its parent
-            // granted at spawn time. A client may lower it further but never
-            // raise it: the parent's policy, not the client's, bounds what a
-            // child can do to the workspace.
             let (owned, current): (bool, String) = transaction.query_row(
                 "SELECT owner_run_id IS NOT NULL, approval_mode FROM sessions WHERE id = ?1",
                 [session_id.to_string()],
@@ -1664,8 +1558,6 @@ pub(super) fn execute_command(
                 "UPDATE sessions SET approval_mode = ?2, updated_at_ms = ?3 WHERE id = ?1",
                 params![session_id.to_string(), approval_mode_str(mode), now],
             )?;
-            // The mode is read when each approval is evaluated, so it applies
-            // to the next held call; the summary carries it to every client.
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
@@ -1714,9 +1606,6 @@ pub(super) fn execute_command(
                     model.model_is_fallback,
                 ],
             )?;
-            // The new selection is read at claim time (`claim_next_run`), so
-            // it applies to the next run; an executing run keeps the
-            // `ClaimedRun` model it started with.
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
@@ -1829,9 +1718,6 @@ pub(super) fn execute_command(
         }
         SessionCommand::PruneSessions { workspace_id } => {
             ensure_workspace(&transaction, workspace_id)?;
-            // Idle sessions that never received a message: the residue left
-            // by creating sessions without prompting them. Anything with a
-            // run row (even a cancelled one) is history worth keeping.
             let mut statement = transaction.prepare(
                 "SELECT id FROM sessions
                      WHERE workspace_id = ?1 AND status = 'idle'
@@ -1900,15 +1786,10 @@ pub(super) fn execute_command(
                 )
                 .optional()?
                 .ok_or(SessionRuntimeError::SessionNotFound)?;
-            // Compaction is valid only while the session is idle: a running
-            // run keeps the context it started with, and a queued prompt
-            // must not race the summarizer.
             if status != "idle" || active_run.is_some() || preparing_run.is_some() || queued > 0 {
                 return Err(SessionRuntimeError::SessionActive);
             }
             let run_id = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
-            // Internal runs persist no message rows; the ids are placeholders
-            // satisfying the runs schema.
             let user_message_id =
                 MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
             let assistant_message_id =
@@ -1928,8 +1809,6 @@ pub(super) fn execute_command(
                     serde_json::to_string(&qq_protocol::RunOrigin::ManualCompaction {})?,
                 ],
             )?;
-            // The internal run flows through the ordinary queue accounting so
-            // claiming it decrements like any prompt.
             transaction.execute(
                 "UPDATE sessions
                      SET status = 'queued', queued_prompts = queued_prompts + 1,
@@ -1977,9 +1856,6 @@ pub(super) fn execute_command(
                 )
                 .optional()?
                 .ok_or(SessionRuntimeError::SessionNotFound)?;
-            // Same idle requirement as compaction: an active run keeps the
-            // assembly it started with, and a queued prompt must not race the
-            // marker change.
             if status != "idle" || active_run.is_some() || preparing_run.is_some() || queued > 0 {
                 return Err(SessionRuntimeError::SessionActive);
             }
@@ -1998,9 +1874,6 @@ pub(super) fn execute_command(
                 [session_id.to_string()],
                 |row| row.get(0),
             )?;
-            // The assembly changed under the meter: the last measured turn
-            // saw the discarded summary, so the session is unknown until the
-            // next prompt turn measures the restored context.
             transaction.execute(
                 "UPDATE sessions
                      SET context_tokens = NULL,
@@ -2059,10 +1932,6 @@ pub(super) fn execute_command(
     })
 }
 
-/// Appends replaceable liveness information for an active run. Activity is
-/// Marks queued steering as applied (`complete`) and publishes the boundary
-/// it entered at. The message is now model context for `turn_ordinal` and
-/// every later request of the run.
 pub(super) fn apply_steering_message(
     connection: &mut Connection,
     store_id: StoreId,
@@ -2085,8 +1954,6 @@ pub(super) fn apply_steering_message(
     if changed != 1 {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
-    // The bytes the model saw ride the same transaction as the state change,
-    // exactly as a prompt's attachments ride `RunStarted`.
     if !attachments.is_empty() {
         store_message_attachments(
             &transaction,
@@ -2109,8 +1976,6 @@ pub(super) fn apply_steering_message(
     Ok(event)
 }
 
-/// Steering still queued when a run settles never reached the model: the
-/// rows move to `cancelled` and each is published as superseded.
 pub(super) fn supersede_pending_steering(
     transaction: &Connection,
     store_id: StoreId,
@@ -2163,8 +2028,6 @@ pub(super) fn pending_steering_rows(
         .collect::<Result<Vec<_>, _>>()?;
     rows.into_iter()
         .map(|(id, text, input_json)| {
-            // Rows written before `input_json` was recorded carry only their
-            // rendered text; that text is the whole input.
             let input = match input_json {
                 Some(json) => parse_input_parts(Some(&json))?,
                 None => vec![qq_protocol::InputPart::Text { text }],
@@ -2177,9 +2040,6 @@ pub(super) fn pending_steering_rows(
         .collect()
 }
 
-/// The model-selection rules shared by `CreateSession` and `SetSessionModel`:
-/// a bounded `provider/model` route, a nonzero token budget, and a bounded
-/// organization.
 pub(super) fn validate_model_selection(model: &ModelSelection) -> Result<(), SessionRuntimeError> {
     if !model.model.as_ref().is_some_and(|value| {
         value.len() <= MAX_MODEL_SELECTION_BYTES
@@ -2197,24 +2057,6 @@ pub(super) fn validate_model_selection(model: &ModelSelection) -> Result<(), Ses
     Ok(())
 }
 
-/// Deletes one idle session and every row it owns, then appends
-/// `SessionDeleted`, all inside the caller's transaction.
-///
-/// Refused while the session has an active run or a running side question
-/// (whose executor would otherwise lose its row). That guard also keeps the
-/// runtime's in-memory maps clean without extra plumbing: cancellation
-/// senders and pending approvals exist only for claimed (executing) runs and
-/// are removed when the run finishes, so a deletable session can have none.
-/// Owned history also stays until every owning ancestor run has settled: an
-/// ancestor may still need the descendant's spend for its child receipt.
-///
-/// The session's rows in the `events` log are deliberately kept. Workspace
-/// cursors promise a gapless `previous + 1` sequence to subscribers (and the
-/// sequence counter lives on the workspace row, so deletion could never
-/// regress it), which means deleting event rows would break every replay
-/// that spans the deletion. Replaying the kept events is harmless:
-/// `SessionDeleted` removes the child, and a following parent
-/// `SessionUpdated` refreshes the live inclusive projection when needed.
 pub(super) fn delete_idle_session(
     transaction: &Connection,
     store_id: StoreId,
@@ -2304,8 +2146,6 @@ pub(super) fn delete_idle_session(
     }
     let parent_id = session_parent(transaction, session_id)?;
     let session = session_id.to_string();
-    // Children survive their parent as root sessions; their spawn ownership
-    // ends with that parent because its run rows are deleted below.
     for statement in [
         "UPDATE runs SET goal_paid_owner_run_id=NULL WHERE goal_paid_owner_run_id IN (SELECT id FROM runs WHERE session_id=?1)",
         "UPDATE sessions SET parent_id = NULL, owner_run_id = NULL WHERE parent_id = ?1",
@@ -2432,7 +2272,6 @@ pub(super) fn prompt_title(prompt: &str) -> String {
     }
 }
 
-/// Cancellation preserves reservations until their executor has drained.
 pub(super) fn cancel_goal_work(
     transaction: &Connection,
     store_id: StoreId,

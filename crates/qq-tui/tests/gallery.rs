@@ -1,15 +1,3 @@
-//! Gallery dump: every review scene at every golden size under every
-//! compiled theme, as the exact bytes a terminal receives, for viewing with
-//! `cat` in a real terminal. Ignored by default because it writes files:
-//!
-//! ```sh
-//! cargo test -p qq-tui --test gallery -- --ignored
-//! cat target/qq-tui-gallery/ink/markdown-gallery-120x40.ans
-//! ```
-//!
-//! Highlighting lands off-tick, so frames are drawn under a Tokio runtime
-//! and settled before they are written.
-
 use std::{fs, path::PathBuf};
 
 use qq_config::{ConfigLoader, ConfigPaths};
@@ -22,7 +10,6 @@ fn gallery_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/qq-tui-gallery")
 }
 
-/// The compiled themes as the TUI sees them, the `ink` default first.
 fn compiled_themes() -> Vec<Theme> {
     let scratch = tempfile::tempdir().expect("scratch directory for theme discovery");
     let paths = ConfigPaths::new(

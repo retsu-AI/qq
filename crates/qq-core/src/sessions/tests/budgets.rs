@@ -24,10 +24,6 @@ async fn turn_budget_grants_one_final_response_then_settles_as_budget_exhausted(
     assert!(exhaustion.final_response);
     assert!(exhaustion.message.contains("2 model turn"));
 
-    // One working turn, then the last permitted turn is the final response,
-    // whose text is persisted as the run's last assistant message. It keeps
-    // the tools declared (Bedrock rejects a request whose history holds tool
-    // calls without them) and asks for none.
     {
         let requests = harness.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
@@ -35,15 +31,12 @@ async fn turn_budget_grants_one_final_response_then_settles_as_budget_exhausted(
         assert_eq!(requests[0].tool_choice(), qq_provider::ToolChoice::Auto);
         assert_eq!(requests[1].tools(), requests[0].tools());
         assert_eq!(requests[1].tool_choice(), qq_provider::ToolChoice::None);
-        // The notice is a conversation message, so the system prompt (the
-        // head of every provider's cached prefix) is the run's own.
         assert_eq!(requests[1].system(), requests[0].system());
         assert_eq!(
             requests[1].messages().last(),
             Some(&Message::user(crate::BUDGET_FINAL_RESPONSE_NOTICE))
         );
     }
-    // A later run in the session replays the notice where the model saw it.
     let replayed = queue_limited_prompt(
         &harness,
         RunLimits {
@@ -107,9 +100,6 @@ async fn tool_call_budget_reserves_the_final_turn_before_the_cap() {
         hang: false,
     })
     .await;
-    // Each turn issues one call, but a turn may issue sixteen: the meter
-    // must reserve room for a full turn, so three calls fit and the
-    // fourth turn becomes the final response.
     let run_id = queue_limited_prompt(
         &harness,
         RunLimits {
@@ -142,8 +132,6 @@ async fn wall_clock_budget_settles_a_hanging_provider_without_a_final_response()
     })
     .await;
     tokio::time::pause();
-    // Real store/preparation work must not let Tokio auto-advance the deadline
-    // before the hanging provider has received its first request.
     let keep_clock = tokio::spawn(async {
         loop {
             tokio::task::yield_now().await;
@@ -174,7 +162,7 @@ async fn cost_budget_settles_on_spend_and_fails_closed_when_usage_goes_missing()
     let mut harness = budget_harness(BudgetLoopLoader {
         requests: Arc::new(StdMutex::new(Vec::new())),
         entered: None,
-        usage: Some(usage(2, 1)), // 4_000 nanos per turn
+        usage: Some(usage(2, 1)),
         pricing: Some(budget_pricing()),
         hang: false,
     })
@@ -191,7 +179,6 @@ async fn cost_budget_settles_on_spend_and_fails_closed_when_usage_goes_missing()
     let exhaustion = exhaustion_of(&observed, run_id);
     assert_eq!(exhaustion.limit, BudgetLimitKind::Cost);
     assert!(exhaustion.final_response);
-    // Two working turns overran 7_000; the final response is the third.
     assert_eq!(harness.requests.lock().unwrap().len(), 3);
     let finished_cost = observed.iter().find_map(|event| match &event.event {
         SessionEvent::RunFinished {
@@ -334,8 +321,6 @@ async fn run_limits_survive_restart_and_bound_the_recovered_run() {
         max_model_turns: Some(1),
         ..RunLimits::default()
     };
-    // Queue while a hanging run occupies the session so the limited run
-    // is still queued at shutdown.
     let hanging = queue_limited_prompt(&harness, RunLimits::default()).await;
     let limited = queue_limited_prompt(&harness, limits).await;
     let mut events = harness.events;
@@ -344,11 +329,6 @@ async fn run_limits_survive_restart_and_bound_the_recovered_run() {
         |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id == hanging),
     )
     .await;
-    // An unclean stop (no shutdown) leaves the hanging run interrupted and
-    // the limited run queued; recovery must enforce its persisted limits.
-    // The hanging task still holds the runtime, so stop the store worker
-    // directly: that is what process death looks like to the store, and
-    // it releases store ownership for the successor.
     drop(events);
     harness.runtime.abandon_for_test().await.unwrap();
     drop(harness.runtime);
@@ -407,9 +387,6 @@ async fn run_limits_survive_restart_and_bound_the_recovered_run() {
     runtime.close().await.unwrap();
 }
 
-/// Every request of a session names the session as its cache key, so a
-/// provider that routes by key sends each turn and each later run to the
-/// cache holding their prefix.
 #[tokio::test]
 async fn every_session_request_carries_the_session_as_its_cache_key() {
     let mut harness = budget_harness(BudgetLoopLoader {

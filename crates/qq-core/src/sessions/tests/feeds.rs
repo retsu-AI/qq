@@ -111,7 +111,6 @@ async fn canceled_feed_attachment_releases_queued_and_unreceived_replies() {
         }
         release.send(()).unwrap();
         hold.await.unwrap().unwrap();
-        // The FIFO control barrier also waits for the attachment reply.
         harness
             .runtime
             .inner
@@ -161,10 +160,6 @@ async fn failed_initial_replay_releases_its_feed() {
     harness.runtime.close().await.unwrap();
 }
 
-/// A store written while Jev existed holds its routing and checkpoint events
-/// and `delegate: "jev"` resolutions. Protocol 36 removed those features, but
-/// retained delivery rows must still decode instead of failing the subscriber
-/// with a codec error.
 #[tokio::test]
 async fn replay_decodes_events_from_removed_jev_features() {
     let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![Vec::new()]).await;
@@ -214,8 +209,6 @@ async fn replay_decodes_events_from_removed_jev_features() {
         let published = events.next().await.unwrap().unwrap();
         assert_eq!(published.envelope.cursor.sequence, sequence);
         assert_eq!(published.envelope.event, SessionEvent::Retired);
-        // The bytes a server forwards over SSE are the normalized form,
-        // which a protocol-36 client decodes; never the legacy row.
         let forwarded: SessionEventEnvelope = serde_json::from_str(&published.json).unwrap();
         assert_eq!(forwarded, published.envelope);
         assert!(
@@ -227,15 +220,9 @@ async fn replay_decodes_events_from_removed_jev_features() {
     harness.runtime.close().await.unwrap();
 }
 
-/// D1: a subscriber that keeps up performs one catch-up read when it
-/// attaches and no store read per event afterwards; the live and replayed
-/// deliveries are byte-identical and the sequence is contiguous.
 #[tokio::test]
 async fn live_subscribers_read_the_store_once_and_receive_committed_bytes() {
     let harness = scripted_runs_harness(ApprovalMode::Ask, vec![Vec::new()]).await;
-    // Attach eight subscribers, each catching up from the session cursor.
-    // Their catch-up reads happen when first polled, so poll each once
-    // before the run so the baseline includes them.
     let mut subscribers: Vec<PublishedEventStream> = (0..8)
         .map(|_| {
             harness
@@ -253,8 +240,6 @@ async fn live_subscribers_read_the_store_once_and_receive_committed_bytes() {
         .collect();
     let mut caught_up = Vec::new();
     for subscriber in &mut subscribers {
-        // The SessionCreated event is already committed; catch-up
-        // delivers it. Two control reads: the page and the empty page.
         caught_up.push(subscriber.next().await.unwrap().unwrap());
     }
     let reads_before = harness.runtime.inner.store.catch_up_reads();
@@ -279,19 +264,13 @@ async fn live_subscribers_read_the_store_once_and_receive_committed_bytes() {
     }
     let events_per_subscriber = streams[0].len();
     assert!(events_per_subscriber >= 4, "{events_per_subscriber} events");
-    // Every event reached every subscriber from the live feed: zero
-    // catch-up reads during the run.
     assert_eq!(
         harness.runtime.inner.store.catch_up_reads(),
         reads_before,
         "8 subscribers observing {events_per_subscriber} events must not read the store"
     );
-    // Attaching cost each of the eight subscribers exactly one read; the
-    // harness's own stream is never polled here.
     assert_eq!(reads_before, 8);
 
-    // Every subscriber saw the same contiguous sequence with the same
-    // bytes, and the bytes equal a fresh replay from the store.
     let replay = harness
         .runtime
         .inner
@@ -317,10 +296,6 @@ async fn live_subscribers_read_the_store_once_and_receive_committed_bytes() {
     harness.runtime.shutdown().await.unwrap();
 }
 
-/// A reconnecting subscriber whose cursor is still inside the workspace
-/// ring attaches and catches up from memory: no store job, byte-identical
-/// events, contiguous sequence. A cursor the ring does not cover, or a
-/// workspace with no ring, still reads SQLite.
 #[tokio::test]
 async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
     let harness = scripted_runs_harness(ApprovalMode::Ask, vec![Vec::new()]).await;
@@ -332,20 +307,15 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
             sequence: 0,
         },
     };
-    // Cold attach: one store read validates the workspace and pages.
     let mut anchor = harness.runtime.subscribe_published(request).unwrap();
     let created = anchor.next().await.unwrap().unwrap();
     assert_eq!(harness.runtime.inner.store.catch_up_reads(), 1);
 
-    // Sequence 0 predates the ring, so a second cold subscriber at the
-    // same cursor still goes to SQLite even though a ring now exists.
     let mut cold = harness.runtime.subscribe_published(request).unwrap();
     assert_eq!(cold.next().await.unwrap().unwrap().json, created.json);
     assert_eq!(harness.runtime.inner.store.catch_up_reads(), 2);
     drop(cold);
 
-    // The anchor's short page seeded the tail: a subscriber exactly at
-    // the tail attaches warm and observes the run entirely from memory.
     let mut warm_at_tail = harness
         .runtime
         .subscribe_published(SubscribeRequest {
@@ -377,7 +347,6 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
     }
     assert_eq!(harness.runtime.inner.store.catch_up_reads(), 2);
 
-    // Reconnect from the middle of the run: the page comes from the ring.
     let midpoint = live[1].envelope.cursor;
     let mut reconnect = harness
         .runtime
@@ -401,14 +370,12 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
         "warm reconnects must not read the store"
     );
 
-    // The ring vouches only for cursors it covers.
     let mut cold_again = harness.runtime.subscribe_published(request).unwrap();
     assert_eq!(cold_again.next().await.unwrap().unwrap().json, created.json);
     assert_eq!(harness.runtime.inner.store.catch_up_reads(), 3);
 
     drop((anchor, warm_at_tail, reconnect, cold_again));
     assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
-    // With no ring, the same cursor is cold once more.
     let mut after_release = harness
         .runtime
         .subscribe_published(SubscribeRequest {
@@ -424,12 +391,8 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
     harness.runtime.shutdown().await.unwrap();
 }
 
-/// D1: a subscriber that lags past the feed capacity is redirected to
-/// SQLite catch-up and still observes every event exactly once, in order.
 #[tokio::test]
 async fn a_lagging_subscriber_catches_up_from_the_store_without_gaps_or_duplicates() {
-    // Each scripted read-only tool run commits a dozen or so events;
-    // enough runs overrun the feed while the slow subscriber sits unpolled.
     let runs = feed::FEED_CAPACITY / 14;
     let script = vec![("read_file", r#"{"path":"AGENTS.md"}"#.to_owned())];
     let mut harness = scripted_runs_harness(ApprovalMode::Ask, vec![script; runs]).await;
@@ -444,7 +407,6 @@ async fn a_lagging_subscriber_catches_up_from_the_store_without_gaps_or_duplicat
             },
         })
         .unwrap();
-    // Poll once so it is attached live, then leave it unpolled.
     let first = slow.next().await.unwrap().unwrap();
     let mut last = None;
     for index in 0..runs {
@@ -562,7 +524,6 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
         let session_id = harness.session_id;
         let run_id = call.run_id;
         let call_id = call.id;
-        // Keep a genuine pre-recovery store for both migration cases.
         for missing in [false, true] {
             let path = harness._directory.path().join(if missing {
                 "legacy-missing.sqlite3"
@@ -603,7 +564,6 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
             );
             if missing {
                 assert_eq!(recovered.unwrap_err(), SessionRuntimeError::CODEC);
-                // No guess or global startup failure for an incomplete legacy hold.
                 assert_eq!(
                     migrated
                         .query_row(
@@ -635,7 +595,6 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
             .inner
             .store
             .call(Priority::Control, move |connection| {
-                // Durable inputs must not cross any of these authority boundaries.
                 for (workspace, session, run) in [
                     (WorkspaceId::generate().unwrap(), session_id, run_id),
                     (workspace_id, SessionId::generate().unwrap(), run_id),
@@ -805,7 +764,6 @@ async fn terminal_receipts_remain_scoped_and_recover_from_legacy_delivery_histor
         SessionRuntimeError::SessionNotFound
     );
 
-    // Upgrade a real schema-61 store, with and without the original receipt.
     for missing in [false, true] {
         let path = harness._directory.path().join(if missing {
             "missing-receipts.sqlite3"
@@ -870,7 +828,6 @@ async fn terminal_receipts_remain_scoped_and_recover_from_legacy_delivery_histor
             );
         } else {
             assert_eq!(recovered, page);
-            // A second terminal event must not replace the original receipt.
             let transaction = migrated.transaction().unwrap();
             let receipt = &expected[0];
             let context = events::EventContext::for_run_ids(
@@ -970,7 +927,6 @@ async fn terminal_receipt_pages_bound_rows_and_bytes_without_skipping_runs() {
                     unreachable!()
                 };
                 *run_id = run;
-                // Nine individually valid receipts exceed the 8 MiB page budget.
                 if offset <= 10 {
                     session.title = "x".repeat(950_000);
                 }
@@ -1257,7 +1213,6 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
         Some(expected.clone())
     );
     drop(migrated);
-    // A normal append must enforce the real configured window globally.
     create_session(&harness.runtime, other, None).await;
     harness.runtime.inner.store.call(Priority::Control, move |connection| {
         let measure = |connection: &Connection| -> Result<(u64,u64), SessionRuntimeError> {

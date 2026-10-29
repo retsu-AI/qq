@@ -1,10 +1,8 @@
-//! Server-owned workspace discovery, independent of a client's local paths.
 use crate::{StoreId, WorkspaceId, WorkspaceSummary};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_WORKSPACE_PAGE: u16 = 100;
 
-/// A page position belongs to one store, never to a path or hostname.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceCatalogCursor {
@@ -28,7 +26,6 @@ impl Default for WorkspaceCatalogRequest {
     }
 }
 
-/// Registered roots only: listing never opens directories or grants access.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceCatalog {

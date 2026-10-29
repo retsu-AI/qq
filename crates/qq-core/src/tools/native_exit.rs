@@ -1,5 +1,3 @@
-//! Bounded OS teardown confirmation, independent of the task's Tokio clock.
-
 use std::{
     io,
     sync::{Arc, OnceLock},

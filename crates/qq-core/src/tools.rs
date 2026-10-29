@@ -26,7 +26,6 @@ mod write;
 
 pub(crate) use dispatch::{ToolCancellation, ToolTaskLease};
 
-/// `command_status`: waits on, reads, or cancels a command this run yielded.
 pub(crate) async fn command_status(
     tasks: &ToolTasks,
     arguments: &str,
@@ -38,22 +37,17 @@ pub(crate) async fn command_status(
         .await
 }
 
-/// Parse qualification envelopes with the same type used by shell dispatch.
 pub(crate) fn parsed_shell_command(arguments: &str) -> Option<String> {
     process_context::arguments_digest("shell", arguments)?;
     match serde_json::from_str::<shell::ShellArgs>(arguments) {
         Ok(arguments) => Some(arguments.command),
-        Err(_) => None, // Malformed envelopes remain non-read without exposing their text.
+        Err(_) => None,
     }
 }
 
 #[cfg(test)]
 pub(crate) use dispatch::{execute, test_executions_started};
 
-/// Runs a goal's completion check through the shell runner: in the
-/// workspace, with the process tree killed at the check's absolute deadline
-/// or on cancellation. Returns the terminal outcome and the bounded result
-/// text.
 #[cfg(any(not(unix), test))]
 pub(crate) async fn run_goal_check_shell(
     workspace: &crate::workspace::Workspace,
@@ -69,8 +63,6 @@ pub(crate) async fn run_goal_check_shell(
         timeout_seconds: None,
         yield_after_seconds: None,
     };
-    // The check's own deadline stops the command; a relative timeout would
-    // restart the clock and round it to whole seconds.
     let stop = crate::RunCancellation::new();
     let policy = crate::runtime::ShellPolicy::default();
     let stopped = ToolCancellation::new(stop.clone());
@@ -102,8 +94,6 @@ pub(crate) async fn run_goal_check_shell(
     (outcome, result.model_text)
 }
 
-/// Entry points for the `search_walk` and `edit_batch` benches. Not a
-/// public API.
 pub mod bench_support {
     use std::path::Path;
 
@@ -112,8 +102,6 @@ pub mod bench_support {
         workspace::{FileState, Workspace},
     };
 
-    /// Runs one built-in read-side tool against `workspace_root` and returns
-    /// its model-facing text.
     pub fn run_tool(workspace_root: &Path, name: &str, arguments: &str) -> String {
         let workspace = Workspace::open(workspace_root).expect("workspace must open");
         super::dispatch::execute_blocking(
@@ -126,8 +114,6 @@ pub mod bench_support {
         .model_text
     }
 
-    /// A session's file-state map for a sequence of tool calls, so a bench
-    /// can read then edit the way a run does.
     pub struct Session {
         workspace: Workspace,
         state: FileState,
@@ -141,7 +127,6 @@ pub mod bench_support {
             }
         }
 
-        /// Runs one built-in tool and returns `(is_error, model_text)`.
         pub fn run(&self, name: &str, arguments: &str) -> (bool, String) {
             let output = super::dispatch::execute_blocking(
                 &self.workspace,
@@ -234,15 +219,13 @@ pub(crate) async fn assert_panicked_process_exits(pid: u32) {
     let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        // Panic deliberately leaves production cleanup unconfirmed. Reap only
-        // this fixture's child, without mistaking a dead zombie for a live process.
         match rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG) {
             Ok(Some((reaped, status))) => {
                 assert_eq!(reaped, pid);
                 assert!(status.exited() || status.signaled());
                 return;
             }
-            Err(rustix::io::Errno::CHILD) => return, // Tokio already reaped it.
+            Err(rustix::io::Errno::CHILD) => return,
             Ok(None) | Err(rustix::io::Errno::INTR) => {}
             Err(error) => panic!("cannot wait for the panicked fixture's child: {error}"),
         }
@@ -256,14 +239,10 @@ pub(crate) async fn assert_panicked_process_exits(pid: u32) {
 
 #[cfg(all(test, windows))]
 pub(crate) async fn assert_panicked_process_exits(pid: u32) {
-    // Observe the kernel process object directly. Launching PowerShell adds a
-    // second process startup to the timeout and cannot strengthen this proof.
-    // This fixture observation never confirms production tool quiescence.
     tokio::task::spawn_blocking(move || {
         let process = match win_custody::Process::open(pid, win_custody::ProcessAccess::Synchronize)
         {
             Ok(process) => process,
-            // ERROR_INVALID_PARAMETER means the process left the PID table.
             Err(error) if error.raw_os_error() == Some(87) => return,
             Err(error) => panic!("cannot observe the panicked fixture's process: {error}"),
         };
@@ -300,8 +279,6 @@ mod tests {
         )
     }
 
-    /// The minimal call shown on a repeated argument error must itself
-    /// decode, or the hint teaches a broken shape.
     #[test]
     fn every_minimal_call_decodes() {
         fn decodes<T: serde::de::DeserializeOwned>(name: &str) {
@@ -973,7 +950,6 @@ mod tests {
             listed.model_text,
             "tree . depth=1 entries=2/2 files=2 dirs=0\na.txt 1  b.txt 14\n"
         );
-        // The pre-v0.1.0 name is not a tool.
         let legacy = run_tool(&workspace, &state, "list_dir", r#"{"path":"."}"#);
         assert!(legacy.is_error, "{}", legacy.model_text);
         let tree = run_tool(&workspace, &state, "tree", r#"{}"#);
@@ -1555,7 +1531,6 @@ mod tests {
     #[test]
     fn read_file_stops_at_its_byte_budget_and_names_the_resume_offset() {
         let directory = tempfile::tempdir().unwrap();
-        // 200 lines of 1 KiB: within the line limit, over the 32 KiB default.
         let line = format!("{}\n", "x".repeat(1_023));
         fs::write(directory.path().join("large.txt"), line.repeat(200)).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
@@ -1573,7 +1548,6 @@ mod tests {
         assert!(header.starts_with("read large.txt L1-"), "{header}");
         assert!(header.contains("/200 h:"), "{header}");
         assert!(header.ends_with(" truncated=bytes"), "{header}");
-        // Whole lines only, in order, then one marker with the next offset.
         let shown: Vec<&str> = result
             .model_text
             .lines()
@@ -1592,7 +1566,6 @@ mod tests {
             "{}",
             result.model_text.lines().last().unwrap()
         );
-        // The whole file still hashes: the read is complete for the guard.
         assert!(!result.file_states.is_empty());
     }
 
@@ -1648,7 +1621,6 @@ mod tests {
             )
         );
 
-        // A range past the end is clipped when another range is in bounds…
         let tail = run_tool(
             &workspace,
             &state,
@@ -1656,7 +1628,6 @@ mod tests {
             r#"{"path":"n.txt","ranges":["118-500"]}"#,
         );
         assert!(tail.model_text.starts_with("read n.txt L118-120/120 h:"));
-        // …and a typed failure when nothing is.
         let past = run_tool(
             &workspace,
             &state,
@@ -1689,13 +1660,9 @@ mod tests {
                 failed.model_text
             );
         }
-        // Failures record nothing.
         assert_eq!(state.recorded("n.txt"), Some(hash));
     }
 
-    /// D9: models that fill every optional field send `offset`/`limit`
-    /// beside `ranges`, or a comma for the range separator. `ranges` wins
-    /// and the header says what was ignored.
     #[test]
     fn read_file_ranges_win_over_default_shaped_offset_and_limit() {
         let directory = tempfile::tempdir().unwrap();
@@ -1731,7 +1698,6 @@ mod tests {
             comma.model_text,
             format!("read n.txt L5-6/20 h:{short}\n5\tline 5\n6\tline 6\n")
         );
-        // Without ranges, offset/limit are the request and stay validated.
         let plain = run_tool(
             &workspace,
             &state,
@@ -1775,7 +1741,6 @@ mod tests {
     #[test]
     fn a_spilled_read_stores_the_ignored_offset_note() {
         let directory = tempfile::tempdir().unwrap();
-        // 400 outline rows of ~190 bytes overrun the 32 KiB read bound.
         let source: String = (0..400)
             .map(|n| format!("fn f{n:03}_{}() {{}}\n", "x".repeat(180)))
             .collect();
@@ -1885,7 +1850,6 @@ mod tests {
                 "L9 fn helper"
             ]
         );
-        // Outline records the hash too: the model saw the file's shape.
         assert!(!outline.file_states.is_empty());
 
         let unsupported = run_tool(
@@ -1920,7 +1884,6 @@ mod tests {
             "{}",
             info.model_text
         );
-        // CRLF content renders without the CR; the hash is of the bytes.
         let win = run_tool(&workspace, &state, "read_file", r#"{"path":"win.txt"}"#);
         assert!(
             win.model_text.ends_with("\n1\ta\n2\tb\n"),
@@ -1963,8 +1926,6 @@ mod tests {
     #[test]
     fn control_dense_results_are_bounded_by_their_json_escaped_size() {
         let directory = tempfile::tempdir().unwrap();
-        // Raw size stays under the result cap, but every ESC escapes 6:1 so the
-        // escaped size would far exceed the persisted-event budget.
         fs::write(
             directory.path().join("ansi.log"),
             format!("{}\n", "\u{1b}".repeat(1_000)).repeat(120),
@@ -2021,7 +1982,6 @@ mod tests {
             "{}",
             result.model_text
         );
-        // Nothing is recorded for a file the guard could not hash whole.
         assert!(result.file_states.is_empty());
     }
 
@@ -2089,7 +2049,6 @@ mod tests {
             let outside = tempfile::tempdir().unwrap();
             fs::write(outside.path().join("needle.txt"), "needle outside").unwrap();
             std::os::unix::fs::symlink(outside.path(), directory.path().join("link")).unwrap();
-            // The symlink stays open across the test so its target exists.
             std::mem::forget(outside);
         }
         let workspace = Workspace::open(directory.path()).unwrap();
@@ -2685,7 +2644,6 @@ mod tests {
              nested/a.txt\nL1: needle nested txt\n"
         );
 
-        // A walk rooted below the workspace root still honours the root file.
         let nested = run_tool(
             &workspace,
             &FileState::default(),
@@ -2719,8 +2677,6 @@ mod tests {
             );
         }
 
-        // `.qqignore` stacks with `.gitignore` and hides from `search` and
-        // `tree` alike, so every listing tool sees the same tree.
         fs::write(root.join(".qqignore"), "main.rs\n").unwrap();
         let qq = run_tool(
             &workspace,
@@ -2743,7 +2699,6 @@ mod tests {
     fn search_pages_with_an_exact_cursor_and_caps_per_file() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        // 3 files × 30 lines = 90 matches; page size 60; per-file cap 10 → 30 shown per page.
         for name in ["a.txt", "b.txt", "c.txt"] {
             let body: String = (1..=30).map(|n| format!("needle {n}\n")).collect();
             fs::write(root.join(name), body).unwrap();
@@ -2777,9 +2732,6 @@ mod tests {
             }
         );
 
-        // Resume: match #26 is c.txt L6 and nothing before it repeats. The
-        // per-file cap hides the rest of c.txt behind `+N more in file` and
-        // the header's total, not behind a cursor.
         let second = run_tool(
             &workspace,
             &state,
@@ -2800,7 +2752,6 @@ mod tests {
         );
         assert!(!second.model_text.contains("next="));
 
-        // Match #61 is reachable across pages with the default per-file cap.
         let mut seen = Vec::new();
         let mut cursor: Option<String> = None;
         for _ in 0..10 {
@@ -2851,10 +2802,6 @@ mod tests {
             bad.model_text
         );
 
-        // ENG-959: every placeholder a model sends for "start from the
-        // beginning" is the first page, byte for byte identical to omitting
-        // the field. One day's sessions had ~1,470 of 1,485 search calls
-        // fail on these.
         let first_page = run_tool(
             &workspace,
             &state,
@@ -2929,7 +2876,6 @@ mod tests {
         );
         assert!(invalid.is_error && invalid.model_text.starts_with("invalid_symbol"));
 
-        // Smart case: a lowercase query is insensitive; CRLF lines lose the CR.
         let smart = run_tool(
             &workspace,
             &state,
@@ -2940,7 +2886,6 @@ mod tests {
             smart.model_text,
             "search \"apply_lock\" mode=content matches=1/1 files=1 scanned=1\nnotes.md\nL1: Apply_Lock notes\n"
         );
-        // Sensitive zero-result search hints at the insensitive count.
         let sensitive = run_tool(
             &workspace,
             &state,
@@ -2976,8 +2921,6 @@ mod tests {
             r#"{"query":"x","include":["["]}"#,
         );
         assert!(bad_glob.is_error && bad_glob.model_text.starts_with("bad_glob"));
-        // D9: an empty glob is a filled-in "no filter", and context above the
-        // bound clamps with a note instead of refusing the search.
         let defaults = run_tool(
             &workspace,
             &state,
@@ -3039,7 +2982,6 @@ mod tests {
     fn search_stops_at_the_byte_budget_with_a_cursor_instead_of_cutting() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        // 8 files × 50 matches of ~100 bytes: over the 12 KiB body budget.
         for index in 0..8 {
             let body: String = (1..=50)
                 .map(|n| format!("needle {n} {}\n", "x".repeat(90)))
@@ -3066,9 +3008,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_fifo_or_oversized_ignore_file_is_skipped_not_read() {
-        // A FIFO `.gitignore` used to block the walk at open forever, and an
-        // ignore file of any size was read whole. Both are now ignored as if
-        // absent; a normal `.qqignore` beside them still applies.
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let status = std::process::Command::new("mkfifo")
@@ -3128,8 +3067,6 @@ mod tests {
         let workspace = Workspace::open(root).unwrap();
         let state = FileState::default();
 
-        // depth=3 lists src/deep/er but not est; the chain collapses as far
-        // as it was listed and the counts cover the whole subtree.
         let tree = run_tool(&workspace, &state, "tree", r#"{"depth":3}"#);
         assert!(!tree.is_error, "{}", tree.model_text);
         let expected_link = if cfg!(unix) { "link.md@\n" } else { "" };
@@ -3216,7 +3153,6 @@ mod tests {
         );
         assert!(result.model_text.contains("2 more entries; raise limit"));
 
-        // D9: `"glob":""` is a filled-in "no filter", not `bad_glob`.
         let unfiltered = run_tool(
             &workspace,
             &FileState::default(),
@@ -3466,8 +3402,6 @@ mod tests {
             content_hash(b"fn one() { start() }\nfn two() {}\n")
         );
 
-        // The recorded hash was refreshed by the apply, so a follow-up edit
-        // needs no intervening read.
         let followup = run_tool(
             &workspace,
             &state,
@@ -3597,8 +3531,6 @@ mod tests {
 
     #[test]
     fn spawn_agent_with_a_roster_selects_by_role_and_limits_overrides_to_roster_routes() {
-        // The flat authenticated list is ignored once a roster exists: the
-        // model may only name roster routes exactly.
         let every_route = ["openai/fast".to_owned(), "openai/other".to_owned()];
         let spec = spawn_agent_spec(&every_route, &roster());
         let schema: serde_json::Value = serde_json::from_str(spec.input_schema().get()).unwrap();
@@ -3720,7 +3652,6 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let state = FileState::default();
 
-        // ADR-0058: a unique exact `old` is proof enough; an anchor is not.
         let edit = run_tool(
             &workspace,
             &state,
@@ -3756,8 +3687,6 @@ mod tests {
         let state = FileState::default();
         run_tool(&workspace, &state, "read_file", r#"{"path":"note.txt"}"#);
 
-        // An external writer (editor, another process) changes the file
-        // between the read and the apply.
         fs::write(directory.path().join("note.txt"), "external change\n").unwrap();
         let stale = run_tool(
             &workspace,
@@ -3931,8 +3860,6 @@ mod tests {
         assert_eq!(update.path, "docs/NOTES.md");
         assert_eq!(update.hash, content_hash(b"first\n"));
 
-        // The create recorded the written content, so the same session may
-        // overwrite it without an intervening read.
         let overwritten = run_tool(
             &workspace,
             &state,
@@ -3956,8 +3883,6 @@ mod tests {
             "second\n"
         );
 
-        // Missing parents are created, up to eight deep; the path stays
-        // contained and `..` is refused outright.
         let nested = run_tool(
             &workspace,
             &state,
@@ -3989,8 +3914,6 @@ mod tests {
         assert!(escape.is_error);
         assert!(!directory.path().join("../escape.md").exists());
 
-        // create_only refuses an existing file; if_hash proves currency
-        // without a recorded read.
         let fresh = FileState::default();
         let refused = run_tool(
             &workspace,
@@ -4035,10 +3958,6 @@ mod tests {
         );
     }
 
-    /// Models with no hash fill `if_hash`/`if_changed_since` with zeros
-    /// (21 stale_file errors in 15 v0.1.8 runs). The placeholder is no
-    /// claim at all: a read file edits as if it were absent, and an unread
-    /// one still needs a read.
     #[test]
     fn zero_hash_placeholder_reads_as_absent() {
         let directory = tempfile::tempdir().unwrap();
@@ -4153,9 +4072,6 @@ mod tests {
         run_tool(&workspace, &state, "read_file", r#"{"path":"a.rs"}"#);
         run_tool(&workspace, &state, "read_file", r#"{"path":"b.rs"}"#);
 
-        // Four edits, two files, out of path order: a replace, an insert
-        // after an anchor, an insert before one, and a dedented (indent-
-        // flexible) replace whose replacement is re-indented.
         let edited = run_tool(
             &workspace,
             &state,
@@ -4179,8 +4095,6 @@ mod tests {
             fs::read_to_string(directory.path().join("b.rs")).unwrap(),
             b_after
         );
-        // Header, then one line per file in path order with a change per edit
-        // (line numbers as of that edit) and via= for the non-exact one.
         assert_eq!(
             edited.model_text,
             format!(
@@ -4224,7 +4138,6 @@ mod tests {
         run_tool(&workspace, &state, "read_file", r#"{"path":"b.txt"}"#);
 
         for (arguments, code) in [
-            // The second edit's old is gone after the first rewrote it.
             (
                 r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma"},{"path":"a.txt","old":"beta","new":"delta"}]}"#,
                 "edit 1: not_found",
@@ -4266,7 +4179,6 @@ mod tests {
                 "edit 0: stale_file",
             ),
             (r#"{"edits":[]}"#, "invalid_edit"),
-            // The second edit matches inside what the first wrote.
             (
                 r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma delta"},{"path":"a.txt","old":"delta","new":"epsilon"}]}"#,
                 "edit 1: conflicting_edits: a=0 b=1",
@@ -4291,7 +4203,6 @@ mod tests {
             "one\ntwo\n"
         );
 
-        // not_found carries the closest line so the retry needs no read.
         let close = run_tool(
             &workspace,
             &state,
@@ -4315,7 +4226,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("a.txt"), "alpha\nbeta\n").unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        // No read in this session: if_hash from a header stands in for it.
         let state = FileState::default();
         let short = &content_hash(b"alpha\nbeta\n")[..12];
 
@@ -4335,7 +4245,6 @@ mod tests {
             "{}",
             preview.model_text
         );
-        // D9: an empty unused form is ignored and the header says so.
         let tolerant = run_tool(
             &workspace,
             &state,
@@ -4381,7 +4290,6 @@ mod tests {
             Some(content_hash(b"alpha\ngamma\n"))
         );
 
-        // fuzzy=false refuses a whitespace drift the cascade would forgive.
         let strict = run_tool(
             &workspace,
             &state,
@@ -4424,8 +4332,6 @@ mod tests {
             "read_file",
             r#"{"path":"locked/b.txt"}"#,
         );
-        // The second file's directory refuses new entries, so its temp file
-        // cannot be created after the first file has already been renamed.
         fs::set_permissions(
             directory.path().join("locked"),
             fs::Permissions::from_mode(0o555),
@@ -4459,8 +4365,6 @@ mod tests {
             fs::read_to_string(directory.path().join("locked/b.txt")).unwrap(),
             "beta\n"
         );
-        // The applied file's new hash is recorded so a retry of the rest
-        // does not trip the staleness guard on it.
         assert_eq!(state.recorded("a.txt"), Some(content_hash(b"ALPHA\n")));
     }
 
@@ -4509,7 +4413,6 @@ mod tests {
             Some(qq_protocol::ToolCallDisplay::Diff { .. })
         ));
 
-        // A failed edit carries no payload: nothing was applied.
         let failed = run_tool(
             &workspace,
             &state,
@@ -4542,13 +4445,11 @@ mod tests {
         assert!(read.model_text.ends_with(
             "\n1\tAWS_KEY=[masked:aws_key]\n2\tDB_PASSWORD=[masked:credential]\n3\tPORT=$PORT\n"
         ));
-        // The hash is of the file, not of the rendering.
         assert_eq!(
             read.file_states[0].hash,
             content_hash(b"AWS_KEY=AKIAIOSFODNN7EXAMPLE\nDB_PASSWORD=hunter2hunter2\nPORT=$PORT\n")
         );
 
-        // Hidden files are searched only on request; masking still applies.
         let found = run_tool(
             &workspace,
             &state,
@@ -4654,7 +4555,6 @@ mod tests {
             .unwrap()
             .unwrap();
         let pid = parse_marked_pid(&first);
-        // Do not spend the live-output budget before the PID chunk is consumed.
         fs::write(directory.path().join("start-output"), "go").unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while chunks.capacity() != 0 {
@@ -4884,8 +4784,6 @@ mod tests {
         tasks.drain().await.unwrap();
     }
 
-    /// Polls until the process is gone, failing the test after a generous
-    /// deadline instead of asserting on a single sleep.
     #[cfg(unix)]
     async fn assert_process_exits(pid: u32) {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -5057,8 +4955,6 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let release = directory.path().join("release");
         crate::tools::create_test_fifo(&release).await;
-        // Keep both ends open until completion so an input written just
-        // before the shell opens its reader cannot disappear with the writer.
         let gate = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -5081,8 +4977,6 @@ mod tests {
         .await
         .expect("command started");
 
-        // Advance the deadline clock while the real native process waits on
-        // explicit input, rather than making a long build fixture sleep.
         tokio::time::pause();
         tokio::time::advance(std::time::Duration::from_secs(seconds)).await;
         tokio::time::resume();
@@ -5126,8 +5020,6 @@ mod tests {
     async fn shell_children_inherit_the_full_environment() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        // CARGO_MANIFEST_DIR is always set under `cargo test` and stands in
-        // for any variable of the user's environment.
         let expected = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let run = |arguments: &'static str| {
             let workspace = workspace.clone();
@@ -5153,7 +5045,6 @@ mod tests {
             "{}",
             inherited.model_text
         );
-        // `env` is no longer an argument: the call is refused, nothing runs.
         let refused = run(r#"{"command":"echo ran","env":["CARGO_MANIFEST_DIR"]}"#).await;
         assert!(refused.is_error);
         assert!(
@@ -5187,8 +5078,6 @@ mod tests {
                 .await
             }
         };
-        // Words are argv, not shell: a space in a filename needs no quoting
-        // and `$HOME`, `*`, and `|` are literal characters.
         let literal =
             run(r#"{"program":"printf","args":["%s|%s|%s\n","$HOME","a b.txt","*"]}"#).await;
         assert!(!literal.is_error, "{}", literal.model_text);
@@ -5208,10 +5097,8 @@ mod tests {
             "{}",
             spaced.model_text
         );
-        // stdin reaches the program and the write end closes.
         let fed = run(r#"{"program":"tr","args":["a-z","A-Z"],"stdin":"hello\n"}"#).await;
         assert!(fed.model_text.contains("\nHELLO\n"), "{}", fed.model_text);
-        // Failures are exit codes with the header, like shell.
         let failed = run(r#"{"program":"false"}"#).await;
         assert!(failed.is_error);
         assert!(
@@ -5288,8 +5175,6 @@ mod tests {
         assert!(!quiet.model_text.contains("hint:"), "{}", quiet.model_text);
     }
 
-    /// A command that is not its group's leader may leave the group without
-    /// forking; a timeout still stops it rather than waiting on it forever.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_command_that_leaves_its_group_still_stops_on_timeout() {
@@ -5313,8 +5198,6 @@ mod tests {
         );
     }
 
-    /// The command joins a group its watcher already leads, so nothing the
-    /// command sends its group can reach a watcher still starting up.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_command_starts_in_a_group_its_ready_watcher_leads() {
@@ -5361,8 +5244,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
 
-        // The command starts a background child and then blocks: the timeout
-        // must kill the child too, not just the immediate `sh`.
         let result = run_shell_tool(
             workspace.clone(),
             r#"{"command":"sleep 300 & echo pid:$!; wait","timeout_seconds":1}"#,
@@ -5380,8 +5261,6 @@ mod tests {
         assert_process_exits(parse_marked_pid(&result.model_text)).await;
     }
 
-    /// Commands print plain text into a pipe: TERM is always dumb, and the
-    /// color and pager defaults apply unless the user set their own.
     #[cfg(unix)]
     #[tokio::test]
     async fn commands_get_plain_output_defaults() {
@@ -5409,8 +5288,6 @@ mod tests {
         }
     }
 
-    /// The timeout result names the limit that fired and the two ways to
-    /// give a long command more room.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_shell_timeout_names_its_limit_and_how_to_raise_it() {
@@ -5438,9 +5315,6 @@ mod tests {
         }
     }
 
-    /// A background child that keeps the output pipe open no longer holds
-    /// the call until its timeout: the leader's exit ends it, and its group
-    /// (with the child) is killed.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_background_process_holding_the_pipe_does_not_block_the_call() {
@@ -5470,9 +5344,6 @@ mod tests {
         assert_process_exits(parse_marked_pid(&result.model_text)).await;
     }
 
-    /// A command that outlives its yield point returns a command id; the
-    /// command keeps running, and `command_status` reads its progress and
-    /// then returns its final result.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_long_command_yields_and_completes_through_command_status() {
@@ -5542,7 +5413,6 @@ mod tests {
         );
         assert!(finished.model_text.contains("finished"));
         assert!(finished.execution_context.is_none());
-        // A finished command is forgotten once its result was returned.
         let gone = command_status(&tasks, r#"{"id":"c1","wait_seconds":0}"#, cancelled).await;
         assert!(
             gone.model_text.starts_with("unknown_command:"),
@@ -5552,8 +5422,6 @@ mod tests {
         tasks.drain().await.unwrap();
     }
 
-    /// `cancel=true` kills a yielded command's process group, and run
-    /// teardown stops any yielded command still running.
     #[cfg(unix)]
     #[tokio::test]
     async fn yielded_commands_stop_on_cancel_and_on_teardown() {
@@ -5601,8 +5469,6 @@ mod tests {
         assert_process_exits(parse_marked_pid(&second.model_text)).await;
     }
 
-    /// A table full of finished but unread commands still takes a new one,
-    /// and `cancel` waits a bounded time even if the command never ends.
     #[tokio::test(start_paused = true)]
     async fn the_command_table_forgets_unread_results_and_cancel_is_bounded() {
         let tasks = ToolTasks::default();
@@ -5651,14 +5517,11 @@ mod tests {
         assert!(running.cancel_requested());
     }
 
-    /// The whole output of a long command is kept for `read_tool_result`,
-    /// not only the head and tail the model sees inline.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_one_mebibyte_log_is_searchable_through_read_tool_result() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        // About 1.1 MiB: 16,000 numbered lines with one marker in the middle.
         let result = run_shell_tool(
             workspace,
             r#"{"command":"i=0; while [ $i -lt 16000 ]; do if [ $i -eq 8000 ]; then echo 'error[E0308]: mismatched types in the middle'; fi; printf 'line %05d %s\n' $i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done"}"#,
@@ -5766,8 +5629,6 @@ mod tests {
             cancelled.clone(),
             Some(sender),
         ));
-        // The first live chunk proves the command is running and carries the
-        // background child's pid.
         let chunk = tokio::time::timeout(std::time::Duration::from_secs(10), receiver.recv())
             .await
             .expect("the running command must stream its first chunk")
@@ -5793,8 +5654,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
 
-        // Pure-shell loop producing well over the 16 KiB model bound (and the
-        // 128 KiB capture) with distinct head and tail lines.
         let result = run_shell_tool(
             workspace.clone(),
             r#"{"command":"i=0; while [ $i -lt 40000 ]; do echo line-$i; i=$((i+1)); done"}"#,
@@ -5807,7 +5666,6 @@ mod tests {
         let mut lines = result.model_text.lines();
         let header = lines.next().unwrap();
         assert!(header.starts_with("shell exit=0 elapsed="), "{header}");
-        // 40 000 lines of `line-N\n`: the header counts every byte written.
         assert!(header.ends_with(" bytes=428890"), "{header}");
         assert_eq!(lines.next(), Some("line-0"), "head was not kept");
         assert!(
@@ -5822,7 +5680,6 @@ mod tests {
         );
         assert!(result.model_text.contains("lines omitted"));
         assert!(result.model_text.len() <= SHELL_BOUNDS.max_bytes);
-        // Every kept line is whole.
         for line in result.model_text.lines().skip(1) {
             assert!(
                 line.starts_with("line-") || line.starts_with(MARKER_PREFIX),
@@ -5899,7 +5756,6 @@ mod tests {
         capture.push(b"abcdefgh");
         capture.push(b"ij");
         capture.push(b"klmnop");
-        // Head keeps the first 4 bytes, the rolling tail keeps the last 4.
         assert_eq!(
             capture.into_output(),
             "abcd\n…[qq: 8 bytes not captured]…\nmnop"
@@ -5962,8 +5818,6 @@ mod tests {
 
 #[cfg(all(test, unix))]
 mod goal_check_shell_tests {
-    /// The check's absolute deadline stops a command that outlives it and
-    /// reports a timeout; a command that finishes in time keeps its exit.
     #[tokio::test]
     async fn goal_check_shell_keeps_the_absolute_deadline() {
         let directory = tempfile::tempdir().unwrap();
@@ -5993,8 +5847,6 @@ mod goal_check_shell_tests {
             )
             .await;
             assert_eq!(outcome, Some(expected), "{command}");
-            // Stopping at the deadline itself, not a rounded or restarted
-            // relative timeout: teardown takes well under half a second.
             assert!(
                 tokio::time::Instant::now() < deadline + std::time::Duration::from_millis(500),
                 "{command} outlived its absolute deadline"

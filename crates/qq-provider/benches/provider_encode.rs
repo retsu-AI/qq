@@ -1,21 +1,3 @@
-//! Request encoding cost: the bytes and heap one provider request costs
-//! between the transcript core holds and the HTTP body on the wire.
-//!
-//! Fixture: a one MiB transcript (D5's reference size) of alternating turns
-//! with tool calls and results, plus 32 tool schemas, encoded for each HTTP
-//! protocol. Two things are measured per protocol:
-//!
-//! - `encode`: time to build the wire struct and serialize the body from a
-//!   `ModelRequest` the adapter already holds (`sse_exchange`'s `.json()`).
-//! - `request heap`: peak heap above the transcript's own bytes while the
-//!   adapter path runs — `ModelRequest::new` from core's transcript, the
-//!   per-attempt `request.clone()` every adapter performs inside
-//!   `with_restart`, and the body. D5's gate is a peak at most 2x the
-//!   payload; before D5 the transcript alone existed three times.
-//!
-//! `QQ_BENCH_ITERATIONS` overrides the iteration count. Heap is measured with
-//! a counting global allocator, so numbers are exact, not sampled.
-
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     hint::black_box,
@@ -33,8 +15,6 @@ static PEAK: AtomicUsize = AtomicUsize::new(0);
 
 struct Counting;
 
-// SAFETY: every method forwards to `System` unchanged; the counters are
-// bookkeeping around the delegated call and never touch the returned memory.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let pointer = unsafe { System.alloc(layout) };
@@ -102,7 +82,6 @@ fn main() {
             HttpProtocol::GoogleGenerateContent => "google_generate_content",
         };
 
-        // Encode only: the body from a request the adapter already holds.
         let request = ModelRequest::new("benchmark-model", transcript.clone(), 4096)
             .with_tools(tools.clone())
             .with_system("You are a benchmark.");
@@ -118,11 +97,6 @@ fn main() {
         let encode_us = started.elapsed().as_micros() / u128::from(iterations);
         drop(request);
 
-        // Adapter path heap: core's transcript is live; build the request,
-        // clone it as `with_restart` does per attempt, encode. Peak above the
-        // transcript is the request's own cost. Measured twice: from a
-        // caller that owns a `Vec` (copied into the request, as before D5)
-        // and from one that shares an `Arc` (the run loop after D5).
         let baseline = reset_peak();
         let request = ModelRequest::new("benchmark-model", transcript.clone(), 4096)
             .with_tools(tools.clone())
@@ -154,8 +128,6 @@ fn main() {
     }
 }
 
-/// Alternating user/assistant turns with a tool call and result every other
-/// turn, sized to about one MiB of text and arguments.
 fn transcript() -> Vec<Message> {
     let mut messages = Vec::new();
     let mut bytes = 0;

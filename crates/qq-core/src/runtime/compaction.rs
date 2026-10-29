@@ -1,23 +1,8 @@
-//! In-run compaction: summarizing a run's own earlier turns at a safe turn
-//! boundary so the run continues in one window instead of failing.
-//!
-//! Between runs the session layer compacts before a prompt starts. Within a
-//! run, once stubbing stale read-only results no longer fits the window, the
-//! loop asks its installed compactor to summarize every turn but the most
-//! recent few. The compactor runs the summarizer as an internal run and
-//! commits a marker scoped to this run (`session_compactions.scope_run_id`,
-//! `turn_cutoff`) so replay renders the summary where the replaced turns
-//! stood. The loop then splices the summary into its live transcript and
-//! continues. Direct runs have no compactor and fail as before.
-
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use qq_protocol::RunFailureKind;
 use qq_provider::{Message, ToolSpec};
 
-/// Bounded hierarchical summarization. Splitting changes representation, not
-/// coverage: every byte of transcript text is queued until a summary consumes
-/// it. Tool calls/results are inert evidence, not executable messages.
 pub(crate) struct SummaryFold {
     pending: Vec<Vec<Message>>,
     splits: u8,
@@ -25,8 +10,6 @@ pub(crate) struct SummaryFold {
 }
 
 impl SummaryFold {
-    /// The caller appends the instruction before any summary fragments or
-    /// continuation notices. Its position is control data, not model text.
     pub(crate) fn new(instruction_at: usize) -> Self {
         Self {
             pending: Vec::new(),
@@ -90,8 +73,6 @@ impl SummaryFold {
         true
     }
 
-    /// Consume a completed portion only when another portion is queued. The
-    /// caller keeps the final response without cloning it to probe the fold.
     pub(crate) fn advance(
         &mut self,
         summary: &mut String,
@@ -120,41 +101,20 @@ impl SummaryFold {
     }
 }
 
-/// What the loop hands the compactor: the run's live request cut after the
-/// last turn to replace, and the ordinal of that turn. The compactor sees no
-/// retained turns, so it cannot summarize what stays verbatim. The request
-/// keeps the run's system prompt, tools, and message prefix so it reads the
-/// provider cache the run's own turns wrote (ADR-0056 § 5).
 pub(crate) struct InRunCompactionRequest {
-    /// The session context before the prompt, the prompt, and everything the
-    /// run appended through `turn_cutoff`: assistant turns, tool results,
-    /// applied steering, runtime notices.
     pub(crate) transcript: Vec<Message>,
-    /// The last model turn ordinal the summary replaces. Turns after it stay
-    /// verbatim in the live transcript and in replay.
     pub(crate) turn_cutoff: u32,
 
-    /// Replace the inherited session prefix, not turns of the active prompt.
     pub(crate) inherited_prefix: bool,
-    /// The run's system prompt (without a budget-final notice).
     pub(crate) system: Arc<str>,
-    /// The run's declared tools. Calls are rejected, never run.
     pub(crate) tools: Arc<[ToolSpec]>,
-    /// The live request's weight without the replaced span and without the
-    /// summary: system prompt, tool schemas, session context before the
-    /// prompt, the prompt, and the retained turns. The store adds the framed
-    /// summary it commits and re-bases the run's context reservation to the
-    /// total in the marker's transaction (ADR-0048 § 1).
     pub(crate) retained_bytes: u64,
     pub(crate) goal_notice: Option<Arc<str>>,
     pub(crate) budget: super::ChildBudget,
 }
 
-/// A committed in-run summary the loop splices in.
 pub(crate) struct InRunCompaction {
     pub(crate) summary: String,
-    /// Observed spend belongs to the internal run in storage, and is also
-    /// charged to the prompt's caller allowance in memory.
     pub(crate) usage: Option<qq_protocol::TokenUsage>,
     pub(crate) estimated_cost_usd_nanos: Option<u64>,
 }
@@ -162,16 +122,8 @@ pub(crate) struct InRunCompaction {
 pub(crate) type InRunCompactionFuture =
     Pin<Box<dyn Future<Output = Result<InRunCompaction, InRunCompactionError>> + Send + 'static>>;
 
-/// Why an in-run compaction did not commit. The loop retries a transient
-/// summarizer fault under the run's turn recovery and pauses the run when
-/// that is spent (ADR-0048 § 2); it fails the run with the context diagnosis
-/// for a rejected summary or an availability failure, and as a server
-/// failure when the store could not record the compaction.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum InRunCompactionError {
-    /// The summarizer's provider faulted transiently (overload, rate limit,
-    /// transport loss). The compaction run settled failed; the prompt run's
-    /// turns are untouched, so the step can be retried.
     #[error("the summarizer's provider is unavailable: {message}")]
     SummarizerUnavailable {
         kind: RunFailureKind,
@@ -186,16 +138,10 @@ pub(crate) enum InRunCompactionError {
         usage: Option<qq_protocol::TokenUsage>,
         estimated_cost_usd_nanos: Option<u64>,
     },
-    /// The summarizer ran and settled failed (rejected, malformed, did not
-    /// shrink). Its outcome is durable on its own run.
     #[error("the summarizer failed: {0}")]
     SummarizerFailed(String),
-    /// The session layer could not start the compaction (the prompt run
-    /// ended, it was cancelled, or the runtime has failed).
     #[error("compaction could not run: {0}")]
     Unavailable(String),
-    /// The store failed to start, record, or commit the compaction. Not a
-    /// context problem: `/compact` would not help.
     #[error("compaction could not be persisted: {0}")]
     Persistence(String),
 }
@@ -204,9 +150,6 @@ pub(crate) trait InRunCompactor: Send + Sync {
     fn compact(&self, request: InRunCompactionRequest) -> InRunCompactionFuture;
 }
 
-/// Pull-driven summarizer boundaries. A request cannot be dispatched until
-/// its starting step has been admitted, and each completed turn can be
-/// persisted before the generator is polled for more provider work.
 pub(crate) enum SummarizeStep {
     RequestStarting {
         input_tokens: Option<u64>,
@@ -221,25 +164,20 @@ pub(crate) enum SummarizeStep {
     Summary(String),
 }
 
-/// Why one summarizer request produced no summary.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum SummarizeError {
-    /// A typed provider rejection before output, reasoning, replay or calls.
     #[error("{message}")]
     RejectedBeforeWork {
         kind: RunFailureKind,
         message: String,
         retry_after: Option<std::time::Duration>,
     },
-    /// A provider fault worth re-issuing the request for, as for a model turn.
     #[error("{message}")]
     Transient {
         kind: RunFailureKind,
         message: String,
         retry_after: Option<std::time::Duration>,
     },
-    /// The reply itself is unusable, or the provider refused the request in
-    /// a way a retry would repeat.
     #[error("{0}")]
     Rejected(String),
 }

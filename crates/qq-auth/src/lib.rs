@@ -1,5 +1,3 @@
-//! Credential storage and secret resolution.
-
 #![forbid(unsafe_code)]
 
 use std::{
@@ -43,12 +41,8 @@ use oauth::OAuthProvider;
 pub use codex::{CodexDeviceLogin, CodexLogin};
 pub use xai::XaiLogin;
 
-/// Credential audience (endpoint binding) of stored OpenAI Codex credentials.
 pub const OPENAI_CODEX_CREDENTIAL_ENDPOINT: &str = "https://chatgpt.com";
-/// Credential audience of the built-in xAI deployment, for API keys and OAuth.
 pub const XAI_CREDENTIAL_ENDPOINT: &str = "https://api.x.ai";
-/// The variable xAI resolution falls back to when nothing is stored. The
-/// provider table names the same variable; a root test keeps them equal.
 pub const XAI_API_KEY_VARIABLE: &str = "XAI_API_KEY";
 
 pub(crate) const KEYRING_SERVICE: &str = "dev.qq";
@@ -64,10 +58,6 @@ const WINDOWS_CREDENTIAL_DIRECTORY_NAME: &str = "windows-credentials";
 const REQUEST_CREDENTIAL_CONCURRENCY: usize = 4;
 const REQUEST_CREDENTIAL_CAPACITY_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_CREDENTIAL_LOAD_TIMEOUT: Duration = Duration::from_secs(65);
-/// Successful stored resolutions are reused briefly to avoid repeated OS
-/// keyring reads during one application refresh. The durable credential epoch
-/// remains the primary invalidation boundary; this TTL bounds changes made
-/// directly in an external keychain that QQ's index cannot observe.
 const STORED_RESOLUTION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_STORED_RESOLUTION_CACHE_ENTRIES: usize = 64;
 
@@ -80,7 +70,6 @@ fn is_resolution_capacity_wait(error: &AuthError) -> bool {
     )
 }
 
-/// Secret bytes whose formatted representations never reveal their contents.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret(Vec<u8>);
 
@@ -129,7 +118,6 @@ impl fmt::Display for CredentialBackend {
     }
 }
 
-/// Nonsecret information recorded for a stored credential.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CredentialMetadata {
     pub name: String,
@@ -138,7 +126,6 @@ pub struct CredentialMetadata {
     pub endpoint: Option<String>,
 }
 
-/// All filesystem locations used by a credential store.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CredentialPaths {
     data_dir: PathBuf,
@@ -181,10 +168,6 @@ impl CredentialPaths {
         &self.lock_file
     }
 
-    /// The operation lock file of the OAuth provider named `provider`,
-    /// derived as `{provider}.lock`. That reproduces the published
-    /// `openai-codex.lock` and `xai.lock`, and gives a new provider
-    /// interprocess exclusion without a lock definition of its own.
     pub(crate) fn provider_lock_file(&self, provider: &str) -> PathBuf {
         self.data_dir.join(oauth::lock_file_name(provider))
     }
@@ -218,10 +201,6 @@ pub enum AuthError {
     #[error("environment variable `{variable}` is not set")]
     EnvironmentMissing { variable: String },
 
-    /// A built-in provider has neither a stored credential nor its
-    /// environment variable. Names both remedies because a new user reaches
-    /// this before knowing either exists. `alternate_variables` lists the
-    /// aliases that would also have been accepted (Google's `GOOGLE_API_KEY`).
     #[error(
         "no credential for provider `{provider}`: run `qq auth login {provider}` \
          or set the environment variable `{environment_variable}`{}",
@@ -346,7 +325,6 @@ pub struct CredentialStore {
     paths: CredentialPaths,
     keyring: Arc<dyn KeyringBackend>,
     windows_protected: Arc<dyn WindowsProtectedBackend>,
-    /// Every OAuth token, refresh and device call, for every provider.
     oauth: Arc<dyn oauth::OAuthTransport>,
     oauth_operations: Arc<[Mutex<()>]>,
     request_credential_permits: Arc<tokio::sync::Semaphore>,
@@ -354,7 +332,6 @@ pub struct CredentialStore {
 
     #[cfg(test)]
     resolution_time: Arc<Mutex<std::time::Instant>>,
-    /// The fake clients `oauth` routes to, so tests can add one at a time.
     #[cfg(test)]
     test_oauth: Arc<Mutex<tests::FakeOAuth>>,
 }
@@ -502,7 +479,6 @@ impl CredentialStore {
         )))
     }
 
-    /// Constructs a store rooted at explicit paths while retaining the real OS keyring.
     #[must_use]
     pub fn with_paths(paths: CredentialPaths) -> Self {
         let windows_protected = Arc::new(SystemWindowsProtected::new(paths.clone()));
@@ -514,8 +490,6 @@ impl CredentialStore {
         &self.paths
     }
 
-    /// Resolves an unbound reference. Endpoint-bound stored credentials require
-    /// `resolve_with_endpoint` so they cannot be used out of context.
     pub fn resolve(&self, reference: &SecretRef) -> Result<Secret, AuthError> {
         self.resolve_with_endpoint(reference, None)
     }
@@ -551,9 +525,6 @@ impl CredentialStore {
         }
     }
 
-    /// Resolves a stored reference without the successful-read memo. OAuth
-    /// refresh paths use this after their own expiry deadline or refresh lock
-    /// says the durable value must be checked again.
     pub(crate) fn resolve_with_endpoint_uncached(
         &self,
         reference: &SecretRef,
@@ -572,12 +543,6 @@ impl CredentialStore {
         }
     }
 
-    /// [`Self::resolve_with_endpoint`] plus the [`CredentialEpoch`] of the
-    /// index the secret was read from, in one lock cycle. A caller that
-    /// records the epoch alongside work derived from the secret (the plan
-    /// cache) otherwise takes the state lock once for the epoch and again
-    /// per secret. For a non-stored reference the epoch is read on its own,
-    /// so the caller sees one value whatever the reference kind.
     pub(crate) fn resolve_with_epoch(
         &self,
         reference: &SecretRef,
@@ -677,9 +642,6 @@ impl CredentialStore {
                     self.advance_index_epoch(&mut index)?;
                     match self.keyring.set(name, secret) {
                         Ok(()) => {
-                            // In-place rotation leaves the record unchanged, but
-                            // the index is still rewritten so the credential
-                            // epoch advances for every durable secret change.
                             self.save_index(&index)?;
                             return Ok(CredentialBackend::Keyring);
                         }
@@ -818,12 +780,6 @@ impl CredentialStore {
         Ok(index.records.into_iter().map(Into::into).collect())
     }
 
-    /// The opaque epoch of the stored-credential set. Every durable `set`,
-    /// refresh, or `remove` advances it, so a caller that cached work derived
-    /// from resolved secrets can detect rotation by comparing epochs without
-    /// hashing or retaining secret material. A store with no index yet reports
-    /// [`CredentialEpoch::NONE`]. Environment and inline secrets are outside
-    /// the store and never move the epoch.
     pub fn epoch(&self) -> Result<CredentialEpoch, AuthError> {
         let _lock = self.lock_state_shared()?;
         let index = self.load_index()?;
@@ -841,7 +797,6 @@ impl CredentialStore {
         Ok(self.status(name)?.is_some())
     }
 
-    /// Removes a registered credential. Returns `false` when no index record existed.
     pub fn remove(&self, name: &str) -> Result<bool, AuthError> {
         validate_credential_name(name)?;
         let _oauth_lock = self.lock_oauth_operation_for(name)?;
@@ -898,9 +853,6 @@ impl CredentialStore {
         Self::with_backends(paths, keyring, windows_protected)
     }
 
-    /// Replaces the OAuth transport with one that fails before any network
-    /// I/O and counts the attempt, for benchmarks and tests that must never
-    /// reach a real authorization server.
     #[doc(hidden)]
     #[must_use]
     pub fn offline(mut self) -> (Self, OfflineTokenCalls) {
@@ -1467,16 +1419,10 @@ impl CredentialStore {
         Ok(CredentialBackend::WindowsProtectedFile)
     }
 
-    /// The exclusive state lock, for every operation that writes the index
-    /// or a fallback file.
     fn lock_state(&self) -> Result<StateLock, AuthError> {
         self.lock_state_as(LockMode::Exclusive)
     }
 
-    /// The shared state lock, for reads. Concurrent readers (every compile
-    /// resolving its secrets, every reviewer checking the epoch) no longer
-    /// serialize on each other; a writer still excludes them all. The
-    /// verification after the lock is the same as for a writer.
     fn lock_state_shared(&self) -> Result<StateLock, AuthError> {
         self.lock_state_as(LockMode::Shared)
     }
@@ -1499,9 +1445,6 @@ impl CredentialStore {
         Ok(StateLock { _file: file })
     }
 
-    /// Serialises logins, refreshes, rotations and removals of the OAuth
-    /// credential `name`, across threads and processes. `None` when `name`
-    /// is not stored under a built-in OAuth provider.
     fn lock_oauth_operation_for(
         &self,
         name: &str,
@@ -1525,8 +1468,6 @@ impl CredentialStore {
         })
     }
 
-    /// Takes the interprocess operation lock of the OAuth provider named
-    /// `provider` through its derived `{provider}.lock` file.
     pub(crate) fn lock_provider_file(&self, provider: &str) -> Result<std::fs::File, AuthError> {
         let path = self.paths.provider_lock_file(provider);
         ensure_data_directory(self.paths.data_dir())?;
@@ -1565,9 +1506,6 @@ impl CredentialStore {
         atomic_write(self.paths.index_file(), &bytes)
     }
 
-    /// Durably invalidates request-time caches before mutating any credential
-    /// backend. If the later backend or index update fails, readers still see
-    /// a different epoch and cannot reuse material from before the attempt.
     fn advance_index_epoch(&self, state: &mut IndexState) -> Result<(), AuthError> {
         self.save_index(state)?;
         state.version = INDEX_STATE_VERSION;
@@ -1599,8 +1537,6 @@ impl CredentialStore {
     }
 }
 
-/// Resolves provider credentials in precedence order: explicit reference,
-/// registered stored credential, then provider environment variable.
 pub(crate) fn resolve_provider_credential(
     store: &CredentialStore,
     explicit: Option<&SecretRef>,
@@ -1618,10 +1554,6 @@ pub(crate) fn resolve_provider_credential(
     )
 }
 
-/// [`resolve_provider_credential`] for providers whose SDKs read more than
-/// one variable: `environment_variable` wins, then each of
-/// `alternate_variables` in order. A set-but-empty or non-Unicode variable
-/// is reported for the first variable that is present rather than skipped.
 pub fn resolve_provider_credential_with_aliases(
     store: &CredentialStore,
     explicit: Option<&SecretRef>,
@@ -1640,8 +1572,6 @@ pub fn resolve_provider_credential_with_aliases(
         env::var_os(variable)
     }) {
         Err(AuthError::EnvironmentMissing { .. }) => {
-            // `PROVIDER/PROFILE`: the provider half is what `qq auth login`
-            // takes. A name without a slash is used verbatim.
             let provider = stored_name.split('/').next().unwrap_or(stored_name);
             Err(AuthError::ProviderCredentialMissing {
                 provider: provider.to_owned(),
@@ -1653,11 +1583,6 @@ pub fn resolve_provider_credential_with_aliases(
     }
 }
 
-/// Reads the first of `environment_variable` then `alternate_variables` that
-/// is set. A variable that is set but empty or non-Unicode is reported, not
-/// skipped, so a typo in the preferred variable is never masked by an alias.
-/// `lookup` is injected so the walk is testable without touching the process
-/// environment.
 fn environment_secret_from_any(
     environment_variable: &str,
     alternate_variables: &[&str],
@@ -1675,8 +1600,6 @@ fn environment_secret_from_any(
     })
 }
 
-/// Renders the `(or `A` or `B`)` suffix for alias variables; empty when there
-/// are none so single-variable providers keep the short message.
 fn format_alternate_variables(alternate_variables: &[&str]) -> String {
     if alternate_variables.is_empty() {
         return String::new();
@@ -1694,25 +1617,13 @@ fn format_alternate_variables(alternate_variables: &[&str]) -> String {
     suffix
 }
 
-/// Text attached to request-time "missing credential" failures so the run
-/// error names the provider and the command that fixes it. Built once when a
-/// request-credential provider is constructed; the request path only clones
-/// an `Arc`. `qq-provider` carries the text opaquely and never learns about
-/// `qq auth login`.
 pub(crate) struct MissingCredentialRemedies {
-    /// `PROVIDER/PROFILE`, the name the provider stores under.
     name: String,
-    /// Nothing usable exists: not stored and (when applicable) no variable.
     absent: Arc<str>,
-    /// The index knows the name but the secret behind it is gone.
     secret_missing: Arc<str>,
 }
 
 impl MissingCredentialRemedies {
-    /// `login_commands` are the `qq auth login` spellings for this provider
-    /// in the order they should be suggested; `--profile` is appended for a
-    /// non-default profile. `environment_variable` is the fallback variable
-    /// the provider also reads, if any.
     pub(crate) fn new(
         provider: &str,
         profile: &str,
@@ -1752,11 +1663,6 @@ impl MissingCredentialRemedies {
         }
     }
 
-    /// Maps one of the missing-credential `AuthError`s to a request error
-    /// carrying the matching remedy. An error about a credential the user
-    /// referenced explicitly (an `Env(...)` variable, a `Stored(...)` name
-    /// other than ours) keeps its own message, since our remedies would
-    /// describe the wrong thing.
     pub(crate) fn missing(&self, error: &AuthError) -> qq_provider::RequestCredentialError {
         let remedy = match error {
             AuthError::ProviderCredentialMissing { .. } => Arc::clone(&self.absent),
@@ -1942,8 +1848,6 @@ fn enforce_endpoint_binding(
     Ok(())
 }
 
-/// The OAuth token, refresh and device calls an [`CredentialStore::offline`]
-/// store refused.
 #[doc(hidden)]
 #[derive(Clone, Default)]
 pub struct OfflineTokenCalls(Arc<std::sync::atomic::AtomicUsize>);

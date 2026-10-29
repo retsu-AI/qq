@@ -1,9 +1,3 @@
-//! Deterministic fixtures and a driver for the render benchmark.
-//!
-//! Enabled by the `bench-support` feature so `benches/render.rs` can drive the
-//! crate-private `App` and `FrameRenderer` without widening the public API.
-//! Nothing here is stable and nothing here should be used outside benchmarks.
-
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use qq_protocol::{
     MessageId, MessageSnapshot, MessageState, RunActivity, RunId, SessionEvent, SessionId,
@@ -13,7 +7,6 @@ use qq_protocol::{
 
 use crate::{ClientUpdate, TuiOptions, app::App, fixtures, view::FrameRenderer};
 
-/// One TUI instance driven directly, without a terminal or client transport.
 pub struct BenchHarness {
     app: App,
     renderer: FrameRenderer,
@@ -21,22 +14,17 @@ pub struct BenchHarness {
     next_sequence: u64,
 }
 
-/// Prose long enough to wrap and exercise markdown, but short enough to keep
-/// every message under the full-markdown cache threshold.
 const PARAGRAPH: &str = "The renderer must keep steady-state frames cheap: completed \
 messages are cached per width, so a frame with no new content should touch only the \
 chrome and the row diff. `inline code`, **emphasis**, and a list:\n\n- first item\n- second \
 item\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n";
 
 impl BenchHarness {
-    /// A workspace with `sessions` root sessions. The first is focused and has
-    /// `messages` completed assistant messages loaded; the rest are summaries.
     #[must_use]
     pub fn new(size: (u16, u16), sessions: u8, messages: u8) -> Self {
         Self::with_options(size, sessions, messages, TuiOptions::default())
     }
 
-    /// `new`, with the TUI options (themes, settings) supplied by the caller.
     #[must_use]
     pub fn with_options(size: (u16, u16), sessions: u8, messages: u8, options: TuiOptions) -> Self {
         assert!(sessions >= 1, "at least one session is required");
@@ -71,8 +59,6 @@ impl BenchHarness {
         }
     }
 
-    /// Start a streaming assistant message in session `index` and return its
-    /// id. Session 0 is the focused session.
     pub fn start_stream(&mut self, index: u8) -> MessageId {
         let message = assistant_message(session_id(index), 200 + index, "");
         let id = message.id;
@@ -97,7 +83,6 @@ impl BenchHarness {
         id
     }
 
-    /// Append `text` to a streaming message in session `index`.
     pub fn append(&mut self, index: u8, message_id: MessageId, text: &str) -> bool {
         self.apply(
             index,
@@ -109,7 +94,6 @@ impl BenchHarness {
         )
     }
 
-    /// Type one character into the composer.
     pub fn keystroke(&mut self, character: char) -> bool {
         self.app
             .handle_terminal_event(Event::Key(KeyEvent::new(
@@ -119,21 +103,17 @@ impl BenchHarness {
             .redraws()
     }
 
-    /// Build and diff one frame, returning the terminal bytes it would emit.
     pub fn draw(&mut self) -> Vec<u8> {
         self.renderer
             .draw(&mut self.app, self.size)
             .expect("in-memory frame rendering cannot fail")
     }
 
-    /// Draw every row regardless of the previous frame, as after a resize.
     pub fn draw_full(&mut self) -> Vec<u8> {
         self.renderer.invalidate();
         self.draw()
     }
 
-    /// Install any finished off-tick highlight results, as the event loop
-    /// would between frames. Returns how many were applied.
     pub fn apply_finished_highlights(&mut self) -> usize {
         let mut applied = 0;
         while let Some(result) = self.renderer.highlighter.try_next() {
@@ -144,28 +124,22 @@ impl BenchHarness {
         applied
     }
 
-    /// Force the session sidebar on regardless of width.
     pub fn show_sidebar(&mut self) {
         self.app.layout.rail = crate::view::PanePref::Shown;
     }
 
-    /// Force the session sidebar off regardless of width.
     pub fn hide_sidebar(&mut self) {
         self.app.layout.rail = crate::view::PanePref::Hidden;
     }
 
-    /// Force the inspector pane on regardless of width.
     pub fn show_inspector(&mut self) {
         self.app.layout.inspector = crate::view::PanePref::Shown;
     }
 
-    /// Force the inspector pane off regardless of width.
     pub fn hide_inspector(&mut self) {
         self.app.layout.inspector = crate::view::PanePref::Hidden;
     }
 
-    /// Load `messages` completed assistant messages into session `index`
-    /// through an included body, as the client's pre-warm does.
     pub fn warm_session(&mut self, index: u8, messages: u8) {
         let body = SessionSnapshot {
             approval_previews: Vec::new(),
@@ -192,9 +166,6 @@ impl BenchHarness {
             }));
     }
 
-    /// Draw until every scheduled highlight has landed, as the event loop
-    /// does between frames. Steady-state samples should reflect the
-    /// highlighted cache, not a stream of upgrade frames.
     pub fn settle_highlights(&mut self) {
         loop {
             let applied = self.apply_finished_highlights();
@@ -211,7 +182,6 @@ impl BenchHarness {
         }
     }
 
-    /// Whether highlight jobs are still running.
     pub fn highlights_pending(&self) -> bool {
         self.renderer.highlighter.in_flight() > 0
     }
@@ -262,17 +232,11 @@ fn assistant_message(session_id: SessionId, index: u8, output: &str) -> MessageS
 }
 
 impl BenchHarness {
-    /// A workspace with `sessions` root sessions listed in the sidebar; only
-    /// the first is warm. Sessions beyond 255 are not needed: the sidebar
-    /// cost is per visible row and the store cost is per session.
     #[must_use]
     pub fn with_sessions(size: (u16, u16), sessions: u8) -> Self {
         Self::new(size, sessions, 8)
     }
 
-    /// Load `count` completed tool calls into the focused session's most
-    /// recent run: a mix of reads, edits, and shell commands with results,
-    /// as an agent's working turn looks.
     pub fn add_tool_calls(&mut self, count: u8) {
         let run_id = run_id(0);
         for index in 0..count {
@@ -307,8 +271,6 @@ impl BenchHarness {
         }
     }
 
-    /// Open the session picker, then dismiss it. Measures overlay open and
-    /// close including any cache work they trigger.
     pub fn open_and_close_session_picker(&mut self) {
         self.app.execute(crate::commands::Command::OpenSessions);
         black_box_draw(self);
@@ -317,18 +279,15 @@ impl BenchHarness {
         black_box_draw(self);
     }
 
-    /// Resize the terminal by `delta` columns and draw the full frame.
     pub fn resize(&mut self, delta: i16) -> Vec<u8> {
         self.size.0 = self.size.0.saturating_add_signed(delta).max(40);
         self.draw_full()
     }
 
-    /// Fold quiet finished tool blocks to one row.
     pub fn fold_tools(&mut self) {
         self.app.tool_detail = crate::app::ToolDetail::Folded;
     }
 
-    /// Expand every tool call's body, as a user reviewing a whole turn would.
     pub fn expand_every_tool(&mut self) {
         let ids: Vec<_> = self
             .app
@@ -346,11 +305,6 @@ fn black_box_draw(harness: &mut BenchHarness) {
 }
 
 impl BenchHarness {
-    /// The first minute of a real session, as events: the user's prompt is
-    /// accepted, the run starts, the model reads a file, runs the tests, and
-    /// is mid-way through an edit while streaming its explanation. Session 0
-    /// must be empty. Returns the streaming message id so callers can keep
-    /// appending.
     pub fn golden_path(&mut self) -> MessageId {
         let session = session_id(0);
         let run_id = run_id(0);
@@ -464,8 +418,6 @@ impl BenchHarness {
 }
 
 impl BenchHarness {
-    /// Scroll the transcript by one wheel notch toward older rows, as the
-    /// mouse would. Returns whether the viewport moved.
     pub fn wheel_up(&mut self) -> bool {
         self.app
             .handle_terminal_event(Event::Mouse(crossterm::event::MouseEvent {
@@ -477,7 +429,6 @@ impl BenchHarness {
             .redraws()
     }
 
-    /// Scroll back toward the live tail by one notch.
     pub fn wheel_down(&mut self) -> bool {
         self.app
             .handle_terminal_event(Event::Mouse(crossterm::event::MouseEvent {
@@ -536,9 +487,6 @@ mod tests {
     }
 }
 
-/// Markdown covering every block and inline element the transcript lays
-/// out. Kept in one place so the golden, the gallery, and the QA fixture
-/// all show the same text.
 pub const MARKDOWN_GALLERY: &str = "\
 First paragraph of prose.
 
@@ -586,40 +534,21 @@ fn main() {
 Tail paragraph.
 ";
 
-/// The sizes every golden frame is recorded at: a small laptop window, a
-/// comfortable editor split, and three full-screen tiers up to a 48-inch
-/// display. Widths straddle the responsive breakpoints the layout plan names.
 pub const GOLDEN_SIZES: &[(u16, u16)] = &[(80, 24), (120, 40), (200, 60), (320, 90), (480, 120)];
 
-/// One deterministic transcript state for review frames. Each scene is built
-/// from protocol events only, so the golden pins what a user would see for
-/// the same server output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scene {
     GoalForm,
     GoalReplace,
-    /// A durable goal waiting for renewed check consent, with progress and budgets.
     Goal,
-    /// Explicit scoped consent for a frozen goal check command.
     GoalCheck,
-    /// Every markdown element, as a completed message.
     MarkdownGallery,
-    /// The first minute of a real session: prompt, reads, a failing test,
-    /// an edit in flight, and streaming prose.
     GoldenPath,
-    /// A finished turn of tool calls with every body expanded.
     ToolsExpanded,
-    /// A finished turn of tool calls folded to summary rows.
     ToolsFolded,
-    /// An `edit_file` call held for approval with its diff preview.
     Approval,
-    /// A completed reasoning block above the run's message.
     Reasoning,
-    /// Steering rows at every lifecycle state.
     Steering,
-    /// Eight sessions across every rail group: an approval, two streaming,
-    /// an unread finish, a child, and quiet idle and done sessions. The rail
-    /// follows the tier, so the Compact frame shows the strip.
     Sessions,
 }
 
@@ -639,7 +568,6 @@ impl Scene {
         Self::Sessions,
     ];
 
-    /// The file stem goldens and gallery frames use for this scene.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -660,14 +588,11 @@ impl Scene {
 }
 
 impl BenchHarness {
-    /// Build `scene` at `size` with the default options: three sessions so the
-    /// sidebar has something to list where the layout shows one.
     #[must_use]
     pub fn scene(scene: Scene, size: (u16, u16)) -> Self {
         Self::scene_with_options(scene, size, TuiOptions::default())
     }
 
-    /// `scene`, with the TUI options (themes, settings) supplied by the caller.
     #[must_use]
     pub fn scene_with_options(scene: Scene, size: (u16, u16), options: TuiOptions) -> Self {
         let mut harness = Self::with_options(size, 3, 0, options);
@@ -767,11 +692,6 @@ impl BenchHarness {
         harness
     }
 
-    /// The current frame as plain rows, one per rendered row, with no styling
-    /// and trailing spaces trimmed. Laid out at the same clamped size `draw`
-    /// uses, so the golden pins what a terminal of `size` receives. Goldens
-    /// compare this; styles are asserted separately so a palette change does
-    /// not move every golden.
     pub fn plain_frame(&mut self) -> Vec<String> {
         let (width, height) = crate::view::render_size(self.size);
         let frame = self.renderer.frame_and_commit(&mut self.app, width, height);
@@ -787,14 +707,10 @@ impl BenchHarness {
             .collect()
     }
 
-    /// The last frame as the exact bytes a terminal would receive for a full
-    /// repaint, for viewing with `cat` in a real terminal.
     pub fn ansi_frame(&mut self) -> Vec<u8> {
         self.draw_full()
     }
 
-    /// Select the theme named `name` from the options, if present. Returns
-    /// whether it was found.
     pub fn select_theme(&mut self, name: &str) -> bool {
         match self.app.themes.iter().position(|theme| theme.name == name) {
             Some(index) => {
@@ -808,13 +724,6 @@ impl BenchHarness {
         }
     }
 
-    /// Seven more sessions beside the focused one so every rail group has
-    /// members: `Deploy helper` (a child of session 0) holds a `shell`
-    /// approval; `Survey callers` streams text and `Write tests` streamed
-    /// text, then started compacting its context; `Refactor`
-    /// finished unseen with spend recorded; `Notes` and `Scratch` are idle;
-    /// `Migrate` finished and was seen. Titles and spend are fixed so the
-    /// frame is the same every run.
     fn many_agents(&mut self) {
         let parent = session_id(0);
         let titled = |index: u8, title: &str, status: SessionStatus, parent_id| {
@@ -844,7 +753,6 @@ impl BenchHarness {
                 },
             );
         }
-        // Session 1 waits on a shell approval under its spawn.
         let mut call_id = [0x50; 16];
         call_id[15] = 0x61;
         self.apply(
@@ -862,7 +770,6 @@ impl BenchHarness {
                 fetch: None,
             },
         );
-        // Sessions 2 and 3 stream prose; the rail shows the tails.
         for (session, text) in [
             (survey, "Found twelve call sites across three crates"),
             (tests, "Adding a regression test for the reconnect path"),
@@ -889,8 +796,6 @@ impl BenchHarness {
             self.apply(index, SessionEvent::AssistantMessageStarted { message });
             self.append(index, message_id, text);
         }
-        // Session 3 then compacts its context: the rail shows that, not the
-        // tail it streamed before.
         self.apply(
             3,
             SessionEvent::RunActivityChanged {
@@ -898,7 +803,6 @@ impl BenchHarness {
                 activity: RunActivity::Compacting,
             },
         );
-        // Session 4 finished while unfocused: one unread finish, with spend.
         let mut finished = refactor;
         finished.status = SessionStatus::Idle;
         finished.active_run_id = None;
@@ -927,8 +831,6 @@ impl BenchHarness {
         );
     }
 
-    /// One completed exchange in session 0: the user's `prompt`, then a
-    /// finished assistant message with `output`.
     fn completed_turn(&mut self, prompt: &str, output: &str) {
         let session = session_id(0);
         let run_id = run_id(0);
@@ -984,8 +886,6 @@ impl BenchHarness {
         );
     }
 
-    /// Hold an `edit_file` call on `path` for approval with `diff` as its
-    /// preview, as the server does before a mutating tool runs.
     fn request_edit_approval(&mut self, path: &str, diff: &str) {
         let session = session_id(0);
         let mut id = [0x50; 16];
@@ -1022,8 +922,6 @@ impl BenchHarness {
         );
     }
 
-    /// A completed turn whose run carried a reasoning summary before the
-    /// assistant message.
     fn reasoned_turn(&mut self, prompt: &str, reasoning: &str, output: &str) {
         let session = session_id(0);
         let run_id = run_id(0);
@@ -1090,8 +988,6 @@ impl BenchHarness {
         );
     }
 
-    /// A running session with one model turn followed by steering messages
-    /// in the pending, applied, and late states.
     fn steering_turn(&mut self) {
         let session = session_id(0);
         let run_id = run_id(0);

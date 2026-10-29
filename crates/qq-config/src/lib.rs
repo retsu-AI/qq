@@ -1,5 +1,3 @@
-//! Layered application configuration loading and validation.
-
 #![forbid(unsafe_code)]
 
 use std::{
@@ -40,26 +38,14 @@ pub use tui::{
     TuiSourceReport,
 };
 
-/// Default per-turn output cap. Clamped to the model's advertised output
-/// limit at runtime, so a smaller model never receives an unrepresentable
-/// request. Raised from 4,096 because coding answers routinely exceed it
-/// and each truncation costs a continuation turn.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16_384;
 pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_MCP_CALL_TIMEOUT_SECONDS: u64 = 60;
 pub const MAX_MCP_CALL_TIMEOUT_SECONDS: u64 = 600;
 pub const DEFAULT_MCP_MAX_CONCURRENT_CALLS: u32 = 4;
 pub const MAX_MCP_MAX_CONCURRENT_CALLS: u32 = 64;
-/// Longest server-side approval wait a configuration may set (24 h). Absent
-/// is no deadline; this bounds what "a deadline" may mean.
 pub const MAX_APPROVAL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 
-/// Every supported environment variable [`LoadRequest::from_process_env`]
-/// reads, in the order it reads them. It also checks
-/// [`REMOVED_ENVIRONMENT_VARIABLES`] and fails when one is set, so a caller
-/// that captures or clears process inputs must cover both lists. Provider
-/// credential variables are not here: they are resolved at request time and
-/// listed by [`provider_credential_variables`].
 pub const ENVIRONMENT_VARIABLES: [&str; 4] = [
     "QQ_CONFIG",
     "QQ_CONFIG_CONTENT",
@@ -67,9 +53,6 @@ pub const ENVIRONMENT_VARIABLES: [&str; 4] = [
     "QQ_ORGANIZATION",
 ];
 
-/// Environment variables of removed features, each with what replaced it.
-/// Setting one is an error naming it, so a deployment that relied on the
-/// feature does not silently run without it.
 pub const REMOVED_ENVIRONMENT_VARIABLES: [(&str, &str); 4] = [
     ("QQ_JEV_CHECKPOINTS", "with Jev"),
     ("QQ_JEV_ROUTING", "with Jev"),
@@ -89,7 +72,6 @@ pub use providers::{
     builtin_providers, provider_credential_variables,
 };
 
-/// All process-dependent inputs captured before a configuration load begins.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct LoadRequest {
     cwd: PathBuf,
@@ -108,14 +90,10 @@ impl LoadRequest {
         }
     }
 
-    /// Captures all supported environment variables without silently dropping
-    /// non-Unicode values. Secret environment variables are intentionally not read.
     pub fn from_process_env(
         cwd: impl Into<PathBuf>,
         max_output_tokens: Option<u32>,
     ) -> Result<Self, ConfigError> {
-        // Every name is taken from `ENVIRONMENT_VARIABLES` by position so the
-        // published list and what is actually read cannot drift apart.
         let [config, config_content, model, organization] = ENVIRONMENT_VARIABLES;
         for (name, removed) in REMOVED_ENVIRONMENT_VARIABLES {
             if env::var_os(name).is_some() {
@@ -154,16 +132,12 @@ impl LoadRequest {
         self
     }
 
-    /// Continue with trusted settings and non-sensitive project settings.
-    /// Untrusted permissions, providers, connectors, and packs stay disabled;
-    /// this neither records trust nor grants authority to project content.
     #[must_use]
     pub fn with_untrusted_project_config_ignored(mut self) -> Self {
         self.ignore_untrusted_project_config = true;
         self
     }
 
-    /// Whether pending project authority is withheld without stopping the load.
     #[must_use]
     pub const fn ignores_untrusted_project_config(&self) -> bool {
         self.ignore_untrusted_project_config
@@ -184,7 +158,6 @@ impl LoadRequest {
         self.explicit_content.is_some()
     }
 
-    /// The inline configuration document, when one was supplied.
     #[must_use]
     pub fn explicit_content(&self) -> Option<&str> {
         self.explicit_content.as_deref()
@@ -289,7 +262,6 @@ impl RuntimeOverrides {
     }
 }
 
-/// Injectable roots for global configuration, trust data, and managed policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigPaths {
     global_dir: PathBuf,
@@ -401,21 +373,10 @@ impl ConfigLoader {
         loader::load(self, request)
     }
 
-    /// Loads the layered configuration for an interactive client, which may
-    /// open without a model and ask for one. Every rule other than the model
-    /// requirement is enforced exactly as in [`Self::load`]; a configured
-    /// model is parsed and policy-checked the same way. Headless paths use
-    /// [`Self::load`] and keep failing fast with `ModelRequired`.
     pub fn load_for_client(&self, request: &LoadRequest) -> Result<ClientSnapshot, ConfigError> {
         loader::load_for_client(self, request)
     }
 
-    /// Validates the layered configuration without requiring a model
-    /// selection. Every other rule (syntax, providers, policy, profiles,
-    /// packs, MCP, trust) is enforced exactly as in [`Self::load`]; a
-    /// document that only lacks `model` validates because the selection is
-    /// checked where it is used, at run time. Returns the snapshot when a
-    /// model is configured so callers can report it.
     pub fn check(&self, request: &LoadRequest) -> Result<Option<ConfigSnapshot>, ConfigError> {
         match loader::load(self, request) {
             Ok(snapshot) => Ok(Some(snapshot)),
@@ -437,10 +398,6 @@ impl ConfigLoader {
         tui::load(self, cwd, defaults, &validate_binding)
     }
 
-    /// Resolve one TUI theme by name from the compiled set, the global
-    /// `themes/` directory, and project `.qq/themes/` directories. The
-    /// default alias `qq` resolves to `ink` when `truecolor` is advertised
-    /// and to `terminal` otherwise; any other name is taken literally.
     pub fn load_theme(
         &self,
         cwd: &Path,
@@ -450,18 +407,15 @@ impl ConfigLoader {
         theme::load(self, cwd, name, truecolor)
     }
 
-    /// Every theme selectable from `cwd`, compiled first then by name.
     pub fn discover_themes(&self, cwd: &Path) -> Result<Vec<ThemeDocument>, ConfigError> {
         theme::discover(self, cwd)
     }
 
-    /// Resolves the durable session database owned by the configured user data directory.
     pub fn session_database_path(&self) -> Result<PathBuf, ConfigError> {
         loader::ensure_data_directory(self.paths.data_dir())?;
         Ok(self.paths.data_dir().join("sessions.sqlite3"))
     }
 
-    /// Grants every currently pending project source digest in one atomic state update.
     pub fn grant_pending_trust(
         &self,
         request: &LoadRequest,
@@ -469,10 +423,6 @@ impl ConfigLoader {
         loader::grant_pending_trust(self, request)
     }
 
-    /// The project sources under the request's directory whose sensitive
-    /// content no trust record covers, root first. Read-only: the same scan
-    /// [`Self::grant_pending_trust`] performs before it writes, so it lists
-    /// exactly what `qq trust` would record.
     pub fn pending_trust(&self, request: &LoadRequest) -> Result<Vec<PendingTrust>, ConfigError> {
         loader::pending_trust(self, request)
     }
@@ -629,27 +579,19 @@ impl Connection {
     }
 }
 
-/// How a configured MCP server is reached.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum McpTransport {
-    /// Spawn `command args...` and speak MCP over its stdio. `env` lists
-    /// environment variables passed through from the server process; the
-    /// child otherwise starts from a cleared environment (plus `PATH` and
-    /// `HOME`).
     Stdio {
         command: String,
         args: Vec<String>,
         env: Vec<String>,
     },
-    /// Streamable-HTTP endpoint; the bearer token is sourced like every
-    /// other secret in the configuration system.
     Http {
         url: String,
         bearer: Option<SecretRef>,
     },
 }
 
-/// One configuration-declared MCP server, merged across layers by name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpServerConfig {
     transport: McpTransport,
@@ -684,14 +626,11 @@ impl McpServerConfig {
         &self.transport
     }
 
-    /// Connect at server startup instead of on first use.
     #[must_use]
     pub const fn eager(&self) -> bool {
         self.eager
     }
 
-    /// Bare tool names allowlisted by configuration; they become
-    /// `mcp__<server>__<tool>` grants in the approval policy.
     #[must_use]
     pub fn allow(&self) -> &[String] {
         &self.allow
@@ -707,9 +646,6 @@ impl McpServerConfig {
         self.max_concurrent_calls
     }
 
-    /// The tool-set digest this server's listing must match (64 lowercase
-    /// hex digits, validated at load); a listing that differs is
-    /// quarantined by `qq-mcp`. `None` leaves the server unpinned.
     #[must_use]
     pub fn pin(&self) -> Option<&str> {
         self.pin.as_deref()
@@ -795,7 +731,6 @@ pub struct ModelPricingTier {
 }
 
 impl ModelMetadata {
-    /// Whether configuration explicitly declares this model, even if discovery omits it.
     #[must_use]
     pub const fn explicitly_configured(&self) -> bool {
         self.explicitly_configured
@@ -821,7 +756,6 @@ impl ModelMetadata {
         self.reasoning
     }
 
-    /// Declared remote model values eligible for automatic effort selection.
     #[must_use]
     pub fn reasoning_efforts(&self) -> &[qq_provider::ReasoningEffort] {
         &self.reasoning_efforts
@@ -870,7 +804,6 @@ impl ModelMetadata {
         }
     }
 
-    /// The effort ladder the provider documents for this model.
     #[must_use]
     pub(crate) fn with_reasoning_efforts(
         mut self,
@@ -883,7 +816,6 @@ impl ModelMetadata {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderKind {
-    /// A built-in HTTP provider, by its table row (ADR-0064).
     Builtin(BuiltinProvider),
     LiteLlm,
     AmazonBedrock,
@@ -892,7 +824,6 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    /// The kind's configuration name, as `qq config` prints it.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -904,7 +835,6 @@ impl ProviderKind {
         }
     }
 
-    /// The built-in provider row this kind names, if it is one.
     #[must_use]
     pub const fn builtin(self) -> Option<BuiltinProvider> {
         match self {
@@ -913,7 +843,6 @@ impl ProviderKind {
         }
     }
 
-    /// How model discovery treats this kind's listing.
     #[must_use]
     pub const fn discovery(self) -> ModelDiscoveryShape {
         match self {
@@ -936,11 +865,6 @@ pub enum UsageType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HttpCredential {
     Configured(ProviderAuth),
-    /// A built-in provider's credential (ADR-0064 §4): an explicit API-key
-    /// reference, else the stored `<id>/<profile>` credential, else the
-    /// row's environment variables. `provider.audience` names who owns the
-    /// credential and so which resolver reads it. The configuration patch
-    /// sets only the fields its provider accepts.
     Builtin {
         provider: BuiltinProvider,
         api_key: Option<SecretRef>,
@@ -1062,8 +986,6 @@ impl ProviderConfig {
         &self.models
     }
 
-    /// Effective context limit, including recognized gateway aliases.
-    /// Explicit per-deployment limits always take precedence.
     #[must_use]
     pub fn model_context_window(&self, model: &str) -> Option<u32> {
         self.models
@@ -1193,8 +1115,6 @@ impl Default for EffectivePolicy {
     }
 }
 
-/// How the runtime steers the model from shell habits toward the bounded
-/// built-ins. Layers may only tighten: `off < hint < strict`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuiltinPreference {
@@ -1210,9 +1130,6 @@ impl EffectivePolicy {
         &self.goal_ceilings
     }
 
-    /// Exact catalog exposure, intersected across layers. Absence preserves
-    /// the existing catalog; an empty list exposes nothing. This grants no
-    /// execution authority.
     #[must_use]
     pub fn exposed_tools(&self) -> Option<&[String]> {
         self.exposed_tools.as_deref()
@@ -1248,27 +1165,21 @@ impl EffectivePolicy {
         self.allow_literal_secrets
     }
 
-    /// How hard the runtime steers shell habits toward built-ins.
     #[must_use]
     pub const fn builtin_preference(&self) -> BuiltinPreference {
         self.builtin_preference
     }
 
-    /// Managed-only: exact tool names refused under every approval mode.
     #[must_use]
     pub fn deny_tools(&self) -> &[String] {
         &self.deny_tools
     }
 
-    /// Managed-only: shell command prefixes refused under every approval
-    /// mode, matched at word granularity.
     #[must_use]
     pub fn deny_shell_prefixes(&self) -> &[String] {
         &self.deny_shell_prefixes
     }
 
-    /// Managed-only: hosts `fetch` refuses under every approval mode. Exact
-    /// names or `*.suffix` wildcards.
     #[must_use]
     pub fn deny_hosts(&self) -> &[String] {
         &self.deny_hosts
@@ -1413,7 +1324,6 @@ pub struct ConfigProvenance {
 }
 
 impl ConfigProvenance {
-    /// Sources of chosen goal defaults and monotonic managed ceilings.
     #[must_use]
     pub const fn goals(&self) -> &BTreeMap<String, SourceIdentity> {
         &self.goals
@@ -1424,13 +1334,11 @@ impl ConfigProvenance {
         self.reasoning_effort.as_ref()
     }
 
-    /// The manifest that declared pack `id`.
     #[must_use]
     pub fn pack(&self, id: &str) -> Option<&SourceIdentity> {
         self.packs.get(id)
     }
 
-    /// The layer (or pack manifest) that declared profile `name`.
     #[must_use]
     pub fn profile(&self, name: &str) -> Option<&SourceIdentity> {
         self.profiles.get(name)
@@ -1508,17 +1416,12 @@ impl PendingTrust {
         &self.digest
     }
 
-    /// The sensitive configuration keys the file declares (`model`,
-    /// `providers`, `mcp`, `profiles`, …), which `qq
-    /// trust`, `qq config sources`, and `qq doctor` print so a user can see
-    /// what trusting it admits.
     #[must_use]
     pub fn sections(&self) -> &[&'static str] {
         &self.sections
     }
 }
 
-/// A fully merged, validated configuration. All fields are read-only to callers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigSnapshot {
     organization: Option<String>,
@@ -1540,11 +1443,6 @@ pub struct ConfigSnapshot {
     sources: ConfigSources,
 }
 
-/// A merged, validated configuration that may lack a model selection. Every
-/// other rule (syntax, providers, policy, profiles, packs, MCP, trust) has
-/// passed; the model, when present, was parsed and policy-checked exactly as
-/// for [`ConfigSnapshot`]. Interactive clients load this so they can open and
-/// ask for a model; headless paths never see it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientSnapshot {
     organization: Option<String>,
@@ -1572,20 +1470,15 @@ impl ClientSnapshot {
         &self.goals
     }
 
-    /// Effective MCP declarations, available for inspection without a model.
     #[must_use]
     pub const fn mcp_servers(&self) -> &BTreeMap<String, McpServerConfig> {
         &self.mcp
     }
-    /// The configured model route, or `None` when the configuration is valid
-    /// apart from lacking one.
     #[must_use]
     pub const fn model(&self) -> Option<&ModelRoute> {
         self.model.as_ref()
     }
 
-    /// The server-side approval wait, or `None` for no deadline. See
-    /// [`ConfigSnapshot::approval_timeout`].
     #[must_use]
     pub const fn approval_timeout(&self) -> Option<std::time::Duration> {
         self.approval_timeout
@@ -1622,52 +1515,32 @@ impl ClientSnapshot {
     }
 }
 
-/// Shared filesystem evidence for one configuration load. Contains paths and
-/// metadata only, never source contents, credentials, or content hashes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConfigSources(Arc<loader::Probes>);
 
 impl ConfigSources {
-    /// Rechecks the locations inspected during loading without reading source
-    /// contents or repeating discovery. Evidence precedes the first probe/read;
-    /// metadata errors are never certified as current. Matching metadata is not
-    /// proof of identical content. Blocking: callers use a blocking context.
     #[must_use]
     pub fn is_current(&self) -> bool {
         self.0.is_current()
     }
 
-    /// Estimated retained heap for bounded caches that keep this evidence.
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
         self.0.estimated_bytes()
     }
 }
 
-/// Longest agent profile name in bytes. Mirrors the protocol's identifier
-/// bound so a configured name is always representable on the wire.
 pub const MAX_PROFILE_NAME_BYTES: usize = 64;
 
-/// Most routes a delegation roster may declare. Bounds the `spawn_agent`
-/// schema and the prompt line that advertises the roster.
 pub const MAX_DELEGATION_ROSTER: usize = 8;
-/// Deepest sub-agent nesting a configuration may request. The runtime's own
-/// ceiling is the same; a larger value is a configuration error. Zero
-/// disables delegation: no run is offered `spawn_agent`.
 pub const MAX_DELEGATION_DEPTH: u16 = 3;
-/// Longest operator note on a roster entry, in bytes.
 pub const MAX_DELEGATION_NOTE_BYTES: usize = 120;
 
-/// The operator's declared role for one delegation route: what kind of task
-/// it suits, not a quality tier QQ inferred.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DelegationRole {
-    /// Cheap and quick: lookups, breadth, mechanical summaries.
     Fast,
-    /// The everyday worker.
     Balanced,
-    /// Hard reasoning; expected to cost the most.
     Strong,
 }
 
@@ -1682,7 +1555,6 @@ impl DelegationRole {
     }
 }
 
-/// One route an agent may delegate to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DelegationEntry {
     route: ModelRoute,
@@ -1707,17 +1579,12 @@ impl DelegationEntry {
         self.note.as_deref()
     }
 
-    /// The operator's explicit effort for children on this route, if any.
     #[must_use]
     pub const fn effort(&self) -> Option<qq_provider::ReasoningEffort> {
         self.effort
     }
 }
 
-/// The validated delegation settings: an ordered roster of routes the agent
-/// may spawn, the role chosen when it names none, and the recursion and
-/// authority bounds. An absent `delegation` section yields the empty roster
-/// (or, as sugar, the legacy `worker_model` as a single `balanced` entry).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DelegationConfig {
     roster: Vec<DelegationEntry>,
@@ -1747,7 +1614,6 @@ impl DelegationConfig {
         self.write_children
     }
 
-    /// The first roster entry declaring `role`, in roster order.
     #[must_use]
     pub fn route_for_role(&self, role: DelegationRole) -> Option<&ModelRoute> {
         self.roster
@@ -1767,18 +1633,11 @@ impl Default for DelegationConfig {
         }
     }
 }
-/// When the root run's final answer is audited by a read-only child before
-/// it is presented as complete.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditMode {
-    /// The default: every user-initiated run is one agent loop. Enable an
-    /// audit explicitly; its benefit on coding tasks is unmeasured (the
-    /// delegation plan's B1 arm) and it costs a second full agent run.
     #[default]
     Off,
-    /// Audit when the run mutated files, ran a non-read shell command, made
-    /// at least twelve tool calls, or spawned a child.
     Heuristic,
     Always,
 }
@@ -1794,10 +1653,8 @@ impl AuditMode {
     }
 }
 
-/// Most revision cycles an audit may send a run through.
 pub const MAX_AUDIT_REVISIONS: u16 = 2;
 
-/// The validated final-answer audit settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuditConfig {
     mode: AuditMode,
@@ -1816,8 +1673,6 @@ impl AuditConfig {
         self.max_revisions
     }
 
-    /// The roster role the auditor runs as; falls back to the spawning model
-    /// when the roster declares no such role.
     #[must_use]
     pub const fn role(&self) -> DelegationRole {
         self.role
@@ -1834,7 +1689,6 @@ impl Default for AuditConfig {
     }
 }
 
-/// Per-session approval policy a profile may preselect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileApprovalMode {
@@ -1844,9 +1698,6 @@ pub enum ProfileApprovalMode {
     Full,
 }
 
-/// One configured agent profile. Every field is optional: an absent value
-/// falls back to the top-level configuration, so a profile only records what
-/// it changes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentProfileConfig {
     model: Option<String>,
@@ -1854,11 +1705,9 @@ pub struct AgentProfileConfig {
     max_output_tokens: Option<u32>,
     approval_mode: Option<ProfileApprovalMode>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
-    /// Set when this profile came from an agent pack rather than `profiles`.
     pack: Option<PackProfileRef>,
 }
 
-/// The pack resources behind a pack-declared profile.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackProfileRef {
     pack: String,
@@ -1911,14 +1760,11 @@ impl AgentProfileConfig {
         self.reasoning_effort
     }
 
-    /// The pack resources this profile carries, when it came from a pack.
     #[must_use]
     pub const fn pack(&self) -> Option<&PackProfileRef> {
         self.pack.as_ref()
     }
 
-    /// The profile's model route, already validated against the configured
-    /// providers and policy.
     #[must_use]
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
@@ -1951,10 +1797,6 @@ impl ConfigSnapshot {
         self.reasoning_effort
     }
 
-    /// How long a held call may wait for a client before the server denies
-    /// it, from `approval_timeout_seconds`. `None` (the default) is no server
-    /// deadline: an interactive hold waits for the client, the run deadline,
-    /// or cancellation. A supervisor that wants a bound sets one.
     #[must_use]
     pub const fn approval_timeout(&self) -> Option<std::time::Duration> {
         self.approval_timeout
@@ -1965,22 +1807,16 @@ impl ConfigSnapshot {
         self.organization.as_deref()
     }
 
-    /// Configured agent profiles by name, excluding the implicit `default`.
-    /// Pack-declared profiles are included beneath configured ones.
     #[must_use]
     pub const fn profiles(&self) -> &BTreeMap<String, AgentProfileConfig> {
         &self.profiles
     }
 
-    /// Every admitted agent pack by id.
     #[must_use]
     pub const fn packs(&self) -> &BTreeMap<String, AgentPack> {
         &self.packs
     }
 
-    /// The named profile, or `None` for a name the configuration does not
-    /// declare. `default` always resolves to an empty profile (top-level
-    /// values apply).
     #[must_use]
     pub fn profile(&self, name: &str) -> Option<AgentProfileConfig> {
         if name == "default" {
@@ -1999,13 +1835,11 @@ impl ConfigSnapshot {
         self.worker_model.as_ref()
     }
 
-    /// The validated delegation roster and bounds.
     #[must_use]
     pub const fn delegation(&self) -> &DelegationConfig {
         &self.delegation
     }
 
-    /// The validated final-answer audit settings.
     #[must_use]
     pub const fn audit(&self) -> &AuditConfig {
         &self.audit
@@ -2021,7 +1855,6 @@ impl ConfigSnapshot {
         &self.providers
     }
 
-    /// Configuration-declared MCP servers by name.
     #[must_use]
     pub const fn mcp_servers(&self) -> &BTreeMap<String, McpServerConfig> {
         &self.mcp
@@ -2042,20 +1875,11 @@ impl ConfigSnapshot {
         &self.provenance
     }
 
-    /// Every filesystem location this load inspected to decide which sources
-    /// exist: candidate files whether present or absent, layer directories,
-    /// VCS-root markers, trust and organization state, and the working
-    /// directory itself. A caller holding this snapshot can detect that a
-    /// reload might differ by re-checking exactly these paths, without
-    /// repeating discovery, parsing, or trust evaluation. The list is in
-    /// probe order and free of duplicates; it says nothing about content.
     #[must_use]
     pub fn probed_paths(&self) -> &[PathBuf] {
         self.sources.0.paths()
     }
 
-    /// Filesystem observations retained for this load. Cloning the handle
-    /// shares immutable evidence independently of the configuration values.
     #[must_use]
     pub const fn sources(&self) -> &ConfigSources {
         &self.sources
@@ -2177,9 +2001,6 @@ pub enum ConfigError {
     RemoteCredentialReferenceForbidden { origin: SourceIdentity },
     #[error("remote configuration cannot declare MCP servers: {origin}")]
     RemoteMcpForbidden { origin: SourceIdentity },
-    /// Project configuration declares sensitive sections that no trust
-    /// record covers. The message names every file so the user knows what
-    /// to review before running `qq trust`.
     #[error("{}", trust_required_message(pending))]
     TrustRequired {
         pending: Vec<PendingTrust>,
@@ -2193,8 +2014,6 @@ pub enum ConfigError {
     DuplicateTrustRecord { path: PathBuf, digest: String },
     #[error("trust state contains an invalid SHA-256 digest: {digest}")]
     InvalidTrustDigest { digest: String },
-    /// No layer selected a model. Carries the global configuration file so
-    /// the message names the exact path for this machine.
     #[error(
         "no model is configured. Choose one with any of:\n  \
          --model PROVIDER/MODEL on the command line\n  \
@@ -2257,8 +2076,6 @@ pub enum ConfigError {
     LegacyIntegrationRequired,
 }
 
-/// Compatibility for the current binary until provider construction consumes
-/// `ConfigSnapshot` and resolves `SecretRef` outside this module.
 pub struct AppConfig {
     pub openai_api_key: String,
     pub model: String,

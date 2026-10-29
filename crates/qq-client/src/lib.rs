@@ -1,12 +1,3 @@
-//! Authenticated HTTP/SSE client for QQ servers: the local loopback instance
-//! or a remote one reached over TLS.
-//!
-//! The crate has two transports selected by cargo feature. `native` (default)
-//! drives `reqwest` on Tokio and ships the interactive `TuiClient` loop and
-//! the durable `observer`. `wasm` drives the browser's `fetch` through the
-//! same `reqwest` surface; the decoder, cursor validation, and `ClientPort`
-//! vocabulary are identical, and the embedding app owns its own loop.
-
 #![forbid(unsafe_code)]
 
 use std::{marker::PhantomData, path::Path, pin::Pin, time::Duration};
@@ -43,9 +34,6 @@ mod time;
 pub use interactive::{InitialSession, TuiClient};
 pub use port::{ClientFailure, ClientPort, ClientRequest, ClientUpdate, ConnectionState};
 
-/// Marker for values that must cross threads on native targets. Browser
-/// WebAssembly is single-threaded and its futures are `!Send`, so the bound
-/// is dropped there without changing any public signature.
 #[cfg(not(target_arch = "wasm32"))]
 pub trait MaybeSend: Send {}
 #[cfg(not(target_arch = "wasm32"))]
@@ -62,8 +50,6 @@ const SSE_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_SSE_LINE_BYTES: usize = MAX_SSE_WIRE_EVENT_BYTES;
 
-/// Authenticated coordinates for the server a client attaches to. A local
-/// `LocalServerConnection` converts losslessly with `into()`.
 pub type Connection = qq_protocol::ServerConnection;
 
 fn fresh_command_id() -> Result<CommandId, ClientError> {
@@ -95,8 +81,6 @@ impl SessionClient {
         })
     }
 
-    /// The tests drive stalled and dripping servers over real sockets, where
-    /// the paused Tokio clock cannot shorten the deadline.
     #[cfg(test)]
     fn with_request_timeout(mut self, request_timeout: Duration) -> Self {
         self.request_timeout = request_timeout;
@@ -124,9 +108,6 @@ impl SessionClient {
         .await
     }
 
-    /// Queues a new run on `session` from structured input. Every command id
-    /// is fresh; callers that need retry idempotency use [`Self::command`]
-    /// with their own id.
     pub async fn submit(
         &self,
         session_id: SessionId,
@@ -147,7 +128,6 @@ impl SessionClient {
         .await
     }
 
-    /// Adds input to an executing run at its next model/tool boundary.
     pub async fn steer(
         &self,
         run_id: RunId,
@@ -164,8 +144,6 @@ impl SessionClient {
         .await
     }
 
-    /// Aborts the run's in-flight provider stream or tool and applies `input`
-    /// at the boundary that creates.
     pub async fn interrupt(
         &self,
         run_id: RunId,
@@ -231,8 +209,6 @@ impl SessionClient {
         .await
     }
 
-    /// The server's versioned capability document. Pass a workspace to
-    /// include its configured agent profiles.
     pub async fn capabilities(
         &self,
         workspace_id: Option<WorkspaceId>,
@@ -245,7 +221,6 @@ impl SessionClient {
         .await
     }
 
-    /// Discover roots on this connection's server, without local path resolution.
     pub async fn workspaces(
         &self,
         request: qq_protocol::WorkspaceCatalogRequest,
@@ -301,9 +276,6 @@ impl SessionClient {
             .await
     }
 
-    /// Asks a daemon or `qq serve` to stop. The server answers before it
-    /// stops, naming itself so the caller can wait for that process to exit.
-    /// A server embedded in another client refuses with `404`.
     pub async fn request_stop(&self) -> Result<qq_protocol::ServerInfo, ClientError> {
         self.post_json(
             qq_protocol::DAEMON_SHUTDOWN_PATH,
@@ -446,11 +418,6 @@ impl SessionClient {
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json")
         .body(body);
-        // One deadline spans the whole exchange. Bounding only `send()` left
-        // the body read open-ended: headers followed by a stalled or dripped
-        // body held the request — and in the TUI its concurrency permit —
-        // indefinitely (harness-scale audit F10). JSON responses are small
-        // and complete; SSE keeps its own header and idle deadlines.
         let exchange = async {
             let response = request.send().await.map_err(|_| ClientError::Unavailable)?;
             let status = response.status().as_u16();
@@ -526,8 +493,6 @@ fn http_client() -> Result<reqwest::Client, ClientError> {
         .map_err(|_| ClientError::Unavailable)
 }
 
-/// The browser owns connection setup, proxies, and redirects; `reqwest`'s
-/// wasm builder exposes none of them and `CONNECT_TIMEOUT` is meaningless.
 #[cfg(target_arch = "wasm32")]
 fn http_client() -> Result<reqwest::Client, ClientError> {
     reqwest::Client::builder()
@@ -535,8 +500,6 @@ fn http_client() -> Result<reqwest::Client, ClientError> {
         .map_err(|_| ClientError::Unavailable)
 }
 
-/// Reads a complete response body of at most `limit` bytes. A transport
-/// failure mid-body is `Unavailable`, distinct from the size cap.
 async fn read_response_bounded(
     response: reqwest::Response,
     limit: usize,
@@ -566,15 +529,7 @@ struct DecodedSse<T> {
     event: T,
 }
 
-/// Frames the `/events` stream into decoded envelopes.
-///
-/// Mirrors the provider crate's framer (duplicated rather than shared: the
-/// client must not depend on `qq-provider`). `feed` scans a chunk for line
-/// ends once and parses lines in place; only a line a chunk boundary splits
-/// is buffered. Line and event bounds are enforced on the bytes as they
-/// arrive, before an oversized event could terminate.
 struct SseDecoder<T> {
-    /// Bytes of a line split by a chunk boundary.
     partial: Vec<u8>,
     data: Vec<u8>,
     id: Option<String>,
@@ -604,7 +559,6 @@ impl<T> SseDecoder<T>
 where
     T: DeserializeOwned,
 {
-    /// Frames every complete event in `bytes`, appending them to `events`.
     fn feed(
         &mut self,
         mut bytes: &[u8],
@@ -667,8 +621,6 @@ where
         Ok(())
     }
 
-    /// The body ended: a final line and event without their terminators
-    /// still count.
     fn finish(mut self) -> Result<Option<DecodedSse<T>>, ClientError> {
         let mut events = Vec::new();
         if !self.partial.is_empty() {
@@ -738,7 +690,6 @@ where
             return Err(ClientError::InvalidCursor);
         }
         self.data.pop();
-        // Parse from the buffer in place and keep its allocation.
         let event = serde_json::from_slice(&self.data).map_err(|_| ClientError::MalformedEvent);
         self.data.clear();
         Ok(Some(DecodedSse {
@@ -748,7 +699,6 @@ where
     }
 }
 
-/// Sanitized HTTP and SSE failures.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ClientError {
     #[error("server is unavailable")]
@@ -971,10 +921,6 @@ mod tests {
         raw_server.await.unwrap();
     }
 
-    /// A raw server that answers one request with `headers`, then drives the
-    /// body through `body`, which receives the socket after the headers are
-    /// flushed. `release` fires when the client has given up so the server
-    /// task can stop.
     async fn raw_server<F, Fut>(
         headers: &'static [u8],
         body: F,
@@ -1016,14 +962,11 @@ mod tests {
         }
     }
 
-    /// F10: headers followed by a body that never arrives must fail at the
-    /// request deadline, not hold the future (and its TUI permit) forever.
     #[tokio::test]
     async fn a_stalled_body_times_out_within_the_request_deadline() {
         let (address, server) = raw_server(
             b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n",
             |socket| async move {
-                // Hold the socket open without writing until the client hangs up.
                 let mut socket = socket;
                 let mut sink = [0_u8; 16];
                 let _ = socket.read(&mut sink).await;
@@ -1041,8 +984,6 @@ mod tests {
         server.abort();
     }
 
-    /// F10: a body dripped slowly under the size cap is a timeout, not a
-    /// size failure, and not an indefinite wait.
     #[tokio::test]
     async fn a_dripping_body_times_out_rather_than_waiting_for_completion() {
         let (address, server) = raw_server(
@@ -1070,9 +1011,6 @@ mod tests {
         server.abort();
     }
 
-    /// Transport failure stays `Unavailable`, distinct from the deadline: a
-    /// server that closes the connection mid-body and one that is not
-    /// listening at all.
     #[tokio::test]
     async fn transport_failures_are_unavailable_not_timeouts() {
         let (address, server) = raw_server(
@@ -1222,8 +1160,6 @@ mod tests {
     }
 }
 
-/// Decoder and cursor tests that hold on every transport. They run under
-/// `cargo test` natively and under `wasm-bindgen-test` on `wasm32`.
 #[cfg(test)]
 mod decode_tests {
     use qq_protocol::StoreId;
@@ -1251,7 +1187,6 @@ mod decode_tests {
         Ok(decoded.into_iter().map(|event| event.event).collect())
     }
 
-    /// Every chunking of the body frames identically to one feed.
     #[test]
     fn framing_is_independent_of_chunk_boundaries() {
         let body: &[u8] = b"\xef\xbb\xbf: heartbeat\r\nid: 7\ndata: {\"type\":\r\ndata: \"started\"}\r\n\r\nretry: 1\ndata: {\"type\":\"completed\"}\n\n";
@@ -1283,7 +1218,6 @@ mod decode_tests {
                 ClientError::InvalidCursor
             );
         }
-        // The last event field wins; a data-less frame has no dispatch.
         assert_eq!(
             decode_fragments(&[
                 b"event: snapshot_required\nevent: session_event\ndata: {\"type\":\"started\"}\n\n"
@@ -1348,7 +1282,6 @@ mod decode_tests {
             ClientError::EventTooLarge
         );
 
-        // The bound applies even when the oversized line never ends.
         let mut decoder = SseDecoder::<TestEvent>::default();
         let big = vec![b'x'; MAX_SSE_WIRE_EVENT_BYTES + 1];
         assert_eq!(

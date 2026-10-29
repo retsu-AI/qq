@@ -1,10 +1,3 @@
-//! AC0 baseline characterization. No real provider, user state, or network.
-//!
-//! AC2 flipped the long-run bound fixtures (empty retries per streak, the
-//! context reservation re-based per window, in-run compactions off the
-//! between-run step budget): they now assert completion and fail on the
-//! pre-AC2 tree.
-
 #![forbid(unsafe_code)]
 
 #[path = "support/soak.rs"]
@@ -56,9 +49,6 @@ async fn goal_enabled_soak_measures_real_notices_across_compaction() {
 
 #[tokio::test]
 async fn separated_empty_truncations_each_recover_with_a_fresh_retry() {
-    // AC2 (c): the cap-raise allowance is per streak of truncated turns, so
-    // two reasoning-only truncations 100 turns apart both recover. Before
-    // AC2 the allowance was run-wide and the second one failed the run.
     let mut script = Script::tools(120, 16, None);
     script.calls_per_turn = [1, 1];
     script.truncate_at = vec![0, 100];
@@ -99,8 +89,6 @@ async fn exhausted_outage_pauses_with_prior_results_durable() {
 
 #[tokio::test]
 async fn an_empty_checkpoint_is_a_missed_report_and_the_run_continues() {
-    // AP3a flipped this AC0.1 oracle: an empty checkpoint used to fail the
-    // run; it is now a missed report and the run finishes its task.
     let mut script = Script::tools(120, 16, None);
     script.empty_checkpoint = true;
     let report = run(script).await;
@@ -126,8 +114,6 @@ async fn bounded_loop_fixture_records_repeated_execution_without_a_guard() {
 #[tokio::test]
 #[ignore = "AC0 500-turn soak; QQ_SOAK_TURNS=2000 selects full mode"]
 async fn scripted_soak_completes_across_context_windows() {
-    // AC2 (a): the 4 MiB context reservation re-bases at each in-run
-    // compaction, so a run whose lifetime output far exceeds it completes.
     let turns = match std::env::var("QQ_SOAK_TURNS") {
         Ok(value) => value.parse::<usize>().expect("QQ_SOAK_TURNS is an integer"),
         Err(std::env::VarError::NotPresent) => 500,
@@ -152,8 +138,6 @@ async fn scripted_soak_completes_across_context_windows() {
 #[tokio::test]
 #[ignore = "AC0 isolate the in-run compaction count independently of 4 MiB"]
 async fn forty_in_run_compactions_complete_off_the_between_run_budget() {
-    // AC2 (d): in-run compactions no longer draw on the between-run
-    // `MAX_COMPACTION_STEPS` (32); before AC2 the 33rd was refused.
     let mut script = Script::tools(1_000, 1_024, Some(12 * 1_024));
     script.calls_per_turn = [1, 1];
     let report = run(script).await;
@@ -167,10 +151,6 @@ async fn forty_in_run_compactions_complete_off_the_between_run_budget() {
 #[tokio::test]
 #[ignore = "AC2 long run: 40 MiB of streamed text across windows"]
 async fn forty_mib_of_streamed_text_across_windows_completes() {
-    // AC2 (b): the 16 MiB streamed-text bound is per window. 900 turns of
-    // 48 KiB is 42 MiB of text; the 128k-token window compacts every few
-    // turns, so no window approaches 16 MiB. Before AC2 the run failed at
-    // 16 MiB of lifetime text.
     let mut script = Script::tools(900, 64, Some(128 * 1_024));
     script.calls_per_turn = [1, 1];
     script.text_bytes = 48 * 1_024;
@@ -411,8 +391,6 @@ async fn measured_truncated_summary_usage_survives_a_later_fault() {
 
 #[tokio::test]
 async fn a_summarizer_outage_that_clears_within_the_retry_allowance_continues_the_run() {
-    // ADR-0048 § 2: the summarizer is under turn recovery. Three 529s, then
-    // a summary: the step is retried, commits, and the run completes.
     let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
     script.summary_faults = 3;
     let report = run(script).await;
@@ -422,9 +400,6 @@ async fn a_summarizer_outage_that_clears_within_the_retry_allowance_continues_th
     assert_eq!(report.work_turns, 24);
     assert_eq!(report.duplicate_sequences, 0);
     assert_eq!(report.durable_calls, report.executed_calls);
-    // Every scripted fault was served and retried; each attempt is its own
-    // compaction run, three failed and the rest committed, all settled
-    // while the prompt run kept going.
     assert_eq!(report.summarizer_faults, 3);
     assert_eq!(report.turn_retries, 3);
     assert_eq!(report.step_runs_started, 3 + report.compactions);
@@ -433,8 +408,6 @@ async fn a_summarizer_outage_that_clears_within_the_retry_allowance_continues_th
 
 #[tokio::test]
 async fn a_summarizer_outage_past_the_retry_allowance_pauses_with_prior_turns_durable() {
-    // Six 529s spend the first attempt and all `MAX_TURN_RETRIES` retries:
-    // the run pauses, never fails, and every turn before it is durable.
     let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
     script.summary_faults = 6;
     let report = run(script).await;
@@ -457,8 +430,6 @@ async fn a_summarizer_outage_past_the_retry_allowance_pauses_with_prior_turns_du
 
 #[tokio::test]
 async fn a_summarizer_the_provider_rejects_fails_closed_without_retrying() {
-    // A 400 is the request's fault, not the provider's moment: no retry,
-    // and the run fails closed exactly as before AC3.
     let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
     script.summary_faults = 6;
     script.summary_fault_status = 400;
@@ -672,8 +643,6 @@ async fn original_deadline_stops_a_summarizer_backoff_without_retrying() {
 
 #[tokio::test]
 async fn cancelling_during_a_summarizer_backoff_cancels_the_run_and_starts_no_new_step() {
-    // The failed attempt's compaction run has settled before the backoff,
-    // so a cancel during the sleep leaves nothing running and no retry.
     let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
     script.summary_faults = 100;
     script.retry_delay = Duration::from_secs(600);
@@ -770,8 +739,6 @@ impl WorkerGuard {
             match self.child.try_wait() {
                 Ok(Some(status)) => {
                     self.reaped = true;
-                    // A failed kill can mean the worker exited concurrently;
-                    // reaping its status is authoritative in that race.
                     return Ok(status);
                 }
                 Ok(None) => {}
@@ -925,8 +892,6 @@ async fn process_kill_worker() {
             break;
         }
     }
-    // The host syncs its side-effect journal before waiting forever. The
-    // requested event above is committed before this externally visible barrier.
     while tokio::fs::metadata(directory.join("effects.synced"))
         .await
         .is_err()
@@ -1084,8 +1049,6 @@ async fn pending_summary_kill_worker() {
     while fixture.observed.lock().unwrap().summary_requests < 2 {
         tokio::task::yield_now().await;
     }
-    // The provider is polled only after both the prefix receipt and next
-    // pending-unknown marker commit. The parent kills at this durable barrier.
     tokio::fs::write(directory.join("ready"), b"ready")
         .await
         .unwrap();

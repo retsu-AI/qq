@@ -1,4 +1,3 @@
-//! AC4 runtime acceptance: admission decisions use actual ordered results.
 use super::*;
 use crate::runtime::STALL_REPORT_CALLS;
 
@@ -955,8 +954,6 @@ async fn ac4_runtime_1500_changed_results_for_one_call_remain_novel() {
     );
 }
 
-/// Plan D: the second identical argument error carries a minimal valid call;
-/// the first does not.
 #[tokio::test]
 async fn a_repeated_argument_error_shows_a_minimal_valid_call() {
     let directory = tempfile::tempdir().unwrap();
@@ -1002,13 +999,9 @@ async fn a_repeated_argument_error_shows_a_minimal_valid_call() {
     assert!(!results[0].contains(hint), "{}", results[0]);
     assert!(results[1].starts_with(results[0]), "{}", results[1]);
     assert!(results[1].ends_with(hint), "{}", results[1]);
-    // Refusals never enter the loop guard's executed streak, so the third
-    // is answered the same way rather than refused.
     assert_eq!(results[2], results[1]);
 }
 
-/// An `edits` string or lone object is stored as the list it decodes to, so
-/// approval previews, clients and compaction read the usual array shape.
 #[tokio::test]
 async fn edit_file_arguments_are_stored_with_edits_as_a_list() {
     let directory = tempfile::tempdir().unwrap();
@@ -1048,7 +1041,6 @@ async fn edit_file_arguments_are_stored_with_edits_as_a_list() {
         stored_arguments,
         serde_json::json!({"edits":[{"path":"a.txt","old":"alpha","new":"beta"}]})
     );
-    // The approval preview reads the stored arguments.
     let preview = crate::approval::edit_preview("edit_file", &stored.arguments).unwrap();
     assert_eq!(preview.path, "a.txt");
     assert_eq!(

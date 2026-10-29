@@ -195,9 +195,6 @@ pub(crate) async fn prepare_workspace(
     .map_err(|source| WorkspacePreparationError::Stopped { source })?
 }
 
-/// Loads one explicitly invoked command or skill document from an already
-/// opened workspace. This is the only filesystem work a plan-backed run does
-/// before its first provider request, and only when the prompt named guidance.
 pub(crate) async fn prepare_guidance(
     workspace: Workspace,
     packs: Arc<[Workspace]>,
@@ -227,9 +224,6 @@ pub(crate) async fn prepare_guidance(
     .map_err(|source| WorkspacePreparationError::Stopped { source })?
 }
 
-/// Loads one disclosed document the model asked for by name through
-/// `load_skill`. Same bounds as an explicit invocation; the result is a tool
-/// error rather than a run failure when the name is unknown or undisclosed.
 pub(crate) async fn load_disclosed_skill(
     workspace: Workspace,
     packs: Arc<[Workspace]>,

@@ -1,12 +1,4 @@
 #!/bin/sh
-# Installs a prebuilt qq release binary.
-#
-#   curl -fsSL https://raw.githubusercontent.com/retsu-AI/qq/main/install.sh | sh
-#
-# Downloads the archive for this machine from the GitHub release, verifies it
-# against the release's SHA256SUMS, and installs `qq` into ~/.local/bin (or
-# QQ_INSTALL_DIR / --dir). Never uses sudo. Windows: download the .zip from
-# https://github.com/retsu-AI/qq/releases instead.
 set -eu
 
 REPO="retsu-AI/qq"
@@ -67,8 +59,6 @@ esac
 target="$arch_part-$os_part"
 
 if [ -z "$VERSION" ]; then
-  # `tag_name` from the API; fall back to the /releases/latest redirect when
-  # the API is rate-limited (60 unauthenticated requests per hour per IP).
   VERSION="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
     | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)" || true
   if [ -z "$VERSION" ]; then
@@ -192,7 +182,6 @@ if [ -n "$legacy_sha" ]; then
 fi
 retain_binary "$binary" "$binary_sha"
 ln -s ".qq-versions/qq-$binary_sha" "$install_stage/selected"
-# Existing selectors have been restricted to file targets, never directories.
 mv -f "$install_stage/selected" "$INSTALL_DIR/qq" || fail "cannot select $INSTALL_DIR/qq"
 
 echo "installed qq $VERSION to $INSTALL_DIR/qq"

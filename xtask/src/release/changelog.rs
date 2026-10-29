@@ -1,7 +1,3 @@
-//! `CHANGELOG.md` generation for `cargo xtask release`: Conventional Commit
-//! subjects since the newest `v*` tag, grouped into a dated section that is
-//! prepended to the file.
-
 use std::{
     path::Path,
     process::{Command as ProcessCommand, Stdio},
@@ -44,10 +40,6 @@ struct Entry {
     summary: String,
 }
 
-/// Parses `type(scope)!: summary (#N)`. A subject outside the grammar is
-/// still listed, under Other, verbatim: a release must not silently lose a
-/// commit because its message was misspelled. `chore(release):` bumps are the
-/// one subject dropped, because they are the release itself.
 fn parse_subject(subject: &str) -> Option<Entry> {
     let subject = subject.trim();
     if subject.is_empty() {
@@ -101,8 +93,6 @@ fn parse_subject(subject: &str) -> Option<Entry> {
     })
 }
 
-/// The `## X.Y.Z — date` section for `subjects`, newest commit first within
-/// each group, empty groups omitted.
 pub(super) fn render_section(version: Version, date: &str, subjects: &[String]) -> String {
     let entries: Vec<Entry> = subjects
         .iter()
@@ -131,8 +121,6 @@ pub(super) fn render_section(version: Version, date: &str, subjects: &[String]) 
     out
 }
 
-/// `existing` with `section` inserted above the first release heading, or
-/// after the header when the file has no releases yet, or a fresh file.
 pub(super) fn prepend_section(existing: Option<&str>, section: &str) -> String {
     let Some(existing) = existing else {
         return format!("{HEADER}\n{section}");
@@ -153,8 +141,6 @@ pub(super) fn prepend_section(existing: Option<&str>, section: &str) -> String {
     format!("{existing}{separator}{section}")
 }
 
-/// Commit subjects after the newest `v*` tag (every commit when there is
-/// none), newest first, merges excluded.
 pub(super) fn subjects_since_last_tag(root: &Path) -> Result<Vec<String>, ReleaseError> {
     let tags = git_stdout(root, &["tag", "--list", "v*"])?;
     let newest = tags
@@ -279,7 +265,6 @@ mod tests {
         }
         assert_eq!(parse_subject("chore(release): v9.9.9"), None);
         assert_eq!(parse_subject(""), None);
-        // A release-scoped commit of another type is still news.
         assert!(parse_subject("fix(release): tag the right commit").is_some());
     }
 

@@ -193,12 +193,10 @@ def main():
                 finally:
                     if child is not None:
                         try:
-                            # A terminal leader can leave descendants after closing stdout.
-                            # Every sample owns a fresh process group, including failed metrics.
                             try:
                                 os.killpg(child.pid, signal.SIGKILL)
                             except ProcessLookupError:
-                                pass  # The owned process group has already exited.
+                                pass
                             child.wait(timeout=5)
                         except (OSError, subprocess.TimeoutExpired) as error:
                             failure = f"{failure + '; ' if failure else ''}benchmark cleanup: {error}"

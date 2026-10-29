@@ -1,5 +1,3 @@
-//! Secret storage backends: the OS keyring and the Windows user-protected file.
-
 #[cfg(windows)]
 use std::{fs, io, path::PathBuf};
 

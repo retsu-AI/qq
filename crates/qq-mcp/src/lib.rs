@@ -1,22 +1,3 @@
-//! Shared MCP client management for configuration-declared servers.
-//!
-//! One [`McpManager`] holds one client connection per configured MCP server
-//! for the whole process. Connections start lazily on first use (or eagerly
-//! at construction when a server sets its `eager` flag), tool schemas are
-//! fetched once and cached (refreshed on `list_changed` notifications), and
-//! each server carries a small concurrency bound so a slow server
-//! backpressures instead of queueing unboundedly. Calls to distinct servers
-//! proceed in parallel.
-//!
-//! Every failure — connect error, timeout, cancellation, server error — is
-//! reported as an [`McpCallOutcome`] with `is_error` set, never as a crash of
-//! the shared client: callers turn outcomes into tool errors for the model.
-//!
-//! Each listing is reduced to an [`McpToolSetDigest`]. A server declared with
-//! a `pin` whose live listing digests differently is quarantined (ADR-0046):
-//! its tools leave the catalog and every call on it fails closed with
-//! [`McpCallFailure::Quarantined`] until the listing matches the pin again.
-
 #![forbid(unsafe_code)]
 
 use std::{
@@ -48,36 +29,19 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
 
-/// Namespace prefix carried by every declared MCP tool: `mcp__<server>__<tool>`.
 pub const MCP_TOOL_PREFIX: &str = "mcp__";
-/// Default per-call deadline covering queueing, (re)connection, and the call.
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(60);
-/// Default per-server bound on concurrently executing calls.
 pub const DEFAULT_MAX_CONCURRENT_CALLS: usize = 4;
 
 const MAX_SERVER_NAME_BYTES: usize = 64;
-/// Deadline for establishing a connection and completing MCP initialization.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-/// Deadline for one `tools/list` fetch on an established connection.
 const LIST_TOOLS_TIMEOUT: Duration = Duration::from_secs(20);
-/// A failed connection is not retried until this much time has passed; a use
-/// arriving earlier waits out the remainder, then retries.
 const RECONNECT_BACKOFF: Duration = Duration::from_millis(250);
-/// How often an in-flight call re-checks its cancellation flag.
-/// A future that resolves when the caller's run is cancelled. The manager
-/// awaits it alongside the call so cancellation is observed as soon as it
-/// happens; the caller (`qq-core`'s host adapter) builds it from its own
-/// token, which keeps this crate free of that type.
 pub type CancellationSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
-/// Provider APIs bound tool names; namespaced names above this are skipped.
 const MAX_NAMESPACED_NAME_BYTES: usize = 128;
 const MAX_LIST_PAGES: usize = 32;
 const MAX_LIST_TOOLS: usize = 512;
 const MAX_LIST_BYTES: usize = 1024 * 1024;
-/// A `Write` sink that counts encoded descriptor bytes against a budget and
-/// fails the write once it is spent, so a listing is measured without ever
-/// buffering a second copy of a descriptor. The `rmcp` transports already
-/// hold each decoded page; this keeps the 1 MiB check from doubling that.
 struct ByteBudget {
     remaining: usize,
 }
@@ -98,25 +62,16 @@ impl std::io::Write for ByteBudget {
     }
 }
 
-/// Environment variables always passed through to stdio server processes so
-/// the configured command resolves and behaves like a normal child process.
 const DEFAULT_ENV_PASSTHROUGH: [&str; 2] = ["PATH", "HOME"];
 
-/// One configured MCP server.
 #[derive(Debug, Clone)]
 pub struct McpServerSettings {
-    /// Unique server name; becomes the middle segment of `mcp__<name>__<tool>`.
     pub name: String,
     pub transport: McpTransportSettings,
-    /// Connect at manager construction instead of on first use.
     pub eager: bool,
-    /// Bare (un-namespaced) tool names granted by configuration.
     pub allow: Vec<String>,
     pub call_timeout: Duration,
     pub max_concurrent_calls: usize,
-    /// The tool-set digest the live listing must reproduce. `None` accepts
-    /// whatever the server declares; `Some` quarantines the server while its
-    /// listing digests differently.
     pub pin: Option<McpToolSetDigest>,
 }
 
@@ -135,19 +90,12 @@ impl McpServerSettings {
     }
 }
 
-/// Domain separator for [`McpToolSetDigest`]; bump with any change to what
-/// the digest covers so old pins fail loudly instead of matching by accident.
 const TOOL_SET_DIGEST_DOMAIN: &[u8] = b"qq-mcp-tool-set-v2\0";
 
-/// SHA-256 over one server's normalized tool set: the namespaced tool name
-/// (which carries the server name), description, compact sorted-key input
-/// schema, and hints of every listed tool, in name order. Listing order does
-/// not matter; any change to a name, description, schema, or hint does.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct McpToolSetDigest([u8; 32]);
 
 impl McpToolSetDigest {
-    /// The digest of `tools` as one server listed them.
     #[must_use]
     pub fn of_tools(tools: &[McpTool]) -> Self {
         let mut sorted = tools.iter().collect::<Vec<_>>();
@@ -188,7 +136,6 @@ impl fmt::Debug for McpToolSetDigest {
     }
 }
 
-/// The text of a pin was not a tool-set digest.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 #[error("an MCP tool-set digest is 64 lowercase hex digits")]
 pub struct McpToolSetDigestParseError;
@@ -214,49 +161,34 @@ impl FromStr for McpToolSetDigest {
     }
 }
 
-/// How a configured server is reached.
 #[derive(Debug, Clone)]
 pub enum McpTransportSettings {
-    /// Spawn `command args...` and speak MCP over its stdio. The child starts
-    /// from a cleared environment plus `PATH`/`HOME` and the listed
-    /// passthrough variables copied from this process.
     Stdio {
         command: String,
         args: Vec<String>,
         env: Vec<String>,
     },
-    /// Streamable-HTTP endpoint with an optional bearer token.
-    Http { url: String, bearer: McpBearer },
+    Http {
+        url: String,
+        bearer: McpBearer,
+    },
 }
 
-/// The bearer an HTTP server is reached with. The composition root resolves
-/// configured secrets; this crate only carries the outcome.
 #[derive(Debug, Clone)]
 pub enum McpBearer {
     None,
     Token(String),
-    /// The declared credential could not be resolved on this machine; the
-    /// server stays declared (grants, tool names) but never connects. The
-    /// message is shown to the user as the unavailability reason.
-    Unavailable {
-        reason: String,
-    },
+    Unavailable { reason: String },
 }
 
-/// The outcome of one MCP tool call; failures are `is_error` outcomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpCallOutcome {
-    /// Complete observed response identity before preview conversion; absent on host failures.
     pub result_digest: Option<[u8; 32]>,
     pub content: String,
     pub is_error: bool,
-    /// Which failure class produced an `is_error` outcome that the server
-    /// did not itself report. `None` for successes and for server-reported
-    /// tool errors.
     pub failure: Option<McpCallFailure>,
 }
 
-/// Why a call failed before or instead of the server answering it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpCallFailure {
     Timeout,
@@ -266,8 +198,6 @@ pub enum McpCallFailure {
     InvalidResult,
     UnknownTool,
     ShutDown,
-    /// The server is pinned and its live listing digests differently; no
-    /// tool on it runs until the pin matches again.
     Quarantined,
 }
 
@@ -282,7 +212,6 @@ impl McpCallOutcome {
     }
 }
 
-/// Advisory annotations one server attached to a tool. Hints only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct McpToolHints {
     pub read_only: bool,
@@ -291,21 +220,12 @@ pub struct McpToolHints {
     pub open_world: bool,
 }
 
-/// One namespaced declaration with its server's hints.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpTool {
     pub spec: ToolSpec,
     pub hints: McpToolHints,
 }
 
-/// Every configured server's declarations at one instant. `generation`
-/// changes whenever any server's cached tool set changes (connect, loss,
-/// `list_changed`), so a holder can ask whether its snapshot is stale
-/// without refetching. `servers` carries the current digest of every server
-/// that answered, pinned or not, so an operator can copy it into a `pin`.
-/// `unavailable` names servers that contributed nothing because they could
-/// not be reached, each with the reason; `quarantined` names pinned servers
-/// whose listing did not match, whose tools are likewise absent from `tools`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpCatalog {
     pub generation: u64,
@@ -315,15 +235,12 @@ pub struct McpCatalog {
     pub quarantined: Vec<McpQuarantine>,
 }
 
-/// One server that answered `tools/list`, and what its listing digests to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerListing {
     pub server: String,
     pub digest: McpToolSetDigest,
 }
 
-/// A fresh, non-executing listing inspection. Descriptions and schemas are
-/// untrusted input; exposing a digest does not approve it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpInspection {
     pub server: String,
@@ -332,20 +249,16 @@ pub struct McpInspection {
     pub tools: Vec<McpTool>,
 }
 
-/// One server that contributed no tools to a catalog, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpUnavailable {
     pub server: String,
     pub reason: String,
 }
 
-/// One pinned server whose live listing does not reproduce its pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpQuarantine {
     pub server: String,
-    /// The configured pin.
     pub expected: McpToolSetDigest,
-    /// What the server's current listing digests to.
     pub actual: McpToolSetDigest,
 }
 
@@ -369,9 +282,6 @@ pub enum McpConfigError {
     EmptyAllowedTool(String),
 }
 
-/// Returns whether `name` keeps the `mcp__<server>__<tool>` grammar
-/// unambiguous: non-empty ASCII letters, digits, `-`, or `_`, without any
-/// `__` sequence.
 #[must_use]
 pub fn valid_server_name(name: &str) -> bool {
     !name.is_empty()
@@ -382,9 +292,6 @@ pub fn valid_server_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-/// Client handler shared by every connection: it records `list_changed`
-/// notifications so the next schema use refreshes the cache, and advances
-/// the catalog generation so plans compiled from the old listing recompile.
 #[derive(Clone)]
 struct QqClientHandler {
     tools_dirty: Arc<AtomicBool>,
@@ -420,9 +327,6 @@ struct ServerHandle {
     permits: Arc<Semaphore>,
     state: Mutex<ServerState>,
     tools_dirty: Arc<AtomicBool>,
-    /// Advances whenever the cached tool set changes or a `list_changed`
-    /// notification arrives. Read without the state lock by
-    /// [`McpManager::catalog_is_current`].
     catalog_generation: Arc<AtomicU64>,
     dispatch_gate: Arc<std::sync::Mutex<()>>,
     shut_down: AtomicBool,
@@ -437,8 +341,6 @@ struct ServerState {
     last_failure: Option<Instant>,
 }
 
-/// One server's namespaced declarations and their digest, cached together
-/// so a pin is re-checked against exactly the tools that were listed.
 struct Listing {
     tools: Vec<McpTool>,
     digest: McpToolSetDigest,
@@ -446,11 +348,8 @@ struct Listing {
     generation: u64,
 }
 
-/// Why a server's listing is not usable right now.
 enum ListingFault {
-    /// The server could not be reached or did not answer `tools/list`.
     Unavailable(String),
-    /// The server answered, but its listing does not reproduce the pin.
     Quarantined {
         expected: McpToolSetDigest,
         actual: McpToolSetDigest,
@@ -477,10 +376,6 @@ impl ServerHandle {
         self.catalog_generation.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Returns the shared client, connecting first when necessary. A recent
-    /// failure waits out the remaining backoff before one reconnect attempt.
-    /// The state lock is held across the attempt so concurrent uses cannot
-    /// stampede the server with parallel handshakes.
     async fn client(&self) -> Result<Arc<Client>, String> {
         let mut state = self.state.lock().await;
         self.client_locked(&mut state).await
@@ -572,10 +467,6 @@ impl ServerHandle {
                 match bearer {
                     McpBearer::None => {}
                     McpBearer::Token(token) => config = config.auth_header(token.clone()),
-                    // Nothing to send: the connection is never attempted and
-                    // the reason is the failure text callers see. The
-                    // resulting `last_failure` only delays the next probe by
-                    // the ordinary backoff.
                     McpBearer::Unavailable { reason } => return Err(reason.clone()),
                 }
                 let transport =
@@ -590,9 +481,6 @@ impl ServerHandle {
         }
     }
 
-    /// Marks the shared client dead so the next use reconnects after backoff.
-    /// Only resets when `client` is still the current one, so a call failing
-    /// on a stale client cannot tear down a newer healthy connection.
     async fn invalidate(&self, client: &Arc<Client>) {
         let mut state = self.state.lock().await;
         if state
@@ -608,12 +496,6 @@ impl ServerHandle {
         }
     }
 
-    /// The cached listing checked against the pin: connects and fetches on
-    /// first use, refetches after a `list_changed` notification, and
-    /// compares the digest on every use (a `Copy` compare; the digest is
-    /// computed once per fetch). `Unavailable` names the reason and the next
-    /// use retries; `Quarantined` keeps the listing cached so the fault is
-    /// reported, not refetched, until the server or the pin changes.
     async fn listing(&self) -> Result<Arc<Listing>, ListingFault> {
         let listing = self.fetch_listing().await?;
         match self.settings.pin {
@@ -654,8 +536,6 @@ impl ServerHandle {
                             return Err("tool listing exceeds the 512-tool limit".to_owned());
                         }
                         for tool in &page.tools {
-                            // Measured in place: the decoded descriptor is
-                            // already resident, so no encoded copy is made.
                             if let Err(error) = serde_json::to_writer(&mut budget, tool) {
                                 if error.is_io() {
                                     return Err("tool listing exceeds the 1 MiB descriptor limit"
@@ -674,7 +554,6 @@ impl ServerHandle {
                 };
                 match tokio::time::timeout(LIST_TOOLS_TIMEOUT, fetch).await {
                     Ok(Ok(tools)) => {
-                        // Never publish a snapshot taken across an announced change.
                         let _gate = self.dispatch_gate.lock().expect("dispatch gate poisoned");
                         if self.tools_dirty.load(Ordering::Acquire) {
                             return Err(ListingFault::Unavailable(
@@ -721,7 +600,6 @@ impl ServerHandle {
         let mut namespaced = Vec::<McpTool>::with_capacity(tools.len());
         for tool in tools {
             let name = format!("{MCP_TOOL_PREFIX}{}__{}", self.settings.name, tool.name);
-            // A pin may never approve a silently reduced or ambiguous listing.
             if name.len() > MAX_NAMESPACED_NAME_BYTES
                 || tool.name.is_empty()
                 || !tool
@@ -757,7 +635,6 @@ impl ServerHandle {
         Ok(namespaced)
     }
 
-    /// Executes one call under this server's concurrency bound and deadline.
     async fn call(
         &self,
         tool: &str,
@@ -778,7 +655,6 @@ impl ServerHandle {
         let execution = self.execute(tool, arguments);
         tokio::select! {
             biased;
-            // Check cancellation before polling a potentially ready dispatch.
             () = cancelled => McpCallOutcome::error(
                 "tool execution was cancelled",
                 McpCallFailure::Cancelled,
@@ -805,8 +681,6 @@ impl ServerHandle {
                 McpCallFailure::ShutDown,
             );
         }
-        // Resolve before acquiring a permit. If the snapshot changed while
-        // queued, release the permit before any refresh or reconnect.
         let (client, _permit, generation) = loop {
             let listing = if self.settings.pin.is_some() {
                 match self.listing().await {
@@ -869,8 +743,6 @@ impl ServerHandle {
         };
         let mut params = CallToolRequestParams::new(tool.to_owned());
         params.arguments = arguments;
-        // Pinned calls send exactly one request, not implicit input-required
-        // retries whose later dispatch would escape this admission check.
         let result = if let Some(generation) = generation {
             use rmcp::{
                 model::{CallToolRequest, ClientRequest, ServerResult},
@@ -883,8 +755,6 @@ impl ServerHandle {
                     .send_request_with_option(request, PeerRequestOptions::no_options()),
             );
             let dispatched = futures_util::future::poll_fn(|context| {
-                // This synchronous guard covers only a non-blocking enqueue
-                // poll, never the wait for capacity or the server response.
                 let _gate = self.dispatch_gate.lock().expect("dispatch gate poisoned");
                 if self.shut_down.load(Ordering::Acquire)
                     || self.tools_dirty.load(Ordering::Acquire)
@@ -919,7 +789,6 @@ impl ServerHandle {
         };
         match result {
             Ok(result) => render_result(result),
-            // A JSON-RPC error is the server answering; keep the connection.
             Err(ServiceError::McpError(error)) => McpCallOutcome {
                 result_digest: None,
                 content: format!("MCP server returned an error: {error}"),
@@ -1013,16 +882,12 @@ fn render_result(result: CallToolResult) -> McpCallOutcome {
     }
 }
 
-/// One shared client per configured MCP server for the whole process.
 pub struct McpManager {
     servers: BTreeMap<String, Arc<ServerHandle>>,
-    /// Namespaced `mcp__<server>__<tool>` names granted by configuration.
     grants: Vec<String>,
 }
 
 impl McpManager {
-    /// Validates the declarations and, for servers marked eager, starts
-    /// connecting in the background when a Tokio runtime is available.
     pub fn new(settings: Vec<McpServerSettings>) -> Result<Self, McpConfigError> {
         let mut servers = BTreeMap::new();
         let mut grants = Vec::new();
@@ -1072,16 +937,12 @@ impl McpManager {
             if handle.settings.eager {
                 let handle = Arc::clone(handle);
                 runtime.spawn(async move {
-                    // The listing is cached on the handle; the eager path
-                    // only wants the connection warm.
                     let _warm = handle.listing().await;
                 });
             }
         }
     }
 
-    /// Inspects a configured server even if its pin mismatches. Does not
-    /// change the pin, grant authority, or call a tool.
     pub async fn inspect(&self, server: &str) -> Result<McpInspection, McpUnavailable> {
         let Some(handle) = self.servers.get(server) else {
             return Err(McpUnavailable {
@@ -1106,10 +967,6 @@ impl McpManager {
         }
     }
 
-    /// Cached namespaced declarations for every configured server, connecting
-    /// lazily on first use. Servers are queried in parallel; an unavailable
-    /// or quarantined server contributes nothing rather than failing the
-    /// batch, and is named in the matching list instead.
     pub async fn catalog(&self) -> McpCatalog {
         let fetches = self
             .servers
@@ -1148,8 +1005,6 @@ impl McpManager {
             }
         }
         McpCatalog {
-            // Read after the fetches: a listing that landed during them is
-            // reflected in both the tools and the generation.
             generation: self.generation(),
             tools,
             servers,
@@ -1158,7 +1013,6 @@ impl McpManager {
         }
     }
 
-    /// The cached declarations for every server, flattened.
     pub async fn tool_specs(&self) -> Vec<ToolSpec> {
         self.catalog()
             .await
@@ -1168,9 +1022,6 @@ impl McpManager {
             .collect()
     }
 
-    /// The catalog generation right now. Cheap and synchronous: a sum of
-    /// per-server counters that advance on connect, loss, and
-    /// `list_changed`.
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.servers
@@ -1179,15 +1030,11 @@ impl McpManager {
             .fold(0_u64, u64::wrapping_add)
     }
 
-    /// Whether a catalog taken under `generation` still describes every
-    /// server's cached tool set.
     #[must_use]
     pub fn catalog_is_current(&self, generation: u64) -> bool {
         self.generation() == generation
     }
 
-    /// Refuses new calls and drops every connection. In-flight calls settle
-    /// through their own deadlines; no call is retried.
     pub async fn shutdown(&self) {
         for handle in self.servers.values() {
             {
@@ -1197,8 +1044,6 @@ impl McpManager {
             let mut state = handle.state.lock().await;
             state.client = None;
             state.listing = None;
-            // Always advance: a plan compiled against this manager must not
-            // consider its snapshot current once the backends are gone.
             handle.bump_generation();
         }
     }
@@ -1210,15 +1055,11 @@ impl McpManager {
             .any(|handle| handle.shut_down.load(Ordering::Acquire))
     }
 
-    /// Exact namespaced tool names granted by configuration allowlists.
     #[must_use]
     pub fn config_grants(&self) -> Vec<String> {
         self.grants.clone()
     }
 
-    /// Dispatches one namespaced `mcp__<server>__<tool>` call. `cancelled`
-    /// resolves when the caller's run is cancelled; the call then returns
-    /// [`McpCallFailure::Cancelled`] at once rather than on a poll tick.
     pub async fn call(
         &self,
         name: &str,

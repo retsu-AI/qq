@@ -1,21 +1,3 @@
-//! The `qq run --format jsonl` record vocabulary.
-//!
-//! A headless invocation writes one JSON object per line to stdout: exactly
-//! one [`HeadlessRecord::Trial`] first (unless startup fails before a session
-//! exists), the ordered protocol events of the workspace, and exactly one
-//! [`HeadlessRecord::Outcome`] last. These shapes are part of the protocol
-//! contract and change only with `PROTOCOL_VERSION`; golden encodings live
-//! under `tests/fixtures/headless/v<PROTOCOL_VERSION>/` (ADR-0023).
-//!
-//! The owned [`HeadlessRecord`] is what a consumer decodes. The binary emits
-//! through [`HeadlessRecordRef`], which borrows the event envelope so the
-//! streaming path never clones a delta to serialize it; the two encode
-//! identically and a unit test pins that.
-//!
-//! Foreground goals use `goal_run` for each settled direct prompt/check,
-//! interleaved with workspace events, and one final `goal` record. They do
-//! not emit a prompt trial/outcome pair for the overall goal invocation.
-
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -23,24 +5,16 @@ use crate::{
     RunPromptIdentity, SessionEventEnvelope, SessionId, TokenUsage, WorkspaceId,
 };
 
-/// One line of a headless trial stream, tagged by `type`. Decoding fails
-/// closed on an unknown tag; a supervisor must do the same.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HeadlessRecord {
     Trial(Box<HeadlessTrial>),
-    Event {
-        envelope: Box<SessionEventEnvelope>,
-    },
+    Event { envelope: Box<SessionEventEnvelope> },
     Outcome(Box<HeadlessOutcome>),
-    /// One settled direct goal prompt or completion check.
     GoalRun(Box<HeadlessGoalRun>),
-    /// The foreground goal invocation's final durable state.
     Goal(Box<HeadlessGoalOutcome>),
 }
 
-/// Borrowing view of [`HeadlessRecord`] for emission. Encodes byte-for-byte
-/// as the owned record.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HeadlessRecordRef<'a> {
@@ -51,17 +25,12 @@ pub enum HeadlessRecordRef<'a> {
     Goal(&'a HeadlessGoalOutcome),
 }
 
-/// Invocation metadata: enough to reproduce the run's configuration identity
-/// and to join the stream with the session store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeadlessTrial {
     pub qq_version: String,
-    /// Source revision the binary was built from, or `"unknown"`.
     pub qq_source_revision: String,
     pub protocol_version: u16,
-    /// SHA-256 of the workspace path as given; a stable label, not a
-    /// content hash.
     pub workspace_identity: ContentHash,
     pub model: ModelSelection,
     pub profile: AgentProfileId,
@@ -76,14 +45,10 @@ pub struct HeadlessTrial {
     pub max_turns: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_cost_usd_nanos: Option<u64>,
-    /// Present only when at least one `--correlation` was given.
     #[serde(default, skip_serializing_if = "Correlation::is_empty")]
     pub correlation: Correlation,
-    /// Evaluation arm label; never affects behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arm: Option<String>,
-    /// SHA-256 of the compact canonical encoding of the output schema;
-    /// present only with `--output-schema`, together with the allowance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema_sha256: Option<ContentHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,14 +58,9 @@ pub struct HeadlessTrial {
     pub run_id: RunId,
 }
 
-/// The single terminal record. `status` is authoritative; `exit_code` is
-/// the process exit the status maps to and is repeated so a consumer can
-/// confirm the process exited the way the stream says it did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeadlessOutcome {
-    /// Exact final reply when delivery history expired during this invocation.
-    /// Otherwise consumers reconstruct the reply from the delivered events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovered_answer: Option<String>,
     pub status: HeadlessStatus,
@@ -109,61 +69,37 @@ pub struct HeadlessOutcome {
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<TokenUsage>,
-    /// QQ's estimate from configured pricing; evidence, not a charge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_cost_usd_nanos: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_identity: Option<Box<RunPromptIdentity>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<Box<AuditRecord>>,
-    /// Present only for a completed run submitted with an output contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_output: Option<Box<FinalOutput>>,
 }
 
 impl HeadlessOutcome {
-    /// Whether `exit_code` is the code `status` maps to. A consumer that
-    /// reads a stream from a process whose exit it also observed should
-    /// require both to agree before trusting the status.
     #[must_use]
     pub const fn is_well_formed(&self) -> bool {
         self.exit_code == self.status.code()
     }
 }
 
-/// The terminal status of one headless invocation and its exit code.
-///
-/// Exit `3` is shared by [`TimedOut`](Self::TimedOut) and
-/// [`BudgetExhausted`](Self::BudgetExhausted); the status field is
-/// authoritative. A process exit without a matching outcome record (for
-/// example an external `SIGKILL`) is a harness or infrastructure failure,
-/// never a timeout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HeadlessStatus {
-    /// The model produced a final answer.
     Completed,
-    /// The agent reported a failure, a non-server run failure occurred, or a
-    /// completed answer never satisfied its output contract.
     TaskFailed,
-    /// QQ refused to start: configuration, model, pricing, or flag error.
     InvalidConfiguration,
-    /// The wall-clock limit was reached.
     TimedOut,
-    /// Any other run limit was reached: turns, cost, tokens, tool calls.
     BudgetExhausted,
-    /// QQ itself failed: store, provider protocol, internal.
     HarnessFailure,
-    /// The model asked the user a question (`ask_user`) and no client was
-    /// present to answer; the run was cancelled at the question (protocol
-    /// 21). The question is in the stream's `tool_approval_requested` event.
     NeedsInput,
-    /// Signal or cancellation.
     Interrupted,
 }
 
 impl HeadlessStatus {
-    /// Every status in exit-code order; the contract's exit table.
     pub const ALL: [Self; 8] = [
         Self::Completed,
         Self::TaskFailed,
@@ -175,7 +111,6 @@ impl HeadlessStatus {
         Self::Interrupted,
     ];
 
-    /// The process exit code the status maps to.
     #[must_use]
     pub const fn code(self) -> u8 {
         match self {
@@ -189,7 +124,6 @@ impl HeadlessStatus {
         }
     }
 
-    /// The wire spelling of the status.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -205,20 +139,16 @@ impl HeadlessStatus {
     }
 }
 
-/// Unattended approval policies. Held actions receive an explicit decision:
-/// a headless run must never wait for a human.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HeadlessApproval {
     ReadOnly,
-    /// Read tools run; calls needing explicit human approval are denied.
     Ask,
     Auto,
     Full,
 }
 
 impl HeadlessApproval {
-    /// The wire and flag spelling of the policy.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -409,21 +339,15 @@ mod tests {
     }
 }
 
-/// A settled direct goal run. Helpers and paid descendants remain in events;
-/// they do not produce additional goal-run records.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeadlessGoalRun {
     pub workspace_id: WorkspaceId,
-    /// Root session that owns the goal.
     pub session_id: SessionId,
-    /// Immutable binding of this run, independent of subsequent goal edits.
     pub goal: crate::GoalIdentity,
-    /// Authoritative durable run, including accounting and audit evidence.
     pub run: Box<crate::RunSnapshot>,
 }
 
-/// The final goal record, including its durable reason and resume identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeadlessGoalOutcome {
@@ -433,7 +357,6 @@ pub struct HeadlessGoalOutcome {
     pub exit_code: u8,
 }
 
-/// Foreground goal exits, separate from an individual prompt's outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HeadlessGoalStatus {
@@ -446,7 +369,6 @@ pub enum HeadlessGoalStatus {
 }
 
 impl HeadlessGoalStatus {
-    /// Active goals continue; every other durable state ends the invocation.
     #[must_use]
     pub const fn from_goal(status: &crate::GoalStatus) -> Option<Self> {
         match status {
@@ -458,7 +380,6 @@ impl HeadlessGoalStatus {
         }
     }
 
-    /// Only achievement exits successfully. Codes 1–5 retain prompt semantics.
     #[must_use]
     pub const fn code(self) -> u8 {
         match self {

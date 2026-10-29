@@ -1,12 +1,6 @@
-//! The two-turn read loop the `tool_dispatch` bench times, shared with the
-//! test that proves one iteration finishes. A bench whose fixture stops
-//! completing hangs instead of failing; the test keeps that from going
-//! unnoticed (ENG-1003).
-
 use futures_util::stream;
 use qq_provider::{ContentBlock, ModelRequest, Provider, ProviderEvent, ProviderStream};
 
-/// Calls `read_file` once, then answers once the result is in context.
 pub struct ReadToolProvider;
 
 impl Provider for ReadToolProvider {
@@ -17,8 +11,6 @@ impl Provider for ReadToolProvider {
             .flat_map(|message| message.content())
             .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
         if has_result {
-            // A real answer: an empty, unmetered completion after fresh tool
-            // results is a swallowed gateway fault the run loop retries.
             Box::pin(stream::iter([
                 Ok(ProviderEvent::OutputTextDelta {
                     text: "done".to_owned(),

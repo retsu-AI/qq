@@ -1,6 +1,3 @@
-//! Frame assembly: composes chrome, transcript, and overlays into the lines
-//! the renderer diffs against the previous frame.
-
 mod chrome;
 mod highlight;
 mod layout;
@@ -59,27 +56,17 @@ use wrap::{
     wrap_line_chars,
 };
 
-/// Bounds on the cells one frame lays out. A 48-inch display at a small font
-/// is around 500 × 130; the bound exists so a pathological size costs a
-/// bounded frame, not to describe any real terminal.
 const MAX_RENDER_WIDTH: u16 = 1024;
 const MAX_RENDER_HEIGHT: u16 = 512;
 const MAX_LIVE_MARKDOWN_BYTES: usize = 32 * 1024;
 const MAX_VISIBLE_MESSAGES: usize = 64;
-/// Rows of a streaming message's open tail laid out per frame. Bounded by
-/// the tallest body a frame can show plus headroom, not by the terminal.
 const MAX_LIVE_MARKDOWN_ROWS: usize = 160;
-/// Completed messages at or below these bounds retain full markdown styling.
-/// Larger messages use a sparse plain-text row index so scrolling stays
-/// complete without caching every rendered row.
 const MAX_FULL_MARKDOWN_BYTES: usize = 64 * 1024;
 const MAX_FULL_MARKDOWN_ROWS: usize = 4 * 1024;
 const PLAIN_TEXT_CHECKPOINT_ROWS: usize = 1024;
 const MAX_PLAIN_TEXT_CHECKPOINTS: usize = 4 * 1024;
 const MAX_PLAIN_TEXT_ROW_BYTES: usize = 4 * 1024;
 
-/// The cells a frame lays out for a terminal of `actual_size`: clamped to the
-/// render bounds so a huge or degenerate size costs a bounded frame.
 pub(crate) fn render_size(actual_size: (u16, u16)) -> (usize, usize) {
     (
         usize::from(actual_size.0.clamp(1, MAX_RENDER_WIDTH)),
@@ -87,39 +74,22 @@ pub(crate) fn render_size(actual_size: (u16, u16)) -> (usize, usize) {
     )
 }
 
-/// Whether the sessions rail is on screen at `width` under `prefs`. Shared
-/// with the app so event visibility and the toggle command agree with the
-/// frame.
 pub(crate) fn rail_visible(width: usize, prefs: LayoutPrefs, sessions: usize) -> bool {
     compute_layout(width, layout::MIN_HEIGHT, 0, prefs, sessions).rail_visible()
 }
 
-/// Frame assembly and the row diff against the previous frame. Retained
-/// transcript layouts live in one [`TranscriptCache`] shared by every pane;
-/// the highlighter is separate because its results are keyed by message and
-/// width.
 #[derive(Default)]
 pub(crate) struct FrameRenderer {
     previous: Vec<Line>,
     size: Option<(u16, u16)>,
-    /// Off-tick syntax highlighting for cached completed messages.
     pub(crate) highlighter: Highlighter,
     cache: TranscriptCache,
-    /// `App::theme_generation` the caches were built under. Cached rows
-    /// bake in colors, so a theme change discards every layout and forces
-    /// a full repaint.
     theme_generation: u64,
-    /// Per-pane state reconciled while building the last frame, by pane
-    /// index. `draw` hands it back to the app after the frame is composed;
-    /// `frame` itself never mutates the model. Bounded by `MAX_PANES`.
     pane_updates: Vec<(usize, PaneUpdate)>,
-    /// Where the terminal cursor belongs after the last frame, or hidden.
     cursor: Option<CursorPosition>,
 }
 
 impl FrameRenderer {
-    /// Hand the pane state reconciled while building the last frame back to
-    /// the model.
     pub(crate) fn commit(&mut self, app: &mut App) {
         for (index, update) in self.pane_updates.drain(..) {
             if let Some(pane) = app.panes.get_mut(index) {
@@ -129,16 +99,11 @@ impl FrameRenderer {
         }
     }
 
-    /// Forget the previous frame so the next draw repaints every row, after
-    /// something else (an external editor) wrote to the terminal.
     pub(crate) fn invalidate(&mut self) {
         self.previous.clear();
         self.size = None;
     }
 
-    /// Render one frame for a terminal of `actual_size` columns and rows and
-    /// return the bytes that bring the terminal from the previous frame to
-    /// this one. Only changed rows are emitted unless the size changed.
     pub fn draw(&mut self, app: &mut App, actual_size: (u16, u16)) -> io::Result<Vec<u8>> {
         let (width, height) = render_size(actual_size);
         let frame = self.frame(app, width, height);
@@ -165,9 +130,6 @@ impl FrameRenderer {
             }
         }
         queue!(&mut output, SetAttribute(Attribute::Reset), ResetColor)?;
-        // The real cursor marks the composer caret; overlays and approvals own
-        // input without a caret, so it hides then. Placing it after the rows
-        // keeps IME candidate windows and screen readers anchored correctly.
         match self.cursor {
             Some(position) => {
                 queue!(&mut output, MoveTo(position.column, position.row), Show)?;
@@ -180,8 +142,6 @@ impl FrameRenderer {
         Ok(output)
     }
 
-    /// Build one frame from the model without changing it. The pane state
-    /// reconciled along the way is kept in `pane_updates` for `draw`.
     fn frame(&mut self, app: &App, width: usize, height: usize) -> Vec<Line> {
         theme::activate(app.theme().palette);
         self.pane_updates.clear();
@@ -204,11 +164,6 @@ impl FrameRenderer {
 
         self.cursor = None;
         let mut lines = vec![top_row(app, width)];
-        // The top row and the composer rule are fixed; the rule doubles as
-        // the status and hint line so no row is spent on either. A terminal
-        // tall enough spares one blank row under the composer. The composer
-        // can grow with wrapped multi-line input, so it is laid out first and
-        // the body takes what remains.
         let padding_rows = layout::composer_padding_rows(height);
         let fixed_rows = layout::fixed_chrome_rows(height);
         let max_composer_rows = height
@@ -221,28 +176,17 @@ impl FrameRenderer {
         let layout = compute_layout(width, height, chrome_rows, app.layout, app.sessions.len());
         let body_height = layout.body.height;
         let mode = app.mode();
-        // With the inspector on screen, expanded tool bodies and the
-        // workspace views render there and the transcript keeps its rows.
         let inline_detail = layout.inspector.is_none();
-        // The slots show a window of the panes that always contains the
-        // focused one: with one slot that is the focused pane itself; with
-        // more, focus past the right edge slides the window.
         let slots = layout.transcripts.len();
         let first_shown = app
             .focused_pane
             .saturating_sub(slots.saturating_sub(1))
             .min(app.panes.len().saturating_sub(slots));
         let shown_panes = || app.panes.iter().enumerate().skip(first_shown).take(slots);
-        // The cache keeps layouts for every shown session at once, so panes
-        // on different sessions never evict each other mid-frame.
         let shown: Vec<Option<SessionId>> = shown_panes()
             .map(|(_, pane)| shown_view(app, pane, inline_detail).session())
             .collect();
         self.cache.retain_visible(app, &shown);
-        // Transcript panes fill their slots left to right. Overlays take the
-        // focused pane's cells; the rail stays so the picker is read in
-        // context. The transcript caches stay warm behind an overlay so
-        // closing one costs no relayout or highlight storm.
         let mut body: Vec<Line> = Vec::new();
         let mut columns: Vec<(usize, Vec<Line>)> = Vec::with_capacity(slots + 1);
         for ((index, pane), slot) in shown_panes().zip(&layout.transcripts) {
@@ -260,9 +204,6 @@ impl FrameRenderer {
                     Mode::Sessions => session_picker(app, slot_width, body_height),
                     Mode::Commands => command_picker(app, slot_width, body_height),
                     Mode::History => history_picker(app, slot_width, body_height),
-                    // An approval keeps the transcript on screen and adds its
-                    // block under the awaiting call, so the decision is made
-                    // in context.
                     Mode::Approval => {
                         self.body(app, index, pane, *slot, body_height, inline_detail)
                     }
@@ -288,9 +229,6 @@ impl FrameRenderer {
                 columns.push((slot.area.x, fit_height(rows, body_height)));
             }
         }
-        // Side panes are blitted column-wise onto the body rows: each row is
-        // padded to the pane's `x`, then the pane's cells appended. Columns
-        // are built at pane width so a blit never re-measures the row.
         if let Some(inspector) = layout.inspector {
             columns.push((
                 inspector.x,
@@ -301,9 +239,6 @@ impl FrameRenderer {
             let density = RailDensity::of(layout.tier);
             columns.push((rail.x, sidebar(app, rail.width, body_height, density)));
         }
-        // Each row is measured once and the running width carried through
-        // the columns: measuring the row again per column would scan the
-        // transcript text once per pane on every frame.
         if !columns.is_empty() {
             for (index, slot) in body.iter_mut().enumerate() {
                 let extra: usize = columns
@@ -321,10 +256,6 @@ impl FrameRenderer {
                     let Some(cells) = column.get_mut(index).map(std::mem::take) else {
                         continue;
                     };
-                    // A blitted transcript row carries its measure inset as
-                    // a count; it becomes padding here since only the first
-                    // pane's rows keep the count for the renderer's cursor
-                    // move.
                     let start = *x + cells.indent;
                     if used < start {
                         row.push(" ".repeat(start - used), normal());
@@ -335,9 +266,6 @@ impl FrameRenderer {
                         row.push(span.text, span.style);
                     }
                 }
-                // With side panes glued on, every body row is exactly the
-                // terminal width so the border columns line up and nothing
-                // overflows.
                 if used < width {
                     row.push(" ".repeat(width - used), normal());
                 }
@@ -367,9 +295,6 @@ impl FrameRenderer {
         fit_height(lines, height)
     }
 
-    /// Render one pane's main area through the transcript cache into `slot`
-    /// and remember the pane's reconciled state for `commit`. Rows come back
-    /// at the slot's full width with the content column placed.
     fn body(
         &mut self,
         app: &App,
@@ -389,8 +314,6 @@ impl FrameRenderer {
         );
         self.pane_updates.push((index, update));
         if slot.inset > 0 {
-            // Cached rows are shared with later frames; the margin lives on
-            // the frame's copy as a count, so centering costs no allocation.
             for line in &mut lines {
                 line.indent = slot.inset;
             }
@@ -398,10 +321,6 @@ impl FrameRenderer {
         lines
     }
 
-    /// Install a finished highlight layout if the cache still holds that
-    /// message at that width. Returns whether any frame content changed;
-    /// stale results for a message that was re-laid-out or evicted are
-    /// dropped.
     pub(crate) fn apply_highlight(&mut self, result: Highlighted) -> bool {
         self.cache.apply_highlight(&result)
     }
@@ -437,7 +356,6 @@ mod tests;
 
 #[cfg(any(test, feature = "bench-support"))]
 impl FrameRenderer {
-    /// Build a frame and hand its geometry back to the app, as `draw` does.
     pub(crate) fn frame_and_commit(
         &mut self,
         app: &mut App,

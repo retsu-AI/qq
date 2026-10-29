@@ -1,4 +1,3 @@
-//! Goal scripting over an existing authenticated server, without store ownership.
 use std::{
     io::{self, Write},
     path::PathBuf,

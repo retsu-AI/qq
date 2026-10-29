@@ -1,4 +1,3 @@
-//! A bounded, numeric-only subscriber for QQ boundary diagnostics.
 use std::{
     cell::RefCell,
     collections::BTreeMap,
@@ -93,7 +92,6 @@ impl DiagnosticSubscriber {
             && bytes.len() < super::MAX_RECORD
         {
             bytes.push(b'\n');
-            // The bounded queue is diagnostic-only: pressure drops whole records.
             let _ = self.sender.try_send(bytes);
         }
     }
@@ -215,8 +213,6 @@ impl Subscriber for DiagnosticSubscriber {
             let Some(span) = state.spans.get_mut(&id) else {
                 break;
             };
-            // Saturated ownership is intentionally retained rather than closing
-            // a span while an uncountable number of handles may remain alive.
             if span.references == usize::MAX {
                 break;
             }

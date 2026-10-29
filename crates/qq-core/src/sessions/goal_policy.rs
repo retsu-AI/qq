@@ -1,7 +1,5 @@
-//! Configuration-neutral goal ceilings and durable operational settings.
 use super::*;
 
-/// Effective workspace goal bounds. Applications resolve this before admitting work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalPolicy {
@@ -26,7 +24,6 @@ impl Default for GoalPolicy {
     }
 }
 
-/// A current workspace policy could not be safely resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum GoalPolicyError {
     #[error("goal policy could not be loaded: {0}")]
@@ -69,7 +66,6 @@ impl GoalPolicy {
     ) -> Result<(), SessionRuntimeError> {
         let duration_exceeded = match specification_at_ms {
             Some(at) => budget.deadline_ms > at.saturating_add(self.max_duration_ms),
-            // Legacy stores prove only the shipped seven-day ceiling.
             None => self.max_duration_ms < Self::default().max_duration_ms,
         };
         if budget.max_goal_runs > self.max_goal_runs || duration_exceeded {
@@ -189,7 +185,6 @@ pub(super) fn save(
     at: Option<u64>,
 ) -> Result<(), SessionRuntimeError> {
     policy.validate()?;
-    // Unknown legacy anchors remain unknown until a client specification edit.
     let encoded = serde_json::to_string(&policy)?;
     connection.execute(
         "UPDATE session_goals SET policy_json=?2,specification_at_ms=?3 WHERE goal_id=?1",
@@ -224,7 +219,6 @@ fn bound_goal_owners(
     }
 }
 
-/// The immutable paid ownership chain, including archived rows for cancellation.
 fn bound_goals(
     connection: &Connection,
     identity: RunIdentity,
@@ -284,7 +278,6 @@ fn stop_goal(
     )
 }
 
-/// Settings are resolved outside the store worker; state and cancellation commit together.
 fn apply_refresh(
     connection: &mut Connection,
     store_id: StoreId,
@@ -355,7 +348,7 @@ pub(super) async fn refresh(
                 Some(at) => tokio::time::sleep_until(at).await,
                 None => std::future::pending().await,
             }
-        } => return Ok(true), // Existing goal admission applies deadline exhaustion.
+        } => return Ok(true),
         result = inner.resolve_goal_policy(Path::new(&claimed.workspace)) => result,
     };
     let identity = claimed.identity;
@@ -372,7 +365,6 @@ pub(super) async fn refresh(
     Ok(allowed)
 }
 
-/// A goal hold is bounded even when ordinary human approval waits are unbounded.
 pub(super) fn approval_timeout(
     connection: &Connection,
     identity: RunIdentity,
@@ -393,8 +385,6 @@ pub(super) fn approval_timeout(
     Ok(timeout)
 }
 
-/// A sponsor's duration clock may cancel a held child before its own clock fires.
-/// Cancellation of the owning goal run or a specification edit fences that owner.
 pub(super) fn expired_approval_owner(
     connection: &Connection,
     identity: RunIdentity,
@@ -423,7 +413,6 @@ pub(super) fn expired_approval_owner(
     Ok(false)
 }
 
-/// Called inside the timeout transaction, after checking for a winning client resolution.
 pub(super) fn pause_for_approval(
     connection: &Connection,
     store_id: StoreId,

@@ -1,14 +1,3 @@
-//! Cancellation latency of an in-flight external tool call.
-//!
-//! One embedded host serves a tool that never completes. Each iteration
-//! starts a call, cancels the run after a short delay, and records how long
-//! the call took to settle as `Cancelled` after `cancel()` returned. Before
-//! H22.2 the host noticed cancellation on a 50 ms poll tick, so this measured
-//! ~0-50 ms uniformly (median ~25 ms); after, it is the scheduler's wake
-//! latency.
-//!
-//! Prints median / p95 / max over `QQ_BENCH_ITERATIONS` (default 200).
-
 use std::{sync::Arc, time::Duration};
 
 use qq_core::{
@@ -53,7 +42,6 @@ fn main() {
             let trip = {
                 let cancelled = cancelled.clone();
                 async move {
-                    // Land at an arbitrary phase of any poll period.
                     tokio::time::sleep(Duration::from_micros(1_700)).await;
                     cancelled.cancel();
                     tokio::time::Instant::now()

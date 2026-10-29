@@ -1,12 +1,3 @@
-//! Durable non-interactive execution: the `qq run` mode.
-//!
-//! One validated set of run options goes in; one terminal status comes out.
-//! Everything between — session creation, prompt submission, event
-//! subscription, unattended approval, budget watching, cancellation, trace
-//! writing, and exit-code mapping — stays behind this module. The run drives
-//! the same `SessionRuntime` interface (`command`, `snapshot`, `subscribe`)
-//! that the TUI and server compose; there is no separate agent path.
-
 use std::{
     future::Future,
     io::{self, BufWriter, Write},
@@ -29,54 +20,30 @@ pub use qq_protocol::{HeadlessApproval, HeadlessStatus};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
-/// How long a cancelled run may take to reach its terminal durable event
-/// before the invocation gives up and reports a harness failure.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
-/// Steering lines buffered between stdin and the run. Beyond this the reader
-/// waits; the runtime's own per-run pending bound refuses the rest anyway.
 pub const MAX_PENDING_STEER_LINES: usize = 8;
 
-/// Byte budget for one concise tool-activity line in text format.
 const MAX_ACTIVITY_BYTES: usize = 160;
 
 #[derive(Debug, Clone)]
 pub struct HeadlessOptions {
     pub prompt: String,
-    /// Workspace directory; resolved to its canonical form by the store.
     pub workspace: PathBuf,
-    /// An existing idle root session of the workspace to submit into. `None`
-    /// creates a fresh session.
     pub session: Option<SessionId>,
     pub model: ModelSelection,
-    /// Agent profile the session runs as; validated against the workspace
-    /// configuration before the run starts.
     pub profile: qq_protocol::AgentProfileId,
-    /// Resolved model context limit when configured; unknown stays absent.
     pub context_window: Option<u32>,
-    /// Source of the pricing table used for durable accounting.
     pub pricing_provenance: Option<String>,
     pub approval: HeadlessApproval,
-    /// Whether the invocation explicitly overrides a resumed session's mode.
     pub approval_explicit: bool,
     pub timeout: Option<Duration>,
     pub max_turns: Option<u32>,
     pub max_cost_usd_nanos: Option<u64>,
-    /// Opaque labels stamped on the session and the run; echoed on the trial
-    /// record and every session snapshot. Never interpreted.
     pub correlation: qq_protocol::Correlation,
-    /// The typed-output contract, already compiled once by the caller so an
-    /// unenforceable schema was refused before the runtime opened.
     pub output: Option<Box<qq_protocol::OutputContract>>,
     pub format: HeadlessFormat,
     pub trace: Option<PathBuf>,
-    /// Print the resume hint (session id and the command that continues it)
-    /// to stderr after the outcome. Set only for text output to a terminal:
-    /// JSONL consumers read `session_id` from the trial record, and scripts
-    /// capturing stderr get nothing they did not ask for.
     pub resume_hint: bool,
-    /// An evaluation arm label (`QQ_EVAL_ARM`) stamped on the trial record so
-    /// paired comparisons can tell configurations apart without inferring
-    /// them from prompt or schema hashes. Never affects behavior.
     pub arm: Option<String>,
 }
 
@@ -91,7 +58,6 @@ pub struct GoalInvocation {
     pub defaults: qq_config::GoalsConfig,
 }
 
-/// The session approval mode a headless policy submits with.
 const fn approval_mode(approval: HeadlessApproval) -> ApprovalMode {
     match approval {
         HeadlessApproval::ReadOnly => ApprovalMode::ReadOnly,
@@ -116,7 +82,6 @@ pub enum HeadlessFormat {
     Jsonl,
 }
 
-/// The process exit for a terminal status.
 #[must_use]
 pub fn exit_code(status: HeadlessStatus) -> ExitCode {
     ExitCode::from(status.code())
@@ -128,8 +93,6 @@ enum GoalRecordState {
     Emitted(u8),
 }
 
-/// Writes trial records to the optional trace file and, in JSONL format, to
-/// stdout. Text format still traces when a trace path is given.
 struct RecordSink {
     goal_record: GoalRecordState,
     stdout_failed: bool,
@@ -180,8 +143,6 @@ impl RecordSink {
                 .write_all(line.as_bytes())
                 .and_then(|()| trace.write_all(b"\n"));
             if let Err(error) = result {
-                // Keep a failed optional trace from blocking the final stdout
-                // record after an earlier event could not be traced.
                 self.trace = None;
                 return Err(error);
             }
@@ -303,13 +264,9 @@ impl Drop for AcceptedRunGuard {
 }
 
 fn report_detached_cleanup_failure(message: &str) {
-    // Drop has neither the invocation's borrowed writer nor a return channel.
-    // Reporting is therefore best-effort; restart recovery remains the
-    // durable backstop if stderr is unavailable too.
     let _ = writeln!(io::stderr().lock(), "error: {message}");
 }
 
-/// The terminal result of the event-streaming phase.
 struct RunEnd {
     delivery_recovered: bool,
     status: HeadlessStatus,
@@ -317,14 +274,9 @@ struct RunEnd {
     usage: Option<TokenUsage>,
     estimated_cost_usd_nanos: Option<u64>,
     prompt_identity: Option<Box<RunPromptIdentity>>,
-    /// How the final answer was audited, when it was.
     audit: Option<Box<qq_protocol::AuditRecord>>,
-    /// The typed-output verdict of a run submitted with a contract.
     final_output: Option<Box<qq_protocol::FinalOutput>>,
-    /// Accumulated text of the last assistant message: the final answer.
     answer: String,
-    /// Tool calls of this run that settled as denied. Under `read-only`
-    /// that is every held call, which is what the closing hint explains.
     denied_calls: usize,
 }
 
@@ -345,7 +297,6 @@ impl RunEnd {
     }
 }
 
-/// Pure admission preparation runs before persisted session settings change.
 fn prepare_goal_request(
     request: &GoalInvocation,
     options: &HeadlessOptions,
@@ -421,8 +372,6 @@ fn prepare_goal_request(
     Ok(command)
 }
 
-/// Hosts the core goal driver until its goal leaves Active. No prompt is
-/// resubmitted by this adapter; scheduling and spending remain runtime-owned.
 pub async fn run_goal(
     sessions: &SessionRuntime,
     options: HeadlessOptions,
@@ -464,7 +413,6 @@ pub async fn run_goal(
             guard.cleanup = (goal.status == qq_protocol::GoalStatus::Active)
                 .then(|| (sessions.clone(), goal.session_id));
         }
-        // Missing consent is a durable result, not an unreachable human wait.
         let needs_check = matches!(goal.status, qq_protocol::GoalStatus::Paused {
             reason: qq_protocol::GoalPauseReason::NeedsUser {
                 cause: qq_protocol::GoalNeedsUser::CheckApproval | qq_protocol::GoalNeedsUser::CheckInterrupted,
@@ -504,7 +452,6 @@ pub async fn run_goal(
                     let (paused_goal, interrupted) = match paused {
                         Ok(receipt) => {
                             let goal = goal_receipt(receipt)?;
-                            // A stopped no-op retains its revision; only our pause advances it.
                             let interrupted = goal.revision > expected.revision
                                 && goal.status == qq_protocol::GoalStatus::Paused {
                                     reason: qq_protocol::GoalPauseReason::User,
@@ -586,7 +533,6 @@ pub async fn run_goal(
                         Some(Err(error)) => return Err(Failure::harness(error.to_string())),
                         None => return Err(Failure::harness("goal event stream ended")),
                     };
-                    // Cleanup owns this durable revision even if its output fails.
                     if let SessionEvent::GoalUpdated { goal: updated } = &envelope.event
                         && updated.session_id == handle.session_id
                         && updated.goal_id == expected.goal_id
@@ -627,7 +573,6 @@ pub async fn run_goal(
                                 None => true,
                             } => {}
                         SessionEvent::ToolApprovalRequested { tool_call, question: Some(_), .. } => {
-                            // The core validates held-question ownership before stopping.
                             let id = CommandId::generate()
                                 .map_err(|error| Failure::harness(error.to_string()))?;
                             let receipt = match sessions.command(id, SessionCommand::GoalControl {
@@ -710,8 +655,6 @@ pub async fn run_goal(
                 && matches!(sink.goal_record, GoalRecordState::Pending)
                 && !sink.stdout_failed
             {
-                // Prefer authoritative state when readable; otherwise retain
-                // the last observed goal without inventing a durable outcome.
                 if let Ok(snapshot) = sessions
                     .snapshot(SnapshotRequest::new(workspace, Some(goal.session_id), 1, 1))
                     .await
@@ -814,8 +757,6 @@ async fn replay_settled_goal_runs(
     .map_err(|_| Failure::harness("goal result replay exceeded the shutdown period"))?
 }
 
-/// Once stopped, cancel and drain only this goal's paid family. The single
-/// deadline bounds the entire cleanup, including late admitted descendants.
 async fn settle_goal(
     sessions: &SessionRuntime,
     handle: &SessionHandle,
@@ -838,18 +779,13 @@ async fn settle_goal(
                 Ok(pending) => (pending, true),
                 Err(
                     SessionRuntimeError::GoalNotFound | SessionRuntimeError::GoalConflict { .. },
-                ) => {
-                    // Clear/replacement revokes the live identity, not the old
-                    // family's cancellation obligation. Observe only work the
-                    // core already cancelled; never cancel a replacement run.
-                    (
-                        sessions
-                            .cancelled_goal_runs(handle.session_id, expected.goal_id)
-                            .await
-                            .map_err(|error| Failure::harness(error.to_string()))?,
-                        false,
-                    )
-                }
+                ) => (
+                    sessions
+                        .cancelled_goal_runs(handle.session_id, expected.goal_id)
+                        .await
+                        .map_err(|error| Failure::harness(error.to_string()))?,
+                    false,
+                ),
                 Err(error) => return Err(Failure::harness(error.to_string())),
             };
             if pending.is_empty() {
@@ -937,8 +873,6 @@ fn finish_goal(
     if !matches!(sink.goal_record, GoalRecordState::Pending) {
         return Err(Failure::harness("final goal output was already attempted"));
     }
-    // A failed write can have emitted a prefix; never retry it. Once stdout
-    // is flushed, its selected exit remains authoritative despite trace errors.
     sink.goal_record = GoalRecordState::Attempted;
     if options.format == HeadlessFormat::Text {
         writeln!(
@@ -1028,10 +962,6 @@ impl Drop for AcceptedGoalGuard {
     }
 }
 
-/// Runs one headless task to a terminal status. Never panics the process on
-/// task problems: every path maps to a distinguishable exit status.
-/// `steering` delivers user lines to inject at the run's next boundary; `None`
-/// means the invocation has no steering source.
 pub async fn run(
     sessions: &SessionRuntime,
     options: HeadlessOptions,
@@ -1041,8 +971,6 @@ pub async fn run(
     stderr: &mut impl Write,
 ) -> HeadlessStatus {
     let mut interrupt = pin!(interrupt);
-    // The trace file opens before any command so a bad path fails the
-    // invocation without leaving a half-created session behind.
     let mut sink = match RecordSink::open(&options) {
         Ok(sink) => sink,
         Err(error) => {
@@ -1051,8 +979,6 @@ pub async fn run(
         }
     };
 
-    // `@` mentions resolve here, in the client, exactly as the TUI does:
-    // the server never sees the syntax. Notes are advisory and go to stderr.
     let input = {
         let workspace = options.workspace.clone();
         let prompt = options.prompt.clone();
@@ -1095,8 +1021,6 @@ pub async fn run(
     };
     let mut accepted = AcceptedRunGuard::new(sessions.clone(), handle.clone());
 
-    // The contract compiled before submission, so its canonical encoding
-    // exists; an encoding failure here would be a serde_json bug.
     let output_schema_sha256 = options.output.as_deref().map(|contract| {
         let encoded = serde_json::to_vec(&contract.schema).unwrap_or_default();
         ContentHash::from_bytes(Sha256::digest(&encoded).into())
@@ -1196,9 +1120,6 @@ pub async fn run(
         match status {
             HeadlessStatus::Completed => {
                 let _ = writeln!(stderr);
-                // With a contract the validated document is the answer: a
-                // consumer piping stdout gets exactly the JSON, not a fence
-                // the model may have wrapped it in.
                 let mut answer = match outcome.final_output.as_deref() {
                     Some(qq_protocol::FinalOutput::Valid { value, .. }) => {
                         serde_json::to_string_pretty(value).unwrap_or(answer)
@@ -1222,8 +1143,6 @@ pub async fn run(
                 }
             }
         }
-        // Explain read-only denials and name the mode allowing workspace
-        // edits. JSONL consumers already see each denied call's state.
         if handle.approval == HeadlessApproval::ReadOnly && denied_calls > 0 {
             let _ = writeln!(
                 stderr,
@@ -1233,8 +1152,6 @@ pub async fn run(
     } else if let Some(message) = &outcome.message {
         let _ = writeln!(stderr, "error: {message}");
     }
-    // The session persists whatever the outcome; an interrupted or exhausted
-    // run is exactly when a person wants to pick it up again.
     if options.resume_hint && options.format == HeadlessFormat::Text {
         let _ = write!(stderr, "\n{}", crate::cli::resume_hint(handle.session_id));
     }
@@ -1242,9 +1159,6 @@ pub async fn run(
     status
 }
 
-/// Resolves the workspace, creates the session (or adopts the requested
-/// existing one) with the model and approval choices, and submits the prompt.
-/// Any failure here happens before the model sees the task.
 async fn submit(
     sessions: &SessionRuntime,
     options: &HeadlessOptions,
@@ -1256,8 +1170,6 @@ async fn submit(
         session_id,
         subscribe_after,
     } = prepare_session(sessions, options, SessionIntent::Prompt).await?;
-    // Budgets are core-owned: the runtime enforces them and settles the run
-    // with a typed outcome, so this adapter only relays and renders.
     let queued = send(
         sessions,
         SessionCommand::SubmitPrompt {
@@ -1293,11 +1205,6 @@ async fn submit(
         workspace_id,
         session_id,
         run_id,
-        // Subscribing from the cursor just before submission replays the
-        // queued prompt and everything after it, so no event is lost to the
-        // gap between submission and subscription. For a resumed session that
-        // is the snapshot cursor (or the last settings write), not the
-        // session's history.
         subscribe_after,
     })
 }
@@ -1354,9 +1261,6 @@ async fn prepare_session(
                 .await
             {
                 Ok(snapshot) => snapshot,
-                // Unknown ids and sessions of other workspaces are the same
-                // answer: nothing to resume here. Neither leaks that the id
-                // exists elsewhere.
                 Err(SessionRuntimeError::SessionNotFound) => {
                     return Err(Failure::invalid(format!(
                         "session {session_id} does not exist in this workspace"
@@ -1413,9 +1317,6 @@ async fn prepare_session(
                     }
                 )));
             }
-            // Preserve the session's approval policy unless the operator
-            // explicitly selects another mode. The model selection is always
-            // written (the summary omits its output cap and organization).
             let approval = if options.approval_explicit {
                 options.approval
             } else {
@@ -1475,10 +1376,6 @@ async fn prepare_session(
     })
 }
 
-/// Streams durable events to completion, answering approvals, relaying an
-/// interrupt through the ordinary idempotent cancellation command, and
-/// rendering output per the selected format. Time and budget bounds are
-/// enforced by the core runtime and arrive as typed run outcomes.
 #[expect(
     clippy::too_many_arguments,
     reason = "the CLI's resolved options, passed once from main"
@@ -1506,8 +1403,6 @@ async fn stream_run(
     let mut interrupt = pin!(interrupt);
     let mut interrupt_armed = true;
     let mut interrupted = false;
-    // Set when the model asked the user a question nobody here can answer:
-    // the run is cancelled and settles as `needs_input`, naming the question.
     let mut needs_input: Option<String> = None;
     let mut shutdown_at: Option<Instant> = None;
 
@@ -1531,9 +1426,6 @@ async fn stream_run(
             line = async { steering.as_mut().unwrap().recv().await }, if steering.is_some() => {
                 match line {
                     Some(line) if !line.trim().is_empty() => {
-                        // Steering that arrives before the run starts or after it
-                        // ends is refused by the runtime; that is reported and
-                        // the run continues rather than failing the invocation.
                         match send(
                             sessions,
                             SessionCommand::SteerRun {
@@ -1600,7 +1492,6 @@ async fn stream_run(
                                     let client = SessionHandle { approval: handle.approval, workspace_id: handle.workspace_id, session_id: handle.session_id, subscribe_after: snapshot.cursor };
                                     unattended_call(sessions, &client, call, stderr).await;
                                 } else {
-                                    // Missing legacy inputs convey no authority.
                                     respond_approval(sessions, call.run_id, call.id, ApprovalDecision::Deny, stderr).await;
                                 }
                             }
@@ -1662,9 +1553,6 @@ async fn stream_run(
                     SessionEvent::ToolApprovalRequested { tool_call, question: Some(question), .. }
                         if ours && envelope.run_id == Some(handle.run_id) =>
                     {
-                        // No human is attached to a headless run: rather
-                        // than hang or fake an answer, stop at the question
-                        // so a supervisor can resume with the answer.
                         if needs_input.is_none() {
                             let first = question
                                 .questions
@@ -1684,8 +1572,6 @@ async fn stream_run(
                         }
                     }
                     SessionEvent::ToolApprovalRequested { tool_call, question, .. } => {
-                        // A child session's question has no answerer either;
-                        // declining lets the child proceed on its judgement.
                         if question.is_some() {
                             if let Some(run_id) = envelope.run_id {
                                 respond_approval(
@@ -1817,13 +1703,6 @@ fn finish_run(
     })
 }
 
-/// Maps the run's durable outcome plus this invocation's interrupt intent to
-/// a terminal status. Budget outcomes are core-owned: the wall-clock bound
-/// keeps its historical `timed_out` status; every other bound is
-/// `budget_exhausted`.
-/// A completed run whose answer failed its output contract is a task failure
-/// (exit 1): the agent finished but did not deliver what was asked. Exit codes
-/// stay stable; `final_output.status` tells the two apart.
 fn settle(
     outcome: &RunOutcome,
     final_output: Option<&qq_protocol::FinalOutput>,
@@ -1879,8 +1758,6 @@ fn settle_outcome(outcome: &RunOutcome, interrupted: bool) -> (HeadlessStatus, O
             HeadlessStatus::Interrupted,
             Some("the run was cancelled by an interrupt".to_owned()),
         ),
-        // Same exit a retry-exhausted provider failure has always had, so
-        // supervisors see no new code; the message names the pause.
         RunOutcome::Paused { pause } => {
             (HeadlessStatus::TaskFailed, Some(format!("the run {pause}")))
         }
@@ -1895,8 +1772,6 @@ fn settle_outcome(outcome: &RunOutcome, interrupted: bool) -> (HeadlessStatus, O
     }
 }
 
-/// Sends the ordinary idempotent cancellation command. A run that already
-/// finished is success: the terminal event is on its way or already replayed.
 async fn request_cancel(sessions: &SessionRuntime, run_id: RunId) -> Result<(), Failure> {
     let receipt = send(sessions, SessionCommand::CancelRun { run_id }).await?;
     match receipt.outcome {
@@ -1908,10 +1783,6 @@ async fn request_cancel(sessions: &SessionRuntime, run_id: RunId) -> Result<(), 
     }
 }
 
-/// Retains ownership after a post-submit harness failure: request ordinary
-/// durable cancellation, then wait for the matching terminal event before the
-/// invocation returns. Restart recovery remains the backstop if persistence
-/// itself is unavailable.
 async fn cancel_and_settle(sessions: &SessionRuntime, handle: &RunHandle) -> Result<(), Failure> {
     request_cancel(sessions, handle.run_id).await?;
     let mut events = sessions
@@ -1988,10 +1859,6 @@ async fn unattended_call(
     tool_call: &qq_protocol::ToolCallSnapshot,
     stderr: &mut impl Write,
 ) {
-    // The headless invocation is the approval client for the holds that
-    // remain. Full approves unattended; anything else is denied so the run
-    // never stalls waiting for a human. A child session's held calls are
-    // never blanket-approved by the root: they are denied.
     let approval =
         if handle.approval == HeadlessApproval::Ask || tool_call.session_id == handle.session_id {
             handle.approval
@@ -2007,9 +1874,6 @@ async fn unattended_call(
     respond_approval(sessions, tool_call.run_id, tool_call.id, decision, stderr).await;
 }
 
-/// Answers one pending tool approval. Failures are reported but never fatal:
-/// an unanswerable approval resolves by the runtime's own deny-by-timeout,
-/// so the run still cannot stall forever.
 async fn respond_approval(
     sessions: &SessionRuntime,
     run_id: RunId,
@@ -2051,8 +1915,6 @@ async fn send(
         })
 }
 
-/// Distinguishes caller mistakes (invalid configuration) from harness and
-/// persistence problems.
 const fn status_for_error(error: &SessionRuntimeError) -> HeadlessStatus {
     match error {
         SessionRuntimeError::EmptyWorkspace
@@ -2069,7 +1931,6 @@ const fn status_for_error(error: &SessionRuntimeError) -> HeadlessStatus {
     }
 }
 
-/// One bounded single-line summary of tool arguments for text output.
 fn concise(arguments: &str) -> String {
     let mut summary = String::with_capacity(arguments.len().min(MAX_ACTIVITY_BYTES + 1));
     for character in arguments.chars() {
@@ -2137,8 +1998,6 @@ mod tests {
         .expect("test plan compiles")
     }
 
-    /// Builds a fresh provider per claimed run, mirroring how the real
-    /// loader compiles a runtime per run.
     struct ProviderLoader<F>(F);
 
     impl<P, F> RuntimeLoader for ProviderLoader<F>
@@ -2186,8 +2045,6 @@ mod tests {
 
     impl RuntimeLoader for ParentChildLoader {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-            // Spawn preflight validates before admission; hold only the queued
-            // child's real execution preparation, which has a cancellation owner.
             Self {
                 parent: Arc::clone(&self.parent),
                 child: Arc::clone(&self.child),
@@ -2252,7 +2109,6 @@ mod tests {
         }
     }
 
-    /// Streams "hello" as two deltas and completes with usage.
     struct TextProvider;
 
     impl Provider for TextProvider {
@@ -2329,8 +2185,6 @@ mod tests {
         }
     }
 
-    /// Turn one requests a workspace write and a shell command; turn two
-    /// completes with a final answer.
     struct MutatingProvider {
         turn: Mutex<usize>,
     }
@@ -2386,11 +2240,8 @@ mod tests {
         }
     }
 
-    /// Issues `rm -r scratchN` on each of two turns, then answers. Distinct
-    /// call ids so the second is a fresh approval decision, not a replay.
     struct DangerousShellProvider {
         turn: Mutex<usize>,
-        /// Prefix the command with `sudo`, a fixed stop.
         stopped: bool,
     }
 
@@ -2428,8 +2279,6 @@ mod tests {
         }
     }
 
-    /// Turn one asks the user a question; a second turn would answer, but a
-    /// headless run never gets there.
     struct AskingProvider {
         turn: Mutex<usize>,
     }
@@ -2467,7 +2316,6 @@ mod tests {
         }
     }
 
-    /// Turn one fetches a reserved (never-resolving) host; turn two answers.
     struct FetchingProvider {
         turn: Mutex<usize>,
         url: String,
@@ -2531,9 +2379,6 @@ mod tests {
         }
     }
 
-    /// Turn one requests a read, holding its completion until released, so a
-    /// steering line sent meanwhile lands at the boundary before turn two.
-    /// Turn two answers and records the request it saw.
     struct SteerableProvider {
         turn: Mutex<usize>,
         release: Arc<tokio::sync::Notify>,
@@ -2579,7 +2424,6 @@ mod tests {
         }
     }
 
-    /// Never produces an event; only cancellation can end its run.
     struct HangingProvider;
 
     impl Provider for HangingProvider {
@@ -2588,7 +2432,6 @@ mod tests {
         }
     }
 
-    /// Requests one read per turn forever, so only a budget can stop it.
     struct ReadLoopProvider {
         turn: Mutex<usize>,
         report_usage: bool,
@@ -2716,8 +2559,6 @@ mod tests {
     impl Provider for CompletesAfterInternalSlice {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
             let mut state = self.state.lock().unwrap();
-            // The slice checkpoint keeps tools declared (RR1); its report
-            // notice, the request's last message, marks that turn.
             let checkpoint = request.messages().last().is_some_and(|message| {
                 message.content().iter().any(|block| {
                     matches!(block, qq_provider::ContentBlock::Text { text }
@@ -2734,8 +2575,6 @@ mod tests {
                     Ok(ProviderEvent::Completed { usage: None }),
                 ]));
             }
-            // Reads alone stall: every 64 calls without output the run is
-            // asked for a report, answers it, and keeps reading.
             let stall_report = request.messages().last().is_some_and(|message| {
                 message.content().iter().any(|block| {
                     matches!(block, qq_provider::ContentBlock::Text { text }
@@ -2780,9 +2619,6 @@ mod tests {
         }
     }
 
-    /// Completes two tool turns, then stalls before producing content on the
-    /// third. A turn budget must observe the provider request boundary rather
-    /// than waiting for text or a tool call that may never arrive.
     struct ReadsThenHangsProvider {
         turn: Mutex<usize>,
     }
@@ -2837,10 +2673,6 @@ mod tests {
 
     async fn fixture_with_loader(loader: Arc<dyn RuntimeLoader>) -> Fixture {
         let directory = tempfile::tempdir().unwrap();
-        // macOS commonly exposes TMPDIR through `/var`, which is a symlink to
-        // `/private/var`. Store databases deliberately use SQLite NOFOLLOW, so
-        // fixtures must construct both workspace and database paths from the
-        // canonical temporary root.
         let root = std::fs::canonicalize(directory.path()).unwrap();
         let workspace = root.join("work");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -3114,8 +2946,6 @@ mod tests {
             )
             .await
             .unwrap();
-            // Let startup work reach a held question or achievement before
-            // the foreground client takes its first adoption snapshot.
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     let event = events.next().await.unwrap().unwrap().event;
@@ -4259,8 +4089,6 @@ mod tests {
                     record["type"] == "goal_run" && record["run"]["origin"]["type"] == "goal_check"
                 })
                 .collect();
-            // A consumed one-shot leaves a refused verification attempt;
-            // its durable record does not imply a second process execution.
             assert_eq!(checks.len(), 2);
             assert_ne!(checks[0]["run"]["id"], checks[1]["run"]["id"]);
             assert_eq!(
@@ -4912,7 +4740,6 @@ mod tests {
                         assert!(sequences.len() >= 2);
                         assert!(sequences.windows(2).all(|w| w[0] < w[1]));
                     }
-                    // Check current identity separately from the old family's finish stream.
                     let durable = fixture.sessions.snapshot(SnapshotRequest::new(
                         handle.workspace_id, Some(handle.session_id), 1, 16,
                     )).await.unwrap().focused.unwrap();
@@ -4951,7 +4778,6 @@ mod tests {
                     fixture.sessions.close().await.unwrap();
                     return;
                 }
-                // Failure/owner-drop may return early, but core must retain cleanup ownership.
                 progress.cancelled().await;
                 assert_eq!(early_code, (action == "output").then_some(4));
                 let stopped = fixture.sessions.snapshot(SnapshotRequest::new(
@@ -5095,7 +4921,6 @@ mod tests {
                 opts,
                 request,
                 async {
-                    // run_goal first polls interruption after subscribing.
                     release.notify_one();
                     std::future::pending::<()>().await;
                 },
@@ -5368,8 +5193,6 @@ mod tests {
         )
     }
 
-    /// Every stdout line must be a strict `HeadlessRecord` that re-encodes
-    /// byte-for-byte: the binary emits exactly the protocol's vocabulary.
     fn parse_records(stdout: &str) -> Vec<serde_json::Value> {
         stdout
             .lines()
@@ -5422,8 +5245,6 @@ mod tests {
             .unwrap()
     }
 
-    /// The core Phase 1 guarantee: cancellation and timeout must never leave
-    /// an active run behind.
     async fn assert_no_active_run(fixture: &Fixture) {
         let snapshot = workspace_snapshot(fixture).await;
         for session in &snapshot.sessions {
@@ -5459,9 +5280,6 @@ mod tests {
         }
     }
 
-    /// The selected profile reaches the runtime loader with the run (which
-    /// is what compiles the pack persona and tool policy) and is recorded
-    /// in the trial metadata so a benchmark knows which profile ran it.
     #[tokio::test]
     async fn the_selected_profile_reaches_the_loader_and_the_trial_record() {
         struct RecordingLoader {
@@ -5533,7 +5351,6 @@ mod tests {
         let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
 
         assert_eq!(status, HeadlessStatus::Completed);
-        // The tool calls really executed inside the workspace.
         assert_eq!(
             std::fs::read_to_string(fixture.workspace.join("note.txt")).unwrap(),
             "hello from qq\n"
@@ -5554,9 +5371,6 @@ mod tests {
         };
         assert_eq!(call_state("write_file"), "completed");
         assert_eq!(call_state("shell"), "completed");
-        // Under auto, edits and shell commands the classifier allows (a
-        // workspace-relative `cp`) run directly: no approval round-trip
-        // happened and nothing waited for a human.
         assert!(
             event_records(&records)
                 .iter()
@@ -5564,7 +5378,6 @@ mod tests {
         );
     }
 
-    /// Auto runs a workspace `rm -r` without a hold; a fixed stop is denied.
     #[tokio::test]
     async fn auto_runs_shell_directly_but_fixed_stops_deny() {
         let fixture = fixture(|| DangerousShellProvider {
@@ -5616,9 +5429,6 @@ mod tests {
         );
     }
 
-    /// A line on the steering channel is injected at the run's next boundary
-    /// and reaches the model on the following turn; a blank line is ignored;
-    /// closing the channel does not end the run.
     #[tokio::test]
     async fn stdin_steering_lines_reach_the_next_model_turn() {
         let release = Arc::new(tokio::sync::Notify::new());
@@ -5640,9 +5450,6 @@ mod tests {
         let workspace = fixture.workspace.display().to_string();
         let session_requests = Arc::clone(&requests);
         let driver = tokio::spawn(async move {
-            // Wait until the run is executing (turn one is held open by the
-            // provider), steer, wait for the steering to be durably queued,
-            // then release the turn so the boundary applies it.
             while session_requests.lock().unwrap().len() != 1 {
                 tokio::task::yield_now().await;
             }
@@ -5730,7 +5537,6 @@ mod tests {
         );
     }
 
-    /// Public fetch needs no per-host grant and opens no hold under Auto.
     #[tokio::test]
     async fn auto_fetch_dispatches_public_hosts_without_a_hold() {
         {
@@ -5775,9 +5581,6 @@ mod tests {
         }
     }
 
-    /// A question with nobody to answer it ends the run at the question with
-    /// its own status, rather than hanging until the approval timeout or
-    /// faking an answer. The stream carries the question for a supervisor.
     #[tokio::test]
     async fn a_question_with_no_client_ends_the_run_as_needs_input() {
         let fixture = fixture(|| AskingProvider {
@@ -5805,8 +5608,6 @@ mod tests {
             question["envelope"]["event"]["question"]["questions"][0]["prompt"],
             "Which crate?"
         );
-        // The cancel interrupts the held call; the model never got a second
-        // turn, so nothing was answered on its behalf.
         let finished = finished_tool_calls(&records);
         assert_eq!(finished.len(), 1);
         assert_eq!(finished[0]["state"], "interrupted");
@@ -5823,8 +5624,6 @@ mod tests {
 
         let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
 
-        // The run completes (denials are tool errors the model can react
-        // to), but nothing was written and nothing waited for approval.
         assert_eq!(status, HeadlessStatus::Completed);
         assert!(!fixture.workspace.join("note.txt").exists());
         assert!(!fixture.workspace.join("shelled.txt").exists());
@@ -5887,8 +5686,6 @@ mod tests {
         );
     }
 
-    /// Answers with text and records every request, so a test can see the
-    /// history a resumed run was given.
     struct RecordingTextProvider {
         requests: Arc<Mutex<Vec<ModelRequest>>>,
     }
@@ -5926,7 +5723,6 @@ mod tests {
         let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
 
         assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
-        // The unresolvable mention is reported, not fatal, and left literal.
         assert!(stderr.contains("note: @missing.txt"), "{stderr}");
         let requests = requests.lock().unwrap();
         let prompt = requests[0]
@@ -5958,7 +5754,6 @@ mod tests {
             !prompt.contains("alpha"),
             "the range excludes line 1: {prompt}"
         );
-        // The transcript row keeps the placeholder form.
         let records = parse_records(&stdout);
         let queued = event_records(&records)
             .into_iter()
@@ -6137,7 +5932,6 @@ mod tests {
             .await
         };
 
-        // First run creates the session.
         let first = HeadlessOptions {
             prompt: "first task".to_owned(),
             ..options(&fixture.workspace)
@@ -6148,7 +5942,6 @@ mod tests {
         let session_id: SessionId = records[0]["session_id"].as_str().unwrap().parse().unwrap();
         let first_run_id = records[0]["run_id"].as_str().unwrap().to_owned();
 
-        // Second run resumes it with a different approval and model cap.
         let second = HeadlessOptions {
             prompt: "second task".to_owned(),
             session: Some(session_id),
@@ -6169,9 +5962,6 @@ mod tests {
         assert_eq!(records[0]["session_id"], session_id.to_string());
         assert_ne!(records[0]["run_id"], first_run_id);
         assert_eq!(records[0]["approval"], "auto");
-        // No session_created: the session already existed. The stream starts
-        // at the prompt, not at the session's history and not at the
-        // settings writes that preceded submission.
         let events = event_records(&records);
         assert!(events.iter().all(|record| {
             let kind = &record["envelope"]["event"]["type"];
@@ -6190,7 +5980,6 @@ mod tests {
             1
         );
 
-        // The resumed run's provider request carries the first exchange.
         {
             let captured = requests.lock().unwrap();
             assert_eq!(captured.len(), 2);
@@ -6211,7 +6000,6 @@ mod tests {
     async fn session_resume_rejects_unknown_foreign_busy_and_child_sessions() {
         let fixture = fixture(|| TextProvider).await;
 
-        // Unknown id: invalid configuration, nothing created.
         let unknown = HeadlessOptions {
             session: Some(SessionId::generate().unwrap()),
             ..options(&fixture.workspace)
@@ -6225,7 +6013,6 @@ mod tests {
         assert!(stdout.is_empty(), "no trial record before a session exists");
         assert!(workspace_snapshot(&fixture).await.sessions.is_empty());
 
-        // A session in another workspace is not visible from this one.
         let other_workspace = fixture.workspace.parent().unwrap().join("other");
         std::fs::create_dir_all(&other_workspace).unwrap();
         let (status, stdout, _) = run_to_end(
@@ -6258,7 +6045,6 @@ mod tests {
             "{stderr}"
         );
 
-        // A child session is never a resume target.
         let resolved = send(
             &fixture.sessions,
             SessionCommand::ResolveWorkspace {
@@ -6320,8 +6106,6 @@ mod tests {
         assert!(stderr.contains("sub-agent"), "{stderr}");
     }
 
-    /// Hangs on the first request (so a process can die mid-run) and answers
-    /// with text on every later one, recording what it saw.
     struct HangsOnceProvider {
         turn: Arc<Mutex<usize>>,
         requests: Arc<Mutex<Vec<ModelRequest>>>,
@@ -6366,8 +6150,6 @@ mod tests {
         let workspace = std::fs::canonicalize(&workspace).unwrap();
         let database = root.join("sessions.sqlite3");
 
-        // Process one: start a run that never finishes, then die without
-        // shutting down. The store is left with a `running` run.
         let first =
             SessionRuntime::open(SessionRuntimeOptions::new(database.clone()), loader.clone())
                 .await
@@ -6395,8 +6177,6 @@ mod tests {
                     break;
                 }
             }
-            // `RunStarted` precedes the first provider request; die only
-            // once the provider is actually mid-turn.
             while requests.lock().unwrap().is_empty() {
                 tokio::task::yield_now().await;
             }
@@ -6404,13 +6184,9 @@ mod tests {
         .await
         .unwrap();
         drop(events);
-        // The hanging task still holds the runtime; abandon the store, which
-        // is what process death looks like to it.
         first.abandon_for_test().await.unwrap();
         drop(first);
 
-        // Process two: `qq run --session ID`. Opening the runtime recovers
-        // the interrupted run before submit() ever looks at the session.
         let second = SessionRuntime::open(SessionRuntimeOptions::new(database), loader)
             .await
             .unwrap();
@@ -6434,7 +6210,6 @@ mod tests {
         assert_eq!(records[0]["session_id"], handle.session_id.to_string());
         assert_ne!(records[0]["run_id"], handle.run_id.to_string());
 
-        // The first run settled as interrupted, durably, before the resume.
         let snapshot = fixture
             .sessions
             .snapshot(SnapshotRequest::new(
@@ -6450,9 +6225,6 @@ mod tests {
         assert_eq!(interrupted.status, RunStatus::Interrupted);
         assert_eq!(runs.len(), 2);
 
-        // The provider was asked exactly twice: the hung first turn and the
-        // resumed turn. The interrupted turn was not re-executed, and the
-        // resumed request carries the notice about it.
         let captured = requests.lock().unwrap();
         assert_eq!(captured.len(), 2);
         let history = captured[1].messages();
@@ -6472,7 +6244,6 @@ mod tests {
         assert_eq!(history[history.len() - 1], Message::user("continue"));
     }
 
-    /// Answers each turn with the next scripted text.
     struct ScriptedTextProvider {
         answers: Mutex<std::collections::VecDeque<&'static str>>,
     }
@@ -6543,7 +6314,6 @@ mod tests {
             serde_json::json!({"ok": true})
         );
         assert_eq!(outcome["final_output"]["repair_turns"], 0);
-        // The event stream carries the same verdict on run_finished.
         let finished = event_records(&records)
             .into_iter()
             .find(|record| record["envelope"]["event"]["type"] == "run_finished")
@@ -6799,8 +6569,6 @@ mod tests {
             "{stderr}"
         );
         assert!(stderr.contains(&format!("qq run --session {session_id}")));
-        // Both continuations are shown: the interactive one comes first
-        // because it is the one a person at a terminal wants.
         assert!(stderr.contains(&format!("\n  qq --session {session_id}\n")));
     }
 
@@ -7026,7 +6794,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_denial_hint_is_silent_under_auto() {
-        // `auto` executes the same calls: nothing to explain.
         let fixture = fixture(MutatingProvider::new).await;
         let mut options = options(&fixture.workspace);
         options.format = HeadlessFormat::Text;
@@ -7067,7 +6834,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_resume_hint_is_printed_after_a_timed_out_run_too() {
-        // A run that ended early is exactly when a person wants to continue.
         let fixture = fixture(|| HangingProvider).await;
         let mut options = options(&fixture.workspace);
         options.format = HeadlessFormat::Text;
@@ -7086,8 +6852,6 @@ mod tests {
 
     #[tokio::test]
     async fn jsonl_output_never_carries_the_resume_hint() {
-        // Even if a caller sets the flag, JSONL consumers get the id from the
-        // trial record and nothing else on stderr they did not ask for.
         let fixture = fixture(|| TextProvider).await;
         let mut options = options(&fixture.workspace);
         options.resume_hint = true;
@@ -7258,8 +7022,6 @@ mod tests {
             .await
         });
 
-        // The first output flush follows installation of the accepted-run
-        // guard. A snapshot can observe acceptance before that guard exists.
         tokio::time::timeout(Duration::from_secs(5), accepted)
             .await
             .expect("the headless owner must accept a run before it is aborted")
@@ -7627,8 +7389,6 @@ mod tests {
                     && let Ok(qq_protocol::HeadlessRecord::Trial(trial)) =
                         serde_json::from_slice(bytes)
                 {
-                    // Model a consumer blocked at its first record while the
-                    // independent runtime completes and delivery history expires.
                     tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
                         let snapshot = recovery_snapshot(&self.sessions,trial.workspace_id,trial.session_id).await.unwrap();
@@ -7780,8 +7540,6 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let interrupted = async {
-            // Retire the initial backlog before the foreground subscription is
-            // first polled, as if the CLI was descheduled during startup.
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     entered.notified().await;

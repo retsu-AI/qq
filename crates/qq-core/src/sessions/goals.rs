@@ -1,5 +1,3 @@
-//! Durable client goal mutations. Callers hold the store transaction that
-//! publishes the corresponding event; no shadow copy is authoritative.
 use super::*;
 use qq_protocol::{
     GoalBudget, GoalCheck, GoalCheckAuthorization, GoalCheckScope, GoalControl, GoalCounters,
@@ -20,8 +18,6 @@ pub(super) struct Specification {
     pub(super) budget: GoalBudget,
 }
 
-/// The runtime receives only the claimed goal and its scoped writer. It
-/// cannot create goals or borrow authority from a later session specification.
 #[derive(Clone)]
 pub(crate) struct GoalRunInput {
     store: Store,
@@ -141,8 +137,6 @@ impl GoalRunInput {
         &mut self,
     ) -> Result<Option<String>, SessionRuntimeError> {
         self.refresh_display().await?;
-        // A non-final candidate may still enter output repair or audit. Do not
-        // acknowledge its new revision until a subsequent request carries it.
         Ok(if self.final_slot() {
             self.take_notice()
         } else {
@@ -260,9 +254,6 @@ pub(super) fn read_turn_notices(
     let Some(text) = text else {
         return Ok(Vec::new());
     };
-    // JSON escaping can expand a valid context byte to six bytes. Check
-    // the borrowed envelope before decoding; each item validates before
-    // entering the collection, so invalid empty items cannot inflate it.
     if text.len() > MAX_CONTEXT_BYTES.saturating_mul(6) || text.len() > *remaining {
         return Err(rusqlite::Error::FromSqlConversionFailure(
             index,
@@ -319,7 +310,6 @@ pub(super) fn load_live(
     Ok(Some(goal))
 }
 
-/// Automatic verification cannot widen an ancestor's authority.
 pub(super) fn auto_check_authority(
     connection: &Connection,
     session: SessionId,
@@ -679,8 +669,6 @@ pub(super) fn save(
     Ok(())
 }
 
-/// Freeze active attribution at reservation; captured absence at first paid admission.
-/// SQL NULL is uncaptured; JSON null is a durable captured absence.
 pub(super) fn freeze_goal_claim(
     transaction: &Connection,
     identity: RunIdentity,
@@ -751,8 +739,6 @@ pub(super) fn freeze_goal_claim(
     }
 }
 
-/// Apply only model-owned data against the current live goal. Client revisions
-/// fence controls, while notes/checklist can merge without replacing client data.
 pub(super) fn update_model(
     connection: &mut Connection,
     store_id: StoreId,
@@ -978,7 +964,6 @@ pub(super) fn update_model(
     Ok(result)
 }
 
-/// Immutable paid-run ancestry. Session ownership alone cannot sponsor later prompts.
 pub(super) fn paid_goal_owners(
     connection: &Connection,
     mut run_id: RunId,
@@ -1021,8 +1006,6 @@ pub(super) fn paid_goal_owners(
     Err(SessionRuntimeError::CONSTRAINT)
 }
 
-/// Called only behind terminal settlement's durable outcome guard. Archived
-/// goals receive their own spend; only live rows produce client updates.
 pub(super) fn finalize_spend(
     connection: &Connection,
     session_id: SessionId,
@@ -1175,7 +1158,6 @@ pub(super) fn finalize_spend(
     Ok(updates)
 }
 
-/// Outcomes never borrow authority from a newer live goal revision.
 fn apply_terminal_outcome(
     connection: &Connection,
     goal: &mut GoalSnapshot,
@@ -1257,9 +1239,6 @@ fn apply_terminal_outcome(
                 }
             }
             qq_protocol::RunPause::ProviderRetry { .. } => {
-                // Reuse durable terminal evidence, independently of the other-failure
-                // streak. Neutral stops without work do not consume the five-row
-                // lookback; six retry pauses reach the 30-minute ceiling.
                 let mut previous=connection.prepare("SELECT outcome_json,EXISTS(SELECT 1 FROM model_turns WHERE run_id=runs.id AND work_disposition='committed') FROM runs
                     WHERE session_id=?1 AND goal_id=?2 AND goal_revision=?3 AND kind='prompt'
                       AND id!=?4 AND outcome_json IS NOT NULL
@@ -1329,7 +1308,6 @@ fn apply_terminal_outcome(
             ))
 }
 
-/// Captured tool authority is separate from current paid-work admission.
 #[derive(Clone, Copy)]
 pub(super) enum GoalAdmission {
     Allowed {
@@ -1381,8 +1359,6 @@ pub(super) fn admit_run(
             Some(qq_protocol::RunOrigin::Goal { .. } | qq_protocol::RunOrigin::UserPrompt {})
         )
         && current.counters.runs.saturating_add(1) >= current.budget.max_goal_runs;
-    // Queued automatic limits are a cache; prompts retain their own limits
-    // except for the final slot's finite turn ceiling.
     if matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. })) {
         *limits = current.budget.per_run;
     }
@@ -1390,8 +1366,6 @@ pub(super) fn admit_run(
         limits.max_model_turns = Some(1);
     }
 
-    // Prompt limits are caller-owned, but managed ceilings apply to every
-    // execution claim and again after policy refresh at start.
     let (policy, _) = goal_policy::load(connection, current.goal_id)?;
     macro_rules! clamp {
         ($($field:ident),+ $(,)?) => { $(
@@ -1473,8 +1447,6 @@ pub(super) fn admit_run(
     })
 }
 
-/// Sponsored descendants retain accounting ownership without goal tool authority.
-/// Their inherited relative duration must also respect the owner's absolute deadline.
 pub(super) fn admit_sponsored_run(
     connection: &Connection,
     run_id: RunId,
@@ -1537,8 +1509,6 @@ pub(super) fn goal_driver_exhaustion(
     goal: &GoalSnapshot,
     now: u64,
 ) -> Option<qq_protocol::GoalExhaustion> {
-    // Native verification commits no model run. It may use the final work
-    // run's claim, but never bypass its deadline or token/cost ceilings.
     exhaustion(
         goal,
         now,
@@ -1601,8 +1571,6 @@ pub(super) struct PaidObligation {
     pub(super) autonomous: bool,
 }
 
-/// Roots include settled historical goal runs. Only their exact paid children
-/// and same-session automatic helpers inherit cancellation ownership.
 pub(super) fn paid_obligations(
     connection: &Connection,
     session: SessionId,
@@ -1639,8 +1607,6 @@ pub(super) struct GoalSchedule {
     pub(super) cursors: Vec<EventCursor>,
 }
 
-/// A single scheduler pass commits at most 32 fresh goal runs. The pending
-/// guard and idle check share the transaction with their durable queue rows.
 pub(super) fn queue_due_goals(
     connection: &mut Connection,
     store_id: StoreId,

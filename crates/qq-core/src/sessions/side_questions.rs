@@ -6,17 +6,14 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::Notify;
 use tracing::Instrument as _;
 
-/// In-memory side tasks (admitting, executing or settling) across the runtime.
 const MAX_SIDE_TASKS: usize = 64;
 const MAX_SIDE_DURATION_MS: u64 = 120_000;
 const MAX_SIDE_MODEL_TURNS: u32 = 8;
 const MAX_SIDE_OUTPUT_TOKENS: u64 = 16_384;
 const MAX_SIDE_TOOL_OUTPUT_BYTES: u64 = 96 * 1024;
 const MAX_SIDE_ANSWER_BYTES: usize = 128 * 1024;
-/// Smallest growth of a streamed turn between persisted partial updates.
 const SIDE_PUBLISH_MIN_BYTES: usize = 1024;
 
-/// A side answer is independent of the source session's transcript and spend.
 #[derive(Debug)]
 pub struct SideAnswer {
     pub id: RunId,
@@ -26,10 +23,6 @@ pub struct SideAnswer {
     pub model_turns: u32,
 }
 
-/// Per-question ceilings an embedder may lower but never raise. `None`
-/// keeps the shipped maximum: 120 s wall time (from submission, including
-/// permit and ownership waits), 8 model turns, 16,384 output tokens and
-/// 96 KiB of tool output.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SideQueryLimits {
     pub max_duration_ms: Option<u64>,
@@ -38,7 +31,6 @@ pub struct SideQueryLimits {
     pub max_tool_output_bytes: Option<u64>,
 }
 
-/// Validated [`SideQueryLimits`] with every ceiling resolved.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SideCeilings {
     pub(super) duration_ms: u64,
@@ -74,7 +66,6 @@ impl SideCeilings {
     }
 }
 
-/// A durably admitted side question awaiting execution.
 pub(super) struct SideLaunch {
     pub(super) session: SessionId,
     pub(super) id: RunId,
@@ -83,7 +74,6 @@ pub(super) struct SideLaunch {
     pub(super) messages: Vec<Message>,
 }
 
-/// One reserved `side_tasks` slot; shutdown waits for every slot to drop.
 struct SideTaskSlot(Arc<runtime::SessionRuntimeInner>);
 
 impl Drop for SideTaskSlot {
@@ -92,7 +82,6 @@ impl Drop for SideTaskSlot {
     }
 }
 
-/// Routes a cancel command to the executing question.
 struct SideRegistration {
     inner: Arc<runtime::SessionRuntimeInner>,
     id: RunId,
@@ -108,9 +97,6 @@ impl Drop for SideRegistration {
     }
 }
 
-/// In-memory execution ownership of a source session. A cancelled question
-/// releases its durable `running` row before it has drained, so a durably
-/// admitted replacement waits here for the handoff instead of failing busy.
 struct SideOwnership {
     inner: Arc<runtime::SessionRuntimeInner>,
     session: SessionId,
@@ -178,10 +164,6 @@ impl SessionRuntime {
         }
     }
 
-    /// The wire submission. A spawned task owns the store command and the
-    /// launch from before the transaction can commit, so dropping the
-    /// caller's future never strands a durable `running` row without an
-    /// executor.
     pub(super) async fn submit_side_question(
         &self,
         command_id: CommandId,
@@ -205,13 +187,11 @@ impl SessionRuntime {
             {
                 Ok(applied) => applied,
                 Err(error) => {
-                    // The caller may have gone away; nothing was committed.
                     let _ = reply.send(Err(error));
                     return;
                 }
             };
             runtime.inner.notify(applied.receipt.committed_through);
-            // A dropped caller does not stop the committed launch below.
             let _ = reply.send(Ok(applied.receipt));
             if let Some(launch) = applied.side_launch {
                 runtime.run_launched_side_question(launch, started).await;
@@ -224,8 +204,6 @@ impl SessionRuntime {
         }
     }
 
-    /// Executes a committed launch to durable settlement, including after a
-    /// panic.
     #[tracing::instrument(target = "qq::diagnostic", name = "run", skip_all, fields(run_ordinal = crate::runtime::next_diagnostic_run()))]
     pub(super) async fn run_launched_side_question(
         &self,
@@ -239,7 +217,6 @@ impl SessionRuntime {
                 .await;
         let state = match outcome {
             Ok(Ok(_)) => return,
-            // Most errors were already settled; settlement is idempotent.
             Ok(Err(_)) => qq_protocol::SideQuestionState::Failed,
             Err(_) => qq_protocol::SideQuestionState::Interrupted,
         };
@@ -252,8 +229,6 @@ impl SessionRuntime {
         }
     }
 
-    /// Runs without claiming the main session slot. Captures and updates are
-    /// persisted separately; success returns only after durable settlement.
     pub async fn answer_side_question(
         &self,
         session: SessionId,
@@ -264,7 +239,6 @@ impl SessionRuntime {
             .await
     }
 
-    /// Explicitly starts a new side thread when `new_thread` is true.
     pub async fn answer_side_question_in_thread(
         &self,
         session: SessionId,
@@ -308,7 +282,6 @@ impl SessionRuntime {
                 () = tokio::time::sleep_until(deadline) => {
                     cancellation.cancel();
                     let _ = reply.send(Err(SessionRuntimeError::SideQuestionTimedOut));
-                    // Accepted admission may still commit; settle what it wrote.
                     if matches!(pending.await, Ok(Ok(_)))
                         && runtime.settle_side_question(id, qq_protocol::SideQuestionState::TimedOut, true, limit)
                             .await
@@ -371,8 +344,6 @@ impl SessionRuntime {
         }
     }
 
-    /// Waits until no other execution owns `session`. Registers for the
-    /// release before re-checking ownership so a handoff is never missed.
     async fn own_side_session(&self, session: SessionId) -> SideOwnership {
         loop {
             let owner = {
@@ -443,7 +414,6 @@ impl SessionRuntime {
         if question.trim().is_empty() || question.len() > 8192 {
             return Err(SessionRuntimeError::InvalidSideQuestion);
         }
-        // Subscribe before reading so a shutdown after the check still wakes.
         let mut shutdown = self.inner.shutdown.subscribe();
         if *self.inner.failed.borrow() || *shutdown.borrow_and_update() {
             return Err(SessionRuntimeError::Unavailable);
@@ -460,8 +430,6 @@ impl SessionRuntime {
         };
         let deadline = started + limits.duration();
         let tool_tasks = crate::tools::ToolTasks::default();
-        // Whether a provider request may have been sent and not committed:
-        // its spend is then unknown rather than the last committed total.
         let in_flight = AtomicBool::new(false);
         let acquired = tokio::select! {
             ownership = self.own_side_session(session) => Ok(ownership),
@@ -480,7 +448,6 @@ impl SessionRuntime {
                             find_side_snapshot(connection, id)
                         })
                         .await?;
-                    // A cancelled (or since deleted) row is not executed.
                     let Some(stored) = stored else {
                         return Err(SessionRuntimeError::SideQuestionCancelled);
                     };
@@ -552,18 +519,12 @@ impl SessionRuntime {
                             estimated_cost_usd_nanos: pricing.as_ref().map(|_| 0),
                             model_turns: 0,
                         };
-                        // The streaming turn is kept apart from the last
-                        // completed answer; partial updates carry only it.
                         let mut turn_text = String::new();
                         let mut published_bytes = 0_usize;
                         while let Some(event) = events.next().await {
                             match event {
                                 RuntimeEvent::Prepared { .. } => {
                                     in_flight.store(true, Ordering::Release);
-                                    // A cancel command settles the row without
-                                    // this task, so the durable spend must
-                                    // already read unknown. Before the first
-                                    // commit it is still the insert's NULL.
                                     if answer.model_turns > 0 {
                                         self.inner
                                             .store
@@ -587,8 +548,6 @@ impl SessionRuntime {
                                         return Err(SessionRuntimeError::CONSTRAINT);
                                     }
                                     turn_text.push_str(&text);
-                                    // Geometric checkpoints keep re-persisting
-                                    // the growing turn O(n log n), not O(n²).
                                     let threshold =
                                         (published_bytes / 2).max(SIDE_PUBLISH_MIN_BYTES);
                                     if published_bytes == 0
@@ -649,7 +608,6 @@ impl SessionRuntime {
                                     in_flight.store(false, Ordering::Release);
                                 }
                                 RuntimeEvent::Completed { .. } => return Ok(answer),
-                                // The plan's own clock shares this deadline.
                                 RuntimeEvent::BudgetExhausted { exhaustion }
                                     if exhaustion.limit
                                         == qq_protocol::BudgetLimitKind::Duration =>
@@ -680,9 +638,6 @@ impl SessionRuntime {
                 if result.is_err() {
                     cancellation.cancel();
                 }
-                // Dropping the stream stops dispatch; the drain then waits for
-                // blocking inspection already running, so no side tool outlives
-                // settlement or the task slot shutdown waits on.
                 drop(work);
                 let result = match tool_tasks.drain().await {
                     Ok(()) => result,
@@ -728,7 +683,6 @@ pub(super) fn load_side_snapshot(
     connection: &Connection,
     id: RunId,
 ) -> Result<qq_protocol::SideQuestionSnapshot, SessionRuntimeError> {
-    // Callers read a row they just wrote or already found.
     find_side_snapshot(connection, id)?.ok_or(SessionRuntimeError::CONSTRAINT)
 }
 
@@ -789,12 +743,8 @@ pub(super) fn find_side_snapshot(
     }))
 }
 
-/// Bytes of a snapshot body reserved for side questions ahead of the
-/// transcript, so a long main session cannot starve them on reconnect.
 const SIDE_SNAPSHOT_BUDGET_BYTES: usize = 1024 * 1024;
 
-/// The running question, then the newest terminal ones, from a reserved
-/// share of `budget`. Only what is admitted is charged.
 pub(super) fn load_side_snapshots(
     connection: &Connection,
     session: SessionId,
@@ -814,10 +764,6 @@ pub(super) fn load_side_snapshots(
     for id in ids {
         let item = load_side_snapshot(connection, parse_id(&id)?)?;
         let bytes = escaped_len(&item.question).saturating_add(escaped_len(&item.answer));
-        // Admission refuses a second running row, so the running one is the
-        // newest and is charged first. Its escaped worst case (8 KiB question,
-        // 128 KiB answer) fits the reserve, so it is kept whenever the body
-        // has the reserve left, and always for the focused body.
         if !reserved.admit(bytes) {
             break;
         }

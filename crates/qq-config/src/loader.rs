@@ -110,10 +110,6 @@ pub(super) fn load_for_client(
     };
     let mut seen = BTreeSet::new();
 
-    // Discovered packs are the lowest lane: global first, then each project
-    // directory root-to-leaf, so a nearer pack of the same id replaces a
-    // farther one. Explicit `packs` entries in any layer apply as that layer
-    // is merged (below) and therefore win over discovery.
     for pack in crate::pack::discover(
         &loader.paths.global_dir.join("packs"),
         SourceKind::Global,
@@ -149,10 +145,6 @@ pub(super) fn load_for_client(
     }
 
     for directory in directories {
-        // Project packs are sensitive (they may declare MCP servers that run
-        // commands, grants, and approval modes), so each manifest is its own
-        // trust subject: it is admitted only once its exact bytes are
-        // trusted, whatever the directory's configuration files declare.
         for pack in crate::pack::discover(
             &directory.join(".qq").join("packs"),
             SourceKind::Project,
@@ -239,7 +231,6 @@ pub(super) fn load_for_client(
             .push(SourceReport::new(source, SourceStatus::Applied, touched));
     }
 
-    // Administrator-owned files and native MDM values intentionally run last.
     probes.record(&loader.paths.managed_dir);
     if loader.paths.enforce_managed_ownership {
         validate_managed_directory_if_present(&loader.paths.managed_dir)?;
@@ -437,7 +428,6 @@ pub(super) fn pending_trust(
     scan_pending_trust(&cwd, &trust, probes)
 }
 
-/// Records every pending project source digest in one atomic state update.
 pub(super) fn grant_pending_trust(
     loader: &ConfigLoader,
     request: &LoadRequest,
@@ -464,8 +454,6 @@ pub(super) fn grant_pending_trust(
     Ok(pending)
 }
 
-/// Every project configuration file and project pack manifest from the VCS
-/// root down to `cwd` whose digest `trust` does not cover, in load order.
 fn scan_pending_trust(
     cwd: &Path,
     trust: &TrustState,
@@ -528,26 +516,14 @@ fn scan_pending_trust(
     Ok(pending)
 }
 
-/// The filesystem locations one load inspected to decide which sources exist.
-/// Recording them lets a caller revalidate a cached result by re-checking
-/// exactly these paths instead of rediscovering: every directory whose
-/// presence or listing mattered, every candidate file whether or not it
-/// existed, and every VCS root marker probed while bounding the project walk.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Probes {
     paths: Vec<PathBuf>,
     states: Vec<SourceState>,
-    /// Directories whose every ancestor was checked for symlinks during this
-    /// load. Candidates under one tree share their prefix; without this the
-    /// common prefix is re-stat'd once per candidate.
     verified_directories: BTreeSet<PathBuf>,
 }
 
 impl Probes {
-    /// [`reject_symlink_components`] with the verified prefix memoized for the
-    /// rest of this load. A symlink swapped in mid-load under an already
-    /// verified prefix is a TOCTOU the un-memoized walk did not close either:
-    /// the read that follows still observes the file it opens.
     fn reject_symlink_components(&mut self, path: &Path) -> Result<(), ConfigError> {
         let mut unverified = Vec::new();
         for ancestor in path.ancestors() {
@@ -559,8 +535,6 @@ impl Probes {
             }
             unverified.push(ancestor);
         }
-        // Root first, as the un-memoized walk does, so the first symlink on
-        // the way down is the one reported.
         for component in unverified.into_iter().rev() {
             match fs::symlink_metadata(component) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -586,8 +560,6 @@ impl Probes {
 
     pub(super) fn record(&mut self, path: &Path) {
         if !self.paths.iter().any(|recorded| recorded == path) {
-            // Retain the first observation, before discovery or a read. A
-            // later probe must not certify changed bytes as the old input.
             self.states.push(SourceState::capture(path));
             self.paths.push(path.to_owned());
         }
@@ -627,8 +599,6 @@ struct SourceState {
 impl SourceState {
     fn capture(path: &Path) -> Self {
         let metadata = fs::symlink_metadata(path);
-        // Configuration files reject links, but VCS marker discovery follows
-        // them. Retain target state too so that decision stays revalidatable.
         let target = metadata
             .as_ref()
             .is_ok_and(|metadata| metadata.file_type().is_symlink())
@@ -713,11 +683,7 @@ pub(super) struct FileCandidate {
 struct LoadReport {
     sources: Vec<SourceReport>,
     pending: Vec<PendingTrust>,
-    /// Pack manifests read so far, admitted or withheld; bounded by
-    /// `MAX_PACKS` across discovery and explicit entries.
     loaded_packs: usize,
-    /// The outermost project directory (VCS root, else `cwd`). Packs an
-    /// untrusted file names are read for review only beneath it.
     project_root: PathBuf,
 }
 
@@ -770,8 +736,6 @@ fn apply_document(
     if sensitive {
         apply_explicit_packs(&document, &source, trust, merged, report, probes)?;
     } else {
-        // The file's own entry is pending; list the manifests it names too so
-        // one review covers everything trusting this file would admit.
         for pack in explicit_project_packs(
             &document,
             &source,
@@ -798,11 +762,6 @@ fn apply_document(
     Ok(())
 }
 
-/// Applies a layer's explicit `packs` entries. Paths resolve relative to the
-/// declaring file; virtual sources (inline, MDM, remote) may only use
-/// absolute paths. Discovery is not repeated here: an explicit entry names
-/// exactly one directory. A pack named by a project file is a project pack
-/// and is admitted only when its manifest is trusted.
 fn apply_explicit_packs(
     document: &Document,
     source: &SourceIdentity,
@@ -864,11 +823,6 @@ fn apply_explicit_packs(
     }
 }
 
-/// The existing packs a project file names explicitly, loaded for trust
-/// review whether or not the file itself is trusted yet. Missing
-/// directories are skipped: applying a trusted file reports them. Every
-/// entry spends one unit of `loaded`, manifest or not, so a document cannot
-/// buy unbounded probes with entries that point at nothing.
 fn explicit_project_packs(
     document: &Document,
     source: &SourceIdentity,
@@ -914,16 +868,6 @@ fn explicit_project_packs(
     Ok(packs)
 }
 
-/// Resolves a project file's explicit pack path and requires it to stay
-/// inside the project: lexically beneath `project_root` (the canonical VCS
-/// root, else `cwd`) and reached through no symbolic link, the manifest
-/// leaf included. A repository's entries are read before the user consents
-/// to them, so a path that leaves it (absolute, `..`, a UNC share, an
-/// automount, a link) is a configuration error and is never touched; packs
-/// outside the repository belong in the user's own configuration.
-/// `Ok(None)` is a directory that does not exist (yet). On Windows,
-/// `FileType::is_symlink` is true for every name-surrogate reparse point,
-/// so directory junctions are rejected as links too.
 fn project_pack_directory(
     id: &str,
     path: &str,
@@ -944,9 +888,6 @@ fn project_pack_directory(
                 normalized.pop();
             }
             std::path::Component::CurDir => {}
-            // The root is canonical (`\\?\C:`, `\\?\UNC\server\share` on
-            // Windows) while a document may write `C:` or `\\server\share`;
-            // compare in the canonical form.
             std::path::Component::Prefix(prefix) => match prefix.kind() {
                 std::path::Prefix::Disk(drive) => {
                     normalized.push(format!(r"\\?\{}:", char::from(drive.to_ascii_uppercase())))
@@ -980,7 +921,6 @@ fn project_pack_directory(
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // The manifest alone missing is reported by the caller.
                 if current.file_name() == Some(crate::pack::PACK_MANIFEST_FILE.as_ref()) {
                     break;
                 }
@@ -1018,10 +958,6 @@ fn resolve_explicit_pack(
     }
 }
 
-/// Returns `pack` when it may be admitted. A project pack whose exact
-/// manifest bytes are not trusted is withheld and listed in `pending`
-/// instead, so a repository cannot contribute MCP servers, profiles, or
-/// grants through a pack the user never reviewed.
 fn withhold_untrusted_pack(
     pack: crate::AgentPack,
     trust: &TrustState,
@@ -1051,8 +987,6 @@ fn withhold_untrusted_pack(
     None
 }
 
-/// Canonicalizes a working directory the way every configuration load does,
-/// rejecting paths that do not name an existing directory.
 pub fn canonical_working_directory(path: &Path) -> Result<PathBuf, ConfigError> {
     let canonical = fs::canonicalize(path).map_err(|_| ConfigError::InvalidWorkingDirectory {
         path: path.to_owned(),
@@ -1705,13 +1639,11 @@ mod probe_tests {
         assert!(probes.verified_directories.contains(&real.join("nested")));
         assert!(probes.verified_directories.contains(root.path()));
 
-        // The prefix up to `root` is memoized; `linked` is not and is caught.
         let error = probes
             .reject_symlink_components(&linked.join("config.ron"))
             .unwrap_err();
         assert!(matches!(error, ConfigError::SymlinkSource { path } if path == linked));
 
-        // A second candidate under the verified tree stats nothing new.
         let before = probes.verified_directories.len();
         probes
             .reject_symlink_components(&real.join("nested").join("other.ron"))

@@ -200,8 +200,6 @@ async fn duration_stops_shell_while_output_persistence_is_blocked() {
     });
     entered_rx.await.unwrap();
     release_output.send(()).unwrap();
-    // The output flush cannot finish. Cancellation must still reach the
-    // process; observing /proc avoids stealing Tokio's child reap.
     let process = PathBuf::from(format!("/proc/{pid}"));
     let stopped = tokio::time::timeout(Duration::from_secs(2), async {
         while process.exists() {
@@ -279,8 +277,6 @@ async fn duration_waits_for_blocking_attachment_guidance_and_skill_cleanup() {
         let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
             panic!("prompt")
         };
-        // Keep paused time from auto-advancing while real blocking/store
-        // threads admit the work. Deadline starts only after hook entry.
         let keep_clock = tokio::spawn(async {
             loop {
                 tokio::task::yield_now().await;
@@ -403,8 +399,6 @@ async fn completed_compaction_does_not_restart_the_original_duration() {
         matches!(event, SessionEvent::SessionCompacted { .. })
     })
     .await;
-    // The summary used at least one second; a restarted 1.5 s clock cannot
-    // expire within this interval. Keep the interval wider than the remainder.
     let result = tokio::time::timeout(
         Duration::from_millis(900),
         collect_until(&mut harness.events, finished_for(run_id)),
@@ -548,7 +542,6 @@ async fn duration_cancels_read_only_and_mutating_external_calls() {
         tokio::time::timeout(Duration::from_secs(2), entered.notified())
             .await
             .unwrap();
-        // The call must enter before its duration expires, even on a loaded CI host.
         tokio::time::pause();
         tokio::time::advance(Duration::from_millis(60_001)).await;
         tokio::time::resume();
@@ -675,7 +668,6 @@ async fn preparation_cooperates_with_deadline_and_explicit_cancel() {
             ApprovalMode::Full,
         )
         .await;
-        // Let real Store I/O establish the stage before crossing the deadline.
         let duration_ms = if cancel { 10_000 } else { 3_600_000 };
         let run_id = harness.submit("prepare", duration_ms).await;
         assert_eq!(
@@ -816,8 +808,6 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
             .unwrap()
             .contains(&run_id)
     );
-    // No terminal publication can release this reservation while the legacy
-    // loader still owns preparation, even though it received cancellation.
     while let Some(Some(event)) = futures_util::FutureExt::now_or_never(events.next()) {
         assert!(
             !matches!(event.unwrap().event, SessionEvent::RunFinished { run_id: finished, .. } if finished == run_id)
@@ -908,8 +898,6 @@ impl Provider for DeadlineProvider {
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn duration_expires_during_shell_execution_and_drains_before_session_reuse() {
-    // Native spawn/reap and the store worker use real I/O. Keep the paused
-    // clock from auto-advancing until that work has reached the tested phase.
     let keep_clock = tokio::spawn(async {
         let began = std::time::Instant::now();
         while began.elapsed() < Duration::from_secs(5) {
@@ -990,7 +978,6 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
     })
     .await;
     let elapsed = began.elapsed();
-    // Even the red baseline must clean up its sleeping process before failing.
     if terminal.is_err() {
         runtime.shutdown().await.unwrap();
     }
@@ -1008,8 +995,6 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
         "no final provider turn after expiry"
     );
     assert!(!directory.path().join("late.txt").exists());
-    // The command ran: its real output and a timeout outcome are durable,
-    // not an "interrupted before a result was recorded" placeholder.
     let result: String = runtime
         .inner
         .store

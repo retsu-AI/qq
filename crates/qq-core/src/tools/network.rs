@@ -1,9 +1,3 @@
-//! Network egress policy for `fetch`: which hosts a run may reach at all, and
-//! which addresses a name may resolve to. Names are judged before a request
-//! exists (managed denies, private suffixes); addresses are judged after
-//! resolution and before connecting, and the connection is pinned to the
-//! judged addresses so a second lookup cannot rebind to a private one.
-
 #[cfg(any(feature = "tool-fetch", test))]
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use std::net::IpAddr;
@@ -11,21 +5,13 @@ use std::net::IpAddr;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
-/// The workspace's managed host denies, translated from configuration and
-/// carried on the compiled plan. Exact lowercase names or `*.suffix`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NetworkPolicy {
     pub deny_hosts: Arc<[String]>,
-    /// Test-only: admit loopback and private addresses so fixture servers on
-    /// `127.0.0.1` can stand in for the public internet. Never set from
-    /// configuration.
     #[doc(hidden)]
     pub allow_private_for_tests: bool,
 }
 
-/// Why a host or address may not be reached. Rendered to the model verbatim
-/// so it stops trying rather than retrying with variations.
-// Approval state retains this type even when the fetch implementation is absent.
 #[cfg_attr(not(feature = "tool-fetch"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum HostRefusal {
@@ -46,8 +32,6 @@ pub(crate) enum HostRefusal {
     Unresolved { host: String },
 }
 
-/// Whether a host grant (exact or `*.suffix`) covers a request host. A
-/// wildcard covers any subdomain and never the apex.
 #[must_use]
 pub fn host_grant_matches(grant: &str, host: &str) -> bool {
     match grant.strip_prefix("*.") {
@@ -58,12 +42,9 @@ pub fn host_grant_matches(grant: &str, host: &str) -> bool {
     }
 }
 
-/// Name suffixes that never leave the local network.
 #[cfg(any(feature = "tool-fetch", test))]
 const PRIVATE_SUFFIXES: &[&str] = &[".local", ".internal", ".localhost", ".home.arpa", ".lan"];
 
-/// Cloud instance-metadata names; their addresses are in the private ranges
-/// too, but the name check refuses before any lookup.
 #[cfg(any(feature = "tool-fetch", test))]
 const METADATA_HOSTS: &[&str] = &[
     "metadata.google.internal",
@@ -72,8 +53,6 @@ const METADATA_HOSTS: &[&str] = &[
     "instance-data.ec2.internal",
 ];
 
-/// Judges the host name before resolution: scheme, presence, managed deny,
-/// private suffixes, metadata names, and IP literals in private ranges.
 #[cfg(any(feature = "tool-fetch", test))]
 pub(crate) fn check_host_name(
     url: &url::Url,
@@ -125,11 +104,6 @@ pub(crate) fn check_host_name(
     Ok(host)
 }
 
-/// Judges one resolved address. Refused ranges: unspecified, loopback,
-/// RFC 1918, shared address space (100.64/10), link-local (incl. the
-/// 169.254.169.254 metadata address), ULA, IPv6 link-local, multicast,
-/// documentation and benchmark ranges, and IPv4-mapped IPv6 forms of any of
-/// those.
 #[cfg(any(feature = "tool-fetch", test))]
 pub(crate) fn check_address(
     host: &str,
@@ -163,31 +137,18 @@ fn is_loopback_or_private_for_tests(address: IpAddr) -> bool {
 #[cfg(any(feature = "tool-fetch", test))]
 fn is_private_v4(address: Ipv4Addr) -> bool {
     const REFUSED: &[Ipv4Net] = &[
-        // 0.0.0.0/8 "this" network
         Ipv4Net::new_assert(Ipv4Addr::new(0, 0, 0, 0), 8),
-        // 10/8
         Ipv4Net::new_assert(Ipv4Addr::new(10, 0, 0, 0), 8),
-        // 100.64/10 shared address space
         Ipv4Net::new_assert(Ipv4Addr::new(100, 64, 0, 0), 10),
-        // 127/8 loopback
         Ipv4Net::new_assert(Ipv4Addr::new(127, 0, 0, 0), 8),
-        // 169.254/16 link-local (metadata lives here)
         Ipv4Net::new_assert(Ipv4Addr::new(169, 254, 0, 0), 16),
-        // 172.16/12
         Ipv4Net::new_assert(Ipv4Addr::new(172, 16, 0, 0), 12),
-        // 192.0.0/24 IETF protocol assignments
         Ipv4Net::new_assert(Ipv4Addr::new(192, 0, 0, 0), 24),
-        // 192.0.2/24 TEST-NET-1
         Ipv4Net::new_assert(Ipv4Addr::new(192, 0, 2, 0), 24),
-        // 192.168/16
         Ipv4Net::new_assert(Ipv4Addr::new(192, 168, 0, 0), 16),
-        // 198.18/15 benchmarking
         Ipv4Net::new_assert(Ipv4Addr::new(198, 18, 0, 0), 15),
-        // 198.51.100/24 TEST-NET-2
         Ipv4Net::new_assert(Ipv4Addr::new(198, 51, 100, 0), 24),
-        // 203.0.113/24 TEST-NET-3
         Ipv4Net::new_assert(Ipv4Addr::new(203, 0, 113, 0), 24),
-        // 224/4 multicast, 240/4 reserved + broadcast
         Ipv4Net::new_assert(Ipv4Addr::new(224, 0, 0, 0), 4),
         Ipv4Net::new_assert(Ipv4Addr::new(240, 0, 0, 0), 4),
     ];
@@ -197,22 +158,14 @@ fn is_private_v4(address: Ipv4Addr) -> bool {
 #[cfg(any(feature = "tool-fetch", test))]
 fn is_private_v6(address: Ipv6Addr) -> bool {
     const REFUSED: &[Ipv6Net] = &[
-        // ::/128 unspecified and ::1/128 loopback
         Ipv6Net::new_assert(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0), 127),
-        // 100::/64 discard
         Ipv6Net::new_assert(Ipv6Addr::new(0x100, 0, 0, 0, 0, 0, 0, 0), 64),
-        // 2001:db8::/32 documentation
         Ipv6Net::new_assert(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32),
-        // fc00::/7 unique local
         Ipv6Net::new_assert(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7),
-        // fe80::/10 link-local
         Ipv6Net::new_assert(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
-        // ff00::/8 multicast
         Ipv6Net::new_assert(Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
     ];
     REFUSED.iter().any(|net| net.contains(&address))
-        // NAT64 (64:ff9b::/96) carries an IPv4 in the low 32 bits: judge
-        // that address, so a public one passes and a private one does not.
         || (address.segments()[0] == 0x64 && address.segments()[1] == 0xff9b && {
             let [.., a, b] = address.segments();
             is_private_v4(Ipv4Addr::new(
@@ -224,8 +177,6 @@ fn is_private_v6(address: Ipv6Addr) -> bool {
         })
 }
 
-/// Keeps `IpNet` referenced so the dependency is exercised by one type in
-/// both families (the constant tables above are typed per family).
 #[cfg(any(feature = "tool-fetch", test))]
 #[allow(dead_code)]
 const fn _uses_ipnet(_: IpNet) {}
@@ -356,7 +307,6 @@ mod tests {
             check_address("h", "127.0.0.1".parse().unwrap(), &test_policy),
             Ok(())
         );
-        // The test escape admits loopback and RFC 1918 only, never metadata.
         assert!(check_address("h", "169.254.169.254".parse().unwrap(), &test_policy).is_err());
     }
 }

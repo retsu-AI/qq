@@ -1,26 +1,11 @@
-//! Off-tick syntax highlighting for completed messages.
-//!
-//! Tree-sitter costs roughly 150 µs per short code block, so a first frame
-//! with dozens of completed messages would spend more than ten milliseconds
-//! highlighting on the render tick. Instead the renderer caches a plain layout
-//! immediately and requests a highlighted layout here. Jobs run on Tokio's
-//! blocking pool with a bounded in-flight count; results return on a bounded
-//! channel that the event loop drains like any other update. A result whose
-//! generation no longer matches the cached entry is dropped.
-
 use qq_protocol::MessageId;
 use tokio::sync::mpsc;
 
 use crate::{render::Line, theme};
 
-/// Concurrent highlight jobs. Beyond this, requests are skipped and retried on
-/// a later frame; the plain layout stays visible in the meantime.
 const MAX_IN_FLIGHT: usize = 4;
-/// Completed results waiting for the loop. Sized above the in-flight cap so a
-/// finished job never blocks on a slow loop.
 const RESULT_CAPACITY: usize = 16;
 
-/// Identity of one highlight request so stale results can be discarded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HighlightKey {
     pub message_id: MessageId,
@@ -53,9 +38,6 @@ impl Default for Highlighter {
 }
 
 impl Highlighter {
-    /// Schedule `layout` on the blocking pool. Returns `false` without
-    /// scheduling when the in-flight cap is reached or no runtime is
-    /// available; callers keep the plain layout and may retry later.
     pub(crate) fn request(
         &mut self,
         key: HighlightKey,
@@ -69,22 +51,15 @@ impl Highlighter {
         };
         let results = self.results.clone();
         self.in_flight += 1;
-        // Style helpers read a thread-local palette; the blocking thread has
-        // never had one installed, so without this the layout comes back in
-        // the compiled `qq` colors under every other theme.
         let palette = theme::active();
         handle.spawn_blocking(move || {
             theme::activate(palette);
             let lines = layout();
-            // A full inbox means the loop is gone or hopelessly behind; the
-            // plain layout remains correct, so dropping is the right outcome.
             let _ = results.try_send(Highlighted { key, lines });
         });
         true
     }
 
-    /// Await the next finished job. Pending forever when nothing is in
-    /// flight so it can sit in a `select!` without spinning.
     pub(crate) async fn next(&mut self) -> Highlighted {
         if self.in_flight == 0 {
             return std::future::pending().await;
@@ -94,12 +69,10 @@ impl Highlighter {
                 self.in_flight -= 1;
                 result
             }
-            // The sender half lives in `self`, so the channel cannot close.
             None => std::future::pending().await,
         }
     }
 
-    /// Non-blocking drain used by tests and benchmarks.
     #[cfg(any(test, feature = "bench-support"))]
     pub(crate) fn try_next(&mut self) -> Option<Highlighted> {
         let result = self.inbox.try_recv().ok()?;
@@ -140,7 +113,6 @@ mod tests {
             }));
         }
         assert_eq!(highlighter.in_flight(), MAX_IN_FLIGHT);
-        // Saturated: the caller keeps its plain layout and retries later.
         assert!(!highlighter.request(key(99), Vec::new));
         assert!(highlighter.try_next().is_none());
 

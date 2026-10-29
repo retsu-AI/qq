@@ -1,5 +1,3 @@
-//! Kernel-owned command trees, including the suspended startup interval.
-
 use std::{
     io,
     ops::{Deref, DerefMut},
@@ -13,10 +11,6 @@ mod process;
 
 use super::dispatch::{ToolCancellation, ToolTaskLease};
 
-// The inherited outer job closes the crash window between CreateProcess and
-// assigning the suspended child to its command job. Only trusted worker
-// launchers may request explicit breakaway from this outer job. Every command
-// gets an inner job which forbids breakaway before its first instruction.
 pub(crate) fn root_job() -> io::Result<&'static win32job::Job> {
     static ROOT: OnceLock<Result<win32job::Job, Arc<win32job::JobError>>> = OnceLock::new();
     ROOT.get_or_init(|| {
@@ -31,7 +25,6 @@ pub(crate) fn root_job() -> io::Result<&'static win32job::Job> {
 }
 
 pub(crate) struct Child {
-    // Closing the job precedes closing stdio/process handles on unwinding.
     job: Arc<Mutex<JobObject>>,
     inner: process::Process,
     _directory: cap_std::fs::Dir,
@@ -135,8 +128,6 @@ async fn spawn_prepared(
                 .unwrap_or_else(|error| error.into_inner())
                 .assign(&child.inner)?;
             before_resume(&mut deadline);
-            // CreateProcess and job setup may outlive the admission checked
-            // above. The payload is still suspended: reject it before resume.
             if cancelled.is_cancelled() {
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
@@ -156,10 +147,6 @@ async fn spawn_prepared(
     .await
     .map_err(io::Error::other)??;
     if let Err(error) = admitted {
-        // Terminate the held job, then confirm exit before releasing its lease.
-        // Failed cleanup retains the existing unconfirmed-process fence.
-        // Job assignment itself may have failed. Also target the original
-        // suspended process handle, so an empty job cannot leave it alive.
         let root_stopped = child.inner.start_kill();
         let job_stopped = child.start_kill();
         job_stopped?;

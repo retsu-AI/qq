@@ -1,26 +1,16 @@
-//! The stall scope in the run loop (ADR-0054 § 1–3): a run that stops
-//! producing output reports every `STALL_REPORT_CALLS` calls, and a
-//! sub-agent that keeps reporting without work answers its brief.
-
 use super::*;
 
-/// A shell command that exits non-zero: work that failed is still work.
 const FAILING_SHELL: (&str, &str) = ("shell", r#"{"command":"exit 3"}"#);
 const READ: (&str, &str) = ("read_file", r#"{"path":"note.txt"}"#);
 const WRITE: (&str, &str) = ("write_file", r#"{"path":"out.txt","content":"x"}"#);
 
-/// What the model does on each kind of request.
 #[derive(Clone, Copy)]
 enum Reply {
     Text(&'static str),
     Empty,
-    /// One call anyway: the model ignored the notice.
     Call((&'static str, &'static str)),
 }
 
-/// A model that works through `script` (one entry per executed call, issued
-/// sixteen per turn) and answers runtime notices with fixed replies. After
-/// the script it answers "done". Every request is recorded.
 struct Scripted {
     script: Vec<(&'static str, &'static str)>,
     on_report: Reply,
@@ -61,8 +51,6 @@ fn reply_events(reply: Reply, id: String) -> Vec<Result<ProviderEvent, ProviderE
             Ok(ProviderEvent::ToolCallCompleted { id }),
         ],
     };
-    // Metered, so an empty reply is a missed report rather than a swallowed
-    // gateway fault.
     events.push(Ok(ProviderEvent::Completed {
         usage: Some(qq_provider::ProviderUsage {
             input_tokens: 1,
@@ -132,7 +120,6 @@ impl Provider for Scripted {
                 Ok(ProviderEvent::ToolCallCompleted { id }),
             ]);
         }
-        // Metered like every other turn, so token bounds stay known.
         events.push(Ok(ProviderEvent::Completed {
             usage: Some(qq_provider::ProviderUsage {
                 input_tokens: 1,
@@ -146,8 +133,6 @@ impl Provider for Scripted {
     }
 }
 
-/// The runtime notice a request ends with: the user-text messages after the
-/// last assistant turn (tool results first, notices after them).
 fn last_notice(request: &ModelRequest) -> Option<&str> {
     request
         .messages()
@@ -207,8 +192,6 @@ fn notices(events: &[RuntimeEvent]) -> Vec<runtime::TurnNotice> {
         .collect()
 }
 
-/// Executed calls before each report request, by counting tool results in
-/// the requests that carried a stall-report notice.
 fn calls_before_reports(requests: &[ModelRequest], notice: &str) -> Vec<usize> {
     requests
         .iter()
@@ -255,7 +238,6 @@ fn completed_text(events: &[RuntimeEvent]) -> Option<String> {
     })
 }
 
-/// Whether a `write_file` of `out.txt` ran: a rejected call never writes.
 fn directory_has_out(events: &[RuntimeEvent]) -> bool {
     events.iter().any(|event| {
         matches!(event, RuntimeEvent::ToolCallFinished { is_error: false, result, .. }
@@ -267,8 +249,6 @@ fn reads(count: usize) -> Vec<(&'static str, &'static str)> {
     vec![READ; count]
 }
 
-/// (a) Sixty-four read-only calls: the next request is a report turn. Tools
-/// stay declared and the run continues after it.
 #[tokio::test]
 async fn sixty_four_reads_without_output_get_a_report_turn() {
     let calls = usize::try_from(runtime::STALL_REPORT_CALLS).unwrap();
@@ -311,8 +291,6 @@ async fn sixty_four_reads_without_output_get_a_report_turn() {
     );
 }
 
-/// (b) A call made in the report turn is not executed; its result says to
-/// re-issue it, and the next turn may.
 #[tokio::test]
 async fn a_call_in_the_report_turn_is_not_executed() {
     let mut provider = Scripted::new(reads(64));
@@ -323,8 +301,6 @@ async fn a_call_in_the_report_turn_is_not_executed() {
         Some("done"),
         "{events:?}"
     );
-    // Rejected calls settle through the result path like any other, but
-    // never execute: no file was written.
     assert!(!directory_has_out(&events));
     let report = requests
         .iter()
@@ -341,7 +317,6 @@ async fn a_call_in_the_report_turn_is_not_executed() {
     assert!(rejected, "the next turn sees the not-executed result");
 }
 
-/// (c) A mutating call at call 60 is progress: no report at 64.
 #[tokio::test]
 async fn a_mutation_before_the_threshold_means_no_report() {
     let mut script = reads(100);
@@ -355,7 +330,6 @@ async fn a_mutation_before_the_threshold_means_no_report() {
     );
 }
 
-/// (c′) A failing shell command at call 60 is work too: no report at 64.
 #[tokio::test]
 async fn a_failing_command_before_the_threshold_means_no_report() {
     let mut script = reads(100);
@@ -373,7 +347,6 @@ async fn a_failing_command_before_the_threshold_means_no_report() {
     );
 }
 
-/// Lexical read shape alone cannot qualify an executed program.
 #[tokio::test]
 async fn an_unverified_read_shape_counts_as_work() {
     let mut script = reads(64);
@@ -388,8 +361,6 @@ async fn an_unverified_read_shape_counts_as_work() {
     );
 }
 
-/// (g) A root run of 1 000 distinct reads reports after every 64 calls and
-/// is never ended by the rule.
 #[tokio::test]
 async fn a_root_run_reports_every_sixty_four_calls_and_is_never_ended() {
     let (events, requests) = run(Scripted::new(reads(1_000)), RunCapabilities::user(None)).await;
@@ -403,8 +374,6 @@ async fn a_root_run_reports_every_sixty_four_calls_and_is_never_ended() {
         .iter()
         .filter(|request| last_notice(request) == Some(ROOT_STALL_REPORT_NOTICE))
         .count();
-    // 1 000 calls: a stall report after each 64 (15), with the slice
-    // checkpoints at 256-call boundaries taking the place of some of them.
     let slice_reports = requests
         .iter()
         .filter(|request| last_notice(request) == Some(SLICE_CHECKPOINT_NOTICE))
@@ -422,8 +391,6 @@ async fn a_root_run_reports_every_sixty_four_calls_and_is_never_ended() {
     );
 }
 
-/// (d) A read child with no text after 400 reads completes with its final
-/// answer before call 320, from a request that asks for no tool calls.
 #[tokio::test]
 async fn a_read_child_answers_its_brief_on_its_fourth_report() {
     let (events, requests) = run(
@@ -453,8 +420,6 @@ async fn a_read_child_answers_its_brief_on_its_fourth_report() {
     assert_eq!(executed, 4 * 64);
     let last = requests.last().unwrap();
     assert_eq!(last_notice(last), Some(SUBAGENT_FINAL_ANSWER_NOTICE));
-    // (e′) The tools stay declared (Bedrock requires them once history holds
-    // tool calls) and the request asks for none.
     assert_eq!(last.tool_choice(), qq_provider::ToolChoice::None);
     assert_eq!(last.tools(), requests[0].tools());
     assert_eq!(last.system(), requests[0].system());
@@ -472,8 +437,6 @@ async fn a_read_child_answers_its_brief_on_its_fourth_report() {
     );
 }
 
-/// (e) The same child with an empty final turn still completes: the run
-/// ends there, and the parent reads the latest report (session layer).
 #[tokio::test]
 async fn an_empty_final_answer_still_ends_the_child() {
     let mut provider = Scripted::new(reads(400));
@@ -491,8 +454,6 @@ async fn an_empty_final_answer_still_ends_the_child() {
     );
 }
 
-/// A child that ignores the notice and calls a tool on its final turn: the
-/// call never runs, its result is durable, and the run completes anyway.
 #[tokio::test]
 async fn a_call_on_the_final_answer_turn_never_runs_and_the_child_completes() {
     let mut provider = Scripted::new(reads(400));
@@ -518,7 +479,6 @@ async fn a_call_on_the_final_answer_turn_never_runs_and_the_child_completes() {
     assert!(rejected, "the call settles with a not-executed result");
 }
 
-/// (h) A write child that edits every 50 calls never reports.
 #[tokio::test]
 async fn a_write_child_that_keeps_editing_never_reports() {
     let mut script = reads(400);
@@ -534,7 +494,6 @@ async fn a_write_child_that_keeps_editing_never_reports() {
     assert!(calls_before_reports(&requests, STALL_REPORT_NOTICE).is_empty());
 }
 
-/// (m) An audit child never gets a stall report.
 #[tokio::test]
 async fn an_exempt_run_never_gets_a_stall_report() {
     let (events, requests) = run(
@@ -546,8 +505,6 @@ async fn an_exempt_run_never_gets_a_stall_report() {
     assert!(calls_before_reports(&requests, ROOT_STALL_REPORT_NOTICE).is_empty());
 }
 
-/// (n) When the stall report and the budget-final turn coincide, the budget
-/// wins: one final response, no report.
 #[tokio::test]
 async fn the_budget_final_turn_outranks_a_due_report() {
     let (events, requests) = run(
@@ -575,8 +532,6 @@ async fn the_budget_final_turn_outranks_a_due_report() {
     assert!(notices(&events).is_empty());
 }
 
-/// Denied calls count: a run that keeps asking for denied calls is not
-/// producing anything either.
 #[tokio::test]
 async fn denied_calls_count_toward_the_report() {
     let provider = Scripted::new(reads(64));
@@ -623,9 +578,6 @@ async fn denied_calls_count_toward_the_report() {
     );
 }
 
-/// A stall report cut at the output limit is continued under the one notice
-/// it was asked with: the continuation is the same report, not a new one,
-/// and the run goes on.
 #[tokio::test]
 async fn a_truncated_stall_report_is_continued_under_one_notice() {
     struct CutReport {
@@ -725,11 +677,6 @@ async fn a_truncated_stall_report_is_continued_under_one_notice() {
     assert_eq!(report_notices, 1);
 }
 
-/// An interrupting steer during a stall report applies the steer (progress)
-/// and resumes the same report under its notice; the next stall report is
-/// asked for with its notice again. Regression: the applied steer reset the
-/// count while the report's notice stayed marked as placed, so 64 calls
-/// later the report turn went out with no notice at all.
 #[tokio::test]
 async fn an_interrupted_stall_report_keeps_its_notice_and_the_next_report_gets_one() {
     struct InterruptsFirstReport {
@@ -809,8 +756,6 @@ async fn an_interrupted_stall_report_keeps_its_notice_and_the_next_report_gets_o
             .iter()
             .any(|event| matches!(event, RuntimeEvent::SteeringApplied { .. }))
     );
-    // Every request answered with the stall-report rejection carried the
-    // notice: no report turn ever went out unannounced.
     let requests = requests.lock().unwrap();
     let report_requests = requests
         .iter()
@@ -838,9 +783,6 @@ async fn an_interrupted_stall_report_keeps_its_notice_and_the_next_report_gets_o
     );
 }
 
-/// A sub-agent's final-answer turn interrupted by a steer stays final: the
-/// steer is applied, the turn is resent under the same notice, and the
-/// child still ends with its answer.
 #[tokio::test]
 async fn an_interrupted_final_answer_stays_final() {
     struct InterruptsFinal {
@@ -940,8 +882,6 @@ async fn an_interrupted_final_answer_stays_final() {
     );
 }
 
-/// An external tool its server marks read-only is a read: looping on it
-/// still reaches the report. One without the hint is work.
 #[tokio::test]
 async fn read_only_external_tools_are_reads_and_others_are_work() {
     for (read_only_hint, reports) in [(true, 1), (false, 0)] {
@@ -981,9 +921,6 @@ async fn read_only_external_tools_are_reads_and_others_are_work() {
     }
 }
 
-/// A final-answer turn whose calls were rejected still settles as
-/// exhausted when that turn pushed the run past its cost bound: a
-/// completed run never overran its bounds.
 #[tokio::test]
 async fn a_final_answer_turn_over_its_cost_bound_settles_as_exhausted() {
     struct CostlyFinal(Scripted);
@@ -1118,8 +1055,6 @@ fn ab1_verified_exec_reads_report_on_request_sixty_five() {
         contract: crate::ReadImageContract::SelfContainedReadV1,
     }])
     .unwrap();
-    // This fixture runs in its own child process; retain the bounded script
-    // for the provider's static input lifetime without changing other fixtures.
     let mut provider = Scripted::new(
         (0..64)
             .map(|index| {

@@ -1,17 +1,7 @@
-//! Fixed stops: the few shell actions that can't be undone and are almost
-//! never intended. They are denied in every mode but Full, as a tool error
-//! that tells the agent to find another way.
-//!
-//! This is an accident net over literal commands, not a security boundary.
-//! A script, an interpreter or a dynamically built command can do any of
-//! these things without matching, and a word the parser can't read is not a
-//! stop.
-
 use std::path::{Component, Path, PathBuf};
 
 use super::classify::{SimpleCommand, shell_commands};
 
-/// Why a command was stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stop {
     ForcePush,
@@ -59,7 +49,6 @@ impl Stop {
         }
     }
 
-    /// The model-facing tool error.
     pub(crate) fn result(self) -> String {
         format!(
             "permission_denied: fixed_stop: {}; {}. Do not retry it in another form.",
@@ -69,7 +58,6 @@ impl Stop {
     }
 }
 
-/// The first fixed stop `command` hits, if any.
 pub(crate) fn fixed_stop(command: &str) -> Option<Stop> {
     let home = home();
     let credentials = credential_dirs(&home);
@@ -127,7 +115,6 @@ fn judge(command: &SimpleCommand, home: &Path, credentials: &[PathBuf]) -> Optio
         "rm" if recursive(&args, &['r', 'R']) && operands(&args).any(|op| top(op, home)) => {
             Some(Stop::RemoveRoot)
         }
-        // The sources: moving something into `~/bin` is fine.
         "mv" if copy_operands(&args).0.iter().any(|op| top(op, home)) => Some(Stop::RemoveRoot),
         "cp" | "install" if copy_operands(&args).1.iter().any(|op| disk_device(op)) => {
             Some(Stop::DiskWrite)
@@ -142,7 +129,6 @@ fn judge(command: &SimpleCommand, home: &Path, credentials: &[PathBuf]) -> Optio
     }
 }
 
-/// `-r`, `-R`, `--recursive`, or a short-option cluster holding one of `flags`.
 fn recursive(args: &[&str], flags: &[char]) -> bool {
     args.iter().take_while(|arg| **arg != "--").any(|arg| {
         *arg == "--recursive"
@@ -150,7 +136,6 @@ fn recursive(args: &[&str], flags: &[char]) -> bool {
     })
 }
 
-/// Words that are not options; everything after `--` is an operand.
 fn operands<'a>(args: &'a [&'a str]) -> impl Iterator<Item = &'a str> + 'a {
     let end = args.iter().position(|arg| *arg == "--");
     args.iter().enumerate().filter_map(move |(index, arg)| {
@@ -158,9 +143,6 @@ fn operands<'a>(args: &'a [&'a str]) -> impl Iterator<Item = &'a str> + 'a {
     })
 }
 
-/// The sources and destination of `cp`/`mv`/`install`: `-t DIR`, `-tDIR`
-/// and `--target-directory[=]DIR` name the destination; otherwise it is the
-/// last operand.
 fn copy_operands<'a>(args: &'a [&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
     let mut target = None;
     let mut rest = Vec::new();
@@ -188,7 +170,6 @@ fn copy_operands<'a>(args: &'a [&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
     }
 }
 
-/// `/`, the home directory, or a path directly under either.
 fn top(operand: &str, home: &Path) -> bool {
     let Some(path) = expand(operand, home) else {
         return false;
@@ -201,7 +182,6 @@ fn top(operand: &str, home: &Path) -> bool {
 }
 
 fn force_push(args: &[Option<String>]) -> bool {
-    // Git's global options come before the subcommand: `git -C dir push`.
     let mut index = 0;
     while let Some(Some(word)) = args.get(index) {
         if !word.starts_with('-') {
@@ -259,7 +239,6 @@ fn force_push(args: &[Option<String>]) -> bool {
             for (offset, flag) in arg[1..].char_indices() {
                 match flag {
                     'f' | 'd' => return true,
-                    // `-o VALUE`, or `-oVALUE`.
                     'o' => {
                         value = offset + 1 == arg.len() - 1;
                         break;
@@ -269,7 +248,6 @@ fn force_push(args: &[Option<String>]) -> bool {
             }
         } else {
             positional += 1;
-            // After the remote: `+ref` forces, `:ref` deletes.
             if positional >= 2 && arg.starts_with(['+', ':']) {
                 return true;
             }
@@ -295,7 +273,6 @@ fn disk_device(target: &str) -> bool {
         || matches!(target, "/dev/mem" | "/dev/kmem" | "/dev/port")
 }
 
-/// Home-relative credential locations; a path at or under one is stopped.
 const CREDENTIALS: [&str; 8] = [
     ".ssh",
     ".aws",
@@ -307,11 +284,9 @@ const CREDENTIALS: [&str; 8] = [
     ".git-credentials",
 ];
 
-/// Files of QQ's credential store inside its data directory.
 const QQ_CREDENTIAL_FILES: [&str; 3] = ["auth.ron", "credentials.ron", "windows-credentials"];
 
 fn names_credentials(word: &str, home: &Path, qq: &[PathBuf]) -> bool {
-    // `--file=~/.aws/credentials` names the path after the `=`.
     let candidates = std::iter::once(word).chain(word.split_once('=').map(|(_, value)| value));
     candidates
         .filter_map(|word| expand(word, home))
@@ -328,8 +303,6 @@ fn names_credentials(word: &str, home: &Path, qq: &[PathBuf]) -> bool {
         })
 }
 
-/// The absolute, lexically normalized path a word names: `~` and `~/…`
-/// against `home`, an absolute path as written. Relative words are `None`.
 fn expand(word: &str, home: &Path) -> Option<PathBuf> {
     let path = if word == "~" {
         home.to_path_buf()
@@ -350,19 +323,15 @@ fn expand(word: &str, home: &Path) -> Option<PathBuf> {
             component => out.push(component),
         }
     }
-    // `/a/` and `/a` are the same directory.
     Some(out)
 }
 
-/// The user's home, or a stand-in that only `~` words reach.
 fn home() -> PathBuf {
     std::env::var_os("HOME")
         .filter(|home| Path::new(home).is_absolute())
         .map_or_else(|| PathBuf::from("/\u{0}home"), PathBuf::from)
 }
 
-/// Where QQ keeps credentials: `$QQ_HOME/data`, `$XDG_DATA_HOME/qq`, and
-/// the platform default data directory.
 fn credential_dirs(home: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![
         home.join(".local/share/qq"),
@@ -386,7 +355,6 @@ mod tests {
         fixed_stop(command)
     }
 
-    /// Each stop, bare and behind the wrappers the parser sees through.
     fn assert_stopped(command: &str, expected: Stop) {
         for form in [
             command.to_owned(),

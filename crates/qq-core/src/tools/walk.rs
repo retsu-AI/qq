@@ -1,11 +1,3 @@
-//! Ignore-aware, contained directory listing shared by `search` and `tree`.
-//!
-//! Every path is read through the workspace's `cap-std` capability, never the
-//! ambient filesystem, so the `ignore` crate is used only as a matcher: this
-//! module lists one directory at a time and asks a stack of gitignore matchers
-//! whether each child is excluded. Traversal order and bounds are the calling
-//! tool's business; this module owns what "ignored" means.
-
 use std::{
     io::Read as _,
     time::{Instant, SystemTime},
@@ -19,9 +11,6 @@ use ignore::{
 
 use crate::workspace::Workspace;
 
-/// Directories qq never lists or searches by default, regardless of ignore
-/// files: build output and dependency caches. `.git` is excluded even with
-/// `include_ignored`; its objects are never useful results.
 pub(crate) const GENERATED_DIRECTORIES: [&str; 7] = [
     "target",
     "node_modules",
@@ -32,18 +21,13 @@ pub(crate) const GENERATED_DIRECTORIES: [&str; 7] = [
     ".git",
 ];
 
-/// Largest file whose contents a read-side tool scans.
 pub(crate) const MAX_FILE_SCAN_BYTES: u64 = 4 * 1024 * 1024;
-/// Bytes inspected for a NUL to call a file binary.
 pub(super) const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EntryKind {
     File {
         size: u64,
-        /// Modification time, when the filesystem reports one. Read from
-        /// the same `metadata` call that yields `size`, so it is free for
-        /// callers that compare it and ignored by the rest.
         modified: Option<SystemTime>,
     },
     Dir,
@@ -51,15 +35,11 @@ pub(crate) enum EntryKind {
     Other,
 }
 
-/// One directory child. `path` is workspace-relative with `/` separators and
-/// no leading `./`, so it is both the cursor key and the display form.
 #[derive(Debug, Clone)]
 pub(crate) struct Child {
     pub(crate) name: String,
     pub(crate) path: String,
     pub(crate) kind: EntryKind,
-    /// Excluded by the generated-directory list, an ignore file, or being
-    /// hidden. Listed so `tree` can show `…ignored`; never descended.
     pub(crate) ignored: bool,
 }
 
@@ -68,9 +48,6 @@ impl Child {
         matches!(self.kind, EntryKind::Dir)
     }
 
-    /// The key a depth-first walk orders children by: a directory sorts as
-    /// `name/`, which places `a.txt` before `a/…` and makes the walk emit
-    /// paths in bytewise order.
     fn order(&self) -> impl Iterator<Item = u8> + '_ {
         self.name.bytes().chain(self.is_dir().then_some(b'/'))
     }
@@ -138,7 +115,6 @@ impl ListingLimits<'_> {
     }
 }
 
-/// Why a scan stopped before the subtree was exhausted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StopReason {
     Entries,
@@ -156,21 +132,12 @@ impl StopReason {
     }
 }
 
-/// Gitignore matchers for the directory being listed and every ancestor up
-/// to the workspace root, deepest last. A deeper file overrides a shallower
-/// one and, within one file, the last matching pattern wins, as in git.
-/// Each directory contributes `.gitignore`, `.ignore`, and `.qqignore` —
-/// the last is QQ's own, for paths git tracks but agents should not see.
 pub(crate) struct IgnoreStack {
     matchers: Vec<Option<Gitignore>>,
     include_ignored: bool,
 }
 
 impl IgnoreStack {
-    /// Loads `.git/info/exclude` and the ignore files of every proper
-    /// ancestor of `root` (`"."` for the workspace root), so a walk rooted
-    /// below the workspace root still honours the root `.gitignore`. The
-    /// root directory's own files are loaded when it is listed.
     pub(crate) fn open(workspace: &Workspace, root: &str, include_ignored: bool) -> Self {
         let mut stack = Self {
             matchers: Vec::new(),
@@ -221,7 +188,6 @@ impl IgnoreStack {
         false
     }
 
-    /// Undoes the push made by [`list_children`] for a directory.
     pub(crate) fn leave(&mut self) {
         if !self.include_ignored {
             self.matchers.pop();
@@ -242,19 +208,9 @@ fn directory_matcher(workspace: &Workspace, dir: &str) -> Option<Gitignore> {
     builder.build().ok()
 }
 
-/// Largest ignore file read. Real ones are a few KiB; a larger one is almost
-/// certainly not a pattern list, and reading it would stall every walk of
-/// its directory. An oversized file is ignored as if absent.
 pub(crate) const MAX_IGNORE_FILE_BYTES: u64 = 256 * 1024;
 
 fn add_ignore_file(workspace: &Workspace, builder: &mut GitignoreBuilder, path: &str) -> bool {
-    // Open first, then check what was opened, so the file cannot be swapped
-    // between a check and the open. The open neither follows a symlink (a
-    // symlink is not followed anywhere else in the walk) nor blocks on a FIFO
-    // or device; the type and size checks then run on the open descriptor.
-    // Both are set on cap-primitives' own options, not as raw flags: its
-    // manual path resolution (macOS, or Linux without openat2) honours only
-    // its own `follow` setting and would otherwise follow the link.
     let mut options = cap_std::fs::OpenOptions::new();
     options.read(true);
     options._cap_fs_ext_follow(cap_primitives::fs::FollowSymlinks::No);
@@ -266,7 +222,6 @@ fn add_ignore_file(workspace: &Workspace, builder: &mut GitignoreBuilder, path: 
         Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_IGNORE_FILE_BYTES => {}
         Ok(_) | Err(_) => return false,
     }
-    // The size was a hint: bound the read in case the file grew since.
     let mut content = String::new();
     if file
         .take(MAX_IGNORE_FILE_BYTES + 1)
@@ -277,20 +232,11 @@ fn add_ignore_file(workspace: &Workspace, builder: &mut GitignoreBuilder, path: 
         return false;
     }
     for line in content.lines() {
-        // A malformed pattern is skipped, as git does; the rest still apply.
         let _ = builder.add_line(None, line);
     }
     true
 }
 
-/// Lists `dir` (`"."` for the workspace root) with `stack` applied to each
-/// child, after pushing the directory's own ignore files onto `stack` so the
-/// caller can descend; call [`IgnoreStack::leave`] afterwards. Children come
-/// back in walk order (see [`Child::order`]).
-///
-/// Symlinks are reported and never followed. Names that are not UTF-8 are
-/// counted in `unreadable` and dropped: no cursor or later call could
-/// address them.
 pub(crate) fn list_children(
     workspace: &Workspace,
     dir: &str,
@@ -403,9 +349,6 @@ pub(super) fn join(dir: &str, name: &str) -> String {
     }
 }
 
-/// Normalizes a contained path from `Workspace::contained_path` to the
-/// `/`-separated relative form used in output and cursors (`"."` for the
-/// workspace root).
 pub(super) fn relative_string(path: &std::path::Path) -> String {
     let mut out = String::new();
     for component in path.components() {
@@ -422,9 +365,6 @@ pub(super) fn relative_string(path: &std::path::Path) -> String {
     out
 }
 
-/// Include/exclude globs in gitignore syntax, matched against the
-/// workspace-relative path. Directories always pass so the walk still
-/// descends to find matching files.
 pub(crate) struct PathFilter(Option<Override>);
 
 #[derive(Debug, thiserror::Error)]
@@ -461,8 +401,6 @@ impl PathFilter {
         Ok(Self(Some(overrides)))
     }
 
-    /// With only excludes an unmatched file is admitted; with any include an
-    /// unmatched file is not (`Override` reports it as ignored).
     pub(crate) fn admits_file(&self, path: &str) -> bool {
         match &self.0 {
             None => true,
@@ -471,12 +409,10 @@ impl PathFilter {
     }
 }
 
-/// Whether `bytes` looks binary: a NUL within the sniff window.
 pub(super) fn looks_binary(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0)
 }
 
-/// Shared scan accounting for read-side walks: entry, byte, and time bounds.
 pub(crate) struct ScanBudget {
     pub(crate) entries: usize,
     max_entries: usize,
@@ -502,7 +438,6 @@ impl ScanBudget {
         }
     }
 
-    /// Charges one directory entry; the clock is consulted every 64 entries.
     pub(crate) fn charge_entry(&mut self) -> Option<StopReason> {
         self.entries += 1;
         if self.entries >= self.max_entries {
@@ -622,10 +557,6 @@ mod tests {
 
     #[test]
     fn an_ignore_file_swapped_for_a_fifo_or_link_after_listing_is_not_read() {
-        // Review (#217): the type check used to run before the open, so a
-        // file replaced by a FIFO in between blocked the walk at open. The
-        // open is now non-blocking and no-follow, and the type is checked on
-        // the opened descriptor. These are the states such a swap leaves.
         let directory = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(directory.path()).unwrap();
         let status = std::process::Command::new("mkfifo")

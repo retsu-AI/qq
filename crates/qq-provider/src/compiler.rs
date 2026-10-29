@@ -1,5 +1,3 @@
-//! Provider recipe compilation.
-
 use std::sync::Arc;
 
 use crate::{
@@ -15,12 +13,8 @@ use crate::{
     providers::{bedrock::Bedrock, mantle::Mantle},
 };
 
-/// The configuration error a build without `provider-bedrock` returns for an
-/// Amazon Bedrock recipe. Neutral request and event behavior is unchanged;
-/// only compilation of that family is refused.
 pub const BEDROCK_FAMILY_UNAVAILABLE_MESSAGE: &str = "this build of qq-provider was compiled without the provider-bedrock feature; Amazon Bedrock and Bedrock Mantle recipes cannot be compiled";
 
-/// Compiles provider recipes while sharing expensive transport state.
 #[derive(Clone)]
 pub struct ProviderCompiler {
     http: reqwest::Client,
@@ -29,7 +23,6 @@ pub struct ProviderCompiler {
 }
 
 impl ProviderCompiler {
-    /// Creates a compiler with one reusable HTTP connection pool.
     pub fn new() -> Result<Self, ProviderError> {
         Ok(Self {
             http: build_client()?,
@@ -38,8 +31,6 @@ impl ProviderCompiler {
         })
     }
 
-    /// The attempt policy every HTTP provider this compiler produces carries.
-    /// This is the only retry owner: nothing above the provider resends.
     #[must_use]
     pub fn with_attempt_policy(mut self, attempts: AttemptPolicy) -> Self {
         self.attempts = attempts;
@@ -51,7 +42,6 @@ impl ProviderCompiler {
         self.attempts
     }
 
-    /// Validates and compiles one immutable provider recipe.
     pub fn compile(&self, recipe: ProviderRecipe) -> Result<Arc<dyn Provider>, ProviderError> {
         match recipe {
             ProviderRecipe::Http(recipe) => self.compile_http(recipe),
@@ -80,8 +70,6 @@ impl ProviderCompiler {
         }
     }
 
-    /// Compiles one provider for an operational canary with adapter retries
-    /// disabled, so the probe observes exactly one provider attempt.
     pub fn compile_for_canary(
         &self,
         recipe: ProviderRecipe,
@@ -127,7 +115,6 @@ impl ProviderCompiler {
         Ok(Arc::new(self.construct_http(recipe)?.without_retries()))
     }
 
-    // Keep the ordinary compile path branch-free after adding the canary call site.
     #[inline(always)]
     fn construct_http(
         &self,
@@ -155,7 +142,6 @@ impl ProviderCompiler {
     }
 }
 
-/// An uncompiled provider deployment recipe.
 pub enum ProviderRecipe {
     Http(HttpProviderRecipe),
     AmazonBedrock {
@@ -194,7 +180,6 @@ impl ProviderRecipe {
     }
 }
 
-/// A protocol-bound HTTP provider recipe.
 pub struct HttpProviderRecipe {
     endpoint: EndpointSpec,
     protocol: HttpProtocol,
@@ -205,9 +190,6 @@ pub struct HttpProviderRecipe {
 }
 
 impl HttpProviderRecipe {
-    /// A recipe whose Responses body shape is the one its auth intent
-    /// implies: Codex for request-time Codex credentials, standard otherwise.
-    /// Use [`Self::with_body_shape`] to choose it independently.
     #[must_use]
     pub fn new(endpoint: EndpointSpec, protocol: HttpProtocol, auth: HttpAuth) -> Self {
         let body_shape = ResponsesBodyShape::implied_by(&auth);
@@ -227,18 +209,12 @@ impl HttpProviderRecipe {
         self
     }
 
-    /// Selects the Responses request body shape. Only OpenAI Responses has
-    /// more than one; compiling another protocol with
-    /// [`ResponsesBodyShape::Codex`] is a configuration error.
     #[must_use]
     pub fn with_body_shape(mut self, body_shape: ResponsesBodyShape) -> Self {
         self.body_shape = body_shape;
         self
     }
 
-    /// Selects how a request's cache key reaches the endpoint. Each choice
-    /// belongs to one protocol; compiling it with another is a
-    /// configuration error.
     #[must_use]
     pub fn with_cache_routing(mut self, cache_routing: CacheRouting) -> Self {
         self.cache_routing = cache_routing;
@@ -246,34 +222,21 @@ impl HttpProviderRecipe {
     }
 }
 
-/// How a request's [`crate::ModelRequest::cache_key`] reaches a provider
-/// that routes requests to the machine holding their cached prefix. Only
-/// endpoints known to accept the signal get one: a strict OpenAI-compatible
-/// proxy may reject an unknown body field.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CacheRouting {
-    /// The key is not sent.
     #[default]
     None,
-    /// OpenAI Responses `prompt_cache_key`; the Codex body also sends the
-    /// `session-id` header the ChatGPT backend routes by.
     PromptCacheKey,
-    /// xAI Chat Completions `x-grok-conv-id` header.
     GrokConversation,
 }
 
-/// The OpenAI Responses request body a compiled provider sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResponsesBodyShape {
-    /// The public Responses API body, including `max_output_tokens`.
     Standard,
-    /// The ChatGPT Codex backend body, which omits `max_output_tokens` and
-    /// may stream SSE without a `Content-Type`.
     Codex,
 }
 
 impl ResponsesBodyShape {
-    /// The shape the auth intent implies before the shape is explicit.
     #[must_use]
     pub const fn implied_by(auth: &HttpAuth) -> Self {
         match auth {
@@ -287,7 +250,6 @@ impl ResponsesBodyShape {
     }
 }
 
-/// Whether a configured URL is a protocol-independent base or an exact endpoint.
 pub struct EndpointSpec {
     url: String,
     kind: EndpointKind,
@@ -342,7 +304,6 @@ pub(crate) enum EndpointKind {
     Exact,
 }
 
-/// HTTP wire protocols supported by the compiler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpProtocol {
     OpenAiResponses,
@@ -362,19 +323,13 @@ impl HttpProtocol {
     }
 }
 
-/// Protocol-independent HTTP authentication intent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HttpAuth {
     NoAuth,
     ApiKey(SecretLiteral),
     Bearer(SecretLiteral),
     Header(String, SecretLiteral),
-    /// Bearer credentials resolved on each request.
     RequestTimeBearer(SharedRequestCredentialProvider),
-    /// Codex credentials resolved on each request.
-    ///
-    /// This intent is valid only for OpenAI Responses. [`HttpProviderRecipe::new`]
-    /// pairs it with [`ResponsesBodyShape::Codex`] unless another shape is set.
     RequestTimeCodex(SharedRequestCredentialProvider),
 }
 
@@ -714,10 +669,6 @@ mod tests {
         assert!(matches!(error, ProviderError::Configuration(_)));
     }
 
-    /// Both feature profiles construct and inspect Bedrock recipes; only
-    /// compilation differs. Without `provider-bedrock` the compiler refuses
-    /// the family with a configuration error before any network or SDK work,
-    /// and the shared HTTP contract fixtures above are unaffected.
     #[test]
     fn bedrock_recipes_compile_only_with_the_provider_bedrock_feature() {
         let compiler = ProviderCompiler::new().unwrap();
@@ -757,10 +708,6 @@ mod tests {
         }
     }
 
-    /// The body shape is the recipe's choice, not the credential's: a
-    /// Codex-shaped body with plain bearer auth omits `max_output_tokens`, and
-    /// a standard body with Codex request-time credentials includes it while
-    /// still sending the Codex headers.
     #[tokio::test]
     async fn responses_body_shape_is_independent_of_the_auth_intent() {
         let cases = [
@@ -897,9 +844,6 @@ mod tests {
         }
     }
 
-    /// A rejection body that echoes both Codex secrets reaches the caller
-    /// with each one redacted, while the non-secret `true` metadata value,
-    /// which also appears in ordinary JSON, survives intact.
     #[tokio::test]
     async fn request_time_codex_rejections_redact_every_secret_but_not_metadata() {
         let server = LoopbackServer::respond(
@@ -940,9 +884,6 @@ mod tests {
         );
     }
 
-    /// Headers a request-time Codex credential owns cannot also be set as
-    /// static headers: the duplicate is rejected at compile time instead of
-    /// being overwritten or removed per attempt.
     #[test]
     fn request_time_codex_protects_its_headers_from_static_configuration() {
         for name in [

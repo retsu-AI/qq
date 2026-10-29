@@ -1,26 +1,13 @@
-//! The active color theme. The renderer paints with eight semantic roles;
-//! a theme maps each to a terminal color (see `docs/design/theme.md`).
-//!
-//! Style helpers in `render.rs` are called hundreds of times per frame, so
-//! the active palette is a `Copy` value in a thread-local read by each
-//! helper, refreshed from the shared slot once per frame by the renderer.
-//! Switching themes bumps a generation the renderer compares to know when
-//! to drop every cached layout and repaint every row.
-
 use std::cell::Cell;
 
 use crossterm::style::Color;
 
-/// One resolved theme: a name for the picker and its role colors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
     pub name: String,
     pub palette: Palette,
 }
 
-/// The role colors. `Copy` so a frame can snapshot it for free. The first
-/// eight are what a theme file declares; the rest are derived from them
-/// unless the theme overrides them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
     pub text: Color,
@@ -31,22 +18,12 @@ pub struct Palette {
     pub error: Color,
     pub success: Color,
     pub surface: Color,
-    /// A second surface a step further from the background, for rules and
-    /// the composer frame.
     pub surface_alt: Color,
-    /// Background of the selected row in pickers and the sidebar.
     pub selection_bg: Color,
-    /// Rules and dividers.
     pub border: Color,
-    /// Background tint behind added and removed diff lines.
     pub diff_add_bg: Color,
     pub diff_del_bg: Color,
-    /// Running-state color: spinners and "working" labels.
     pub info: Color,
-    /// Syntax roles for highlighted code panels. Derived from the declared
-    /// roles unless the theme's `syntax` block overrides them; none of the
-    /// defaults ever reads `error`, so code never looks broken. Comment
-    /// italic is applied by the style helper, not stored here.
     pub syn_keyword: Color,
     pub syn_function: Color,
     pub syn_type: Color,
@@ -58,9 +35,6 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// The compiled `terminal` palette: the terminal's own ANSI colors for
-    /// every role but `brand` and `surface`. The fallback when the terminal
-    /// does not advertise truecolor, and selectable by name anywhere.
     pub const TERMINAL: Self = Self {
         text: Color::White,
         muted: Color::DarkGrey,
@@ -108,8 +82,6 @@ impl Palette {
         syn_function: Color::Cyan,
         syn_type: Color::Yellow,
         syn_string: Color::Green,
-        // Brand blended toward text; text is a terminal color here, so the
-        // blend falls back to brand itself.
         syn_constant: Color::Rgb {
             r: 255,
             g: 159,
@@ -120,13 +92,6 @@ impl Palette {
         syn_punctuation: Color::DarkGrey,
     };
 
-    /// Fill the derived roles from the eight declared ones: the selection and
-    /// alternate surface lift the surface a step, borders come from muted and
-    /// accent, diff tints from success and error at low intensity, info
-    /// follows accent, and the syntax roles map keyword → brand, function →
-    /// accent, type → warning, string → success, constant → brand softened a
-    /// third of the way toward text, comment and punctuation → muted,
-    /// property → text. `error` is deliberately absent from the syntax set.
     #[must_use]
     pub fn derive(roles: [Color; 8]) -> Self {
         let [text, muted, accent, brand, warning, error, success, surface] = roles;
@@ -179,8 +144,6 @@ impl Palette {
         }
     }
 
-    /// Replace any syntax role the theme overrides, leaving the derived
-    /// defaults for the rest.
     #[must_use]
     pub fn with_syntax(mut self, overrides: SyntaxOverrides) -> Self {
         let SyntaxOverrides {
@@ -221,9 +184,6 @@ impl Palette {
     }
 }
 
-/// `color` moved one third of the way toward `toward`: the constant tone
-/// keeps the brand hue at reduced intensity. Terminal (non-RGB) colors have
-/// no channels to mix, so the color is returned unchanged.
 const fn soften(color: Color, toward: Color) -> Color {
     match (color, toward) {
         (
@@ -248,18 +208,14 @@ impl Default for Palette {
     }
 }
 
-/// A role color as the composition root supplies it, free of any terminal
-/// library type. `Palette` converts it to the renderer's color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeColor {
-    /// The terminal's own palette entry; follows the user's terminal theme.
     White,
     DarkGrey,
     Cyan,
     Yellow,
     Red,
     Green,
-    /// A fixed 24-bit color.
     Rgb(u8, u8, u8),
 }
 
@@ -277,12 +233,8 @@ impl From<ThemeColor> for Color {
     }
 }
 
-/// Eight role colors in the order of `docs/design/theme.md`: text, muted,
-/// accent, brand, warning, error, success, surface.
 pub type ThemeRoles = [ThemeColor; 8];
 
-/// Syntax roles a theme document's optional `syntax` block sets. `None`
-/// keeps the default derived from the declared roles.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SyntaxOverrides {
     pub keyword: Option<ThemeColor>,
@@ -296,8 +248,6 @@ pub struct SyntaxOverrides {
 }
 
 impl Theme {
-    /// The compiled ANSI fallback. The designed default (`ink`) is a theme
-    /// document the composition root loads and passes in like any other.
     #[must_use]
     pub fn terminal() -> Self {
         Self {
@@ -306,14 +256,11 @@ impl Theme {
         }
     }
 
-    /// A theme from resolved role colors, syntax roles derived.
     #[must_use]
     pub fn from_roles(name: impl Into<String>, roles: ThemeRoles) -> Self {
         Self::from_roles_and_syntax(name, roles, SyntaxOverrides::default())
     }
 
-    /// A theme from resolved role colors plus the document's `syntax`
-    /// overrides, applied after the defaults are derived.
     #[must_use]
     pub fn from_roles_and_syntax(
         name: impl Into<String>,
@@ -348,13 +295,10 @@ thread_local! {
     static ACTIVE: Cell<Palette> = const { Cell::new(Palette::TERMINAL) };
 }
 
-/// Install `palette` for style helpers on this thread. The renderer calls
-/// this at the top of every frame; tests call it to render under a theme.
 pub(crate) fn activate(palette: Palette) {
     ACTIVE.with(|active| active.set(palette));
 }
 
-/// The palette style helpers read. One thread-local load, no lock.
 pub(crate) fn active() -> Palette {
     ACTIVE.with(Cell::get)
 }
@@ -426,15 +370,12 @@ mod tests {
         assert_eq!(palette.syn_comment, muted);
         assert_eq!(palette.syn_property, text);
         assert_eq!(palette.syn_punctuation, muted);
-        // Two thirds brand, one third text, per channel.
         assert_eq!(palette.syn_constant, rgb(0xe7, 0xc7, 0xcd));
         assert_ne!(palette.syn_constant, brand, "constant is softened");
         for role in syntax_roles(palette) {
             assert_ne!(role, error, "no syntax role maps to error");
         }
 
-        // The compiled `terminal` palette mixes ANSI colors, which have no
-        // channels to blend: constant stays brand, and nothing is red.
         for role in syntax_roles(Palette::TERMINAL) {
             assert_ne!(role, Palette::TERMINAL.error);
         }
@@ -454,8 +395,6 @@ mod tests {
             "the compiled constant's syntax roles match derivation"
         );
 
-        // A synthetic palette whose brand *is* an error-like red still
-        // yields a constant distinct from error because of the blend.
         let hot = Palette::derive([
             text,
             muted,

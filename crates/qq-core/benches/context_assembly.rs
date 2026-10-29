@@ -1,10 +1,3 @@
-//! `context_assembly`: model-context assembly and `search_history` against a
-//! session with a fixed retained context and a growing compacted archive.
-//! Assembly cost must follow the retained context, not the archive
-//! (harness-scale audit F06); an absent-term search must stay within its scan
-//! budget. Reports wall time per assembly and per search at each archive
-//! size.
-
 use std::{
     hint::black_box,
     time::{Duration, Instant},
@@ -28,8 +21,6 @@ fn main() {
     );
     for archived in archive_sizes {
         let directory = tempfile::tempdir().expect("temp dir");
-        // `QQ_BENCH_KEEP_DB=path` copies the largest store there for
-        // `EXPLAIN QUERY PLAN` inspection.
         let (connection, session_id) = bench::seed_compacted_session(
             &directory.path().join("sessions.sqlite3"),
             archived,
@@ -37,7 +28,6 @@ fn main() {
             TURNS_PER_RUN,
             RESULT_BYTES,
         );
-        // Warm.
         black_box(bench::assemble(&connection, session_id));
         let assemble = time(iterations, || {
             black_box(bench::assemble(&connection, session_id));

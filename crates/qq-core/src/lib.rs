@@ -1,23 +1,3 @@
-//! Agent runtime, session behavior, tools, and persistence.
-//!
-//! # Embedding lifecycle
-//!
-//! Construct a [`Runtime`] from a [`qq_provider::Provider`], attach external
-//! tools with [`Runtime::with_tool_host`], then asynchronously compile it with
-//! [`LoadedRuntime::from_runtime`]. A [`RuntimeLoader`] supplies this immutable
-//! plan to [`SessionRuntime::open`]. The host need not depend on a configuration
-//! crate; [`Runtime::resolved_model`] records only capabilities it can establish.
-//!
-//! Resolve the workspace and create a session with [`qq_protocol::SessionCommand`],
-//! subscribe before submitting a prompt, and consume committed [`qq_protocol::SessionEvent`]
-//! values. In ask mode, respond to tool approvals through the same command lane.
-//! A `RunFinished` event records the typed outcome; silence is not completion.
-//! Call [`SessionRuntime::shutdown`] to cancel and drain owned work before closing
-//! the store. The credential-free `examples/embed.rs` runs this entire lifecycle.
-//! Compilation performs blocking filesystem/catalog work on bounded Tokio
-//! blocking tasks. Cancellation of a compilation future does not stop work that
-//! has already started; compilation is not a run and produces no tool side effects.
-
 #![forbid(unsafe_code)]
 
 use std::{collections::HashMap, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
@@ -48,10 +28,6 @@ mod sessions;
 mod tools;
 pub mod undo;
 
-/// Places this process in QQ's own job, which permits breakaway, so a child
-/// spawned with `CREATE_BREAKAWAY_FROM_JOB` leaves every enclosing job that
-/// permits it. The detached daemon uses this to outlive the shell that
-/// started it.
 #[cfg(windows)]
 pub fn prepare_detached_spawn() -> std::io::Result<()> {
     tools::windows_job::root_job().map(|_| ())
@@ -63,7 +39,6 @@ pub use tools::process_context::ProcessProducer;
 pub use approval::bench_support as classify_bench;
 #[doc(hidden)]
 pub use sessions::bench_support as context_assembly_bench;
-/// Entry points for the `tool_output` bench. Not a public API.
 #[doc(hidden)]
 pub use tools::bench_support as tool_bench;
 pub use tools::network::{NetworkPolicy, host_grant_matches};
@@ -109,8 +84,6 @@ pub use sessions::{
     SessionRuntimeOptions, SideAnswer, SideQueryLimits, SlashCommandError,
     SpawnModelValidationFuture, WorkerRuntimeLoadFuture, WorkspacePolicyAuthority, run_cost,
 };
-/// Merkle index over the workspace tree the tools see.
-/// Detects changed paths between bounded workspace scans.
 pub use workspace::index::{
     IndexBudget, IndexDiff, IndexError, IndexOutcome, IndexStop, IndexedDirectory, IndexedFile,
     PartialIndex, WorkspaceIndex,
@@ -121,25 +94,9 @@ pub use workspace::{SkillEntry, SkillIndex, SkillKind};
 pub type RunStream = Pin<Box<dyn Stream<Item = RunEvent> + Send + 'static>>;
 type RuntimeStream = Pin<Box<dyn Stream<Item = RuntimeEvent> + Send + 'static>>;
 
-/// Tool calls one model turn may execute. Calls past this cap are admitted
-/// into the transcript with a not-executed error result so the model can
-/// re-issue them, and the run continues.
 const MAX_TOOL_CALLS_PER_TURN: usize = 16;
-/// Tool calls one model turn may name at all; beyond this the provider stream
-/// is treated as a protocol violation.
 const MAX_ADMITTED_TOOL_CALLS_PER_TURN: usize = 4 * MAX_TOOL_CALLS_PER_TURN;
-// A runaway-loop backstop for one internal execution slice, not a task
-// completion limit. Before a new model turn can exceed this ceiling, QQ asks
-// for a checkpoint reply, persists it, resets the counter, and continues the
-// same run. Tools stay declared on that turn: a call the model makes anyway is
-// admitted with a not-executed result instead of failing the run, because the
-// persisted turn is the boundary, not the model's obedience. An empty reply is
-// a missed report, not a failure (ADR-0054 § 2).
 const MAX_TOOL_CALLS_PER_SLICE: usize = 256;
-// The checkpoint and continuation notices are messages in the conversation,
-// not system-prompt text, so the cached prefix survives the seam. They are
-// replayed from `model_turns.notice` (`runtime::TurnNotice`); their wording is
-// part of every stored run that carried them.
 pub(crate) const SLICE_CHECKPOINT_NOTICE: &str = "[QQ runtime notice; not a user instruction]\n\
 This execution slice is at its safe tool-call boundary. Do not call tools in this reply. Write \
 a short report: what is established (with path:line evidence), what is still unknown, and the \
@@ -147,9 +104,6 @@ one next action. QQ keeps this report and continues the same run with tools avai
 const SLICE_CHECKPOINT_REJECTION: &str = "not executed: this reply was the slice checkpoint, \
 which records progress without running tools; the run continues and tools are available on \
 the next turn, so re-issue this call then";
-/// The stall report (ADR-0054 § 2) is the same kind of turn as the slice
-/// checkpoint, under its own wording: it fires after calls that changed
-/// nothing, not at a fixed slice boundary. It asks for the same report.
 pub(crate) const STALL_REPORT_NOTICE: &str = "[QQ runtime notice; not a user instruction]\n\
 The last 64 tool calls changed nothing and produced no answer. Do not call tools in this reply. \
 Write a short report: what is established (with path:line evidence), what is still unknown, and \
@@ -163,8 +117,6 @@ next turn.";
 const STALL_REPORT_REJECTION: &str = "not executed: this reply was a progress report, which \
 records what is established without running tools; the run continues and tools are available \
 on the next turn, so re-issue this call then";
-/// A sub-agent's last turn (ADR-0054 § 3). Its tools stay declared with
-/// `ToolChoice::None`; the turn ends the run whatever it returns.
 pub(crate) const SUBAGENT_FINAL_ANSWER_NOTICE: &str = "[QQ runtime notice; not a user \
 instruction]\nYou have reported several times without new results, so this reply ends your \
 run and is returned to the parent as your answer. Do not call tools; none will run. Answer the \
@@ -172,8 +124,6 @@ brief from what you have: the answer first, then the evidence as path:line, then
 unknown.";
 const SUBAGENT_FINAL_ANSWER_REJECTION: &str = "not executed: this reply was the sub-agent's \
 final answer, which ends the run without running tools";
-/// A compaction summarizer declares the session's tools only so its request
-/// shares the provider cache; it never runs one (ADR-0056 § 5).
 const SUMMARIZER_TOOL_REJECTION: &str = "not executed: this is a compaction request and tools \
 are unavailable; reply with the summary only";
 pub(crate) const SLICE_CONTINUATION_NOTICE: &str = "[QQ runtime notice; not a user \
@@ -189,58 +139,31 @@ const MAX_PARALLEL_READS: usize = 4;
 const SHELL_OUTPUT_QUEUE_CAPACITY: usize = 16;
 const CONTEXT_MESSAGE_FRAMING_BYTES: u64 = 16;
 const CONTEXT_BLOCK_FRAMING_BYTES: u64 = 16;
-/// Sent to the model when an interrupt left the transcript ending on an
-/// assistant message with no steering to inject.
 const INTERRUPT_CONTINUE_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe previous \
 turn was interrupted by the user. Continue from where it stopped.";
 const INTERRUPTED_TOOL_RESULT: &str =
     "Tool execution was interrupted before a durable result was recorded.";
-/// Most times one run resumes a turn the provider cut at its output token
-/// limit. The cap keeps a model that re-emits the same prefix from spending
-/// the whole budget; the typed failure names it.
 pub const MAX_OUTPUT_CONTINUATIONS: u16 = 3;
-/// Most times one streak of truncated turns raises its output cap after a turn
-/// hit the limit with nothing visible streamed. Such a turn was spent entirely
-/// on hidden reasoning; resending the same request would only spend it again,
-/// so the retry doubles the cap (bounded by the model's ceiling) and a second
-/// empty turn in the same streak settles the run with the cause named. Any
-/// completed turn ends the streak (ADR-0048 § 1).
 pub const MAX_EMPTY_OUTPUT_RETRIES: u16 = 1;
 
-/// The highest output cap the empty-truncation recovery may raise a turn to:
-/// the model's catalog limit, lowered to a managed `policy.max_output_tokens`
-/// when one is set below it. `policy_bound` says which one binds, so the
-/// terminal diagnostic names a remedy that can work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputCeiling {
     pub tokens: u32,
     pub policy_bound: bool,
 }
-/// Sent after a truncated turn is committed so the model resumes rather than
-/// restarts. Assistant/user alternation is preserved because the partial
-/// assistant message precedes it.
 pub(crate) const OUTPUT_TRUNCATED_CONTINUE_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
 previous response was cut off at the output token limit. Continue exactly from where it \
 stopped; do not repeat what was already written.";
 pub(crate) const REASONING_TRUNCATED_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
 previous response spent the whole output token limit on reasoning and produced no text or tool \
 call. Reason less this time: take the next step now, or give the answer briefly.";
-/// Most retries one turn may spend on a transient provider fault after the
-/// stream has started (the provider owns retries before that, ADR-0005). The
-/// count resets when a turn completes, so a long run survives many isolated
-/// blips while a provider that is down settles the run `paused` in minutes.
 pub use qq_protocol::MAX_TURN_RETRIES;
 
 pub use qq_provider::TurnRecoveryPolicy;
 
-/// Sent after a partial turn is committed when the provider fault cut the
-/// model off mid-reply. Alternation holds because the partial assistant
-/// message precedes it.
 pub(crate) const TURN_RETRY_CONTINUE_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
 previous response was cut off by a transient provider error and QQ is retrying. Continue \
 exactly from where it stopped; do not repeat what was already written.";
-/// Fills a skipped empty assistant turn so the follow-up user message does
-/// not sit next to the previous user message. Providers require alternation.
 pub(crate) const EMPTY_TURN_PLACEHOLDER: &str = "[QQ runtime notice; not a user instruction]\nThe previous \
 turn produced no model-visible text.";
 
@@ -249,8 +172,6 @@ enum StreamStep<T> {
     Event(Option<T>),
 }
 
-/// Resolves when an interrupting steer newer than `handled` arrives; pending
-/// forever for runs without steering.
 async fn interrupt_requested(steering: &mut Option<runtime::SteeringReceiver>, handled: u64) {
     match steering {
         Some(steering) => loop {
@@ -265,15 +186,9 @@ async fn interrupt_requested(steering: &mut Option<runtime::SteeringReceiver>, h
     }
 }
 
-/// How long a parent waiting for answers first pauses before retrying a
-/// settled child whose spend is not yet readable (its descendants are
-/// settling); the pause doubles up to `SUBAGENT_DELIVERY_RETRY_MAX`.
 const SUBAGENT_DELIVERY_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
 const SUBAGENT_DELIVERY_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Resolves when steering arrives (the message is kept for the next
-/// boundary) or an interrupt newer than `handled` is requested; pending
-/// forever for runs without steering.
 async fn steering_arrived(steering: &mut Option<runtime::SteeringReceiver>, handled: u64) {
     let Some(steering) = steering else {
         return std::future::pending().await;
@@ -304,14 +219,6 @@ async fn steering_arrived(steering: &mut Option<runtime::SteeringReceiver>, hand
     }
 }
 
-/// Commits every settled detached child's answer for the parent's turn
-/// `turn_ordinal` and appends each as a runtime notice, after the boundary's
-/// steering (ADR-0054 § 4). The store commits before the message joins
-/// context; each answer is charged once here. Only a child that answered is
-/// progress (ADR-0054 § 1): a failed or cancelled child's notice is evidence
-/// for the parent, not output, exactly as a blocking spawn's error result is
-/// not progress, and neither is an interim report. Returns how many answers
-/// and how many interim reports were delivered.
 async fn deliver_children(
     spawner: &Arc<dyn SubagentSpawner>,
     boundary: Boundary,
@@ -331,9 +238,6 @@ async fn deliver_children(
             count.answers += 1;
         }
         budget.charge_child(child.spend.usage, child.spend.cost_usd_nanos);
-        // Answers are output the parent asked for, like tool results: they
-        // count against its tool-output bound. The store bounded each
-        // boundary's notices together.
         budget.charge_tool_output(child.notice.len());
         if child.answered {
             stall.progress();
@@ -346,37 +250,23 @@ async fn deliver_children(
     Ok(count)
 }
 
-/// The boundary a delivery is for: the parent turn whose request carries
-/// it, and whether running children's reports come with it.
 #[derive(Debug, Clone, Copy)]
 struct Boundary {
     turn_ordinal: u32,
     reports: runtime::ReportDelivery,
 }
 
-/// What one boundary delivery added to the parent's context.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Delivered {
     answers: usize,
     reports: usize,
 }
 
-/// One steering message the loop has injected: its id and the files it read.
 struct AppliedSteering {
     message_id: qq_protocol::MessageId,
     attachments: Vec<input::ResolvedAttachment>,
 }
 
-/// Drains every steering message that is ready and appends each as a user
-/// message; applying any restarts the stall count. Returns what was
-/// applied, in order, or `None` when nothing was pending. Never waits for
-/// more steering: messages that arrive after the drain wait for the next
-/// boundary. A message with file parts reads them
-/// here — off the executor, through the plan's workspace — so the model sees
-/// the bytes as they are at the boundary and the store can keep them as
-/// this message's attachments. A file that cannot be read is reported to the
-/// model in place of the attachment rather than failing the run: the user's
-/// text still lands, and the message names what was missing.
 async fn apply_steering(
     stall: &mut runtime::StallScope,
     steering: &mut Option<runtime::SteeringReceiver>,
@@ -440,26 +330,10 @@ async fn apply_steering(
     if applied.is_empty() {
         return None;
     }
-    // An applied steer is a progress event: the user just gave the run
-    // something new to act on (ADR-0054 § 1).
     stall.progress();
     Some(applied)
 }
 
-/// Executes one `select_tools` call against the run's pin set. Returns the
-/// bounded tool result and whether any pin was added.
-/// Resolves a `spawn_agent` call's model choice against the roster. Precedence:
-/// an explicit `model` (which must be a roster route when a roster exists),
-/// then the requested `role`, then the roster's default role. `None` means
-/// "no roster and no override": the session layer falls back to the legacy
-/// worker model or the parent's selection. Errors are tool results the model
-/// can act on.
-/// Records one finished tool call for the audit trigger and, when a hook will
-/// read it, the auditor's action summary. Bounded: the summary keeps names
-/// and targets only and stops growing at `MAX_AUDIT_ACTION_BYTES`.
-/// Names the spill in the result's marker when a session store will keep
-/// it, and drops the spill otherwise so the marker keeps saying `not
-/// stored`. The handle's digest is of the complete text, known here.
 fn cite_spill(
     mut result: tools::ToolOutput,
     tool: &str,
@@ -496,8 +370,6 @@ fn note_audited_action(
     {
         triggers.non_read_shell = true;
     }
-    // Classification here only asks "was it a mutation or a non-read shell";
-    // the network policy is irrelevant to that, so the default is enough.
     match approval::classify(
         call.effect,
         &call.name,
@@ -646,9 +518,6 @@ fn select_tools(
     (tools::bounded_result(content, false), changed)
 }
 
-/// Re-pins every tool an earlier `select_tools` result in `messages` pinned,
-/// so a recovered run offers the schemas the model already selected. Only
-/// names the catalog still holds are pinned.
 fn recover_pins(
     messages: &[Message],
     catalog: &catalog::ToolCatalog,
@@ -695,75 +564,33 @@ impl Drop for CancelOnDrop {
     }
 }
 
-/// Capabilities granted to one model run. Guidance is allowed for durable
-/// user commands, including explicit follow-ups in a child session. Runtime-
-/// authored compactions and model-authored child tasks remain restricted.
 pub(crate) struct RunCapabilities {
     spawner: Option<Arc<dyn SubagentSpawner>>,
     allow_guidance: bool,
     slash_is_literal: bool,
     allow_tools: bool,
-    /// The session's policy is `ReadOnly`: mutating, shell, and non-read
-    /// external schemas are withheld from the request instead of offered and
-    /// denied. Policy still evaluates every call; this only saves the tokens.
     read_only: bool,
     unattended: bool,
     max_output_tokens: Option<u32>,
-    /// Caller-imposed budgets and the pricing that makes the cost bound
-    /// measurable. Admission rejects a cost cap without pricing before this
-    /// struct is built.
     limits: RunLimits,
     execution_started: Option<tokio::time::Instant>,
     pricing: Option<ModelPricing>,
-    /// Full-transcript recall for `search_history`. Session runs install one;
-    /// direct runs have no durable history to search.
     history: Option<Arc<dyn HistorySearcher>>,
     goal: Option<sessions::GoalRunInput>,
     goal_spend_tracking: bool,
     goal_paid: Option<sessions::GoalPaidInput>,
-    /// Stored complete tool outputs for `read_tool_result`. Session runs
-    /// install one and keep spills; direct runs keep none, so their markers
-    /// say `not stored`.
     spills: Option<Arc<dyn runtime::SpillReader>>,
-    /// Steering input from the session layer. Direct runs have none.
     steering: Option<runtime::SteeringReceiver>,
-    /// Summarizes this run's own earlier turns when a later turn would not
-    /// fit the window even after stubbing. Session prompt runs install one;
-    /// direct runs, children of the summarizer, and internal runs have none.
     compactor: Option<Arc<dyn runtime::InRunCompactor>>,
-    /// Audits the candidate final answer of a root run. Session roots install
-    /// one; children, internal runs, and direct runs have none.
     audit_hook: Option<Arc<dyn runtime::AuditHook>>,
     tool_tasks: Option<tools::ToolTasks>,
-    /// The typed-output contract of a prompt submitted with one. The final
-    /// answer is validated at the completion boundary and repaired within
-    /// the contract's turn allowance. Compaction and children have none.
     output: Option<Arc<output::CompiledOutputSchema>>,
-    /// Set for a model-spawned child task: its prompt says a parent is
-    /// waiting on it (ADR-0054 § 5).
     subagent: Option<runtime::SubagentAuthority>,
-    /// Audit children keep no stall count: they are already bounded at a
-    /// few turns (ADR-0054 § 1).
     stall_exempt: bool,
-    /// Set for a compaction summarizer: the prompt prefix of the session's
-    /// prompt runs. The request declares that tool list under that system
-    /// prompt, so it reads the provider cache those runs wrote; every call is
-    /// rejected unexecuted (ADR-0056 § 5).
     summarizer: Option<plan::PromptPrefixKey>,
-    /// The stored effect of each tool result in the messages the run starts
-    /// with, in block order (`None` for rows that predate the effect
-    /// column). The live overflow prune classifies inherited results by
-    /// these, exactly as assembly does, so a prune seam replays byte for
-    /// byte. Direct runs have none and fall back to the built-in names.
     inherited_effects: Vec<Option<catalog::EffectClass>>,
-    /// The session this run continues, sent to providers that route a
-    /// conversation's requests to one prompt cache. Direct runs have none.
     cache_key: Option<Arc<str>>,
-    /// The session's approval mode, for the prompt's Environment section.
-    /// Direct runs are Auto.
     mode: ApprovalMode,
-    /// The session layer snapshots the workspace before the run's first
-    /// change. Direct runs take no snapshot.
     snapshots: bool,
 }
 
@@ -800,9 +627,6 @@ impl RunCapabilities {
         }
     }
 
-    /// Marks a leading slash as already normalized from the durable `//`
-    /// escape. The message is provider-ready and must not be reinterpreted as
-    /// a guidance invocation.
     pub(crate) fn with_literal_slash(mut self, literal: bool) -> Self {
         self.slash_is_literal = literal;
         self
@@ -813,14 +637,11 @@ impl RunCapabilities {
         self
     }
 
-    /// Withholds schemas the `ReadOnly` policy would deny anyway.
     pub(crate) fn read_only(mut self) -> Self {
         self.read_only = true;
         self
     }
 
-    /// Marks a session run under `mode`, whose workspace the session layer
-    /// snapshots before the first change.
     pub(crate) fn in_session(mut self, mode: ApprovalMode) -> Self {
         self.mode = mode;
         self.snapshots = true;
@@ -898,24 +719,16 @@ impl RunCapabilities {
         self
     }
 
-    /// Marks a model-spawned child task, so its prompt carries the sub-agent
-    /// section for its authority.
     pub(crate) fn for_subagent(mut self, authority: runtime::SubagentAuthority) -> Self {
         self.subagent = Some(authority);
         self
     }
 
-    /// Exempts the run from stall reports: an audit child, bounded already.
     pub(crate) fn stall_exempt(mut self) -> Self {
         self.stall_exempt = true;
         self
     }
 
-    /// Makes the run a compaction summarizer whose request carries the
-    /// prompt prefix `key`: the same system prompt and tool list as the
-    /// session's prompt runs. Context sources and an output contract are
-    /// never applied to it, it keeps no stall count, and every call it makes
-    /// is rejected unexecuted; a second turn that calls a tool fails the run.
     pub(crate) fn with_inherited_effects(
         mut self,
         effects: Vec<Option<catalog::EffectClass>>,
@@ -930,8 +743,6 @@ impl RunCapabilities {
         self
     }
 
-    /// Installs a spawner on a restricted run: a model-authored child task at a
-    /// depth the roster still permits to delegate.
     pub(crate) fn with_spawner(mut self, spawner: Arc<dyn SubagentSpawner>) -> Self {
         self.spawner = Some(spawner);
         self
@@ -983,8 +794,6 @@ impl RunCapabilities {
 
 struct StaticPolicyGate {
     mode: ApprovalMode,
-    /// Workspace-configured tool allowlist entries by exact namespaced name.
-    /// Mode still wins: read-only denies granted tools.
     tools: std::collections::HashSet<String>,
     network: Arc<tools::network::NetworkPolicy>,
 }
@@ -1008,8 +817,6 @@ impl ToolGate for StaticPolicyGate {
     }
 }
 
-/// Direct embedded runs have no human approval channel. Their configured
-/// tool allowlist is an authority ceiling, independent of approval mode.
 struct ConfiguredToolGate(StaticPolicyGate);
 
 impl ToolGate for ConfiguredToolGate {
@@ -1027,33 +834,21 @@ impl ToolGate for ConfiguredToolGate {
     }
 }
 
-/// Runs protocol commands against a configured model provider.
 #[derive(Clone)]
 pub struct Runtime {
     provider: Arc<dyn Provider>,
     model: Arc<str>,
     max_output_tokens: u32,
-    /// The most the empty-truncation recovery may raise a turn's cap to: the
-    /// model's catalog limit, bounded by policy. `None` (no catalog limit, or
-    /// an embedded runtime) means the cap cannot be raised past
-    /// `max_output_tokens`.
     output_ceiling: Option<OutputCeiling>,
     context_window: Option<u32>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
-    /// External tool hosts in contribution order. A compiled plan snapshots
-    /// their catalogs; direct runs snapshot them per run.
     pub(crate) hosts: Arc<[Arc<dyn ExternalToolHost>]>,
-    /// Pre-turn context sources in registration order, with the shared cache.
     pub(crate) context_sources: Arc<[context_source::RegisteredSource]>,
     pub(crate) context_cache: Arc<ContextCache>,
     spawn_model_routes: Arc<[String]>,
-    /// Canonical configured pack trust inputs retained by direct runtime runs.
     protected_pack_roots: Arc<[PathBuf]>,
-    /// The roster and bounds `spawn_agent` advertises and resolves through.
     pub(crate) delegation: Arc<DelegationRoster>,
-    /// When a root run's final answer is audited before completion.
     pub(crate) audit: runtime::AuditPolicy,
-    /// Environment allowlist and built-in preference for `shell` calls.
     pub(crate) shell: Arc<runtime::ShellPolicy>,
     pub(crate) approved_read_images: Arc<runtime::ApprovedReadImages>,
     pub(crate) process_producer: Arc<ProcessProducer>,
@@ -1062,7 +857,6 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Pins effort for every provider request, including continuation turns.
     #[must_use]
     pub const fn with_reasoning_effort(mut self, effort: qq_provider::ReasoningEffort) -> Self {
         self.reasoning_effort = Some(effort);
@@ -1077,7 +871,6 @@ impl Runtime {
         Self::with_provider(Arc::new(provider), model, max_output_tokens)
     }
 
-    /// Creates a runtime without reboxing an already shared provider.
     pub fn with_provider(
         provider: Arc<dyn Provider>,
         model: impl Into<Arc<str>>,
@@ -1113,27 +906,12 @@ impl Runtime {
         })
     }
 
-    /// Sets the backoff between turn retries after a transient provider
-    /// fault. The retry count itself is fixed at [`MAX_TURN_RETRIES`].
     #[must_use]
     pub const fn with_turn_recovery(mut self, policy: TurnRecoveryPolicy) -> Self {
         self.turn_recovery = policy;
         self
     }
 
-    /// The summarizer request of an in-run compaction, under the run's own
-    /// system prompt and tools (ADR-0056 § 5). It is continued up to
-    /// `MAX_OUTPUT_CONTINUATIONS` times when the reply is cut at the output
-    /// limit, exactly as the run loop and the between-run path do; a cut turn
-    /// resumes mid-token, so its continuation is appended verbatim. A turn
-    /// that calls tools gets a rejection result for each call and is asked
-    /// again once, dropping what it wrote; a second such turn, a refusal, a
-    /// protocol violation, or a transport failure is an error naming it, and
-    /// the caller settles the compaction run failed. A provider fault the run
-    /// loop would retry for a model turn, or a stream that ends without a
-    /// terminal event, is `Transient`; everything else is `Rejected`. Returns
-    /// the joined text and the summed usage. The provider owns retries before
-    /// the stream starts, as for any request.
     pub(crate) fn summarize(
         &self,
         messages: Vec<Message>,
@@ -1152,8 +930,6 @@ impl Runtime {
         let mut ordinal = 0_u32;
         let mut continuations: u16 = 0;
         let mut fold = runtime::SummaryFold::new(messages.len().saturating_sub(1));
-        // One turn of calls is answered with rejections so the model can
-        // still write the summary; a second fails the step.
         let mut rejected_call_turn = false;
         let static_bytes = paid_output_cap.as_ref().map(|_| {
             (system.len() as u64).saturating_add(runtime::tool_schema_measurement(&tools).bytes)
@@ -1164,8 +940,6 @@ impl Runtime {
             yield Ok(runtime::SummarizeStep::RequestStarting { input_tokens });
             let request_cap = paid_output_cap.as_ref().map_or(max_output_tokens, |cap|
                 cap.load(std::sync::atomic::Ordering::Acquire).min(max_output_tokens));
-            // The run's own system prompt and tools, so this request shares
-            // the run's provider cache (ADR-0056 § 5). Calls are never run.
             let request =
                 ModelRequest::new(Arc::clone(&self.model), messages.clone(), request_cap)
                     .with_system(Arc::clone(&system));
@@ -1187,8 +961,6 @@ impl Runtime {
             let mut reasoning_seen = false;
             let mut truncated = None;
             let usage;
-            // Calls in this turn, in order, and the turn's replay data: a
-            // rejected-call turn is sent back exactly as it was produced.
             struct SummarizerCall {
                 id: String,
                 name: String,
@@ -1273,9 +1045,6 @@ impl Runtime {
                         truncated = Some(reason);
                         break;
                     }
-                    // A transient fault (overload, rate limit, transport loss)
-                    // is the provider's moment; the run loop retries the
-                    // summarizer like a model turn (ADR-0048 § 2).
                     Err(error) => {
                         let rejected_before_work = matches!(&error,
                             qq_provider::ProviderError::Api { .. } | qq_provider::ProviderError::RetryAfter { .. } | qq_provider::ProviderError::ResponseFailed { kind: qq_provider::ProviderErrorKind::ContextExceeded, .. } | qq_provider::ProviderError::Configuration(_)
@@ -1323,8 +1092,6 @@ impl Runtime {
                     Ok(arguments) => completed_blocks.push(ContentBlock::ToolCall {
                         id: call.id.clone(), name: call.name.clone(), arguments,
                     }),
-                    // Preserve measured spend even when malformed arguments
-                    // make this turn unusable; these calls are never executed.
                     Err(_) => completed_blocks.push(ContentBlock::Text {
                         text: format!("[Malformed summarizer call {} {}: {}]", call.id, call.name, call.arguments),
                     }),
@@ -1339,8 +1106,6 @@ impl Runtime {
                 model_work: runtime::ModelWorkDisposition::Committed,
                 ordinal, message: completed, usage, truncated: truncated.is_some(),
             });
-            // Overflowing the sum is a provider protocol fault; fail the
-            // compaction rather than persist an understated total.
             total_usage = match (total_usage, usage) {
                 (Some(total), Some(turn)) => match sessions::add_usage(total, turn) {
                     Some(sum) => Some(sum),
@@ -1353,9 +1118,6 @@ impl Runtime {
                 (Some(_), None) | (None, Some(_)) | (None, None) => None,
             };
             if !calls.is_empty() {
-                // Answer each call with a rejection and ask again. The model
-                // abandoned its reply, so nothing written so far is kept. A
-                // cut turn's calls are incomplete and cannot be answered.
                 if truncated.is_some() {
                     yield Err(runtime::SummarizeError::Rejected(
                         "summarizer called a tool and was cut off".to_owned(),
@@ -1396,8 +1158,6 @@ impl Runtime {
                         is_error: true,
                     });
                 }
-                // Reasoning providers (Anthropic thinking) require the turn's
-                // replay data alongside its tool calls.
                 let assistant = Message::new(Role::Assistant, blocks);
                 messages.push(match replay {
                     Some(data) => assistant.with_replay(data),
@@ -1420,9 +1180,6 @@ impl Runtime {
                 yield Ok(runtime::SummarizeStep::Summary(summary)); return;
             };
             if text.trim().is_empty() && reason == qq_provider::IncompleteReason::OutputTokens {
-                // Nothing visible: the cap went to hidden reasoning. A
-                // continuation would resend the same request. (A provider
-                // pause with no text is resent as the provider requires.)
                 yield Err(runtime::SummarizeError::Rejected(format!(
                     "summarizer output was cut off at the output token limit ({max_output_tokens} tokens) without producing any visible text; the limit was spent on reasoning. Lower `reasoning_effort` or raise `max_output_tokens`"
                 ))); return;
@@ -1440,27 +1197,18 @@ impl Runtime {
         }
     }
 
-    /// Supplies the effective model context window for provider-neutral
-    /// request planning. `None` retains the independent storage backstop.
     #[must_use]
     pub fn with_context_window(mut self, context_window: Option<u32>) -> Self {
         self.context_window = context_window;
         self
     }
 
-    /// Supplies the highest output cap a turn may be raised to when the whole
-    /// cap went to hidden reasoning (see [`MAX_EMPTY_OUTPUT_RETRIES`]). A
-    /// value at or below `max_output_tokens` disables the raise.
     #[must_use]
     pub const fn with_output_ceiling(mut self, output_ceiling: Option<OutputCeiling>) -> Self {
         self.output_ceiling = output_ceiling;
         self
     }
 
-    /// The resolved-model account of a runtime constructed without
-    /// configuration: identity comes from the runtime itself, and every
-    /// capability the embedder did not declare is recorded as unsupported or
-    /// unknown rather than guessed.
     #[must_use]
     pub fn resolved_model(&self) -> qq_protocol::ResolvedModel {
         self.embedded_resolved_model()
@@ -1490,8 +1238,6 @@ impl Runtime {
         }
     }
 
-    /// Attaches an external tool host. Its catalog is snapshotted when a plan
-    /// compiles from this runtime and its tools dispatch to it by name.
     #[must_use]
     pub fn with_tool_host(mut self, host: Arc<dyn ExternalToolHost>) -> Self {
         let mut hosts = self.hosts.to_vec();
@@ -1500,12 +1246,6 @@ impl Runtime {
         self
     }
 
-    /// Registers a bounded pre-turn context source. Sources are consulted
-    /// once per run, concurrently, before the first provider request. At
-    /// most [`MAX_CONTEXT_SOURCES`] may be registered; plan compilation,
-    /// which every run path goes through, rejects more with
-    /// [`plan::PlanCompileError::TooManyContextSources`] before any
-    /// provider work.
     #[must_use]
     pub fn with_context_source(mut self, source: Arc<dyn ContextSource>) -> Self {
         let mut sources = self.context_sources.to_vec();
@@ -1514,16 +1254,12 @@ impl Runtime {
         self
     }
 
-    /// Replaces the shared context cache (bounds are the embedder's call).
     #[must_use]
     pub fn with_context_cache(mut self, cache: Arc<ContextCache>) -> Self {
         self.context_cache = cache;
         self
     }
 
-    /// Restricts model-visible sub-agent overrides to authenticated canonical
-    /// routes supplied by the embedding application. Omission still resolves
-    /// through the configured worker model and persisted parent selection.
     #[must_use]
     pub fn with_spawn_model_routes(mut self, mut routes: Vec<String>) -> Self {
         routes.sort();
@@ -1533,50 +1269,42 @@ impl Runtime {
         self
     }
 
-    /// Installs the delegation roster the run loop advertises to the model.
     #[must_use]
     pub fn with_delegation(mut self, delegation: DelegationRoster) -> Self {
         self.delegation = Arc::new(delegation);
         self
     }
 
-    /// Sets when a root run's final answer is audited before completion.
     #[must_use]
     pub const fn with_audit(mut self, audit: runtime::AuditPolicy) -> Self {
         self.audit = audit;
         self
     }
 
-    /// Share the executing host's provenance across this runtime's plans and children.
     #[must_use]
     pub fn with_process_producer(mut self, producer: Arc<ProcessProducer>) -> Self {
         self.process_producer = producer;
         self
     }
 
-    /// Approve exact self-contained native read implementations for this host.
-    /// Empty by default; this trust must never come from tool or workspace input.
     #[must_use]
     pub fn with_approved_read_images(mut self, images: runtime::ApprovedReadImages) -> Self {
         self.approved_read_images = Arc::new(images);
         self
     }
 
-    /// Sets the shell environment allowlist and built-in preference.
     #[must_use]
     pub fn with_shell_policy(mut self, shell: runtime::ShellPolicy) -> Self {
         self.shell = Arc::new(shell);
         self
     }
 
-    /// Sets the managed host denies `fetch` refuses under every mode.
     #[must_use]
     pub fn with_network_policy(mut self, network: NetworkPolicy) -> Self {
         self.network = Arc::new(network);
         self
     }
 
-    /// Runs one command and returns events as they become available.
     pub fn run(&self, command: RunCommand) -> RunStream {
         self.run_in_workspace(
             command,
@@ -1584,7 +1312,6 @@ impl Runtime {
         )
     }
 
-    /// Runs one command with read-only tools scoped to `workspace`.
     pub fn run_in_workspace(&self, command: RunCommand, workspace: PathBuf) -> RunStream {
         public_run_stream(
             self.run_messages_in_workspace(
@@ -1595,7 +1322,6 @@ impl Runtime {
         )
     }
 
-    /// Runs a multi-turn model/tool loop with explicit prior conversation context.
     pub fn run_messages(&self, messages: Vec<Message>) -> RunStream {
         let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         public_run_stream(
@@ -1657,10 +1383,6 @@ impl Runtime {
         )
     }
 
-    /// Runs the loop from a runtime that was not compiled into a plan: the
-    /// workspace is canonicalized and opened, and instructions are read, for
-    /// this run only. Durable sessions compile once and call
-    /// [`CompiledAgentPlan::execute`] directly.
     pub(crate) fn run_loop_with_spawner(
         &self,
         messages: Vec<Message>,
@@ -1712,10 +1434,6 @@ impl Runtime {
                     return;
                 }
             };
-            // Capturing the profile calls every host's blocking catalog and
-            // compilation re-opens the workspace and re-reads instructions, so
-            // both run on the blocking thread; the direct path pays this once
-            // per run, the same filesystem work it always did.
             let profile_runtime = runtime.clone();
             let workspace_path = opened.path().to_owned();
             let mut compilation = tokio::task::spawn_blocking(move || {
@@ -1762,7 +1480,6 @@ impl Runtime {
             let mut events = compiled.execute(messages, cancelled, gate, file_state, capabilities);
             while let Some(event) = events.next().await {
                 match event {
-                    // The wrapper already announced the start.
                     RuntimeEvent::Started => {}
                     event => yield event,
                 }
@@ -1772,9 +1489,6 @@ impl Runtime {
 }
 
 impl plan::CompiledAgentPlan {
-    /// Runs one command from this plan with read-only tools scoped to the
-    /// plan's workspace, the direct (non-durable) counterpart of a session
-    /// run. Configuration allowlists are the only grants.
     pub fn run(self: &Arc<Self>, command: RunCommand) -> RunStream {
         let mut capabilities = RunCapabilities::user(None);
         capabilities.unattended = true;
@@ -1802,9 +1516,6 @@ impl plan::CompiledAgentPlan {
     }
 }
 
-/// Translates the richer internal runtime stream into the direct public API.
-/// Session execution consumes the internal preparation and tool events
-/// separately so it can persist them before publishing visible state.
 fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> RunStream {
     Box::pin(stream! {
         while let Some(event) = events.next().await {
@@ -1819,8 +1530,6 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                         reducible_message_bytes: weight.reducible_message_bytes,
                         irreducible_message_bytes: weight.irreducible_message_bytes,
                         compatible_input_tokens: weight.compatible_input_tokens,
-                        // The direct compatibility path has no durable
-                        // between-run compaction lifecycle.
                         compaction: sessions::context::CompactionDisposition::Unsupported,
                     });
                     if let Some(message) = sessions::context::rejection_message(plan) {
@@ -1854,9 +1563,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                     yield RunEvent::Usage { usage };
                 }
                 RuntimeEvent::AssistantTurnCompleted { usage: None, .. }
-                // Direct runs have no compactor, so these never fire.
                 | RuntimeEvent::InRunCompacted { .. }
-                // Direct runs keep no session history to replay.
                 | RuntimeEvent::ContextPruned { .. }
                 | RuntimeEvent::ProviderOverflow { .. }
                 | RuntimeEvent::ToolCallStarted { .. }
@@ -1869,18 +1576,11 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::ToolCallOutputDelta { .. }
                 | RuntimeEvent::ToolCallFinished { .. }
                 | RuntimeEvent::ToolResultsProjected { .. }
-                // Direct runs have no steering channel, so these never fire.
                 | RuntimeEvent::SteeringApplied { .. }
                 | RuntimeEvent::Interrupted { .. }
-                // Direct runs have no auditor either.
                 | RuntimeEvent::Audited { .. }
-                // Continuation is transparent to the direct stream: the text
-                // keeps flowing and the typed failure names exhaustion.
                 | RuntimeEvent::OutputTruncated { .. }
-                // Turn recovery is transparent too; `Paused` below names
-                // exhaustion.
                 | RuntimeEvent::TurnRetrying { .. }
-                // Direct runs carry no output contract.
                 | RuntimeEvent::OutputRepairRequested { .. } => {}
                 RuntimeEvent::Completed { .. } => {
                     drop(events);
@@ -1892,8 +1592,6 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                     yield RunEvent::Failed { kind, message };
                     return;
                 }
-                // Direct streams have no durable session to resume. Preserve
-                // the provider failure kind and expose no-progress separately.
                 RuntimeEvent::Paused { pause } => {
                     drop(events);
                     let (kind, message) = match pause.as_ref() {
@@ -1905,8 +1603,6 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                     yield RunEvent::Failed { kind, message };
                     return;
                 }
-                // The direct compatibility path imposes no caller limits, so
-                // this cannot occur; surface it truthfully rather than panic.
                 RuntimeEvent::BudgetExhausted { exhaustion } => {
                     drop(events);
                     yield RunEvent::Failed {
@@ -1946,10 +1642,6 @@ pub(crate) fn measure_messages(messages: &[Message]) -> u64 {
     })
 }
 
-/// What the run loop keeps of a tool result between its finished event and
-/// the turn's result message: the bounded text, the error flag, and the spill
-/// handle. The full output (file states, display payload, and the spilled
-/// text, which can be as large as the store keeps) moves into the event.
 #[derive(Debug, Clone)]
 struct RetainedResult {
     disposition: tools::ResultDisposition,
@@ -1995,8 +1687,6 @@ impl RetainedResult {
         result
     }
 
-    /// An `ask_user` result the session layer already persisted: kept as-is
-    /// so the model reads exactly what the store holds.
     const fn answered(result: String) -> Self {
         Self {
             disposition: tools::ResultDisposition::Refused,
@@ -2070,10 +1760,6 @@ const fn run_failure_kind(kind: ProviderErrorKind) -> RunFailureKind {
     }
 }
 
-/// Whether a provider fault that ended a started stream is worth re-issuing
-/// the turn for. Overload, rate limiting, and transport loss are the
-/// provider's moment, not the request's; everything else (auth, invalid
-/// request, malformed stream) would fail the same way again.
 const fn recoverable_turn_fault(kind: RunFailureKind) -> bool {
     matches!(
         kind,
@@ -2272,11 +1958,6 @@ mod tests {
         }
     }
 
-    /// D5: the run shares its transcript with each turn's request and, once
-    /// the provider stream is dropped, appends in place. The provider records
-    /// only the allocation's address (a `Weak` would itself force
-    /// `Arc::make_mut` to reallocate); turn two's request must then point at
-    /// the very allocation turn one saw, grown by two messages.
     #[tokio::test]
     async fn the_transcript_is_shared_with_each_request_and_grown_in_place() {
         struct TwoTurnProvider {
@@ -2349,21 +2030,13 @@ mod tests {
             *second_len, 3,
             "turn two sees prompt, assistant tool call, tool results"
         );
-        // Exactly two holders at request time: the run and the request.
         assert_eq!((*first_holders, *second_holders), (2, 2));
-        // Same allocation both turns: the append copied nothing.
         assert_eq!(
             first, second,
             "the transcript must be grown in place between turns"
         );
     }
 
-    /// D5: the run's `system_prompt_hash` is the SHA-256 of the full prompt
-    /// even though the plan-constant prefix was hashed once at compile and
-    /// only the per-run suffix (guidance, output contract) per run. The full
-    /// text must also equal what the one-shot builder produces, across the
-    /// capability sets that vary the prefix, so persisted identities are
-    /// unchanged by the split.
     #[tokio::test]
     async fn prefix_plus_suffix_digest_equals_the_full_prompt_digest() {
         struct SystemCapture(Arc<Mutex<Vec<Arc<str>>>>);
@@ -2410,9 +2083,6 @@ mod tests {
             .unwrap(),
         );
 
-        // (capabilities, prompt) pairs: the default set with a skill and a
-        // contract (both suffix), a read-only guidance-less child, a tool-less
-        // compaction-style run, and the default set with no suffix at all.
         let cases: Vec<(RunCapabilities, &str)> = vec![
             (
                 RunCapabilities::user(None).with_output(Some(Arc::clone(&contract))),
@@ -2479,7 +2149,6 @@ mod tests {
                 "the continued prefix digest must equal the whole-prompt digest"
             );
         }
-        // The suffix landed where the one-shot builder would have put it.
         assert!(systems[0].contains("Selected skill `review`"));
         assert!(
             systems[0].ends_with("\n```\n"),
@@ -2493,7 +2162,6 @@ mod tests {
         );
         assert!(!systems[2].contains("Available tools: read_file"));
         assert!(systems[3].contains("--- BEGIN WORKSPACE INSTRUCTIONS ---"));
-        // Byte-for-byte parity with the single-pass builder for the plain case.
         let expected = runtime::agent_system_prompt(
             &plan.catalog.base_specs(&catalog::StaticFilter {
                 spawn_agent: false,
@@ -2516,14 +2184,10 @@ mod tests {
             None,
         );
         assert_eq!(systems[3].as_ref(), expected.as_str());
-        // Distinct capability sets produced distinct prefixes; the two
-        // default-set runs shared one.
         assert_ne!(systems[1], systems[2]);
         assert_ne!(systems[1], systems[3]);
     }
 
-    /// Scripted turns for `Runtime::summarize`: each request pops the next
-    /// event list and is recorded.
     struct SummarizeScript {
         turns: Mutex<std::collections::VecDeque<Vec<Result<ProviderEvent, ProviderError>>>>,
         requests: Arc<Mutex<Vec<ModelRequest>>>,
@@ -2891,9 +2555,6 @@ mod tests {
 
     #[tokio::test]
     async fn in_run_summarize_answers_one_call_turn_with_rejections_and_keeps_only_the_new_reply() {
-        // Turn one is cut mid-reply; turn two continues it but calls a tool,
-        // abandoning the reply; turn three writes the summary. Only turn
-        // three is the summary: no fragment of the abandoned reply survives.
         let mut call_turn = vec![
             Ok(ProviderEvent::Replay {
                 data: Arc::from("thinking-signature"),
@@ -2929,7 +2590,6 @@ mod tests {
             assert_eq!(request.system(), Some("system"));
             assert_eq!(request.tools().len(), 1);
         }
-        // The retry carries the call with its replay data, then a rejection.
         let messages = requests[2].messages();
         let (call, result) = (&messages[messages.len() - 2], &messages[messages.len() - 1]);
         assert_eq!(call.replay(), Some("thinking-signature"));
@@ -2969,10 +2629,6 @@ mod tests {
         );
     }
 
-    /// ADR-0056 § 5: a summarizer run carries the system prompt and tools
-    /// of the prompt runs whose prefix key it is given, fetches no context
-    /// sources, and sends no output-contract notice, so its request shares
-    /// the cached prefix of those runs.
     #[tokio::test]
     async fn a_summarizer_run_sends_the_prompt_runs_system_prompt_and_tools_without_context_sources()
      {
@@ -3094,8 +2750,6 @@ mod tests {
         assert!(prompt_system.contains("[memory:0]"));
         assert!(!summarizer_system.contains("[memory:0]"));
         assert!(!summarizer_system.contains("## Output contract"));
-        // The plan-constant prefix is shared byte for byte; only the prompt
-        // run's per-run suffix (here, the context block) follows it.
         assert!(prompt_system.starts_with(summarizer_system));
         assert_eq!(summarizer.tools(), prompt.tools());
         assert!(!summarizer.tools().is_empty());
@@ -4273,8 +3927,6 @@ mod tests {
             .system()
             .expect("agent runs set a system prompt");
         assert!(!system.contains("edit_file"));
-        // Tools take relative paths; naming the absolute root would make the
-        // cached prompt prefix differ per task directory.
         assert!(!system.contains(directory.path().to_str().unwrap()));
         let result_message = &requests[1].messages()[2];
         assert!(matches!(
@@ -4541,7 +4193,6 @@ mod tests {
     async fn ab2_deferred_searches_do_not_trigger_a_premature_slice_checkpoint() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("AGENTS.md"), "instructions").unwrap();
-        // Distinct queries isolate page deferral from the repeated-read guard.
         let turns = (0..20).map(|turn| (0..16).map(|index| {
             ("search", serde_json::json!({"query":format!("AGENTS[.]md|^__page_probe_{turn}_{index}$"),"mode":"names","regex":true}).to_string())
         }).collect()).collect();
@@ -4601,7 +4252,6 @@ mod tests {
     async fn ab2_batched_searches_defer_before_execution_and_retry_unchanged() {
         for count in [16, 64] {
             let directory = tempfile::tempdir().unwrap();
-            // Long names fill a page and force an actual continuation cursor.
             for index in 0..100 {
                 std::fs::write(
                     directory
@@ -4614,8 +4264,6 @@ mod tests {
             let admitted = (tools::output::MAX_TURN_TOOL_OUTPUT_BYTES
                 - count * tools::output::result_reserve_bytes("search"))
                 / tools::output::SEARCH_RESERVATION_BYTES;
-            // Admitted slots use distinct arguments. Deferred slots retry query zero
-            // unchanged, so no deferral spends a repeated-read allowance.
             let arguments = (0..count)
                 .map(|index| {
                     let query = if index < admitted { index } else { 0 };
@@ -4880,10 +4528,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_turns_tool_output_is_capped_and_persisted_results_stay_whole() {
-        // Four reads of ~28 KiB each: per call every one fits its own 32 KiB
-        // bound, together they exceed the 96 KiB turn budget. The fourth
-        // result the model sees is re-bounded to the remainder; the events
-        // (what the store persists) keep each call's full bounded text.
         struct ThreeReadsProvider {
             turn: Mutex<usize>,
             requests: Arc<Mutex<Vec<ModelRequest>>>,
@@ -5055,9 +4699,6 @@ mod tests {
         )
         .unwrap();
 
-        // With the concurrent read path the fast call would finish first (as
-        // the read-overlap test proves); a mutating turn must instead finish
-        // in request order because side effects may not interleave.
         let events = runtime
             .run_loop(
                 vec![Message::user("mutate twice")],
@@ -5349,9 +4990,6 @@ mod tests {
         ));
     }
 
-    /// A run follows a yielded command with `command_status` on a later
-    /// turn, then ends with a second one still running: the run completes
-    /// and its teardown stops that command.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_run_follows_a_yielded_command_and_stops_the_rest_when_it_ends() {
@@ -5362,9 +5000,6 @@ mod tests {
 
         impl Provider for ReleaseOnSecondTurn {
             fn stream(&self, request: ModelRequest) -> ProviderStream {
-                // The second request means the first call already yielded:
-                // only then may the command finish. Like a model, it follows
-                // the id the yielded result named.
                 if self.script.requests.lock().unwrap().len() == 1 {
                     use std::io::Write as _;
                     (&self.gate).write_all(b"go\n").unwrap();
@@ -5418,7 +5053,6 @@ mod tests {
                         r#"{"command":"echo building; read token < release; echo built","yield_after_seconds":1}"#
                             .to_owned(),
                     )],
-                    // Turn two is built by the provider from the first result.
                     Vec::new(),
                     vec![(
                         "shell",
@@ -5449,8 +5083,6 @@ mod tests {
         )
         .await
         .expect("a yielded command must not hold the run");
-        // The run's end alone stops the command: wait for it to finish
-        // without draining, which would cancel it itself.
         tokio::time::timeout(
             std::time::Duration::from_secs(20),
             tool_tasks.commands().all_finished(),
@@ -5668,9 +5300,6 @@ mod tests {
         )
         .unwrap();
 
-        // Even though the tool is mutating and the gate would deny it, a call
-        // with malformed arguments has nothing executable to approve: it must
-        // return its argument error without an approval round trip.
         let events = runtime
             .run_loop(
                 vec![Message::user("mutate")],
@@ -5739,26 +5368,16 @@ mod tests {
         ));
     }
 
-    /// Truncates the first `truncations` turns at the output limit (each with
-    /// its own text prefix and, on the first, a half-streamed tool call), then
-    /// completes with a final chunk. Records every request for inspection.
     struct TruncatingProvider {
         truncations: usize,
-        /// Cut a tool call mid-arguments on the first truncated turn.
         cut_tool_call: bool,
-        /// Truncated turns stream nothing visible (all hidden reasoning).
         empty: bool,
-        /// Truncated turns from this ordinal onward stream nothing visible.
         empty_from: usize,
         requests: Arc<Mutex<Vec<ModelRequest>>>,
     }
 
-    /// Streams one complete tool call, then stops at the output limit with no
-    /// text; every later turn answers `done`.
     struct CallThenCutProvider {
         requests: Arc<Mutex<Vec<ModelRequest>>>,
-        /// After the call-then-cut turn, every later turn is cut with nothing
-        /// visible (all reasoning) instead of answering.
         then_empty: bool,
     }
 
@@ -5824,7 +5443,6 @@ mod tests {
                     })]
                 };
                 if turn == 0 && self.cut_tool_call {
-                    // A tool call cut mid-arguments must never execute.
                     events.push(Ok(ProviderEvent::ToolCallStarted {
                         id: "cut".to_owned(),
                         name: "read_file".to_owned(),
@@ -5874,8 +5492,6 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
 
-        // Three provider turns, each committed; the two truncated ones flagged
-        // and carrying no calls.
         let turns = events
             .iter()
             .filter_map(|event| match event {
@@ -5904,15 +5520,11 @@ mod tests {
             events.last(),
             Some(&RuntimeEvent::Completed { final_output: None })
         );
-        // The half-streamed tool call never reached the tool loop.
         assert!(!events.iter().any(|event| matches!(
             event,
             RuntimeEvent::ToolCallStarted { .. } | RuntimeEvent::ToolCallDenied { .. }
         )));
 
-        // The final request carries both partial turns with the continuation
-        // notice after each, so the model resumes rather than restarts, and
-        // alternation holds.
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         let transcript = requests[2]
@@ -5936,7 +5548,6 @@ mod tests {
                 (Role::User, OUTPUT_TRUNCATED_CONTINUE_NOTICE),
             ]
         );
-        // Tools stay available on continuation turns.
         assert!(!requests[2].tools().is_empty());
     }
 
@@ -5997,10 +5608,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_truncated_turn_raises_the_cap_once_then_completes() {
-        // RR8.1 regression: a turn cut at the limit with nothing visible was
-        // resent byte-for-byte up to the continuation cap (four identical
-        // 16 384-token reasoning turns in the audited runs). The retry must
-        // change the request: the cap doubles toward the model ceiling.
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             TruncatingProvider {
@@ -6042,7 +5649,6 @@ mod tests {
             events.last(),
             Some(&RuntimeEvent::Completed { final_output: None })
         );
-        // The retry is announced as the first (1-based) continuation.
         assert!(events.iter().any(|event| matches!(
             event,
             RuntimeEvent::OutputTruncated {
@@ -6050,8 +5656,6 @@ mod tests {
                 ..
             }
         )));
-        // The empty partial turn is durable and flagged; no continuation
-        // notice was appended because there was nothing to continue.
         assert!(events.iter().any(|event| matches!(
             event,
             RuntimeEvent::AssistantTurnCompleted {
@@ -6065,9 +5669,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_truncation_after_the_continuation_cap_does_not_spend_another_turn() {
-        // Three visible truncations exhaust the shared continuation cap; an
-        // empty one after them must settle, not emit `continuation: 4` (past
-        // the advertised `max_output_continuations`) and spend a fifth turn.
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             TruncatingProvider {
@@ -6250,12 +5851,7 @@ mod tests {
     }
     #[tokio::test]
     async fn a_truncated_turn_that_streamed_a_tool_call_is_continued_not_failed() {
-        // The model streamed a whole tool call (visible work) and then hit the
-        // cap with no text. The call cannot execute, but the turn was not
-        // spent on hidden reasoning: it is continued like any truncation
-        // rather than failed as an empty one.
         let requests = Arc::new(Mutex::new(Vec::new()));
-        // Already at the model ceiling: an empty truncation would fail here.
         let runtime = Runtime::new(
             CallThenCutProvider {
                 requests: Arc::clone(&requests),
@@ -6287,10 +5883,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_shaped_run_raises_an_empty_truncated_cap_toward_the_catalog_ceiling() {
-        // ENG-973: session runs start at the configured cap, which was also
-        // the raise limit, so the RR8.1 raise never fired and the error named
-        // the configured cap as the "model ceiling". With a catalog ceiling
-        // above it the first empty truncation doubles the cap.
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             TruncatingProvider {
@@ -6328,7 +5920,6 @@ mod tests {
             Some(&RuntimeEvent::Completed { final_output: None })
         );
 
-        // When the raise is spent the error names the catalog ceiling.
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             TruncatingProvider {
@@ -6369,10 +5960,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_tool_call_then_cut_turn_changes_the_resend_when_it_can() {
-        // ENG-973: a turn that streamed a complete call and then hit the cap
-        // drops the call, so a plain continuation resends the identical
-        // request. With room under the ceiling the resend carries a raised
-        // cap instead; the continuation counter still bounds the run.
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             CallThenCutProvider {
@@ -6404,10 +5991,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_reasoning_diagnostic_counts_only_turns_that_produced_nothing() {
-        // Review (#216): a call-then-cut turn takes the one raise, then the
-        // retried turn is a genuine all-reasoning cut at the ceiling. The
-        // failure must count one empty turn, not attribute the earlier turn
-        // (which streamed a complete call) to reasoning too.
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             CallThenCutProvider {
@@ -6436,8 +6019,6 @@ mod tests {
         assert!(message.contains("(512 tokens)"), "{message}");
     }
 
-    /// Turn 0: nothing visible, cut. Turn 1: a complete `read_file` call that
-    /// finishes normally. Turn 2 onward: nothing visible, cut.
     struct EmptyThenToolThenEmptyProvider {
         requests: Arc<Mutex<Vec<ModelRequest>>>,
     }
@@ -6477,9 +6058,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_completed_tool_turn_resets_the_reasoning_only_streak() {
-        // Review (#216): empty (takes the raise) -> a completed tool turn ->
-        // empty at the ceiling reported two consecutive reasoning-only turns;
-        // the tool turn in between was visible work.
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             EmptyThenToolThenEmptyProvider {
@@ -6509,9 +6087,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_policy_bound_ceiling_names_the_policy_not_max_output_tokens() {
-        // Review (#216): when managed policy, not the model, set the raise
-        // ceiling, "raise `max_output_tokens`" cannot help and the number is
-        // not the model's.
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             TruncatingProvider {
@@ -6590,10 +6165,6 @@ mod tests {
         );
     }
 
-    /// Bedrock Converse cannot ask for no tool calls, so a model may call a
-    /// tool on the budget-final turn anyway. The call never runs and the run
-    /// settles as exhausted without a final response, never as a provider
-    /// failure.
     #[tokio::test]
     async fn a_tool_call_on_the_budget_final_turn_settles_without_running() {
         struct AlwaysCalls {
@@ -6689,10 +6260,6 @@ mod tests {
         )
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
-        // One model turn: the first request is already the reserved final
-        // response, so its truncation must not spend a second turn.
-        // (A tool call on that turn is already a budget failure; this case
-        // covers plain text running out of room.)
         let limits = RunLimits {
             max_model_turns: Some(1),
             ..RunLimits::default()
@@ -6787,9 +6354,6 @@ mod tests {
                 ..
             }
         )));
-        // A paused turn with no text commits no assistant message, so there
-        // is nothing to append a notice after: the resume request repeats
-        // the original prompt alone and alternation holds.
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[1].messages().len(), 1);
@@ -7020,15 +6584,10 @@ mod tests {
         ));
     }
 
-    /// Whether a recorded request is the slice-checkpoint turn: tools stay
-    /// declared there and the system prompt is unchanged, so the report
-    /// notice as the last message is the marker.
     fn is_checkpoint_request(request: &ModelRequest) -> bool {
         last_user_text(request) == Some(SLICE_CHECKPOINT_NOTICE)
     }
 
-    /// The text of the request's last message when it is a user text, such
-    /// as a runtime notice.
     fn last_user_text(request: &ModelRequest) -> Option<&str> {
         let message = request.messages().last()?;
         if message.role() != Role::User {
@@ -7042,10 +6601,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_measured_token_chain_survives_the_slice_checkpoint_and_continuation() {
-        // Every turn reports usage. The checkpoint and continuation turns add
-        // a notice message each; the system prompt and the static prefix stay
-        // the run's own (ADR-0054 § 2). Each request must still carry a
-        // measurement-derived estimate, adjusted by the byte deltas.
         struct MeasuredCheckpoint {
             emitted: Mutex<usize>,
         }
@@ -7072,7 +6627,6 @@ mod tests {
                     ]));
                 }
                 let mut emitted = self.emitted.lock().unwrap();
-                // Two turns past the checkpoint: continuation, then one more.
                 if *emitted >= MAX_TOOL_CALLS_PER_SLICE + 2 {
                     return Box::pin(stream::iter([
                         Ok(ProviderEvent::OutputTextDelta {
@@ -7145,8 +6699,6 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // One static prefix for the whole run: the seam no longer changes it,
-        // so occupancy reuse and the provider cache hold across it.
         let prefixes = events
             .iter()
             .filter_map(|event| match event {
@@ -7159,8 +6711,6 @@ mod tests {
             prefixes.iter().all(|prefix| *prefix == prefixes[0]),
             "{prefixes:?}"
         );
-        // The first request has nothing to inherit; every later one does,
-        // including the checkpoint, the continuation, and the turn after.
         assert_eq!(prepared[0].1, None);
         let unmeasured: Vec<u32> = prepared[1..]
             .iter()
@@ -7171,11 +6721,6 @@ mod tests {
             unmeasured.is_empty(),
             "turns without a measured chain: {unmeasured:?}"
         );
-        // Every measured turn reports 1,000 tokens, so each request after the
-        // first estimates 1,000 plus the byte delta of one turn's calls and
-        // results (~300 tokens here), never the raw byte count of the whole
-        // transcript. The checkpoint and continuation requests are charged
-        // only their notice message on top of the measurement.
         for (turn, tokens) in &prepared[1..] {
             let tokens = tokens.expect("measured");
             assert!((900..=1_400).contains(&tokens), "turn {turn}: {tokens}");
@@ -7222,10 +6767,6 @@ mod tests {
                     ]));
                 }
 
-                // Fifteen calls per provider turn deliberately leaves the
-                // first slice at 255. A rollover implementation that checks
-                // only after a turn would accept two more calls and overshoot
-                // the 256-call ceiling.
                 let first = *emitted;
                 let count = (required - first).min(MAX_TOOL_CALLS_PER_TURN - 1);
                 *emitted += count;
@@ -7293,12 +6834,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_tool_call_on_the_checkpoint_turn_settles_as_a_rejection_and_the_run_continues() {
-        // Regression: models over OpenAI-compatible routes keep emitting
-        // tool calls on the checkpoint turn when the transcript is dense with
-        // them. That used to be a `ProviderProtocol` failure that discarded
-        // the whole run (5 runs, 120 minutes in the 2026-09-21 audit). The
-        // checkpoint keeps tools declared; a call there is admitted with a
-        // not-executed result and the run continues into the next slice.
         struct AllowAllGate;
 
         impl ToolGate for AllowAllGate {
@@ -7344,8 +6879,6 @@ mod tests {
                         Ok(ProviderEvent::Completed { usage: None }),
                     ]));
                 }
-                // Fifteen per turn parks the first slice at 255 so the next
-                // turn is the checkpoint.
                 let mut emitted = self.emitted.lock().unwrap();
                 let first = *emitted;
                 let count = (MAX_TOOL_CALLS_PER_SLICE - 1 - first).min(MAX_TOOL_CALLS_PER_TURN - 1);
@@ -7354,8 +6887,6 @@ mod tests {
                 let mut events = Vec::with_capacity(count * 3 + 1);
                 for index in first..first + count {
                     if index == first {
-                        // One write per turn is progress, so the run reaches
-                        // the slice checkpoint rather than a stall report.
                         let id = format!("call-{index}");
                         events.extend([
                             Ok(ProviderEvent::ToolCallStarted {
@@ -7448,16 +6979,12 @@ mod tests {
         assert!(!requests[checkpoint_index].tools().is_empty());
         let continuation = &requests[checkpoint_index + 1];
         assert!(!continuation.tools().is_empty());
-        // Neither seam touches the system prompt: the notices are messages,
-        // so the cached prefix holds across the checkpoint (ADR-0054 § 2).
         assert_eq!(requests[checkpoint_index].system(), requests[0].system());
         assert_eq!(continuation.system(), requests[0].system());
         assert_eq!(
             last_user_text(continuation),
             Some(SLICE_CONTINUATION_NOTICE)
         );
-        // The rejected call has exactly one result, just before the
-        // continuation notice, so the model can re-issue it.
         let messages = continuation.messages();
         assert!(matches!(
             messages[messages.len() - 2].content(),
@@ -7582,9 +7109,6 @@ mod tests {
             }
         }
 
-        // Three reads, one edit, one read: the leading reads overlap and see
-        // the original file; the trailing read runs after the edit and sees
-        // the new text. Results still land in call order.
         struct MixedTurn {
             requests: Arc<Mutex<Vec<ModelRequest>>>,
         }
@@ -7719,9 +7243,6 @@ mod tests {
             })
         ));
 
-        // An empty checkpoint is a missed report, not a failure: the slice
-        // still resets and the run finishes (ADR-0054 § 2). The live context
-        // fills the empty turn with the placeholder assembly would insert.
         struct EmptyCheckpoint {
             turn: Mutex<usize>,
             requests: Arc<Mutex<Vec<ModelRequest>>>,
@@ -7816,9 +7337,6 @@ mod tests {
         );
     }
 
-    /// When the turn after a slice report is the budget-final turn, it asks
-    /// for no tool calls, so it is not told that tools are available again: it carries
-    /// only the budget-final notice, and its turn records no continuation.
     #[tokio::test]
     async fn a_budget_final_turn_after_a_report_gets_no_continuation_notice() {
         struct ReportThenFinal {
@@ -7845,8 +7363,6 @@ mod tests {
                 let mut events = Vec::new();
                 for index in first..first + MAX_TOOL_CALLS_PER_TURN {
                     let id = format!("call-{index}");
-                    // One write per turn is progress, so the run reaches the
-                    // slice checkpoint, not a stall report.
                     let (name, json) = if index == first {
                         ("write_file", r#"{"path":"progress.txt","content":"x"}"#)
                     } else {
@@ -7867,10 +7383,6 @@ mod tests {
             }
         }
 
-        // Sixteen-call turns fill the slice exactly: after sixteen of them
-        // (256 calls) the next turn could pass the ceiling, so turn 17 is the
-        // report. With 18 turns allowed, turn 18 is the reserved tool-free
-        // final response, which is also the first turn of the next slice.
         let report_turn =
             u32::try_from(MAX_TOOL_CALLS_PER_SLICE / MAX_TOOL_CALLS_PER_TURN).unwrap() + 1;
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -7944,11 +7456,6 @@ mod tests {
         assert!(notices.contains(&Some(runtime::TurnNotice::Report)));
     }
 
-    /// A checkpoint reply with no content *and no usage* after fresh tool
-    /// results is a gateway that swallowed a failure, not a missed report:
-    /// it is retried like any transient fault. The report notice is placed
-    /// once and the retry's report is the one that stands. (A metered empty
-    /// reply is a missed report; see the test above.)
     #[tokio::test(start_paused = true)]
     async fn an_unmetered_empty_checkpoint_is_retried_as_a_transient_fault() {
         struct SwallowedCheckpoint {
@@ -8025,7 +7532,6 @@ mod tests {
             events.last()
         );
         let requests = requests.lock().unwrap();
-        // The swallowed reply was re-issued: two checkpoint requests.
         assert_eq!(
             requests.iter().filter(|r| is_checkpoint_request(r)).count(),
             2
@@ -8074,7 +7580,6 @@ mod tests {
         }
     }
 
-    /// Counts stream calls and fails every one of them the scripted way.
     struct FailingProvider {
         calls: Arc<std::sync::atomic::AtomicU32>,
         failure: fn() -> Option<ProviderError>,
@@ -8090,10 +7595,6 @@ mod tests {
         }
     }
 
-    /// A gateway that swallows an upstream failure: turn one asks for a
-    /// read, then every reply to the result is `prelude` (a gateway that
-    /// flushes a trailing newline before `[DONE]`) followed by exactly one
-    /// `Completed` carrying the given usage.
     struct EmptyCompletionProvider {
         calls: Arc<std::sync::atomic::AtomicU32>,
         usage: Option<qq_provider::ProviderUsage>,
@@ -8131,18 +7632,11 @@ mod tests {
         }
     }
 
-    /// ENG-952: two production runs settled `completed` after the gateway
-    /// returned a bare `[DONE]` — no text, no calls, no usage — in reply to
-    /// fresh tool results. Silence is not an answer: it is the transient
-    /// fault a cut stream is, and takes the same bounded retry then pause.
     #[tokio::test(start_paused = true)]
     async fn an_empty_completion_without_usage_is_a_transient_fault_not_an_answer() {
         let fast = TurnRecoveryPolicy::new(Duration::from_millis(1), Duration::from_millis(1));
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("note.txt"), "note\n").unwrap();
-        // Whitespace before the terminal event is still nothing: the
-        // transcript would drop it (`has_content` trims), so the fault
-        // predicate measures emptiness the same way.
         for prelude in [None, Some("\n"), Some(" \n\t")] {
             let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
             let runtime = Runtime::new(
@@ -8184,8 +7678,6 @@ mod tests {
             );
         }
 
-        // Real text without usage is an answer, exactly as every
-        // `Completed { usage: None }` provider in this module is.
         let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let runtime = Runtime::new(
             EmptyCompletionProvider {
@@ -8208,9 +7700,6 @@ mod tests {
             "{events:?}"
         );
 
-        // A provider that measured the request and genuinely returned an
-        // empty answer is a real (if useless) completion, not a fault: the
-        // run settles once and never resends.
         let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let runtime = Runtime::new(
             EmptyCompletionProvider {
@@ -8294,10 +7783,6 @@ mod tests {
         }
     }
 
-    /// Steering accepted while tools ran joins the request as a user message
-    /// after the results (`apply_steering` at the turn boundary), so the
-    /// last message is no longer the results. The empty completion that
-    /// follows is still a fault: the results are what the model was answering.
     #[tokio::test(start_paused = true)]
     async fn an_empty_completion_after_tool_results_and_steering_is_still_a_fault() {
         let fast = TurnRecoveryPolicy::new(Duration::from_millis(1), Duration::from_millis(1));
@@ -8317,9 +7802,6 @@ mod tests {
         .with_turn_recovery(fast);
         let (sender, receiver) = runtime::steering_channel();
         let message_id = qq_protocol::MessageId::from_bytes([7; 16]);
-        // Queued before the run starts: the first boundary after the read's
-        // result drains it, so the empty turn's request ends with this
-        // user message, not with the tool result.
         sender
             .messages
             .send(runtime::SteeringMessage::text(message_id, "also summarize"))
@@ -8361,12 +7843,6 @@ mod tests {
         );
     }
 
-    /// Two-phase retry ownership (ADR-0040). The provider owns resends while
-    /// nothing has streamed; the run owns recovery of the *turn*: a transient
-    /// fault commits whatever arrived, re-issues the turn up to
-    /// `MAX_TURN_RETRIES` times, and then settles `paused` rather than failed.
-    /// Faults that would recur (auth, invalid request, malformed stream) still
-    /// fail at once with no resend.
     #[tokio::test(start_paused = true)]
     async fn transient_faults_retry_the_turn_and_exhaustion_pauses() {
         let fast = TurnRecoveryPolicy::new(Duration::from_millis(1), Duration::from_millis(1));
@@ -8409,8 +7885,6 @@ mod tests {
                 u32::from(MAX_TURN_RETRIES) + 1,
                 "{kind:?}: one send plus every retry"
             );
-            // The direct path has no session to resume from, so the pause
-            // surfaces as the last fault with the retries it spent.
             assert!(
                 matches!(
                     events.last(),
@@ -8423,7 +7897,6 @@ mod tests {
             );
         }
 
-        // A fault the retry cannot fix fails at once with no resend.
         let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let runtime = Runtime::new(
             FailingProvider {
@@ -8453,8 +7926,6 @@ mod tests {
             })
         ));
 
-        // After visible output a fault commits the partial turn and the
-        // retry continues it: the answer is the two halves.
         struct RecoversMidStream {
             calls: Arc<std::sync::atomic::AtomicU32>,
             requests: Arc<Mutex<Vec<ModelRequest>>>,
@@ -8465,7 +7936,6 @@ mod tests {
                 let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 self.requests.lock().unwrap().push(request);
                 match call {
-                    // 529 twice mid-stream, then a clean finish.
                     0 | 1 => Box::pin(stream::iter([
                         Ok(ProviderEvent::OutputTextDelta {
                             text: format!("part{call} "),
@@ -8511,8 +7981,6 @@ mod tests {
             .collect();
         assert_eq!(text, "part0 part1 done");
         assert!(matches!(events.last(), Some(RunEvent::Completed)));
-        // Each retry carried the partial turn and the continue notice, so
-        // the model resumes rather than restarts.
         let requests = requests.lock().unwrap();
         let third = requests[2].messages();
         assert!(matches!(
@@ -8525,8 +7993,6 @@ mod tests {
         ));
     }
 
-    /// The retry count is per turn: a run that completes a turn between
-    /// faults never pauses, however many isolated blips it meets.
     #[tokio::test(start_paused = true)]
     async fn the_turn_retry_allowance_resets_on_a_completed_turn() {
         struct BlipEveryTurn {
@@ -8542,9 +8008,6 @@ mod tests {
                     .flat_map(|message| message.content())
                     .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
                     .count();
-                // Odd calls fault mid-stream; even calls complete. Eight
-                // completed tool turns, each preceded by one fault, is more
-                // faults than one turn may spend.
                 if call.is_multiple_of(2) {
                     return Box::pin(stream::iter([
                         Ok(ProviderEvent::OutputTextDelta {
@@ -8596,8 +8059,6 @@ mod tests {
             .run_messages_in_workspace(vec![Message::user("read a lot")], directory.path().into())
             .collect::<Vec<_>>()
             .await;
-        // 9 faults (one per turn) + 9 completions; well past MAX_TURN_RETRIES
-        // in total, never more than one per turn.
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 18);
         assert!(
             matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
@@ -8615,7 +8076,6 @@ mod tests {
         )));
     }
 
-    /// Cancellation and the run deadline both cut a retry sleep short.
     #[tokio::test(start_paused = true)]
     async fn a_retry_sleep_yields_to_cancellation_and_the_deadline() {
         struct AlwaysBlips;
@@ -8638,8 +8098,6 @@ mod tests {
         let slow = TurnRecoveryPolicy::new(Duration::from_secs(60), Duration::from_secs(60));
         let directory = tempfile::tempdir().unwrap();
 
-        // Cancel during the first backoff: the stream ends without a
-        // terminal event of its own (the session layer settles Cancelled).
         let runtime = Runtime::new(AlwaysBlips, "gpt-test", 256)
             .unwrap()
             .with_turn_recovery(slow);
@@ -8672,8 +8130,6 @@ mod tests {
             events.last()
         );
 
-        // A run deadline inside the backoff settles as that budget, not as a
-        // pause and not after the full sleep.
         let runtime = Runtime::new(AlwaysBlips, "gpt-test", 256)
             .unwrap()
             .with_turn_recovery(slow);
@@ -8785,7 +8241,6 @@ mod tests {
         }
     }
 
-    /// Scripts one `mcp__srv__ping` call on the first turn, then completes.
     struct McpCallProvider {
         requests: Arc<Mutex<Vec<ModelRequest>>>,
     }
@@ -8830,14 +8285,11 @@ mod tests {
             content: "pong".to_owned(),
             is_error: false,
         });
-        // A spec that violates the namespace contract must be discarded.
         registry.specs.push(qq_provider::ToolSpec::new(
             "rogue_tool",
             "not namespaced",
             serde_json::json!({"type": "object"}),
         ));
-        // The configuration allowlist covers the call, so gate-less Ask mode
-        // executes it without an approval round trip.
         registry.grants = vec!["mcp__srv__ping".to_owned()];
         let calls = Arc::clone(&registry.calls);
         let runtime = Runtime::new(
@@ -8987,8 +8439,6 @@ mod tests {
         )
         .unwrap()
         .with_tool_host(Arc::new(registry));
-        // No configuration grant covers the call: gate-less Ask mode denies
-        // without executing, and the run still completes.
         let events = runtime
             .run_messages_in_workspace(vec![Message::user("ping")], directory.path().to_owned())
             .collect::<Vec<_>>()
@@ -9011,8 +8461,6 @@ mod tests {
             }
         }
 
-        // Without a registry, an approved mcp__ call falls through to the
-        // built-in dispatcher's precise unknown-tool error.
         let runtime = Runtime::new(
             McpCallProvider {
                 requests: Arc::new(Mutex::new(Vec::new())),
@@ -9117,7 +8565,6 @@ mod tests {
         );
     }
 
-    /// Scripts one `spawn_agent` call on the first turn, then completes.
     struct SpawnCallProvider {
         turn: Mutex<usize>,
         model: Option<&'static str>,
@@ -9192,7 +8639,6 @@ mod tests {
         }
     }
 
-    /// Delivers a fixed set of children once.
     struct DeliveringSpawner {
         delivered: Mutex<Vec<runtime::DeliveredChild>>,
     }
@@ -9211,13 +8657,6 @@ mod tests {
         }
     }
 
-    /// Only a child that answered is progress for its parent (ADR-0054 § 1),
-    /// exactly as only a successful blocking spawn result is. A delivered
-    /// notice that the child failed or was cancelled is still context the
-    /// parent sees and spend it pays, but it does not hold off the parent's
-    /// stall report: a parent spawning children that fail must still report.
-    /// An interim report from a child still working is neither progress nor
-    /// an answer.
     #[tokio::test]
     async fn only_a_delivered_answer_restarts_the_stall_count() {
         let child = |answered: bool, interim: bool| runtime::DeliveredChild {
@@ -9263,7 +8702,6 @@ mod tests {
                     reports: usize::from(interim),
                 }
             );
-            // Either way the notice is in context.
             assert_eq!(
                 messages.last().unwrap(),
                 &Message::user(format!("child answered: {answered}"))
@@ -9305,8 +8743,6 @@ mod tests {
             256,
         )
         .unwrap();
-        // run_messages_in_workspace passes no spawner: the tool must be
-        // absent from the declarations and rejected by dispatch.
         let events = runtime
             .run_messages_in_workspace(vec![Message::user("go")], directory.path().to_owned())
             .collect::<Vec<_>>()
@@ -9322,8 +8758,6 @@ mod tests {
             Some(RuntimeEvent::Completed { .. })
         ));
         let requests = requests.lock().unwrap();
-        // The delegation tools come and go together: a run that cannot
-        // spawn has no background children to wait for or cancel.
         for tool in [tools::SPAWN_AGENT_TOOL, "wait_agents", "cancel_agent"] {
             assert!(
                 !requests[0].tools().iter().any(|spec| spec.name() == tool),
@@ -9332,8 +8766,6 @@ mod tests {
         }
         let system = requests[0].system().unwrap();
         assert!(!system.contains("Delegation:"));
-        // Direct runs have no durable transcript, so history recall is
-        // withheld the same way.
         assert!(
             !requests[0]
                 .tools()
@@ -9342,11 +8774,6 @@ mod tests {
         );
     }
 
-    /// The tool-free wait asks for reports only together with an answer
-    /// (ADR-0054 § 4), so the one delivery that ends the wait is the
-    /// boundary's only one: one budget, before any steering, as replay
-    /// places it. The turn-top boundary takes reports from children still
-    /// working.
     #[tokio::test]
     async fn a_tool_free_wait_takes_reports_only_with_an_answer() {
         struct AllowAllGate;
@@ -9355,8 +8782,6 @@ mod tests {
                 Box::pin(std::future::ready(GateDecision::Execute))
             }
         }
-        /// One detached child that reports at every boundary that accepts
-        /// reports, and answers on the third wake of the wait.
         struct Reporter {
             asked: Mutex<Vec<runtime::ReportDelivery>>,
             wakes: Mutex<usize>,
@@ -9459,10 +8884,6 @@ mod tests {
             events.last(),
             Some(RuntimeEvent::Completed { .. })
         ));
-        // The turn-top boundaries (turns 1 and 2; this stub is outstanding
-        // from the start) take reports; the wait's three wakes do not, and
-        // the third, with the answer, ends it. Turn 3 then needs no boundary
-        // delivery: the wait already delivered for it.
         use runtime::ReportDelivery::{Always, WithAnswers};
         assert_eq!(
             spawner.asked.lock().unwrap().as_slice(),
@@ -9470,8 +8891,6 @@ mod tests {
         );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
-        // Turn 2 carried the turn-top report; turn 3 the reply, the answer,
-        // then the report that came with it.
         let tail = requests[2]
             .messages()
             .iter()
@@ -9575,10 +8994,6 @@ mod tests {
             (Some(""), None),
             (Some("   "), None),
             (Some("openai-codex/gpt-test"), Some("openai-codex/gpt-test")),
-            // Routes outside the advertised schema list still reach the
-            // spawner: the session layer validates every resolved route
-            // against the served model list at spawn time, so a discovered
-            // model absent from the advertised list stays spawnable.
             (Some("openai/gpt-guessed"), Some("openai/gpt-guessed")),
         ];
         for (requested, expected) in cases {
@@ -9634,8 +9049,6 @@ mod tests {
             }
         }
 
-        // Turn one spawns a child and reports its own usage; the child then
-        // reports usage large enough to spend the parent's token cap.
         struct MeteredSpawnProvider {
             turn: Mutex<usize>,
         }
@@ -9726,9 +9139,6 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
 
-        // The child was admitted with what the parent had left after turn
-        // one (150 tokens spent of 1_000 total, 100 of 1_000 input) and none
-        // of the parent's per-run caps.
         let requests = spawner.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].budget.limits.max_total_tokens, Some(850));
@@ -9737,8 +9147,6 @@ mod tests {
         assert_eq!(requests[0].budget.limits.max_duration_ms, None);
         drop(requests);
 
-        // Parent 150 + child 900 = 1_050 > 1_000: the child's tokens exhaust
-        // the parent's total-token bound after the turn that ran it.
         assert!(matches!(
             events.last(),
             Some(RuntimeEvent::BudgetExhausted { exhaustion })
@@ -9756,7 +9164,6 @@ mod tests {
             }
         }
 
-        // Turn one spends the whole input-token cap and then asks to spawn.
         struct ExhaustedSpawnProvider {
             turn: Mutex<usize>,
             requests: Arc<Mutex<Vec<ModelRequest>>>,
@@ -9824,9 +9231,6 @@ mod tests {
             256,
         )
         .unwrap();
-        // Input tokens are only observed after the turn, so the meter grants
-        // the reserved final response; the spawn inside that turn's tool
-        // loop must still be refused rather than handed a zero budget.
         let limits = RunLimits {
             max_input_tokens: Some(500),
             ..RunLimits::default()
@@ -9886,11 +9290,8 @@ mod tests {
         let read = render(Some(runtime::SubagentAuthority::Read));
         let write = render(Some(runtime::SubagentAuthority::Write));
 
-        // A root, including a read-only one, keeps today's conventions and
-        // has no sub-agent section.
         assert!(root.contains(IMPLEMENT));
         assert!(!root.contains("Sub-agent:"));
-        // Every child is told who reads its reply and how to shape it.
         for child in [&read, &write] {
             assert!(child.contains("\n\nSub-agent:\n"), "{child}");
             assert!(child.contains("only your final reply reaches it"));
@@ -9898,19 +9299,13 @@ mod tests {
             assert!(child.contains("answer first, then the evidence as path:line"));
             assert!(child.contains("Do not re-read text that is still in your context"));
         }
-        // A read child cannot implement anything, so the line that tells it
-        // to keep going until it has would only keep it reading.
         assert!(!read.contains(IMPLEMENT));
         assert!(read.contains("You cannot change files or run commands"));
         assert!(write.contains(IMPLEMENT));
-        // Only those lines differ from the root prompt.
         let without_section = |prompt: &str| {
             let (head, _) = prompt.split_once("\n\nSub-agent:\n").unwrap();
             head.to_owned()
         };
-        // A child's reply shape is in its own section, so the root's
-        // final-answer bullet is dropped; its parent's snapshot covers it and
-        // its mode is bounded by the parent's.
         let root = root
             .replacen(FINAL, "", 1)
             .replacen(" QQ takes no snapshot for this run, so qq undo cannot restore it.", "", 1)
@@ -9979,11 +9374,6 @@ mod tests {
     #[test]
     #[cfg(feature = "tool-fetch")]
     fn a_root_prompt_and_tools_change_only_by_the_brief_guidance() {
-        // Golden against prompt version 14: a root's system
-        // prompt gains only the delegation bullet, and its tools block only
-        // the `spawn_agent` `task` description. Everything else is
-        // byte-identical, so a root keeps its prompt-cache prefix up to the
-        // Delegation section.
         const NEW_BULLET: &str = "- Write the brief as a question to answer, what the answer is \
             for, and the shape you want back (a list of path:line findings, a yes or no with \
             evidence, a short plan). A sub-agent stops when it can answer, so an open-ended brief \
@@ -10011,8 +9401,6 @@ mod tests {
         const CONCURRENT: &str = "because sub-agents run concurrently.";
         const CONCURRENT_WITH_YOU: &str =
             "because sub-agents run concurrently with each other and with you.";
-        // Prompt 27 moves delegation policy out of the description; the
-        // prompt's Delegation section keeps it.
         const CURRENT_DESCRIPTION: &str = "Start a one-shot read-only sub-agent in this \
             workspace from a self-contained task brief. It usually runs in the background: the \
             call returns its id at once, and its final answer arrives later as a runtime notice.";
@@ -10029,10 +9417,6 @@ mod tests {
             None,
             None,
         );
-        // Prompt 28 changes only the skill index (absent here). Prompt 27
-        // adds the Environment section and the final-answer bullet, drops
-        // approval wording from the header and command preference, and
-        // shortens nested instruction discovery; undo it.
         assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 28);
         let environment = prompt.find("\nEnvironment:\n").unwrap()
             ..prompt.find("\nWorking conventions:\n").unwrap();
@@ -10043,11 +9427,6 @@ mod tests {
             .replacen("no quoting or globbing surprises. Reserve shell", "no quoting or globbing surprises, and the approval gate sees exact words. Reserve shell", 1)
             .replacen("- End with the outcome first, in a few lines: what changed or what you found, how you verified it, and anything left undone. Cite code as path:line. When a next step is within the request, take it instead of offering it.\n", "", 1)
             .replacen("Workspace-root instructions are already loaded. Before editing below the root, find nested AGENTS.md files (CLAUDE.md where there is none) once with search mode=names regex=true query=\"(^|/)(AGENTS|CLAUDE)\\.md$\" (for a target in an ignored directory, add path and include_ignored=true), read those on the path to the target, and let the more specific one win.", "Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query=\"(^|/)(AGENTS|CLAUDE)\\.md$\", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. For a target deeper than 64 directory components, also search its target ancestor at each 64-component boundary with path and include_ignored=true. A partial=depth or depth_limited marker requires these bounded target scopes; cursor pages cannot recover skipped depths. Names discovery reports safe instruction-file symlinks; an unresolved instruction link is a blocker before editing. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions.", 1);
-        // Prompt 26 changes execution guidance again; prompt 25 changes
-        // write-child guidance (absent here). Prompt 24
-        // drops the workspace root from the header; prompt 23
-        // changes execution, questions and public-fetch guidance. Undo those
-        // declared changes before checking the historical v14 bytes.
         let prompt = prompt
             .replacen(
                 "operating in a workspace.\n",
@@ -10057,8 +9436,6 @@ mod tests {
             .replacen("run commands in the workspace as the user, with the inherited environment and host network, using the task deadline or an earlier explicit timeout. Auto never waits for human approval: a denied call is a tool error, so choose another permitted approach without bypassing the boundary. Ask may require human approval; ", "run one command in the workspace with a bounded timeout and may require user approval; the child starts from a cleared environment (PATH HOME LANG TERM TMPDIR) plus names you list in env that policy allows, and commands the policy classifies as forbidden (rm -rf on system paths, sudo, curl | sh, force-push, …) are refused under every approval mode; ", 1)
             .replacen("ask_user asks a bounded multiple-choice question when human input is enabled; in Auto it returns a result telling you to decide without human input; ", "ask_user puts a bounded multiple-choice question to the user and waits for the answer; ", 1)
             .replacen("fetch reads one public http(s) URL (HTML as markdown, JSON formatted). Auto needs no per-host approval; Ask requires human approval. Private, link-local and managed-denied hosts are refused.", "fetch reads one public http(s) URL (HTML as markdown, JSON formatted) and may require approval for the host; private and link-local hosts are refused.", 1);
-        // Reconstruct v19 by undoing AB2's explicitly scoped changes; the
-        // older prompt-14 golden below stays unchanged.
         let prompt = prompt
             .replacen("- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n", "- Determine observable completion criteria from the user's request before acting.\n", 1)
             .replacen("- Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n", "", 1)
@@ -10070,10 +9447,6 @@ mod tests {
             .replacen("read_file, tree, search are read-only;", "read_file, tree, search, search_history, and read_tool_result are read-only;", 1)
             .replacen("- Give every tool path relative to the workspace root; absolute paths are rejected.\n", "- Give every tool path relative to the workspace root; absolute paths are rejected.\n- When a result ends in a …[qq: … omitted; full output t:…]… marker, the complete output is stored: call read_tool_result with that handle (offset/limit to page, query to search) instead of re-running the command.\n", 1);
         assert!(prompt.contains(NEW_BULLET), "{prompt}");
-        // Prompt 19 (T19, ADR-0058) rewords only the read-before-edit
-        // bullet. Prompt 17 (ADR-0054 § 4, AP4.2) adds only the control
-        // bullet, and prompt 16 rewords only the first and last delegation
-        // bullets; undo them, then the brief bullet.
         assert!(prompt.contains(EXACT_EDIT_BULLET), "{prompt}");
         let prompt = prompt.replacen(EXACT_EDIT_BULLET, READ_FIRST_BULLET, 1);
         assert!(prompt.contains(CONTROL_BULLET), "{prompt}");
@@ -10091,11 +9464,6 @@ mod tests {
             format!("{:x}", Sha256::digest(v14.as_bytes())),
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
-        // AB2 widens the cursor bound; AB3 removes the fixed read-limit default.
-        // Run-in-place drops the shell and exec `env` argument; long-running
-        // commands add `yield_after_seconds`; prompt 27 moves policy out of
-        // the read_file, exec, ask_user and fetch descriptions.
-        // Record the current schema identity separately from the historical prompt.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
@@ -10118,8 +9486,6 @@ mod tests {
     #[test]
     fn ab4_read_only_root_states_authority_and_has_no_action_obligation() {
         let instructions = workspace::WorkspaceInstructions::empty();
-        // The schemas a ReadOnly root is offered: the mutating, shell and
-        // network built-ins are withheld (`catalog.rs` read-only filter).
         let read_only = tools::specs()
             .into_iter()
             .filter(|spec| matches!(spec.name(), "read_file" | "tree" | "search" | "ask_user"))
@@ -10232,7 +9598,6 @@ mod tests {
             write_children: false,
         };
 
-        // Exact model wins and must be a roster route.
         assert_eq!(
             resolve_delegation_route(
                 &roster,
@@ -10247,7 +9612,6 @@ mod tests {
                 .unwrap_err()
                 .contains("not on the delegation roster")
         );
-        // Role maps to the first entry declaring it.
         assert_eq!(
             resolve_delegation_route(&roster, None, Some(DelegationRole::Balanced), None),
             Ok((
@@ -10255,7 +9619,6 @@ mod tests {
                 Some(ReasoningEffort::Medium)
             ))
         );
-        // Default role when neither is given.
         assert_eq!(
             resolve_delegation_route(&roster, None, None, None),
             Ok((
@@ -10263,15 +9626,12 @@ mod tests {
                 Some(ReasoningEffort::Medium)
             ))
         );
-        // A role nobody declares is a tool error naming it.
         assert!(
             resolve_delegation_route(&roster, None, Some(DelegationRole::Strong), None)
                 .unwrap_err()
                 .contains("strong role")
         );
 
-        // Without a roster the legacy path is untouched: any model passes
-        // through for spawn-time validation, and role is refused.
         let none = DelegationRoster::default();
         assert_eq!(
             resolve_delegation_route(&none, Some("x/y".to_owned()), None, None),
@@ -10290,8 +9650,6 @@ mod tests {
 
     #[test]
     fn child_effort_derives_from_the_role_and_never_exceeds_the_parent() {
-        // RR8.4: the audited failure was a read-only review child inheriting
-        // `max` and spending 14 k reasoning tokens per read_file turn.
         use qq_protocol::{
             DelegationRole, DelegationRosterEntry, ReasoningEffort, child_reasoning_effort,
         };
@@ -10307,7 +9665,6 @@ mod tests {
         let fast = entry(DelegationRole::Fast, None);
         let balanced = entry(DelegationRole::Balanced, None);
         let strong = entry(DelegationRole::Strong, None);
-        // Parent at max: fast and balanced are capped, strong inherits.
         assert_eq!(
             child_reasoning_effort(&fast, Some(ReasoningEffort::Max)),
             Some(ReasoningEffort::Low)
@@ -10320,12 +9677,10 @@ mod tests {
             child_reasoning_effort(&strong, Some(ReasoningEffort::Max)),
             Some(ReasoningEffort::Max)
         );
-        // A parent already below the role ceiling is not raised.
         assert_eq!(
             child_reasoning_effort(&balanced, Some(ReasoningEffort::Minimal)),
             Some(ReasoningEffort::Minimal)
         );
-        // Unpinned or provider-default parent: the role ceiling applies.
         assert_eq!(
             child_reasoning_effort(&fast, None),
             Some(ReasoningEffort::Low)
@@ -10335,7 +9690,6 @@ mod tests {
             Some(ReasoningEffort::Low)
         );
         assert_eq!(child_reasoning_effort(&strong, None), None);
-        // An explicit roster effort wins over everything.
         assert_eq!(
             child_reasoning_effort(
                 &entry(DelegationRole::Fast, Some(ReasoningEffort::High)),
@@ -10403,8 +9757,6 @@ mod tests {
         );
         assert!(runtime::delegation_roster_text("x", None, &DelegationRoster::default()).is_none());
 
-        // The prompt embeds it and switches to role-based guidance; the
-        // legacy worker-model sentence goes away.
         let instructions = workspace::WorkspaceInstructions::empty();
         let mut specs = tools::specs();
         specs.push(tools::spawn_agent_spec(&[], &roster));
@@ -10426,15 +9778,12 @@ mod tests {
         assert!(prompt.contains("independent questions"));
     }
 
-    /// A host serving many tools so the catalog is disclosed progressively.
     struct WideHost {
         count: usize,
         generation: Arc<std::sync::atomic::AtomicU64>,
         calls: Arc<Mutex<Vec<String>>>,
         failure: Option<HostCallError>,
-        /// Advertised on every tool; must never change a policy decision.
         read_only_hint: bool,
-        /// Whether the host declares configuration grants for its tools.
         granted: bool,
         live_granted: Option<Arc<std::sync::atomic::AtomicBool>>,
     }
@@ -10525,8 +9874,6 @@ mod tests {
         }
     }
 
-    /// Scripts a sequence of turns, each a list of (tool name, arguments);
-    /// an empty list completes with text.
     struct TurnScript {
         turns: Vec<Vec<(&'static str, String)>>,
         requests: Arc<Mutex<Vec<ModelRequest>>>,
@@ -10572,11 +9919,6 @@ mod tests {
             .collect()
     }
 
-    /// Regression for the `ext__` approval bypass: embedded-host tools once
-    /// classified as `Unknown` and executed under every mode. Policy now
-    /// classifies from the catalog effect, so an external call is denied
-    /// under read-only and held under ask and supervised, and the host's
-    /// `read_only` hint never changes the decision.
     #[tokio::test]
     async fn external_host_tools_obey_every_approval_mode_regardless_of_hints() {
         let directory = tempfile::tempdir().unwrap();
@@ -10764,7 +10106,6 @@ mod tests {
         let workspace = std::fs::canonicalize(directory.path()).unwrap();
         let plan = tokio::task::spawn_blocking(move || {
             let mut profile = plan::AgentProfile::embedded(&runtime, workspace);
-            // A supplied host catalog cannot impersonate an allowed built-in.
             profile = profile.with_host(plan::HostSnapshot {
                 host: collision_host,
                 catalog: HostCatalog {
@@ -11298,7 +10639,6 @@ mod tests {
             );
             let requests = requests.lock().unwrap();
             assert_eq!(requests.len(), 1);
-            // `command_status` follows `shell` and `exec`.
             let mut declared = expected.iter().map(String::as_str).collect::<Vec<_>>();
             if declared
                 .iter()
@@ -11557,7 +10897,6 @@ mod tests {
                             catalog::SELECT_TOOLS_TOOL,
                             r#"{"query":"deploy service","limit":2}"#.to_owned(),
                         ),
-                        // Selected earlier in the same turn, so already usable.
                         ("ext__wide__tool07", "{}".to_owned()),
                     ],
                     vec![(
@@ -11584,8 +10923,6 @@ mod tests {
         );
 
         let requests = requests.lock().unwrap();
-        // Turn 1: static tools plus the selector, no external schema, and the
-        // index in the system prompt.
         let first = tool_names(&requests[0]);
         assert!(first.contains(&catalog::SELECT_TOOLS_TOOL));
         assert!(!first.iter().any(|name| name.starts_with("ext__")));
@@ -11593,8 +10930,6 @@ mod tests {
         assert!(system.contains("External tools (progressive)"));
         assert!(system.contains("ext__wide__tool07 — Deploy the service"));
         assert!(system.contains("host wide: 40 tools"));
-        // An unpinned external call never reaches the host: the tool error
-        // tells the model how to make it available.
         let first_results = requests[1].messages().last().unwrap().content();
         let unpinned = first_results.iter().find_map(|block| match block {
             ContentBlock::ToolResult {
@@ -11607,7 +10942,6 @@ mod tests {
         let (message, is_error) = unpinned.unwrap();
         assert!(is_error && message.contains("select_tools"), "{message}");
         assert_eq!(tool_names(&requests[1]), first, "nothing pinned yet");
-        // Turn 2 selects, then calls the selected tool in the same turn.
         let second_results = requests[2].messages().last().unwrap().content();
         let selection = second_results.iter().find_map(|block| match block {
             ContentBlock::ToolResult {
@@ -11622,12 +10956,9 @@ mod tests {
         let selection = selection.unwrap();
         assert_eq!(selection["pinned"][0], "ext__wide__tool07");
         assert_eq!(calls.lock().unwrap().as_slice(), ["ext__wide__tool07"]);
-        // Turn 3 carries the pinned schema.
         let third = tool_names(&requests[2]);
         assert!(third.contains(&"ext__wide__tool07"));
         assert_eq!(third.len(), first.len() + 1);
-        // Turn 3 pins eight more; turn 4 sees them all, in pin order, and
-        // nothing is duplicated.
         let fourth = tool_names(&requests[3]);
         assert_eq!(fourth.len(), first.len() + 9);
         let mut deduped = fourth.clone();
@@ -11962,7 +11293,6 @@ mod tests {
             assert!(hidden_refused);
         }
 
-        // A restricted run (no guidance) neither lists nor declares the loader.
         let plan = plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
             &runtime,
             std::fs::canonicalize(directory.path()).unwrap(),

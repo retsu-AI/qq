@@ -18,10 +18,7 @@ use super::{
     read::short_hash,
 };
 
-/// Deepest chain of missing parent directories a write may create.
 const MAX_CREATED_PARENTS: usize = 8;
-/// Above this many lines on either side the `use_edit_file` hint is skipped:
-/// the line-hash LCS is quadratic.
 const HINT_MAX_LINES: usize = 4_000;
 const HINT_SHARED_PERCENT: usize = 80;
 
@@ -83,15 +80,9 @@ pub(super) fn write_file(
                 Err(error) => return ToolOutput::error(error),
             };
             let current_hash = content_hash(&current.bytes);
-            // Overwrites follow the same read-before-write and staleness
-            // rules as edits: a recorded read of this content, or an if_hash
-            // that proves currency another way. Only new files are exempt.
             match (if_hash, file_state.recorded(&key)) {
                 (Some(if_hash), _) => {
                     if if_hash != &current_hash[..12] {
-                        // The current hash is not named (ADR-0058): passed
-                        // back as if_hash it would authorize an overwrite of
-                        // content the model never saw.
                         return ToolOutput::error(format!(
                             "stale_file: {} is not h:{if_hash} now; read_file it again",
                             arguments.path
@@ -178,8 +169,6 @@ pub(super) fn write_file(
     result
 }
 
-/// Whether `after` keeps more than 80 % of `before`'s lines in order: a
-/// rewrite that an edit would have expressed in a fraction of the tokens.
 fn shares_most_lines(before: &str, after: &str) -> bool {
     let a: Vec<&str> = before.lines().collect();
     let b: Vec<&str> = after.lines().collect();
@@ -189,11 +178,6 @@ fn shares_most_lines(before: &str, after: &str) -> bool {
     lcs_len(&a, &b) * 100 >= a.len().max(b.len()) * HINT_SHARED_PERCENT
 }
 
-/// Resolves a `write_file` target, which may not exist yet: an existing path
-/// resolves through the same containment as every other tool; a new file
-/// resolves its deepest existing ancestor, checks the missing chain stays
-/// under [`MAX_CREATED_PARENTS`] components, and re-attaches the rest.
-/// Returns the resolved workspace-relative target.
 fn resolve_write_path(workspace: &Workspace, requested: &str) -> Result<PathBuf, String> {
     let resolve_error = match workspace.contained_path(requested) {
         Ok(path) => return Ok(path),
@@ -212,8 +196,6 @@ fn resolve_write_path(workspace: &Workspace, requested: &str) -> Result<PathBuf,
     let Some(file_name) = requested_path.file_name() else {
         return Err(resolve_error);
     };
-    // Walk up to the deepest ancestor that exists; everything below it is
-    // created (bounded) under that resolved directory.
     let mut missing: Vec<std::ffi::OsString> = Vec::new();
     let mut ancestor = requested_path.parent();
     let existing = loop {

@@ -1,11 +1,3 @@
-//! `search`: ignore-aware content, name, definition, and reference search.
-//!
-//! The walk is depth-first in bytewise path order so a cursor
-//! (`base64url(path \0 line)`) resumes exactly where a previous call stopped.
-//! Output is pre-bounded: rather than letting dispatch cut the middle out of
-//! a result, the walk stops emitting when the byte budget is reached and
-//! hands the model a cursor, so nothing is lost between calls.
-
 use std::{
     io::Read,
     time::{Duration, Instant},
@@ -28,17 +20,12 @@ use super::{
     },
 };
 
-/// Model-facing bound. Search stops emitting at this budget and returns a
-/// cursor, so the bound is a ceiling the walk itself respects.
 pub(super) const SEARCH_BOUNDS: Bounds = Bounds {
     max_line_bytes: 12 * 1024,
     ..Bounds::new(12 * 1024, 4_000)
 };
-/// File bytes one call may scan before returning `partial=bytes`.
 pub(super) const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
-/// Directory entries one call may visit before returning `partial=scan`.
 pub(super) const MAX_SCAN_ENTRIES: usize = 50_000;
-/// Soft deadline; the walk returns `partial=time` with a cursor.
 const SEARCH_DEADLINE: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
@@ -67,19 +54,11 @@ pub(super) const MAX_GLOBS: usize = 8;
 pub(super) const MAX_GLOB_BYTES: usize = 256;
 pub(super) const MAX_CURSOR_PATH_BYTES: usize = 4_096;
 pub(super) const MAX_CURSOR_BYTES: usize = ((MAX_CURSOR_PATH_BYTES + 1 + 10) * 4).div_ceil(3);
-/// Cursor values models send for "the first page". None can be a real cursor
-/// under any casing: a real one is base64url of `path\0line` with a non-empty
-/// path, so at least four alphabet characters that decode to a NUL byte.
 const FIRST_PAGE_PLACEHOLDERS: &[&str] =
     &["initial", "start", "first", "0", ".", "/", "null", "none"];
-/// Directory depth past which the walk does not descend (symlinks are never
-/// followed, so this only guards pathological trees).
 const MAX_WALK_DEPTH: usize = 64;
-/// Case-insensitive matches counted for the zero-result hint.
 const MAX_HINT_MATCHES: usize = 1_000;
-/// Header bytes reserved before the body budget.
 const HEADER_RESERVE_BYTES: usize = 512;
-/// Header subject bytes for the quoted query.
 const MAX_SUBJECT_BYTES: usize = 64;
 pub(super) const CANCELLED_MESSAGE: &str = "tool execution was cancelled";
 
@@ -159,9 +138,6 @@ const fn default_max_per_file() -> usize {
     DEFAULT_MAX_PER_FILE
 }
 
-/// Where a previous call stopped: files before `path` are skipped, and in
-/// `path` itself lines up to and including `line` are. `line == u32::MAX`
-/// means the whole file is done.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Cursor {
     pub(super) path: String,
@@ -195,12 +171,9 @@ impl Cursor {
         path.as_bytes() < self.path.as_bytes()
     }
 
-    /// Every path under `dir` sorts before the cursor, so the walk need not
-    /// descend into it.
     fn skips_dir(&self, dir: &str) -> bool {
         let prefix_len = dir.len() + 1;
         let cursor = self.path.as_bytes();
-        // A trailing slash with the terminal line marks a fully visited subtree.
         if self.line == u32::MAX
             && cursor.len() == prefix_len
             && cursor.starts_with(dir.as_bytes())
@@ -214,7 +187,6 @@ impl Cursor {
         {
             return false;
         }
-        // Compare `dir/` against the cursor without allocating.
         match dir.as_bytes().cmp(&cursor[..cursor.len().min(dir.len())]) {
             std::cmp::Ordering::Less => true,
             std::cmp::Ordering::Greater => false,
@@ -238,9 +210,7 @@ enum Matcher {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stop {
-    /// `limit` shown and at least one more match exists.
     Limit,
-    /// The byte budget is full; more matches exist.
     Bytes,
     Scan(StopReason),
     Cancelled,
@@ -297,8 +267,6 @@ struct Walker<'a> {
 }
 
 impl Walker<'_> {
-    /// Reserve the longest possible line position before advancing the frontier.
-    /// A larger cursor must not consume bytes already promised to the body.
     fn reserve_cursor(&mut self, path: &str) -> Result<bool, SearchWalkError> {
         if self.count_only {
             return Ok(true);
@@ -366,7 +334,6 @@ impl Walker<'_> {
                     }
                     if let Some(frontier) = excluded_subtree {
                         self.depth_skipped += 1;
-                        // This policy-excluded subtree is terminal for this scope.
                         self.last_scanned = Some(frontier);
                         continue;
                     }
@@ -430,7 +397,7 @@ impl Walker<'_> {
                                 source,
                             });
                         }
-                        Err(_) => continue, // Other unresolved links retain the existing exclusion.
+                        Err(_) => continue,
                     };
                     let metadata = match self.workspace.root().metadata(&resolved) {
                         Ok(metadata) => metadata,
@@ -441,7 +408,7 @@ impl Walker<'_> {
                             }
                             .into());
                         }
-                        Err(_) => continue, // Other unresolved links retain the existing exclusion.
+                        Err(_) => continue,
                     };
                     if metadata.is_file() {
                         self.scanned_files += 1;
@@ -495,7 +462,6 @@ impl Walker<'_> {
                     source,
                 })?;
         self.buffer.clear();
-        // The size is a hint: a file may grow between listing and reading.
         file.by_ref()
             .take(MAX_FILE_SCAN_BYTES + 1)
             .read_to_end(&mut self.buffer)
@@ -553,9 +519,6 @@ impl Walker<'_> {
         Ok(())
     }
 
-    /// Finds every matching line in `self.buffer` and emits it. Matches are
-    /// located over the whole buffer (one vectorized pass) and mapped to
-    /// lines afterwards; a line with several matches is reported once.
     fn scan_buffer(&mut self, path: &str) -> Result<(), SearchWalkError> {
         let buffer = std::mem::take(&mut self.buffer);
         let language = Language::from_path(path);
@@ -565,8 +528,6 @@ impl Walker<'_> {
         let mut line_number = 1_u32;
         let mut counted_to = 0_usize;
         let mut current_line_end = 0_usize;
-        // Context bookkeeping: the last line rendered for this file and the
-        // trailing-context lines still owed after the previous match.
         let mut last_rendered_line = 0_u32;
         let mut pending_after: Option<(u32, usize)> = None;
 
@@ -622,8 +583,6 @@ impl Walker<'_> {
                 self.stop = Some(Stop::Limit);
                 break;
             }
-            // Render into scratch first so a match that does not fit leaves
-            // the body untouched and the cursor pointing at the last shown.
             self.scratch.clear();
             if !file_named {
                 self.identity.update(b"file\0");
@@ -633,7 +592,6 @@ impl Walker<'_> {
                 self.scratch.push('\n');
             }
             if self.context > 0 {
-                // Trailing context owed by the previous match, up to this line.
                 if let Some((after_until, mut offset)) = pending_after.take() {
                     let mut number = last_rendered_line + 1;
                     while number <= after_until && number < line_number && offset < line_start {
@@ -752,7 +710,6 @@ fn count_newlines(bytes: &[u8]) -> u32 {
     u32::try_from(bytes.iter().filter(|&&byte| byte == b'\n').count()).unwrap_or(u32::MAX)
 }
 
-/// `[start, end)` of the line containing byte `pos`; `end` excludes the `\n`.
 fn line_bounds(buffer: &[u8], pos: usize) -> (usize, usize) {
     let start = buffer[..pos]
         .iter()
@@ -765,8 +722,6 @@ fn line_bounds(buffer: &[u8], pos: usize) -> (usize, usize) {
     (start, end)
 }
 
-/// `L<n><sep> <text>` with CR stripped and the text clipped at
-/// [`MAX_LINE_BYTES`] on a UTF-8 boundary.
 fn push_row(out: &mut String, identity: &mut Sha256, number: u32, separator: char, line: &[u8]) {
     identity.update(b"row\0");
     identity.update(number.to_le_bytes());
@@ -825,13 +780,10 @@ pub(super) fn search(
             "invalid_max_per_file: max_per_file must be between 1 and {MAX_PER_FILE}"
         ));
     }
-    // Above the bound is a request for "more context": give the most there
-    // is and say so rather than refusing the search.
     let context_clamped = arguments.context > MAX_CONTEXT;
     if context_clamped {
         arguments.context = MAX_CONTEXT;
     }
-    // `""` is a filled-in default for "no filter", not a pattern.
     let empty_globs = arguments
         .include
         .iter()
@@ -856,12 +808,6 @@ pub(super) fn search(
         Err(error) => return ReadSideOutput::refused(error.to_string()),
     };
     let cursor = match arguments.cursor.as_deref().map(str::trim) {
-        // Models routinely send an empty or placeholder cursor on the first
-        // page ("", "initial", "start", "0", ".", "null", in any case):
-        // 99 % of search calls in one day's sessions failed that way. None of
-        // these can be a real cursor (those are base64 of `path\0line` with a
-        // non-empty path), so read them as "no cursor" instead of refusing
-        // the call.
         None => None,
         Some(trimmed)
             if trimmed.is_empty()
@@ -959,8 +905,6 @@ pub(super) fn search(
         return ReadSideOutput::interrupted(CANCELLED_MESSAGE);
     }
 
-    // A sensitive search that found nothing tells the model what a
-    // case-insensitive one would have, so it need not guess and retry.
     let mut hint_insensitive = None;
     let hint_wanted = walker.total == 0
         && walker.stop.is_none()
@@ -1086,14 +1030,12 @@ pub(super) fn search(
         header = header.field("next", next.encode());
     }
     let mut text = header.into_line();
-    // Primary identity excludes the optional second-walk advisory, which
-    // depends on the remaining deadline rather than the primary query.
     walker.identity.update(b"rendered\0");
     walker.identity.update(text.as_bytes());
     walker.identity.update(walker.body.as_bytes());
     let digest = walker.identity.finalize().into();
     if let Some((count, more)) = hint_insensitive {
-        text.pop(); // Header::into_line always appends exactly one newline.
+        text.pop();
         let _ = std::fmt::Write::write_fmt(
             &mut text,
             format_args!(
@@ -1108,9 +1050,6 @@ pub(super) fn search(
     result
 }
 
-/// `path_escapes_workspace` for absolute, parent-relative, and symlinked-out
-/// paths; `path_not_found` otherwise. cap-std reports an escape through `..`
-/// as a resolution failure, so the request itself is inspected.
 pub(super) fn path_error(requested: &str, error: &crate::workspace::WorkspacePathError) -> String {
     use crate::workspace::WorkspacePathError as E;
     let escapes = match error {

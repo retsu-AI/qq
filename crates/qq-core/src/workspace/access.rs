@@ -10,8 +10,6 @@ use tokio::sync::Semaphore;
 
 const MAX_BLOCKING_TOOL_TASKS: usize = 8;
 static BLOCKING_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-/// One apply lock per canonical workspace path, shared by every session in
-/// this process; entries are pruned once no workspace handle keeps them alive.
 static APPLY_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 
 #[derive(Clone)]
@@ -20,19 +18,15 @@ pub(crate) struct Workspace {
     path: Arc<PathBuf>,
     protected_pack_roots: Arc<[PathBuf]>,
     protected_directories: Arc<Mutex<Vec<ProtectedDirectory>>>,
-    /// Serializes the hash-check-and-rename apply section for this workspace.
     apply_lock: Arc<Mutex<()>>,
 }
 
-/// The admitted directory capability and its workspace-relative pathname.
 pub(crate) struct WriteTarget {
     pub directory: Dir,
     pub name: std::ffi::OsString,
     pub path: PathBuf,
 }
 
-// Retain the handle as well as its identity: an unlinked directory's ID must
-// not be recycled while it remains part of the workspace authority boundary.
 struct ProtectedDirectory {
     directory: Dir,
     path: PathBuf,
@@ -104,7 +98,6 @@ impl Workspace {
             let mut observers = OPEN_OBSERVERS.lock().unwrap();
             if let Some(index) = observers.iter().position(|(root, _)| root == path) {
                 let (_, sender) = observers.remove(index);
-                // A test may drop its observer before opening begins.
                 let _ = sender.send(std::thread::current().id());
             }
         }
@@ -148,8 +141,6 @@ impl Workspace {
         Ok(workspace)
     }
 
-    /// Canonical configured pack directories inside this workspace are trust
-    /// inputs even when their resources live outside `.qq/packs`.
     pub(crate) fn with_protected_pack_roots(mut self, roots: &[PathBuf]) -> std::io::Result<Self> {
         let mut relative: Vec<_> = roots
             .iter()
@@ -187,7 +178,6 @@ impl Workspace {
         ];
         for root in self.protected_pack_roots.iter() {
             paths.push((root.clone(), true));
-            // A relocated containing directory must not hide a trusted pack.
             for parent in root
                 .ancestors()
                 .skip(1)
@@ -201,8 +191,6 @@ impl Workspace {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         for (path, subtree) in paths {
-            // Worktrees commonly use a regular `.git` file. Avoid relying on
-            // platform-specific errors from attempting to open it as a Dir.
             match self.root.metadata(&path) {
                 Ok(metadata) if !metadata.is_dir() => continue,
                 Ok(_) => {}
@@ -221,8 +209,6 @@ impl Workspace {
                 }
                 Err(error) => return Err(error),
             };
-            // Fail at configuration/admission if this platform cannot provide
-            // the identity needed to enforce protection.
             same_directory(&directory, &directory)?;
             let mut captured = false;
             for guard in guards.iter() {
@@ -268,9 +254,6 @@ impl Workspace {
         Ok(())
     }
 
-    /// Validate the opened identities, then retain the parent capability for
-    /// every read, stale check and rename in this mutation. No pathname reopen
-    /// after admission may redirect the operation to a replacement directory.
     pub(crate) fn write_target(&self, path: &Path, create: bool) -> std::io::Result<WriteTarget> {
         let name = path
             .file_name()
@@ -309,9 +292,6 @@ impl Workspace {
         })
     }
 
-    /// Revalidate the namespace without replacing the admitted capability.
-    /// This rejects completed directory moves, but is not an OS lock against
-    /// another process renaming a directory after this check returns.
     pub(crate) fn revalidate_write_target(&self, target: &WriteTarget) -> std::io::Result<()> {
         self.capture_protected_directories()?;
         let current = self.write_target(&target.path, false)?;
@@ -324,8 +304,6 @@ impl Workspace {
         Ok(())
     }
 
-    /// Mutation tools may change task files, never the policy or Git trust
-    /// configuration that determines the authority of subsequent work.
     pub(crate) fn check_write_path(
         &self,
         requested: &str,

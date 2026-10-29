@@ -1,7 +1,3 @@
-//! Styled text primitives and the terminal writer. Everything the TUI draws
-//! is a `Line` of `Span`s; the frame differ compares whole lines, so equality
-//! on these types is the redraw criterion.
-
 use std::io::{self, Write};
 
 use crossterm::{
@@ -12,10 +8,6 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{app::terminal_safe_character, theme};
 
-/// Text attributes packed into one byte. `Style` is copied and compared on
-/// every span in the wrap and diff hot paths; adding a fourth `bool` field
-/// measured +5 % on the 32 KiB streaming ceiling, so the flags live here and
-/// `Style` stays at nine bytes (two `Option<Color>` plus this).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Attributes(u8);
 
@@ -29,7 +21,6 @@ impl Attributes {
         self.0 & flag != 0
     }
 
-    /// Flags set in `self` but not in `other`.
     const fn added_over(self, other: Self) -> Self {
         Self(self.0 & !other.0)
     }
@@ -100,9 +91,6 @@ pub(crate) struct Span {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Line {
-    /// Blank cells before the first span. A pane wider than its content
-    /// shifts every row by the same margin; carrying it as a count keeps the
-    /// shift free for rows shared with the width-keyed caches.
     pub(crate) indent: usize,
     pub(crate) spans: Vec<Span>,
 }
@@ -146,25 +134,16 @@ impl Line {
     }
 }
 
-/// Display columns of `text`. One pass over the characters; a printable-ASCII
-/// byte-scan fast path measured +8 % on the 32 KiB streaming ceiling because
-/// `wrap_line` measures every span and the second scan cost more than the
-/// width table saves.
 pub(crate) fn text_width(text: &str) -> usize {
     text.chars()
         .map(|character| UnicodeWidthChar::width(character).unwrap_or_default())
         .sum()
 }
 
-/// Role styles read the thread's active palette (see `theme.rs`); the
-/// renderer refreshes it once per frame so a theme switch repaints
-/// everything without threading a theme through every leaf.
 pub(crate) fn normal() -> Style {
     Style::color(theme::active().text)
 }
 
-/// Secondary text. Color alone carries the step back: `Dim` on top would
-/// sink it below readability on many terminals.
 pub(crate) fn muted() -> Style {
     Style::color(theme::active().muted)
 }
@@ -189,23 +168,18 @@ pub(crate) fn success() -> Style {
     Style::color(theme::active().success)
 }
 
-/// Running-state color for spinners and activity labels.
 pub(crate) fn info() -> Style {
     Style::color(theme::active().info)
 }
 
-/// Pane dividers and rules at rest.
 pub(crate) fn border() -> Style {
     Style::color(theme::active().border)
 }
 
-/// Background for the selected row in pickers and lists.
 pub(crate) fn selection(style: Style) -> Style {
     style.on(theme::active().selection_bg)
 }
 
-/// Dark surface tint behind code-block panels, distinct from the terminal
-/// background so a padded block reads as one solid slab.
 pub(crate) fn surface_color() -> Color {
     theme::active().surface
 }
@@ -214,25 +188,14 @@ pub(crate) fn surface(style: Style) -> Style {
     style.on(surface_color())
 }
 
-/// Inline code: plain text on the panel surface, so a `name` in prose shares
-/// its tint with fenced blocks instead of shouting in the warning color.
 pub(crate) fn inline_code() -> Style {
     surface(normal())
 }
 
-/// Link text: accent and underlined. The URL is not rendered (no OSC 8), so
-/// the underline is what marks the span as a link.
 pub(crate) fn link() -> Style {
     accent().underline()
 }
 
-/// Syntax palette for highlighted code panels. The roles live on the
-/// `Palette` (derived from the theme roles unless the theme's `syntax` block
-/// overrides them): keywords in brand, functions in accent, types in
-/// warning, strings in success, constants in a softened brand, comments in
-/// muted italic, properties in text, punctuation in muted. No role reads
-/// `error`, so code never looks broken. Anything a grammar leaves uncaptured
-/// keeps the plain panel text style.
 pub(crate) fn code_keyword() -> Style {
     Style::color(theme::active().syn_keyword)
 }
@@ -265,9 +228,6 @@ pub(crate) fn code_punctuation() -> Style {
     Style::color(theme::active().syn_punctuation)
 }
 
-/// Unified-diff line coloring: additions in success on the add tint,
-/// removals in error on the delete tint, hunk headers muted, context lines
-/// normal. Diff lines never reflow.
 pub(crate) fn diff_line_style(line: &str) -> Style {
     let palette = theme::active();
     if line.starts_with("@@") {
@@ -281,16 +241,9 @@ pub(crate) fn diff_line_style(line: &str) -> Style {
     }
 }
 
-/// Write one row. The caller has reset attributes and colors at the start of
-/// the row; from there only the differences between consecutive spans are
-/// emitted, so a row of one style costs one color sequence instead of a
-/// reset-and-set per span. Attributes that turn off (bold to plain) need a
-/// reset, which then re-applies the surviving colors.
 pub(crate) fn write_line(output: &mut impl Write, line: &Line) -> io::Result<()> {
     let mut current = Style::default();
     if line.indent > 0 {
-        // The caller cleared the row, so a cursor move paints the margin
-        // without emitting spaces.
         queue!(
             output,
             crossterm::cursor::MoveRight(u16::try_from(line.indent).unwrap_or(u16::MAX))
@@ -302,11 +255,8 @@ pub(crate) fn write_line(output: &mut impl Write, line: &Line) -> io::Result<()>
         }
         let next = span.style;
         if next != current {
-            // Any attribute that turns off needs SGR 0; bits set in current
-            // and clear in next.
             let attribute_dropped = current.attributes.added_over(next.attributes).0 != 0;
             if attribute_dropped {
-                // SGR 0 clears colors too; no separate color reset needed.
                 queue!(output, SetAttribute(Attribute::Reset))?;
                 current = Style::default();
             }
@@ -339,8 +289,6 @@ pub(crate) fn write_line(output: &mut impl Write, line: &Line) -> io::Result<()>
             }
             current = next;
         }
-        // Most spans are already terminal-safe; scan once and only allocate
-        // when something must be dropped.
         if span
             .text
             .chars()
@@ -374,7 +322,6 @@ mod tests {
         let mut line = Line::styled("alpha ", Style::color(Color::Red));
         line.push("beta", Style::color(Color::Red));
         let out = bytes(&line);
-        // `push` merges same-style spans, so one span, one color, no reset.
         assert_eq!(out.matches("\x1b[38;5;9m").count(), 1, "{out:?}");
         assert!(!out.contains("\x1b[0m"), "{out:?}");
     }
@@ -385,7 +332,6 @@ mod tests {
         line.push("b", Style::color(Color::Red).bold());
         line.push("c", Style::color(Color::Green).bold());
         let out = bytes(&line);
-        // red, then bold added (no new color), then green replaces red.
         assert_eq!(out, "\x1b[38;5;9ma\x1b[1mb\x1b[38;5;10mc", "{out:?}");
     }
 
@@ -403,7 +349,6 @@ mod tests {
         line.push("here", Style::color(Color::Red).underline());
         line.push(" now", Style::color(Color::Red));
         let out = bytes(&line);
-        // red, underline on (color kept), reset then red again for the tail.
         assert_eq!(
             out, "\x1b[38;5;9msee \x1b[4mhere\x1b[0m\x1b[38;5;9m now",
             "{out:?}"

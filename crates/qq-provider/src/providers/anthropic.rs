@@ -1,5 +1,3 @@
-//! Anthropic Messages API adapter.
-
 use std::sync::Arc;
 
 use async_stream::try_stream;
@@ -38,7 +36,6 @@ const SSE_SPEC: SseExchangeSpec = SseExchangeSpec {
     content_type_gate: ContentTypeGate::Strict,
 };
 
-/// A client for Anthropic-compatible Messages endpoints.
 pub(crate) struct AnthropicMessages {
     pub(crate) exchange: HttpExchange,
     endpoint: reqwest::Url,
@@ -48,8 +45,6 @@ pub(crate) struct AnthropicMessages {
 
 #[cfg(test)]
 impl AnthropicMessages {
-    /// One attempt per request, so a scripted single-response server is
-    /// observed exactly once.
     fn single_shot(mut self) -> Self {
         self.exchange
             .set_attempt_policy(crate::http::AttemptPolicy::disabled());
@@ -58,7 +53,6 @@ impl AnthropicMessages {
 }
 
 impl AnthropicMessages {
-    /// Creates a client for Anthropic's standard Messages endpoint.
     #[cfg(test)]
     pub(crate) fn new(api_key: &str) -> Result<Self, ProviderError> {
         Self::with_endpoint(
@@ -69,10 +63,6 @@ impl AnthropicMessages {
         )
     }
 
-    /// Creates a client for an exact Anthropic-compatible endpoint URL.
-    ///
-    /// Plain HTTP is accepted only when `allow_http` is true and the URL host is
-    /// loopback. The Anthropic version defaults to `2023-06-01`.
     #[cfg(test)]
     pub(crate) fn with_endpoint(
         endpoint: &str,
@@ -89,7 +79,6 @@ impl AnthropicMessages {
         )
     }
 
-    /// Creates a client with an explicit `anthropic-version` header value.
     #[cfg(test)]
     pub(crate) fn with_endpoint_and_version(
         endpoint: &str,
@@ -214,8 +203,6 @@ impl Provider for AnthropicMessages {
                 let mut usage = UsageOnce::new(
                     "Anthropic-compatible stream reported starting usage more than once",
                 );
-                // Maps streamed content-block indexes to tool-call ids so argument
-                // deltas and block stops can be attributed after the start event.
                 let mut tool_calls = ToolCallLedger::new(
                     "Anthropic-compatible stream reused a tool content-block index",
                     "Anthropic-compatible stream sent arguments for an unknown tool call",
@@ -348,8 +335,6 @@ fn build_headers(
             "anthropic-version is not a valid HTTP header value".to_owned(),
         )
     })?;
-    // `anthropic-version` is a protocol constant, not a secret: it is never
-    // redacted, which would rewrite every matching date in a diagnostic.
     build_static_headers(
         auth,
         static_headers,
@@ -369,13 +354,6 @@ pub(crate) fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
     )
 }
 
-/// Prompt-cache breakpoints. Anthropic caches the request prefix up to each
-/// marked block, so three markers cover the whole stable prefix: the system
-/// prompt, the last tool declaration (tools precede the system prompt in the
-/// cached order), and the last message block, which the next turn's request
-/// extends rather than rewrites. Every reference harness (Codex via the
-/// server, pi, fx, OpenCode) places the same three; without them a long
-/// transcript is re-processed uncached on every turn.
 #[derive(Serialize, Clone, Copy)]
 struct CacheControl {
     r#type: &'static str,
@@ -733,8 +711,6 @@ fn prefix_digest(body: &MessagesRequest<'_>) -> String {
 }
 
 impl<'a> AnthropicMessage<'a> {
-    /// The message as wire blocks; the last block of the request's final
-    /// message carries the cache breakpoint.
     fn from_message(message: &'a Message, breakpoint: bool) -> Self {
         let mut content: Vec<AnthropicBlock<'a>> =
             message.content().iter().map(AnthropicBlock::from).collect();
@@ -853,9 +829,6 @@ enum StreamingEvent {
 }
 
 impl StreamingEvent {
-    /// The wire `type` this variant was decoded from, for checking the SSE
-    /// event name against the payload without a second parse. `None` for
-    /// types this adapter does not model, which any name may carry.
     const fn wire_type(&self) -> Option<&'static str> {
         Some(match self {
             Self::ContentBlockDelta { .. } => "content_block_delta",
@@ -949,8 +922,6 @@ pub(crate) enum DecodedEvent {
     MessageDelta {
         refusal: Option<String>,
         output_tokens: Option<u64>,
-        /// A recoverable stop reason; the stream still runs to
-        /// `message_stop` so the terminal event carries final usage.
         incomplete: Option<IncompleteReason>,
     },
     ThinkingStarted {
@@ -984,8 +955,6 @@ pub(crate) fn decode_event(
         return Ok(DecodedEvent::Ignored);
     }
 
-    // One parse: the payload's `type` selects the variant, and the SSE
-    // event name (when the provider sent one) must agree with it.
     let parsed: StreamingEvent = serde_json::from_str(&event.data).map_err(|error| {
         ProviderError::Protocol(sanitize_message(
             &format!("could not decode Anthropic-compatible event: {error}"),
@@ -1046,8 +1015,6 @@ pub(crate) fn decode_event(
                     cache_read_input_tokens: usage.cache_read_input_tokens,
                     cache_write_input_tokens: usage.cache_creation_input_tokens,
                     output_tokens: usage.output_tokens,
-                    // Anthropic bills thinking inside output_tokens and does
-                    // not break it out.
                     reasoning_tokens: None,
                 }
             })))
@@ -1065,8 +1032,6 @@ pub(crate) fn decode_event(
     }
 }
 
-/// Decodes a `message_delta` stop into the refusal text (if the model
-/// refused) and the recoverable incomplete reason (if it stopped short).
 fn decode_message_delta(
     delta: MessageDelta,
     redactions: &[String],
@@ -1136,8 +1101,6 @@ fn wire_error_kind(error: &WireApiError) -> ProviderErrorKind {
 }
 
 fn status_error_kind(status: u16) -> ProviderErrorKind {
-    // Anthropic classifies 413 (request too large) as a context-size
-    // failure the session layer can compact away.
     match status {
         413 => ProviderErrorKind::ContextExceeded,
         status => support::status_error_kind(status),
@@ -1583,12 +1546,10 @@ mod tests {
 
     #[test]
     fn the_event_name_is_checked_against_the_payload_in_one_parse() {
-        // A known type with the wrong name is refused.
         assert!(matches!(
             decode_data("content_block_delta", r#"{"type":"ping"}"#),
             Err(ProviderError::Protocol(_))
         ));
-        // Matching, and a payload without a name, decode.
         assert_eq!(
             decode_data("ping", r#"{"type":"ping"}"#).unwrap(),
             DecodedEvent::Ignored
@@ -1604,8 +1565,6 @@ mod tests {
             .unwrap(),
             DecodedEvent::Ignored
         );
-        // A type this adapter does not model is ignored under any name: the
-        // name check cannot apply to a payload whose type is not read.
         assert_eq!(
             decode_data("future_event", r#"{"type":"something_new","x":1}"#).unwrap(),
             DecodedEvent::Ignored
@@ -1718,8 +1677,6 @@ mod tests {
             .with_tool_choice(crate::ToolChoice::None);
         let body = serde_json::to_value(MessagesRequest::from(&request)).unwrap();
         assert_eq!(body["tool_choice"], json!({"type": "none"}));
-        // The tool block, and its cache breakpoint, are byte-identical to an
-        // ordinary turn's, so the cached prefix survives a no-tools turn.
         let auto =
             ModelRequest::new("claude-test", vec![Message::user("ping")], 64).with_tools(tools);
         let auto_body = serde_json::to_value(MessagesRequest::from(&auto)).unwrap();
@@ -1827,9 +1784,6 @@ mod tests {
 
     #[test]
     fn cache_breakpoints_mark_exactly_the_system_last_tool_and_last_block() {
-        // Anthropic allows four breakpoints per request; QQ spends three on
-        // the stable prefix and leaves the rest of the transcript unmarked so
-        // consecutive turns extend one cached prefix.
         let request = ModelRequest::new(
             "claude-test",
             vec![
@@ -2269,9 +2223,6 @@ mod tests {
         ModelRequest::new("claude-test", vec![Message::user("ping")], 128)
     }
 
-    /// The provider is the single retry owner: a 503 before the body and an
-    /// empty body before the first event each cost one attempt under the same
-    /// policy, and the eventual stream is delivered once with no duplicates.
     #[tokio::test]
     async fn the_attempt_policy_covers_rejections_and_empty_bodies_alike() {
         use std::{

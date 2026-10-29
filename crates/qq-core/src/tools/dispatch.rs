@@ -31,23 +31,16 @@ static TEST_EXECUTIONS_STARTED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static TEST_EXECUTION_BARRIER: OnceLock<std::sync::Barrier> = OnceLock::new();
 
-/// Tracks actual local execution, including work whose result waiter was
-/// dropped. Stop dispatching into the scope before awaiting its drain.
 #[derive(Clone, Default)]
 pub(crate) struct ToolTasks(Arc<ToolTaskState>);
 
 #[derive(Default)]
 struct ToolTaskState {
     process_recorder: OnceLock<ProcessRecorder>,
-    /// Finished command results, kept until the run persists them: a
-    /// cancelled or expired run drops the event stream that would have
-    /// carried them, but the command did run.
     finished: std::sync::Mutex<std::collections::HashMap<qq_protocol::ToolCallId, ToolOutput>>,
     commands: super::commands::Commands,
     unrecorded_process: AtomicBool,
     active: AtomicUsize,
-    /// Executions whose call has not returned: active work minus yielded
-    /// commands and the leases they forked.
     calls: AtomicUsize,
     idle: Notify,
     unconfirmed_process_exit: AtomicBool,
@@ -74,7 +67,6 @@ pub enum ToolDrainError {
 }
 
 impl ToolTasks {
-    /// The result of a command that finished, if it was not yet persisted.
     pub(crate) fn finished_result(&self, id: qq_protocol::ToolCallId) -> Option<ToolOutput> {
         self.0
             .finished
@@ -92,7 +84,6 @@ impl ToolTasks {
             .remove(&id);
     }
 
-    /// Every finished command result not yet persisted, for run teardown.
     pub(crate) fn take_finished(&self) -> Vec<(qq_protocol::ToolCallId, ToolOutput)> {
         self.0
             .finished
@@ -128,16 +119,12 @@ impl ToolTasks {
         }
     }
 
-    /// Waits for every local execution, stopping yielded commands first: a
-    /// run's teardown leaves no command running.
     pub(crate) async fn drain(&self) -> Result<(), ToolDrainError> {
         self.0.commands.cancel_all();
         self.wait_until(|state| state.active.load(Ordering::Acquire) == 0)
             .await
     }
 
-    /// Waits for executions whose calls have not returned. Yielded commands
-    /// keep running: their calls already settled.
     pub(crate) async fn drain_calls(&self) -> Result<(), ToolDrainError> {
         self.wait_until(|state| state.calls.load(Ordering::Acquire) == 0)
             .await
@@ -176,12 +163,10 @@ impl ToolTasks {
 pub(crate) struct ToolTaskLease {
     tasks: Arc<ToolTaskState>,
     process_pending: bool,
-    /// Counts toward [`ToolTasks::drain_calls`] until it yields or drops.
     call: bool,
 }
 
 impl ToolTaskLease {
-    /// Keep native startup and its child tracked if the awaiting task unwinds.
     #[cfg(windows)]
     pub(super) fn fork(&self) -> Self {
         self.tasks.active.fetch_add(1, Ordering::AcqRel);
@@ -192,7 +177,6 @@ impl ToolTaskLease {
         }
     }
 
-    /// The call returned a command id; the command keeps this lease.
     pub(super) fn yielded(&mut self) {
         if std::mem::take(&mut self.call) {
             self.tasks.calls.fetch_sub(1, Ordering::AcqRel);
@@ -267,10 +251,6 @@ impl Drop for ToolTaskLease {
     }
 }
 
-/// Why a tool call should stop: the run was cancelled, or this call's own
-/// future was dropped (the caller gave up on it). Both halves wake waiters;
-/// blocking tools check [`Self::is_cancelled`] between steps and the shell
-/// awaits [`Self::cancelled`] alongside its child process.
 #[derive(Clone)]
 pub(crate) struct ToolCancellation {
     run: RunCancellation,
@@ -311,7 +291,6 @@ impl ToolCancellation {
         self.run.is_cancelled() || self.call.cancelled.load(Ordering::Acquire)
     }
 
-    /// Resolves when either the run is cancelled or the call was dropped.
     pub(crate) async fn cancelled(&self) {
         let caller_dropped = async {
             loop {
@@ -331,8 +310,6 @@ impl ToolCancellation {
     }
 }
 
-/// Cancels the call when its waiter goes away, unless the call already
-/// handed its command to `command_status`.
 struct CancelCallOnDrop(Option<Arc<CallCancellation>>);
 
 impl Drop for CancelCallOnDrop {
@@ -396,8 +373,6 @@ pub(crate) async fn execute_with_images(
     }
     let cancelled = ToolCancellation::new(cancelled);
     let mut cancel_on_drop = CancelCallOnDrop(Some(Arc::clone(&cancelled.call)));
-    // Fetch awaits sockets, not files: it runs on the async runtime like
-    // shell, under the same task lease, never on a blocking permit.
     #[cfg(not(feature = "tool-fetch"))]
     let _ = network_policy;
     #[cfg(feature = "tool-fetch")]
@@ -417,10 +392,6 @@ pub(crate) async fn execute_with_images(
             Err(_) => ToolOutput::unobserved("tool execution stopped unexpectedly"),
         };
     }
-    // Shell executes on the async runtime directly: it awaits a child process
-    // rather than doing blocking filesystem work, so it must neither occupy a
-    // blocking permit for its full (possibly 120 s) lifetime nor block a
-    // worker thread.
     let launch_tool = BuiltInTool::from_name(&name);
     if matches!(launch_tool, Some(BuiltInTool::Shell | BuiltInTool::Exec)) {
         let is_exec = launch_tool == Some(BuiltInTool::Exec);
@@ -467,8 +438,6 @@ pub(crate) async fn execute_with_images(
             )
             .await;
             match &yielding.command {
-                // The call settled with its command id; the result goes to
-                // `command_status`, never to this call's row.
                 Some(_) => {}
                 None => {
                     if let Some(id) = call_id
@@ -510,8 +479,6 @@ pub(crate) async fn execute_with_images(
     }
 }
 
-/// Wraps an externally produced result (an MCP call outcome) in the same
-/// masking and bounding as built-in tool executions.
 pub(crate) fn bounded_result(content: String, is_error: bool) -> ToolOutput {
     if is_error {
         ToolOutput::error(content)
@@ -520,8 +487,6 @@ pub(crate) fn bounded_result(content: String, is_error: bool) -> ToolOutput {
     }
 }
 
-/// Terminal process evidence, separate from the text shown to the model.
-/// `None` on a result means execution was refused or could not be observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum CommandOutcome {
@@ -534,40 +499,24 @@ pub(crate) enum CommandOutcome {
 pub(crate) enum ResultDisposition {
     Observed,
     Refused,
-    /// No response proves whether an external operation ran.
     Unobserved,
     Interrupted,
 }
 
-/// What one tool call produced. `model_text` is the only part that enters
-/// model context; `ui_payload` is persisted for clients and never sent back
-/// to the model. Constructors are the one bounding boundary: they mask
-/// secrets, then bound the text to the tool's [`Bounds`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) native_outcome: Option<CommandOutcome>,
     pub(crate) disposition: ResultDisposition,
-    /// Result identity before masking, output bounds or citations.
-    /// Constructors hash their input; producers that clip earlier override it.
     pub(crate) result_digest: [u8; 32],
     pub(crate) model_text: String,
     pub(crate) is_error: bool,
     pub(crate) ui_payload: Option<ToolCallDisplay>,
-    /// Every file whose content hash the execution (re)recorded, so the
-    /// session store can persist the file-state map alongside the result.
-    /// Reads and writes record one; a batch edit records each file touched.
     pub(crate) file_states: Vec<FileStateUpdate>,
-    /// The complete masked text when bounding cut any of it, for the session
-    /// store to keep under a handle the marker names. `None` when the model
-    /// text is complete or the text exceeds what the store keeps.
     pub(crate) spill: Option<SpillRecord>,
     pub(crate) execution_context: Option<Box<super::process_context::ExecutionContextReceipt>>,
 }
 
-/// Complete read-side domain output. Dispatch adds any argument-repair
-/// note before masking and bounding once; a clipped preview is never treated
-/// as complete input for another bound.
 pub(super) struct ReadSideOutput {
     pub(super) result_digest: Option<[u8; 32]>,
     disposition: ResultDisposition,
@@ -617,9 +566,6 @@ impl ReadSideOutput {
     }
 }
 
-/// A complete tool output awaiting storage: the text, its SHA-256 (the
-/// handle's digest), and the line the bounded text omits from so the marker
-/// can point at it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SpillRecord {
     pub(crate) text: String,
@@ -628,8 +574,6 @@ pub(crate) struct SpillRecord {
 }
 
 impl SpillRecord {
-    /// The marker token for this record under `call`:
-    /// `t:<tool>:<call8>:<digest8>`.
     pub(crate) fn handle(&self, tool: &str, call: qq_protocol::ToolCallId) -> String {
         super::output::result_handle(tool, call, &self.digest)
     }
@@ -665,11 +609,6 @@ impl ToolOutput {
     }
 
     pub(super) fn bounded(text: String, bounds: &Bounds, is_error: bool) -> Self {
-        // The complete text is kept only when the size alone says a cut may
-        // happen: cloning every small result would cost on the hot path for
-        // nothing. It is kept unmasked — an explicit `read_tool_result` is
-        // the model asking for exact bytes of something it produced — while
-        // the inline preview is masked as before.
         let digest = Sha256::digest(text.as_bytes());
         let spill_source =
             (text.len() > bounds.max_bytes || text.len() > bounds.max_lines).then(|| text.clone());
@@ -694,9 +633,6 @@ impl ToolOutput {
         }
     }
 
-    /// A bounded but unmasked result: an explicit read of stored output the
-    /// model already produced, where masking would defeat the read. Never
-    /// spills — the page is itself bounded on whole lines by its renderer.
     pub(crate) fn exact(text: String, bounds: &Bounds) -> Self {
         Self {
             disposition: ResultDisposition::Observed,
@@ -711,8 +647,6 @@ impl ToolOutput {
         }
     }
 
-    /// A result that bypasses masking and bounding: fixed runtime messages
-    /// (denials, interruption) whose text is a constant.
     pub(crate) fn verbatim_error(message: String) -> Self {
         Self {
             disposition: ResultDisposition::Refused,
@@ -785,8 +719,6 @@ pub(super) fn execute_blocking(
             .map_or_else(ToolOutput::refused, |(args, notes)| {
                 with_argument_notes(search(workspace, args, cancelled), &notes)
             }),
-        // The applied change travels as a UI payload (the unified diff of what
-        // actually changed on disk); the model gets the header summary.
         Some(BuiltInTool::EditFile) => deserialize(arguments)
             .map_or_else(ToolOutput::refused, |args| {
                 edit_file(workspace, file_state, &args, cancelled)
@@ -802,9 +734,6 @@ pub(super) fn execute_blocking(
         Some(BuiltInTool::Shell | BuiltInTool::Exec) => {
             ToolOutput::refused("network and shell tools must execute asynchronously")
         }
-        // A well-formed `ask_user` never reaches dispatch: the gate holds it
-        // and the answer is its result. Only malformed calls fall through,
-        // so this is where the model learns what was wrong.
         Some(BuiltInTool::AskUser) => match super::ask::parse(arguments) {
             Ok(_) => ToolOutput::refused("ask_user was not put to the user"),
             Err(error) => ToolOutput::refused(error.to_string()),
@@ -856,8 +785,6 @@ fn deserialize<T: serde::de::DeserializeOwned>(arguments: &str) -> Result<T, Str
     serde_json::from_str(arguments).map_err(|error| format!("invalid arguments: {error}"))
 }
 
-// Value's default object decoder overwrites duplicate keys. A failed strict
-// decode must never turn an ambiguous path or query into an accepted call.
 struct ReadOnlyObject(serde_json::Map<String, serde_json::Value>);
 
 impl<'de> serde::Deserialize<'de> for ReadOnlyObject {
@@ -929,8 +856,6 @@ fn deserialize_read_only<T: serde::de::DeserializeOwned>(
             notes.push(note);
         }
     }
-    // These unknown values explicitly select the existing workspace root or
-    // first search page. Any non-neutral value still fails strict decoding.
     if object
         .get("cwd")
         .is_some_and(|value| value.as_str() == Some("."))
@@ -946,8 +871,6 @@ fn deserialize_read_only<T: serde::de::DeserializeOwned>(
         object.remove("offset");
         notes.push("offset_ignored");
     }
-    // An ignore-walk flag has no effect on reading a named file. The
-    // observed boolean shape is redundant; other types remain invalid.
     if name == "read_file"
         && object
             .get("include_ignored")

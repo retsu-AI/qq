@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-# The harness must not inherit a caller repository before creating its own fixtures.
 git_local_env=$(git rev-parse --local-env-vars)
 for git_env_name in $git_local_env; do unset "$git_env_name"; done
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null

@@ -1,12 +1,5 @@
-//! Terminal settlement: `settle_run` behind the `outcome_json IS NULL` guard,
-//! the queued/reserved/prepared finishers, panic and recovery settlement, and
-//! owned-child cancellation.
-
 use super::*;
 
-/// Records that an interrupting steer aborted `turn_ordinal`: every tool call
-/// of the run still open settles as interrupted (the loop already yielded
-/// their finished events, so this is the durable half), then the event.
 pub(super) fn record_run_interrupted(
     connection: &mut Connection,
     store_id: StoreId,
@@ -89,8 +82,6 @@ pub(super) fn complete_run(
     accounting: Option<RunAccounting>,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    // Guard before any write: a replayed settlement must leave the superseded
-    // steering rows exactly as the first settlement left them.
     if run_is_settled(&transaction, claimed.identity.run_id)? {
         return Ok(Vec::new());
     }
@@ -124,8 +115,6 @@ pub(super) fn complete_run(
     Ok(events)
 }
 
-/// Teardown has dropped the summary future, whose asynchronous drop cleanup
-/// may still be queued. Commit that receipt before exposing its owner's finish.
 fn settle_abandoned_owned_summary(
     transaction: &Connection,
     store_id: StoreId,
@@ -176,23 +165,14 @@ fn settle_abandoned_owned_summary(
     Ok(Some(summary.identity.run_id))
 }
 
-/// Who is settling a started run. The executor that owns the run knows the
-/// command that queued it; recovery and panic sweeps settle rows they never
-/// claimed and record no cause.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum SettlementCause {
     Executor,
     Recovery,
 }
 
-/// Result of a settlement attempt: goal updates and `RunFinished` when this call
-/// settled the run, `None` when the run already carried an outcome and
-/// nothing was written. A run settles exactly once through any path.
 pub(super) type RunSettled = Option<Vec<SessionEventEnvelope>>;
 
-/// For callers that checked `run_is_settled` earlier in the same transaction:
-/// `None` there means the row changed under an open write transaction, which
-/// SQLite forbids.
 pub(super) fn expect_settled<T>(settled: Option<T>) -> Result<T, SessionRuntimeError> {
     settled.ok_or(SessionRuntimeError::CONSTRAINT)
 }
@@ -208,14 +188,9 @@ pub(super) fn run_is_settled(
             |row| row.get::<_, bool>(0),
         )
         .optional()?;
-    // A missing row has nothing left to settle either.
     Ok(settled.unwrap_or(true))
 }
 
-/// Settles a started run inside an open transaction: outcome, usage and cost
-/// accounting, message states, tool-call interruption, session status, and
-/// the `RunFinished` event. This is the only path that writes a started run's
-/// `outcome_json`; the pre-read guard makes any replay a no-op.
 pub(super) fn settle_run(
     transaction: &Connection,
     store_id: StoreId,
@@ -284,8 +259,6 @@ pub(super) fn settle_run(
     let saw_turn = accounting
         .as_ref()
         .is_some_and(|accounting| accounting.saw_turn);
-    // The verdict is meaningful only for a completed answer: a run that was
-    // cancelled, failed, or ran out of budget never produced one to judge.
     let final_output = match &outcome {
         RunOutcome::Completed => accounting
             .as_ref()
@@ -322,8 +295,6 @@ pub(super) fn settle_run(
         [claimed.identity.session_id.to_string()],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
     )?;
-    // Recovery has no executor accumulator. Goal-bound main runs and owned
-    // summaries retain aggregate spending and chargeable-work proof in storage.
     let (session_cost, session_saw_turn) = if cause == SettlementCause::Recovery {
         transaction
             .query_row(
@@ -356,9 +327,6 @@ pub(super) fn settle_run(
     } else {
         (current_cost, current_cost_known)
     };
-    // Internal in-run compaction owns spend but never owns the prompt's
-    // active slot. Charge the session under the same exact-once settlement
-    // guard independently of releasing that slot.
     transaction.execute(
         "UPDATE sessions SET estimated_cost_usd_nanos = ?2, cost_known = ?3 WHERE id = ?1",
         params![
@@ -367,11 +335,6 @@ pub(super) fn settle_run(
             next_cost_known
         ],
     )?;
-    // Terminal accounting owns the final per-turn figure only when a model
-    // turn completed. No completed turn preserves an earlier committed value;
-    // an unmeasured completed turn explicitly clears it. Recovery never held
-    // the accumulator, so the row keeps whatever its last committed turn
-    // recorded.
     let preserve_run_accounting = cause == SettlementCause::Recovery || pending_goal_request;
     transaction.execute(
         "UPDATE runs
@@ -436,10 +399,6 @@ pub(super) fn settle_run(
             pending_context_overflow_basis,
         ],
     )?;
-    // Answers the run never received at a turn boundary are committed into
-    // its session now, after its own turns; and a detached child that
-    // outlived its parent's settlement goes to that parent the same way
-    // (ADR-0054 § 4).
     deliveries::deliver_settled_children(
         transaction,
         claimed.identity.run_id,
@@ -495,7 +454,6 @@ pub(super) fn settle_run(
     Ok(Some(events))
 }
 
-/// Cancels a run the caller has just read as `queued` in this transaction.
 pub(super) fn finish_queued_run(
     transaction: &Connection,
     store_id: StoreId,
@@ -515,8 +473,6 @@ pub(super) fn finish_queued_run(
     )?)
 }
 
-/// Settles a run that never started. Only a `queued` row without an outcome
-/// is written; a started or already-settled row is left untouched.
 pub(super) fn finish_queued_run_with_outcome(
     transaction: &Connection,
     store_id: StoreId,
@@ -612,7 +568,6 @@ pub(super) fn finish_queued_run_with_outcome(
             run_id,
             outcome,
             usage,
-            // A queued run never reached the model; no context to report.
             context_tokens: None,
             final_output: None,
         },
@@ -741,10 +696,6 @@ pub(super) struct PanickedExecutionSettlement {
     pub(super) run_ids: Vec<RunId>,
 }
 
-/// Settles whichever durable state an execution task owned when it panicked.
-/// The task may still be preparing its original queued prompt, may have
-/// started that prompt, or may have atomically handed the session to a
-/// distinct auto-compaction while retaining the prompt reservation.
 pub(super) fn settle_panicked_execution(
     connection: &mut Connection,
     store_id: StoreId,
@@ -780,9 +731,6 @@ pub(super) fn settle_panicked_execution(
         )
         .optional()?;
     let mut events = Vec::with_capacity(3);
-    // Cleanup ownership is independent of whether this transaction emits a
-    // new terminal event: a concurrent cancel may already have settled the
-    // original while its task still owns the in-memory registration.
     let mut run_ids = vec![original.identity.run_id];
     if let Some(summary) =
         settle_abandoned_owned_summary(&transaction, store_id, original, &mut events)?
@@ -906,9 +854,6 @@ pub(super) struct OwnedChildCancellations {
     pub(super) settled_queued: bool,
 }
 
-/// Returns running child work whose durable cancellation still needs its
-/// in-memory signal. This is also used when an idempotent parent cancellation
-/// is replayed after its first caller disappeared before signalling children.
 pub(super) fn owned_running_run_ids(
     connection: &Connection,
     owner_run_id: RunId,
@@ -972,10 +917,6 @@ pub(super) fn cancellation_signal_run_ids(
     Ok(run_ids)
 }
 
-/// Cancels every unfinished run in a session spawned by `owner_run_id`.
-/// Running children are returned for their in-memory signal; queued children
-/// are settled in this transaction, so either ordering between parent
-/// cancellation and atomic child creation has a durable outcome.
 pub(super) fn cancel_owned_child_runs(
     transaction: &Connection,
     store_id: StoreId,
@@ -984,9 +925,6 @@ pub(super) fn cancel_owned_child_runs(
     now: u64,
 ) -> Result<OwnedChildCancellations, SessionRuntimeError> {
     let mut statement = transaction.prepare(
-        // The whole subtree: sessions this run owns, sessions their runs
-        // own, and so on to the depth ceiling. Cancelling a parent must
-        // settle every descendant, not only the first generation.
         "WITH RECURSIVE owned(session_id, level) AS (
                  SELECT id, 1 FROM sessions WHERE owner_run_id = ?1
                  UNION ALL
@@ -1052,9 +990,6 @@ pub(super) fn cancel_owned_child_runs(
             );
             settled_queued = true;
             if preparing {
-                // The durable row is terminal, but its loader/runtime
-                // preparation may still be holding a permit. Signal that
-                // task so parent cancellation and shutdown can quiesce.
                 running.push(run_id);
             }
         } else {
@@ -1069,12 +1004,6 @@ pub(super) fn cancel_owned_child_runs(
     })
 }
 
-/// Requests cancellation of the session's active auto-compaction when no
-/// queued prompt remains to run after it. Returns the compaction's run id
-/// (for the in-memory cancellation signal) and the appended
-/// `CancellationRequested` event, or `None` when there is nothing to cascade
-/// to: prompts still queued, a manual compaction, an ordinary prompt run, or
-/// a cancellation already underway.
 pub(super) fn cascade_auto_compaction_cancel(
     transaction: &Connection,
     store_id: StoreId,
@@ -1120,9 +1049,6 @@ pub(super) fn cascade_auto_compaction_cancel(
     Ok(Some((compaction_run, event)))
 }
 
-/// Cancels the in-run compaction a running prompt owns, if one is running.
-/// Unlike `cascade_auto_compaction_cancel` it keys on ownership, not the
-/// session's active slot, because an in-run compaction never holds the slot.
 pub(super) fn cascade_in_run_compaction_cancel(
     transaction: &Connection,
     store_id: StoreId,
@@ -1175,8 +1101,6 @@ pub(super) fn recover_interrupted_runs(
 ) -> Result<Vec<EventCursor>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
 
-    // Routing may already have billed while the main model was unstarted.
-    // Interrupt these reservations instead of silently dispatching twice.
     let mut statement = transaction.prepare(
         "SELECT r.id, r.session_id, s.workspace_id FROM runs r
          JOIN sessions s ON s.id = r.session_id
@@ -1207,20 +1131,11 @@ pub(super) fn recover_interrupted_runs(
             cursors.extend(event.into_iter().map(|event| event.cursor));
         }
     }
-    // Reservation is process-local work backed by a queued run. A crash may
-    // leave the pointer behind before RunStarted; clearing it makes that same
-    // queued row eligible again. The per-prompt compaction-attempt marker is
-    // deliberately retained: once a compaction start committed, recovery
-    // must not spend a second attempt.
     transaction.execute(
         "UPDATE sessions SET preparing_run_id = NULL
              WHERE preparing_run_id IS NOT NULL",
         [],
     )?;
-    // A spawned child can be durably queued while its owner was running when
-    // the process stopped. Settle it before recovering running rows: once the
-    // owner is marked interrupted its session no longer advertises an active
-    // run, but the explicit owner id still proves this child has no waiter.
     let mut statement = transaction.prepare(
         "SELECT child_run.id, child.id, child.workspace_id
              FROM runs child_run
@@ -1293,13 +1208,11 @@ pub(super) fn recover_interrupted_runs(
         )?;
         cursors.extend(events.into_iter().map(|event| event.cursor));
     }
-    // Runs settle above in no particular order. Deliver the settled portion.
     deliveries::deliver_orphaned_answers(&transaction, now_ms())?;
     transaction.commit()?;
     Ok(cursors)
 }
 
-/// Reconstruct only settlement ownership; recovery never loads a model plan.
 pub(super) fn recovery_claim(identity: RunIdentity) -> ClaimedRun {
     ClaimedRun {
         goal_spend_owner: None,
@@ -1341,7 +1254,6 @@ pub(super) fn recovery_claim(identity: RunIdentity) -> ClaimedRun {
     }
 }
 
-/// Settle a run the previous process left running as interrupted.
 pub(super) fn recover_running_run(
     transaction: &Connection,
     store_id: StoreId,
@@ -1397,8 +1309,6 @@ pub(super) fn outcome_states(outcome: &RunOutcome) -> (&'static str, &'static st
         RunOutcome::Cancelled => ("cancelled", "cancelled"),
         RunOutcome::Interrupted => ("interrupted", "interrupted"),
         RunOutcome::BudgetExhausted { .. } => ("budget_exhausted", "interrupted"),
-        // The transcript stands and the next prompt continues it, so the
-        // message reads as interrupted rather than failed.
         RunOutcome::Paused { .. } => ("paused", "interrupted"),
         RunOutcome::Failed { .. } => ("failed", "failed"),
     }

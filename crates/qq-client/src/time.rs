@@ -1,9 +1,5 @@
-//! Timers for the selected transport. Native uses Tokio; the browser has no
-//! executor of its own, so timers come from `setTimeout` via `gloo-timers`.
-
 use std::{future::Future, time::Duration};
 
-/// Elapsed before the inner future settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Elapsed;
 

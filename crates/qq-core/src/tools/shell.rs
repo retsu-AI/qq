@@ -19,24 +19,12 @@ use super::{
     output::{Bounds, Header},
 };
 
-/// Live output streamed to clients per command. The captured output is
-/// larger: see [`MAX_CAPTURE_BYTES`].
 const MAX_LIVE_OUTPUT_BYTES: usize = 128 * 1024;
-/// Combined output captured (head+tail) per command: what the spill store
-/// keeps for `read_tool_result`, leaving room under its item cap for the
-/// header and trailing notes. The model sees [`SHELL_BOUNDS`].
 const MAX_CAPTURE_BYTES: usize = super::output::MAX_SPILL_ITEM_BYTES - 64 * 1024;
-/// How long output still buffered in the pipes is read after the leader
-/// exits and its process group is killed. A process that escaped the group
-/// can hold a pipe open forever; it no longer holds the call.
 const EXIT_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
-/// Model-facing bound: the head of a command's output and its tail, where the
-/// verdict lives, are what the model reads; the middle of a long build log
-/// is noise it should page into deliberately.
 pub(super) const SHELL_BOUNDS: Bounds = Bounds::new(16 * 1024, 4_000);
 const SHELL_READ_CHUNK_BYTES: usize = 8 * 1024;
 const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
-// This bounds admission work, not the lifetime of a running command.
 const PREPARATION_TIMEOUT_SECS: u64 = 120;
 
 #[cfg(test)]
@@ -117,9 +105,6 @@ pub(super) struct ShellArgs {
     pub(super) yield_after_seconds: Option<u64>,
 }
 
-/// `exec`: one program with an argument list and no shell between the model
-/// and the process — no quoting, globbing, `$`, or pipes, so the classifier
-/// sees exact argv. Same bounds, capture, spill, and approval path as `shell`.
 #[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ExecArgs {
@@ -141,8 +126,6 @@ pub(super) const MAX_EXEC_ARG_BYTES: usize = 4096;
 pub(super) const MAX_EXEC_PROGRAM_BYTES: usize = 256;
 pub(super) const MAX_EXEC_STDIN_BYTES: usize = 64 * 1024;
 
-/// What to start: a shell string or an exact argv. Everything after spawn
-/// is shared.
 pub(super) enum Launch<'a> {
     Shell(&'a ShellArgs),
     Exec(&'a ExecArgs),
@@ -233,8 +216,6 @@ impl Launch<'_> {
         }
     }
 
-    /// The text the built-in preference judges: the shell string, or the
-    /// argv joined so `exec grep …` gets the same hint as `shell grep …`.
     fn nudge_text(&self) -> std::borrow::Cow<'_, str> {
         match self {
             Self::Shell(args) => std::borrow::Cow::Borrowed(&args.command),
@@ -275,7 +256,6 @@ pub(super) enum InvalidLaunch {
     Cwd,
 }
 
-/// The fate of one supervised shell command.
 enum ShellOutcome {
     Exited(std::io::Result<std::process::ExitStatus>),
     ReadFailed {
@@ -286,9 +266,6 @@ enum ShellOutcome {
     Cancelled,
 }
 
-/// How a call hands a still-running command to `command_status`: at the
-/// yield point the call's result goes to `early` and the command is
-/// registered in `tasks`; this task keeps owning the process to its end.
 pub(super) struct Yielding {
     pub(super) tasks: super::ToolTasks,
     pub(super) call: std::sync::Arc<super::dispatch::CallCancellation>,
@@ -296,12 +273,6 @@ pub(super) struct Yielding {
     pub(super) command: Option<std::sync::Arc<super::commands::Command>>,
 }
 
-/// Executes one bounded shell command on the async runtime: `sh -c` in its own
-/// process group with the workspace (or a contained subdirectory) as its
-/// working directory, combined stdout+stderr captured head+tail within the
-/// output budget, live chunks forwarded to `output`, and the whole process
-/// group killed on timeout or cancellation. The dispatch task owns this
-/// future through kill and reap even when its result waiter disappears.
 #[expect(
     clippy::too_many_arguments,
     reason = "process identity, producer, image approvals and supervision are distinct capabilities"
@@ -324,8 +295,6 @@ pub(super) async fn run_shell(
     if let Err(error) = launch.validate() {
         return ToolOutput::refused(error.to_string());
     }
-    // The prefer-built-in nudge: strict mode is refused before the gate
-    // (see approval); here it can only be a hint appended to the result.
     let hint = match (
         policy.builtin_preference,
         builtin_alternative(&launch.nudge_text()),
@@ -400,7 +369,6 @@ pub(super) async fn run_shell(
         Launch::Exec(arguments) => arguments.stdin.clone(),
         Launch::Shell(_) => None,
     };
-    // Subscribe before spawn so even an immediate exit cannot lose its wake.
     let mut child_exit = match child_exit::ChildExit::new() {
         Ok(exit) => exit,
         Err(error) => {
@@ -424,9 +392,6 @@ pub(super) async fn run_shell(
         Err(error) => return ToolOutput::refused(format!("could not start the command: {error}")),
     };
     process.process_started();
-    // Unix commands lead their own process group, watched for this process's
-    // death. Windows children own a kernel job which follows descendants
-    // across process-group changes and dies with this process.
     #[cfg(all(test, unix))]
     {
         let hook = {
@@ -441,8 +406,6 @@ pub(super) async fn run_shell(
             let _ = hook.release.await;
         }
     }
-    // Keep the persistence future owned through acknowledgement, but terminate
-    // the child promptly if cancellation or the command deadline wins first.
     if let (Some(id), Some(receipt)) = (call_id, receipt.as_ref()) {
         let mut write = process.record_process(id, receipt.clone());
         let interrupted = tokio::select! {
@@ -487,8 +450,6 @@ pub(super) async fn run_shell(
             assert!(!hook.panic, "injected shell task panic after process spawn");
         }
     }
-    // Stdin is written by its own task so a program that never reads it
-    // cannot stall the capture loop; the write end closes when done.
     if let (Some(text), Some(mut stdin)) = (stdin_text, child.stdin.take()) {
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt as _;
@@ -517,9 +478,6 @@ pub(super) async fn run_shell(
     let read_chunk_bytes = SHELL_READ_CHUNK_BYTES;
     let mut stdout_buffer = vec![0_u8; read_chunk_bytes];
     let mut stderr_buffer = vec![0_u8; read_chunk_bytes];
-    // One timer and one cancellation wait for the whole call: this loop wakes
-    // once per output chunk, and re-creating either per iteration would
-    // re-register on each of them.
     let mut timeout = std::pin::pin!(wait_for_command_deadline(command_deadline));
     let cancellation = cancelled;
     let mut cancelled = std::pin::pin!(cancelled.cancelled());
@@ -546,15 +504,11 @@ pub(super) async fn run_shell(
     };
 
     let ended = {
-        // Polled from the start: the leader's exit ends the command even when
-        // a process outside the call still holds a pipe open.
         let mut exit = std::pin::pin!(child_exit.wait(&mut child, &mut guard));
         loop {
             if exited.is_some() && stdout.is_none() && stderr.is_none() {
                 break None;
             }
-            // Bound memory and delta frequency. Flush the final tail before
-            // observing completion.
             if !buffered_output.is_empty()
                 && (buffered_output.len() >= SHELL_READ_CHUNK_BYTES
                     || (stdout.is_none() && stderr.is_none()))
@@ -634,9 +588,6 @@ pub(super) async fn run_shell(
                         }
                     }
                 }
-                // The exit observer kills the leader's process group before
-                // reaping it, so anything it left running stops. Output still
-                // buffered in the pipes is read for a short while after.
                 status = &mut exit, if exited.is_none() => {
                     exited = Some(status);
                     drain.as_mut().reset(tokio::time::Instant::now() + EXIT_DRAIN);
@@ -644,12 +595,9 @@ pub(super) async fn run_shell(
             }
         }
     };
-    // Stop reading: a process that escaped the group may hold a pipe open.
     drop((stdout, stderr));
     let outcome = match (ended, exited) {
         (Some(outcome), _) => outcome,
-        // The leader still pins the group identity until it is reaped;
-        // confirm disappearance without ever signalling a saved PID.
         (None, Some(status)) => {
             ShellOutcome::Exited(confirm_child_exit(status, &mut guard, process).await)
         }
@@ -662,7 +610,6 @@ pub(super) async fn run_shell(
         BoundedCapture::new(0),
     );
 
-    // The run's own time limit stops the command as a timeout, not a cancel.
     let run_expired = cancellation.timed_out();
     let outcome = match outcome {
         ShellOutcome::Cancelled if run_expired => ShellOutcome::TimedOut,
@@ -746,13 +693,10 @@ pub(super) async fn run_shell(
         }
     }
     .await;
-    // Cancellation and read failures also keep the bounded tail, after the
-    // process has stopped.
     streamed.forward(output, &mut buffered_output, true);
     let mut result = result;
     result.execution_context = receipt;
     drop(prepared);
-    // A yielded call already settled: its result belongs to `command_status`.
     match yielding.and_then(|yielding| yielding.command.as_ref()) {
         Some(command) => {
             command.finish(result);
@@ -762,8 +706,6 @@ pub(super) async fn run_shell(
     }
 }
 
-/// `<tool> exit=running id=<id> elapsed=<s> bytes=<n>`, the output so far,
-/// then how to follow the command.
 fn yielded_result(
     tool: &str,
     id: &str,
@@ -814,8 +756,6 @@ async fn stop_shell(
             "could not terminate the command process group: {error}"
         ));
     }
-    // The command leads no group, so it may have left this one without
-    // forking: stop it directly as well.
     if let Err(error) = child.start_kill() {
         return Err(format!("could not terminate the command: {error}"));
     }
@@ -848,10 +788,6 @@ pub(super) fn shell_command(command: &str) -> tokio::process::Command {
     shell
 }
 
-/// `cmd /D /S /C "<text>"`, passed raw: `/S` strips exactly the outer pair
-/// of quotes and cmd parses the text unchanged, where the C runtime's
-/// backslash escaping would turn its quotes into literals. `/D` skips the
-/// user's registry AutoRun commands.
 #[cfg(windows)]
 pub(super) fn shell_command(command: &str) -> tokio::process::Command {
     let mut shell = tokio::process::Command::new("cmd");
@@ -878,8 +814,6 @@ async fn wait_for_command_deadline(deadline: Option<std::time::Instant>) {
     }
 }
 
-/// Reads from a pipe that may already be closed; a closed side never resolves,
-/// letting `select!` disable it without re-arming.
 async fn read_from<R>(reader: &mut Option<R>, buffer: &mut [u8]) -> std::io::Result<usize>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -890,10 +824,6 @@ where
     }
 }
 
-/// Live output already sent, and an incomplete UTF-8 sequence held back so
-/// a character split across reads is not shown as two replacement
-/// characters. The held bytes stay out of the flush buffer: a buffer that
-/// never empties would keep an expired flush timer ready forever.
 #[derive(Default)]
 struct LiveOutput {
     sent: usize,
@@ -901,8 +831,6 @@ struct LiveOutput {
 }
 
 impl LiveOutput {
-    /// Sends and drains `buffered`, keeping an incomplete trailing UTF-8
-    /// sequence for the next call. `last` sends everything.
     fn forward(
         &mut self,
         output: Option<&mpsc::Sender<String>>,
@@ -918,8 +846,6 @@ impl LiveOutput {
     }
 }
 
-/// Forwards one raw output chunk as a lossy UTF-8 delta, bounded by the same
-/// budget as the captured result so a runaway command cannot flood clients.
 pub(super) fn forward_shell_chunk(
     output: Option<&mpsc::Sender<String>>,
     streamed: &mut usize,
@@ -936,16 +862,11 @@ pub(super) fn forward_shell_chunk(
     let chunk = String::from_utf8_lossy(bytes).into_owned();
     match sender.try_send(chunk) {
         Ok(()) => *streamed += bytes.len(),
-        // Live output is a best-effort view of the same bounded bytes carried
-        // by the terminal result. A slow renderer may miss deltas, but it can
-        // never stall process timeout, cancellation, or final persistence.
         Err(mpsc::error::TrySendError::Full(_)) => *streamed += bytes.len(),
         Err(mpsc::error::TrySendError::Closed(_)) => *streamed = MAX_LIVE_OUTPUT_BYTES,
     }
 }
 
-/// Where a UTF-8 sequence that the next read may complete begins: the start
-/// of an unfinished multibyte character in the last three bytes, else the end.
 fn incomplete_utf8_start(bytes: &[u8]) -> usize {
     for back in 1..=bytes.len().min(3) {
         let byte = bytes[bytes.len() - back];
@@ -967,8 +888,6 @@ fn incomplete_utf8_start(bytes: &[u8]) -> usize {
     bytes.len()
 }
 
-/// `<tool> exit=<why> elapsed=<s> bytes=<n>`, the captured output, then the
-/// reason the process group was stopped.
 fn stopped_result(
     tool: &str,
     exit: &str,
@@ -989,9 +908,6 @@ fn stopped_result(
     content
 }
 
-/// `shell exit=<code> elapsed=<s> bytes=<n>` then the captured output. The
-/// header carries the verdict so a pruned stub, a head-only glance, or a
-/// truncated tail all still tell the model how the command ended.
 fn shell_result(
     tool: &str,
     capture: BoundedCapture,
@@ -1046,28 +962,15 @@ fn shell_result(
     result
 }
 
-/// Kills the process group on task destruction, unless disarmed after a
-/// normal exit. Ordinary cancellation keeps the owning task alive to reap
-/// the child; this guard also covers unwinding of that task.
 pub(crate) struct ProcessGroupGuard {
     #[cfg(unix)]
     pgid: Option<rustix::process::Pid>,
     #[cfg(unix)]
     killed_pgid: Option<rustix::process::Pid>,
-    /// Lives in the group and kills it once this process is gone; reaped
-    /// before termination is confirmed.
     #[cfg(unix)]
     watcher: Option<tokio::process::Child>,
 }
 
-/// Every Unix command's process group gets one of these. It blocks reading
-/// a pipe whose write end only this process holds; when this process exits
-/// for any reason, SIGKILL included, the read ends and the watcher kills its
-/// group. It ignores the catchable signals a script may send its own group.
-///
-/// The watcher leads a new group and reports once its traps are set; only
-/// then may the command join. A command started first could signal its group
-/// before the traps exist and kill the watcher.
 #[cfg(unix)]
 pub(crate) async fn spawn_watcher(
     deadline: std::time::Instant,
@@ -1138,14 +1041,11 @@ impl ProcessGroupGuard {
         self.watcher = Some(watcher);
     }
 
-    /// The command's process group, led by its watcher.
     #[cfg(unix)]
     pub(crate) fn group(&self) -> Option<rustix::process::Pid> {
         self.pgid
     }
 
-    /// Reaps the watcher after its group was killed. Darwin reports a group
-    /// of zombies as EPERM, so confirmation needs the watcher gone first.
     #[cfg(unix)]
     pub(crate) async fn reap_watcher(&mut self) -> std::io::Result<()> {
         if let Some(mut watcher) = self.watcher.take() {
@@ -1157,8 +1057,6 @@ impl ProcessGroupGuard {
         Ok(())
     }
 
-    /// Forgets the group after a normal exit; the reaped leader's pid may be
-    /// recycled, so killing the group then would be unsound.
     pub(crate) fn disarm(&mut self) {
         #[cfg(unix)]
         {
@@ -1185,10 +1083,6 @@ impl ProcessGroupGuard {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn kill_exited(&mut self) -> std::io::Result<()> {
         let result = self.kill();
-        // Darwin's killpg skips zombies and returns EPERM when no eligible
-        // member remains. WNOWAIT has already proved the leader exited. Reap
-        // it, then require actual group disappearance: never treat permission
-        // denial alone as termination proof for any surviving member.
         #[cfg(target_os = "macos")]
         if result.as_ref().is_err_and(|error| {
             error.raw_os_error() == Some(rustix::io::Errno::PERM.raw_os_error())
@@ -1204,8 +1098,6 @@ impl ProcessGroupGuard {
         if self.killed_pgid.is_some() {
             self.reap_watcher().await?;
         }
-        // Zombie descendants count as stopped: a container's PID 1 may never
-        // reap them, and signal zero would keep finding the group.
         #[cfg(target_os = "linux")]
         if let Some(pgid) = self.killed_pgid {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -1235,15 +1127,10 @@ impl ProcessGroupGuard {
 
 impl Drop for ProcessGroupGuard {
     fn drop(&mut self) {
-        // Destruction is a best-effort fallback. The task lease still records
-        // an unconfirmed exit unless the owned Child was successfully reaped.
         let _ = self.kill();
     }
 }
 
-/// Stable identity of observed process output, independent of capture bounds,
-/// pipe scheduling, elapsed time and advisory text. Each stream retains only
-/// its incremental hash and length, even when output exceeds spill retention.
 #[derive(Default)]
 struct ShellResultIdentity {
     stdout: Sha256,
@@ -1269,9 +1156,6 @@ impl ShellResultIdentity {
     }
 }
 
-/// Bounded head+tail capture of combined command output: the first half of
-/// the budget keeps the start of the output, the second half keeps a rolling
-/// window of its end, and everything between is counted as omitted.
 #[derive(Clone)]
 pub(super) struct BoundedCapture {
     head: Vec<u8>,
@@ -1306,14 +1190,10 @@ impl BoundedCapture {
         }
     }
 
-    /// Every byte the command wrote, including bytes the capture dropped.
     pub(super) fn total(&self) -> u64 {
         self.total
     }
 
-    /// The captured bytes as text. When the capture itself dropped bytes the
-    /// gap is marked here (a capture limit, distinct from output bounding);
-    /// the model-facing bound is applied afterwards by dispatch.
     pub(super) fn into_output(self) -> String {
         let omitted = self.total - self.head.len() as u64 - self.tail.len() as u64;
         let tail = self.tail.into_iter().collect::<Vec<_>>();
@@ -1499,8 +1379,6 @@ mod identity_tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod watcher_tests {
-    /// A command may signal its own group the moment it starts, so the
-    /// watcher must already ignore those signals when it is handed over.
     #[tokio::test]
     async fn the_watcher_ignores_group_signals_before_a_command_joins() {
         let mut watcher =
@@ -1531,18 +1409,12 @@ mod watcher_tests {
 
 #[cfg(all(test, unix))]
 mod orphan_tests {
-    /// A command's process group dies with the process that started it, even
-    /// when that process is SIGKILLed and runs no cleanup.
     #[test]
     fn a_killed_server_takes_its_commands_with_it() {
         if let Some(report) = std::env::var_os("QQ_COMMAND_ORPHAN_WORKER") {
             let directory = tempfile::tempdir().unwrap();
             let workspace = crate::workspace::Workspace::open(directory.path()).unwrap();
-            // The background child and the trap prove the watcher kills the
-            // whole group and survives the group signals a script may send.
             let command = format!(
-                // Output goes nowhere QQ reads, so the server's death closes
-                // no pipe a payload would notice: only the watcher stops it.
                 "exec >/dev/null 2>&1; trap '' TERM; kill -s TERM 0; tail -f /dev/null & echo $$ $! > '{}'; exec tail -f /dev/null",
                 std::path::Path::new(&report).display()
             );
@@ -1607,8 +1479,6 @@ mod orphan_tests {
         let background = rustix::process::Pid::from_raw(pids.next().unwrap()).unwrap();
         server.kill().unwrap();
         server.wait().unwrap();
-        // Orphans reparent to init, which reaps them; until then a zombie
-        // still answers signal zero, so wait for both to be gone.
         let stopped = std::time::Instant::now();
         for pid in [leader, background] {
             while rustix::process::test_kill_process(pid).is_ok() {
@@ -1632,8 +1502,6 @@ mod cmd_text_tests {
         );
     }
 
-    /// Quoted paths reach cmd unchanged; the C runtime's `\"` escaping
-    /// would make cmd write a file named with literal backslashes.
     #[cfg(windows)]
     #[tokio::test]
     async fn quoted_redirection_reaches_cmd_unchanged() {
@@ -1660,13 +1528,10 @@ mod live_output_tests {
         let mut buffered = "a é".as_bytes()[..3].to_vec();
         live.forward(Some(&sender), &mut buffered, false);
         assert_eq!(receiver.try_recv().unwrap(), "a ");
-        // The held byte leaves the flush buffer, so an expired flush timer
-        // never sees a buffer it cannot drain.
         assert!(buffered.is_empty());
         buffered.extend_from_slice(&[0xa9, b'!']);
         live.forward(Some(&sender), &mut buffered, false);
         assert_eq!(receiver.try_recv().unwrap(), "é!");
-        // At the end nothing more can complete it.
         buffered.push(0xe2);
         live.forward(Some(&sender), &mut buffered, false);
         assert!(receiver.try_recv().is_err());
@@ -1677,8 +1542,6 @@ mod live_output_tests {
 
 #[cfg(all(test, unix))]
 mod split_character_tests {
-    /// Half a character, a pause longer than the flush interval, then the
-    /// rest: the command still completes and its output is whole.
     #[tokio::test]
     async fn a_paused_partial_character_does_not_stall_the_command() {
         let directory = tempfile::tempdir().unwrap();

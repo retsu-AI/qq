@@ -1,5 +1,3 @@
-//! Observe an exited leader without reaping it before group teardown.
-
 pub(super) struct ChildExit {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     signal: tokio::signal::unix::Signal,
@@ -51,8 +49,6 @@ impl ChildExit {
                     return Err(std::io::Error::other("command exit notifications stopped"));
                 }
             }
-            // WNOWAIT keeps the exited leader waitable, preventing PID/group
-            // reuse until after this signal. Tokio remains the sole reaper.
             group.kill_exited()?;
         }
         let status = child.wait().await;

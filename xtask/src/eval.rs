@@ -262,7 +262,6 @@ struct LaunchPlan {
     harbor_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     machine_class: Option<String>,
-    /// Rust target triple of the uploaded binary; absent for the host build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     qq_build_target: Option<String>,
     #[serde(default = "default_plan_approval")]
@@ -272,16 +271,10 @@ struct LaunchPlan {
     environment: BTreeMap<String, String>,
 }
 
-/// Manifests written before `--approval` existed were produced by an adapter
-/// that hard-coded `auto`.
 const fn default_plan_approval() -> EvalApproval {
     EvalApproval::Auto
 }
 
-/// The non-secret Harbor invocation for `args`, relative to `repository`.
-/// `target_dir` is Cargo's build output directory (`CARGO_TARGET_DIR` or the
-/// repository's `target/`). Pure so the launch contract can be tested without
-/// git, cargo, or Harbor.
 fn launch_plan(
     args: RunArgs,
     repository: &Path,
@@ -598,10 +591,6 @@ struct FailureClassification {
     note: String,
 }
 
-/// What every trial in one job must share. Two per-trial facts deliberately
-/// live elsewhere: `workspace_identity` hashes the task's working directory
-/// and `system_prompt_hash` covers a prompt that names that directory, so both
-/// vary across the tasks of a dataset and belong on [`TrialSummary`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct BaselineIdentity {
     qq_version: String,
@@ -620,13 +609,10 @@ struct BaselineIdentity {
     instruction_hash: String,
     tool_schema_hash: String,
     selected_guidance: Option<Value>,
-    /// Operator-declared arm label; the only identity field two compared
-    /// jobs are expected to differ in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     arm: Option<String>,
 }
 
-/// The per-trial half of a trace's identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrialIdentity {
     workspace_identity: String,
@@ -647,11 +633,8 @@ struct TrialSummary {
     passed: bool,
     harness_failure: bool,
     identity_observed: bool,
-    /// SHA-256 of the task's canonical working directory; from the trace.
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace_identity: Option<String>,
-    /// Hash of the rendered system prompt, which names the working directory
-    /// and therefore differs task to task; from the trace.
     #[serde(skip_serializing_if = "Option::is_none")]
     system_prompt_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -660,18 +643,12 @@ struct TrialSummary {
     total_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     uncached_tokens: Option<u64>,
-    /// Reasoning tokens the provider broke out of `output_tokens`; read from
-    /// the durable QQ trace outcome, since Harbor carries no such field.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     wall_seconds: Option<f64>,
-    /// Sub-agent sessions the trial's run spawned, counted from durable
-    /// `session_created` events with a parent.
     child_count: u64,
-    /// Turns the provider cut at its output limit and the runtime continued.
     output_continuations: u64,
-    /// The run settled as `provider_output_truncated`.
     output_truncated_failure: bool,
     trajectory: Option<String>,
     classification: Option<FailureClassification>,
@@ -705,7 +682,6 @@ struct EvalReport {
     trials: Vec<TrialSummary>,
 }
 
-/// Coverage of the existing Harbor aggregates, not a claim of task-tree billing.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct EfficiencyCoverage {
     schema_version: u16,
@@ -888,10 +864,6 @@ fn report_job(job: &Path) -> Result<EvalReport, EvalError> {
                 path: trial_config_path.display().to_string(),
                 source,
             })?;
-        // Harbor 0.20.0 writes the trial's config.json with pydantic's
-        // `exclude_defaults`, while result.json embeds the fully defaulted
-        // model, so identity means "every explicit field agrees", not
-        // byte-for-byte equality.
         if !is_projection_of(&decoded_config, &result.config) {
             return Err(EvalError::Invalid(format!(
                 "trial {trial_name} result.json does not match its resolved config.json"
@@ -905,10 +877,6 @@ fn report_job(job: &Path) -> Result<EvalReport, EvalError> {
         let harness_failure = result.exception_info.is_some();
         harness_failures += u64::from(harness_failure);
         let trace_path = trial_dir.join("agent/qq-trace.jsonl");
-        // A trace whose outcome record is missing was cut off from outside
-        // (Harbor's agent timeout, a stopped container); Harbor records that
-        // as an exception, and the trial is a harness failure with partial
-        // metrics rather than an attempt with a settled identity.
         let trace_settled = trace_path.is_file() && trace_has_outcome(&trace_path)?;
         if trace_path.is_file() && !trace_settled && !harness_failure {
             return Err(EvalError::Invalid(format!(
@@ -1090,33 +1058,20 @@ fn report_job(job: &Path) -> Result<EvalReport, EvalError> {
     })
 }
 
-/// The result of comparing two compatible jobs task by task.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct EvalComparison {
     baseline_arm: Option<String>,
     candidate_arm: Option<String>,
-    /// Identity fields that legitimately differ between arms and were not
-    /// required to match, with both values, so a reader can see exactly what
-    /// changed besides the label.
     tolerated_differences: BTreeMap<&'static str, (Value, Value)>,
     pairs: u64,
-    /// Both arms passed.
     both_passed: u64,
-    /// Neither arm passed.
     both_failed: u64,
-    /// Baseline passed, candidate did not.
     baseline_only: u64,
-    /// Candidate passed, baseline did not.
     candidate_only: u64,
-    /// Two-sided exact McNemar p-value on the discordant pairs; `None` when
-    /// there are none.
     mcnemar_p_value: Option<f64>,
     baseline: Scorecard,
     candidate: Scorecard,
     delta: ScorecardDelta,
-    /// Candidate dollars-per-pass divided by baseline dollars-per-pass, with a
-    /// percentile bootstrap interval over task pairs. Below 1.0 favors the
-    /// candidate. `None` when either arm has no priced pass.
     cost_per_pass_ratio: Option<f64>,
     cost_per_pass_ratio_ci95_low: Option<f64>,
     cost_per_pass_ratio_ci95_high: Option<f64>,
@@ -1124,8 +1079,6 @@ struct EvalComparison {
     bootstrap_seed: u64,
 }
 
-/// One arm's headline numbers, copied from its report so the comparison is
-/// self-contained.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct Scorecard {
     attempts: u64,
@@ -1198,7 +1151,6 @@ impl Scorecard {
     }
 }
 
-/// One task attempt present in both arms.
 struct TrialPair<'a> {
     baseline: &'a TrialSummary,
     candidate: &'a TrialSummary,
@@ -1216,8 +1168,6 @@ fn compare_jobs(args: &CompareArgs) -> Result<EvalComparison, EvalError> {
         ));
     };
 
-    // Everything that shapes the task or the model must match; everything an
-    // arm is allowed to change is reported rather than rejected.
     let required: [(&str, Value, Value); 12] = [
         (
             "model",
@@ -1331,8 +1281,6 @@ fn compare_jobs(args: &CompareArgs) -> Result<EvalComparison, EvalError> {
         )));
     }
 
-    // Pair attempts task by task. Within a task, attempts pair in trial-name
-    // order, which is the seed order Harbor assigns.
     let mut by_task: BTreeMap<&str, (Vec<&TrialSummary>, Vec<&TrialSummary>)> = BTreeMap::new();
     for trial in &baseline.trials {
         by_task.entry(&trial.task_name).or_default().0.push(trial);
@@ -1357,9 +1305,6 @@ fn compare_jobs(args: &CompareArgs) -> Result<EvalComparison, EvalError> {
                     "task {task} has different checksums across arms; the task changed"
                 )));
             }
-            // The working directory is part of the task; two arms that saw
-            // different ones did not run the same task even if the checksum
-            // agrees.
             if let (Some(left), Some(right)) =
                 (&baseline.workspace_identity, &candidate.workspace_identity)
                 && left != right
@@ -1439,9 +1384,6 @@ fn difference(candidate: Option<f64>, baseline: Option<f64>) -> Option<f64> {
     Some(candidate? - baseline?)
 }
 
-/// Candidate dollars-per-pass over baseline dollars-per-pass across the given
-/// pairs. `None` when either side has no pass, or any trial on a side lacks a
-/// cost: an unpriced trial makes that side's total unknown, never zero.
 fn cost_per_pass_ratio<'a>(
     pairs: impl Iterator<Item = (&'a TrialSummary, &'a TrialSummary)>,
 ) -> Option<f64> {
@@ -1472,10 +1414,6 @@ fn cost_per_pass_ratio<'a>(
     Some(candidate_per_pass / baseline_per_pass)
 }
 
-/// Percentile bootstrap over task pairs: resampling pairs (not sides) keeps
-/// the pairing, so task difficulty cancels the way it does in the estimate.
-/// Resamples where either side has no pass are dropped; if fewer than half
-/// survive the interval is reported as unknown rather than misleadingly tight.
 fn bootstrap_ratio_interval(
     pairs: &[TrialPair<'_>],
     resamples: u32,
@@ -1504,17 +1442,12 @@ fn bootstrap_ratio_interval(
     (Some(low), Some(high))
 }
 
-/// Two-sided exact McNemar test: under no difference, each discordant pair is
-/// equally likely to favor either arm, so the count favoring the candidate is
-/// Binomial(discordant, 1/2). Returns `None` with no discordant pairs.
 fn mcnemar_exact(baseline_only: u64, candidate_only: u64) -> Option<f64> {
     let n = baseline_only + candidate_only;
     if n == 0 {
         return None;
     }
     let k = baseline_only.min(candidate_only);
-    // Sum the lower tail in log space to stay finite for large n, then
-    // double for two sides (capped at 1).
     let log_half_n = -(n as f64) * std::f64::consts::LN_2;
     let mut tail = 0.0_f64;
     for i in 0..=k {
@@ -1531,8 +1464,6 @@ fn ln_factorial(n: u64) -> f64 {
     (1..=n).map(|i| (i as f64).ln()).sum()
 }
 
-/// A tiny deterministic generator (SplitMix64) so bootstrap intervals are
-/// reproducible from the recorded seed without a dependency.
 struct SplitMix64(u64);
 
 impl SplitMix64 {
@@ -1548,7 +1479,6 @@ impl SplitMix64 {
         z ^ (z >> 31)
     }
 
-    /// Uniform in `0..bound` by rejection, so no modulo bias.
     fn below(&mut self, bound: usize) -> usize {
         let bound = bound as u64;
         let zone = u64::MAX - (u64::MAX % bound);
@@ -1806,8 +1736,6 @@ fn read_identity(trace: &Path) -> Result<(BaselineIdentity, TrialIdentity), Eval
     Ok((baseline, trial_identity))
 }
 
-/// Per-trial facts only the durable QQ trace carries: Harbor's result has no
-/// notion of reasoning tokens, sub-agents, or continuation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct TraceMetrics {
     reasoning_tokens: Option<u64>,
@@ -1850,8 +1778,6 @@ fn read_trace_metrics(trace: &Path) -> Result<TraceMetrics, EvalError> {
             _ => {}
         }
     }
-    // The typed failure is on Harbor's side too, but the trace outcome is
-    // what QQ wrote; a `run_finished` event carries the failure kind.
     metrics.output_truncated_failure = records.iter().any(|record| {
         record
             .get("envelope")
@@ -2205,9 +2131,6 @@ fn content_hash(bytes: &[u8]) -> String {
     hash
 }
 
-/// `true` when every key present in `partial` is present in `full` with an
-/// equal value, recursing through objects. Arrays and scalars must match
-/// exactly; `full` may carry additional keys.
 fn is_projection_of(partial: &Value, full: &Value) -> bool {
     match (partial, full) {
         (Value::Object(partial), Value::Object(full)) => partial.iter().all(|(key, value)| {
@@ -2427,8 +2350,6 @@ mod tests {
 
     #[test]
     fn trial_config_written_without_defaults_still_matches_its_result_config() {
-        // Harbor 0.20.0 writes config.json with exclude_defaults but embeds
-        // the fully defaulted config in result.json.
         let written = json!({
             "agent": {"name": "qq_harbor.agent:QQAgent", "kwargs": {"approval": "full"}},
             "task": {"path": "/tasks/smoke"},
@@ -2678,8 +2599,6 @@ mod tests {
         assert_eq!(identity.max_turns, Some(100));
         assert_eq!(identity.max_cost_usd_nanos, Some(2_000_000_000));
         assert_eq!(identity.prompt_version, 7);
-        // Two tasks with different working directories share one fixed
-        // identity; the directory-dependent hashes are reported per trial.
         let pass = report
             .trials
             .iter()
@@ -2753,10 +2672,6 @@ mod tests {
 
     #[test]
     fn externally_interrupted_trace_without_an_outcome_is_a_harness_failure() {
-        // Harbor's agent deadline fired before qq settled: the trace has a
-        // trial record and events but no outcome, and Harbor recorded an
-        // AgentTimeoutError. The report must not read identity from it, and
-        // must not accept the same trace when Harbor recorded no exception.
         let interrupted_trace = |exception: bool| {
             let directory = tempfile::tempdir().unwrap();
             write_job_scaffold(directory.path());
@@ -3159,7 +3074,6 @@ mod tests {
         );
     }
 
-    /// Extra per-trial facts for comparison fixtures.
     struct ArmTrial<'a> {
         task: &'a str,
         attempt: u8,
@@ -3362,11 +3276,7 @@ mod tests {
         assert_eq!(comparison.both_failed, 0);
         assert_eq!(comparison.baseline_only, 1);
         assert_eq!(comparison.candidate_only, 2);
-        // Three discordant pairs, one favoring baseline: exact two-sided
-        // binomial p = 2 * P(X <= 1 | n = 3, 1/2) = 2 * 4/8 = 1.0.
         assert_eq!(comparison.mcnemar_p_value, Some(1.0));
-        // A schema hash that differs between arms is tolerated and reported,
-        // never silently accepted or fatally rejected.
         assert!(
             comparison
                 .tolerated_differences
@@ -3378,7 +3288,6 @@ mod tests {
                 .tolerated_differences
                 .contains_key("qq_source_revision")
         );
-        // Baseline: 1.60 / 2 passes = 0.80 per pass. Candidate: 0.40 / 3 = 0.1333.
         let ratio = comparison.cost_per_pass_ratio.unwrap();
         assert!((ratio - (0.40 / 3.0) / 0.80).abs() < 1e-9, "{ratio}");
         assert!(comparison.cost_per_pass_ratio_ci95_low.unwrap() <= ratio);
@@ -3387,13 +3296,10 @@ mod tests {
         assert_eq!(comparison.candidate.output_continuations_per_attempt, 0.25);
         assert_eq!(comparison.candidate.output_truncated_failures, 1);
         assert_eq!(comparison.baseline.output_truncated_failures, 0);
-        // Reasoning tokens are unknown for the arm as a whole when any trial
-        // omits them; the baseline reported none.
         assert_eq!(comparison.candidate.reasoning_tokens_per_attempt, None);
         assert_eq!(comparison.baseline.reasoning_tokens_per_attempt, None);
         assert!((comparison.delta.pass_rate - 0.25).abs() < 1e-9);
 
-        // The same seed reproduces the same interval.
         let again = compare_jobs(&compare_args(&baseline, &candidate)).unwrap();
         assert_eq!(
             again.cost_per_pass_ratio_ci95_low,
@@ -3411,7 +3317,6 @@ mod tests {
         let baseline = root.path().join("base");
         write_arm_job(&baseline, Some("A0"), 'c', &[trial("alpha", 1, true, 0.1)]);
 
-        // Same arm label on both sides is a labeling mistake.
         let same_label = root.path().join("same");
         write_arm_job(
             &same_label,
@@ -3422,7 +3327,6 @@ mod tests {
         let error = compare_jobs(&compare_args(&baseline, &same_label)).unwrap_err();
         assert!(error.to_string().contains("same arm label"), "{error}");
 
-        // A different task set cannot be paired.
         let other_tasks = root.path().join("other");
         write_arm_job(
             &other_tasks,
@@ -3433,7 +3337,6 @@ mod tests {
         let error = compare_jobs(&compare_args(&baseline, &other_tasks)).unwrap_err();
         assert!(error.to_string().contains("baseline attempts"), "{error}");
 
-        // A different model is not a comparison at all.
         let other_model = root.path().join("model");
         write_arm_job(
             &other_model,
@@ -3453,15 +3356,10 @@ mod tests {
     #[test]
     fn mcnemar_exact_matches_hand_computed_binomial_tails() {
         assert_eq!(mcnemar_exact(0, 0), None);
-        // One discordant pair: p = 2 * 0.5 = 1.
         assert_eq!(mcnemar_exact(1, 0), Some(1.0));
-        // 0 vs 6: p = 2 * (1/64) = 0.03125.
         assert!((mcnemar_exact(0, 6).unwrap() - 0.03125).abs() < 1e-12);
-        // 2 vs 8: lower tail P(X <= 2 | 10) = (1 + 10 + 45) / 1024.
         assert!((mcnemar_exact(2, 8).unwrap() - 2.0 * 56.0 / 1024.0).abs() < 1e-12);
-        // Symmetric.
         assert_eq!(mcnemar_exact(3, 9), mcnemar_exact(9, 3));
-        // Large n stays finite and small.
         let p = mcnemar_exact(10, 90).unwrap();
         assert!(p > 0.0 && p < 1e-12, "{p}");
     }

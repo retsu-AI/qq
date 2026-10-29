@@ -1,4 +1,3 @@
-//! Opt-in metadata-only tracing. The subscriber rejects all dependency targets.
 use std::{
     fs::File,
     io::{self, Write},
@@ -47,12 +46,9 @@ pub(crate) struct LogGuard {
 }
 
 impl LogGuard {
-    // Called off the async executor, including directory and file creation.
     pub(crate) fn start(directory: &Path) -> Result<Self, LogError> {
         let directory = open_log_directory(directory)?;
         let mut file = None;
-        // Fixed create-new slots bound retained disk use across processes without
-        // deleting another process's log or reopening an attacker-supplied file.
         for slot in 0..16 {
             match create_log(&directory, slot) {
                 Ok(opened) => {
@@ -86,16 +82,10 @@ impl LogGuard {
     }
 
     pub(crate) fn finish(mut self) -> Result<(), LogError> {
-        // The process-global subscriber remains alive, so explicit shutdown is
-        // sent in-band after all runtime tasks have settled.
         if let Some(dispatch) = self.dispatch.take() {
             drop(dispatch);
         }
-        // A global subscriber retains its sender. The worker uses an explicit
-        // empty-record sentinel instead of waiting for channel disconnection.
         let sent = self.stop.send(Vec::new());
-        // A disconnected receiver can mean the writer already failed. Always
-        // join so its preserved I/O error takes precedence over send failure.
         self.worker.join().map_err(|_| LogError::Worker)??;
         sent.map_err(|_| LogError::Worker)
     }
@@ -208,7 +198,6 @@ impl Write for Record {
 impl Drop for Record {
     fn drop(&mut self) {
         if !self.overflow && !self.bytes.is_empty() {
-            // Diagnostics are lossy under pressure; agent work never waits on disk.
             let _ = self.sender.try_send(std::mem::take(&mut self.bytes));
         }
     }

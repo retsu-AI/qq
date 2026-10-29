@@ -10,7 +10,6 @@ pub use classify::goal_check_shell_denied;
 pub(crate) use classify::shell_prefix_denied;
 pub(crate) use stops::{Stop, fixed_stop};
 
-/// Entry point for the `classify_command` bench. Not a public API.
 #[doc(hidden)]
 pub mod bench_support {
     pub use crate::tools::process_context::{
@@ -20,30 +19,24 @@ pub mod bench_support {
     pub fn process_policy_digest() -> qq_protocol::ContentHash {
         crate::tools::process_context::policy_digest()
     }
-    /// Original command-byte ceiling of the progress-read recognizer.
     pub const MAX_READ_COMMAND_BYTES: usize = super::classify::MAX_CLASSIFIED_BYTES;
 
-    /// Progress/audit read predicate; this does not classify approval authority.
     #[must_use]
     pub fn read_only_shell_command(command: &str) -> bool {
         super::read_only_shell_command(command)
     }
 
-    /// Exact execution command of a valid `shell` call.
     #[must_use]
     pub fn parsed_shell_command(arguments: &str) -> Option<String> {
         crate::tools::parsed_shell_command(arguments)
     }
 
-    /// The fixed stop `command` hits, or `"none"`.
     #[must_use]
     pub fn classify(command: &str) -> &'static str {
         super::fixed_stop(command).map_or("none", super::Stop::name)
     }
 }
 
-/// A model-facing refusal: `permission_denied: <who>: <reason>; <what to do
-/// instead>`, where `<who>` is `fixed_stop`, `user`, `mode` or `config`.
 macro_rules! denial {
     ($who:literal, $reason:literal, $instead:literal) => {
         concat!(
@@ -64,8 +57,6 @@ pub(crate) const POLICY_DENIED_RESULT: &str = denial!(
     "continue with reads, or tell the user what change is needed"
 );
 
-/// The model-facing text for a `Deny`: the mode, or the host rule that
-/// refused the action, with an allowed alternative where applicable.
 pub(crate) fn deny_result(reason: &DenyReason) -> String {
     match reason {
         DenyReason::Mode => POLICY_DENIED_RESULT.to_owned(),
@@ -96,7 +87,6 @@ pub(crate) const UNATTENDED_DENIED_RESULT: &str = denial!(
     "this run has no one to approve calls",
     "use a step that needs no approval, or tell the user what you need"
 );
-/// A held call's authority narrowed while it waited for an answer.
 pub(crate) const AUTHORITY_CHANGED_RESULT: &str = denial!(
     "mode",
     "the session's permissions changed while this call waited, so it did not run",
@@ -116,10 +106,6 @@ pub(crate) const UNATTENDED_QUESTION_RESULT: &str =
     "No user is available to answer questions in this run; decide without asking.";
 pub(crate) const DECLINED_QUESTION_RESULT: &str =
     "The user declined to answer; proceed with your best judgement.";
-/// How one requested tool call relates to the workspace and the outside world.
-/// Derived from the catalog's [`EffectClass`], refined by arguments only for
-/// the shell command and the `spawn_agent` authority. A name the catalog does
-/// not hold never reaches classification: dispatch rejects it first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolClass {
     ReadOnly,
@@ -129,38 +115,23 @@ pub(crate) enum ToolClass {
         cwd: Option<String>,
         read_only: bool,
     },
-    /// An MCP or embedded-host tool. Host hints never grant authority, so
-    /// every external call is gated like a mutation.
     External,
-    /// `ask_user`: a question for the human. Well-formed arguments carry the
-    /// parsed preview; malformed ones fall through to dispatch, which
-    /// returns the contract error to the model.
     Interactive {
         question: Option<qq_protocol::QuestionPreview>,
     },
-    /// `fetch`: the lowercase host the URL names, once the network policy
-    /// admitted the name. `None` when the URL is malformed or the name is
-    /// refused; the refusal reaches the model from dispatch or as a deny.
     Network {
         host: Option<String>,
         refusal: Option<crate::tools::network::HostRefusal>,
     },
 }
 
-/// Why a call is refused outright, so the model's tool error names the rule
-/// rather than the mode alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DenyReason {
-    /// The approval mode refuses this class of call.
     Mode,
-    /// Auto refuses actions outside its configured authority without prompting.
     OutOfScope,
-    /// A managed `deny_hosts` entry, private/link-local name, or metadata
-    /// host: refused under every mode.
     HostBlocked {
         refusal: crate::tools::network::HostRefusal,
     },
-    /// A fixed stop: refused in every mode but Full.
     Stop(Stop),
 }
 
@@ -168,21 +139,14 @@ pub(crate) enum DenyReason {
 pub(crate) enum PolicyDecision {
     Execute,
     RequireApproval,
-    /// Hold the call until a client answers the question; the answer, not
-    /// an execution, becomes the result. Every mode allows asking.
     AskUser {
         question: qq_protocol::QuestionPreview,
     },
-    /// The call is refused outright; `reason` says by what.
     Deny {
         reason: DenyReason,
     },
 }
 
-/// Classifies one call from the effect the catalog recorded for its name.
-/// Arguments are consulted only where the effect alone is not the whole
-/// story: the shell command (for the fixed-stop and managed-deny checks) and
-/// the `spawn_agent` authority (a write child is a mutating act).
 pub(crate) fn classify(
     effect: EffectClass,
     name: &str,
@@ -222,12 +186,6 @@ pub(crate) fn classify(
 const MAX_PREVIEW_SIDE_BYTES: usize = 2 * 1024;
 const PREVIEW_TRUNCATION_MARKER: &str = "[preview truncated]";
 
-/// Builds the approval-request preview for a file-modifying call: the
-/// workspace-relative path the model addressed (the first, for a batch) and
-/// a bounded unified-diff-style rendering of every change, grouped by path.
-/// Returns None for other tools and for arguments the tool itself would
-/// reject. The preview renders what the model asked; the display persisted
-/// with the result renders what changed on disk.
 pub(crate) fn edit_preview(name: &str, arguments: &str) -> Option<EditPreview> {
     #[derive(Deserialize)]
     struct EditArguments {
@@ -311,8 +269,6 @@ fn push_diff_lines(diff: &mut String, sign: char, content: &str, side_budget: us
     for line in content.lines() {
         diff.push(sign);
         diff.push(' ');
-        // The sign, separator, and newline count against the side budget so
-        // one side of a preview can never exceed it by more than the marker.
         if line.len() + 3 > remaining {
             let mut end = remaining.saturating_sub(3).min(line.len());
             while !line.is_char_boundary(end) {
@@ -335,10 +291,6 @@ fn spawn_class(arguments: &str) -> ToolClass {
         #[serde(default)]
         authority: qq_protocol::ChildAuthority,
     }
-    // A read child carries no mutation authority and never needs a prompt.
-    // Asking for a write child is itself a mutating act under the parent's
-    // policy: `Ask` prompts for the delegation, `ReadOnly` denies it, `Auto`
-    // and `Full` proceed.
     match serde_json::from_str::<SpawnArguments>(arguments) {
         Ok(SpawnArguments {
             authority: qq_protocol::ChildAuthority::Write,
@@ -355,9 +307,6 @@ struct ShellArguments {
     cwd: Option<String>,
 }
 
-/// The shell class for `shell` (a command string) or `exec` (an argv). An
-/// `exec` uses literal argv for progress reads. Its command-line rendering
-/// remains the shared approval preview and prefix-grant shape.
 fn shell_class(name: &str, arguments: &str) -> ToolClass {
     #[derive(Deserialize)]
     struct ExecArguments {
@@ -410,8 +359,6 @@ fn shell_class(name: &str, arguments: &str) -> ToolClass {
     }
 }
 
-/// `program arg…` with each word single-quoted when it contains anything
-/// the shell would interpret, so the rendering parses back to the same argv.
 pub(crate) fn exec_command_line(program: &str, args: &[String]) -> String {
     fn quote(word: &str, out: &mut String) {
         let plain = !word.is_empty()
@@ -440,9 +387,6 @@ pub(crate) fn exec_command_line(program: &str, args: &[String]) -> String {
     out
 }
 
-/// Recognized shell reads for the stall counter and heuristic audit only.
-/// This grants no execution authority; build/test commands remain work even
-/// when the independent approval classifier allows them.
 pub(crate) fn read_only_shell_command(command: &str) -> bool {
     if command.len() > classify::MAX_CLASSIFIED_BYTES
         || command.contains(['\n', '\r'])
@@ -454,8 +398,6 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
     if command.is_empty() {
         return true;
     }
-    // A bounded argv view preserves quoted filenames/scripts without a shell
-    // parser or allocation. Unknown syntax counts as work, never as authority.
     let reads = |segment: &str, first: bool, connector: u8| {
         let mut argv = [""; 128];
         let mut count = 0;
@@ -554,8 +496,6 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
         }
 }
 
-/// A bounded, literal sed program containing only addresses, printing and
-/// pattern-space substitutions. Delimiters are parsed before command separators.
 fn read_only_sed_script(script: &str) -> bool {
     fn field(bytes: &[u8], position: &mut usize, delimiter: u8) -> bool {
         while let Some(&byte) = bytes.get(*position) {
@@ -661,34 +601,23 @@ fn read_only_sed_script(script: &str) -> bool {
     }
 }
 
-/// `git branch` arguments that only list: every option is a listing option,
-/// and pattern words appear only in list mode. An allowlist, because git's
-/// last-option-wins parsing (`--list --no-list name` creates `name`) and its
-/// abbreviated long options make any denylist incomplete.
 fn branch_lists(args: &[&str]) -> bool {
     let mut list_mode = false;
     let mut expect_value = false;
     let mut patterns = false;
     for arg in args {
-        // A value option consumes the next word whatever it looks like:
-        // `--format --list name` formats with `--list` and creates `name`.
         if std::mem::take(&mut expect_value) {
             continue;
         }
         match *arg {
-            // `-l` meant `--create-reflog` before git 2.23; only the long
-            // form is a listing on every git a workspace may run.
             "--list" => list_mode = true,
             "-a" | "--all" | "-r" | "--remotes" | "-v" | "-vv" | "--verbose" | "-q" | "--quiet"
             | "-i" | "--ignore-case" | "--color" | "--no-color" | "--column" | "--no-column"
             | "--no-abbrev" | "--show-current" => {}
-            // Filters select listing mode and take a value.
             "--merged" | "--no-merged" | "--contains" | "--no-contains" | "--points-at" => {
                 list_mode = true;
                 expect_value = true;
             }
-            // Formatting takes a value but does not select listing mode:
-            // `git branch --format x name` creates `name`.
             "--sort" | "--format" => expect_value = true,
             arg if arg.starts_with("--sort=") || arg.starts_with("--format=") => {}
             arg if [
@@ -724,7 +653,6 @@ pub(crate) fn read_only_argv(program: &str, args: &[&str]) -> bool {
             } else {
                 args
             };
-            // Working-tree reads may run a configured fsmonitor hook.
             let Some(args) = args.strip_prefix(&["--no-lazy-fetch", "-c", "core.fsmonitor=false"])
             else {
                 return false;
@@ -780,7 +708,6 @@ pub(crate) fn read_only_argv(program: &str, args: &[&str]) -> bool {
                             })
                     })
                 }
-                // Working-tree reads can invoke configured clean/process filters.
                 "status" | "diff" | "blame" => false,
                 "rev-parse" => matches!(
                     args,
@@ -802,7 +729,6 @@ pub(crate) fn read_only_argv(program: &str, args: &[&str]) -> bool {
                     .iter()
                     .any(|prefix| arg.starts_with(prefix))
         }),
-        // Spills can write inside the workspace through inherited TMPDIR.
         "sort" => false,
         "uniq" => {
             let mut operands = 0;
@@ -869,9 +795,7 @@ pub(crate) fn read_only_argv(program: &str, args: &[&str]) -> bool {
             }
             quiet && script && !expect_script
         }
-        // Repository loading may reconcile and persist divergent operation heads.
         "jj" => false,
-        // Compiler queries invoke wrappers; rustup proxies can install toolchains.
         "cargo" | "rustc" => false,
         "tree" => !args.iter().any(|arg| {
             (arg.starts_with('-')
@@ -914,15 +838,6 @@ pub(crate) fn read_only_argv(program: &str, args: &[&str]) -> bool {
     }
 }
 
-/// Decides whether one classified tool call executes, waits for a human, or
-/// is denied under the session's approval mode.
-///
-/// | mode | reads | everything else | fixed stops |
-/// | --- | --- | --- | --- |
-/// | `read_only` | run | denied | denied |
-/// | `ask` | run | held for the human | denied |
-/// | `auto` | run | run | denied |
-/// | `full` | run | run | run |
 pub(crate) fn evaluate(mode: ApprovalMode, class: &ToolClass) -> PolicyDecision {
     if mode != ApprovalMode::Full
         && let ToolClass::Shell { command, .. } = class
@@ -932,9 +847,6 @@ pub(crate) fn evaluate(mode: ApprovalMode, class: &ToolClass) -> PolicyDecision 
             reason: DenyReason::Stop(stop),
         };
     }
-    // A blocked host is refused before the mode is consulted: `full` is
-    // authority over the workspace, not over the local network or a
-    // managed deny.
     if let ToolClass::Network {
         refusal: Some(refusal),
         ..
@@ -948,10 +860,7 @@ pub(crate) fn evaluate(mode: ApprovalMode, class: &ToolClass) -> PolicyDecision 
     }
     match class {
         ToolClass::ReadOnly => PolicyDecision::Execute,
-        // A malformed fetch URL has nothing to gate; dispatch reports it.
         ToolClass::Network { host: None, .. } => PolicyDecision::Execute,
-        // Asking the user grants no execution authority; read-only sessions
-        // may still ask questions.
         ToolClass::Interactive {
             question: Some(question),
         } => PolicyDecision::AskUser {
@@ -965,7 +874,6 @@ pub(crate) fn evaluate(mode: ApprovalMode, class: &ToolClass) -> PolicyDecision 
             ApprovalMode::ReadOnly => PolicyDecision::Deny {
                 reason: DenyReason::Mode,
             },
-            // Human approval is fresh for every non-read action.
             ApprovalMode::Ask => PolicyDecision::RequireApproval,
             ApprovalMode::Auto | ApprovalMode::Full => PolicyDecision::Execute,
         },
@@ -1583,8 +1491,6 @@ mod tests {
                 "{mode:?} must put the question to the user"
             );
         }
-        // Malformed arguments carry no question and pass to dispatch, which
-        // reports the contract error.
         let malformed = classify(
             EffectClass::Interactive,
             "ask_user",
@@ -1634,8 +1540,6 @@ mod tests {
             PolicyDecision::Execute
         );
 
-        // Blocked hosts: private names, metadata, managed denies — refused
-        // before the mode, even under full.
         let denied_policy = NetworkPolicy {
             deny_hosts: Arc::from(vec!["*.example.com".to_owned()]),
             allow_private_for_tests: false,
@@ -1674,8 +1578,6 @@ mod tests {
                 );
             }
         }
-        // Malformed arguments have no host and nothing to gate: dispatch
-        // reports the shape.
         let malformed = classify(EffectClass::Network, "fetch", "{}", &open);
         assert_eq!(
             malformed,
@@ -1706,8 +1608,6 @@ mod tests {
                 read_only: false,
             }
         );
-        // Arguments with metacharacters are quoted so the parser reads them
-        // as literal words: no pipe, no expansion, no stop.
         let quoted = classify(
             EffectClass::Shell,
             "exec",
@@ -1726,7 +1626,6 @@ mod tests {
             evaluate(ApprovalMode::Auto, &quoted),
             PolicyDecision::Execute
         );
-        // An exec of a stopped program is stopped like the command line.
         let sudo = classify(
             EffectClass::Shell,
             "exec",
@@ -1790,7 +1689,6 @@ mod tests {
         assert_eq!(preview.path, "src/lib.rs");
         assert_eq!(preview.diff, "- fn a() {}\n- fn b() {}\n+ fn a() {}\n");
 
-        // A batch groups by path and shows anchors as context.
         let preview = edit_preview(
             "edit_file",
             r#"{"edits":[
@@ -1830,8 +1728,6 @@ mod tests {
         }))
         .unwrap();
         let preview = edit_preview("edit_file", &oversized).unwrap();
-        // Each side may exceed its budget only by the truncation line's
-        // sign, separator, marker, and newline.
         assert!(
             preview.diff.len()
                 <= 2 * (MAX_PREVIEW_SIDE_BYTES + PREVIEW_TRUNCATION_MARKER.len() + 3)
@@ -1895,7 +1791,6 @@ mod tests {
                 read_only: false,
             }
         );
-        // Every external tool is gated by its effect, whatever its prefix.
         assert_eq!(
             classify(
                 EffectClass::External,
@@ -1914,8 +1809,6 @@ mod tests {
             ),
             ToolClass::External
         );
-        // The effect, not the name, decides: a read-only-named tool that the
-        // catalog recorded as mutating is mutating.
         assert_eq!(
             classify(
                 EffectClass::Mutating,

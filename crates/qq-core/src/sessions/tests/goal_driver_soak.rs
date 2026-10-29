@@ -196,8 +196,6 @@ async fn child(setup: Setup) {
     let session = match setup.session {
         Some(session) => session,
         None => {
-            // Checked soaks exercise explicitly consented host-check recovery.
-            // Model-only soaks retain ReadOnly authority.
             let mode = if setup.checked {
                 ApprovalMode::Full
             } else {
@@ -668,7 +666,6 @@ async fn multi_day(checked: bool) {
         assert_eq!(same, run, "the goal tool result precedes this run's answer");
         if checked && step == 40 {
             assert_eq!(before.counters.runs, 41);
-            // External readiness arrives only after the fortieth goal tool committed.
             tokio::fs::write(directory.path().join("completion-ready"), b"ready")
                 .await
                 .unwrap();
@@ -880,8 +877,6 @@ pub(super) struct CheckProcess(pub(super) tokio::io::unix::AsyncFd<rustix::fd::O
 #[cfg(target_os = "linux")]
 impl Drop for CheckProcess {
     fn drop(&mut self) {
-        // A stable pidfd limits failure-path cleanup to this test's shell.
-        // ESRCH after normal completion is expected; cleanup is best effort on panic.
         let _ = rustix::process::pidfd_send_signal(self.0.get_ref(), rustix::process::Signal::KILL);
     }
 }
@@ -1176,8 +1171,6 @@ async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_
                 recovered.ask(Input::WorkspaceHold).await,
                 serde_json::to_value(Some(expected_hold)).unwrap()
             );
-            // SIGKILL of QQ takes its check's process group down with it:
-            // the check never finishes and never writes after the restart.
             let mut exited = tokio::time::timeout(
                 Duration::from_secs(10),
                 process.as_ref().unwrap().0.readable(),

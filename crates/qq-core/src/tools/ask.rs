@@ -1,9 +1,3 @@
-//! `ask_user`: the model puts a bounded, structured question to the human and
-//! the run waits for the answer. Nothing executes: the gate holds the call like
-//! an approval, the client answers with `ApprovalDecision::Answer`, and the
-//! answers become the call's result. This module owns the argument contract
-//! and the two renderings (the preview clients show, the text the model reads).
-
 use qq_protocol::{Question, QuestionPreview};
 use serde::Deserialize;
 
@@ -12,8 +6,6 @@ pub(crate) const MIN_OPTIONS: usize = 2;
 pub(crate) const MAX_OPTIONS: usize = 6;
 pub(crate) const MAX_QUESTION_BYTES: usize = 512;
 pub(crate) const MAX_OPTION_BYTES: usize = 128;
-/// Ceiling on one answer as typed by the user; the full result is the
-/// questions plus the answers and stays well under any tool-result bound.
 pub(crate) const MAX_ANSWER_BYTES: usize = 4096;
 
 #[derive(Deserialize)]
@@ -32,8 +24,6 @@ struct QuestionArgs {
     free_text: bool,
 }
 
-/// Why an `ask_user` call cannot be put to the user. Returned to the model as
-/// a tool error so it can re-ask within bounds.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum AskError {
     #[error("invalid arguments: {0}")]
@@ -50,7 +40,6 @@ pub(crate) enum AskError {
     Option { index: usize, option: usize },
 }
 
-/// Parses and bounds the call's arguments into the preview clients render.
 pub(crate) fn parse(arguments: &str) -> Result<QuestionPreview, AskError> {
     let args: AskArgs =
         serde_json::from_str(arguments).map_err(|error| AskError::Arguments(error.to_string()))?;
@@ -65,8 +54,6 @@ pub(crate) fn parse(arguments: &str) -> Result<QuestionPreview, AskError> {
             return Err(AskError::Prompt { index });
         }
         let count = question.options.len();
-        // A question with no options is a plain free-text prompt; one with
-        // options must offer a real choice.
         let free_text = question.free_text || count == 0;
         if count != 0 && !(MIN_OPTIONS..=MAX_OPTIONS).contains(&count) {
             return Err(AskError::OptionCount { index, count });
@@ -91,10 +78,6 @@ pub(crate) fn parse(arguments: &str) -> Result<QuestionPreview, AskError> {
     Ok(QuestionPreview { questions })
 }
 
-/// The model-facing result once the user answered: each question with its
-/// answer, so the transcript needs no other record of what was asked. Missing
-/// answers (fewer than questions) render as unanswered; each answer is
-/// clipped to [`MAX_ANSWER_BYTES`].
 pub(crate) fn render_answers(preview: &QuestionPreview, answers: &[String]) -> String {
     let mut text = format!(
         "ask_user answered={}/{}\n",

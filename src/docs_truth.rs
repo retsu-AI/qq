@@ -1,17 +1,5 @@
-//! Docs-truth, in two directions.
-//!
-//! Code → docs: every configuration key, environment variable, slash command,
-//! and doctor check the code defines must be named in `docs/guide/`. The CLI
-//! walk lives in `cli::tests`, the doctor names in `doctor::tests`; this
-//! module holds the shared guide loader and assertion plus the checks whose
-//! sources of truth live in other crates.
-//!
-//! Docs → code: every version and compatibility number the guide states must
-//! be the one this build reports, so a sample cannot go stale.
-
 use std::{collections::BTreeSet, fs, path::Path};
 
-/// Every `docs/guide/*.md` page as `(file name, text)`, sorted by name.
 pub(crate) fn guide_pages() -> Vec<(String, String)> {
     let guide = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/guide");
     let mut pages = Vec::new();
@@ -27,8 +15,6 @@ pub(crate) fn guide_pages() -> Vec<(String, String)> {
     pages
 }
 
-/// Every `MAJOR.MINOR.PATCH` token in `text` with its 1-based line. A dotted
-/// quad such as `127.0.0.1` is not a version and is skipped whole.
 pub(crate) fn version_tokens(text: &str) -> Vec<(usize, &str)> {
     let mut found = Vec::new();
     for (index, line) in text.lines().enumerate() {
@@ -41,7 +27,6 @@ pub(crate) fn version_tokens(text: &str) -> Vec<(usize, &str)> {
                 start += 1;
                 continue;
             }
-            // A run of digit groups joined by single dots.
             let mut end = start;
             let mut groups = 0;
             loop {
@@ -68,7 +53,6 @@ pub(crate) fn version_tokens(text: &str) -> Vec<(usize, &str)> {
     found
 }
 
-/// Every `label N` in `text` (for example `protocol 30`) as `(line, N)`.
 pub(crate) fn labelled_numbers(text: &str, label: &str) -> Vec<(usize, u64)> {
     let mut found = Vec::new();
     for (index, line) in text.lines().enumerate() {
@@ -85,15 +69,12 @@ pub(crate) fn labelled_numbers(text: &str, label: &str) -> Vec<(usize, u64)> {
     found
 }
 
-/// A fenced block in a guide page: its info string (`sh`, `ron`,
-/// `ron config.ron`), the 1-based line of the opening fence, and its body.
 pub(crate) struct Fence<'a> {
     pub info: &'a str,
     pub line: usize,
     pub body: String,
 }
 
-/// Every fenced block in `text`, in order.
 pub(crate) fn fences(text: &str) -> Vec<Fence<'_>> {
     let mut found = Vec::new();
     let mut open: Option<Fence<'_>> = None;
@@ -120,9 +101,6 @@ pub(crate) fn fences(text: &str) -> Vec<Fence<'_>> {
     found
 }
 
-/// The contents of every Rust string literal in `source`: normal literals
-/// with `\`-newline continuations joined and escapes kept as written, and
-/// raw literals verbatim. Character literals and comments are skipped.
 pub(crate) fn string_literals(source: &str) -> Vec<String> {
     let bytes = source.as_bytes();
     let mut found = Vec::new();
@@ -143,9 +121,6 @@ pub(crate) fn string_literals(source: &str) -> Vec<String> {
                 index += 2;
             }
             b'\'' => {
-                // A char literal (`'"'`, `'\\''`, `'\u{1}'`) is skipped whole
-                // so its quote never opens a string; a lifetime (`'a`) has
-                // no closing quote nearby and advances one byte.
                 let body = if bytes.get(index + 1) == Some(&b'\\') {
                     index + 3
                 } else {
@@ -218,16 +193,12 @@ pub(crate) fn string_literals(source: &str) -> Vec<String> {
     found
 }
 
-/// One element of a format template: a literal character, or a `{…}`
-/// placeholder that renders to any text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TemplatePart {
     Char(char),
     Hole,
 }
 
-/// `text` with every `{…}` placeholder collapsed to one [`TemplatePart::Hole`].
-/// `{{` and `}}` are literal braces, as in `format!`.
 pub(crate) fn template_pattern(text: &str) -> Vec<TemplatePart> {
     let mut parts = Vec::new();
     let mut chars = text.chars().peekable();
@@ -255,9 +226,6 @@ pub(crate) fn template_pattern(text: &str) -> Vec<TemplatePart> {
     parts
 }
 
-/// Whether `fragment` occurs in `template`, where a `{…}` hole in the
-/// template matches one rendered token (no whitespace) and a hole in the
-/// fragment only meets a hole.
 pub(crate) fn template_contains(template: &[TemplatePart], fragment: &[TemplatePart]) -> bool {
     fn at(template: &[TemplatePart], fragment: &[TemplatePart]) -> bool {
         match (template.first(), fragment.first()) {
@@ -281,11 +249,6 @@ pub(crate) fn template_contains(template: &[TemplatePart], fragment: &[TemplateP
     (0..template.len()).any(|start| at(&template[start..], fragment))
 }
 
-/// Whether a `cfg(…)` predicate keeps its item out of a default non-test
-/// build: `test`; `all(…)` with any such part; `any(…)` whose every part is
-/// such, or a `feature = "…"` (dev features such as `test-support` and
-/// `bench-support` are not default). `any(test, target_os = "macos")`
-/// ships on macOS, so it is production.
 pub(crate) fn cfg_requires_test(predicate: &str) -> bool {
     fn split_top(list: &str) -> Vec<&str> {
         let mut parts = Vec::new();
@@ -326,7 +289,6 @@ pub(crate) fn cfg_requires_test(predicate: &str) -> bool {
     false
 }
 
-/// Every `#[cfg(…)]` attribute in `source` as `(start, end, predicate)`.
 fn cfg_attributes(source: &str) -> Vec<(usize, usize, &str)> {
     let mut found = Vec::new();
     for (start, _) in source.match_indices("#[cfg(") {
@@ -353,12 +315,6 @@ fn cfg_attributes(source: &str) -> Vec<(usize, usize, &str)> {
     found
 }
 
-/// `source` with every test-only item removed (see [`cfg_requires_test`]):
-/// from the attribute to the end of the item it gates — the matching `}` of
-/// its first block, or its `;` when it has none (`mod x;`, `use …;`). Any
-/// test module name and any test-only function, constant or import is
-/// excluded. Braces inside string and char literals are skipped so they
-/// cannot unbalance the count.
 pub(crate) fn without_test_items(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut out = String::with_capacity(source.len());
@@ -413,12 +369,6 @@ pub(crate) fn without_test_items(source: &str) -> String {
     out
 }
 
-/// Every source file a non-test build compiles, found by following
-/// `mod name;` declarations from each crate root. A declaration inside a
-/// `#[cfg(test)]` item, or gated by one (`#[cfg(test)] mod x;`,
-/// `#[cfg(any(test, feature = "…"))] pub mod x;`), is not followed, so
-/// test-only files — whatever they are named, and wherever the gate is —
-/// never count as production.
 pub(crate) fn production_module_files(roots: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
     let mut pending: Vec<std::path::PathBuf> = roots.to_vec();
@@ -426,8 +376,6 @@ pub(crate) fn production_module_files(roots: &[std::path::PathBuf]) -> Vec<std::
         let Ok(text) = fs::read_to_string(&file) else {
             continue;
         };
-        // `src/a.rs` declares children in `src/a/`; a crate root or
-        // `mod.rs`-free layout keeps them beside it.
         let stem = file.file_stem().unwrap().to_string_lossy().into_owned();
         let parent = file.parent().unwrap();
         let children = if matches!(stem.as_str(), "main" | "lib") {
@@ -467,7 +415,6 @@ pub(crate) fn production_module_files(roots: &[std::path::PathBuf]) -> Vec<std::
     files
 }
 
-/// The concatenated text of every `docs/guide/*.md` page.
 pub(crate) fn guide_text() -> String {
     let guide = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/guide");
     let mut text = String::new();
@@ -489,16 +436,7 @@ pub(crate) fn guide_text() -> String {
     text
 }
 
-/// Every name that appears in `guide` as a code span or inside a fenced
-/// block. Prose mentions do not count: the guide must spell the exact
-/// identifier a user would type. `` `--flag VALUE` `` counts for `--flag`
-/// and `` `qq run --session` `` counts for `--session`, because the first
-/// tokens of each span are indexed, as is the whole span (for multi-word
-/// names such as `project trust`).
 pub(crate) fn documented_names(guide: &str) -> BTreeSet<&str> {
-    // Everything that separates one typed identifier from the next in RON,
-    // shell, and JSON samples. `-`, `_`, `/`, `.`, `*` stay inside names so
-    // `--max-cost-usd`, `/rollback`, and `*.suffix` survive whole.
     fn separator(c: char) -> bool {
         c.is_whitespace()
             || matches!(
@@ -548,8 +486,6 @@ pub(crate) fn documented_names(guide: &str) -> BTreeSet<&str> {
     names
 }
 
-/// Asserts that every `(category, name)` is documented; reports all misses in
-/// one message grouped by category so a failure is actionable in one pass.
 pub(crate) fn assert_documented<'a>(
     guide: &str,
     expectations: impl IntoIterator<Item = (&'a str, &'a str)>,
@@ -617,18 +553,8 @@ mod tests {
         );
     }
 
-    /// The line marker the release tool also honours: a version on a line
-    /// carrying it is not QQ's. Kept as a literal so the root crate does not
-    /// depend on `xtask`; `xtask`'s own test pins the same text.
     const NOT_QQ_VERSION: &str = "<!-- not-qq-version -->";
 
-    /// Every QQ version a user reads — install pins, `--version` samples,
-    /// release tags — is one version, and it is this build's or the release
-    /// before it. The bump PR leaves the pins on the previous release (the
-    /// site deploys on merge, before the new tag's assets exist); once they
-    /// are published, `cargo xtask release --docs` moves them all at once.
-    /// A version that is not QQ's (an upstream client, an example pack) sits
-    /// on a line marked `NOT_QQ_VERSION`; the exemption is that exact line.
     #[test]
     fn every_product_version_in_the_guide_is_one_current_release() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -637,9 +563,6 @@ mod tests {
         let mut pages = guide_pages();
         pages.push(("README.md".to_owned(), readme));
         let current = env!("CARGO_PKG_VERSION");
-        // Release headings are `## X.Y.Z — date`, newest first, possibly under
-        // an `## Unreleased` upgrading block. The previous release is the
-        // first version that is not this build's.
         let previous = changelog
             .lines()
             .filter_map(|line| line.strip_prefix("## ")?.split(' ').next())
@@ -681,10 +604,6 @@ mod tests {
         );
     }
 
-    /// The guide states compatibility numbers only as this build reports
-    /// them (`qq version`, `qq doctor`); history belongs in
-    /// `design/protocol.md`. `design/protocol.md` names the current
-    /// `PROTOCOL_VERSION` and describes it.
     #[test]
     fn every_compatibility_number_in_the_guide_is_this_builds() {
         let current = [
@@ -788,7 +707,6 @@ mod tests {
         let guide = guide_text();
         let install_sh =
             fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh")).unwrap();
-        // `QQ_*` names the installer reads: `${QQ_NAME:-default}` expansions.
         let mut installer: Vec<&str> = Vec::new();
         for (index, _) in install_sh.match_indices("${QQ_") {
             let name = &install_sh[index + 2..];
@@ -824,11 +742,7 @@ mod tests {
         );
     }
 
-    /// Installer variables deliberately absent from the guide.
-    const INSTALLER_UNDOCUMENTED: &[&str] = &[
-        // Test hook: points the installer at a local fixture server (tests/install_sh.sh).
-        "QQ_RELEASE_BASE_URL",
-    ];
+    const INSTALLER_UNDOCUMENTED: &[&str] = &["QQ_RELEASE_BASE_URL"];
 
     #[test]
     fn slash_commands_are_documented() {
@@ -896,7 +810,6 @@ mod tests {
         let has = |relative: &str| files.contains(&root.join(relative));
         assert!(has("src/main.rs") && has("src/cli.rs") && has("src/headless.rs"));
         assert!(has("crates/qq-tui/src/app.rs"));
-        // Gated on the parent's `mod` line, not in the file itself.
         assert!(!has("src/docs_truth.rs"), "{files:?}");
         assert!(!has("crates/qq-tui/src/fixtures.rs"), "{files:?}");
         assert!(!has("crates/qq-tui/src/app/tests.rs"), "{files:?}");
@@ -910,7 +823,6 @@ mod tests {
         assert!(found("run qq auth login openai or set OPENAI_API_KEY"));
         assert!(found("login {} or set"));
         assert!(!found("run qq auth signin openai or set OPENAI_API_KEY"));
-        // A hole is one token, not a whole sentence.
         assert!(!found("run qq auth login any words at all or set X"));
         assert_eq!(
             template_pattern("{{x}} {y}"),
@@ -939,19 +851,11 @@ mod tests {
         );
     }
 
-    /// Where a guide RON sample is loaded, from the fence info string:
-    /// `ron` is `config.ron`, `ron managed.ron` / `ron pack.ron` /
-    /// `ron tui.ron` name the others. A sample that does not start with `(`
-    /// is a fragment of that file and is wrapped in `(version: 1, …)`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum SampleFile {
-        /// `<global>/config.ron`.
         Config,
-        /// `<managed>/managed.ron`: administrator-only keys are allowed.
         Managed,
-        /// `<global>/packs/<id>/pack.ron`.
         Pack,
-        /// `<global>/tui.ron`.
         Tui,
     }
 
@@ -967,7 +871,6 @@ mod tests {
         }
     }
 
-    /// An isolated configuration root: global, data, managed, workspace.
     struct SampleRoot {
         _root: tempfile::TempDir,
         loader: qq_config::ConfigLoader,
@@ -1010,7 +913,6 @@ mod tests {
             }
         }
 
-        /// Loads `sample` as `file`; the error is the loader's own message.
         fn load(&self, file: SampleFile, sample: &str) -> Result<Vec<String>, String> {
             let request = qq_config::LoadRequest::new(&self.workspace);
             match file {
@@ -1021,9 +923,6 @@ mod tests {
                         self.managed.join("managed.ron")
                     };
                     Self::write(&path, sample);
-                    // `"id": Pack(path: "dir")` declares a pack directory
-                    // relative to the declaring file; give it a manifest so
-                    // the declaration itself is what gets checked.
                     let mut rest = sample;
                     while let Some(at) = rest.find(": Pack(path: \"") {
                         let id = rest[..at].rsplit('"').nth(1).unwrap_or_default();
@@ -1077,8 +976,6 @@ mod tests {
                     .values()
                     .filter_map(|profile| profile.model().map(str::to_owned)),
             );
-            // A route the guide shows must be one a user can select: its
-            // provider exists and lists the model.
             let mut unknown = Vec::new();
             for route in &routes {
                 let (provider, model) = route.split_once('/').unwrap();
@@ -1100,10 +997,6 @@ mod tests {
         }
     }
 
-    /// Every ```ron block in the guide loads through the real loader as the
-    /// file it belongs to, and every model route it names is in the catalog.
-    /// A sample that a user copies must work; a key the loader stops
-    /// accepting fails here instead of on a user's machine.
     #[test]
     fn every_ron_sample_in_the_guide_loads() {
         let mut failures = Vec::new();
@@ -1148,10 +1041,6 @@ mod tests {
         assert!(loaded >= 15, "only {loaded} RON samples found");
     }
 
-    /// Every `qq …` line a user may copy, from ```sh blocks and from inline
-    /// code spans, parses with the real CLI. Placeholders in capitals
-    /// (`PROMPT`, `NAME`, `ID`), `…`, `<…>` and `[…]` mark a synopsis, not a
-    /// command, and are skipped.
     #[test]
     fn every_qq_command_in_the_guide_parses() {
         use clap::Parser as _;
@@ -1208,7 +1097,6 @@ mod tests {
         for (name, text) in guide_pages() {
             let mut candidates: Vec<(usize, String)> = Vec::new();
             for fence in fences(&text) {
-                // Untitled fences hold output (`qq doctor`, the TUI layout).
                 if fence.info != "sh" {
                     continue;
                 }
@@ -1220,7 +1108,6 @@ mod tests {
                         continue;
                     }
                     continued.clear();
-                    // `QQ_MODEL=x qq …`: environment assignments before the command.
                     let command = joined
                         .split(' ')
                         .skip_while(|word| word.contains('=') && !word.starts_with('-'))
@@ -1239,8 +1126,6 @@ mod tests {
                         break;
                     };
                     let span = &after[..close];
-                    // `qq 0.1.4 (…)` and the TUI's `qq  project › …` top row
-                    // are output, not commands.
                     let output = span.strip_prefix("qq ").is_some_and(|rest| {
                         rest.starts_with(|c: char| c.is_ascii_digit() || c == ' ')
                     });
@@ -1251,8 +1136,6 @@ mod tests {
                 }
             }
             for (line, command) in candidates {
-                // Prose names a command (`qq run`, `qq run --approval`)
-                // without all of its arguments; an invocation must be whole.
                 let (inline, command) = match command.strip_prefix("inline:") {
                     Some(span) => (true, span.to_owned()),
                     None => (false, command),
@@ -1269,7 +1152,6 @@ mod tests {
                     use clap::error::ErrorKind;
                     let names_a_flag = words.last().is_some_and(|word| word.starts_with("--"));
                     let accepted = match error.kind() {
-                        // `--help` and `--version` "fail" by printing.
                         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => true,
                         ErrorKind::MissingRequiredArgument
                         | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => inline,
@@ -1292,12 +1174,8 @@ mod tests {
         assert!(checked >= 40, "only {checked} qq commands checked");
     }
 
-    /// Inline `qq …` spans that quote output rather than a command.
     const IGNORED_QQ_SPANS: &[&str] = &["qq server already running at …"];
 
-    /// The `qq doctor` sample lists every check, in order, in the real
-    /// layout; the resume sample is exactly what `resume_hint` prints; the
-    /// exit-code tables list every status with its real code.
     #[test]
     fn output_samples_in_the_guide_match_the_code() {
         let pages = guide_pages();
@@ -1361,9 +1239,6 @@ mod tests {
         }
     }
 
-    /// The rows of the first Markdown table after the heading `## {heading}`
-    /// in `text`, as cells (outer pipes stripped, the separator row
-    /// dropped). A `\|` inside a cell is a literal pipe.
     fn table_after(text: &str, heading: &str) -> Vec<Vec<String>> {
         let marker = format!("\n{heading}\n");
         let start = text
@@ -1397,13 +1272,10 @@ mod tests {
         rows
     }
 
-    /// Every code span in `cell`, in order.
     fn spans(cell: &str) -> Vec<&str> {
         cell.split('`').skip(1).step_by(2).collect()
     }
 
-    /// `configuration.md`'s policy table marks exactly the keys a user layer
-    /// is refused as `managed layers only`, and names every policy key.
     #[test]
     fn policy_table_marks_exactly_the_managed_only_keys() {
         let pages = guide_pages();
@@ -1417,8 +1289,6 @@ mod tests {
         let rows = table_after(text, "## `policy`");
         for row in &rows {
             let managed_only = row[1] == "managed layers only";
-            // A key every layer may set says so: `any layer`, or `any; …`
-            // qualifying how layers combine. Anything else is wrong guidance.
             let any_layer = row[1] == "any layer" || row[1].starts_with("any; ");
             if !managed_only && !any_layer {
                 wrong.push(format!(
@@ -1459,10 +1329,6 @@ mod tests {
         );
     }
 
-    /// Each `QQ_*` variable the loader reads appears as an exact code span
-    /// in its own precedence row — `QQ_CONFIG` in "explicit file",
-    /// `QQ_CONFIG_CONTENT` in "inline document", the rest in "overrides" —
-    /// and nowhere else in the table; the MDM row names both MDM sources.
     #[test]
     fn precedence_table_names_every_override_and_mdm_source() {
         let pages = guide_pages();
@@ -1521,9 +1387,6 @@ mod tests {
         );
     }
 
-    /// `tui.md` "Every command" has one row per registry command whose
-    /// slashes and default keys are exactly the registry's, so a rebound
-    /// default, a new command, or a removed chord fails here.
     #[test]
     fn tui_command_table_is_the_registry() {
         let pages = guide_pages();
@@ -1572,13 +1435,6 @@ mod tests {
         );
     }
 
-    /// `(registry title, key)` for keys the guide lists after a command's
-    /// registry chords that the key handler binds by state rather than the
-    /// registry: `?` only on an empty composer, `Enter` steers only while a
-    /// run is active, `Esc` walks to the parent only when nothing else claims
-    /// it, `Esc Esc` cancels only while running. Each is checked on exactly
-    /// its row; the registry keeps the first two commands chord-free (see
-    /// `commands::tests`' contextual list).
     const CONTEXTUAL_KEYS: &[(&str, &str)] = &[
         ("show every command and key", "?"),
         ("focus the parent session", "Esc"),
@@ -1586,15 +1442,11 @@ mod tests {
         ("steer the active run with the draft", "Enter"),
     ];
 
-    /// Parts of a quoted message rendered from data, with the format
-    /// placeholder that renders them. A heading may quote the rendered text
-    /// when the data is a fixed list the reader should see.
     const RENDERED: &[(&str, &str)] = &[
         ("openai, anthropic, google, xai, openai-codex", "{}"),
         ("registered in OS keyring", "registered in {backend}"),
     ];
 
-    /// An empty keyring, for rendering missing-credential messages.
     struct EmptyKeyring;
 
     impl qq_auth::KeyringBackend for EmptyKeyring {
@@ -1609,8 +1461,6 @@ mod tests {
         }
     }
 
-    /// Headings QQ composes at run time rather than from one literal are
-    /// rendered through the real code path and compared exactly.
     #[tokio::test]
     async fn composed_troubleshooting_messages_are_rendered_exactly() {
         let directory = tempfile::tempdir().unwrap();
@@ -1622,7 +1472,6 @@ mod tests {
         let error = qq_provider::RequestCredentialProvider::credential(&provider)
             .await
             .unwrap_err();
-        // `request_credential_error` wraps it as the provider error the user sees.
         let rendered = qq_provider::ProviderError::ResponseFailed {
             kind: qq_provider::ProviderErrorKind::Authentication,
             message: error.to_string(),
@@ -1640,9 +1489,6 @@ mod tests {
         );
     }
 
-    /// Troubleshooting headings that quote text QQ relays but does not
-    /// write: a provider's own error body, or a message composed at run time
-    /// and rendered exactly by `composed_troubleshooting_messages_are_rendered_exactly`.
     const QUOTED_ELSEWHERE: &[(&str, &str)] = &[
         (
             "provider response failed: no credential for provider `xai`: run `qq auth login xai --oauth` or `qq auth login xai` or set the environment variable `XAI_API_KEY`",
@@ -1654,14 +1500,9 @@ mod tests {
         ),
     ];
 
-    /// Every troubleshooting heading that quotes a message quotes one the
-    /// code can print: each literal run of three or more words between the
-    /// placeholders (`…`, a quoted name) appears in the source.
     #[test]
     fn troubleshooting_headings_quote_real_messages() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        // Only string literals from non-test code: comments, test modules,
-        // and `tests/` fixtures never print a message a user sees.
         let mut literals: Vec<String> = Vec::new();
         let mut roots = vec![root.join("src/main.rs")];
         for entry in fs::read_dir(root.join("crates")).unwrap() {
@@ -1707,15 +1548,7 @@ mod tests {
             if QUOTED_ELSEWHERE.iter().any(|(entry, _)| *entry == message) {
                 continue;
             }
-            // `…` marks rendered data and becomes a hole; quoted spans stay
-            // literal, so fixed commands (`qq ask "<prompt>"`) and quoted
-            // names are compared too. A span of rendered data is written as
-            // `…` in the heading, or matches the template's own `{…}` hole.
             let rest = message.replace('…', "{}");
-            // Each clause (split at `:` / `;` and at placeholders) of two
-            // or more words must occur in one production literal. Clauses
-            // may come from different literals: QQ composes messages
-            // (`{provider} needs a credential: {remedy}`).
             let clauses: Vec<Vec<TemplatePart>> = rest
                 .split([':', ';'])
                 .map(|clause| clause.trim_matches(|c: char| " ,.'".contains(c)))
@@ -1763,8 +1596,6 @@ mod tests {
         );
     }
 
-    /// `concepts.md` defines each term once as a `###` heading other pages
-    /// link to, and the names and bounds it states are the build's.
     #[test]
     fn glossary_defines_each_term_with_the_builds_names_and_bounds() {
         use qq_config::DelegationRole;
@@ -1811,8 +1642,6 @@ mod tests {
             let end = body[4..].find("\n#").map_or(body.len(), |at| at + 4);
             &body[..end]
         };
-        // A new mode or role is a compile error in these matches until it is
-        // added to the list the glossary is checked against.
         let modes = [
             ApprovalMode::ReadOnly,
             ApprovalMode::Ask,

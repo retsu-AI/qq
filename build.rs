@@ -1,12 +1,3 @@
-//! Embeds the build's source revision into `qq --version`.
-//!
-//! The version string is `<crate version> (<short sha> <commit date>)`, with a
-//! `-dirty` suffix when the worktree had uncommitted changes. Release builds
-//! from a tarball have no `.git`; they read the short `QQ_GIT_SHA`, full
-//! `QQ_GIT_FULL_SHA`, and `QQ_GIT_DATE` from the environment (the release
-//! workflow exports them) and otherwise print `unknown`. The build never fails
-//! because of revision lookup.
-
 use std::{env, path::Path, process::Command};
 
 fn main() {
@@ -55,14 +46,10 @@ fn release_metadata(
     Some((short_sha, full_sha, date))
 }
 
-/// Short display SHA, full source SHA (both with `-dirty` when the tree is
-/// modified), and ISO commit date.
 fn from_git() -> Option<(String, String, String)> {
     let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")?;
     let root = Path::new(&manifest_dir);
 
-    // Rebuild when the checked-out commit changes so a stale revision is never
-    // baked into an incremental build.
     if let Ok(output) = Command::new("git")
         .args(["rev-parse", "--git-path", "HEAD"])
         .current_dir(root)
@@ -71,8 +58,6 @@ fn from_git() -> Option<(String, String, String)> {
     {
         let head = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         println!("cargo:rerun-if-changed={head}");
-        // A symbolic HEAD moves when its branch does. Watch its loose ref when
-        // present, otherwise packed-refs, where a packed branch is recorded.
         if let Ok(target) = std::fs::read_to_string(root.join(&head))
             && let Some(reference) = target.strip_prefix("ref: ")
             && let Ok(output) = Command::new("git")
@@ -82,8 +67,6 @@ fn from_git() -> Option<(String, String, String)> {
             && output.status.success()
         {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            // A packed branch update creates this loose ref; watch it even
-            // before it exists, as well as packed-refs for repacks.
             println!("cargo:rerun-if-changed={path}");
             if let Ok(output) = Command::new("git")
                 .args(["rev-parse", "--git-path", "packed-refs"])
@@ -98,12 +81,6 @@ fn from_git() -> Option<(String, String, String)> {
             }
         }
     }
-    // `git describe --dirty` covers tracked changes only. Release builds (and
-    // `QQ_EXACT_REVISION=1`) watch the index and every tracked path so an
-    // incremental build cannot retain a clean source revision after one of
-    // those inputs becomes dirty (or vice versa). Debug builds skip this:
-    // watching every tracked file relinks `qq` on any edit, docs included, so
-    // a dev binary's `-dirty` flag may lag until the next commit or checkout.
     println!("cargo:rerun-if-env-changed=QQ_EXACT_REVISION");
     let exact = env::var("PROFILE").as_deref() == Ok("release")
         || env::var("QQ_EXACT_REVISION").as_deref() == Ok("1");

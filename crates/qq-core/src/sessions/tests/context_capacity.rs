@@ -2,9 +2,6 @@ use super::*;
 
 #[test]
 fn the_between_run_fold_still_stops_at_its_step_budget() {
-    // AC2: in-run compactions left `MAX_COMPACTION_STEPS`; the between-run
-    // fold keeps it. A prompt that has spent 31 steps with transcript left
-    // may take one more; at 32 the fold is exhausted.
     let (_directory, _connection, _store_id, mut claimed, _, _) =
         denial_capacity_fixture(DenialCapacityPath::Policy, 0);
     claimed.context_compaction_remaining = true;
@@ -43,7 +40,6 @@ fn assembly_pruning_stubs_old_read_only_results_and_preserves_errors() {
         Message::tool_results(vec![result("c2", false)]),
         Message::new(Role::Assistant, vec![call("c3", "read_file")]),
         Message::tool_results(vec![result("c3", true)]),
-        // The recency window: the last four model turns stay verbatim.
         Message::new(Role::Assistant, vec![call("c4", "read_file")]),
         Message::tool_results(vec![result("c4", false)]),
         Message::assistant("a"),
@@ -76,13 +72,10 @@ fn assembly_pruning_stubs_old_read_only_results_and_preserves_errors() {
             false
         )
     );
-    // Shell output is not re-derivable; it survives outside the window.
     assert_eq!(results[1].0, "c2");
     assert!(results[1].1.starts_with("yyy"));
-    // Errors prune to error stubs: content stubbed, is_error preserved.
     assert!(results[2].1.starts_with("[pruned: read_file"));
     assert!(results[2].2, "the error flag must survive pruning");
-    // Inside the window everything stays verbatim.
     assert!(results[3].1.starts_with("yyy"));
     assert!(context_bytes(&context) < before);
 }
@@ -136,16 +129,11 @@ fn pruning_stubs_keep_a_result_header_line() {
             with_header.len()
         )
     );
-    // A first line that does not follow `<tool> …` is not a header.
     assert!(stubs[1].starts_with("[pruned: search"), "{}", stubs[1]);
 }
 
 #[test]
 fn a_stub_is_never_stubbed_again_but_a_result_that_merely_ends_like_one_is() {
-    // CX3: a live run prunes again on every overflowing turn. Its own stubs
-    // must stay as they are, or the stub names the previous stub's size and
-    // disagrees with replay. A real result is judged by what it is: a large
-    // one whose last line happens to read like a stub still prunes.
     let call = |id: &str, name: &str| {
         ContentBlock::tool_call(
             id.to_owned(),
@@ -168,13 +156,10 @@ fn a_stub_is_never_stubbed_again_but_a_result_that_merely_ends_like_one_is() {
         "{}[pruned: search {{\"query\":\"needle\"}} returned 12 bytes; call it again if needed]",
         "match\n".repeat(200)
     );
-    // Two lines, the second a valid stub line, the first far past a
-    // header's bound: not a stub.
     let long_first_line = format!(
         "search {}\n[pruned: search {{\"query\":\"needle\"}} returned 1 bytes; call it again if needed]",
         "m".repeat(crate::tools::MAX_MODEL_TEXT_BYTES)
     );
-    // A stub line whose size is not a `u64`: not a stub.
     let huge_size = format!(
         "[pruned: search {{\"query\":\"needle\"}} returned {} bytes; call it again if needed]",
         "9".repeat(2 * 1024)
@@ -230,7 +215,6 @@ fn a_stub_is_never_stubbed_again_but_a_result_that_merely_ends_like_one_is() {
             "result {index}"
         );
     }
-    // The long first line is not a header, so the stub carries none.
     assert_eq!(
         first[3],
         format!(
@@ -238,25 +222,18 @@ fn a_stub_is_never_stubbed_again_but_a_result_that_merely_ends_like_one_is() {
             long_first_line.len()
         )
     );
-    // A second pass, as a later overflowing turn makes, changes nothing.
     assert!(!prune_stale_tool_results(&mut context, &HashMap::new()));
     assert_eq!(results(&context), first);
 }
 
 #[test]
 fn pruned_read_file_stubs_keep_the_window_drop_the_hash_and_name_the_reread() {
-    // `read_file`'s header names the operation (`read`), not the tool. The
-    // stub keeps the window and line count so the model can re-read only
-    // what it needs, and drops `h:` so it cannot pass that hash back through
-    // `if_changed_since`, which would return no body for text that is no
-    // longer in context.
     let call = |id: &str, arguments: serde_json::Value| {
         ContentBlock::tool_call(id.to_owned(), "read_file".to_owned(), &arguments)
     };
     let body = "fn line() {}\n".repeat(60);
     let windowed = format!("read src/lib.rs L1-60/240 h:3f9a0c1d2e4b clipped=2\n{body}");
     let unscanned = format!("read big.log L1-60/- h:-\n{body}");
-    // A path segment can look like a hash; only the trailing hash goes.
     let odd_path = format!("read docs/a h:0123456789ab b.md L1-60/60 h:3f9a0c1d2e4b\n{body}");
     let result = |id: &str, content: &str| ContentBlock::ToolResult {
         call_id: id.to_owned(),
@@ -340,18 +317,12 @@ fn assembly_pruning_decides_from_the_stored_effect_class_not_the_tool_name() {
     };
     let mut context = vec![
         Message::user("start"),
-        // An external read-only tool: prunable only because the store
-        // recorded its effect as read_only.
         Message::new(Role::Assistant, vec![call("c1", "mcp__docs__lookup")]),
         Message::tool_results(vec![result("c1")]),
-        // A built-in read-only name without a stored effect (a row from
-        // before schema 26) still prunes through the name fallback.
         Message::new(Role::Assistant, vec![call("c2", "read_file")]),
         Message::tool_results(vec![result("c2")]),
-        // An external tool without a read-only effect is never pruned.
         Message::new(Role::Assistant, vec![call("c3", "mcp__docs__write")]),
         Message::tool_results(vec![result("c3")]),
-        // An explicit stored effect takes precedence over legacy names.
         Message::new(Role::Assistant, vec![call("c4", "read_file")]),
         Message::tool_results(vec![result("c4")]),
         Message::assistant("a"),
@@ -530,9 +501,6 @@ fn assert_capacity_accounting_for_descriptor(descriptor_version: u16) {
             ],
         )
         .unwrap();
-    // Two early read_file turns whose results total ~6 MiB of stored
-    // rows — well over the 4 MiB budget — followed by four text turns
-    // that push them out of the recency window.
     for (turn, provider_id) in [(1_u8, "c1"), (2, "c2")] {
         connection
             .execute(
@@ -583,8 +551,6 @@ fn assert_capacity_accounting_for_descriptor(descriptor_version: u16) {
         "stale results must assemble as stubs, got {assembled} bytes"
     );
 
-    // A prompt fits because the budget measures the pruned assembly, not
-    // the ~6 MiB of stored result rows.
     let applied = execute_command(
         &mut connection,
         store_id,

@@ -1,11 +1,3 @@
-//! Client-side resolution of `@` mentions into [`InputPart`]s: the one place
-//! a client reads workspace files before a prompt leaves the process. Runs
-//! through the same `cap-std` containment and ignore-aware walk the tools
-//! use, so an `@` reference cannot escape the workspace either, and fuzzy
-//! completion reuses the walker rather than growing a second index.
-//!
-//! Blocking: callers run it off the async executor (`spawn_blocking`).
-
 use std::{
     io::Read,
     path::Path,
@@ -22,34 +14,21 @@ use crate::{
     workspace::{Workspace, content_hash},
 };
 
-/// Bytes of `git diff` attached for `@diff`.
 pub const MAX_DIFF_BYTES: usize = 64 * 1024;
-/// Bytes of `git show --stat` attached for `@sha`.
 pub const MAX_SHA_BYTES: usize = 16 * 1024;
-/// Completion candidates returned per query.
 pub const MAX_COMPLETIONS: usize = 12;
 const MAX_EXPANSION_ENTRIES: usize = 20_000;
 const MAX_EXPANSION_DEPTH: usize = 32;
 const COMPLETION_DEADLINE: Duration = Duration::from_millis(150);
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A prompt after mention resolution: the text with resolved mentions
-/// removed (unresolvable ones stay literal), the file parts to attach, and
-/// per-mention notes for the client to show.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResolvedPrompt {
     pub parts: Vec<InputPart>,
-    /// One line per mention that did not become an attachment: a literal
-    /// left in place, a directory that expanded to too many files, a git
-    /// command that failed.
     pub notes: Vec<String>,
-    /// `@skill:name` at message start: the client submits `/name …` instead.
     pub skill: Option<String>,
 }
 
-/// Resolves every mention in `text` against `workspace_root`. Never fails:
-/// a mention that cannot be resolved is left in the text and noted, so the
-/// grammar never eats a word by mistake.
 pub fn resolve_prompt(workspace_root: &Path, text: &str) -> ResolvedPrompt {
     let mentions = parse_mentions(text);
     let mut out = ResolvedPrompt::default();
@@ -91,7 +70,6 @@ pub fn resolve_prompt(workspace_root: &Path, text: &str) -> ResolvedPrompt {
             }
             MentionKind::Web { url } => {
                 if cfg!(feature = "tool-fetch") {
-                    // Network authority passes server policy: the model fetches.
                     rewritten.push_str(&format!("(fetch {url} and use its contents)"));
                 } else {
                     rewritten.push_str(literal);
@@ -143,8 +121,6 @@ pub fn resolve_prompt(workspace_root: &Path, text: &str) -> ResolvedPrompt {
                         out.notes.push(format!("{literal}: no files matched"));
                     }
                     Ok(expanded) => {
-                        // The text keeps the reference so the model knows
-                        // which attachment the sentence is about.
                         rewritten.push_str(literal);
                         files.extend(expanded);
                     }
@@ -168,8 +144,6 @@ pub fn resolve_prompt(workspace_root: &Path, text: &str) -> ResolvedPrompt {
     out
 }
 
-/// One file, a directory (recursively, ignore-aware), or a glob, as up to
-/// `budget` attachments with `expected_hash` filled from the current bytes.
 fn expand_file(
     workspace: &Workspace,
     path: &str,
@@ -195,7 +169,6 @@ fn expand_file(
     if range.is_some() {
         return Err("a line range applies to one file, not a directory or glob".to_owned());
     }
-    // Directory or glob: walk under the deepest literal prefix.
     let (root, filter) = if has_glob {
         let (prefix, _) = path.split_at(path.find(['*', '?', '[']).unwrap_or(0));
         let root = prefix.rsplit_once('/').map_or(".", |(dir, _)| dir);
@@ -297,7 +270,6 @@ fn git_output(workspace_root: &Path, args: Vec<&str>, max_bytes: usize) -> Resul
     let started = Instant::now();
     let mut stdout = child.stdout.take().expect("piped");
     let mut buffer = Vec::new();
-    // Bounded read; a runaway diff is cut and the child killed.
     let mut chunk = [0_u8; 8192];
     loop {
         if started.elapsed() > GIT_TIMEOUT {
@@ -343,16 +315,12 @@ fn git_output(workspace_root: &Path, args: Vec<&str>, max_bytes: usize) -> Resul
     Ok(String::from_utf8_lossy(&buffer).into_owned())
 }
 
-/// Workspace paths matching `query` for `@` completion: an ignore-aware walk
-/// ranked by prefix match, then subsequence match, then shorter path.
-/// `recent` (paths edited in this session, most recent first) rank first.
 pub fn complete_paths(workspace_root: &Path, query: &str, recent: &[String]) -> Vec<String> {
     let Ok(workspace) = Workspace::open(workspace_root) else {
         return Vec::new();
     };
     let deadline = Instant::now() + COMPLETION_DEADLINE;
     let query_lower = query.to_ascii_lowercase();
-    // Walk from the query's directory prefix when it names one.
     let (root, needle) = match query.rsplit_once('/') {
         Some((dir, rest)) if workspace.root().is_dir(dir) => {
             (dir.to_owned(), rest.to_ascii_lowercase())
@@ -433,8 +401,6 @@ mod tests {
 
     fn workspace() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        // `@diff` must describe only this fixture even when TMPDIR is nested
-        // under the repository running the tests.
         std::fs::create_dir_all(dir.path().join(".git/objects")).unwrap();
         std::fs::create_dir_all(dir.path().join(".git/refs/heads")).unwrap();
         std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
@@ -507,7 +473,6 @@ mod tests {
         );
         assert!(resolved.notes.is_empty(), "{:?}", resolved.notes);
 
-        // A directory expands recursively, ignore-aware, sorted.
         let resolved = resolve_prompt(&root, "review @src/");
         assert_eq!(
             file_parts(&resolved)
@@ -516,7 +481,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["src/inner/deep.rs", "src/lib.rs", "src/main.rs"]
         );
-        // A glob; target/ is a generated directory and is skipped.
         let resolved = resolve_prompt(&root, "check @**/*.rs");
         assert_eq!(
             file_parts(&resolved)
@@ -525,16 +489,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["src/inner/deep.rs", "src/lib.rs", "src/main.rs"]
         );
-        // Unresolvable stays literal with a note; nothing is eaten.
         let resolved = resolve_prompt(&root, "email me@example.com about @missing.rs");
         assert!(file_parts(&resolved).is_empty());
         assert_eq!(text_of(&resolved), "email me@example.com about @missing.rs");
         assert_eq!(resolved.notes.len(), 1, "{:?}", resolved.notes);
-        // Binary refuses; a range on a directory refuses.
         let resolved = resolve_prompt(&root, "@blob.bin @src/:1-2");
         assert!(file_parts(&resolved).is_empty());
         assert_eq!(resolved.notes.len(), 2, "{:?}", resolved.notes);
-        // Escapes are refused by containment.
         let resolved = resolve_prompt(&root, "@../outside.txt @src/../../x");
         assert!(file_parts(&resolved).is_empty());
     }
@@ -575,7 +536,6 @@ mod tests {
                 vec!["@web:https://x.test/doc: web mentions require the tool-fetch feature"]
             );
         }
-        // A clean isolated repository cannot inherit the caller's diff.
         let resolved = resolve_prompt(&root, "explain @diff");
         assert_eq!(
             text_of(&resolved),
@@ -602,7 +562,7 @@ mod tests {
             status.map(|s| s.success()).unwrap_or(false)
         };
         if !git(&["init", "-q"]) {
-            return; // no git on this host
+            return;
         }
         assert!(git(&["add", "."]));
         assert!(git(&[
@@ -627,7 +587,6 @@ mod tests {
         let text = text_of(&resolved);
         assert!(text.contains("<git-show ref=\"HEAD\">"), "{text}");
         assert!(text.contains("init"), "{text}");
-        // A bad ref is left literal with a note.
         let resolved = resolve_prompt(&root, "@sha:nope-not-a-ref");
         assert_eq!(text_of(&resolved), "@sha:nope-not-a-ref");
         assert_eq!(resolved.notes.len(), 1);
@@ -647,7 +606,6 @@ mod tests {
         assert!(src.contains(&"src/lib.rs".to_owned()));
         let main = complete_paths(&root, "ma", &[]);
         assert_eq!(main[0], "src/main.rs");
-        // Recency pulls a file to the front of its tier.
         let ranked = complete_paths(&root, "src/", &["src/main.rs".to_owned()]);
         assert_eq!(ranked[0], "src/main.rs", "{ranked:?}");
         let fuzzy = complete_paths(&root, "sdp", &[]);

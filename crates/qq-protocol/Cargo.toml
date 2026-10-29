@@ -14,8 +14,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [features]
-# Browser builds: `getrandom` has no ambient entropy source on
-# `wasm32-unknown-unknown` and must be told to use `crypto.getRandomValues`.
-# The build also needs `--cfg getrandom_backend="wasm_js"`; see
-# `.cargo/config.toml`.
 wasm = ["getrandom/wasm_js"]

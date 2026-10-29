@@ -1,5 +1,3 @@
-//! Bundled model catalog generated from a pinned models.dev projection.
-
 use std::collections::BTreeMap;
 
 use crate::{ModelMetadata, ModelPricing, ModelPricingTier, ProviderApi};
@@ -45,8 +43,6 @@ struct ModelDefinition {
     canonical_id: &'static str,
     name: &'static str,
     reasoning: bool,
-    /// Documented effort values for this access route. Empty means unknown or
-    /// unsupported; provider-default and configured inheritance are UI controls.
     efforts: &'static [ReasoningEffort],
     context_tokens: u32,
     output_tokens: u32,
@@ -54,7 +50,6 @@ struct ModelDefinition {
     api: Option<ProviderApi>,
 }
 
-/// GPT-5.2/5.4 API ladder; later and earlier families use separate lists.
 const OPENAI_EFFORTS: &[ReasoningEffort] = &[
     ReasoningEffort::None,
     ReasoningEffort::Low,
@@ -63,7 +58,6 @@ const OPENAI_EFFORTS: &[ReasoningEffort] = &[
     ReasoningEffort::Xhigh,
 ];
 
-/// xAI's Responses/Chat deployments accept the `low`/`high` pair.
 const GPT5_EFFORTS: &[ReasoningEffort] = &[
     ReasoningEffort::Minimal,
     ReasoningEffort::Low,
@@ -160,7 +154,6 @@ const fn tiered(
     })
 }
 
-// GPT-6 Sol/Luna exclude the legacy `minimal` effort.
 const GPT6_EFFORTS: &[ReasoningEffort] = &[
     ReasoningEffort::None,
     ReasoningEffort::Low,
@@ -422,8 +415,6 @@ const MODELS: &[ModelDefinition] = &[
     model! { catalogs: XAI_API, wire: "grok-4.3", canonical: "xai/grok-4.3", name: "Grok 4.3", reasoning: true, efforts: XAI_EFFORTS, limits: 131_072 / 32_768, pricing: None, api: ProviderApi::OpenAiChatCompletions },
 ];
 
-/// Only the context limit is portable across gateway aliases, not pricing
-/// or wire capabilities. Explicit deployment configuration takes precedence.
 pub(crate) fn gateway_context_window(model: &str) -> Option<u32> {
     let original = model;
     let model = model
@@ -445,7 +436,6 @@ pub(crate) fn gateway_context_window(model: &str) -> Option<u32> {
                     definition.catalogs & ANTHROPIC_API != 0 && definition.wire_id == id
                 })
         })
-        // Access routes may differ; never promise the largest known limit.
         .map(|definition| definition.context_tokens)
         .min()
 }
@@ -553,7 +543,6 @@ mod tests {
             assert_eq!(model.canonical_id(), Some("openai/gpt-6.1-sol"));
             assert_eq!(model.name(), Some("GPT-6.1 Sol"));
             assert!(model.reasoning());
-            // `none` and `minimal` are documented as unsupported.
             assert_eq!(model.reasoning_efforts(), FRONTIER_EFFORTS);
             assert_eq!(model.max_output_tokens(), Some(128_000));
         }
@@ -625,9 +614,6 @@ mod tests {
         assert_eq!(pricing.provenance, PROVENANCE);
     }
 
-    /// The catalog advertises an effort ladder only where the wire adapter
-    /// transmits `reasoning_effort`. Anthropic-shaped routes never do, so
-    /// their entries stay empty even though the models reason.
     #[test]
     fn effort_ladders_follow_the_wire_adapter_not_the_reasoning_flag() {
         let openai = builtin_models(BuiltinCatalog::OpenAiApi);
