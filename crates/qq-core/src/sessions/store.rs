@@ -2529,6 +2529,13 @@ mod tests {
         (release_tx, blocked)
     }
 
+    /// Waits until the worker's queues hold at least this many messages.
+    async fn queued(store: &Store, control: usize, output: usize) {
+        while store.inner.control.len() < control || store.inner.output.len() < output {
+            tokio::task::yield_now().await;
+        }
+    }
+
     fn scratch_rows(connection: &Connection) -> Vec<i64> {
         let mut statement = connection
             .prepare("SELECT n FROM scratch ORDER BY n")
@@ -2585,8 +2592,7 @@ mod tests {
                     .await
             }));
         }
-        // Let every job enter the output queue before the worker is released.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        queued(&store, 0, 6).await;
         release.send(()).unwrap();
         blocked.await.unwrap().unwrap();
 
@@ -2667,7 +2673,7 @@ mod tests {
                     .await
             }));
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        queued(&store, 0, 1).await;
         let write_store = store.clone();
         let write = tokio::spawn(async move {
             write_store
@@ -2691,7 +2697,7 @@ mod tests {
                 })
                 .await
         });
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        queued(&store, 2, 1).await;
         release.send(()).unwrap();
         blocked.await.unwrap().unwrap();
 
@@ -2778,7 +2784,7 @@ mod tests {
                     .await
             }));
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        queued(&store, 0, 3).await;
         release.send(()).unwrap();
         blocked.await.unwrap().unwrap();
         for job in jobs {
@@ -2815,7 +2821,7 @@ mod tests {
                     .await
             }));
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        queued(&store, 0, worker::OUTPUT_GROUP_LIMIT * 3).await;
         let control_order = Arc::clone(&order);
         let control = {
             let store = store.clone();
@@ -2828,7 +2834,7 @@ mod tests {
                     .await
             })
         };
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        queued(&store, 1, 0).await;
         release.send(()).unwrap();
         blocked.await.unwrap().unwrap();
         for job in jobs {
@@ -3049,7 +3055,10 @@ mod tests {
         let output_store = store.clone();
         let output =
             tokio::spawn(async move { output_store.call(Priority::Output, |_| Ok(7)).await });
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        // The test runtime is single-threaded: each yield polls the submitter.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
         assert!(!output.is_finished());
 
         release_tx.send(()).unwrap();
