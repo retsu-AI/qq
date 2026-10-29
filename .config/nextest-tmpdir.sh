@@ -7,6 +7,9 @@ set -euo pipefail
 [[ -n ${NEXTEST_ENV:-} ]] || exit 1
 [[ -z ${QQ_TEST_DISK_TMPDIR:-} ]] || exit 0
 [[ -d /dev/shm && -w /dev/shm ]] || exit 0
+# Containers often mount a 64 MiB /dev/shm; session fixtures need far more.
+available_kib=$(df -Pk /dev/shm 2>/dev/null | awk 'NR == 2 { print $4 }')
+[[ ${available_kib:-0} -ge 2097152 ]] || exit 0
 
 dir="/dev/shm/qq-test-$(id -u)"
 mkdir -p -m 700 "$dir" 2>/dev/null || exit 0

@@ -141,7 +141,8 @@ On Linux a setup script (`.config/nextest-tmpdir.sh`) points `TMPDIR` at
 `synchronous = FULL`, so on a disk-backed `TMPDIR` fsync is most of a session
 test's wall time and the suite runs about ten times slower. Set
 `QQ_TEST_DISK_TMPDIR=1` to keep the default `TMPDIR`; the script also keeps
-it when `/dev/shm` is missing, unwritable, or mounted `noexec`. Plain
+it when `/dev/shm` is missing, unwritable, mounted `noexec`, or has under
+2 GiB free (a container's default 64 MiB). Plain
 `cargo test` does not run the script.
 
 ## CI
