@@ -9944,34 +9944,11 @@ mod tests {
         const CONCURRENT: &str = "because sub-agents run concurrently.";
         const CONCURRENT_WITH_YOU: &str =
             "because sub-agents run concurrently with each other and with you.";
-        const BLOCKING_DESCRIPTION: &str = "Delegate one self-contained task to a read-only \
-            sub-agent in this workspace and receive only its final answer. Worth it when the raw \
-            evidence would dwarf the distilled answer and you will not need that evidence \
-            verbatim later; several independent questions can be delegated in parallel. Single \
-            reads, searches, and quick lookups are cheaper inline. The task brief must carry \
-            everything the sub-agent needs: it starts with no other context. Omit model";
-        const BACKGROUND_DESCRIPTION: &str = "Delegate one self-contained task to a read-only \
-            sub-agent in this workspace; only its final answer comes back, usually later as a \
-            runtime notice while you keep working. Worth it when the raw evidence would dwarf the \
-            distilled answer and you will not need that evidence verbatim later; several \
-            independent questions can be delegated in parallel. Single reads, searches, and \
-            quick lookups are cheaper inline. The task brief must carry everything the sub-agent \
-            needs: it starts with no other context. Omit model";
         // Prompt 27 moves delegation policy out of the description; the
         // prompt's Delegation section keeps it.
         const CURRENT_DESCRIPTION: &str = "Start a one-shot read-only sub-agent in this \
             workspace from a self-contained task brief. It usually runs in the background: the \
             call returns its id at once, and its final answer arrives later as a runtime notice.";
-        const V26_DESCRIPTION: &str = "Delegate one self-contained task to a read-only sub-agent \
-            in this workspace; only its final answer comes back, usually later as a runtime notice \
-            while you keep working. Worth it when the raw evidence would dwarf the distilled \
-            answer and you will not need that evidence verbatim later; several independent \
-            questions can be delegated in parallel. Single reads, searches, and quick lookups are \
-            cheaper inline. The task brief must carry everything the sub-agent needs: it starts \
-            with no other context. Omit model by default so QQ uses its configured worker model \
-            or the current session's selected model. Set model only when the user explicitly \
-            requests an exact provider/model route listed by this tool; never guess, translate, \
-            or invent a route.";
         const NEW_TASK: &str = "A complete, self-contained brief for the sub-agent: the question \
             to answer, what the answer is for, and the answer shape you want back. The sub-agent \
             starts with no other context and stops once it can answer.";
@@ -10059,18 +10036,6 @@ mod tests {
         );
         let spawn = specs.last().unwrap();
         assert_eq!(spawn.description(), CURRENT_DESCRIPTION);
-        assert!(V26_DESCRIPTION.starts_with(BACKGROUND_DESCRIPTION));
-        assert_eq!(
-            format!(
-                "{:x}",
-                Sha256::digest(
-                    V26_DESCRIPTION
-                        .replacen(BACKGROUND_DESCRIPTION, BLOCKING_DESCRIPTION, 1)
-                        .as_bytes()
-                )
-            ),
-            "09105474547d899bf0bf5346f2c72079425d0f0c236c9a201378a33f0421c5ac"
-        );
         let schema = spawn.input_schema().get();
         assert!(schema.contains(NEW_TASK), "{schema}");
         assert_eq!(
