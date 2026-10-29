@@ -7770,7 +7770,7 @@ async fn wait_side(
             if done(&item) {
                 return item;
             }
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -7850,7 +7850,7 @@ async fn side_cancel_drains_a_blocked_inspection_tool_before_settlement() {
     release.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         while harness.runtime.inner.side_tasks.load(Ordering::Acquire) != 0 {
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -8262,7 +8262,7 @@ async fn side_dropped_submit_future_still_settles_and_frees_the_session() {
             if let Some(id) = found {
                 return parse_id::<RunId>(&id).unwrap();
             }
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await

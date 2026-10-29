@@ -1053,6 +1053,7 @@ mod tests {
                     if socket.write_all(b"1\r\n{\r\n").await.is_err() {
                         break;
                     }
+                    // lint: allow(sleep) the drip rate is the server behavior under test
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             },

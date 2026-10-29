@@ -126,8 +126,14 @@ mod tests {
         assert!(present.is_current());
 
         // Same length, different content: a rewrite changes mtime or inode.
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        let previous = std::fs::metadata(&path).unwrap().modified().unwrap();
         std::fs::write(&path, "two").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(previous + std::time::Duration::from_secs(1))
+            .unwrap();
         assert!(!present.is_current());
 
         // Atomic replacement with equal bytes still changes the inode.

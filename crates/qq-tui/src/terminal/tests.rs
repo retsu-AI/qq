@@ -442,7 +442,7 @@ async fn loop_upgrades_completed_code_to_highlighted_off_the_render_path() {
     let mut plain_seen = false;
     let mut highlighted_seen = false;
     while std::time::Instant::now() < deadline && !highlighted_seen {
-        tokio::time::sleep(FRAME_INTERVAL).await;
+        tokio::task::yield_now().await;
         for frame in harness.frames.frames() {
             let text = frame_text(&frame);
             if text.contains(keyword) {

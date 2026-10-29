@@ -2785,7 +2785,7 @@ async fn independent_codex_stores_share_one_refresh_owner_and_newest_epoch() {
     };
     tokio::time::timeout(Duration::from_secs(5), async {
         while keyring.read_count("openai-codex/work") < 3 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await

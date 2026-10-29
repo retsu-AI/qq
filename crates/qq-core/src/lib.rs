@@ -8646,6 +8646,7 @@ mod tests {
         let cancellation = RunCancellation::new();
         let canceller = cancellation.clone();
         let cancel = tokio::spawn(async move {
+            // lint: allow(sleep) virtual: this test runs on paused time
             tokio::time::sleep(Duration::from_secs(5)).await;
             canceller.cancel();
         });
