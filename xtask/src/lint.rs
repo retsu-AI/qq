@@ -27,7 +27,7 @@ use thiserror::Error;
 // Baseline correction: compound native tests add one previously missed sleep;
 // test-only functions add three; syncing main adds four existing sleeps.
 // No new sleeps are introduced by this change.
-pub const SLEEP_CEILING: usize = 61;
+pub const SLEEP_CEILING: usize = 60;
 
 #[derive(Debug, Error)]
 pub enum LintError {
