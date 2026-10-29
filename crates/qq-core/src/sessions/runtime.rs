@@ -284,6 +284,7 @@ pub struct SessionRuntimeOptions {
     pub max_active_side_queries: Option<usize>,
     pub side_query_limits: SideQueryLimits,
     pub approval_timeout: Option<Duration>,
+    pub retention: Option<Duration>,
     pub grant_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
 }
 
@@ -296,6 +297,7 @@ impl std::fmt::Debug for SessionRuntimeOptions {
             .field("max_active_side_queries", &self.max_active_side_queries)
             .field("side_query_limits", &self.side_query_limits)
             .field("approval_timeout", &self.approval_timeout)
+            .field("retention", &self.retention)
             .field("grant_authority", &self.grant_authority.is_some())
             .finish()
     }
@@ -310,6 +312,7 @@ impl SessionRuntimeOptions {
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
+            retention: None,
             grant_authority: None,
         }
     }
@@ -317,6 +320,12 @@ impl SessionRuntimeOptions {
     #[must_use]
     pub const fn with_approval_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.approval_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_retention(mut self, retention: Option<Duration>) -> Self {
+        self.retention = retention;
         self
     }
 
@@ -339,6 +348,7 @@ pub(super) struct SessionRuntimeInner {
     pub(super) permits: Arc<Semaphore>,
     pub(super) side_permits: Arc<Semaphore>,
     pub(super) side_tasks: AtomicUsize,
+    pub(super) restores: AtomicUsize,
     pub(super) side_limits: side_questions::SideCeilings,
     pub(super) side_sessions: Mutex<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     pub(super) side_cancellations: Mutex<HashMap<RunId, RunCancellation>>,
@@ -350,6 +360,7 @@ pub(super) struct SessionRuntimeInner {
     pub(super) steering: Mutex<HashMap<RunId, crate::runtime::SteeringSender>>,
     approvals: Mutex<HashMap<ToolCallId, PendingApproval>>,
     pub(super) approval_timeout: Option<Duration>,
+    pub(super) retention: Option<Duration>,
     wakeups: Mutex<HashMap<WorkspaceId, watch::Sender<u64>>>,
     pub(super) failed: watch::Sender<bool>,
     pub(super) shutdown: watch::Sender<bool>,
@@ -419,6 +430,7 @@ impl SessionRuntime {
             permits: Arc::new(Semaphore::new(options.max_active_runs)),
             side_permits: Arc::new(Semaphore::new(side_limit)),
             side_tasks: AtomicUsize::new(0),
+            restores: AtomicUsize::new(0),
             side_limits,
             side_sessions: Mutex::new(HashMap::new()),
             side_cancellations: Mutex::new(HashMap::new()),
@@ -432,6 +444,7 @@ impl SessionRuntime {
             steering: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
             approval_timeout: options.approval_timeout,
+            retention: options.retention,
             wakeups: Mutex::new(HashMap::new()),
             failed,
             shutdown,
@@ -504,6 +517,9 @@ impl SessionRuntime {
         }
         if matches!(command, SessionCommand::SubmitSideQuestion { .. }) {
             return self.submit_side_question(command_id, command).await;
+        }
+        if matches!(command, SessionCommand::UndoWorkspace { .. }) {
+            return self.undo_workspace(command_id, command).await;
         }
         let signal_side = match &command {
             SessionCommand::CancelSideQuestion { side_question_id } => Some(*side_question_id),
@@ -665,6 +681,76 @@ impl SessionRuntime {
             self.request_schedule();
         }
         Ok(applied.receipt)
+    }
+
+    async fn undo_workspace(
+        &self,
+        command_id: CommandId,
+        command: SessionCommand,
+    ) -> Result<CommandReceipt, SessionRuntimeError> {
+        let runtime = self.clone();
+        tokio::spawn(async move { runtime.restore_workspace(command_id, command).await })
+            .await
+            .map_err(|_| SessionRuntimeError::Unavailable)?
+    }
+
+    async fn restore_workspace(
+        &self,
+        command_id: CommandId,
+        command: SessionCommand,
+    ) -> Result<CommandReceipt, SessionRuntimeError> {
+        let SessionCommand::UndoWorkspace {
+            workspace_id,
+            snapshot,
+        } = &command
+        else {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        };
+        let workspace_id = *workspace_id;
+        let snapshot = snapshot.clone();
+        let lifecycle = self.inner.lifecycle.read().await;
+        if *self.inner.shutdown.borrow()
+            || *self.inner.failed.borrow()
+            || self.inner.draining.load(Ordering::Acquire)
+        {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        let started = self
+            .inner
+            .store
+            .begin_workspace_restore(command_id, command.clone())
+            .await;
+        let path = match started {
+            Ok(commands::WorkspaceRestore::Replayed(receipt)) => return Ok(receipt),
+            Ok(commands::WorkspaceRestore::Started(path)) => path,
+            Err(error) => return Err(error),
+        };
+        let _restore = RestoreSlot::new(&self.inner);
+        drop(lifecycle);
+        let restored = AssertUnwindSafe(restore_snapshot(Path::new(&path), snapshot.as_deref()))
+            .catch_unwind()
+            .await;
+        let receipt = match restored {
+            Ok(Ok(restored)) => {
+                self.inner
+                    .store
+                    .record_workspace_restore(command_id, command, restored.outcome(workspace_id))
+                    .await
+            }
+            Ok(Err(error)) => Err(SessionRuntimeError::UndoFailed(error.into())),
+            Err(_) => Err(SessionRuntimeError::Unavailable),
+        };
+        if self
+            .inner
+            .store
+            .clear_workspace_restore(path)
+            .await
+            .is_err()
+        {
+            self.inner.failed.send_replace(true);
+        }
+        self.request_schedule();
+        receipt
     }
 
     pub async fn workspace_path(
@@ -960,6 +1046,7 @@ impl SessionRuntime {
                     .iter()
                     .all(|pool| pool.available_permits() == self.inner.max_active_runs);
             if self.inner.side_tasks.load(Ordering::Acquire) == 0
+                && self.inner.restores.load(Ordering::Acquire) == 0
                 && unfinished.is_empty()
                 && preparation_quiescent
                 && self
@@ -1304,6 +1391,12 @@ pub enum SessionRuntimeError {
     SessionNotFound,
     #[error("session or an owning run is active")]
     SessionActive,
+    #[error(
+        "a run in this workspace is active, queued or due from a goal; cancel or pause it, then undo"
+    )]
+    WorkspaceBusy,
+    #[error("undo failed: {0}")]
+    UndoFailed(#[source] crate::undo::UndoFailure),
     #[error("workspace session limit reached")]
     SessionLimitReached,
     #[error("parent session does not belong to the workspace")]
@@ -1406,4 +1499,67 @@ impl From<serde_json::Error> for SessionRuntimeError {
     fn from(_: serde_json::Error) -> Self {
         Self::CODEC
     }
+}
+
+const MAX_UNDO_CHANGE_BYTES: usize = 8 * 1024;
+
+struct RestoreSlot(Arc<SessionRuntimeInner>);
+
+impl RestoreSlot {
+    fn new(inner: &Arc<SessionRuntimeInner>) -> Self {
+        inner.restores.fetch_add(1, Ordering::AcqRel);
+        Self(Arc::clone(inner))
+    }
+}
+
+impl Drop for RestoreSlot {
+    fn drop(&mut self) {
+        self.0.restores.fetch_sub(1, Ordering::AcqRel);
+        self.0
+            .settlements
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+}
+
+struct RestoredSnapshot {
+    snapshot: String,
+    restored: crate::undo::Restored,
+}
+
+impl RestoredSnapshot {
+    fn outcome(&self, workspace_id: WorkspaceId) -> CommandOutcome {
+        CommandOutcome::WorkspaceUndone {
+            workspace_id,
+            snapshot: self.snapshot.clone(),
+            before: self.restored.before.name.clone(),
+            changes: bounded_changes(&self.restored.changes),
+            changes_total: u32::try_from(self.restored.changes.len()).unwrap_or(u32::MAX),
+            head_moved: self.restored.head_moved.is_some(),
+        }
+    }
+}
+
+async fn restore_snapshot(
+    workspace: &Path,
+    name: Option<&str>,
+) -> Result<RestoredSnapshot, crate::undo::UndoError> {
+    let mut snapshots = crate::undo::list(workspace).await?;
+    snapshots.retain(|snapshot| snapshot.workspace == workspace);
+    let target = crate::undo::select(&snapshots, workspace, name)?;
+    Ok(RestoredSnapshot {
+        snapshot: target.name.clone(),
+        restored: crate::undo::restore(target).await?,
+    })
+}
+
+pub(super) fn bounded_changes(changes: &[String]) -> Vec<String> {
+    let mut bytes = 0;
+    changes
+        .iter()
+        .take_while(|change| {
+            bytes += serde_json::to_string(change).map_or(usize::MAX, |encoded| encoded.len() + 1);
+            bytes <= MAX_UNDO_CHANGE_BYTES
+        })
+        .cloned()
+        .collect()
 }

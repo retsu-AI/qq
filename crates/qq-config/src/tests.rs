@@ -530,6 +530,47 @@ fn removed_jev_keys_are_rejected_by_name() {
 }
 
 #[test]
+fn retention_is_absent_by_default_bounded_and_refused_from_project_config() {
+    let tree = TempTree::new();
+    let bare = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(bare.retention(), None);
+    assert!(bare.provenance().retention().is_none());
+
+    tree.write("global/config.ron", "(version: 1, retention_days: 30)");
+    let global = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(
+        global.retention(),
+        Some(std::time::Duration::from_secs(30 * 24 * 60 * 60))
+    );
+    assert_eq!(
+        global.provenance().retention().unwrap().kind(),
+        SourceKind::Global
+    );
+
+    tree.write("work/qq.ron", "(version: 1, retention_days: 1)");
+    assert!(matches!(
+        tree.loader().load(&tree.request()),
+        Err(ConfigError::RetentionOutsideUserConfig { .. })
+    ));
+
+    for days in [0, 3_651] {
+        let clean = TempTree::new();
+        let error = clean
+            .loader()
+            .load(
+                &clean
+                    .request()
+                    .with_explicit_content(format!("(version: 1, retention_days: {days})")),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::InvalidRetention { days: found } if found == days),
+            "{days}: {error}"
+        );
+    }
+}
+
+#[test]
 fn approval_timeout_is_absent_by_default_and_bounded_when_set() {
     let tree = TempTree::new();
     let bare = tree.loader().load(&tree.request()).unwrap();
@@ -3603,6 +3644,7 @@ fn published_document_field_names_match_the_struct_and_all_parse() {
             "goals" => "(default_max_runs: 40)".to_owned(),
             "approval_delegate" => "on".to_owned(),
             "approval_timeout_seconds" => "60".to_owned(),
+            "retention_days" => "30".to_owned(),
             "reasoning_effort" => "low".to_owned(),
             "max_output_tokens" => "1000".to_owned(),
             "providers" | "mcp" | "profiles" | "packs" => "{}".to_owned(),

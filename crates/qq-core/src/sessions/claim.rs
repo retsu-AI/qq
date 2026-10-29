@@ -365,9 +365,10 @@ pub(super) fn reserve_next_run_recoverable(
     depth: u16,
 ) -> Result<Option<ClaimedRun>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    let restoring = commands::paths_overlap_sql("w.path", "rp.path");
     let row = transaction
         .query_row(
-            "SELECT r.id, r.session_id, r.command_id, r.user_message_id, r.kind,
+            &format!("SELECT r.id, r.session_id, r.command_id, r.user_message_id, r.kind,
                     s.workspace_id, w.path, s.model, s.max_output_tokens, s.organization,
                     r.context_compaction_attempted,
                     (SELECT c.request_json FROM commands c WHERE c.id = r.command_id),
@@ -398,6 +399,7 @@ pub(super) fn reserve_next_run_recoverable(
                AND NOT EXISTS(SELECT 1 FROM runs check_run JOIN sessions check_session ON check_session.id=check_run.session_id
                    WHERE check_session.workspace_id=s.workspace_id AND check_run.kind='goal_check' AND (check_run.status='running' OR check_run.check_acknowledgment_pending=1))
                AND s.depth = ?1
+               AND NOT EXISTS(SELECT 1 FROM temp.restoring_paths rp WHERE {restoring})
                AND (r.kind!='prompt' OR g.goal_id IS NULL
                     OR json_extract(g.payload_json,'$.status.type')!='active'
                     OR NOT EXISTS(
@@ -422,7 +424,7 @@ pub(super) fn reserve_next_run_recoverable(
                          WHERE previous.session_id = r.session_id
                      ), 0),
                       r.created_at_ms, r.rowid
-             LIMIT 1",
+             LIMIT 1"),
             params![depth, MAX_CHILD_DEPTH],
             |row| {
                 Ok((

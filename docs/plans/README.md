@@ -168,19 +168,9 @@ arguments.
 **Accepted when** the devcontainer builds and runs one deterministic smoke
 task against the loopback fake provider in CI.
 
-## H. Smaller reliability items
-
-- Bound store growth with an explicit retention setting before more runs
-  die on `DiskFull`. Snapshot refs follow the same setting.
-- `/undo` in the TUI, as a server command: the runtime refuses it while
-  any run is active, queued or due from a goal, and admits no run until the
-  restore finishes. A client-side guard cannot see other clients or goal
-  scheduling.
-
 ## Order
 
-1. F and G in parallel with disjoint owned paths.
-2. H whenever there is room.
+F and G in parallel with disjoint owned paths.
 
 Each PR:
 - shows its regression failing before the fix;

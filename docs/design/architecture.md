@@ -1107,7 +1107,7 @@ workspace, session, prompt, steering message, model or profile change,
 compaction — are refused with `CommandLimitReached` at 100 000 durable
 receipts, while commands that only stop, resolve, or remove existing work
 (`CancelRun`, `RespondToolApproval`, `DeleteSession`, `PruneSessions`,
-`RollbackCompaction`) are admitted up to a further 10 000, and a cancel the
+`UndoWorkspace`, `RollbackCompaction`) are admitted up to a further 10 000, and a cancel the
 runtime issues for itself while settling is never refused. A full store can
 therefore always be cancelled, approved, and cleaned up; the receipt table is
 the idempotency record and is never trimmed to make room. A claimed run carries the cancellation flag, session file
@@ -1682,6 +1682,14 @@ projections, pending approval inputs and terminal receipts keep their existing
 lifetimes. Freed SQLite pages are reused; retention does not vacuum or shrink
 the database file. Expired cold cursors require a fresh snapshot. Warm feeds
 may still replay older committed events from their bounded rings.
+
+With `retention_days` set, the scheduler deletes idle sessions whose
+`updated_at_ms` is older than the cutoff when the runtime opens and at most
+hourly after that, 64 per transaction, through the same path as
+`DeleteSession`, so each deletion is a `session_deleted` event with no causing
+command. Sessions with a live goal, a queued prompt or unfinished work are
+kept. A run's snapshot also drops `refs/qq/snapshots/` entries older than the
+cutoff, on top of the cap of 50.
 
 Pending approval details and their call rows reserve snapshot capacity before
 history. A focused body's irreducible holds that exceed its byte budget fail

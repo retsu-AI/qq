@@ -22,10 +22,10 @@ use super::{
     EffectivePolicy, GoalCeilings, GoalsConfig, HttpAccess, InputModality,
     MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH,
     MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER, MAX_MCP_CALL_TIMEOUT_SECONDS,
-    MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, McpServerConfig, McpTransport,
-    ModelMetadata, ModelPricing, ModelRoute, ProfileApprovalMode, ProviderAccess, ProviderApi,
-    ProviderConfig, ProviderKind, RuntimeOverrides, SecretRef, SourceIdentity, SourceKind,
-    SourceReport,
+    MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, MAX_RETENTION_DAYS, McpServerConfig,
+    McpTransport, ModelMetadata, ModelPricing, ModelRoute, ProfileApprovalMode, ProviderAccess,
+    ProviderApi, ProviderConfig, ProviderKind, RuntimeOverrides, SecretRef, SourceIdentity,
+    SourceKind, SourceReport,
 };
 
 pub(super) fn deserialize_unique_btree_map<'de, D, K, V>(
@@ -620,7 +620,7 @@ pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 9] = [
     "goals",
 ];
 
-pub const DOCUMENT_FIELD_NAMES: [&str; 15] = [
+pub const DOCUMENT_FIELD_NAMES: [&str; 16] = [
     "version",
     "organization",
     "model",
@@ -629,6 +629,7 @@ pub const DOCUMENT_FIELD_NAMES: [&str; 15] = [
     "audit",
     "goals",
     "approval_timeout_seconds",
+    "retention_days",
     "reasoning_effort",
     "max_output_tokens",
     "providers",
@@ -749,6 +750,8 @@ pub(super) struct Document {
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     approval_timeout_seconds: Field<u64>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
+    retention_days: Field<u32>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
     reasoning_effort: Field<qq_provider::ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     max_output_tokens: Field<u32>,
@@ -852,6 +855,13 @@ impl Document {
             )
         {
             return Err(ConfigError::LiteralSecretForbidden {
+                origin: origin.clone(),
+            });
+        }
+        if self.retention_days.is_present()
+            && matches!(origin.kind(), SourceKind::Project | SourceKind::Remote)
+        {
+            return Err(ConfigError::RetentionOutsideUserConfig {
                 origin: origin.clone(),
             });
         }
@@ -1022,6 +1032,9 @@ impl Document {
         }
         if self.approval_timeout_seconds.is_present() {
             touched.push(ConfigKey::ApprovalTimeout);
+        }
+        if self.retention_days.is_present() {
+            touched.push(ConfigKey::Retention);
         }
         if self.providers.is_present() {
             touched.push(ConfigKey::Providers);
@@ -1407,6 +1420,7 @@ pub(super) struct MergeState {
     audit: Option<AuditPatch>,
     goals: GoalsConfig,
     approval_timeout_seconds: Option<u64>,
+    retention_days: Option<u32>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
@@ -1466,6 +1480,7 @@ impl MergeState {
                 audit: None,
                 goals: GoalsConfig::default(),
                 approval_timeout_seconds: None,
+                retention_days: None,
                 reasoning_effort: None,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
                 providers,
@@ -1507,6 +1522,14 @@ impl MergeState {
         }
         if document.approval_timeout_seconds.is_present() {
             self.provenance.approval_timeout = Some(source.clone());
+        }
+        match document.retention_days {
+            Field::Missing => {}
+            Field::Set(days) => self.retention_days = Some(days),
+            Field::Clear => self.retention_days = None,
+        }
+        if document.retention_days.is_present() {
+            self.provenance.retention = Some(source.clone());
         }
         if let Some(incoming) = document
             .policy
@@ -2150,6 +2173,15 @@ impl MergeState {
             }
             Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
         };
+        let retention = match self.retention_days {
+            None => None,
+            Some(days) if days == 0 || days > MAX_RETENTION_DAYS => {
+                return Err(ConfigError::InvalidRetention { days });
+            }
+            Some(days) => Some(std::time::Duration::from_secs(
+                u64::from(days) * 24 * 60 * 60,
+            )),
+        };
         let goals = self.goals.finish(self.policy.goal_ceilings)?;
         Ok(ClientSnapshot {
             organization: self.organization,
@@ -2159,6 +2191,7 @@ impl MergeState {
             delegation,
             audit,
             approval_timeout,
+            retention,
             reasoning_effort: self.reasoning_effort,
             max_output_tokens: self.max_output_tokens,
             providers: self.providers,
@@ -2188,6 +2221,7 @@ impl ClientSnapshot {
             audit: self.audit,
             goals: self.goals,
             approval_timeout: self.approval_timeout,
+            retention: self.retention,
             reasoning_effort: self.reasoning_effort,
             max_output_tokens: self.max_output_tokens,
             providers: self.providers,

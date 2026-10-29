@@ -282,6 +282,7 @@ pub(super) fn execute_command(
     origin: CommandOrigin,
 ) -> Result<AppliedCommand, SessionRuntimeError> {
     let request_json = serde_json::to_string(&command)?;
+    restoring_command(connection, command_id, &request_json)?;
     if let Some((stored_request, stored_receipt)) = connection
         .query_row(
             "SELECT request_json, receipt_json FROM commands WHERE id = ?1",
@@ -1704,7 +1705,7 @@ pub(super) fn execute_command(
                 store_id,
                 workspace_id,
                 session_id,
-                command_id,
+                Some(command_id),
                 now,
             )?;
             (
@@ -1752,7 +1753,7 @@ pub(super) fn execute_command(
                     store_id,
                     workspace_id,
                     session_id,
-                    command_id,
+                    Some(command_id),
                     now,
                 )?;
                 cursor = event.cursor;
@@ -1769,6 +1770,9 @@ pub(super) fn execute_command(
                 },
                 false,
             )
+        }
+        SessionCommand::UndoWorkspace { .. } => {
+            return Err(SessionRuntimeError::CONSTRAINT);
         }
         SessionCommand::CompactSession { session_id } => {
             let workspace_id = session_workspace(&transaction, session_id)?;
@@ -2062,7 +2066,7 @@ pub(super) fn delete_idle_session(
     store_id: StoreId,
     workspace_id: WorkspaceId,
     session_id: SessionId,
-    command_id: CommandId,
+    command_id: Option<CommandId>,
     now: u64,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let state = transaction
@@ -2166,7 +2170,7 @@ pub(super) fn delete_idle_session(
     }
     let deleted = append_event(
         transaction,
-        EventContext::for_session(store_id, workspace_id, session_id, Some(command_id), now),
+        EventContext::for_session(store_id, workspace_id, session_id, command_id, now),
         SessionEvent::SessionDeleted { session_id },
     )?;
     let Some(parent_id) = parent_id else {
@@ -2175,11 +2179,239 @@ pub(super) fn delete_idle_session(
     let session = load_session_summary(transaction, parent_id)?;
     append_event(
         transaction,
-        EventContext::for_session(store_id, workspace_id, parent_id, Some(command_id), now),
+        EventContext::for_session(store_id, workspace_id, parent_id, command_id, now),
         SessionEvent::SessionUpdated {
             session: Box::new(session),
         },
     )
+}
+
+pub(super) struct ExpiredSessions {
+    pub(super) cursors: Vec<EventCursor>,
+    pub(super) resume_after: Option<(u64, i64)>,
+}
+
+pub(super) fn expire_idle_sessions(
+    connection: &mut Connection,
+    store_id: StoreId,
+    cutoff_ms: u64,
+    after: Option<(u64, i64)>,
+    now: u64,
+) -> Result<ExpiredSessions, SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    let (after_ms, after_rowid) = after.unwrap_or((0, i64::MIN));
+    let mut statement = transaction.prepare(
+        "SELECT id, workspace_id, updated_at_ms, rowid FROM sessions
+         WHERE status = 'idle' AND updated_at_ms < ?1
+           AND (updated_at_ms, rowid) > (?2, ?3)
+           AND active_run_id IS NULL AND preparing_run_id IS NULL AND queued_prompts = 0
+           AND NOT EXISTS (SELECT 1 FROM session_goals g WHERE g.session_id = sessions.id AND g.live = 1)
+         ORDER BY updated_at_ms, rowid
+         LIMIT ?4",
+    )?;
+    let candidates = statement
+        .query_map(
+            params![
+                cutoff_ms,
+                after_ms,
+                after_rowid,
+                MAX_EXPIRED_SESSIONS_PER_PASS
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    let full = candidates.len() == MAX_EXPIRED_SESSIONS_PER_PASS as usize;
+    let mut cursors = Vec::new();
+    let mut last = None;
+    for (session, workspace, updated_at_ms, rowid) in candidates {
+        last = Some((updated_at_ms, rowid));
+        let session_id: SessionId = parse_id(&session)?;
+        let workspace_id: WorkspaceId = parse_id(&workspace)?;
+        match delete_idle_session(&transaction, store_id, workspace_id, session_id, None, now) {
+            Ok(event) => cursors.push(event.cursor),
+            Err(SessionRuntimeError::SessionActive) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    transaction.commit()?;
+    Ok(ExpiredSessions {
+        cursors,
+        resume_after: last.filter(|_| full),
+    })
+}
+
+pub(super) fn recorded_receipt(
+    connection: &Connection,
+    command_id: CommandId,
+    command: &SessionCommand,
+) -> Result<Option<CommandReceipt>, SessionRuntimeError> {
+    let stored = connection
+        .query_row(
+            "SELECT request_json, receipt_json FROM commands WHERE id = ?1",
+            [command_id.to_string()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    match stored {
+        None => Ok(None),
+        Some((request, receipt)) if request == serde_json::to_string(command)? => {
+            Ok(Some(serde_json::from_str(&receipt)?))
+        }
+        Some(_) => Err(SessionRuntimeError::IdempotencyConflict),
+    }
+}
+
+pub(super) fn paths_overlap_sql(left: &str, right: &str) -> String {
+    let separator = std::path::MAIN_SEPARATOR;
+    let contains = |outer: &str, inner: &str| {
+        format!(
+            "substr({inner}, 1, length(rtrim({outer}, '{separator}')) + 1) = rtrim({outer}, '{separator}') || '{separator}'"
+        )
+    };
+    format!(
+        "({left} = {right} OR {} OR {})",
+        contains(left, right),
+        contains(right, left)
+    )
+}
+
+fn restoring_command(
+    connection: &Connection,
+    command_id: CommandId,
+    request_json: &str,
+) -> Result<(), SessionRuntimeError> {
+    let reserved: Option<String> = connection
+        .query_row(
+            "SELECT request_json FROM temp.restoring_paths WHERE command_id = ?1",
+            [command_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match reserved {
+        None => Ok(()),
+        Some(reserved) if reserved == request_json => Err(SessionRuntimeError::WorkspaceBusy),
+        Some(_) => Err(SessionRuntimeError::IdempotencyConflict),
+    }
+}
+
+pub(super) enum WorkspaceRestore {
+    Replayed(CommandReceipt),
+    Started(String),
+}
+
+pub(super) fn begin_workspace_restore(
+    connection: &mut Connection,
+    command_id: CommandId,
+    command: &SessionCommand,
+) -> Result<WorkspaceRestore, SessionRuntimeError> {
+    let SessionCommand::UndoWorkspace { workspace_id, .. } = command else {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    };
+    if let Some(receipt) = recorded_receipt(connection, command_id, command)? {
+        return Ok(WorkspaceRestore::Replayed(receipt));
+    }
+    let request_json = serde_json::to_string(command)?;
+    restoring_command(connection, command_id, &request_json)?;
+    let command_count: u32 = connection
+        .prepare_cached("SELECT value FROM metadata WHERE key = 'command_count'")
+        .and_then(|mut statement| statement.query_row([], |row| row.get::<_, String>(0)))?
+        .parse()
+        .map_err(|_| SessionRuntimeError::CODEC)?;
+    if command_count >= MAX_COMMANDS_WITH_CONTROL_HEADROOM {
+        return Err(SessionRuntimeError::CommandLimitReached);
+    }
+    let transaction = store::begin_unit(connection)?;
+    let workspace = workspace_id.to_string();
+    let path: String = transaction
+        .query_row(
+            "SELECT path FROM workspaces WHERE id = ?1",
+            [&workspace],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(SessionRuntimeError::WorkspaceNotFound)?;
+    let busy: bool = transaction.query_row(
+        &format!(
+            "WITH overlapping(id) AS (SELECT id FROM workspaces o WHERE {})
+         SELECT EXISTS(SELECT 1 FROM temp.restoring_paths rp WHERE {})
+             OR EXISTS(SELECT 1 FROM sessions s WHERE s.workspace_id IN (SELECT id FROM overlapping)
+                 AND (s.status != 'idle' OR s.active_run_id IS NOT NULL
+                      OR s.preparing_run_id IS NOT NULL OR s.queued_prompts != 0))
+             OR EXISTS(SELECT 1 FROM runs r JOIN sessions s ON s.id = r.session_id
+                 WHERE s.workspace_id IN (SELECT id FROM overlapping)
+                   AND (r.status IN ('queued', 'running') OR r.check_acknowledgment_pending = 1))
+             OR EXISTS(SELECT 1 FROM session_goals g JOIN sessions s ON s.id = g.session_id
+                 WHERE s.workspace_id IN (SELECT id FROM overlapping) AND g.live = 1
+                   AND json_extract(g.payload_json, '$.status.type') = 'active')",
+            paths_overlap_sql("o.path", "?1"),
+            paths_overlap_sql("rp.path", "?1")
+        ),
+        [&path],
+        |row| row.get(0),
+    )?;
+    if busy {
+        return Err(SessionRuntimeError::WorkspaceBusy);
+    }
+    transaction.execute(
+        "INSERT INTO temp.restoring_paths(path, command_id, request_json) VALUES (?1, ?2, ?3)",
+        params![&path, command_id.to_string(), request_json],
+    )?;
+    transaction.commit()?;
+    Ok(WorkspaceRestore::Started(path))
+}
+
+pub(super) fn record_workspace_restore(
+    connection: &mut Connection,
+    store_id: StoreId,
+    command_id: CommandId,
+    command: &SessionCommand,
+    outcome: CommandOutcome,
+) -> Result<CommandReceipt, SessionRuntimeError> {
+    let SessionCommand::UndoWorkspace { workspace_id, .. } = command else {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    };
+    let transaction = store::begin_unit(connection)?;
+    let receipt = CommandReceipt {
+        command_id,
+        committed_through: EventCursor {
+            store_id,
+            workspace_id: *workspace_id,
+            sequence: workspace_sequence(&transaction, *workspace_id)?,
+        },
+        outcome,
+    };
+    transaction.execute(
+        "INSERT INTO commands(id, request_json, receipt_json) VALUES (?1, ?2, ?3)",
+        params![
+            command_id.to_string(),
+            serde_json::to_string(command)?,
+            serde_json::to_string(&receipt)?
+        ],
+    )?;
+    transaction
+        .prepare_cached(
+            "UPDATE metadata SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+             WHERE key = 'command_count'",
+        )
+        .and_then(|mut statement| statement.execute([]))?;
+    transaction.commit()?;
+    Ok(receipt)
+}
+
+pub(super) fn clear_workspace_restore(
+    connection: &Connection,
+    path: &str,
+) -> Result<(), SessionRuntimeError> {
+    connection.execute("DELETE FROM temp.restoring_paths WHERE path = ?1", [path])?;
+    Ok(())
 }
 
 pub(super) fn ensure_workspace(

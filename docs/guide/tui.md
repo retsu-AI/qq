@@ -54,6 +54,7 @@ below works the same either way.
 | jump to the next session that needs you | `Ctrl-G` | |
 | delete the highlighted session in the list (confirms) | `Ctrl-D` | |
 | delete every empty session | | `/prune` |
+| restore files to before the newest run changed them | | `/undo` |
 
 \* `Esc` focuses the parent only when nothing else claims it. An open
 picker, palette, or overlay (`/models`, `/sessions`, `Ctrl-K`, …) closes
@@ -190,6 +191,11 @@ container) and whether `qq undo` can restore this workspace. They also show
 before the first session exists. To isolate the agent, see
 [Running unattended](running-unattended.md).
 
+`/undo` restores the newest run's snapshot of this workspace through the
+server, which refuses while any run in the workspace is active, queued or due
+from a goal, and starts none until the restore finishes. `qq undo NAME`
+restores an older one.
+
 It disappears as soon as you send your first prompt and never shows for a
 second session; those read `Ask QQ to begin this session.` instead. When the
 configured provider still needs a credential, that remedy is printed above
@@ -282,6 +288,7 @@ searchable palette that runs the highlighted command on `Enter`.
 | compact session context | `/compact` |  |
 | undo the newest compaction | `/rollback` |  |
 | delete every empty session | `/prune` |  |
+| restore files to before the newest run changed them | `/undo` |  |
 | focus the parent session |  | `Esc` |
 | focus the first child session |  | `Alt-Down` |
 | focus the next sibling session |  | `Alt-Right` |

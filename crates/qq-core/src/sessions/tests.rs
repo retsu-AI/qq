@@ -1343,6 +1343,7 @@ async fn approval_harness_with_authority(
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
             approval_timeout,
+            retention: None,
             grant_authority,
         },
         Arc::new(ApprovalLoader {

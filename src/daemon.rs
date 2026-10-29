@@ -156,8 +156,9 @@ pub async fn host(
         cli::HOST_BUILD,
         overrides.approved_read_images.clone(),
     )?;
-    let approval_timeout = approval_timeout(&factory).await?;
-    let handler = Arc::new(runtime::RuntimeHandler::open_owned(factory, approval_timeout).await?);
+    let (approval_timeout, retention) = server_wide_settings(&factory).await?;
+    let handler =
+        Arc::new(runtime::RuntimeHandler::open_owned(factory, approval_timeout, retention).await?);
     let identity = handler.server_identity(None);
     let mut server = match reservation.start(handler.clone(), identity) {
         Ok(server) => server,
@@ -203,9 +204,9 @@ async fn take_host_lock(paths: &server::ServerPaths) -> Result<HostLock, Box<dyn
     }
 }
 
-async fn approval_timeout(
+async fn server_wide_settings(
     factory: &runtime::RuntimeFactory,
-) -> Result<Option<Duration>, Box<dyn Error>> {
+) -> Result<(Option<Duration>, Option<Duration>), Box<dyn Error>> {
     let request = server_config_request(&config::LoadRequest::from_process_env(
         neutral_directory(),
         None,
@@ -215,7 +216,9 @@ async fn approval_timeout(
         factory
             .load_for_client(&request)
             .ok()
-            .and_then(|snapshot| snapshot.approval_timeout())
+            .map_or((None, None), |snapshot| {
+                (snapshot.approval_timeout(), snapshot.retention())
+            })
     })
     .await?)
 }

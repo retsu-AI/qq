@@ -690,6 +690,40 @@ impl Store {
         .await
     }
 
+    pub(super) async fn begin_workspace_restore(
+        &self,
+        command_id: CommandId,
+        command: SessionCommand,
+    ) -> Result<commands::WorkspaceRestore, SessionRuntimeError> {
+        self.call_write(Priority::Control, move |connection| {
+            commands::begin_workspace_restore(connection, command_id, &command)
+        })
+        .await
+    }
+
+    pub(super) async fn record_workspace_restore(
+        &self,
+        command_id: CommandId,
+        command: SessionCommand,
+        outcome: CommandOutcome,
+    ) -> Result<CommandReceipt, SessionRuntimeError> {
+        let store_id = self.store_id;
+        self.call_write(Priority::AwaitControl, move |connection| {
+            commands::record_workspace_restore(connection, store_id, command_id, &command, outcome)
+        })
+        .await
+    }
+
+    pub(super) async fn clear_workspace_restore(
+        &self,
+        path: String,
+    ) -> Result<(), SessionRuntimeError> {
+        self.call(Priority::AwaitControl, move |connection| {
+            commands::clear_workspace_restore(connection, &path)
+        })
+        .await
+    }
+
     pub(super) async fn command_with_admission(
         &self,
         command_id: CommandId,
@@ -1026,6 +1060,19 @@ impl Store {
 
     pub(super) fn has_goals(&self) -> bool {
         self.inner.goals_present.load(Ordering::Acquire)
+    }
+
+    pub(super) async fn expire_idle_sessions(
+        &self,
+        cutoff_ms: u64,
+        after: Option<(u64, i64)>,
+        now: u64,
+    ) -> Result<commands::ExpiredSessions, SessionRuntimeError> {
+        let store_id = self.store_id;
+        self.call_after_group(Priority::AwaitControl, move |connection| {
+            commands::expire_idle_sessions(connection, store_id, cutoff_ms, after, now)
+        })
+        .await
     }
 
     pub(super) async fn drive_goals(

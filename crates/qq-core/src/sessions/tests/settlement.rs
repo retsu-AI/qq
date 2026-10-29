@@ -1982,6 +1982,7 @@ async fn queues_follow_ups_without_reordering_conversation_context() {
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
+            retention: None,
             grant_authority: None,
         },
         Arc::new(CapturingLoader {
@@ -2054,6 +2055,7 @@ async fn follow_up_after_an_empty_completed_turn_reaches_the_provider() {
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
+            retention: None,
             grant_authority: None,
         },
         Arc::new(EmptyThenTextLoader {
@@ -3312,6 +3314,7 @@ async fn schedules_ready_sessions_fairly() {
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
+            retention: None,
             grant_authority: None,
         },
         Arc::new(FairnessLoader {

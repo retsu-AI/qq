@@ -562,7 +562,7 @@ fn deleting_child_persists_deleted_then_refreshed_parent_projection() {
         store_id,
         workspace_id,
         child_id,
-        command_id,
+        Some(command_id),
         17,
     )
     .unwrap();

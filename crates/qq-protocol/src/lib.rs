@@ -79,13 +79,13 @@ pub use workspaces::{
     MAX_WORKSPACE_PAGE, WorkspaceCatalog, WorkspaceCatalogCursor, WorkspaceCatalogRequest,
 };
 
-pub const PROTOCOL_VERSION: u16 = 41;
+pub const PROTOCOL_VERSION: u16 = 42;
 
 pub const SNAPSHOT_REQUIRED_SSE_EVENT: &str = "snapshot_required";
 
 pub const MAX_TURN_RETRIES: u16 = 5;
 
-pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 27] = [
+pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 28] = [
     "/goal",
     "/btw",
     "/ask",
@@ -108,6 +108,7 @@ pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 27] = [
     "/compact",
     "/rollback",
     "/prune",
+    "/undo",
     "/mouse",
     "/attention",
     "/changes",

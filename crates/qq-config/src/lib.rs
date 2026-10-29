@@ -45,6 +45,7 @@ pub const MAX_MCP_CALL_TIMEOUT_SECONDS: u64 = 600;
 pub const DEFAULT_MCP_MAX_CONCURRENT_CALLS: u32 = 4;
 pub const MAX_MCP_MAX_CONCURRENT_CALLS: u32 = 64;
 pub const MAX_APPROVAL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
+pub const MAX_RETENTION_DAYS: u32 = 3_650;
 
 pub const ENVIRONMENT_VARIABLES: [&str; 4] = [
     "QQ_CONFIG",
@@ -1262,6 +1263,7 @@ pub enum ConfigKey {
     Audit,
     Goals,
     ApprovalTimeout,
+    Retention,
     ReasoningEffort,
     MaxOutputTokens,
     Providers,
@@ -1316,6 +1318,7 @@ pub struct ConfigProvenance {
     delegation: Option<SourceIdentity>,
     audit: Option<SourceIdentity>,
     approval_timeout: Option<SourceIdentity>,
+    retention: Option<SourceIdentity>,
     reasoning_effort: Option<SourceIdentity>,
     max_output_tokens: Option<SourceIdentity>,
     providers: BTreeMap<String, SourceIdentity>,
@@ -1367,6 +1370,11 @@ impl ConfigProvenance {
     #[must_use]
     pub const fn approval_timeout(&self) -> Option<&SourceIdentity> {
         self.approval_timeout.as_ref()
+    }
+
+    #[must_use]
+    pub const fn retention(&self) -> Option<&SourceIdentity> {
+        self.retention.as_ref()
     }
 
     #[must_use]
@@ -1431,6 +1439,7 @@ pub struct ConfigSnapshot {
     audit: AuditConfig,
     goals: GoalsConfig,
     approval_timeout: Option<std::time::Duration>,
+    retention: Option<std::time::Duration>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
@@ -1452,6 +1461,7 @@ pub struct ClientSnapshot {
     audit: AuditConfig,
     goals: GoalsConfig,
     approval_timeout: Option<std::time::Duration>,
+    retention: Option<std::time::Duration>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
@@ -1482,6 +1492,11 @@ impl ClientSnapshot {
     #[must_use]
     pub const fn approval_timeout(&self) -> Option<std::time::Duration> {
         self.approval_timeout
+    }
+
+    #[must_use]
+    pub const fn retention(&self) -> Option<std::time::Duration> {
+        self.retention
     }
 
     #[must_use]
@@ -1803,6 +1818,11 @@ impl ConfigSnapshot {
     }
 
     #[must_use]
+    pub const fn retention(&self) -> Option<std::time::Duration> {
+        self.retention
+    }
+
+    #[must_use]
     pub fn organization(&self) -> Option<&str> {
         self.organization.as_deref()
     }
@@ -2055,6 +2075,12 @@ pub enum ConfigError {
     },
     #[error("approval timeout is invalid: {0}")]
     InvalidApprovalTimeout(String),
+    #[error("retention_days must be between 1 and {MAX_RETENTION_DAYS}, found {days}")]
+    InvalidRetention { days: u32 },
+    #[error(
+        "retention_days applies to the whole session store; set it in user or managed configuration, not {origin}"
+    )]
+    RetentionOutsideUserConfig { origin: SourceIdentity },
     #[error("managed policy {rule} was violated: {message}")]
     PolicyViolation { rule: &'static str, message: String },
     #[error("TUI settings are invalid: {message}")]

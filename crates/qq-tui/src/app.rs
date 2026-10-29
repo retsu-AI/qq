@@ -255,6 +255,7 @@ enum PendingIntent {
         session_id: SessionId,
     },
     Prune,
+    Undo,
 }
 
 pub(crate) struct App {
@@ -597,6 +598,26 @@ impl App {
                             }
                             CommandOutcome::SessionsPruned { deleted, .. } => {
                                 self.set_warning(format!("deleted {deleted} empty sessions"));
+                            }
+                            CommandOutcome::WorkspaceUndone {
+                                before,
+                                changes_total,
+                                head_moved,
+                                ..
+                            } => {
+                                let files = match changes_total {
+                                    0 => "nothing had changed".to_owned(),
+                                    1 => "restored 1 file".to_owned(),
+                                    total => format!("restored {total} files"),
+                                };
+                                let head = if *head_moved {
+                                    "; HEAD moved since, so only files were restored"
+                                } else {
+                                    ""
+                                };
+                                self.set_warning(format!(
+                                    "{files}{head}; qq undo {before} reverses it"
+                                ));
                             }
                             _ => {}
                         }
@@ -1107,7 +1128,9 @@ impl App {
                 .flat_map(|session| session.tool_calls.iter().flatten())
                 .find(|tool_call| tool_call.id == *tool_call_id)
                 .map(|tool_call| tool_call.session_id),
-            Some(PendingIntent::Create | PendingIntent::Prune) | None => self.focused(),
+            Some(PendingIntent::Create | PendingIntent::Prune | PendingIntent::Undo) | None => {
+                self.focused()
+            }
         };
         match intent {
             Some(PendingIntent::Side { session_id, text })
@@ -1528,6 +1551,7 @@ impl App {
                 effects
             }
             Command::PruneSessions => self.request_prune_confirmation(),
+            Command::UndoWorkspace => self.undo_workspace(),
             Command::ShowAttention => self.show_workspace_view(View::Attention),
             Command::ShowChanges => self.show_workspace_view(View::Changes),
             Command::CursorUp => Effects::changed_now(self.move_transcript_cursor(false)),
@@ -2686,7 +2710,8 @@ impl App {
                 | PendingIntent::Delete { .. }
                 | PendingIntent::Side { .. }
                 | PendingIntent::CancelSide { .. }
-                | PendingIntent::Prune => None,
+                | PendingIntent::Prune
+                | PendingIntent::Undo => None,
             })
     }
 

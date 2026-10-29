@@ -2895,3 +2895,67 @@ async fn model_fallback_provenance_survives_commands_and_run_reservation() {
     }
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn retention_deletes_idle_sessions_older_than_the_cutoff_when_the_runtime_opens() {
+    let directory = test_directory();
+    let database = directory.path().join("sessions.sqlite3");
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(database.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let CommandOutcome::SessionCreated { session_id: stale } =
+        create_session(&runtime, workspace_id, None).await.outcome
+    else {
+        panic!("unexpected receipt")
+    };
+    let created = create_session(&runtime, workspace_id, None).await;
+    let CommandOutcome::SessionCreated { session_id: fresh } = created.outcome else {
+        panic!("unexpected receipt")
+    };
+    runtime.shutdown().await.unwrap();
+    drop(runtime);
+    Connection::open(&database)
+        .unwrap()
+        .execute(
+            "UPDATE sessions SET updated_at_ms = 1 WHERE id = ?1",
+            [stale.to_string()],
+        )
+        .unwrap();
+
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(database.clone())
+            .with_retention(Some(Duration::from_secs(30 * 24 * 60 * 60))),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let deleted = events.next().await.unwrap().unwrap();
+    assert!(
+        matches!(deleted.event, SessionEvent::SessionDeleted { session_id } if session_id == stale),
+        "{deleted:?}"
+    );
+    assert_eq!(deleted.caused_by, None);
+    let snapshot = runtime
+        .snapshot(SnapshotRequest::new(workspace_id, None, 8, 8))
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot
+            .sessions
+            .iter()
+            .map(|session| session.id)
+            .collect::<Vec<_>>(),
+        [fresh]
+    );
+    runtime.shutdown().await.unwrap();
+}

@@ -1,0 +1,22 @@
+{
+  "command_id": "65656565656565656565656565656565",
+  "command": {
+    "type": "set_goal",
+    "session_id": "03030303030303030303030303030303",
+    "objective": "Implement billing migration",
+    "check": {
+      "command": "cargo test -p billing",
+      "timeout_ms": 1000
+    },
+    "check_approval": "once",
+    "budget": {
+      "max_goal_runs": 200,
+      "deadline_ms": 1800000000000,
+      "per_run": {
+        "max_model_turns": 256
+      }
+    },
+    "expected": null,
+    "replace": false
+  }
+}

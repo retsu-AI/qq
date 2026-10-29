@@ -906,6 +906,7 @@ async fn session_command(
         | SessionCommand::SetSessionEffort { .. }
         | SessionCommand::DeleteSession { .. }
         | SessionCommand::PruneSessions { .. }
+        | SessionCommand::UndoWorkspace { .. }
         | SessionCommand::CompactSession { .. }
         | SessionCommand::RollbackCompaction { .. }
         | SessionCommand::SetGoal { .. }
@@ -2570,6 +2571,10 @@ mod tests {
             },
             SessionCommandKind::DeleteSession => SessionCommand::DeleteSession { session_id },
             SessionCommandKind::PruneSessions => SessionCommand::PruneSessions { workspace_id },
+            SessionCommandKind::UndoWorkspace => SessionCommand::UndoWorkspace {
+                workspace_id,
+                snapshot: None,
+            },
             SessionCommandKind::CompactSession => SessionCommand::CompactSession { session_id },
             SessionCommandKind::RollbackCompaction => {
                 SessionCommand::RollbackCompaction { session_id }
