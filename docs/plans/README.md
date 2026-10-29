@@ -1,5 +1,7 @@
 # v0.1.10: fewer disruptions
 
+The next release, v0.1.11, changes only the TUI: [v0.1.11 plan](0.1.11.md).
+
 The goal for v0.1.10 is that an ordinary coding task runs to a verified
 result without the agent stalling, asking for help it doesn't need, or
 fighting its own environment. This replaces the core stabilization plan,
