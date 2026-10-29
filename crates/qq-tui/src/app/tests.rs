@@ -889,6 +889,46 @@ fn session_picker_prunes_empty_sessions_after_a_confirm() {
 }
 
 #[test]
+fn undo_sends_the_workspace_command_and_reports_how_to_reverse_it() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let workspace_id = app.workspace_id.unwrap();
+    app.composer.text = "/undo".to_owned();
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    let Some(ClientRequest::Command(request)) = requests.into_iter().next() else {
+        panic!("expected the undo command")
+    };
+    assert_eq!(
+        request.command,
+        SessionCommand::UndoWorkspace {
+            workspace_id,
+            snapshot: None,
+        }
+    );
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Ok(qq_protocol::CommandReceipt {
+            command_id: request.command_id,
+            committed_through: fixtures::cursor(2),
+            outcome: CommandOutcome::WorkspaceUndone {
+                workspace_id,
+                snapshot: "run".to_owned(),
+                before: "undo-1".to_owned(),
+                changes: vec!["M\ta.txt".to_owned(), "D\tb.txt".to_owned()],
+                changes_total: 2,
+                head_moved: false,
+            },
+        }),
+    });
+    assert_eq!(
+        app.status.as_deref(),
+        Some("restored 2 files; qq undo undo-1 reverses it")
+    );
+}
+
+#[test]
 fn session_deleted_event_drops_state_and_refocuses_a_neighbor() {
     let mut initial = snapshot();
     let deleted = initial.sessions[0].id;

@@ -8844,3 +8844,57 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
         }
     }
 }
+
+#[tokio::test]
+async fn a_due_goal_waits_for_a_workspace_restore_and_blocks_starting_one() {
+    let (_directory, store, parent) = model_goal_claim(false).await;
+    let session = parent.identity.session_id;
+    let workspace_id = parent.identity.workspace_id;
+    store
+        .finish_run(
+            &parent,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .begin_workspace_restore(
+                CommandId::generate().unwrap(),
+                SessionCommand::UndoWorkspace {
+                    workspace_id,
+                    snapshot: None,
+                },
+            )
+            .await,
+        Err(SessionRuntimeError::WorkspaceBusy)
+    ));
+    store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "INSERT INTO temp.restoring_paths(path, command_id, request_json)
+                 SELECT path, ?2, '{}' FROM workspaces WHERE id = ?1",
+                [
+                    workspace_id.to_string(),
+                    CommandId::generate().unwrap().to_string(),
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.queue_due_goals(now_ms()).await.unwrap();
+    let pending = store
+        .call(Priority::Control, move |connection| {
+            Ok(crate::sessions::goals::load_live(connection, session)?
+                .unwrap()
+                .pending_run_id)
+        })
+        .await
+        .unwrap();
+    assert_eq!(pending, None);
+    assert!(store.reserve_next_run(false).await.unwrap().is_none());
+    store.close().await.unwrap();
+}

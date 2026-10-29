@@ -2568,7 +2568,7 @@ async fn execute_started_run(
                         biased;
                         _ = stop.wait_for(|cancelled| *cancelled) => true,
                         () = tool_cancellation.cancelled() => true,
-                        () = snapshot_workspace(&claimed) => false,
+                        () = snapshot_workspace(&claimed, inner.retention) => false,
                     };
                     if cancelled {
                         continue;
@@ -3265,10 +3265,10 @@ async fn execute_started_run(
     }
 }
 
-async fn snapshot_workspace(claimed: &ClaimedRun) {
+async fn snapshot_workspace(claimed: &ClaimedRun, retention: Option<Duration>) {
     let workspace = Path::new(&claimed.workspace);
     let run = claimed.identity.run_id;
-    match crate::undo::snapshot(workspace, crate::undo::SnapshotKind::Run(run)).await {
+    match crate::undo::snapshot(workspace, crate::undo::SnapshotKind::Run(run), retention).await {
         Ok(Some(snapshot)) => {
             tracing::debug!(%run, commit = %snapshot.commit, "workspace snapshot recorded");
         }

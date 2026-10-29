@@ -188,7 +188,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 41);
+    assert_eq!(PROTOCOL_VERSION, 42);
     let catalog_cursor = qq_protocol::WorkspaceCatalogCursor {
         store_id: StoreId::from_bytes([1; 16]),
         workspace_id: WorkspaceId::from_bytes([2; 16]),
@@ -494,6 +494,16 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
         ),
     );
+    check(
+        "command_undo_workspace",
+        &command(
+            0x28,
+            SessionCommand::UndoWorkspace {
+                workspace_id: WorkspaceId::from_bytes([2; 16]),
+                snapshot: Some("3f9a".to_owned()),
+            },
+        ),
+    );
 
     let receipt = |byte: u8, sequence: u64, outcome: CommandOutcome| CommandReceipt {
         command_id: CommandId::from_bytes([byte; 16]),
@@ -559,6 +569,21 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             CommandOutcome::SessionEffortSet {
                 session_id,
                 effort: Some(qq_reasoning::ReasoningEffort::Xhigh),
+            },
+        ),
+    );
+    check(
+        "receipt_workspace_undone",
+        &receipt(
+            0x28,
+            15,
+            CommandOutcome::WorkspaceUndone {
+                workspace_id: WorkspaceId::from_bytes([2; 16]),
+                snapshot: "3f9a1c".to_owned(),
+                before: "undo-1700000000000".to_owned(),
+                changes: vec!["M\ttracked.txt".to_owned(), "D\tcreated.txt".to_owned()],
+                changes_total: 2,
+                head_moved: false,
             },
         ),
     );

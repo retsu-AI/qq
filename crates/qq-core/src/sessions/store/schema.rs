@@ -99,6 +99,11 @@ pub(in crate::sessions) fn open_database(
              PRAGMA synchronous = FULL;
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;
+             CREATE TEMP TABLE IF NOT EXISTS restoring_paths (
+                 path TEXT PRIMARY KEY,
+                 command_id TEXT NOT NULL UNIQUE,
+                 request_json TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS metadata (
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL

@@ -60,6 +60,62 @@ pub enum UndoError {
     Index(#[source] std::io::Error),
     #[error("the workspace path cannot be recorded in a snapshot: {0}")]
     UnrecordablePath(PathBuf),
+    #[error("no snapshot named {0}; qq undo --list shows them")]
+    UnknownSnapshot(String),
+    #[error("{0} matches more than one snapshot; give more of the name")]
+    AmbiguousSnapshot(String),
+    #[error(
+        "no run has been snapshotted in {0}; snapshots are taken before a run first changes files in a Git work tree"
+    )]
+    NoRunSnapshot(PathBuf),
+}
+
+#[derive(Debug, Clone, Error)]
+#[error(transparent)]
+pub struct UndoFailure(std::sync::Arc<UndoError>);
+
+impl UndoFailure {
+    #[must_use]
+    pub fn cause(&self) -> &UndoError {
+        &self.0
+    }
+}
+
+impl From<UndoError> for UndoFailure {
+    fn from(error: UndoError) -> Self {
+        Self(std::sync::Arc::new(error))
+    }
+}
+
+impl PartialEq for UndoFailure {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0) || self.0.to_string() == other.0.to_string()
+    }
+}
+
+impl Eq for UndoFailure {}
+
+pub fn select<'a>(
+    snapshots: &'a [Snapshot],
+    directory: &Path,
+    name: Option<&str>,
+) -> Result<&'a Snapshot, UndoError> {
+    match name {
+        Some(name) => {
+            let mut matching = snapshots
+                .iter()
+                .filter(|snapshot| snapshot.name.starts_with(name));
+            match (matching.next(), matching.next()) {
+                (Some(one), None) => Ok(one),
+                (None, _) => Err(UndoError::UnknownSnapshot(name.to_owned())),
+                (Some(_), Some(_)) => Err(UndoError::AmbiguousSnapshot(name.to_owned())),
+            }
+        }
+        None => snapshots
+            .iter()
+            .find(|snapshot| matches!(snapshot.kind, SnapshotKind::Run(_)))
+            .ok_or_else(|| UndoError::NoRunSnapshot(directory.to_owned())),
+    }
 }
 
 struct Repository {
@@ -68,12 +124,21 @@ struct Repository {
     git_dir: PathBuf,
 }
 
-pub async fn snapshot(workspace: &Path, kind: SnapshotKind) -> Result<Option<Snapshot>, UndoError> {
+pub async fn snapshot(
+    workspace: &Path,
+    kind: SnapshotKind,
+    retention: Option<Duration>,
+) -> Result<Option<Snapshot>, UndoError> {
     let Some(repository) = discover(workspace).await? else {
         return Ok(None);
     };
     let snapshot = record(&repository, kind).await?;
-    prune(&repository.workspace, MAX_SNAPSHOTS).await?;
+    let cutoff_ms = retention.map(|retention| {
+        snapshot
+            .created_at_ms
+            .saturating_sub(u64::try_from(retention.as_millis()).unwrap_or(u64::MAX))
+    });
+    prune(&repository.workspace, MAX_SNAPSHOTS, cutoff_ms).await?;
     Ok(Some(snapshot))
 }
 
@@ -147,7 +212,7 @@ pub async fn restore(target: &Snapshot) -> Result<Restored, UndoError> {
     let changes = diff.lines().map(str::to_owned).collect();
     let head_moved =
         (before.head != target.head).then(|| (target.head.clone(), before.head.clone()));
-    prune(&repository.workspace, MAX_SNAPSHOTS).await?;
+    prune(&repository.workspace, MAX_SNAPSHOTS, None).await?;
     Ok(Restored {
         before,
         changes,
@@ -330,8 +395,12 @@ async fn all_snapshots(directory: &Path) -> Result<Vec<Snapshot>, UndoError> {
     Ok(snapshots)
 }
 
-async fn prune(directory: &Path, keep: usize) -> Result<(), UndoError> {
-    for stale in all_snapshots(directory).await?.into_iter().skip(keep) {
+async fn prune(directory: &Path, keep: usize, cutoff_ms: Option<u64>) -> Result<(), UndoError> {
+    let snapshots = all_snapshots(directory).await?;
+    for (index, stale) in snapshots.into_iter().enumerate() {
+        if index < keep && cutoff_ms.is_none_or(|cutoff| stale.created_at_ms >= cutoff) {
+            continue;
+        }
         let reference = format!("{SNAPSHOT_REF_PREFIX}{}", stale.name);
         git(
             directory,
@@ -792,6 +861,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -820,7 +890,7 @@ mod tests {
         let index_before = git(root, &["ls-files", "--stage"]);
 
         let run = qq_protocol::RunId::generate().unwrap();
-        let taken = snapshot(root, SnapshotKind::Run(run))
+        let taken = snapshot(root, SnapshotKind::Run(run), None)
             .await
             .unwrap()
             .unwrap();
@@ -873,6 +943,7 @@ mod tests {
         let taken = snapshot(
             &workspace,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -899,6 +970,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -922,6 +994,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -938,7 +1011,9 @@ mod tests {
         let plain = fixture.path().join("plain");
         std::fs::create_dir(&plain).unwrap();
         assert_eq!(
-            snapshot(&plain, SnapshotKind::BeforeUndo).await.unwrap(),
+            snapshot(&plain, SnapshotKind::BeforeUndo, None)
+                .await
+                .unwrap(),
             None
         );
         assert!(matches!(list(&plain).await, Err(UndoError::NotGit(_))));
@@ -955,8 +1030,30 @@ mod tests {
             record(&repository, SnapshotKind::Run(run)).await.unwrap();
         }
         assert_eq!(all_snapshots(root).await.unwrap().len(), 4);
-        prune(root, 2).await.unwrap();
+        prune(root, 2, None).await.unwrap();
         assert_eq!(all_snapshots(root).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn pruning_drops_snapshots_older_than_the_cutoff() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        let repository = discover(root).await.unwrap().unwrap();
+        let mut taken = Vec::new();
+        for _ in 0..2 {
+            let run = qq_protocol::RunId::generate().unwrap();
+            taken.push(record(&repository, SnapshotKind::Run(run)).await.unwrap());
+        }
+        let oldest = taken
+            .iter()
+            .map(|snapshot| snapshot.created_at_ms)
+            .min()
+            .unwrap();
+        prune(root, MAX_SNAPSHOTS, Some(oldest)).await.unwrap();
+        assert_eq!(all_snapshots(root).await.unwrap().len(), 2);
+        prune(root, MAX_SNAPSHOTS, Some(u64::MAX)).await.unwrap();
+        assert!(all_snapshots(root).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -971,6 +1068,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -996,6 +1094,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -1029,6 +1128,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -1056,6 +1156,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -1080,6 +1181,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -1105,6 +1207,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -1129,6 +1232,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -1173,6 +1277,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -1212,6 +1317,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -1243,6 +1349,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -1277,7 +1384,7 @@ mod tests {
         assert!(marker.exists());
         std::fs::remove_file(&marker).unwrap();
 
-        let taken = snapshot(root, SnapshotKind::BeforeUndo)
+        let taken = snapshot(root, SnapshotKind::BeforeUndo, None)
             .await
             .unwrap()
             .unwrap();
@@ -1313,6 +1420,7 @@ mod tests {
         let taken = snapshot(
             &root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -1335,6 +1443,7 @@ mod tests {
         let taken = snapshot(
             root,
             SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
         )
         .await
         .unwrap()
@@ -1358,7 +1467,7 @@ mod tests {
         let fixture = directory();
         let root = fixture.path();
         repository(root);
-        snapshot(root, SnapshotKind::BeforeUndo)
+        snapshot(root, SnapshotKind::BeforeUndo, None)
             .await
             .unwrap()
             .unwrap();

@@ -442,6 +442,11 @@ pub enum SessionCommand {
     PruneSessions {
         workspace_id: WorkspaceId,
     },
+    UndoWorkspace {
+        workspace_id: WorkspaceId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot: Option<String>,
+    },
     CompactSession {
         session_id: SessionId,
     },
@@ -473,6 +478,7 @@ impl SessionCommand {
             Self::SetSessionEffort { .. } => SessionCommandKind::SetSessionEffort,
             Self::DeleteSession { .. } => SessionCommandKind::DeleteSession,
             Self::PruneSessions { .. } => SessionCommandKind::PruneSessions,
+            Self::UndoWorkspace { .. } => SessionCommandKind::UndoWorkspace,
             Self::CompactSession { .. } => SessionCommandKind::CompactSession,
             Self::RollbackCompaction { .. } => SessionCommandKind::RollbackCompaction,
         }
@@ -499,12 +505,13 @@ pub enum SessionCommandKind {
     SetSessionEffort,
     DeleteSession,
     PruneSessions,
+    UndoWorkspace,
     CompactSession,
     RollbackCompaction,
 }
 
 impl SessionCommandKind {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::AcknowledgeCheckInterruption,
         Self::SetGoal,
         Self::GoalControl,
@@ -522,6 +529,7 @@ impl SessionCommandKind {
         Self::SetSessionEffort,
         Self::DeleteSession,
         Self::PruneSessions,
+        Self::UndoWorkspace,
         Self::CompactSession,
         Self::RollbackCompaction,
     ];
@@ -547,6 +555,7 @@ impl SessionCommandKind {
             | Self::RespondToolApproval
             | Self::DeleteSession
             | Self::PruneSessions
+            | Self::UndoWorkspace
             | Self::RollbackCompaction => false,
         }
     }
@@ -571,6 +580,7 @@ impl SessionCommandKind {
             Self::SetSessionEffort => "/v1/sessions/effort",
             Self::DeleteSession => "/v1/sessions/delete",
             Self::PruneSessions => "/v1/sessions/prune",
+            Self::UndoWorkspace => "/v1/workspaces/undo",
             Self::CompactSession => "/v1/sessions/compact",
             Self::RollbackCompaction => "/v1/sessions/compact/rollback",
         }
@@ -679,6 +689,14 @@ pub enum CommandOutcome {
     SessionsPruned {
         workspace_id: WorkspaceId,
         deleted: u32,
+    },
+    WorkspaceUndone {
+        workspace_id: WorkspaceId,
+        snapshot: String,
+        before: String,
+        changes: Vec<String>,
+        changes_total: u32,
+        head_moved: bool,
     },
     CompactionQueued {
         session_id: SessionId,
@@ -2044,6 +2062,7 @@ mod tests {
                 SessionCommandKind::RespondToolApproval,
                 SessionCommandKind::DeleteSession,
                 SessionCommandKind::PruneSessions,
+                SessionCommandKind::UndoWorkspace,
                 SessionCommandKind::RollbackCompaction,
             ]
         );
@@ -3577,7 +3596,7 @@ mod tests {
         invalid["resolved_model"]["version"] = serde_json::json!(0);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
 
-        assert_eq!(crate::PROTOCOL_VERSION, 41);
+        assert_eq!(crate::PROTOCOL_VERSION, 42);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
@@ -3683,7 +3702,7 @@ mod tests {
             serde_json::to_value(SessionCommandKind::SetSessionProfile).unwrap(),
             "set_session_profile"
         );
-        assert_eq!(SessionCommandKind::ALL.len(), 19);
+        assert_eq!(SessionCommandKind::ALL.len(), 20);
 
         let create = SessionCommand::CreateSession {
             workspace_id: id(2),

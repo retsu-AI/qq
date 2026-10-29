@@ -537,13 +537,17 @@ async fn prepare_headless(
         ),
         organization: snapshot.organization().map(str::to_owned),
     };
-    let handler = runtime::RuntimeHandler::open_owned(factory, snapshot.approval_timeout())
-        .await
-        .map_err(|error| match error {
-            runtime::RuntimeHandlerError::Build(error) => invalid(error.to_string()),
-            runtime::RuntimeHandlerError::Config(error) => invalid(error.to_string()),
-            runtime::RuntimeHandlerError::Sessions(error) => harness(error.to_string()),
-        })?;
+    let handler = runtime::RuntimeHandler::open_owned(
+        factory,
+        snapshot.approval_timeout(),
+        snapshot.retention(),
+    )
+    .await
+    .map_err(|error| match error {
+        runtime::RuntimeHandlerError::Build(error) => invalid(error.to_string()),
+        runtime::RuntimeHandlerError::Config(error) => invalid(error.to_string()),
+        runtime::RuntimeHandlerError::Sessions(error) => harness(error.to_string()),
+    })?;
 
     let goal = args.goal.map(|objective| headless::GoalInvocation {
         objective,
@@ -720,6 +724,7 @@ async fn interactive(
         models,
         unauthenticated_providers,
         approval_timeout,
+        retention,
     } = model_state;
     let models = models
         .into_iter()
@@ -763,9 +768,13 @@ async fn interactive(
                 }
                 server::ReserveOutcome::Reserved(reservation) => {
                     let handler = Arc::new(
-                        runtime::RuntimeHandler::open_owned(factory.clone(), approval_timeout)
-                            .await
-                            .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
+                        runtime::RuntimeHandler::open_owned(
+                            factory.clone(),
+                            approval_timeout,
+                            retention,
+                        )
+                        .await
+                        .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
                     );
                     let identity = handler.server_identity(None);
                     let server = match reservation.start(handler.clone(), identity) {
@@ -1163,6 +1172,7 @@ fn config_command(
                     "delegation" => snapshot.provenance().delegation(),
                     "audit" => snapshot.provenance().audit(),
                     "approval_timeout" => snapshot.provenance().approval_timeout(),
+                    "retention" => snapshot.provenance().retention(),
                     "reasoning_effort" => snapshot.provenance().reasoning_effort(),
                     "max_output_tokens" => snapshot.provenance().max_output_tokens(),
                     _ if field.starts_with("goals.") => field
@@ -1269,6 +1279,12 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
         snapshot
             .approval_timeout()
             .map_or("none".to_owned(), |timeout| timeout.as_secs().to_string())
+    );
+    println!(
+        "retention_days: {}",
+        snapshot.retention().map_or("none".to_owned(), |retention| {
+            (retention.as_secs() / (24 * 60 * 60)).to_string()
+        })
     );
     println!(
         "reasoning_effort: {}",

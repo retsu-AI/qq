@@ -50,39 +50,17 @@ async fn execute(args: UndoArgs, out: &mut impl Write) -> Result<ExitCode, Comma
         }
         return Ok(ExitCode::SUCCESS);
     }
-    let target = match &args.snapshot {
-        Some(name) => {
-            let matching: Vec<&Snapshot> = snapshots
-                .iter()
-                .filter(|snapshot| snapshot.name.starts_with(name.as_str()))
-                .collect();
-            match matching.as_slice() {
-                [one] => *one,
-                [] => {
-                    eprintln!("error: no snapshot named {name}; qq undo --list shows them");
-                    return Ok(ExitCode::from(2));
-                }
-                _ => {
-                    eprintln!(
-                        "error: {name} matches more than one snapshot; give more of the name"
-                    );
-                    return Ok(ExitCode::from(2));
-                }
-            }
+    let target = match undo::select(&snapshots, &directory, args.snapshot.as_deref()) {
+        Ok(target) => target,
+        Err(
+            error @ (UndoError::UnknownSnapshot(_)
+            | UndoError::AmbiguousSnapshot(_)
+            | UndoError::NoRunSnapshot(_)),
+        ) => {
+            eprintln!("error: {error}");
+            return Ok(ExitCode::from(2));
         }
-        None => match snapshots
-            .iter()
-            .find(|snapshot| matches!(snapshot.kind, SnapshotKind::Run(_)))
-        {
-            Some(newest) => newest,
-            None => {
-                eprintln!(
-                    "error: no run has been snapshotted in {}; snapshots are taken before a run first changes files in a Git work tree",
-                    directory.display()
-                );
-                return Ok(ExitCode::from(2));
-            }
-        },
+        Err(error) => return Err(error.into()),
     };
     let restored = undo::restore(target).await?;
     writeln!(

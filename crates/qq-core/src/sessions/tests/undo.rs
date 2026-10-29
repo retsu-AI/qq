@@ -252,3 +252,512 @@ async fn a_duration_budget_does_not_wait_for_the_snapshot() {
     assert_eq!(exhaustion.limit, qq_protocol::BudgetLimitKind::Duration);
     assert!(!root.join("created.txt").exists());
 }
+
+async fn undo_workspace(
+    harness: &ScriptedRunsHarness,
+    command_id: CommandId,
+) -> Result<CommandReceipt, SessionRuntimeError> {
+    harness
+        .runtime
+        .command(
+            command_id,
+            SessionCommand::UndoWorkspace {
+                workspace_id: harness.workspace_id,
+                snapshot: None,
+            },
+        )
+        .await
+}
+
+#[tokio::test]
+async fn undo_workspace_restores_the_newest_run_and_replays_its_receipt() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::Full,
+        vec![vec![
+            ("read_file", r#"{"path":"tracked.txt"}"#.to_owned()),
+            (
+                "write_file",
+                r#"{"path":"tracked.txt","content":"agent\n"}"#.to_owned(),
+            ),
+        ]],
+    )
+    .await;
+    workspace_repository(&harness);
+    let root = harness.workspace_path.clone();
+    let run_id = submit_prompt(&harness, "change things").await;
+    collect_until_run_finished(&mut harness.events, run_id).await;
+    assert_eq!(
+        std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+        "agent\n"
+    );
+
+    let command_id = CommandId::generate().unwrap();
+    let receipt = undo_workspace(&harness, command_id).await.unwrap();
+    let CommandOutcome::WorkspaceUndone {
+        workspace_id,
+        snapshot,
+        before,
+        changes,
+        changes_total,
+        head_moved,
+    } = &receipt.outcome
+    else {
+        panic!("unexpected outcome {:?}", receipt.outcome);
+    };
+    assert_eq!(*workspace_id, harness.workspace_id);
+    assert_eq!(*snapshot, run_id.to_string());
+    assert!(before.starts_with("undo-"), "{before}");
+    assert_eq!(changes, &["M\ttracked.txt".to_owned()]);
+    assert_eq!(*changes_total, 1);
+    assert!(!head_moved);
+    assert_eq!(
+        std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+        "base\n"
+    );
+
+    std::fs::write(root.join("tracked.txt"), "edited again\n").unwrap();
+    assert_eq!(undo_workspace(&harness, command_id).await.unwrap(), receipt);
+    assert_eq!(
+        std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+        "edited again\n"
+    );
+}
+
+#[tokio::test]
+async fn undo_workspace_is_refused_while_a_run_is_queued_or_active() {
+    let mut harness = approval_harness(ApprovalMode::Ask, "__test_mutate", "{}", 1, None).await;
+    collect_until_approval_requested(&mut harness.events).await;
+    let refused = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::UndoWorkspace {
+                workspace_id: harness.workspace_id,
+                snapshot: None,
+            },
+        )
+        .await;
+    assert_eq!(refused, Err(SessionRuntimeError::WorkspaceBusy));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn no_run_starts_in_the_workspace_until_its_restore_finishes() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::Full,
+        vec![
+            vec![(
+                "write_file",
+                r#"{"path":"created.txt","content":"new\n"}"#.to_owned(),
+            )],
+            vec![],
+        ],
+    )
+    .await;
+    workspace_repository(&harness);
+    let root = harness.workspace_path.clone();
+    let first = submit_prompt(&harness, "change things").await;
+    collect_until_run_finished(&mut harness.events, first).await;
+
+    let held = HeldSnapshot::new(&root);
+    let undo = {
+        let runtime = harness.runtime.clone();
+        let workspace_id = harness.workspace_id;
+        tokio::spawn(async move {
+            runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::UndoWorkspace {
+                        workspace_id,
+                        snapshot: None,
+                    },
+                )
+                .await
+        })
+    };
+    held.entered().await;
+
+    assert_eq!(
+        undo_workspace(&harness, CommandId::generate().unwrap()).await,
+        Err(SessionRuntimeError::WorkspaceBusy)
+    );
+    let second = submit_prompt(&harness, "after the undo").await;
+    assert!(
+        harness
+            .runtime
+            .inner
+            .store
+            .reserve_next_run(false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let session = harness.session_id.to_string();
+    let reserved: (Option<String>, Option<String>) = harness
+        .runtime
+        .inner
+        .store
+        .call(store::Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT preparing_run_id, active_run_id FROM sessions WHERE id = ?1",
+                [session],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(reserved, (None, None));
+
+    drop(held);
+    let receipt = undo.await.unwrap().unwrap();
+    assert!(matches!(
+        receipt.outcome,
+        CommandOutcome::WorkspaceUndone { .. }
+    ));
+    assert!(!root.join("created.txt").exists());
+    let observed = collect_until_run_finished(&mut harness.events, second).await;
+    assert!(matches!(
+        finished_outcome(&observed, second),
+        Some(RunOutcome::Completed)
+    ));
+}
+
+#[tokio::test]
+async fn a_failed_undo_leaves_the_workspace_free_to_run() {
+    let mut harness = scripted_runs_harness(ApprovalMode::Full, vec![vec![]]).await;
+    workspace_repository(&harness);
+    let refused = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::UndoWorkspace {
+                workspace_id: harness.workspace_id,
+                snapshot: Some("missing".to_owned()),
+            },
+        )
+        .await;
+    let Err(error) = refused else {
+        panic!("expected a failed undo, got {refused:?}");
+    };
+    assert_eq!(
+        error.to_string(),
+        "undo failed: no snapshot named missing; qq undo --list shows them"
+    );
+    let cause = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<undo::UndoFailure>())
+        .map(undo::UndoFailure::cause);
+    assert!(
+        matches!(cause, Some(undo::UndoError::UnknownSnapshot(name)) if name == "missing"),
+        "{cause:?}"
+    );
+    let run_id = submit_prompt(&harness, "still works").await;
+    let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+    assert!(matches!(
+        finished_outcome(&observed, run_id),
+        Some(RunOutcome::Completed)
+    ));
+}
+
+#[tokio::test]
+async fn undo_is_refused_while_a_prompt_is_queued() {
+    let (_directory, store, claimed) = claimed_store_fixture().await;
+    store
+        .finish_run(
+            &claimed,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let undo = SessionCommand::UndoWorkspace {
+        workspace_id: claimed.identity.workspace_id,
+        snapshot: None,
+    };
+    store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id: claimed.identity.session_id,
+                input: vec![InputPart::text("queued")],
+                limits: qq_protocol::RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .begin_workspace_restore(CommandId::generate().unwrap(), undo)
+            .await,
+        Err(SessionRuntimeError::WorkspaceBusy)
+    ));
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn undo_in_a_subdirectory_never_restores_the_parent_workspace() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::Full,
+        vec![vec![
+            ("read_file", r#"{"path":"tracked.txt"}"#.to_owned()),
+            (
+                "write_file",
+                r#"{"path":"tracked.txt","content":"agent\n"}"#.to_owned(),
+            ),
+        ]],
+    )
+    .await;
+    workspace_repository(&harness);
+    let root = harness.workspace_path.clone();
+    let run_id = submit_prompt(&harness, "change things").await;
+    collect_until_run_finished(&mut harness.events, run_id).await;
+    let nested = root.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let (nested_id, _) = resolve_workspace(&harness.runtime, &nested).await;
+    let refused = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::UndoWorkspace {
+                workspace_id: nested_id,
+                snapshot: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(SessionRuntimeError::UndoFailed(failure)) if matches!(failure.cause(), undo::UndoError::NoRunSnapshot(_))),
+        "{refused:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+        "agent\n"
+    );
+}
+
+#[tokio::test]
+async fn undo_is_refused_while_a_run_is_active_in_a_nested_workspace() {
+    let mut harness = approval_harness(ApprovalMode::Ask, "__test_mutate", "{}", 1, None).await;
+    collect_until_approval_requested(&mut harness.events).await;
+    let nested_path = harness
+        .runtime
+        .workspace_path(harness.workspace_id)
+        .await
+        .unwrap();
+    let parent = Path::new(&nested_path).parent().unwrap().to_owned();
+    let (parent_id, _) = resolve_workspace(&harness.runtime, &parent).await;
+    let refused = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::UndoWorkspace {
+                workspace_id: parent_id,
+                snapshot: None,
+            },
+        )
+        .await;
+    assert_eq!(refused, Err(SessionRuntimeError::WorkspaceBusy));
+}
+
+#[tokio::test]
+async fn no_run_starts_in_a_nested_workspace_while_its_parent_restores() {
+    let (_directory, store, claimed) = claimed_store_fixture().await;
+    store
+        .finish_run(
+            &claimed,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let workspace = claimed.workspace.clone();
+    let parent = Path::new(&workspace)
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    store
+        .call(store::Priority::Control, move |connection| {
+            connection.execute(
+                "INSERT INTO temp.restoring_paths(path, command_id, request_json)
+                 VALUES (?1, ?2, '{}')",
+                [parent, CommandId::generate().unwrap().to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id: claimed.identity.session_id,
+                input: vec![InputPart::text("queued")],
+                limits: qq_protocol::RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(store.reserve_next_run(false).await.unwrap().is_none());
+    store.close().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_is_not_held_behind_a_stalled_restore() {
+    let mut harness = scripted_runs_harness(ApprovalMode::Full, one_write()).await;
+    workspace_repository(&harness);
+    let root = harness.workspace_path.clone();
+    let first = submit_prompt(&harness, "change things").await;
+    collect_until_run_finished(&mut harness.events, first).await;
+    let held = HeldSnapshot::new(&root);
+    let undo = {
+        let runtime = harness.runtime.clone();
+        let workspace_id = harness.workspace_id;
+        tokio::spawn(async move {
+            runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::UndoWorkspace {
+                        workspace_id,
+                        snapshot: None,
+                    },
+                )
+                .await
+        })
+    };
+    held.entered().await;
+    let shutdown = {
+        let runtime = harness.runtime.clone();
+        tokio::spawn(async move { runtime.shutdown().await })
+    };
+    let mut flag = harness.runtime.inner.shutdown.subscribe();
+    flag.wait_for(|stopped| *stopped).await.unwrap();
+    assert!(!shutdown.is_finished());
+    drop(held);
+    assert!(matches!(
+        undo.await.unwrap().unwrap().outcome,
+        CommandOutcome::WorkspaceUndone { .. }
+    ));
+    shutdown.await.unwrap().unwrap();
+}
+
+#[test]
+fn undo_changes_stay_within_the_byte_budget_and_keep_the_total() {
+    let changes: Vec<String> = (0..256)
+        .map(|index| format!("M\t{}/{index}.rs", "nested/directory".repeat(5)))
+        .collect();
+    let bounded = super::super::runtime::bounded_changes(&changes);
+    let encoded = serde_json::to_string(&bounded).unwrap();
+    assert!(encoded.len() <= 8 * 1024, "{}", encoded.len());
+    assert!(!bounded.is_empty() && bounded.len() < changes.len());
+    assert_eq!(bounded, changes[..bounded.len()]);
+}
+
+#[test]
+fn overlap_matches_whole_components_with_the_platform_separator() {
+    let separator = std::path::MAIN_SEPARATOR;
+    let root = separator.to_string();
+    let repo = format!("{separator}repo");
+    let nested = format!("{separator}repo{separator}sub");
+    let sibling = format!("{separator}repository");
+    let connection = Connection::open_in_memory().unwrap();
+    let overlap = |left: &str, right: &str| -> bool {
+        connection
+            .query_row(
+                &format!(
+                    "SELECT {}",
+                    super::super::commands::paths_overlap_sql("?1", "?2")
+                ),
+                [left, right],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert!(overlap(&repo, &repo));
+    assert!(overlap(&repo, &nested));
+    assert!(overlap(&nested, &repo));
+    assert!(overlap(&root, &nested));
+    assert!(overlap(&nested, &root));
+    assert!(!overlap(&repo, &sibling));
+    assert!(!overlap(&sibling, &nested));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_restoring_command_id_is_reserved_against_every_other_request() {
+    let mut harness = scripted_runs_harness(ApprovalMode::Full, one_write()).await;
+    workspace_repository(&harness);
+    let root = harness.workspace_path.clone();
+    let first = submit_prompt(&harness, "change things").await;
+    collect_until_run_finished(&mut harness.events, first).await;
+    let other = test_directory();
+    let (other_id, _) = resolve_workspace(&harness.runtime, other.path()).await;
+
+    let command_id = CommandId::generate().unwrap();
+    let undo = SessionCommand::UndoWorkspace {
+        workspace_id: harness.workspace_id,
+        snapshot: None,
+    };
+    let held = HeldSnapshot::new(&root);
+    let restoring = {
+        let runtime = harness.runtime.clone();
+        let undo = undo.clone();
+        tokio::spawn(async move { runtime.command(command_id, undo).await })
+    };
+    held.entered().await;
+
+    assert_eq!(
+        harness
+            .runtime
+            .command(
+                command_id,
+                SessionCommand::UndoWorkspace {
+                    workspace_id: other_id,
+                    snapshot: None,
+                },
+            )
+            .await,
+        Err(SessionRuntimeError::IdempotencyConflict)
+    );
+    assert_eq!(
+        harness
+            .runtime
+            .command(
+                command_id,
+                SessionCommand::CreateSession {
+                    workspace_id: other_id,
+                    parent_id: None,
+                    model: ModelSelection {
+                        model_is_fallback: false,
+                        model: Some("test/model".to_owned()),
+                        max_output_tokens: Some(256),
+                        organization: None,
+                    },
+                    approval_mode: ApprovalMode::Full,
+                    profile: AgentProfileId::default(),
+                    reasoning_effort: None,
+                    correlation: Correlation::default(),
+                },
+            )
+            .await,
+        Err(SessionRuntimeError::IdempotencyConflict)
+    );
+    assert_eq!(
+        harness.runtime.command(command_id, undo.clone()).await,
+        Err(SessionRuntimeError::WorkspaceBusy)
+    );
+
+    drop(held);
+    let receipt = restoring.await.unwrap().unwrap();
+    assert!(!root.join("created.txt").exists());
+    assert_eq!(
+        harness.runtime.command(command_id, undo).await.unwrap(),
+        receipt
+    );
+}

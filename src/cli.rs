@@ -593,9 +593,9 @@ pub enum ConfigCommand {
     Show,
     /// Explain the source of one effective field.
     Explain {
-        /// Field name: model, worker_model, organization, delegation, audit,
-        /// approval_timeout, reasoning_effort, max_output_tokens, pack.ID,
-        /// profile.NAME, provider.NAME, tui.theme, or tui.bindings.ACTION.
+        #[arg(
+            help = "Field name: model, worker_model, organization, delegation, audit, approval_timeout, retention, reasoning_effort, max_output_tokens, pack.ID, profile.NAME, provider.NAME, tui.theme, or tui.bindings.ACTION."
+        )]
         field: String,
     },
 }

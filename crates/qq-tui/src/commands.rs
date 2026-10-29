@@ -49,6 +49,7 @@ pub(crate) enum Command {
     OpenEditor,
     SearchHistory,
     PruneSessions,
+    UndoWorkspace,
     Quit,
 }
 
@@ -102,7 +103,7 @@ macro_rules! spec {
     (@action $action:ident) => { Some(Action::$action) };
 }
 
-pub(crate) const COMMANDS: [CommandSpec; 44] = [
+pub(crate) const COMMANDS: [CommandSpec; 45] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -174,6 +175,13 @@ pub(crate) const COMMANDS: [CommandSpec; 44] = [
         "delete every empty session",
         Session,
         ["/prune"],
+        []
+    ),
+    spec!(
+        UndoWorkspace,
+        "restore files to before the newest run changed them",
+        Session,
+        ["/undo"],
         []
     ),
     spec!(FocusParent, "focus the parent session", Session, [], []),

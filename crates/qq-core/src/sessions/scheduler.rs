@@ -14,6 +14,31 @@ impl Drop for SchedulerStopGuard {
     }
 }
 
+const EXPIRY_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+async fn expire_idle_sessions(inner: &SessionRuntimeInner, retention: Duration) {
+    let now = now_ms();
+    let cutoff = now.saturating_sub(u64::try_from(retention.as_millis()).unwrap_or(u64::MAX));
+    let mut after = None;
+    loop {
+        match inner.store.expire_idle_sessions(cutoff, after, now).await {
+            Ok(expired) => {
+                for cursor in expired.cursors {
+                    inner.notify(cursor);
+                }
+                match expired.resume_after {
+                    Some(next) => after = Some(next),
+                    None => return,
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not delete sessions past retention_days");
+                return;
+            }
+        }
+    }
+}
+
 pub(super) async fn schedule_runs(
     inner: std::sync::Weak<SessionRuntimeInner>,
     mut receiver: mpsc::Receiver<()>,
@@ -22,6 +47,7 @@ pub(super) async fn schedule_runs(
 ) {
     let _stopped = SchedulerStopGuard(stopped);
     let mut next_goal_wake: Option<u64> = None;
+    let mut next_expiry = Some(tokio::time::Instant::now());
     'scheduler: loop {
         let scheduled = tokio::select! {
             biased;
@@ -38,6 +64,12 @@ pub(super) async fn schedule_runs(
                     None=>std::future::pending::<()>().await,
                 }
             } => Some(()),
+            () = async {
+                match next_expiry {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => Some(()),
         };
         if scheduled.is_none() {
             break;
@@ -47,6 +79,14 @@ pub(super) async fn schedule_runs(
         };
         if *shutdown.borrow() || *inner.failed.borrow() {
             break;
+        }
+        if let Some(retention) = inner.retention
+            && next_expiry.is_some_and(|at| at <= tokio::time::Instant::now())
+        {
+            next_expiry = Some(tokio::time::Instant::now() + EXPIRY_INTERVAL);
+            expire_idle_sessions(&inner, retention).await;
+        } else if inner.retention.is_none() {
+            next_expiry = None;
         }
         next_goal_wake = if inner.store.has_goals() {
             let _lifecycle = inner.lifecycle.read().await;

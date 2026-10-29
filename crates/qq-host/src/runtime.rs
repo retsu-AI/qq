@@ -116,6 +116,7 @@ pub struct TuiModelState {
     pub models: Vec<ModelDescriptor>,
     pub unauthenticated_providers: Vec<ProviderRemedy>,
     pub approval_timeout: Option<std::time::Duration>,
+    pub retention: Option<std::time::Duration>,
 }
 
 #[derive(Clone)]
@@ -338,6 +339,7 @@ impl RuntimeFactory {
             models,
             unauthenticated_providers,
             approval_timeout: snapshot.approval_timeout(),
+            retention: snapshot.retention(),
         }
     }
 
@@ -2309,17 +2311,19 @@ pub struct RuntimeHandler {
 impl RuntimeHandler {
     #[cfg(any(test, feature = "test-support"))]
     pub async fn open(factory: RuntimeFactory) -> Result<Self, RuntimeHandlerError> {
-        Self::open_with(factory, None).await
+        Self::open_with(factory, None, None).await
     }
 
     pub async fn open_owned(
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
+        retention: Option<std::time::Duration>,
     ) -> Result<Self, RuntimeHandlerError> {
         factory.validate_isolated_tui_qa_state()?;
         let database_path = factory.inner.config.session_database_path()?;
         let options = SessionRuntimeOptions::new(database_path)
             .with_approval_timeout(approval_timeout)
+            .with_retention(retention)
             .with_grant_authority(Arc::new(factory.clone()));
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
         Ok(Self { durable, factory })
@@ -2329,8 +2333,9 @@ impl RuntimeHandler {
     pub async fn open_with(
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
+        retention: Option<std::time::Duration>,
     ) -> Result<Self, RuntimeHandlerError> {
-        Self::open_owned(factory, approval_timeout).await
+        Self::open_owned(factory, approval_timeout, retention).await
     }
 
     pub fn sessions(&self) -> &SessionRuntime {
@@ -2538,6 +2543,8 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::WorkspaceNotFound
         | SessionRuntimeError::SessionNotFound
         | SessionRuntimeError::SessionActive
+        | SessionRuntimeError::WorkspaceBusy
+        | SessionRuntimeError::UndoFailed(_)
         | SessionRuntimeError::ParentWorkspaceMismatch
         | SessionRuntimeError::RunNotFound
         | SessionRuntimeError::SideQuestionNotFound

@@ -1024,6 +1024,21 @@ impl App {
         )
     }
 
+    pub(super) fn undo_workspace(&mut self) -> Effects {
+        let Some(workspace_id) = self.workspace_id else {
+            self.set_warning("workspace is still connecting".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        self.set_info("restoring the workspace...".to_owned());
+        self.send(
+            PendingIntent::Undo,
+            qq_protocol::SessionCommand::UndoWorkspace {
+                workspace_id,
+                snapshot: None,
+            },
+        )
+    }
+
     pub(super) fn open_history(&mut self) -> Effects {
         let Some(session) = self.focused().and_then(|id| self.sessions.get(&id)) else {
             self.set_info("no session history to search".to_owned());
