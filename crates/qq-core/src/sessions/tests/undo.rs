@@ -1,6 +1,130 @@
 use super::*;
 use crate::undo::{self, SnapshotKind, test_support};
 
+#[tokio::test]
+async fn undo_user_created_child_snapshot_preserves_the_earlier_root_change() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::Full,
+        vec![
+            vec![(
+                "write_file",
+                r#"{"path":"root.txt","content":"root\n"}"#.to_owned(),
+            )],
+            vec![(
+                "write_file",
+                r#"{"path":"child.txt","content":"child\n"}"#.to_owned(),
+            )],
+        ],
+    )
+    .await;
+    workspace_repository(&harness);
+    let root_run = submit_prompt(&harness, "root change").await;
+    collect_until_run_finished(&mut harness.events, root_run).await;
+    let created = create_session_with_mode(
+        &harness.runtime,
+        harness.workspace_id,
+        Some(harness.session_id),
+        ApprovalMode::Full,
+    )
+    .await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("child session created");
+    };
+    let child_run = submit_prompt_to(&harness.runtime, session_id, "child change").await;
+    let observed = collect_until_run_finished(&mut harness.events, child_run).await;
+    assert!(matches!(
+        finished_outcome(&observed, child_run),
+        Some(RunOutcome::Completed)
+    ));
+    let root = &harness.workspace_path;
+    assert_eq!(
+        std::fs::read_to_string(root.join("child.txt")).unwrap(),
+        "child\n"
+    );
+    let snapshots = undo::list(root).await.unwrap();
+    assert_eq!(snapshots.len(), 2, "{snapshots:?}");
+    assert_eq!(snapshots[0].kind, SnapshotKind::Run(child_run));
+    assert_eq!(snapshots[1].kind, SnapshotKind::Run(root_run));
+    let receipt = undo_workspace(&harness, CommandId::generate().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        matches!(receipt.outcome, CommandOutcome::WorkspaceUndone { snapshot, .. } if snapshot == child_run.to_string())
+    );
+    assert!(!root.join("child.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("root.txt")).unwrap(),
+        "root\n"
+    );
+}
+
+#[tokio::test]
+async fn undo_root_snapshot_covers_a_spawned_write_child() {
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests,
+        script: vec![(
+            "write_file",
+            r#"{"path":"child.txt","content":"child\n"}"#.to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let (mut harness, _) = write_child_harness(
+        child,
+        vec![(
+            "spawn_agent",
+            r#"{"task":"write the file","model":"test/child","authority":"write"}"#.to_owned(),
+        )],
+        ApprovalMode::Auto,
+    )
+    .await;
+    let root = harness._directory.path().to_owned();
+    test_support::repository(&root);
+    std::fs::write(root.join(".gitignore"), "sessions.sqlite3*\n").unwrap();
+    let run = submit_prompt_to(&harness.runtime, harness.session_id, "delegate the write").await;
+    let mut observed = collect_until_run_finished(&mut harness.events, run).await;
+    let child_run = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::PromptQueued { session, run, .. }
+                if session.parent_id == Some(harness.session_id) =>
+            {
+                Some(run.id)
+            }
+            _ => None,
+        })
+        .expect("spawned child queued");
+    if finished_outcome(&observed, child_run).is_none() {
+        observed.extend(collect_until_run_finished(&mut harness.events, child_run).await);
+    }
+    assert!(matches!(
+        finished_outcome(&observed, child_run),
+        Some(RunOutcome::Completed)
+    ));
+    assert_eq!(
+        std::fs::read_to_string(root.join("child.txt")).unwrap(),
+        "child\n"
+    );
+    let snapshots = undo::list(&root).await.unwrap();
+    assert_eq!(snapshots.len(), 1, "{snapshots:?}");
+    assert_eq!(snapshots[0].kind, SnapshotKind::Run(run));
+    let receipt = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::UndoWorkspace {
+                workspace_id: harness.workspace_id,
+                snapshot: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(receipt.outcome, CommandOutcome::WorkspaceUndone { snapshot, .. } if snapshot == run.to_string())
+    );
+    assert!(!root.join("child.txt").exists());
+}
+
 fn workspace_repository(harness: &ScriptedRunsHarness) {
     let root = &harness.workspace_path;
     test_support::repository(root);
