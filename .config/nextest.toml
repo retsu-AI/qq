@@ -1,10 +1,14 @@
 # Test runner configuration. `cargo xtask check` and CI drive nextest through
 # these profiles; plain `cargo nextest run` uses `default`.
+experimental = ["setup-scripts"]
+
 [store]
 dir = "target/nextest"
 
-[profile.default]
+[scripts.setup.tmpfs-tmpdir]
+command = { command-line = ".config/nextest-tmpdir.sh", relative-to = "workspace-root" }
 
+[profile.default]
 # Shell-heavy session fixtures compete for processes and SQLite workers.
 # Bound simultaneous test processes instead of amplifying host load.
 test-threads = 8
@@ -15,6 +19,14 @@ final-status-level = "slow"
 failure-output = "final"
 # A test still running after 60 s is reported; after 180 s it is killed.
 slow-timeout = { period = "60s", terminate-after = 3 }
+
+# The session store commits with `synchronous = FULL`; on a disk-backed
+# TMPDIR fsync is most of a session test's wall time (the suite runs about
+# ten times slower). Point TMPDIR at tmpfs where the host has one.
+[[profile.default.scripts]]
+platform = { host = "cfg(target_os = \"linux\")" }
+filter = 'all()'
+setup = 'tmpfs-tmpdir'
 
 # The qq-core session suites are the long tail (7–13 s each alone, several
 # times that under full parallel load). Start them first so they overlap the

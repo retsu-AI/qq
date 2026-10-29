@@ -887,7 +887,7 @@ impl Provider for DeadlineProvider {
                 ProviderEvent::ToolCallStarted { id: "sleep".to_owned(), name: "shell".to_owned() },
                 ProviderEvent::ToolCallArgumentsDelta {
                     id: "sleep".to_owned(),
-                    json: serde_json::json!({"command": "printf before-deadline; sleep 30; printf late > late.txt", "timeout_seconds": 1800}).to_string(),
+                    json: serde_json::json!({"command": "printf before-deadline; : > printed; sleep 30; printf late > late.txt", "timeout_seconds": 1800}).to_string(),
                 },
                 ProviderEvent::ToolCallCompleted { id: "sleep".to_owned() },
                 ProviderEvent::Completed { usage: None },
@@ -962,6 +962,13 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
         .await
         .expect("the process must reach actual spawn")
         .unwrap();
+    // Spawn precedes the shell's first write; expire only after it printed.
+    let printed = directory.path().join("printed");
+    let waited = std::time::Instant::now();
+    while !printed.exists() {
+        assert!(waited.elapsed() < Duration::from_secs(5), "shell never printed");
+        tokio::task::yield_now().await;
+    }
     tokio::time::advance(Duration::from_millis(300)).await;
     let mut tool_started = false;
     let terminal = tokio::time::timeout(Duration::from_secs(2), async {
