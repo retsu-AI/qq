@@ -1506,8 +1506,9 @@ mod watcher_tests {
             super::spawn_watcher(std::time::Instant::now() + std::time::Duration::from_secs(10))
                 .await
                 .unwrap();
-        let status =
-            std::fs::read_to_string(format!("/proc/{}/status", watcher.id().unwrap())).unwrap();
+        let status = tokio::fs::read_to_string(format!("/proc/{}/status", watcher.id().unwrap()))
+            .await
+            .unwrap();
         watcher.start_kill().unwrap();
         watcher.wait().await.unwrap();
         let ignored = status
