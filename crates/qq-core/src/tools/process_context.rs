@@ -260,6 +260,14 @@ impl PreparedLaunch {
         let (child, guard) = {
             let _ = process;
             let mut watcher = super::shell::spawn_watcher(deadline).await?;
+            if cancelled.is_cancelled() {
+                let _ = watcher.start_kill();
+                let _ = watcher.wait().await;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "command startup was cancelled",
+                ));
+            }
             let group = watcher
                 .id()
                 .and_then(|pid| i32::try_from(pid).ok())

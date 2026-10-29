@@ -5288,6 +5288,48 @@ mod tests {
         assert!(!quiet.model_text.contains("hint:"), "{}", quiet.model_text);
     }
 
+    /// The command joins a group its watcher already leads, so nothing the
+    /// command sends its group can reach a watcher still starting up.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_command_starts_in_a_group_its_ready_watcher_leads() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_shell_tool(
+            workspace,
+            r#"{"command":"set -- $(sed 's/.*) //' /proc/$$/stat); echo self:$$ group:$3; grep SigIgn /proc/$3/status"}"#,
+            RunCancellation::new(),
+            None,
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.model_text);
+        let field = |name: &str| {
+            result
+                .model_text
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix(name))
+                .unwrap_or_else(|| panic!("no {name} in {}", result.model_text))
+                .to_owned()
+        };
+        assert_ne!(
+            field("self:"),
+            field("group:"),
+            "the command leads its own group"
+        );
+        let ignored = u64::from_str_radix(
+            result
+                .model_text
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("SigIgn:"))
+                .unwrap()
+                .trim(),
+            16,
+        )
+        .unwrap();
+        let term = 1_u64 << (rustix::process::Signal::TERM.as_raw() - 1);
+        assert_ne!(ignored & term, 0, "the group leader does not ignore TERM");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn shell_timeout_kills_the_whole_process_group() {
