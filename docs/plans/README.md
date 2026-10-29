@@ -145,29 +145,10 @@ recount on a week of v0.1.10 use shows the repeated-error rate below the
 
 ## E. Prompt
 
-Bump `AGENT_PROMPT_VERSION`.
-
-- **Environment.** State it once:
-  - the working directory;
-  - that commands run as the user with network access;
-  - that edits apply immediately;
-  - whether a snapshot exists;
-  - the session's mode;
-  - the fixed stops;
-  - what a denial means.
-
-  Drop "may require user approval" and the "host policy" wording.
-- **Nested instructions.** Shorten the bullet: the root instructions are
-  already loaded, and a nested `AGENTS.md` is read only when editing below
-  it.
-- **Tool descriptions.** They say how to use the tool; the prompt holds
-  policy. Remove the repetition in `spawn_agent`, `read_file`, `exec`,
-  `fetch` and `ask_user`.
-- **Final answer.** Lead with the outcome, keep it short, and cite
-  `path:line`. In Auto, take the next in-scope step instead of offering it.
-- **Golden file.** Add a full-text golden file of the rendered root prompt,
-  refreshed by an environment variable (no new dependency), so prompt
-  changes are reviewed as diffs.
+Shipped in prompt version 27 (PR `feat/plan-e-prompt`): one Environment
+section, policy out of tool descriptions, a shorter nested-instructions
+bullet, a final-answer rule, and the golden file
+`crates/qq-core/tests/golden/root_prompt.txt`.
 
 **Accepted when** the six tasks below show no more offers or questions at
 the end of completed runs than the v0.1.9 baseline, with Claude Opus

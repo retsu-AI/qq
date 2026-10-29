@@ -756,6 +756,12 @@ pub(crate) struct RunCapabilities {
     /// The session this run continues, sent to providers that route a
     /// conversation's requests to one prompt cache. Direct runs have none.
     cache_key: Option<Arc<str>>,
+    /// The session's approval mode, for the prompt's Environment section.
+    /// Direct runs are Auto.
+    mode: ApprovalMode,
+    /// The session layer snapshots the workspace before the run's first
+    /// change. Direct runs take no snapshot.
+    snapshots: bool,
 }
 
 impl RunCapabilities {
@@ -786,6 +792,8 @@ impl RunCapabilities {
             summarizer: None,
             inherited_effects: Vec::new(),
             cache_key: None,
+            mode: ApprovalMode::Auto,
+            snapshots: false,
         }
     }
 
@@ -805,6 +813,14 @@ impl RunCapabilities {
     /// Withholds schemas the `ReadOnly` policy would deny anyway.
     pub(crate) fn read_only(mut self) -> Self {
         self.read_only = true;
+        self
+    }
+
+    /// Marks a session run under `mode`, whose workspace the session layer
+    /// snapshots before the first change.
+    pub(crate) fn in_session(mut self, mode: ApprovalMode) -> Self {
+        self.mode = mode;
+        self.snapshots = true;
         self
     }
 
@@ -956,6 +972,8 @@ impl RunCapabilities {
             summarizer: None,
             inherited_effects: Vec::new(),
             cache_key: None,
+            mode: ApprovalMode::Auto,
+            snapshots: false,
         }
     }
 }
@@ -3033,6 +3051,8 @@ mod tests {
             }),
             guidance: true,
             subagent: None,
+            mode: ApprovalMode::Auto,
+            snapshots: false,
         };
         for capabilities in [
             RunCapabilities::user(None),
@@ -3146,6 +3166,8 @@ mod tests {
                     tools: None,
                     guidance: false,
                     subagent: None,
+                    mode: ApprovalMode::Auto,
+                    snapshots: false,
                 }),
             )
             .collect::<Vec<_>>()
@@ -3268,7 +3290,7 @@ mod tests {
         assert!(system.contains("Do not claim success without evidence"));
         assert!(system.contains("remaining failures and uncertainty honestly"));
         assert!(system.contains("time, token, cost, and safety budgets"));
-        assert!(system.contains("more specific first"));
+        assert!(system.contains("let the more specific one win"));
     }
 
     #[tokio::test]
@@ -9779,6 +9801,7 @@ mod tests {
     #[test]
     fn subagent_prompts_say_a_parent_is_waiting_and_read_children_drop_the_implement_line() {
         const IMPLEMENT: &str = "- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n";
+        const FINAL: &str = "- End with the outcome first, in a few lines: what changed or what you found, how you verified it, and anything left undone. Cite code as path:line. When a next step is within the request, take it instead of offering it.\n";
         let instructions = workspace::WorkspaceInstructions::empty();
         let render = |subagent| {
             runtime::agent_system_prompt(
@@ -9818,6 +9841,13 @@ mod tests {
             let (head, _) = prompt.split_once("\n\nSub-agent:\n").unwrap();
             head.to_owned()
         };
+        // A child's reply shape is in its own section, so the root's
+        // final-answer bullet is dropped; its parent's snapshot covers it and
+        // its mode is bounded by the parent's.
+        let root = root
+            .replacen(FINAL, "", 1)
+            .replacen(" QQ takes no snapshot for this run, so qq undo cannot restore it.", "", 1)
+            .replacen("- Mode: Auto. Calls run without asking anyone, and ask_user gets no answer.", "- Mode: within your parent's authority. A call the parent's mode would not run without a human is denied.", 1);
         assert_eq!(without_section(&write), root);
         assert_eq!(without_section(&read), root.replacen(IMPLEMENT, "", 1).replacen("- Explore only as far as your next action needs. Once you can name the file and the change, make the change.", "- Explore only as far as the next finding needs. Once you can answer the brief, return the evidence.", 1));
     }
@@ -9914,19 +9944,11 @@ mod tests {
         const CONCURRENT: &str = "because sub-agents run concurrently.";
         const CONCURRENT_WITH_YOU: &str =
             "because sub-agents run concurrently with each other and with you.";
-        const BLOCKING_DESCRIPTION: &str = "Delegate one self-contained task to a read-only \
-            sub-agent in this workspace and receive only its final answer. Worth it when the raw \
-            evidence would dwarf the distilled answer and you will not need that evidence \
-            verbatim later; several independent questions can be delegated in parallel. Single \
-            reads, searches, and quick lookups are cheaper inline. The task brief must carry \
-            everything the sub-agent needs: it starts with no other context. Omit model";
-        const BACKGROUND_DESCRIPTION: &str = "Delegate one self-contained task to a read-only \
-            sub-agent in this workspace; only its final answer comes back, usually later as a \
-            runtime notice while you keep working. Worth it when the raw evidence would dwarf the \
-            distilled answer and you will not need that evidence verbatim later; several \
-            independent questions can be delegated in parallel. Single reads, searches, and \
-            quick lookups are cheaper inline. The task brief must carry everything the sub-agent \
-            needs: it starts with no other context. Omit model";
+        // Prompt 27 moves delegation policy out of the description; the
+        // prompt's Delegation section keeps it.
+        const CURRENT_DESCRIPTION: &str = "Start a one-shot read-only sub-agent in this \
+            workspace from a self-contained task brief. It usually runs in the background: the \
+            call returns its id at once, and its final answer arrives later as a runtime notice.";
         const NEW_TASK: &str = "A complete, self-contained brief for the sub-agent: the question \
             to answer, what the answer is for, and the answer shape you want back. The sub-agent \
             starts with no other context and stops once it can answer.";
@@ -9940,12 +9962,24 @@ mod tests {
             None,
             None,
         );
+        // Prompt 27 adds the Environment section and the final-answer
+        // bullet, drops approval wording from the header and command
+        // preference, and shortens nested instruction discovery; undo it.
+        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 27);
+        let environment = prompt.find("\nEnvironment:\n").unwrap()
+            ..prompt.find("\nWorking conventions:\n").unwrap();
+        let mut prompt = prompt;
+        prompt.replace_range(environment, "");
+        let prompt = prompt
+            .replacen("edit_file and write_file change workspace files; shell and exec run commands; ask_user asks the user multiple-choice questions; fetch reads one public http(s) URL (HTML as markdown, JSON formatted); private, link-local and managed-denied hosts are refused.", "edit_file and write_file modify workspace files and may require user approval; shell and exec run commands in the workspace as the user, with the inherited environment and host network, using the task deadline or an earlier explicit timeout. Auto never waits for human approval: a denied call is a tool error, so choose another permitted approach without bypassing the boundary. Ask may require human approval; ask_user asks a bounded multiple-choice question when human input is enabled; in Auto it returns a result telling you to decide without human input; fetch reads one public http(s) URL (HTML as markdown, JSON formatted). Auto needs no per-host approval; Ask requires human approval. Private, link-local and managed-denied hosts are refused.", 1)
+            .replacen("no quoting or globbing surprises. Reserve shell", "no quoting or globbing surprises, and the approval gate sees exact words. Reserve shell", 1)
+            .replacen("- End with the outcome first, in a few lines: what changed or what you found, how you verified it, and anything left undone. Cite code as path:line. When a next step is within the request, take it instead of offering it.\n", "", 1)
+            .replacen("Workspace-root instructions are already loaded. Before editing below the root, find nested AGENTS.md files (CLAUDE.md where there is none) once with search mode=names regex=true query=\"(^|/)(AGENTS|CLAUDE)\\.md$\" (for a target in an ignored directory, add path and include_ignored=true), read those on the path to the target, and let the more specific one win.", "Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query=\"(^|/)(AGENTS|CLAUDE)\\.md$\", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. For a target deeper than 64 directory components, also search its target ancestor at each 64-component boundary with path and include_ignored=true. A partial=depth or depth_limited marker requires these bounded target scopes; cursor pages cannot recover skipped depths. Names discovery reports safe instruction-file symlinks; an unresolved instruction link is a blocker before editing. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions.", 1);
         // Prompt 26 changes execution guidance again; prompt 25 changes
         // write-child guidance (absent here). Prompt 24
         // drops the workspace root from the header; prompt 23
         // changes execution, questions and public-fetch guidance. Undo those
         // declared changes before checking the historical v14 bytes.
-        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 26);
         let prompt = prompt
             .replacen(
                 "operating in a workspace.\n",
@@ -9991,32 +10025,17 @@ mod tests {
         );
         // AB2 widens the cursor bound; AB3 removes the fixed read-limit default.
         // Run-in-place drops the shell and exec `env` argument; long-running
-        // commands add `yield_after_seconds`.
+        // commands add `yield_after_seconds`; prompt 27 moves policy out of
+        // the read_file, exec, ask_user and fetch descriptions.
         // Record the current schema identity separately from the historical prompt.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "18b8c7e06cd2f016433bdf5bd2ee4188b69074a7b732adfdb000d8e28002a248"
+            "d129d3bca9c23c3362687d5bf1bf157c45d978bb69ffbf1ed224355010dcd183"
         );
         let spawn = specs.last().unwrap();
-        assert!(
-            spawn.description().starts_with(BACKGROUND_DESCRIPTION),
-            "{}",
-            spawn.description()
-        );
-        assert_eq!(
-            format!(
-                "{:x}",
-                Sha256::digest(
-                    spawn
-                        .description()
-                        .replacen(BACKGROUND_DESCRIPTION, BLOCKING_DESCRIPTION, 1)
-                        .as_bytes()
-                )
-            ),
-            "09105474547d899bf0bf5346f2c72079425d0f0c236c9a201378a33f0421c5ac"
-        );
+        assert_eq!(spawn.description(), CURRENT_DESCRIPTION);
         let schema = spawn.input_schema().get();
         assert!(schema.contains(NEW_TASK), "{schema}");
         assert_eq!(

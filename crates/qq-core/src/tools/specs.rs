@@ -111,7 +111,7 @@ impl BuiltInTool {
         match self {
             Self::ReadFile => ToolSpec::new(
                 "read_file",
-                "Read a workspace file by line range(s), or get its outline or info. Use instead of cat, head, tail, or sed -n. Prefer one larger read over many small slices; omit limit to fill the byte budget. The header carries the content hash; pass if_changed_since to skip unchanged content.",
+                "Read a workspace file by line range(s), or get its outline or info. Omit limit to fill the byte budget. The header carries the content hash; pass if_changed_since to skip unchanged content.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -244,7 +244,7 @@ impl BuiltInTool {
             ),
             Self::Exec => ToolSpec::new(
                 "exec",
-                "Run one program with an argument list; no shell interpretation (no quoting, globbing, $, or pipes). Prefer it over shell for a single program such as `cargo test -p x` or `python -m pytest tests/x.py`; reserve shell for pipelines. Same environment, timeout, and output rules as shell.",
+                "Run one program with an argument list; no shell interpretation (no quoting, globbing, $, or pipes). Same cwd, environment, timeout, yield_after_seconds and output rules as shell.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -271,7 +271,7 @@ impl BuiltInTool {
             ),
             Self::AskUser => ToolSpec::new(
                 "ask_user",
-                "Ask the user 1-4 questions and wait for their answers. Use only when the task is genuinely ambiguous and a wrong guess would be costly; offer 2-6 concrete options per question, or free_text for open answers.",
+                "Ask the user 1-4 questions and wait for their answers. Give each question 2-6 concrete options, or set free_text for an open answer.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -303,7 +303,7 @@ impl BuiltInTool {
             #[cfg(feature = "tool-fetch")]
             Self::Fetch => ToolSpec::new(
                 "fetch",
-                "Fetch a public http(s) URL (GET, or method=HEAD for headers only). HTML is converted to markdown, JSON is formatted; the body is bounded and spills when long. Private, link-local, and managed-denied hosts are refused.",
+                "Fetch a public http(s) URL (GET, or method=HEAD for headers only). HTML is converted to markdown, JSON is formatted; the body is bounded and spills when long.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -388,7 +388,7 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
             json!({
                 "type": "string",
                 "enum": ["read", "write"],
-                "description": "read (default): read-only workspace access. write: edit files and run commands using Auto within the parent's authority; only one write sub-agent runs at a time. Choose write only for implementation."
+                "description": "read (default): read-only workspace access. write: edit files and run commands within the parent's authority."
             }),
         );
     }
@@ -400,43 +400,33 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
                 "type": "string",
                 "enum": override_routes,
                 "description": if has_roster {
-                    "Exact roster route override. Omit by default and choose by role instead. Set only when the user explicitly requests one of these exact routes; never guess or translate providers."
+                    "Exact roster route override. Omit by default and choose by role instead."
                 } else {
-                    "Exact authenticated provider/model override. Omit by default to use QQ's configured worker model or this session's selected model. Set only when the user explicitly requests one of these exact routes; never guess or translate providers."
+                    "Exact authenticated provider/model override. Omit by default to use QQ's configured worker model or this session's selected model."
                 }
             }),
         );
     }
-    let description = if has_roster {
-        "Delegate one self-contained task to a read-only sub-agent in this workspace; only its \
-         final answer comes back, usually later as a runtime notice while you keep working. Worth \
-         it when the raw evidence would dwarf the distilled answer and you will not need that \
-         evidence verbatim later; several independent questions can be delegated in parallel. \
-         Single reads, searches, and quick lookups are cheaper inline. The task brief must carry \
-         everything the sub-agent needs: it starts with no other context. Choose the sub-agent \
-         by role (see Delegation in the system prompt for each role's route \
-         and relative cost); omit role for the default. Set model only when the user explicitly \
-         requests an exact roster route; never guess, translate, or invent a route."
+    let authority = if delegation.write_children {
+        "sub-agent"
     } else {
-        "Delegate one self-contained task to a read-only sub-agent in this workspace; only its \
-         final answer comes back, usually later as a runtime notice while you keep working. Worth \
-         it when the raw evidence would dwarf the distilled answer and you will not need that \
-         evidence verbatim later; several independent questions can be delegated in parallel. \
-         Single reads, searches, and quick lookups are cheaper inline. The task brief must carry \
-         everything the sub-agent needs: it starts with no other context. Omit model by \
-         default so QQ uses its configured worker model or the current session's \
-         selected model. Set model only when the user explicitly requests an exact provider/model \
-         route listed by this tool; never guess, translate, or invent a route."
+        "read-only sub-agent"
     };
-    let description = if delegation.write_children {
-        format!(
-            "{} Read by default; authority: write enables edits and commands using Auto within the parent's \
-             authority, with one write sub-agent at a time.",
-            description.replacen("to a read-only sub-agent", "to a sub-agent", 1)
-        )
+    let selection = if has_roster {
+        " Choose it by role; omit role for the default."
     } else {
-        description.to_owned()
+        ""
     };
+    let write = if delegation.write_children {
+        " authority: write lets it edit files and run commands."
+    } else {
+        ""
+    };
+    let description = format!(
+        "Start a one-shot {authority} in this workspace from a self-contained task brief. It \
+         usually runs in the background: the call returns its id at once, and its final answer \
+         arrives later as a runtime notice.{selection}{write}"
+    );
     ToolSpec::new(
         SPAWN_AGENT_TOOL,
         description,
