@@ -176,6 +176,8 @@ discovery file. No provider is contacted and nothing is written.
 | `mcp` | `none declared`, or every declared HTTP server's `bearer` resolves | `warn` naming the server, the credential problem, and its remedy (`qq auth set NAME`, export the variable); runs proceed without that server; `skip` when configuration did not load |
 | `server` | `running at ADDR (pid, version)` or `none running; qq starts one on demand` | `warn` when the discovery state is unreadable |
 | `workspace` | the current directory resolves; lists `.qq/config.ron` and `AGENTS.md` when present | `warn` without an `AGENTS.md`; `fail` when the directory does not exist |
+| `environment` | always `ok`; says whether QQ is on the host or in a container, and that commands run as your user with that machine's network and credentials | — |
+| `snapshots` | the workspace is in a Git work tree, so `qq undo` can restore each run | `warn` outside Git or when `git` cannot run |
 | `data` | the data directory is private and writable; shows `sessions.sqlite3` and its size | `fail` when it is not a directory, world-readable, or read-only |
 
 `--json` prints one object:

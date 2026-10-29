@@ -180,7 +180,15 @@ The first session in a workspace opens with a short list in the transcript:
     /approval  choose an approval mode
     /skills    list workspace commands and skills
     @path      mention a file in your prompt
+
+  QQ is on the host: commands run as you, with this machine's network and credentials.
+  Snapshots on: `qq undo` restores the workspace as it was before each run.
 ```
+
+The last two lines say where the agent's commands run (the host, or a
+container) and whether `qq undo` can restore this workspace. They also show
+before the first session exists. To isolate the agent, see
+[Running unattended](running-unattended.md).
 
 It disappears as soon as you send your first prompt and never shows for a
 second session; those read `Ask QQ to begin this session.` instead. When the

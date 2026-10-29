@@ -94,6 +94,9 @@ pub struct TuiOptions {
     /// The canonical workspace root `@` mentions resolve against. `None`
     /// (a remote client without the tree) leaves `@` as literal text.
     pub workspace_root: Option<std::path::PathBuf>,
+    /// Where commands run and whether the workspace has snapshots, one
+    /// sentence per line; the first-run screen shows them under its hints.
+    pub environment: Vec<String>,
 }
 
 /// A provider the configuration admits but that has no credential, and how
@@ -311,6 +314,9 @@ pub(crate) struct App {
     /// Read-only after startup: a credential added while the TUI runs takes
     /// effect at the next launch, like the catalog it gates.
     pub(crate) unauthenticated_providers: Vec<ProviderRemedy>,
+    /// Startup facts the first-run screen states: where commands run and
+    /// whether the workspace has snapshots.
+    pub(crate) environment: Vec<String>,
     /// Profile new sessions are created with. `/profile` with nothing focused
     /// sets it; the server validates the name when the session is created.
     pub profile: AgentProfileId,
@@ -433,6 +439,7 @@ impl App {
             reasoning_effort: None,
             models: options.models,
             unauthenticated_providers: options.unauthenticated_providers,
+            environment: options.environment,
             workspace_id: None,
             workspace_path: String::new(),
             check_interruption: None,
