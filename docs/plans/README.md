@@ -124,27 +124,6 @@ list of stops plus undo is easier to predict.
 - `$ARGUMENTS` is not substituted, the skill's directory is not given, and
   `.agents/skills` is invisible to the model.
 
-## D. Tool calls tell the model how to recover
-
-- Re-measure the top argument errors on a v0.1.9 build with the
-  [run output queries](../runbooks/run-output-queries.md) approach before
-  changing anything. Fix only the shapes that still occur. Likely fixes:
-  - When `ranges` arrives with `offset`/`limit`, prefer `ranges`.
-  - Ignore empty `insert_*` fields next to `old`.
-  - Accept `edits` sent as a JSON string or a single object.
-- Edit matching:
-  - preserve CRLF line endings on fuzzy matches (`tools/matching.rs`);
-  - normalize typographic quotes and dashes;
-  - strip a copied read_file line-number gutter from `old`.
-- On the second identical argument error in a run, include a minimal valid
-  call in the error.
-- Remove the duplicated `if_hash` checks (edit, write, read) and the three
-  copies of the shell outcome formatting.
-
-**Accepted when** there is a regression test per repaired shape, and a
-recount on a week of v0.1.10 use shows the repeated-error rate below the
-9.6% above.
-
 ## E. Prompt
 
 Shipped in prompt version 27 (PR `feat/plan-e-prompt`): one Environment
@@ -209,7 +188,7 @@ task against the loopback fake provider in CI.
 
 ## Order
 
-1. D, E, F and G in parallel with disjoint owned paths.
+1. F and G in parallel with disjoint owned paths.
 2. H whenever there is room.
 
 Each PR:
@@ -261,3 +240,8 @@ within a stated spend cap. If there is no cap, the check is recorded as not
 run. Report every outcome, tool failure, denial and human
 intervention as observed. Never combine passes from different builds or
 rerun until green. Run the `run-in-place` smoke scenario on the same build.
+
+After a week of v0.1.10 use, recount runs that repeat the same tool error
+three or more times. D (tool-call recovery, #485 and its follow-up) shipped
+against the 9.6% in the evidence table; the newest pre-v0.1.9 build showed
+0.3%. Record the count, window and build in the release notes.

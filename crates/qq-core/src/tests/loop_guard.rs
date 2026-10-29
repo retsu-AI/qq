@@ -954,3 +954,105 @@ async fn ac4_runtime_1500_changed_results_for_one_call_remain_novel() {
         "report cadence must survive changed observations: {reports}"
     );
 }
+
+/// Plan D: the second identical argument error carries a minimal valid call;
+/// the first does not.
+#[tokio::test]
+async fn a_repeated_argument_error_shows_a_minimal_valid_call() {
+    let directory = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let runtime = Runtime::new(
+        RepeatingCalls {
+            requests: Arc::clone(&requests),
+            tool: "read_file",
+            arguments: r#"{"file":"note.txt"}"#,
+            calls_per_turn: 3,
+            ordinary_turns: 1,
+            turns: Mutex::new(0),
+        },
+        "test-model",
+        256,
+    )
+    .unwrap();
+    let events = runtime
+        .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().to_owned())
+        .collect::<Vec<_>>()
+        .await;
+    assert!(matches!(
+        events.last(),
+        Some(RuntimeEvent::Completed { .. })
+    ));
+    let requests = requests.lock().unwrap();
+    let results = requests[1]
+        .messages()
+        .iter()
+        .flat_map(|message| message.content())
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 3);
+    let hint = "a minimal valid call: read_file {\"path\":\"README.md\"}";
+    assert!(
+        results[0].starts_with("invalid arguments"),
+        "{}",
+        results[0]
+    );
+    assert!(!results[0].contains(hint), "{}", results[0]);
+    assert!(results[1].starts_with(results[0]), "{}", results[1]);
+    assert!(results[1].ends_with(hint), "{}", results[1]);
+    // Refusals never enter the loop guard's executed streak, so the third
+    // is answered the same way rather than refused.
+    assert_eq!(results[2], results[1]);
+}
+
+/// An `edits` string or lone object is stored as the list it decodes to, so
+/// approval previews, clients and compaction read the usual array shape.
+#[tokio::test]
+async fn edit_file_arguments_are_stored_with_edits_as_a_list() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("a.txt"), "alpha\n").unwrap();
+    let runtime = Runtime::new(
+        RepeatingCalls {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            tool: "edit_file",
+            arguments: r#"{"edits":{"path":"a.txt","old":"alpha","new":"beta"}}"#,
+            calls_per_turn: 1,
+            ordinary_turns: 1,
+            turns: Mutex::new(0),
+        },
+        "test-model",
+        256,
+    )
+    .unwrap();
+    let events = runtime
+        .run_loop(
+            vec![Message::user("edit")],
+            directory.path().to_owned(),
+            RunCancellation::new(),
+            Arc::new(ApprovedFixtureGate),
+            Arc::new(workspace::FileState::default()),
+        )
+        .collect::<Vec<_>>()
+        .await;
+    let stored = events
+        .iter()
+        .find_map(|event| match event {
+            RuntimeEvent::AssistantTurnCompleted { calls, .. } => calls.first(),
+            _ => None,
+        })
+        .unwrap();
+    let stored_arguments = serde_json::from_str::<serde_json::Value>(&stored.arguments).unwrap();
+    assert_eq!(
+        stored_arguments,
+        serde_json::json!({"edits":[{"path":"a.txt","old":"alpha","new":"beta"}]})
+    );
+    // The approval preview reads the stored arguments.
+    let preview = crate::approval::edit_preview("edit_file", &stored.arguments).unwrap();
+    assert_eq!(preview.path, "a.txt");
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+        "beta\n"
+    );
+}

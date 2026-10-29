@@ -160,6 +160,7 @@ pub(crate) use dispatch::{
 };
 #[cfg(test)]
 pub(crate) use edit::hold_tool_apply;
+pub(crate) use edit::normalize_edits;
 #[cfg(test)]
 pub(crate) use output::MAX_MODEL_TEXT_BYTES;
 pub(crate) use output::{ResultRecall, TurnOutputBudget, finalize_spill_marker, header_line};
@@ -167,8 +168,8 @@ pub(crate) use output::{ResultRecall, TurnOutputBudget, finalize_spill_marker, h
 pub(crate) use read::hold_tool_read;
 pub(crate) use specs::{
     CancelAgentArgs, MAX_SPAWN_AGENT_SCHEMA_BYTES, MAX_WAIT_AGENTS_SECS, SPAWN_AGENT_TOOL,
-    SpawnAgentArgs, WaitAgentsArgs, cancel_agent_spec, command_status_spec, spawn_agent_spec,
-    spawn_model_routes, static_tools, wait_agents_spec,
+    SpawnAgentArgs, WaitAgentsArgs, cancel_agent_spec, command_status_spec, minimal_call,
+    spawn_agent_spec, spawn_model_routes, static_tools, wait_agents_spec,
 };
 #[cfg(test)]
 pub(crate) use specs::{specs, test_tool_effect};
@@ -297,6 +298,31 @@ mod tests {
             arguments,
             &ToolCancellation::new(RunCancellation::new()),
         )
+    }
+
+    /// The minimal call shown on a repeated argument error must itself
+    /// decode, or the hint teaches a broken shape.
+    #[test]
+    fn every_minimal_call_decodes() {
+        fn decodes<T: serde::de::DeserializeOwned>(name: &str) {
+            let arguments = minimal_call(name).unwrap_or_else(|| panic!("{name} has no example"));
+            if let Err(error) = serde_json::from_str::<T>(arguments) {
+                panic!("{name} {arguments}: {error}");
+            }
+        }
+        decodes::<read::ReadFileArgs>("read_file");
+        decodes::<tree::TreeArgs>("tree");
+        decodes::<search::SearchArgs>("search");
+        decodes::<edit::EditFileArgs>("edit_file");
+        decodes::<write::WriteFileArgs>("write_file");
+        decodes::<shell::ShellArgs>("shell");
+        decodes::<shell::ExecArgs>("exec");
+        #[cfg(feature = "tool-fetch")]
+        decodes::<fetch::FetchArgs>("fetch");
+        decodes::<goal::UpdateGoalArgs>("update_goal");
+        decodes::<SpawnAgentArgs>(SPAWN_AGENT_TOOL);
+        decodes::<WaitAgentsArgs>("wait_agents");
+        ask::parse(minimal_call("ask_user").unwrap()).unwrap();
     }
 
     #[test]
