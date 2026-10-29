@@ -9,7 +9,7 @@
   - Settings: `/models`, `/profile`, `/approval`, `/effort`, `/skills`, `/theme`, `/mouse`, `/attention`.
   - Goals: `/goal`.
   - Side questions: `/btw`, `/ask`, `/btw-new`, `/btw-cancel`.
-  - Other: `/changes`, `/editor`, `/quit`.
+  - Other: `/changes`, `/undo`, `/editor`, `/quit`.
 - **Keys:**
 
   | Key | Action |
