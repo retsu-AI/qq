@@ -43,7 +43,6 @@ fn on_edit_planned(workspace: &Path, hook: impl FnOnce() + Send + 'static) {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct EditFileArgs {
-    #[serde(deserialize_with = "edit_list")]
     pub(super) edits: Vec<Edit>,
     #[serde(default = "default_true")]
     fuzzy: bool,
@@ -51,25 +50,26 @@ pub(super) struct EditFileArgs {
     dry_run: bool,
 }
 
-/// Models sometimes send `edits` JSON-encoded as a string, or one edit
-/// object without its array; both mean the list they decode to. The
-/// approval preview decodes with this too, so it shows what will apply.
-pub(crate) fn edit_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::de::DeserializeOwned,
-{
-    let value = match serde_json::Value::deserialize(deserializer)? {
-        serde_json::Value::String(encoded) => {
-            serde_json::from_str(&encoded).map_err(serde::de::Error::custom)?
+/// Models sometimes send `edit_file`'s `edits` JSON-encoded as a string, or
+/// as one edit object without its array; both mean the list they decode
+/// to. The runtime rewrites the arguments to that list before the call is
+/// stored, so approval previews, clients and compaction see one shape.
+/// Anything else is left for the strict decoder to refuse.
+pub(crate) fn normalize_edits(arguments: &mut serde_json::Value) {
+    let Some(edits) = arguments.get_mut("edits") else {
+        return;
+    };
+    if let serde_json::Value::String(encoded) = edits {
+        match serde_json::from_str::<serde_json::Value>(encoded) {
+            Ok(decoded @ (serde_json::Value::Array(_) | serde_json::Value::Object(_))) => {
+                *edits = decoded;
+            }
+            _ => return,
         }
-        value => value,
-    };
-    let value = match value {
-        serde_json::Value::Object(edit) => serde_json::Value::Array(vec![edit.into()]),
-        value => value,
-    };
-    serde_json::from_value(value).map_err(serde::de::Error::custom)
+    }
+    if edits.is_object() {
+        *edits = serde_json::Value::Array(vec![edits.take()]);
+    }
 }
 
 const fn default_true() -> bool {
@@ -1779,38 +1779,28 @@ mod tests {
     /// An earlier build refused an edit_file call whose `edits` arrived as a
     /// JSON-encoded string; a lone edit object is the same slip.
     #[test]
-    fn edits_sent_as_a_string_or_a_single_object_apply() {
-        let directory = tempfile::tempdir().unwrap();
-        fs::write(directory.path().join("a.txt"), "alpha\nbeta\n").unwrap();
-        let workspace = Workspace::open(directory.path()).unwrap();
-        let state = FileState::default();
-        run(&workspace, &state, "read_file", r#"{"path":"a.txt"}"#);
-
-        let encoded = run(
-            &workspace,
-            &state,
-            "edit_file",
-            r#"{"edits":"[{\"path\":\"a.txt\",\"old\":\"alpha\",\"new\":\"one\"}]"}"#,
-        );
-        assert!(!encoded.is_error, "{}", encoded.model_text);
-        let single = run(
-            &workspace,
-            &state,
-            "edit_file",
-            r#"{"edits":{"path":"a.txt","old":"beta","new":"two"}}"#,
-        );
-        assert!(!single.is_error, "{}", single.model_text);
-        assert_eq!(
-            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
-            "one\ntwo\n"
-        );
-
-        let garbled = run(&workspace, &state, "edit_file", r#"{"edits":"not json"}"#);
-        assert!(
-            garbled.model_text.starts_with("invalid arguments: "),
-            "{}",
-            garbled.model_text
-        );
+    fn edits_sent_as_a_string_or_a_single_object_become_the_list() {
+        let list = serde_json::json!({"edits":[{"path":"a.txt","old":"a","new":"b"}]});
+        for sent in [
+            serde_json::json!({"edits":"[{\"path\":\"a.txt\",\"old\":\"a\",\"new\":\"b\"}]"}),
+            serde_json::json!({"edits":"{\"path\":\"a.txt\",\"old\":\"a\",\"new\":\"b\"}"}),
+            serde_json::json!({"edits":{"path":"a.txt","old":"a","new":"b"}}),
+            list.clone(),
+        ] {
+            let mut arguments = sent.clone();
+            super::normalize_edits(&mut arguments);
+            assert_eq!(arguments, list, "{sent}");
+        }
+        for sent in [
+            serde_json::json!({"edits":"not json"}),
+            serde_json::json!({"edits":"3"}),
+            serde_json::json!({"edits":3}),
+            serde_json::json!({"path":"a.txt"}),
+        ] {
+            let mut arguments = sent.clone();
+            super::normalize_edits(&mut arguments);
+            assert_eq!(arguments, sent);
+        }
     }
 }
 

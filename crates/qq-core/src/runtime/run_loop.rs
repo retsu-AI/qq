@@ -1980,7 +1980,12 @@ impl RunState {
                                     // run failure: return a retryable tool error instead.
                                     let parsed: serde_json::Value = match serde_json::from_str(arguments)
                                     {
-                                        Ok(arguments) => arguments,
+                                        Ok(mut arguments) => {
+                                            if call.name == "edit_file" {
+                                                tools::normalize_edits(&mut arguments);
+                                            }
+                                            arguments
+                                        }
                                         Err(error) => {
                                             if call.rejection.is_none() {
                                                 call.rejection = Some(format!(

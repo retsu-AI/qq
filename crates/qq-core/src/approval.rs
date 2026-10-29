@@ -231,7 +231,6 @@ const PREVIEW_TRUNCATION_MARKER: &str = "[preview truncated]";
 pub(crate) fn edit_preview(name: &str, arguments: &str) -> Option<EditPreview> {
     #[derive(Deserialize)]
     struct EditArguments {
-        #[serde(deserialize_with = "crate::tools::edit_list")]
         edits: Vec<EditArgument>,
     }
     #[derive(Deserialize)]
@@ -1778,18 +1777,6 @@ mod tests {
                 )
                 .is_none()
             );
-        }
-    }
-
-    #[test]
-    fn edit_preview_reads_edits_sent_as_a_string_or_a_single_object() {
-        for arguments in [
-            r#"{"edits":"[{\"path\":\"a.rs\",\"old\":\"old\",\"new\":\"text\"}]"}"#,
-            r#"{"edits":{"path":"a.rs","old":"old","new":"text"}}"#,
-        ] {
-            let preview = edit_preview("edit_file", arguments).unwrap();
-            assert_eq!(preview.path, "a.rs", "{arguments}");
-            assert_eq!(preview.diff, "- old\n+ text\n", "{arguments}");
         }
     }
 

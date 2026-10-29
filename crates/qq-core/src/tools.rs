@@ -158,9 +158,9 @@ pub(crate) use dispatch::{
     ResultDisposition, SpillRecord, ToolDrainError, ToolOutput, ToolTasks, bounded_result,
     execute_with_images,
 };
-pub(crate) use edit::edit_list;
 #[cfg(test)]
 pub(crate) use edit::hold_tool_apply;
+pub(crate) use edit::normalize_edits;
 #[cfg(test)]
 pub(crate) use output::MAX_MODEL_TEXT_BYTES;
 pub(crate) use output::{ResultRecall, TurnOutputBudget, finalize_spill_marker, header_line};
