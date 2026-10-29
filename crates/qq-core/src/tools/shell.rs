@@ -1063,8 +1063,14 @@ pub(crate) struct ProcessGroupGuard {
 /// a pipe whose write end only this process holds; when this process exits
 /// for any reason, SIGKILL included, the read ends and the watcher kills its
 /// group. It ignores the catchable signals a script may send its own group.
+///
+/// The watcher leads a new group and reports once its traps are set; only
+/// then may the command join. A command started first could signal its group
+/// before the traps exist and kill the watcher.
 #[cfg(unix)]
-pub(crate) fn spawn_watcher(leader: Option<u32>) -> std::io::Result<tokio::process::Child> {
+pub(crate) async fn spawn_watcher(
+    deadline: std::time::Instant,
+) -> std::io::Result<tokio::process::Child> {
     static PIPE: std::sync::OnceLock<
         Result<(std::io::PipeReader, std::io::PipeWriter), std::io::ErrorKind>,
     > = std::sync::OnceLock::new();
@@ -1072,22 +1078,39 @@ pub(crate) fn spawn_watcher(leader: Option<u32>) -> std::io::Result<tokio::proce
         .get_or_init(|| std::io::pipe().map_err(|error| error.kind()))
         .as_ref()
         .map_err(|kind| std::io::Error::from(*kind))?;
-    let leader = leader
-        .and_then(|pid| i32::try_from(pid).ok())
-        .ok_or_else(|| std::io::Error::other("command leader has no process id"))?;
     let mut watcher = tokio::process::Command::new("/bin/sh");
     watcher
         .args([
             "-c",
-            "trap '' HUP INT QUIT TERM; while read -r _; do :; done; kill -s KILL 0",
+            "trap '' HUP INT QUIT TERM; echo; exec >/dev/null; while read -r _; do :; done; kill -s KILL 0",
         ])
         .env_clear()
         .current_dir("/")
         .stdin(std::process::Stdio::from(reader.try_clone()?))
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .process_group(leader);
-    watcher.spawn()
+        .kill_on_drop(true)
+        .process_group(0);
+    let mut watcher = watcher.spawn()?;
+    let mut ready = watcher
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("command watcher has no stdout"))?;
+    let mut byte = [0_u8; 1];
+    let read = tokio::time::timeout_at(deadline.into(), ready.read(&mut byte)).await;
+    if !matches!(read, Ok(Ok(1))) {
+        let _ = watcher.start_kill();
+        let _ = watcher.wait().await;
+        return Err(match read {
+            Ok(Err(error)) => error,
+            Ok(Ok(_)) => std::io::Error::other("command watcher exited before it was ready"),
+            Err(_) => std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "command watcher did not start",
+            ),
+        });
+    }
+    Ok(watcher)
 }
 
 impl ProcessGroupGuard {
@@ -1112,6 +1135,12 @@ impl ProcessGroupGuard {
     #[cfg(unix)]
     pub(crate) fn watch(&mut self, watcher: tokio::process::Child) {
         self.watcher = Some(watcher);
+    }
+
+    /// The command's process group, led by its watcher.
+    #[cfg(unix)]
+    pub(crate) fn group(&self) -> Option<rustix::process::Pid> {
+        self.pgid
     }
 
     /// Reaps the watcher after its group was killed. Darwin reports a group
@@ -1463,6 +1492,37 @@ mod identity_tests {
                 spill.digest,
                 format!("{:x}", sha2::Sha256::digest(spill.text.as_bytes()))
             );
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod watcher_tests {
+    /// A command may signal its own group the moment it starts, so the
+    /// watcher must already ignore those signals when it is handed over.
+    #[tokio::test]
+    async fn the_watcher_ignores_group_signals_before_a_command_joins() {
+        let mut watcher =
+            super::spawn_watcher(std::time::Instant::now() + std::time::Duration::from_secs(10))
+                .await
+                .unwrap();
+        let status =
+            std::fs::read_to_string(format!("/proc/{}/status", watcher.id().unwrap())).unwrap();
+        watcher.start_kill().unwrap();
+        watcher.wait().await.unwrap();
+        let ignored = status
+            .lines()
+            .find_map(|line| line.strip_prefix("SigIgn:"))
+            .map(|mask| u64::from_str_radix(mask.trim(), 16).unwrap())
+            .unwrap();
+        for signal in [
+            rustix::process::Signal::HUP,
+            rustix::process::Signal::INT,
+            rustix::process::Signal::QUIT,
+            rustix::process::Signal::TERM,
+        ] {
+            let bit = 1_u64 << (signal.as_raw() - 1);
+            assert_ne!(ignored & bit, 0, "watcher does not yet ignore {signal:?}");
         }
     }
 }

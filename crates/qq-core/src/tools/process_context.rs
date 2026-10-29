@@ -256,24 +256,25 @@ impl PreparedLaunch {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        #[cfg(unix)]
-        command.process_group(0);
         #[cfg(not(windows))]
         let (child, guard) = {
             let _ = process;
-            let mut child = command.spawn()?;
-            let mut guard = super::shell::ProcessGroupGuard::new(child.id());
-            // No await since spawn: the watcher joins the group before
-            // anything else can run, so the group never lacks one.
-            match super::shell::spawn_watcher(child.id()) {
-                Ok(watcher) => guard.watch(watcher),
+            let mut watcher = super::shell::spawn_watcher(deadline).await?;
+            let group = watcher
+                .id()
+                .and_then(|pid| i32::try_from(pid).ok())
+                .ok_or_else(|| std::io::Error::other("command watcher has no process id"))?;
+            command.process_group(group);
+            let child = match command.spawn() {
+                Ok(child) => child,
                 Err(error) => {
-                    let _ = guard.kill();
-                    let _ = child.wait().await;
-                    guard.disarm();
+                    let _ = watcher.start_kill();
+                    let _ = watcher.wait().await;
                     return Err(error);
                 }
-            }
+            };
+            let mut guard = super::shell::ProcessGroupGuard::new(u32::try_from(group).ok());
+            guard.watch(watcher);
             (child, guard)
         };
         #[cfg(windows)]
