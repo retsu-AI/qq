@@ -1437,7 +1437,7 @@ fn write_metadata_atomically(
     paths: &ServerPaths,
     metadata: &MetadataFile,
 ) -> Result<(), ServerError> {
-    if open_private_read_file(&paths.metadata_file)?.is_some() {}
+    open_private_read_file(&paths.metadata_file)?;
     let encoded = ron::ser::to_string(metadata).map_err(|_| ServerError::MetadataCorrupt)?;
     if encoded.len() > MAX_METADATA_BYTES {
         return Err(ServerError::MetadataTooLarge);
