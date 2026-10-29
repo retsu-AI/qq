@@ -5866,6 +5866,7 @@ mod tests {
             {
                 return;
             }
+            // lint: allow(sleep) polls /proc for a real killed process group
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("timed-out process group still exists: {pids:?}");
@@ -5909,6 +5910,7 @@ mod tests {
             if !Path::new("/proc").join(pid.to_string()).exists() {
                 return;
             }
+            // lint: allow(sleep) polls /proc for a real background child
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("background child from a completed command still exists: {pid}");

@@ -12,15 +12,6 @@ crates/qq-core/src/tools.rs	253	pub(crate) async fn assert_panicked_process_exit
 crates/qq-core/src/tools.rs	4904	async fn assert_process_exits(pid: u32) {	tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 crates/qq-core/src/tools/dispatch.rs	828	pub(super) fn execute_blocking(	std::thread::sleep(std::time::Duration::from_millis(1));
 crates/qq-core/src/tools/dispatch.rs	843	pub(super) fn execute_blocking(	std::thread::sleep(std::time::Duration::from_millis(1));
-crates/qq-core/tests/soak.rs	789	fn terminate(&mut self) -> io::Result<ExitStatus> {	std::thread::sleep(Duration::from_millis(5));
-crates/qq-core/tests/soak.rs	820	fn worker_guard_reaps_an_already_exited_worker() {	std::thread::sleep(Duration::from_millis(5));
-crates/qq-core/tests/soak.rs	857	fn process_kill_preserves_the_side_effect_without_reexecution() {	std::thread::sleep(Duration::from_millis(5));
-crates/qq-core/tests/soak.rs	931	async fn process_kill_worker() {	tokio::time::sleep(Duration::from_millis(5)).await;
-crates/qq-core/tests/soak.rs	972	fn process_kill_preserves_pending_summary_prefix_without_resending() {	std::thread::sleep(Duration::from_millis(5));
-crates/qq-core/tests/soak.rs	1081	async fn pending_summary_kill_worker() {	tokio::time::sleep(Duration::from_millis(5)).await;
 crates/qq-mcp/src/tests.rs	113	async fn call_tool(	tokio::time::sleep(self.slow_delay).await;
 crates/qq-provider/src/http.rs	2119	fn serve_scripted_with_auth(	thread::sleep(duration);
 crates/qq-provider/src/test_support.rs	214	fn respond_sequence_and_headers(	thread::sleep(Duration::from_millis(1));
-crates/qq-provider/src/test_support.rs	252	fn accept_before(listener: &TcpListener, timeout: Duration) -> TcpStream {	thread::sleep(Duration::from_millis(5));
-xtask/src/perf.rs	5869	async fn captured_output_timeout_kills_and_reaps_the_process_group() {	tokio::time::sleep(Duration::from_millis(10)).await;
-xtask/src/perf.rs	5912	async fn nonzero_captured_command_cannot_leave_a_background_child() {	tokio::time::sleep(Duration::from_millis(10)).await;

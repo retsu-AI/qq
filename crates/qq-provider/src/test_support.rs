@@ -249,6 +249,7 @@ fn accept_before(listener: &TcpListener, timeout: Duration) -> TcpStream {
                 return stream;
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                // lint: allow(sleep) non-blocking accept on a real loopback socket
                 thread::sleep(Duration::from_millis(5));
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
