@@ -49,7 +49,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git tini \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid "$GID" agent \
-    && useradd --create-home --uid "$UID" --gid "$GID" --shell /bin/bash agent
+    && useradd --create-home --uid "$UID" --gid "$GID" --shell /bin/bash agent \
+    && install -d -m 0700 -o agent -g agent /home/agent/.local /home/agent/.local/share \
+        /home/agent/.local/share/qq
 COPY --from=build /usr/local/bin/qq /usr/local/bin/qq
 USER agent
 WORKDIR /workspace

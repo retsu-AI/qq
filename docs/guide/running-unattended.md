@@ -31,22 +31,25 @@ ships a `Dockerfile` that does this:
 
 ```sh
 docker build -t qq .
-docker run --rm -it -v "$PWD:/workspace" -e ANTHROPIC_API_KEY qq
+docker run --rm -it -v "$PWD:/workspace" -e ANTHROPIC_API_KEY -e QQ_MODEL=anthropic/claude-sonnet-5 qq
 ```
 
-`-v "$PWD:/workspace"` is the only mount. The image runs as an unprivileged
-`agent` user with `git` installed, so snapshots and `qq undo` work on the
-mounted checkout. Everything after the image name is passed to `qq`:
+`-v "$PWD:/workspace"` is the only mount. The container sees none of your
+QQ configuration, so `QQ_MODEL` picks the model (or commit a
+`.qq/config.ron` to the project and `qq trust` it). The image runs as an
+unprivileged `agent` user with `git` installed, so snapshots and `qq undo`
+work on the mounted checkout. Everything after the image name is passed to
+`qq`:
 
 ```sh
-docker run --rm -v "$PWD:/workspace" -e ANTHROPIC_API_KEY qq run --goal "Make cargo test pass" --check 'cargo test' --format jsonl
+docker run --rm -v "$PWD:/workspace" -e ANTHROPIC_API_KEY -e QQ_MODEL=anthropic/claude-sonnet-5 qq run --goal "Make cargo test pass" --check 'cargo test' --format jsonl
 ```
 
 For a long-lived server, run the daemon and attach to it inside the
 container:
 
 ```sh
-docker run -d --name qq -v "$PWD:/workspace" -v qq-data:/home/agent/.local/share/qq -e ANTHROPIC_API_KEY qq daemon run
+docker run -d --name qq -v "$PWD:/workspace" -v qq-data:/home/agent/.local/share/qq -e ANTHROPIC_API_KEY -e QQ_MODEL=anthropic/claude-sonnet-5 qq daemon run
 docker exec -it qq qq
 ```
 
@@ -97,7 +100,7 @@ with:
 Pass it in as an environment variable, not a mounted file:
 
 ```sh
-docker run --rm -it -v "$PWD:/workspace" -e ANTHROPIC_API_KEY -e GH_TOKEN qq
+docker run --rm -it -v "$PWD:/workspace" -e ANTHROPIC_API_KEY -e QQ_MODEL=anthropic/claude-sonnet-5 -e GH_TOKEN qq
 ```
 
 `gh` reads `GH_TOKEN` directly. For `git push` over HTTPS, have Git read it
@@ -122,7 +125,7 @@ Commit as the agent, not as you, so `git log` and blame show which changes
 it made:
 
 ```sh
-docker run --rm -it -v "$PWD:/workspace" -e ANTHROPIC_API_KEY -e GIT_AUTHOR_NAME="QQ agent" -e GIT_AUTHOR_EMAIL=agent@example.com -e GIT_COMMITTER_NAME="QQ agent" -e GIT_COMMITTER_EMAIL=agent@example.com qq
+docker run --rm -it -v "$PWD:/workspace" -e ANTHROPIC_API_KEY -e QQ_MODEL=anthropic/claude-sonnet-5 -e GIT_AUTHOR_NAME="QQ agent" -e GIT_AUTHOR_EMAIL=agent@example.com -e GIT_COMMITTER_NAME="QQ agent" -e GIT_COMMITTER_EMAIL=agent@example.com qq
 ```
 
 The container never sees your `~/.gitconfig`, so without these variables
@@ -134,11 +137,14 @@ account, and register that.
 
 Inside the container you are the administrator. Managed policy is read
 from `/etc/qq/managed.ron` and must be owned by root, so bake it into an
-image built from QQ's:
+image built from QQ's. Save this as `managed.ron`:
 
 ```ron managed.ron
-policy: (
-    deny_shell_prefixes: ["git push origin main", "gh pr merge", "gh release", "npm publish", "cargo publish"],
+(
+    version: 1,
+    policy: (
+        deny_shell_prefixes: ["git push origin main", "gh pr merge", "gh release", "npm publish", "cargo publish"],
+    ),
 )
 ```
 

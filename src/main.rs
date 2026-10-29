@@ -306,10 +306,17 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
             } else {
                 None
             };
+            let is_goal = goal.is_some();
+            let note = if is_goal {
+                environment::Environment::detect_off_workers()
+                    .await
+                    .goal_note()
+            } else {
+                None
+            };
             let mut stdout = io::stdout().lock();
             let mut stderr = io::stderr().lock();
-            let is_goal = goal.is_some();
-            if is_goal && let Some(note) = environment::Environment::detect().goal_note() {
+            if let Some(note) = note {
                 let _ = writeln!(stderr, "{note}");
             }
             let code = match goal {
@@ -760,8 +767,10 @@ async fn interactive(
     // A failed probe reads as "no snapshots": the screen must not claim undo
     // works when it cannot tell.
     let snapshots = matches!(snapshots.await, Ok(Ok(true)));
-    let environment_lines =
-        environment::first_run_lines(&environment::Environment::detect(), snapshots);
+    let environment_lines = environment::first_run_lines(
+        &environment::Environment::detect_off_workers().await,
+        snapshots,
+    );
 
     // The TUI paints its first frame before the server is reserved or the
     // embedded runtime opened; the port connects on the loop's first recv
@@ -1561,8 +1570,8 @@ async fn doctor_command(
     let request = overrides.load_request()?;
     let server_paths = server::ServerPaths::for_user()?;
     let cwd = std::env::current_dir()?;
-    let environment = environment::Environment::detect();
     let report = tokio::task::spawn_blocking(move || {
+        let environment = environment::Environment::detect();
         doctor::run_checks(&loader, &store, &request, &server_paths, &cwd, &environment)
     })
     .await?;

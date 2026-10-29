@@ -36,6 +36,16 @@ impl Environment {
         }
     }
 
+    /// [`Self::detect`] on a blocking thread: it stats container markers.
+    pub async fn detect_off_workers() -> Self {
+        tokio::task::spawn_blocking(Self::detect)
+            .await
+            .unwrap_or_else(|_| Self {
+                placement: Placement::Host,
+                user: "your user".to_owned(),
+            })
+    }
+
     /// `on the host: commands run as …`, for the doctor and the TUI.
     pub fn summary(&self) -> String {
         match self.placement {
