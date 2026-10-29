@@ -508,7 +508,7 @@ async fn stopping_a_pending_summarizer_preserves_measured_turns_and_unknown_tota
             .await;
         tokio::time::timeout(Duration::from_secs(4), async {
             while fixture.observed.lock().unwrap().summary_requests < 2 {
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await

@@ -180,7 +180,7 @@ async fn delegation(script: Vec<ParentTurn>, answer: &'static str) -> Delegation
 async fn children_started(delegation: &Delegation, count: usize) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while delegation.children_started.load(Ordering::Acquire) < count {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await

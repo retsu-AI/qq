@@ -242,7 +242,7 @@ fn not_cancelled() -> CancellationSignal {
 async fn poll_until(mut condition: impl AsyncFnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while !condition().await {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await

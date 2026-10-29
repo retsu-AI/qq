@@ -100,7 +100,7 @@ async fn the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runti
     // run inherits the rest of the script after the restart.
     tokio::time::timeout(Duration::from_secs(10), async {
         while requests.lock().unwrap().is_empty() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await

@@ -5643,11 +5643,8 @@ mod tests {
             // Wait until the run is executing (turn one is held open by the
             // provider), steer, wait for the steering to be durably queued,
             // then release the turn so the boundary applies it.
-            loop {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                if session_requests.lock().unwrap().len() == 1 {
-                    break;
-                }
+            while session_requests.lock().unwrap().len() != 1 {
+                tokio::task::yield_now().await;
             }
             tx.send("   ".to_owned()).await.unwrap();
             tx.send("also check the tests".to_owned()).await.unwrap();
@@ -5661,7 +5658,7 @@ mod tests {
                 panic!("unexpected receipt")
             };
             loop {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                tokio::task::yield_now().await;
                 let sessions_snapshot = sessions
                     .snapshot(SnapshotRequest {
                         workspace_id,
@@ -6401,7 +6398,7 @@ mod tests {
             // `RunStarted` precedes the first provider request; die only
             // once the provider is actually mid-turn.
             while requests.lock().unwrap().is_empty() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await
@@ -7419,7 +7416,7 @@ mod tests {
                 }) {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await
