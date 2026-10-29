@@ -701,9 +701,9 @@ acting, and `load_skill` reads the body on demand. `.claude/` roots are
 indexed for explicit `/name` invocation only. A name keeps only its
 highest-precedence tier (workspace and pack, then global, then compatibility),
 so an `.agents/skills` copy of a `.qq/skills` skill is dropped. The index is
-bounded (64 entries, about 8 KiB rendered) and its roots are fingerprinted
-into the plan so a new skill file recompiles on the next load, not on the
-next run.
+bounded (64 entries, about 8 KiB rendered) and its roots and indexed
+documents are fingerprinted into the plan, so a new skill or an edited front
+matter recompiles on the next load, not on the next run.
 
 ### Agent Packs
 

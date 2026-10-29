@@ -316,6 +316,9 @@ impl SkillIndex {
             names.sort();
             for name in names {
                 let relative = root.document_path(&name);
+                // Front matter decides the name and description, so an
+                // in-place edit must recompile the plan too.
+                fingerprints.push(SourceFingerprint::capture(opened.path().join(&relative)));
                 let Some(head) = read_front_matter(opened, &relative) else {
                     // Not a regular readable file at the expected path.
                     continue;
@@ -783,7 +786,8 @@ mod tests {
         roots.push(SkillRoot::global(0));
         let (index, fingerprints) =
             SkillIndex::compile_blocking(&workspace, std::slice::from_ref(&global), &roots);
-        assert_eq!(fingerprints.len(), 6);
+        // Six roots plus one per document read.
+        assert_eq!(fingerprints.len(), 10);
         assert_eq!(
             disclosed(&index),
             [
@@ -798,6 +802,22 @@ mod tests {
             mine.directory,
             global.path().join("mine").display().to_string()
         );
+    }
+
+    #[test]
+    fn renaming_a_skill_in_place_makes_its_fingerprint_stale() {
+        let (dir, workspace) =
+            workspace_with(&[(".qq/skills/tool/SKILL.md", "---\nname: old\n---\n")]);
+        let (index, fingerprints) =
+            SkillIndex::compile_blocking(&workspace, &[], &SkillRoot::workspace_defaults());
+        assert!(index.resolve_disclosed("old").is_some());
+        assert!(fingerprints.iter().all(SourceFingerprint::is_current));
+        std::fs::write(
+            dir.path().join(".qq/skills/tool/SKILL.md"),
+            "---\nname: renamed\n---\n",
+        )
+        .unwrap();
+        assert!(!fingerprints.iter().all(SourceFingerprint::is_current));
     }
 
     #[test]
