@@ -954,7 +954,8 @@ commands are not subject to these checks at all.
 insertion relative to an anchor (`insert_before`/`insert_after` + `new`),
 rather than a unified diff. An empty string in an unused form is absent, so
 `{"old":"","insert_after":"x",…}` is an insertion; an empty string that is
-the only form given still fails. Exact strings are what models produce most
+the only form given still fails. `edits` sent as a JSON-encoded string, or
+as one edit object without its array, decodes to the list it names. Exact strings are what models produce most
 reliably, validation is trivial, and a failed match returns a precise,
 retryable error instead of a mis-applied hunk. Rejected on the way here:
 unified-diff input (models mis-count hunks), line-range edits (numbers

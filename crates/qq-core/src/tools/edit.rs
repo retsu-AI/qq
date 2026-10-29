@@ -43,11 +43,28 @@ fn on_edit_planned(workspace: &Path, hook: impl FnOnce() + Send + 'static) {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct EditFileArgs {
+    #[serde(deserialize_with = "edit_list")]
     pub(super) edits: Vec<Edit>,
     #[serde(default = "default_true")]
     fuzzy: bool,
     #[serde(default)]
     dry_run: bool,
+}
+
+/// Models sometimes send `edits` JSON-encoded as a string, or one edit
+/// object without its array; both mean the list they decode to.
+fn edit_list<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Edit>, D::Error> {
+    let value = match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(encoded) => {
+            serde_json::from_str(&encoded).map_err(serde::de::Error::custom)?
+        }
+        value => value,
+    };
+    let value = match value {
+        serde_json::Value::Object(edit) => serde_json::Value::Array(vec![edit.into()]),
+        value => value,
+    };
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
 const fn default_true() -> bool {
@@ -1751,6 +1768,43 @@ mod tests {
         assert_eq!(
             fs::read_to_string(directory.path().join("a.txt")).unwrap(),
             "alpha\ngamma\n"
+        );
+    }
+
+    /// An earlier build refused an edit_file call whose `edits` arrived as a
+    /// JSON-encoded string; a lone edit object is the same slip.
+    #[test]
+    fn edits_sent_as_a_string_or_a_single_object_apply() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        run(&workspace, &state, "read_file", r#"{"path":"a.txt"}"#);
+
+        let encoded = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":"[{\"path\":\"a.txt\",\"old\":\"alpha\",\"new\":\"one\"}]"}"#,
+        );
+        assert!(!encoded.is_error, "{}", encoded.model_text);
+        let single = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":{"path":"a.txt","old":"beta","new":"two"}}"#,
+        );
+        assert!(!single.is_error, "{}", single.model_text);
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+            "one\ntwo\n"
+        );
+
+        let garbled = run(&workspace, &state, "edit_file", r#"{"edits":"not json"}"#);
+        assert!(
+            garbled.model_text.starts_with("invalid arguments: "),
+            "{}",
+            garbled.model_text
         );
     }
 }

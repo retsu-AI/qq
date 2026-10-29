@@ -1240,6 +1240,11 @@ results enter observation history in request order even when their terminal
 events arrive in completion order. Argument hashes are computed once per
 ordinary turn admission.
 
+An argument-shape refusal (`invalid arguments…` or an `invalid_*` code) that
+repeats one the run already returned for the same tool gets a minimal valid
+call for that tool appended. The result identity the guard observes is
+unchanged.
+
 Novel triples reset quiet attempts. Successful mutations, actual checklist
 changes and applied steering clear both observation windows; spontaneous
 assistant text resets quiet attempts. Runtime-requested report text does not.

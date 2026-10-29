@@ -2,6 +2,7 @@
 use super::loop_guard::{CallKey, LoopGuard};
 use crate::*;
 
+use sha2::Digest as _;
 use tracing::Instrument as _;
 
 static NEXT_DIAGNOSTIC_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -45,9 +46,57 @@ struct RunScope {
     tool_schema: runtime::ToolSchemaMeasurement,
     prompt_identity: Option<Arc<RunPromptIdentity>>,
     call_effects: HashMap<String, catalog::EffectClass>,
+    /// Digests of the argument errors this run has returned, so the second
+    /// identical one can carry a minimal valid call. Bounded by
+    /// `MAX_ARGUMENT_ERRORS_SEEN`; older entries are dropped first.
+    argument_errors: Vec<[u8; 32]>,
+}
+
+const MAX_ARGUMENT_ERRORS_SEEN: usize = 64;
+
+/// Whether `text` is a refusal of the call's argument shape (decode
+/// failures and `invalid_*` codes, optionally behind an `edit <n>: `
+/// prefix), as opposed to a refusal about the workspace.
+fn is_argument_error(text: &str) -> bool {
+    let text = text
+        .strip_prefix("edit ")
+        .and_then(|rest| rest.split_once(": "))
+        .filter(|(index, _)| index.bytes().all(|byte| byte.is_ascii_digit()))
+        .map_or(text, |(_, rest)| rest);
+    text.starts_with("invalid arguments") || text.starts_with("invalid_")
 }
 
 impl RunScope {
+    /// On the second identical argument error in this run, appends a minimal
+    /// valid call for the tool. The result digest is untouched, so the loop
+    /// guard still sees the same result.
+    fn hint_repeated_argument_error(&mut self, name: &str, result: &mut tools::ToolOutput) {
+        if !result.is_error
+            || result.disposition != tools::ResultDisposition::Refused
+            || !is_argument_error(&result.model_text)
+        {
+            return;
+        }
+        let Some(example) = tools::minimal_call(name) else {
+            return;
+        };
+        let mut hash = sha2::Sha256::new();
+        hash.update(name.as_bytes());
+        hash.update([0]);
+        hash.update(result.model_text.as_bytes());
+        let digest: [u8; 32] = hash.finalize().into();
+        if self.argument_errors.contains(&digest) {
+            result.model_text.push_str(&format!(
+                "\nthe same error as before; a minimal valid call: {name} {example}"
+            ));
+            return;
+        }
+        if self.argument_errors.len() == MAX_ARGUMENT_ERRORS_SEEN {
+            self.argument_errors.remove(0);
+        }
+        self.argument_errors.push(digest);
+    }
+
     fn admission_key(&self, id: ToolCallId) -> Option<CallKey> {
         self.guard_eligible
             .iter()
@@ -869,6 +918,7 @@ impl plan::CompiledAgentPlan {
                        tool_schema,
                        prompt_identity,
                        call_effects,
+                       argument_errors: Vec::new(),
                    };
                    let window = WindowScope {
                        reducible_message_bytes,
@@ -3566,6 +3616,8 @@ impl RunState {
                                         && child_spend.is_none();
                                     run.stall.settled(!receipt && runtime::is_progress(&call, entry, &result));
                                 }
+                                let mut result = result;
+                                run.hint_repeated_argument_error(&call.name, &mut result);
                                 let result = cite_spill(result, &call.name, call.id, spills.is_some());
                                 results[usize::from(call.call_ordinal - 1)] =
                                     Some(RetainedResult::retain(&result, &call.name, call.id));
@@ -3684,6 +3736,8 @@ impl RunState {
                                     }
                                 }
                             };
+                            let mut result = result;
+                            run.hint_repeated_argument_error(&call.name, &mut result);
                             run.stall.settled(!result.is_error);
                             run.observe_tool(&call, &RetainedResult::retain(&result, &call.name, call.id), network_policy, catalog.lookup(&call.name));
                             results[index] = Some(RetainedResult::retain(&result, &call.name, call.id));
@@ -3776,6 +3830,8 @@ impl RunState {
                                     run.stall.settled(!receipt && runtime::is_progress(&call, entry, &result));
                                 }
                                 run.observe_tool(&call, &RetainedResult::retain(&result, &call.name, call.id), network_policy, catalog.lookup(&call.name));
+                                let mut result = result;
+                                run.hint_repeated_argument_error(&call.name, &mut result);
                                 let result = cite_spill(result, &call.name, call.id, spills.is_some());
                                 results[usize::from(call.call_ordinal - 1)] =
                                     Some(RetainedResult::retain(&result, &call.name, call.id));
