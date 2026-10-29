@@ -547,6 +547,8 @@ impl plan::CompiledAgentPlan {
                        summarizer,
                        inherited_effects,
                        cache_key,
+                       mode,
+                       snapshots,
                    } = capabilities;
                    let tool_tasks = tool_tasks.unwrap_or_default();
                    let steering = steering;
@@ -705,6 +707,8 @@ impl plan::CompiledAgentPlan {
                            }),
                            guidance: allow_guidance,
                            subagent,
+                           mode,
+                           snapshots,
                        },
                    };
                    let static_filter = prefix_key.tools;

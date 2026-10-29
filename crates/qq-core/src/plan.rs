@@ -494,8 +494,8 @@ pub struct CompiledAgentPlan {
     /// The plan-constant system prompt per capability set, built on first
     /// use and shared by every later run with the same set. Bounded by the
     /// number of `PromptPrefixKey` values: 2⁷ tool filters plus none, times
-    /// guidance, times three sub-agent states (774). In practice a plan sees a
-    /// handful: roots, read children and write children.
+    /// guidance, three sub-agent states, four modes and the snapshot flag. In
+    /// practice a plan sees a handful: roots, read children and write children.
     prompt_prefixes: std::sync::Mutex<Vec<(PromptPrefixKey, Arc<crate::runtime::PromptPrefix>)>>,
     resolved_model: Arc<ResolvedModel>,
     descriptor: Arc<AgentPlanDescriptor>,
@@ -507,6 +507,8 @@ pub struct CompiledAgentPlan {
     /// must `stat` to revalidate the workspace side of this plan.
     sources: Vec<SourceFingerprint>,
     estimated_bytes: usize,
+    /// The workspace is inside a Git work tree, so session runs snapshot it.
+    in_git: bool,
 }
 
 /// What varies the plan-constant prompt between runs of one plan: which
@@ -517,6 +519,11 @@ pub(crate) struct PromptPrefixKey {
     pub(crate) tools: Option<crate::catalog::StaticFilter>,
     pub(crate) guidance: bool,
     pub(crate) subagent: Option<crate::runtime::SubagentAuthority>,
+    /// The session's approval mode, which the Environment section states.
+    pub(crate) mode: qq_protocol::ApprovalMode,
+    /// The run snapshots the workspace before its first change (session
+    /// runs); the prompt says so only when the workspace is in Git.
+    pub(crate) snapshots: bool,
 }
 
 impl CompiledAgentPlan {
@@ -558,6 +565,8 @@ impl CompiledAgentPlan {
                 subagent: key.subagent,
                 read_only: key.tools.is_some_and(|filter| filter.read_only),
                 unattended: key.tools.is_some_and(|filter| filter.unattended),
+                mode: key.mode,
+                snapshots: key.snapshots && self.in_git,
             },
             &self.instructions,
             self.persona.as_deref(),
@@ -991,9 +1000,7 @@ impl CompiledAgentPlan {
                 }
                 "exec" if !has_shell => Some(tool.spec.description()
                     .replace("no shell interpretation", "arguments are literal")
-                    .replace("Prefer it over shell for a single program such as", "Use it for a single program such as")
-                    .replace("; reserve shell for pipelines", "")
-                    .replace("Same environment, timeout, and output rules as shell.", "Runs in the selected workspace under host environment policy, the task deadline or an earlier explicit timeout, and bounded output.")),
+                    .replace("Same cwd, environment, timeout, yield_after_seconds and output rules as shell.", "Runs in the workspace root or cwd until the task deadline or timeout_seconds; a command still running after yield_after_seconds returns a command id to follow with command_status. Combined output is bounded and the full output is stored.")),
                 "write_file" if !has_read_file => Some(
                     "Create new workspace files (parents are created); use create_only to fail if a path exists. An existing file can be overwritten only with an independently known current content hash in if_hash; no file-reading tool is declared.".to_owned()
                 ),
@@ -1099,7 +1106,10 @@ impl CompiledAgentPlan {
             }),
             guidance: true,
             subagent: None,
+            mode: qq_protocol::ApprovalMode::Auto,
+            snapshots: true,
         };
+        let in_git = in_git_work_tree(&workspace);
         let full_prefix = Arc::new(crate::runtime::PromptPrefix::new(
             &catalog.base_specs(&full_key.tools.expect("full key has a filter")),
             crate::runtime::PromptSections {
@@ -1109,6 +1119,8 @@ impl CompiledAgentPlan {
                 subagent: None,
                 read_only: false,
                 unattended: false,
+                mode: full_key.mode,
+                snapshots: in_git,
             },
             &instructions,
             persona.as_deref(),
@@ -1140,6 +1152,7 @@ impl CompiledAgentPlan {
             side_question_denies: side_question_denies.into(),
             sources,
             estimated_bytes,
+            in_git,
         }))
     }
 
@@ -1330,6 +1343,16 @@ fn is_canonical_absolute(path: &Path) -> bool {
                 std::path::Component::CurDir | std::path::Component::ParentDir
             )
         })
+}
+
+/// Whether `workspace` is inside a Git work tree, judged the way Git
+/// discovers one: a `.git` directory or file in it or an ancestor.
+/// Snapshots need Git (`undo::snapshot`), so this decides whether the
+/// prompt promises one.
+fn in_git_work_tree(workspace: &Path) -> bool {
+    workspace
+        .ancestors()
+        .any(|directory| std::fs::symlink_metadata(directory.join(".git")).is_ok())
 }
 #[cfg(test)]
 mod tests_support {
@@ -1568,6 +1591,8 @@ mod tests {
                 }),
                 guidance: true,
                 subagent: None,
+                mode: qq_protocol::ApprovalMode::Auto,
+                snapshots: true,
             };
             let specs = plan.catalog().base_specs(&key.tools.unwrap());
             plan.prompt_prefix(key, &specs).complete("").0
@@ -1575,6 +1600,52 @@ mod tests {
         let (a, b) = (prompt(first.path()), prompt(second.path()));
         assert!(!a.contains(&*first.path().to_string_lossy()), "{a}");
         assert_eq!(a, b);
+    }
+
+    /// The full root prompt of an Auto session in a Git checkout, pinned in
+    /// `tests/golden/root_prompt.txt` so every prompt change is reviewed as
+    /// a text diff. Run with `QQ_UPDATE_GOLDENS=1` to rewrite it.
+    #[test]
+    #[cfg(feature = "tool-fetch")]
+    fn the_root_prompt_matches_its_golden() {
+        let workspace = canonical_temp();
+        std::fs::create_dir(workspace.path().join(".git")).unwrap();
+        let plan = CompiledAgentPlan::compile_blocking(profile(workspace.path())).unwrap();
+        let key = PromptPrefixKey {
+            tools: Some(crate::catalog::StaticFilter {
+                spawn_agent: true,
+                search_history: true,
+                update_goal: false,
+                read_tool_result: true,
+                load_skill: true,
+                read_only: false,
+                unattended: false,
+            }),
+            guidance: true,
+            subagent: None,
+            mode: qq_protocol::ApprovalMode::Auto,
+            snapshots: true,
+        };
+        let specs = plan.catalog().base_specs(&key.tools.unwrap());
+        let mut actual = plan.prompt_prefix(key, &specs).complete("").0.to_string();
+        actual.push('\n');
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/root_prompt.txt");
+        if std::env::var_os("QQ_UPDATE_GOLDENS").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &actual).unwrap();
+            return;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "{}: {error}; run with QQ_UPDATE_GOLDENS=1 to record it",
+                path.display()
+            )
+        });
+        assert!(
+            expected == actual,
+            "{} differs; rerun with QQ_UPDATE_GOLDENS=1 if the change is intended\n--- expected\n{expected}\n--- actual\n{actual}",
+            path.display()
+        );
     }
 
     /// `wait_agents` and `cancel_agent` are never named in policy: they
@@ -1779,7 +1850,7 @@ mod tests {
         // changing the encoding (descriptor 16: configured pack mutation authority).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "84d7d72464c75e81d568860c37c86a6edacc34f045e3b53ed262582a01476e63"
+            "30ee3607493b6c71b00f92d9e13c879dfa410d1faffc53b794d28c38094fb78e"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v16\0".len()..]).unwrap();

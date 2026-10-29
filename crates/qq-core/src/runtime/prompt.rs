@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use qq_protocol::{ContentHash, DelegationRoster, PromptVersion};
+use qq_protocol::{ApprovalMode, ContentHash, DelegationRoster, PromptVersion};
 use qq_provider::ToolSpec;
 use sha2::{Digest, Sha256};
 
@@ -12,12 +12,12 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(26) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(27) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// The base agent prompt, now at version 26. History: 10 → 11 covers the tool-layer
+/// The base agent prompt, now at version 27. History: 10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
@@ -43,6 +43,10 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// requiring a reviewer for their authorized edits and commands.
 /// 25 → 26 says commands run in the workspace as the user with the inherited
 /// environment and host network, and drops the credential-grant sentence.
+/// 26 → 27 states the environment once (checkout, user and network, edits
+/// in place, snapshot, mode, fixed stops, denials), shortens nested
+/// instruction discovery, drops approval wording from tool phrases, and adds
+/// the final-answer rule. `tests/golden/root_prompt.txt` holds the full text.
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -65,6 +69,12 @@ pub(crate) struct PromptSections<'a> {
     pub(crate) subagent: Option<SubagentAuthority>,
     pub(crate) read_only: bool,
     pub(crate) unattended: bool,
+    /// The session's approval mode, stated in the Environment section.
+    /// `read_only` overrides it.
+    pub(crate) mode: ApprovalMode,
+    /// The workspace is in a Git work tree, so a run's first change is
+    /// preceded by a snapshot `qq undo` can restore.
+    pub(crate) snapshots: bool,
 }
 
 /// What a sub-agent may do, as far as its prompt is concerned. A read child
@@ -157,7 +167,14 @@ fn agent_prompt_prefix(
         subagent,
         read_only,
         unattended,
+        mode,
+        snapshots,
     } = sections;
+    let mode = if read_only {
+        ApprovalMode::ReadOnly
+    } else {
+        mode
+    };
     let mut tool_names = String::new();
     let mut has_external = tool_index.is_some();
     let mut has_spawn = false;
@@ -204,11 +221,9 @@ fn agent_prompt_prefix(
         || has("shell")
         || has("exec");
     let edit_description = match (has("edit_file"), has("write_file")) {
-        (true, true) => {
-            "edit_file and write_file modify workspace files and may require user approval; "
-        }
-        (true, false) => "edit_file modifies workspace files and may require user approval; ",
-        (false, true) => "write_file modifies workspace files and may require user approval; ",
+        (true, true) => "edit_file and write_file change workspace files; ",
+        (true, false) => "edit_file changes workspace files; ",
+        (false, true) => "write_file changes workspace files; ",
         (false, false) => "",
     };
     let command_names = match (has("shell"), has("exec")) {
@@ -220,12 +235,10 @@ fn agent_prompt_prefix(
     let command_description = if command_names.is_empty() {
         String::new()
     } else {
-        format!(
-            "{command_names} run commands in the workspace as the user, with the inherited environment and host network, using the task deadline or an earlier explicit timeout. Auto never waits for human approval: a denied call is a tool error, so choose another permitted approach without bypassing the boundary. Ask may require human approval; "
-        )
+        format!("{command_names} run commands; ")
     };
     let ask_description = if has("ask_user") {
-        "ask_user asks a bounded multiple-choice question when human input is enabled; in Auto it returns a result telling you to decide without human input; "
+        "ask_user asks the user multiple-choice questions; "
     } else {
         ""
     };
@@ -236,7 +249,7 @@ fn agent_prompt_prefix(
     };
     let has_fetch = specs.iter().any(|spec| spec.name() == "fetch");
     let fetch_description = if has_fetch {
-        "fetch reads one public http(s) URL (HTML as markdown, JSON formatted). Auto needs no per-host approval; Ask requires human approval. Private, link-local and managed-denied hosts are refused."
+        "fetch reads one public http(s) URL (HTML as markdown, JSON formatted); private, link-local and managed-denied hosts are refused."
     } else {
         ""
     };
@@ -248,8 +261,8 @@ fn agent_prompt_prefix(
         ""
     };
     let mcp_note = if has_external {
-        " Tools named mcp__<server>__<tool> or ext__<host>__<tool> call external tool hosts, \
-         execute outside the workspace, and may require user approval."
+        " Tools named mcp__<server>__<tool> or ext__<host>__<tool> call external tool hosts and \
+         run outside the workspace."
     } else {
         ""
     };
@@ -391,9 +404,9 @@ fn agent_prompt_prefix(
         ""
     };
     let instruction_guidance = if has("search") {
-        "- Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query=\"(^|/)(AGENTS|CLAUDE)\\.md$\", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. For a target deeper than 64 directory components, also search its target ancestor at each 64-component boundary with path and include_ignored=true. A partial=depth or depth_limited marker requires these bounded target scopes; cursor pages cannot recover skipped depths. Names discovery reports safe instruction-file symlinks; an unresolved instruction link is a blocker before editing. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions.\n"
+        "- Workspace-root instructions are already loaded. Before editing below the root, find nested AGENTS.md files (CLAUDE.md where there is none) once with search mode=names regex=true query=\"(^|/)(AGENTS|CLAUDE)\\.md$\" (for a target in an ignored directory, add path and include_ignored=true), read those on the path to the target, and let the more specific one win.\n"
     } else if has("edit_file") || has("write_file") || has("shell") || has("exec") {
-        "- Nested AGENTS.md (CLAUDE.md where absent) applies below its directory, more specific first. Discover applicable instructions with declared tools before editing; if you cannot discover them, report that blocker. The host supplies workspace-root instructions.\n"
+        "- Workspace-root instructions are already loaded. Before editing below the root, read any nested AGENTS.md (CLAUDE.md where there is none) on the path to the target; the more specific one wins.\n"
     } else {
         ""
     };
@@ -405,15 +418,32 @@ fn agent_prompt_prefix(
     };
     let command_preference = match (has("exec"), has("shell")) {
         (true, true) => {
-            "- Prefer exec for a single program with arguments (exec program=cargo args=[test, -p, x]): no quoting or globbing surprises, and the approval gate sees exact words. Reserve shell for pipelines and redirection.\n"
+            "- Prefer exec for a single program with arguments (exec program=cargo args=[test, -p, x]): no quoting or globbing surprises. Reserve shell for pipelines and redirection.\n"
         }
         (true, false) => {
-            "- Use exec for one program with arguments; the approval gate sees exact words without quoting or globbing.\n"
+            "- Use exec for one program with arguments; its words are passed exactly, without quoting or globbing.\n"
         }
-        (false, true) => {
-            "- Use shell for commands, pipelines and redirection within the declared policy.\n"
-        }
+        (false, true) => "- Use shell for commands, pipelines and redirection.\n",
         _ => "",
+    };
+    let environment = if specs.is_empty() && !has_external {
+        String::new()
+    } else {
+        environment_section(
+            mode,
+            snapshots,
+            subagent,
+            has("shell") || has("exec"),
+            can_act,
+            has("ask_user"),
+        )
+    };
+    let final_answer = if subagent.is_some() {
+        ""
+    } else if mode == ApprovalMode::Auto && can_act && !read_only && !unattended {
+        "- End with the outcome first, in a few lines: what changed or what you found, how you verified it, and anything left undone. Cite code as path:line. When a next step is within the request, take it instead of offering it.\n"
+    } else {
+        "- End with the outcome first, in a few lines: what changed or what you found, how you verified it, and anything left undone. Cite code as path:line.\n"
     };
     let mut prompt = format!(
         "You are QQ, a coding agent operating in a workspace.\n\
@@ -421,6 +451,7 @@ fn agent_prompt_prefix(
          Available tools: {tool_names}. {read_description}\
          {edit_description}{command_description}{ask_description}\
          {fetch_description}{mcp_note}\n\
+         {environment}\
          \n\
          Working conventions:\n\
          {action}\
@@ -442,6 +473,7 @@ fn agent_prompt_prefix(
          {edit_preference}\
          {command_preference}\
 {fetch_guidance}\
+         {final_answer}\
          {ask_guidance}{spawn_section}",
     );
     if let Some(authority) = subagent {
@@ -463,6 +495,64 @@ fn agent_prompt_prefix(
         persona.append_to_prompt(&mut prompt);
     }
     prompt
+}
+
+/// The Environment section: where work happens and what stops it, stated
+/// once so tool descriptions need not repeat it.
+fn environment_section(
+    mode: ApprovalMode,
+    snapshots: bool,
+    subagent: Option<SubagentAuthority>,
+    commands: bool,
+    changes: bool,
+    asks: bool,
+) -> String {
+    let mut text = String::from("\nEnvironment:\n");
+    text.push_str(
+        "- The workspace root is the user's real checkout, not a copy, and tool paths are relative to it.",
+    );
+    if commands {
+        text.push_str(
+            " Commands run there as the user, with the user's environment, credentials and network: they can do anything the user can do from a terminal.",
+        );
+    }
+    text.push('\n');
+    if changes && mode != ApprovalMode::ReadOnly {
+        text.push_str("- Changes apply to the checkout immediately; nothing is staged for later.");
+        text.push_str(if subagent.is_some() {
+            // The parent's snapshot, taken before it spawned, covers a child.
+            "\n"
+        } else if snapshots {
+            " Before the first change of each request QQ snapshots the working tree with Git (untracked files included; ignored and very large files not), and the user can restore it with qq undo.\n"
+        } else {
+            " QQ takes no snapshot for this run, so qq undo cannot restore it.\n"
+        });
+    }
+    text.push_str(match (mode, subagent) {
+        (ApprovalMode::ReadOnly, _) => "- Mode: read-only. Only reads run.\n",
+        (_, Some(_)) => {
+            "- Mode: within your parent's authority. A call the parent's mode would not run without a human is denied.\n"
+        }
+        (ApprovalMode::Ask, None) => {
+            "- Mode: Ask. Each edit, command, external tool call and fetch is held for the user's approval; with no one to approve it, it is denied.\n"
+        }
+        (ApprovalMode::Auto, None) if asks => {
+            "- Mode: Auto. Calls run without asking anyone, and ask_user gets no answer.\n"
+        }
+        (ApprovalMode::Auto, None) => "- Mode: Auto. Calls run without asking anyone.\n",
+        (ApprovalMode::Full, None) => {
+            "- Mode: Full. Calls run without asking anyone, fixed stops included; managed configuration can still refuse some.\n"
+        }
+    });
+    if commands && mode != ApprovalMode::Full && mode != ApprovalMode::ReadOnly {
+        text.push_str(
+            "- Fixed stops are refused: force-pushing or deleting remote refs; removing, moving or recursively changing /, the home directory, or a directory directly under either; sudo, doas, su and pkexec; writing to disk devices; shutdown and reboot; commands that name credential files such as ~/.ssh or ~/.aws.\n",
+        );
+    }
+    text.push_str(
+        "- A result starting permission_denied: <who>: <reason>; <what to do instead> means the call did not run. Do not retry it in another form: take the suggested alternative, or tell the user what is blocked.\n",
+    );
+    text
 }
 
 /// Appended for a model-spawned child run (ADR-0054 § 5). The parent is
@@ -601,7 +691,7 @@ mod ab2_contract {
     const EXPLORE: &str = "Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.";
     const REREAD: &str = "Do not re-read text that is still in your context; re-read only lines you have not seen, lines that may have changed, or a read that shows as a [pruned: …] stub. Read the region you need in one call, with ranges for several windows, rather than paging in slices.";
     const BUILTINS: &str = "Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path and include_ignored=true to search or tree rather than cd.";
-    const INSTRUCTIONS: &str = r#"Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query="(^|/)(AGENTS|CLAUDE)\.md$", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. For a target deeper than 64 directory components, also search its target ancestor at each 64-component boundary with path and include_ignored=true. A partial=depth or depth_limited marker requires these bounded target scopes; cursor pages cannot recover skipped depths. Names discovery reports safe instruction-file symlinks; an unresolved instruction link is a blocker before editing. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions."#;
+    const INSTRUCTIONS: &str = r#"Workspace-root instructions are already loaded. Before editing below the root, find nested AGENTS.md files (CLAUDE.md where there is none) once with search mode=names regex=true query="(^|/)(AGENTS|CLAUDE)\.md$" (for a target in an ignored directory, add path and include_ignored=true), read those on the path to the target, and let the more specific one win."#;
 
     fn render(subagent: Option<SubagentAuthority>, specs: &[ToolSpec]) -> String {
         agent_system_prompt(
@@ -635,7 +725,7 @@ mod ab2_contract {
         ] {
             assert!(prompt.contains(bullet), "missing contract: {bullet}");
         }
-        assert_eq!(AGENT_PROMPT_VERSION.get(), 26);
+        assert_eq!(AGENT_PROMPT_VERSION.get(), 27);
     }
 
     #[test]
@@ -669,6 +759,112 @@ mod ab2_contract {
 #[cfg(test)]
 mod ab2_header_authority {
     use super::*;
+
+    fn environment(mode: ApprovalMode, snapshots: bool) -> String {
+        let prompt = agent_system_prompt(
+            &crate::tools::specs(),
+            PromptSections {
+                mode,
+                snapshots,
+                ..PromptSections::default()
+            },
+            &WorkspaceInstructions::empty(),
+            None,
+            None,
+        );
+        let start = prompt.find("\nEnvironment:\n").unwrap();
+        let end = prompt.find("\nWorking conventions:\n").unwrap();
+        prompt[start..end].to_owned()
+    }
+
+    #[test]
+    fn the_environment_states_mode_snapshot_and_stops() {
+        let auto = environment(ApprovalMode::Auto, true);
+        assert!(auto.contains("- Mode: Auto. Calls run without asking anyone"));
+        assert!(auto.contains("qq undo"));
+        assert!(auto.contains("Fixed stops are refused"));
+        assert!(auto.contains("permission_denied: <who>"));
+        assert!(!auto.contains("approval"));
+        assert!(environment(ApprovalMode::Auto, false).contains("QQ takes no snapshot"));
+        let ask = environment(ApprovalMode::Ask, true);
+        assert!(ask.contains("held for the user's approval"));
+        assert!(ask.contains("with no one to approve it, it is denied"));
+        assert!(ask.contains("Fixed stops are refused"));
+        let full = environment(ApprovalMode::Full, true);
+        assert!(full.contains("fixed stops included"));
+        assert!(full.contains("managed configuration can still refuse"));
+        assert!(!full.contains("Fixed stops are refused"));
+        let read_only = agent_system_prompt(
+            &crate::tools::specs(),
+            PromptSections {
+                read_only: true,
+                ..PromptSections::default()
+            },
+            &WorkspaceInstructions::empty(),
+            None,
+            None,
+        );
+        assert!(read_only.contains("- Mode: read-only. Only reads run."));
+        assert!(!read_only.contains("qq undo"));
+        // Only an acting Auto root is told to take the next step itself.
+        let take = "take it instead of offering it";
+        assert!(
+            agent_system_prompt(
+                &crate::tools::specs(),
+                PromptSections::default(),
+                &WorkspaceInstructions::empty(),
+                None,
+                None
+            )
+            .contains(take)
+        );
+        assert!(!read_only.contains(take));
+        let ask_prompt = agent_system_prompt(
+            &crate::tools::specs(),
+            PromptSections {
+                mode: ApprovalMode::Ask,
+                ..PromptSections::default()
+            },
+            &WorkspaceInstructions::empty(),
+            None,
+            None,
+        );
+        assert!(ask_prompt.contains("Cite code as path:line."));
+        assert!(!ask_prompt.contains(take));
+    }
+
+    #[test]
+    fn a_write_child_defers_to_its_parent_and_its_snapshot() {
+        let prompt = agent_system_prompt(
+            &crate::tools::specs(),
+            PromptSections {
+                subagent: Some(SubagentAuthority::Write),
+                ..PromptSections::default()
+            },
+            &WorkspaceInstructions::empty(),
+            None,
+            None,
+        );
+        assert!(prompt.contains("- Mode: within your parent's authority."));
+        assert!(prompt.contains(
+            "- Changes apply to the checkout immediately; nothing is staged for later.\n"
+        ));
+        assert!(!prompt.contains("Mode: Auto"));
+        assert!(!prompt.contains("qq undo"));
+        assert!(!prompt.contains("End with the outcome first"));
+    }
+
+    #[test]
+    fn a_run_without_tools_has_no_environment() {
+        let prompt = agent_system_prompt(
+            &[],
+            PromptSections::default(),
+            &WorkspaceInstructions::empty(),
+            None,
+            None,
+        );
+        assert!(!prompt.contains("Environment:"), "{prompt}");
+    }
 
     #[test]
     fn ab2_single_tool_prompts_omit_all_other_tool_instructions() {

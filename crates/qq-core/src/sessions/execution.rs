@@ -97,6 +97,8 @@ fn session_prompt_prefix_key(
                 }
             },
         ),
+        mode: claimed.approval_mode,
+        snapshots: !claimed.identity.child,
     }
 }
 
@@ -512,6 +514,13 @@ async fn prepare_execution(
     .with_tool_tasks(resources.tools.clone())
     .with_output(claimed.output.clone())
     .with_inherited_effects(inherited_effects);
+    // Only roots snapshot (see the tool-start handler below); a child's
+    // changes are covered by its root's snapshot, which it cannot restore.
+    if !claimed.identity.child {
+        capabilities = capabilities.in_session(claimed.approval_mode);
+    } else {
+        capabilities.mode = claimed.approval_mode;
+    }
     if claimed
         .goal
         .as_ref()

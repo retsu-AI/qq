@@ -95,24 +95,40 @@ stays usable; the next run starts with a fresh budget.
 Tool declarations tell the model what it may call; they do not tell it
 that it is an agent. `ModelRequest` carries a system-prompt field, and
 `qq-core` owns a base agent prompt assembled per run: what the workspace
-is, which tools are available, and the working conventions — read a file
-before editing it, define what done looks like, inspect only what the next
-action needs, make requested changes, verify resulting state, and report
-remaining failures honestly. Analysis-only requests produce findings without
-file changes. The prompt discourages re-reading retained context except
-changed/new lines and pruned stubs, maps shell reads to the built-ins, and
-finds scoped instruction files once per discovery root, following cursor
-pages without restarting the same search. All targets use workspace-root discovery for nonignored ancestors; ignored
-targets also use their highest ignored ancestor with `include_ignored=true`,
-covering instructions within that subtree and multiple worktrees. Targets deeper
-than 64 directory components use additional target-ancestor discovery roots at each
-64-component boundary. Search/tree calls into ignored roots include both path
-and include_ignored=true. Tool-specific header descriptions and working conventions
+is, which tools are available, an Environment section, and the working
+conventions: read a file before editing it, define what done looks like,
+inspect only what the next action needs, make requested changes, verify
+resulting state, and report remaining failures honestly. Analysis-only
+requests produce findings without file changes.
+
+The Environment section states once what tool descriptions used to repeat:
+the workspace root is the user's real checkout and tool paths are relative
+to it (no absolute path, so checkouts share a provider cache prefix);
+commands run as the user with the user's environment, credentials and
+network; changes apply immediately; whether the run is snapshotted for
+`qq undo` (a session root in a Git work tree) or not; the session's mode
+(a sub-agent is told it works within its parent's authority, under the
+parent's snapshot);
+the fixed stops in Ask and Auto; and that a `permission_denied:` result
+means the call did not run and is not to be retried in another form. Tool
+descriptions say how to use the tool; the prompt holds policy.
+
+The prompt discourages re-reading retained context except changed/new lines
+and pruned stubs, maps shell reads to the built-ins, says root instructions
+are already loaded, and finds nested instruction files with one names search
+(adding `include_ignored=true` for a target in an ignored directory) before
+editing below the root. The last convention shapes the final answer: outcome
+first, a few lines, code cited as `path:line`; in Auto, a next step within
+the request is taken instead of offered. Sub-agents use their own reply
+shape instead. Tool-specific header descriptions and working conventions
 are emitted only for declared tools, including restricted and no-tools profiles.
 A read_file plus write_file profile describes whole-file replacement with its
 current hash, without advertising absent anchor-edit or old-match semantics. The prompt is
 versioned in code, not user-editable configuration for now, so behavior
-changes ship as reviewed diffs rather than config drift. Each provider maps the
+changes ship as reviewed diffs rather than config drift. The rendered root
+prompt of an Auto session is pinned in full in
+`crates/qq-core/tests/golden/root_prompt.txt`; `QQ_UPDATE_GOLDENS=1`
+rewrites it. Each provider maps the
 field to its native system/instructions slot; no codec invents its own
 preamble.
 

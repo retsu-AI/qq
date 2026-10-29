@@ -3512,7 +3512,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "18b8c7e06cd2f016433bdf5bd2ee4188b69074a7b732adfdb000d8e28002a248"
+            "d129d3bca9c23c3362687d5bf1bf157c45d978bb69ffbf1ed224355010dcd183"
         );
     }
 
@@ -3530,11 +3530,6 @@ mod tests {
             "openai-codex/gpt-test".to_owned(),
         ];
         let spec = spawn_agent_spec(&routes, &qq_protocol::DelegationRoster::default());
-        assert!(spec.description().contains("Omit model by default"));
-        assert!(
-            spec.description()
-                .contains("never guess, translate, or invent a route")
-        );
         let schema: serde_json::Value = serde_json::from_str(spec.input_schema().get()).unwrap();
         assert_eq!(schema["required"], json!(["task"]));
         assert_eq!(schema["properties"]["model"]["enum"], json!(routes));
@@ -3544,7 +3539,6 @@ mod tests {
         assert!(model.contains("Omit by default"));
         assert!(model.contains("configured worker model"));
         assert!(model.contains("this session's selected model"));
-        assert!(model.contains("never guess or translate providers"));
     }
 
     fn roster() -> qq_protocol::DelegationRoster {
@@ -3597,7 +3591,7 @@ mod tests {
             schema["properties"]["model"]["enum"],
             json!(["openai/fast", "anthropic/strong"])
         );
-        assert!(spec.description().contains("Choose the sub-agent by role"));
+        assert!(spec.description().contains("Choose it by role"));
         let bytes = spec.name().len() + spec.description().len() + schema.to_string().len();
         assert!(bytes <= MAX_SPAWN_AGENT_SCHEMA_BYTES, "{bytes}");
 
@@ -3620,24 +3614,22 @@ mod tests {
                     write_children
                 );
                 if write_children {
-                    assert!(!spec.description().contains("to a read-only sub-agent"));
-                    assert!(spec.description().contains("authority"));
-                    assert!(spec.description().contains("Auto within the parent"));
+                    assert!(!spec.description().contains("read-only sub-agent"));
+                    assert!(spec.description().contains("authority: write"));
                     assert!(!spec.description().contains("reviewer_model"));
                     assert!(!spec.description().contains("supervised approval"));
                     let authority = schema["properties"]["authority"]["description"]
                         .as_str()
                         .unwrap();
-                    assert!(authority.contains("Auto within the parent"));
+                    assert!(authority.contains("within the parent's authority"));
                     assert!(!authority.contains("reviewer_model"));
                     assert!(!authority.contains("supervised approval"));
-                    assert!(spec.description().contains("one write sub-agent"));
                     assert_eq!(
                         schema["properties"]["authority"]["enum"],
                         json!(["read", "write"])
                     );
                 } else {
-                    assert!(spec.description().contains("to a read-only sub-agent"));
+                    assert!(spec.description().contains("read-only sub-agent"));
                     assert!(!spec.description().contains("authority"));
                 }
             }
