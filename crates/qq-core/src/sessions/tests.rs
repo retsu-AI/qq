@@ -1797,6 +1797,7 @@ impl R4RssSampler {
             let mut peak = r4_current_rss_bytes();
             while !worker_stop.load(std::sync::atomic::Ordering::Acquire) {
                 peak = peak.max(r4_current_rss_bytes());
+                // lint: allow(sleep) RSS sampling period of the ignored R4 measurement
                 std::thread::sleep(Duration::from_millis(1));
             }
             peak.max(r4_current_rss_bytes())
@@ -1976,6 +1977,7 @@ fn run_r4_stream_diagnostic_child(
                 String::from_utf8_lossy(&output.stderr),
             );
         }
+        // lint: allow(sleep) polls a real child process of the ignored R4 measurement
         std::thread::sleep(Duration::from_millis(10));
     }
 }

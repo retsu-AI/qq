@@ -1,8 +1,6 @@
-crates/qq-core/src/sessions/tests.rs	1800	fn start() -> Self {	std::thread::sleep(Duration::from_millis(1));
-crates/qq-core/src/sessions/tests.rs	1979	fn run_r4_stream_diagnostic_child(	std::thread::sleep(Duration::from_millis(10));
-crates/qq-core/src/sessions/tests.rs	4794	fn stream(&self, _request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(50)).await;
-crates/qq-core/src/sessions/tests.rs	7839	async fn side_cancel_drains_a_blocked_inspection_tool_before_settlement() {	tokio::time::sleep(Duration::from_millis(50)).await;
-crates/qq-core/src/sessions/tests.rs	8453	async fn side_replacement_waits_for_the_cancelled_owner_to_tear_down() {	tokio::time::sleep(Duration::from_millis(50)).await;
+crates/qq-core/src/sessions/tests.rs	4796	fn stream(&self, _request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(50)).await;
+crates/qq-core/src/sessions/tests.rs	7841	async fn side_cancel_drains_a_blocked_inspection_tool_before_settlement() {	tokio::time::sleep(Duration::from_millis(50)).await;
+crates/qq-core/src/sessions/tests.rs	8455	async fn side_replacement_waits_for_the_cancelled_owner_to_tear_down() {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/sessions/tests/commands.rs	2076	fn stream(&self, _request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/sessions/tests/compaction.rs	1469	async fn saturated_reserved_reload_waits_after_auto_compaction() {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/sessions/tests/deadlines.rs	208	async fn duration_stops_shell_while_output_persistence_is_blocked() {	tokio::time::sleep(Duration::from_millis(10)).await;
