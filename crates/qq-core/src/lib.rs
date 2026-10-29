@@ -9962,10 +9962,11 @@ mod tests {
             None,
             None,
         );
-        // Prompt 27 adds the Environment section and the final-answer
-        // bullet, drops approval wording from the header and command
-        // preference, and shortens nested instruction discovery; undo it.
-        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 27);
+        // Prompt 28 changes only the skill index (absent here). Prompt 27
+        // adds the Environment section and the final-answer bullet, drops
+        // approval wording from the header and command preference, and
+        // shortens nested instruction discovery; undo it.
+        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 28);
         let environment = prompt.find("\nEnvironment:\n").unwrap()
             ..prompt.find("\nWorking conventions:\n").unwrap();
         let mut prompt = prompt;

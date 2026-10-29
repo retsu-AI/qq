@@ -1876,7 +1876,7 @@ mod tests {
         // changing the encoding (descriptor 16: configured pack mutation authority).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "30ee3607493b6c71b00f92d9e13c879dfa410d1faffc53b794d28c38094fb78e"
+            "1d313a6d0988d2bf68b1782a5129ee4b16d08c24ccaa2005d3ba9053e1af0295"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v16\0".len()..]).unwrap();
