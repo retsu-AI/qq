@@ -260,6 +260,7 @@ async fn run_host_process(
             .expect("pid fits signed process id"),
     )
     .expect("spawned child has positive pid");
+    let pgid = group.group().expect("spawned command has a process group");
     // Observe without reaping: the leader pins the process-group id until
     // the group is terminated, even when a background descendant closed
     // its pipes. Reaping first would permit pgid reuse before the kill.
@@ -303,7 +304,7 @@ async fn run_host_process(
                 }
                 if let Err(error) = group.kill() { break Err(ProcessError::Kill(error)); }
                 #[cfg(target_os = "linux")]
-                if let Err(error) = confirm_group_exit(pid).await {
+                if let Err(error) = confirm_group_exit(pgid).await {
                     break Err(ProcessError::Cleanup { original: None, group: Some(error), leader: None, reap: None });
                 }
                 #[cfg(not(target_os = "linux"))]
@@ -316,7 +317,7 @@ async fn run_host_process(
                     if let Err(error) = group.reap_watcher().await {
                         return Err(ProcessError::Cleanup { original: None, group: Some(error), leader: None, reap: None });
                     }
-                    if let Err(error) = confirm_reaped_group_exit(pid).await {
+                    if let Err(error) = confirm_reaped_group_exit(pgid).await {
                         return Err(ProcessError::Cleanup { original: None, group: Some(error), leader: None, reap: None });
                     }
                     reaped_status = Some(status);
@@ -379,7 +380,7 @@ async fn run_host_process(
         let confirmation_error = if matches!(&outcome, Err(ProcessError::Cleanup { .. })) {
             None
         } else {
-            confirm_group_exit(pid).await.err()
+            confirm_group_exit(pgid).await.err()
         };
         let reap_error = if reaped_status.is_some() {
             None
@@ -392,7 +393,7 @@ async fn run_host_process(
         #[cfg(not(target_os = "linux"))]
         let confirmation_error = if reap_error.is_none() {
             match group.reap_watcher().await {
-                Ok(()) => confirm_reaped_group_exit(pid).await.err(),
+                Ok(()) => confirm_reaped_group_exit(pgid).await.err(),
                 Err(error) => Some(error),
             }
         } else {

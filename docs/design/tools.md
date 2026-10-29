@@ -24,9 +24,10 @@ denies, and a snapshot before each run's first change (`qq undo`). Stronger
 isolation means running QQ inside a container, VM or dedicated account.
 
 A command does not outlive the process that started it. On Unix each
-command's process group also holds a small watcher that reads a pipe only
-the QQ process holds open; when QQ exits for any reason, SIGKILL included,
-the watcher kills the group. On Windows each command's job is killed when
+command's process group is led by a small watcher that reads a pipe only
+the QQ process holds open; the watcher ignores the group signals a script
+may send before the command joins, and when QQ exits for any reason,
+SIGKILL included, it kills the group. On Windows each command's job is killed when
 its handle closes. On Unix a command that leaves its process group (`setsid`, a
 double fork into a new group) escapes this, as it escapes timeouts; Windows
 jobs follow every descendant. Commands share the user's terminal, so a
