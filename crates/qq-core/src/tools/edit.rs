@@ -50,6 +50,28 @@ pub(super) struct EditFileArgs {
     dry_run: bool,
 }
 
+/// Models sometimes send `edit_file`'s `edits` JSON-encoded as a string, or
+/// as one edit object without its array; both mean the list they decode
+/// to. The runtime rewrites the arguments to that list before the call is
+/// stored, so approval previews, clients and compaction see one shape.
+/// Anything else is left for the strict decoder to refuse.
+pub(crate) fn normalize_edits(arguments: &mut serde_json::Value) {
+    let Some(edits) = arguments.get_mut("edits") else {
+        return;
+    };
+    if let serde_json::Value::String(encoded) = edits {
+        match serde_json::from_str::<serde_json::Value>(encoded) {
+            Ok(decoded @ (serde_json::Value::Array(_) | serde_json::Value::Object(_))) => {
+                *edits = decoded;
+            }
+            _ => return,
+        }
+    }
+    if edits.is_object() {
+        *edits = serde_json::Value::Array(vec![edits.take()]);
+    }
+}
+
 const fn default_true() -> bool {
     true
 }
@@ -1752,6 +1774,33 @@ mod tests {
             fs::read_to_string(directory.path().join("a.txt")).unwrap(),
             "alpha\ngamma\n"
         );
+    }
+
+    /// An earlier build refused an edit_file call whose `edits` arrived as a
+    /// JSON-encoded string; a lone edit object is the same slip.
+    #[test]
+    fn edits_sent_as_a_string_or_a_single_object_become_the_list() {
+        let list = serde_json::json!({"edits":[{"path":"a.txt","old":"a","new":"b"}]});
+        for sent in [
+            serde_json::json!({"edits":"[{\"path\":\"a.txt\",\"old\":\"a\",\"new\":\"b\"}]"}),
+            serde_json::json!({"edits":"{\"path\":\"a.txt\",\"old\":\"a\",\"new\":\"b\"}"}),
+            serde_json::json!({"edits":{"path":"a.txt","old":"a","new":"b"}}),
+            list.clone(),
+        ] {
+            let mut arguments = sent.clone();
+            super::normalize_edits(&mut arguments);
+            assert_eq!(arguments, list, "{sent}");
+        }
+        for sent in [
+            serde_json::json!({"edits":"not json"}),
+            serde_json::json!({"edits":"3"}),
+            serde_json::json!({"edits":3}),
+            serde_json::json!({"path":"a.txt"}),
+        ] {
+            let mut arguments = sent.clone();
+            super::normalize_edits(&mut arguments);
+            assert_eq!(arguments, sent);
+        }
     }
 }
 

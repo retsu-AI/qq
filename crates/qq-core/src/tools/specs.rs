@@ -545,6 +545,26 @@ pub(crate) struct SpawnAgentArgs {
     pub(crate) authority: ChildAuthority,
 }
 
+/// The smallest call each tool accepts, shown when the same argument error
+/// repeats: a model that misreads the schema twice copies a shape instead.
+pub(crate) fn minimal_call(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "read_file" => r#"{"path":"README.md"}"#,
+        "tree" => "{}",
+        "search" => r#"{"query":"fn main"}"#,
+        "edit_file" => r#"{"edits":[{"path":"README.md","old":"before","new":"after"}]}"#,
+        "write_file" => r#"{"path":"notes.txt","content":"text\n"}"#,
+        "shell" => r#"{"command":"git status"}"#,
+        "exec" => r#"{"program":"git","args":["status"]}"#,
+        "ask_user" => r#"{"questions":[{"prompt":"Which one?","options":["a","b"]}]}"#,
+        "fetch" => r#"{"url":"https://example.com"}"#,
+        "update_goal" => r#"{"checklist":[{"type":"set_state","id":1,"state":"done"}]}"#,
+        SPAWN_AGENT_TOOL => r#"{"task":"Find where the config is loaded"}"#,
+        WAIT_AGENTS_TOOL => r#"{"timeout_seconds":60}"#,
+        _ => return None,
+    })
+}
+
 pub(crate) fn specs() -> Vec<ToolSpec> {
     static SPECS: OnceLock<Vec<ToolSpec>> = OnceLock::new();
     SPECS
