@@ -150,10 +150,14 @@ it when `/dev/shm` is missing, unwritable, mounted `noexec`, or has under
   plus `cargo xtask smoke`. Superseded runs are cancelled. The job summary
   carries the evidence block. Failed runs upload `target/qq-check/`, the
   JUnit file, and `target/qq-smoke/`.
+- **Every run:** the `devcontainer` job builds `.devcontainer/` and runs
+  three smoke scenarios inside it.
 - **Merge queue, `main`, manual runs:** `cargo xtask check --profile ci --full`,
   smoke, the `qq-core` embedding example and minimal profile, the `qq-client`
-  wasm32 build, and the Windows teardown tests.
-- **Label `ci:full` on a pull request:** also runs the wasm32 and Windows jobs.
+  wasm32 build, the Windows teardown tests, and run-in-place on macOS and
+  Windows ([Windows CI](windows-ci.md)).
+- **Label `ci:full` on a pull request:** also runs the wasm32, Windows and
+  run-in-place jobs.
 
 Turn on the merge queue in branch protection and make `checks`,
 `client-wasm`, and `windows-teardown` required. Without a merge queue, the
