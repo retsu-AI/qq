@@ -12,12 +12,12 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(27) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(28) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// The base agent prompt, now at version 27. History: 10 → 11 covers the tool-layer
+/// The base agent prompt, now at version 28. History: 10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
@@ -47,6 +47,8 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// in place, snapshot, mode, fixed stops, denials), shortens nested
 /// instruction discovery, drops approval wording from tool phrases, and adds
 /// the final-answer rule. `tests/golden/root_prompt.txt` holds the full text.
+/// 27 → 28 has the skill index tell the model to load a matching skill
+/// before acting, and gives load_skill an `arguments` field.
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -725,7 +727,7 @@ mod ab2_contract {
         ] {
             assert!(prompt.contains(bullet), "missing contract: {bullet}");
         }
-        assert_eq!(AGENT_PROMPT_VERSION.get(), 27);
+        assert_eq!(AGENT_PROMPT_VERSION.get(), 28);
     }
 
     #[test]

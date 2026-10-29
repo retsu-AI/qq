@@ -200,8 +200,9 @@ the list.
 - `@src/parser.rs` attaches a file; `@src/parser.rs:10-40` attaches those
   lines. Completion opens as you type the path.
 - `/name` runs a workspace command from `.qq/commands/name.md` or loads a
-  skill from `.qq/skills/name/SKILL.md`; `/skills` lists them with their
-  source. Typing after the slash filters by subsequence (`/mdl` finds
+  skill from `.qq/skills/name/SKILL.md` (also `.agents/skills/` and
+  `~/.config/qq/skills/`); text after the name replaces `$ARGUMENTS`.
+  `/skills` lists them with their source. Typing after the slash filters by subsequence (`/mdl` finds
   `/models`).
 - `Ctrl-R` searches your prompt history for this session.
 - `/compact` summarizes an idle session's history so a long conversation

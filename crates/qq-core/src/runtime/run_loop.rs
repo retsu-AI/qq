@@ -3378,6 +3378,7 @@ impl RunState {
                                                 skills,
                                                 cancelled,
                                                 arguments.name.trim().to_owned(),
+                                                arguments.arguments,
                                                 &tool_tasks,
                                             )
                                             .await

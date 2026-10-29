@@ -45,11 +45,11 @@ crates/qq-core/tests/soak.rs	1081	async fn pending_summary_kill_worker() {	tokio
 crates/qq-host/src/plan.rs	794	fn equivalent_refresh_admits_grown_source_evidence() {	thread::sleep(std::time::Duration::from_millis(20));
 crates/qq-host/src/plan.rs	859	fn source_change_with_identical_result_keeps_the_live_generation() {	thread::sleep(std::time::Duration::from_millis(20));
 crates/qq-host/src/plan.rs	1013	fn concurrent_misses_on_one_key_compile_once() {	thread::sleep(std::time::Duration::from_millis(10));
-crates/qq-host/src/runtime.rs	3921	async fn observers_fall_behind_restart_and_converge_without_delaying_commits() {	tokio::time::sleep(Duration::from_millis(20)).await;
-crates/qq-host/src/runtime.rs	7819	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
-crates/qq-host/src/runtime.rs	7829	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
-crates/qq-host/src/runtime.rs	7837	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
-crates/qq-host/src/runtime.rs	8002	fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {	std::thread::sleep(self.delay);
+crates/qq-host/src/runtime.rs	3922	async fn observers_fall_behind_restart_and_converge_without_delaying_commits() {	tokio::time::sleep(Duration::from_millis(20)).await;
+crates/qq-host/src/runtime.rs	7820	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
+crates/qq-host/src/runtime.rs	7830	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
+crates/qq-host/src/runtime.rs	7838	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
+crates/qq-host/src/runtime.rs	8003	fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {	std::thread::sleep(self.delay);
 crates/qq-mcp/src/tests.rs	113	async fn call_tool(	tokio::time::sleep(self.slow_delay).await;
 crates/qq-mcp/src/tests.rs	245	async fn poll_until(mut condition: impl AsyncFnMut() -> bool) {	tokio::time::sleep(Duration::from_millis(10)).await;
 crates/qq-mcp/src/tests.rs	478	async fn cancellation_stops_a_call_without_wedging_the_shared_client() {	tokio::time::sleep(Duration::from_millis(20)).await;

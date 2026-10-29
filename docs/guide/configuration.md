@@ -429,7 +429,16 @@ Not configuration keys, but files QQ discovers:
 | --- | --- |
 | `.qq/commands/<name>.md` | a slash command the composer offers as `/name`; the file is the prompt |
 | `.qq/skills/<name>/SKILL.md` | a skill the model may load; `/name` loads it explicitly |
+| `.agents/skills/<name>/SKILL.md` | same as `.qq/skills`; a skill in both is listed once, from `.qq/skills` |
+| `<global>/skills/<name>/SKILL.md` | a skill for every workspace (`~/.config/qq/skills` on Linux); a workspace skill of the same name wins |
 | `AGENTS.md` | project instructions the agent reads; see the [FAQ](faq.md#agents-md) |
+
+The model sees each skill's name and front-matter `description`, and loads a
+skill when the task matches. A front-matter `name:` overrides the directory
+name. A loaded skill tells the model its directory, so `scripts/run.sh` in a
+skill means the file beside its `SKILL.md`. `$ARGUMENTS` in a skill or
+command is replaced by the text after `/name`, or by what the model passes
+when it loads the skill.
 
 ## A complete example
 

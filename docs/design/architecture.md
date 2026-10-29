@@ -694,12 +694,16 @@ like a mutation whatever its name or hints; a name the catalog does not hold is
 a tool error before any policy runs.
 
 Skills are compiled into a `SkillIndex` beside the catalog. Native `.qq/`
-roots and pack roots are *disclosed*: their names and front-matter
-descriptions appear in the system prompt and `load_skill` reads the body on
-demand. `.agents/` and `.claude/` roots are indexed for explicit `/name`
-invocation only. The index is bounded (64 entries) and its roots are
-fingerprinted into the plan so a new skill file recompiles on the next load,
-not on the next run.
+roots, pack roots, the global `<config>/skills` root, and `.agents/skills`
+are *disclosed*: their names and front-matter descriptions appear in the
+system prompt, which tells the model to `load_skill` a matching skill before
+acting, and `load_skill` reads the body on demand. `.claude/` roots are
+indexed for explicit `/name` invocation only. A name keeps only its
+highest-precedence tier (workspace and pack, then global, then compatibility),
+so an `.agents/skills` copy of a `.qq/skills` skill is dropped. The index is
+bounded (64 entries, about 8 KiB rendered) and its roots and indexed
+documents are fingerprinted into the plan, so a new skill or an edited front
+matter recompiles on the next load, not on the next run.
 
 ### Agent Packs
 

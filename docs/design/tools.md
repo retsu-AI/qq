@@ -169,27 +169,31 @@ original command journal retains the escape marker so preparation does not
 reinterpret it. Restart, event replay, snapshots, and follow-up context
 therefore see the same prompt the first provider request saw.
 Only an exact leading invocation is special; ordinary prompts never inject
-skill bodies. Native `.qq/` roots and agent-pack roots are additionally
-*disclosed*: the plan's compiled `SkillIndex` lists their names and YAML
-front-matter descriptions in the system prompt, and the model may read one
-body on demand with the `load_skill` tool. Compatibility roots (`.agents/`,
-`.claude/`) are indexed for explicit invocation only and never disclosed. The
-index holds at most 64 entries; a loaded body obeys the same bounds and
-authority rules as an explicit invocation and is recorded in the run's
-prompt identity.
+skill bodies. Native `.qq/` roots, agent-pack roots, the global
+`<config>/skills` root (`~/.config/qq/skills` on Linux), and `.agents/skills`
+are additionally *disclosed*: the plan's compiled `SkillIndex` lists their
+names and YAML front-matter descriptions in the system prompt, tells the model
+to call `load_skill` before acting when a task matches a description, and the
+model may read one body on demand with that tool. `.claude/` roots are
+indexed for explicit invocation only and never disclosed. The index holds at
+most 64 entries and its rendered text about 8 KiB; entries past the text cap
+are counted, not listed, and stay loadable by name. A loaded body obeys the
+same bounds and authority rules as an explicit invocation and is recorded in
+the run's prompt identity.
 
-The initial resolver searches repository-local sources in two precedence
-tiers:
+The resolver searches sources in three precedence tiers; a name found in a
+higher tier drops every document of that name from lower tiers:
 
-1. Native QQ sources: `.qq/commands/<name>.md` and
-   `.qq/skills/<name>/SKILL.md`.
-2. Compatibility sources, considered only when the native tier has no match:
-   `.agents/skills/<name>/SKILL.md`, `.claude/commands/<name>.md`, and
-   `.claude/skills/<name>/SKILL.md`.
+1. Native QQ and pack sources: `.qq/commands/<name>.md`,
+   `.qq/skills/<name>/SKILL.md`, and the selected pack's roots.
+2. The global root: `<config>/skills/<name>/SKILL.md`.
+3. Compatibility sources: `.agents/skills/<name>/SKILL.md`,
+   `.claude/commands/<name>.md`, and `.claude/skills/<name>/SKILL.md`.
 
 Exactly one regular file must match within the selected tier. Multiple matches
-are ambiguous and no match is unknown; both fail before provider work. Native
-sources intentionally shadow compatibility sources, while a command and skill
+are ambiguous and no match is unknown; both fail before provider work. Higher
+tiers intentionally shadow lower ones, so a repository carrying the same skill
+in `.qq/skills` and `.agents/skills` lists it once, while a command and skill
 in the same tier do not silently shadow each other. Names are 1--64 bytes,
 start with a lowercase ASCII letter, and otherwise contain lowercase ASCII
 letters, digits, `-`, or `_`. Client control names (every entry of
@@ -209,9 +213,17 @@ depth-capped and never gain `spawn_agent` (or `wait_agents` and
 `cancel_agent`, which come with it) from that selection.
 
 Commands and skills use the same UTF-8 Markdown body contract. Their paths
-supply name and kind; the only front matter interpreted is a `description`
-line used for disclosure, so other foreign metadata remains ordinary guidance
-text. A body is capped at 64 KiB,
+supply name and kind unless front matter declares a valid `name:`, which
+then names the document; the only other front matter interpreted is a
+`description` line used for disclosure, so other foreign metadata remains
+ordinary guidance text. Text after `/name`, or a `load_skill` call's
+`arguments` (up to 4 KiB), replaces every `$ARGUMENTS` in the body; a body
+without the placeholder is unchanged, since the arguments are already in the
+user's message or the model's call. The content hash
+covers the stored body, before substitution. A loaded skill states its
+directory, says its relative paths resolve against it, and lists up to 32
+files beside it (two levels deep, hidden entries skipped). A body is capped
+at 64 KiB,
 resolved through the workspace capability, and rejected if it is not a regular
 file, is invalid UTF-8, or escapes through a symlink. Supporting files remain
 references only: loading a skill grants neither filesystem authority nor
@@ -227,21 +239,21 @@ Clients may offer completion for discoverable names, but discovery, resolution,
 loading, and rejection remain runtime behavior shared by direct, server, TUI,
 and benchmark paths.
 
-Agent packs add a third source: a pack selected by the session's profile
-contributes its declared skill and command roots as `pack:<id>/...` between
-the native and compatibility tiers, and prepends its persona to the system
-prompt. Packs are directories with a `pack.ron` manifest discovered from the
+A pack selected by the session's profile contributes its declared skill and
+command roots as `pack:<id>/...` in the native tier, and prepends its persona
+to the system prompt. Packs are directories with a `pack.ron` manifest discovered from the
 global configuration directory and `.qq/packs/` (each project manifest
 admitted only once its exact content is trusted); see
 `docs/design/architecture.md`.
 
-User-home, administrator-managed, and bundled roots are not discovered (see
-§ Intentionally Deferred). Reading the server process's home directory
-implicitly would make a
-remote TUI mean something different from a direct run and would grant
-host-level authority outside the selected workspace. Add such roots only as
-explicit server-owned configuration with provenance and the same bounds; do
-not infer them from the connecting client.
+The global root is the server process's configuration directory
+(`<global>/skills`, as `qq-config` resolves it, including `QQ_HOME`), indexed
+as `global:skills/...` and opened as its own capability (a symlinked
+`skills` directory is followed); a skill there shows its absolute directory,
+which file tools scoped to the workspace cannot read, so its scripts are
+reached through `exec`/`shell`. It is the host's configuration, like `config.ron`,
+not something inferred from the connecting client. Administrator-managed and
+bundled roots are not discovered (see § Intentionally Deferred).
 
 ### Message And Content Model
 
@@ -1590,7 +1602,7 @@ dispatch overhead has a benchmark.
 
 - Per-child isolation for editing subagents (children share the checkout;
   separate trees would use `git worktree`).
-- User-home, administrator-managed, and bundled skill roots.
+- Administrator-managed and bundled skill roots.
 - Approval pattern languages or per-path ACLs.
 - A plugin API beyond MCP.
 

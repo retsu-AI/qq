@@ -9962,10 +9962,11 @@ mod tests {
             None,
             None,
         );
-        // Prompt 27 adds the Environment section and the final-answer
-        // bullet, drops approval wording from the header and command
-        // preference, and shortens nested instruction discovery; undo it.
-        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 27);
+        // Prompt 28 changes only the skill index (absent here). Prompt 27
+        // adds the Environment section and the final-answer bullet, drops
+        // approval wording from the header and command preference, and
+        // shortens nested instruction discovery; undo it.
+        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 28);
         let environment = prompt.find("\nEnvironment:\n").unwrap()
             ..prompt.find("\nWorking conventions:\n").unwrap();
         let mut prompt = prompt;
@@ -11742,6 +11743,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_model_loads_a_matching_skill_with_arguments_and_reads_the_script_beside_it() {
+        let directory = tempfile::tempdir().unwrap();
+        for (path, content) in [
+            (
+                ".qq/skills/greet/SKILL.md",
+                "---\nname: greet\ndescription: Greet someone by name\n---\nRun scripts/greet.sh $ARGUMENTS.\n",
+            ),
+            (".qq/skills/greet/scripts/greet.sh", "echo \"hello $1\"\n"),
+        ] {
+            let path = directory.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![
+                    vec![(
+                        "load_skill",
+                        r#"{"name":"greet","arguments":"Ada"}"#.to_owned(),
+                    )],
+                    vec![(
+                        "read_file",
+                        r#"{"path":".qq/skills/greet/scripts/greet.sh"}"#.to_owned(),
+                    )],
+                    Vec::new(),
+                ],
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_in_workspace(RunCommand::new("greet Ada"), directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RunEvent::Completed)),
+            "{events:?}"
+        );
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests[0]
+                .system()
+                .unwrap()
+                .contains("call load_skill with its name before acting")
+        );
+        assert!(
+            requests[0]
+                .system()
+                .unwrap()
+                .contains("- greet (skill): Greet someone by name")
+        );
+        let result = |request: &ModelRequest| {
+            request
+                .messages()
+                .last()
+                .unwrap()
+                .content()
+                .iter()
+                .find_map(|block| match block {
+                    ContentBlock::ToolResult {
+                        content,
+                        is_error: false,
+                        ..
+                    } => Some(content.clone()),
+                    _ => None,
+                })
+                .expect("a successful tool result")
+        };
+        let loaded = result(&requests[1]);
+        assert!(
+            loaded.contains("Skill directory: .qq/skills/greet\n"),
+            "{loaded}"
+        );
+        assert!(
+            loaded.contains("- .qq/skills/greet/scripts/greet.sh\n"),
+            "{loaded}"
+        );
+        assert!(loaded.contains("Run scripts/greet.sh Ada.\n"), "{loaded}");
+        assert!(result(&requests[2]).contains("echo \"hello $1\""));
+    }
+
+    #[tokio::test]
     async fn disclosed_skills_are_listed_and_loadable_only_for_guidance_capable_runs() {
         let directory = tempfile::tempdir().unwrap();
         for (path, content) in [
@@ -11749,7 +11835,7 @@ mod tests {
                 ".qq/skills/deploy/SKILL.md",
                 "---\ndescription: How to deploy safely\n---\nRun the deploy checklist.\n",
             ),
-            (".agents/skills/hidden/SKILL.md", "Compat only.\n"),
+            (".claude/skills/hidden/SKILL.md", "Compat only.\n"),
         ] {
             let path = directory.path().join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -11783,7 +11869,10 @@ mod tests {
             let requests = requests.lock().unwrap();
             let system = requests[0].system().unwrap();
             assert!(system.contains("- deploy (skill): How to deploy safely"));
-            assert!(!system.contains("hidden"), "compat roots are not disclosed");
+            assert!(
+                !system.contains("hidden"),
+                ".claude roots are not disclosed"
+            );
             assert!(
                 !system.contains("Run the deploy checklist"),
                 "bodies load on demand"
@@ -11851,7 +11940,7 @@ mod tests {
             !restricted_requests[0]
                 .system()
                 .unwrap()
-                .contains("Available skills")
+                .contains("Skills and commands.")
         );
         assert!(!tool_names(&restricted_requests[0]).contains(&"load_skill"));
         assert_eq!(plan.descriptor().skills.disclosed, 1);
