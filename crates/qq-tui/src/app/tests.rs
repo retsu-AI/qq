@@ -659,6 +659,7 @@ fn new_slash_command_creates_a_root_session_with_the_selected_model() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        environment: Vec::new(),
     });
     app.apply_snapshot(snapshot());
     app.composer.text = "/new".to_owned();
@@ -696,6 +697,7 @@ fn slash_clear_is_a_client_alias_for_a_new_session() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        environment: Vec::new(),
     });
     app.apply_snapshot(snapshot());
     app.composer.text = "/clear".to_owned();
@@ -1037,6 +1039,7 @@ fn context_meter_app() -> App {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        environment: Vec::new(),
     })
 }
 
@@ -1359,6 +1362,7 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        environment: Vec::new(),
     });
     app.apply_snapshot(snapshot());
     app.open_models();
@@ -1442,6 +1446,7 @@ fn model_picker_applies_to_the_focused_session_and_ctrl_n_creates() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        environment: Vec::new(),
     });
     app.apply_snapshot(snapshot());
     app.composer.text = "/models".to_owned();
@@ -1514,6 +1519,7 @@ fn model_picker_enter_without_a_focused_session_creates_one() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        environment: Vec::new(),
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -1570,6 +1576,7 @@ fn model_picker_selection_becomes_the_default_for_new_sessions() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        environment: Vec::new(),
     });
     app.apply_snapshot(snapshot());
     app.open_models();
@@ -3290,6 +3297,7 @@ fn themed_app() -> App {
             crate::Theme::from_roles("mono", [crate::ThemeColor::White; 8]),
         ],
         workspace_root: None,
+        environment: Vec::new(),
     });
     app.apply_snapshot(snapshot());
     app
@@ -3858,6 +3866,7 @@ fn profile_chosen_without_a_focused_session_applies_to_the_next_create() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        environment: Vec::new(),
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -3978,6 +3987,7 @@ fn effort_chosen_without_a_focused_session_applies_to_the_next_create() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        environment: Vec::new(),
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -4057,6 +4067,7 @@ fn effort_picker_is_shaped_by_the_focused_models_advertised_ladder() {
             unauthenticated_providers: Vec::new(),
             themes: Vec::new(),
             workspace_root: None,
+            environment: Vec::new(),
         });
         app.apply_snapshot(snap.clone());
         app.execute(Command::OpenEffort);
@@ -4205,6 +4216,7 @@ fn approval_mode_chosen_without_a_focused_session_applies_to_the_next_create() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        environment: Vec::new(),
     });
     let mut empty = snapshot();
     empty.sessions.clear();

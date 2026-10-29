@@ -1237,6 +1237,25 @@ async fn run_goal_budget(home: &Home) -> Result<(), String> {
         output.status,
         output.stderr
     );
+    // On the host the goal starts with one note pointing at the guide; in a
+    // container (this harness inside the devcontainer) there is none.
+    let in_container = in_container().await;
+    let notes: Vec<&str> = output
+        .stderr
+        .lines()
+        .filter(|line| line.contains("running-unattended"))
+        .collect();
+    if in_container {
+        ensure!(notes.is_empty(), "container goal printed {notes:?}");
+    } else {
+        ensure!(
+            notes.len() == 1
+                && notes[0].starts_with("note: this goal runs on the host as ")
+                && output.stderr.starts_with(notes[0]),
+            "expected one leading host note on stderr: {}",
+            output.stderr
+        );
+    }
     let records = jsonl(&output.stdout)?;
     let final_record = records.last().ok_or("missing final goal record")?;
     ensure!(
@@ -1548,6 +1567,16 @@ async fn serve_sse(home: &Home) -> Result<(), String> {
     result
 }
 
+/// Whether this harness runs inside a container, by the markers `qq` reads.
+async fn in_container() -> bool {
+    for marker in ["/.dockerenv", "/run/.containerenv"] {
+        if tokio::fs::try_exists(marker).await.unwrap_or(false) {
+            return true;
+        }
+    }
+    false
+}
+
 async fn doctor_and_config(home: &Home) -> Result<(), String> {
     let provider = home
         .provider(vec![Reply::Text("unused")])
@@ -1572,6 +1601,20 @@ async fn doctor_and_config(home: &Home) -> Result<(), String> {
     ensure!(
         report.is_object(),
         "doctor --json is not an object: {report}"
+    );
+    let in_container = in_container().await;
+    let environment = report["checks"]
+        .as_array()
+        .and_then(|checks| checks.iter().find(|check| check["name"] == "environment"))
+        .and_then(|check| check["summary"].as_str())
+        .ok_or_else(|| format!("doctor --json has no environment check: {report}"))?;
+    ensure!(
+        environment.starts_with(if in_container {
+            "in a container"
+        } else {
+            "on the host"
+        }) && environment.contains("credentials"),
+        "environment check: {environment}"
     );
     Ok(())
 }

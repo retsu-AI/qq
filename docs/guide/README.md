@@ -17,6 +17,7 @@ published at <https://retsu-ai.github.io/qq/>.
 | understand what the agent may do without asking | [Permissions and trust](permissions.md) |
 | learn the terminal UI | [The TUI](tui.md) |
 | run agents from scripts and CI | [Headless: `qq ask`, `qq run`, `qq serve`](headless.md) |
+| leave a goal or the daemon running with no one watching | [Running unattended](running-unattended.md) |
 | give the agent more tools | [MCP servers](mcp.md) |
 | look up every setting | [Configuration reference](configuration.md) |
 | look up every command and flag | [CLI reference](cli.md) |

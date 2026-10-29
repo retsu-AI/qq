@@ -48,6 +48,12 @@ each run. With a new objective, unspecified limits/check fields survive an
 edit; `--replace` explicitly starts a replacement. Bare `--goal --session ID`
 continues the stored specification. It leaves a missing-consent pause intact.
 
+On the host, a goal starts with one note on stderr: `note: this goal runs
+on the host as USER, with this machine's network and credentials; to
+isolate unattended goals see …`, linking [Running
+unattended](running-unattended.md). It never waits for input. Inside a
+container there is no note.
+
 The foreground client uses the same durable runtime driver as the server.
 It stops on a non-active state, including an unanswered question, without
 inventing an answer. Goal exits are achieved0, paused6, blocked7, exhausted8,

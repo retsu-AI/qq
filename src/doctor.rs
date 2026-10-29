@@ -15,7 +15,7 @@ use qq_config as config;
 use qq_server as server;
 use serde::Serialize;
 
-use crate::cli;
+use crate::{cli, environment::Environment};
 
 /// The outcome of one check. `Skipped` is for a check whose inputs an
 /// earlier failure removed (no model, so no credential to look for); it
@@ -121,7 +121,7 @@ impl DoctorReport {
 
 /// Check names in the order they are reported; the text renderer aligns on
 /// the longest.
-pub const CHECK_NAMES: [&str; 9] = [
+pub const CHECK_NAMES: [&str; 11] = [
     "configuration",
     "project trust",
     "model",
@@ -130,6 +130,8 @@ pub const CHECK_NAMES: [&str; 9] = [
     "mcp",
     "server",
     "workspace",
+    "environment",
+    "snapshots",
     "data",
 ];
 
@@ -150,6 +152,7 @@ pub fn run_checks(
     request: &config::LoadRequest,
     server_paths: &server::ServerPaths,
     cwd: &Path,
+    environment: &Environment,
 ) -> DoctorReport {
     let mut checks = Vec::with_capacity(CHECK_NAMES.len());
     let global_config = loader.paths().global_dir().join("config.ron");
@@ -297,6 +300,8 @@ pub fn run_checks(
 
     checks.push(server_check(server_paths));
     checks.push(workspace_check(cwd));
+    checks.push(Check::ok("environment", environment.summary()));
+    checks.push(snapshots_check(cwd));
     checks.push(data_check(loader.paths().data_dir()));
 
     let failed = checks
@@ -593,6 +598,32 @@ fn server_check(paths: &server::ServerPaths) -> Check {
                 "inspect {} ; a stale or unreadable discovery file is replaced on the next start",
                 paths.directory().display()
             ),
+        ),
+    }
+}
+
+fn snapshots_check(cwd: &Path) -> Check {
+    const NAME: &str = "snapshots";
+    let covered = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())
+        .and_then(|runtime| {
+            runtime
+                .block_on(qq_core::undo::covers(cwd))
+                .map_err(|error| error.to_string())
+        });
+    match covered {
+        Ok(true) => Check::ok(NAME, crate::environment::snapshot_summary(true)),
+        Ok(false) => Check::warn(
+            NAME,
+            crate::environment::snapshot_summary(false),
+            "run qq inside a Git repository (`git init` here) so each run can be undone",
+        ),
+        Err(error) => Check::warn(
+            NAME,
+            format!("could not check: {error}"),
+            "install git and make sure `git status` works here",
         ),
     }
 }
@@ -902,6 +933,10 @@ mod tests {
                 &self.request(),
                 &self.server_paths,
                 &self.workspace,
+                &Environment {
+                    placement: crate::environment::Placement::Host,
+                    user: "ada".to_owned(),
+                },
             )
         }
     }
@@ -1190,6 +1225,44 @@ mod tests {
         let text = String::from_utf8(buffer).unwrap();
         assert!(text.lines().last() == Some("all checks passed"), "{text}");
         assert!(text.contains("\x1b[32mok   \x1b[0m"), "{text}");
+    }
+
+    #[test]
+    fn environment_and_snapshots_say_what_commands_reach_and_whether_undo_works() {
+        let fixture = Fixture::new(Arc::new(MemoryKeyring::default()));
+        let report = fixture.run();
+        let environment = check(&report, "environment");
+        assert_eq!(environment.status, Status::Ok);
+        assert_eq!(
+            environment.summary,
+            "on the host: commands run as ada, with this machine's network and credentials"
+        );
+        let snapshots = check(&report, "snapshots");
+        assert_eq!(snapshots.status, Status::Warn, "{snapshots:#?}");
+        assert!(snapshots.summary.starts_with("off: "), "{snapshots:#?}");
+        assert!(
+            snapshots.remedy.as_deref().unwrap().contains("git init"),
+            "{snapshots:#?}"
+        );
+
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&fixture.workspace)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let report = fixture.run();
+        let snapshots = check(&report, "snapshots");
+        assert_eq!(snapshots.status, Status::Ok, "{snapshots:#?}");
+        assert_eq!(
+            snapshots.summary,
+            "on: `qq undo` restores the workspace as it was before each run"
+        );
     }
 
     #[test]

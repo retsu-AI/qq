@@ -329,6 +329,11 @@ paid descendant runs remain event records. The final `goal` record contains
 `workspace_id`, the complete durable goal snapshot, invocation `status` and
 `exit_code`. Both owned and borrowing encoders use the same wire shape.
 
+On the host (no `/.dockerenv`, `/run/.containerenv`, `container` or
+`KUBERNETES_SERVICE_HOST`), a goal invocation first writes one `note:` line
+to stderr naming the user and linking the running-unattended guide. It
+reads no input and changes no exit code; stdout is unchanged.
+
 A goal invocation continues while active and ends on any other state,
 including needs-user pauses. Final goal exits are achieved0, paused6,
 blocked7, budget_exhausted8, interrupted130 and harness_failure4. Only

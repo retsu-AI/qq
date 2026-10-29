@@ -109,7 +109,9 @@ store from writing.
 
 That means a command can do anything you can do from your terminal,
 including reading your credentials and pushing with your Git identity. For
-stronger isolation, run QQ inside a container, a VM or a dedicated account.
+stronger isolation, run QQ inside a container, a VM or a dedicated account;
+[Running unattended](running-unattended.md) shows how. `qq doctor` says
+which one you are in.
 
 ### Fixed stops
 

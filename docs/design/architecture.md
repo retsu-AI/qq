@@ -109,6 +109,7 @@ src/
   headless.rs    `qq run` durable non-interactive execution
   goals.rs       `qq goal` authenticated server client; no store ownership
   doctor.rs      `qq doctor`
+  environment.rs host or container, and the first-run and goal notes
   init.rs        `qq init`
   output.rs      plain-text command output
   docs_truth.rs  code/docs consistency tests

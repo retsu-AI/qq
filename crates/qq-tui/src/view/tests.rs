@@ -3340,6 +3340,35 @@ fn a_client_without_a_model_shows_no_model_and_the_picker_hint() {
 }
 
 #[test]
+fn the_first_screen_says_where_commands_run_and_whether_undo_works() {
+    let environment = vec![
+        "QQ is on the host: commands run as ada, with this machine's network and credentials."
+            .to_owned(),
+        "Snapshots on: `qq undo` restores the workspace as it was before each run.".to_owned(),
+    ];
+    // No session yet.
+    let mut app = empty_workspace_app(TuiOptions {
+        environment: environment.clone(),
+        ..TuiOptions::default()
+    });
+    let mut renderer = FrameRenderer::default();
+    let text = squash(&frame_rows(&renderer.frame_and_commit(&mut app, 120, 16)).join(" "));
+    for line in &environment {
+        assert!(text.contains(line.as_str()), "{line:?} not in {text}");
+    }
+
+    // The first session, before its first prompt; narrow panes wrap.
+    let mut app = app_with_messages(0);
+    app.environment = environment.clone();
+    app.layout.rail = crate::view::PanePref::Hidden;
+    let mut renderer = FrameRenderer::default();
+    let text = squash(&frame_rows(&renderer.frame_and_commit(&mut app, 60, 20)).join(" "));
+    assert!(text.contains("Try one of these:"), "{text}");
+    assert!(text.contains("commands run as ada"), "{text}");
+    assert!(text.contains("Snapshots on:"), "{text}");
+}
+
+#[test]
 fn the_first_session_offers_try_these_until_the_first_prompt() {
     // OB8: one session, nothing said yet. The transcript names the commands
     // a new user wants first, spelled from the command table.
