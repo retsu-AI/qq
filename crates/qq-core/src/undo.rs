@@ -118,6 +118,12 @@ pub async fn snapshot(workspace: &Path, kind: SnapshotKind) -> Result<Option<Sna
     Ok(Some(snapshot))
 }
 
+/// Whether runs in `directory` get snapshots: it is inside a Git work tree
+/// and `git` runs.
+pub async fn covers(directory: &Path) -> Result<bool, UndoError> {
+    Ok(discover(directory).await?.is_some())
+}
+
 /// Snapshots that cover `directory`: those whose workspace is `directory`
 /// or its nearest ancestor that has any. Newest first.
 pub async fn list(directory: &Path) -> Result<Vec<Snapshot>, UndoError> {

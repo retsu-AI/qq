@@ -1,0 +1,19 @@
+// A container for working on QQ with QQ: this repository's Rust toolchain,
+// only the checkout mounted, and `qq` built from it on PATH.
+// See docs/guide/running-unattended.md.
+{
+  "name": "qq",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": "..",
+    "target": "dev"
+  },
+  "remoteUser": "agent",
+  "updateRemoteUserUID": true,
+  // Editors forward the host's SSH agent into the container; an empty
+  // socket keeps the agent's commands from using your keys.
+  "remoteEnv": {
+    "SSH_AUTH_SOCK": ""
+  },
+  "postCreateCommand": "cargo build --locked --bin qq"
+}

@@ -1,0 +1,11 @@
+target/
+.worktrees/
+.direnv/
+.source/
+result
+result-*
+website/node_modules/
+benchmarks/harbor/.venv/
+benchmarks/harbor/jobs/
+.env
+.env.*

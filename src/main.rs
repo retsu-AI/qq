@@ -2,7 +2,7 @@
 
 use std::{
     error::Error,
-    io::{self, IsTerminal, Read},
+    io::{self, IsTerminal, Read, Write as _},
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
@@ -20,6 +20,7 @@ mod daemon;
 #[cfg(test)]
 mod docs_truth;
 mod doctor;
+mod environment;
 mod goals;
 mod headless;
 mod init;
@@ -308,6 +309,9 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
             let mut stdout = io::stdout().lock();
             let mut stderr = io::stderr().lock();
             let is_goal = goal.is_some();
+            if is_goal && let Some(note) = environment::Environment::detect().goal_note() {
+                let _ = writeln!(stderr, "{note}");
+            }
             let code = match goal {
                 Some(goal) => {
                     headless::run_goal(
@@ -712,6 +716,11 @@ async fn interactive(
     // Read once, here: neither `qq-config` nor `qq-tui` consults the
     // environment, they take the answer as a value.
     let truecolor = truecolor_support(std::env::var_os("COLORTERM").as_deref());
+    // One `git rev-parse`, alongside the config load rather than after it.
+    let snapshots = {
+        let workspace = workspace.clone();
+        tokio::spawn(async move { qq_core::undo::covers(&workspace).await })
+    };
     let (model_state, tui, themes) = tokio::task::spawn_blocking(move || {
         // The client load tolerates a missing model: the TUI opens and
         // routes to `/models`. Headless paths keep `load`. Untrusted project
@@ -748,6 +757,11 @@ async fn interactive(
         .map(tui_provider_remedy)
         .collect();
     let workspace_root = workspace.clone();
+    // A failed probe reads as "no snapshots": the screen must not claim undo
+    // works when it cannot tell.
+    let snapshots = matches!(snapshots.await, Ok(Ok(true)));
+    let environment_lines =
+        environment::first_run_lines(&environment::Environment::detect(), snapshots);
 
     // The TUI paints its first frame before the server is reserved or the
     // embedded runtime opened; the port connects on the loop's first recv
@@ -832,6 +846,7 @@ async fn interactive(
             unauthenticated_providers,
             themes,
             workspace_root: Some(workspace_root),
+            environment: environment_lines,
         },
     )
     .await;
@@ -1546,8 +1561,9 @@ async fn doctor_command(
     let request = overrides.load_request()?;
     let server_paths = server::ServerPaths::for_user()?;
     let cwd = std::env::current_dir()?;
+    let environment = environment::Environment::detect();
     let report = tokio::task::spawn_blocking(move || {
-        doctor::run_checks(&loader, &store, &request, &server_paths, &cwd)
+        doctor::run_checks(&loader, &store, &request, &server_paths, &cwd, &environment)
     })
     .await?;
     let stdout = io::stdout();

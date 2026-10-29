@@ -963,6 +963,7 @@ impl TranscriptCache {
                 ),
                 muted(),
             ));
+            push_environment(&mut body, app, width);
             return body;
         };
         let Some(session) = app.sessions.get(&session_id) else {
@@ -1032,6 +1033,7 @@ impl TranscriptCache {
                 let mut line = Line::styled(format!("    {:<11}", "@path"), accent());
                 line.push("mention a file in your prompt", muted());
                 body.push_line(line);
+                push_environment(&mut body, app, width);
             } else {
                 body.push_line(Line::styled(
                     "  Ask QQ to begin this session.",
@@ -1323,6 +1325,28 @@ impl TranscriptCache {
         lines
     }
 }
+
+/// Where commands run and whether undo works, under the empty-state hints.
+fn push_environment(body: &mut VirtualBody<'_>, app: &App, width: usize) {
+    if app.environment.is_empty() {
+        return;
+    }
+    body.push_line(Line::default());
+    for line in &app.environment {
+        let rows = super::wrap::wrap_line(
+            Line::styled(line.clone(), muted()),
+            width.saturating_sub(2).max(1),
+        );
+        for row in rows {
+            let mut indented = Line::styled("  ", muted());
+            for span in row.spans {
+                indented.push(span.text, span.style);
+            }
+            body.push_line(indented);
+        }
+    }
+}
+
 /// What `pane` paints this frame. A session that no longer exists reads as
 /// the empty prompt: the id is stale navigation state, not a body to wait
 /// for. While the inspector is on screen (`inline_detail` false) it holds the

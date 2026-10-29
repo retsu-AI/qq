@@ -15,6 +15,7 @@
       { "page": "permissions", "label": "Permissions and trust", "description": "What the agent may do without asking, approval modes, and trusting project configuration." },
       { "page": "tui", "label": "The TUI", "description": "The interactive terminal: layout, sessions, approvals, commands, and keys." },
       { "page": "headless", "label": "Headless: ask, run, serve", "description": "Run agents from scripts and CI with qq ask, qq run, and qq serve; exit codes and JSONL output." },
+      { "page": "running-unattended", "label": "Running unattended", "description": "Run goals and the daemon in a container with only the project mounted, a per-repository token, and its own Git identity." },
       { "page": "mcp", "label": "MCP servers", "description": "Give the agent more tools with Model Context Protocol servers over stdio or HTTP." }
     ]
   },

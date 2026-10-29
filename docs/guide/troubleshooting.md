@@ -18,6 +18,8 @@ ok    credential store 0 stored (keyring)
 ok    mcp              none declared
 ok    server           none running; qq starts one on demand
 ok    workspace        /home/you/repo (AGENTS.md)
+ok    environment      on the host: commands run as you, with this machine's network and credentials
+ok    snapshots        on: `qq undo` restores the workspace as it was before each run
 ok    data             /home/you/.local/share/qq (no sessions yet)
 
 1 check failed

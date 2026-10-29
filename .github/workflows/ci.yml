@@ -97,6 +97,21 @@ jobs:
             exit 1
           fi
 
+  devcontainer:
+    name: devcontainer smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start the devcontainer
+        run: npx --yes @devcontainers/cli@0.90.0 up --workspace-folder .
+      # Inside the container, so the scenarios also check that `qq doctor`
+      # reports a container and a goal prints no host note.
+      - name: Smoke inside the devcontainer
+        run: >-
+          npx --yes @devcontainers/cli@0.90.0 exec --workspace-folder .
+          cargo xtask smoke --only run-tool-call --only run-goal-budget --only doctor-and-config
+
   client-wasm:
     name: qq-client on wasm32
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
