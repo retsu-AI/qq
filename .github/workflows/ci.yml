@@ -103,8 +103,16 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      # Docker Hub sometimes answers the base-image pull with a 5xx; retry
+      # the build rather than fail the run on a registry blip.
       - name: Build and start the devcontainer
-        run: npx --yes @devcontainers/cli@0.90.0 up --workspace-folder .
+        run: |
+          for attempt in 1 2 3; do
+            npx --yes @devcontainers/cli@0.90.0 up --workspace-folder . && exit 0
+            echo "devcontainer up failed (attempt $attempt)"
+            sleep $((attempt * 20))
+          done
+          exit 1
       # Inside the container, so the scenarios also check that `qq doctor`
       # reports a container and a goal prints no host note.
       - name: Smoke inside the devcontainer
