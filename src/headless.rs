@@ -7287,11 +7287,18 @@ mod tests {
 
     #[tokio::test]
     async fn interrupt_sends_cancellation_and_leaves_no_active_run() {
-        let fixture = fixture(|| HangingProvider).await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let fixture = fixture({
+            let entered = entered.clone();
+            move || {
+                entered.notify_one();
+                HangingProvider
+            }
+        })
+        .await;
         let options = options(&fixture.workspace);
-        let interrupt = async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        };
+        // Interrupt once the run has loaded its provider, mid-run.
+        let interrupt = entered.notified();
 
         let (status, stdout, _stderr) = run_to_end(&fixture, options, interrupt).await;
 
