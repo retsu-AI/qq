@@ -1557,6 +1557,10 @@ fn codex_login_uses_pkce_rejects_wrong_state_and_stores_tokens() {
         .collect::<BTreeMap<_, _>>();
     let redirect = reqwest::Url::parse(&parameters["redirect_uri"]).unwrap();
     let port = redirect.port().unwrap();
+    assert_eq!(
+        redirect.as_str(),
+        format!("http://127.0.0.1:{port}/auth/callback")
+    );
 
     assert_eq!(
         authorization.as_str().split('?').next().unwrap(),
