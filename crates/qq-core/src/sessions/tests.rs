@@ -1084,7 +1084,6 @@ impl Provider for DelayedProvider {
             .is_some_and(|text| text.starts_with("Summarize this conversation"));
         self.requests.lock().unwrap().push(request);
         Box::pin(async_stream! {
-            tokio::time::sleep(Duration::from_millis(20)).await;
             yield Ok(qq_provider::ProviderEvent::OutputTextDelta {
                 text: if summarizing { valid_summary("answer") } else { "answer".to_owned() },
             });
