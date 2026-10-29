@@ -1,6 +1,3 @@
-//! Store and reducer tests that hold on every surface. They run under
-//! `cargo test` natively and under `wasm-bindgen-test` on `wasm32`.
-
 use std::sync::Arc;
 
 use qq_protocol::{
@@ -14,15 +11,6 @@ use wasm_bindgen_test::wasm_bindgen_test as test;
 
 use super::*;
 
-/// Every `event_*` wire fixture, in cursor order. They describe one session
-/// (`[3; 16]`) and one run (`[4; 16]`); the list is the replay input for the
-/// golden below, so adding a fixture means regenerating the golden.
-///
-/// Pinned to the `v17/` directory on purpose: the golden checks the reducer's
-/// projection of a *fixed* event stream, so it must not move when a newer
-/// protocol version adds events or fields. `v17` is the oldest retained
-/// wire-fixture version; if that directory is ever dropped, repoint this list
-/// at the new oldest and regenerate `state_replay_v17.json` under a new name.
 const EVENT_FIXTURES: [&str; 12] = [
     include_str!("../../../qq-protocol/tests/fixtures/v17/event_prompt_queued.json"),
     include_str!("../../../qq-protocol/tests/fixtures/v17/event_run_started.json"),
@@ -114,8 +102,6 @@ fn message(id: u8, session_id: SessionId, run_id: RunId, output: &str) -> Messag
     }
 }
 
-/// A deterministic view of everything the reducer owns, so a golden can
-/// catch any change in what an event does to the store.
 fn project(store: &SessionStore, effects: &[(u64, StateEffects)]) -> Value {
     let mut sessions: Vec<&SessionView> = store.values().collect();
     sessions.sort_by_key(|view| view.summary.id);
@@ -219,8 +205,6 @@ fn replaying_the_wire_fixtures_matches_the_golden_projection() {
         },
     }];
     let mut store = SessionStore::default();
-    // The fixtures assume the session exists with a warm body, as after the
-    // initial snapshot; the first event carries its summary.
     let SessionEvent::PromptQueued { session, .. } = &envelopes[0].event else {
         panic!("the first fixture in cursor order is the queued prompt");
     };
@@ -263,7 +247,6 @@ fn the_live_tail_is_sanitized_by_the_surface_supplied_function() {
     let mut store = SessionStore::with_sanitizer(shouty);
     store.upsert_summary(summary(session_id), &[], 0);
 
-    // Cold sessions still track the tail.
     store.reduce_event(
         &envelope(
             1,
@@ -277,7 +260,6 @@ fn the_live_tail_is_sanitized_by_the_surface_supplied_function() {
     assert_eq!(store[&session_id].live.tail, "AB CD");
     assert!(!store[&session_id].is_warm());
 
-    // The default drops controls and bidi overrides, keeps everything else.
     let mut plain = SessionStore::default();
     plain.upsert_summary(summary(session_id), &[], 0);
     plain.reduce_event(
@@ -295,9 +277,6 @@ fn the_live_tail_is_sanitized_by_the_surface_supplied_function() {
 
 #[test]
 fn a_denial_records_who_settled_the_call_and_evicts_with_it() {
-    // The row can say "denied by you" because the reducer keeps the
-    // settlement beside the call's timing; a human once-approval says nothing;
-    // the settlement leaves with the body like every other per-call datum.
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let mut store = SessionStore::default();
@@ -351,8 +330,6 @@ fn a_denial_records_who_settled_the_call_and_evicts_with_it() {
 
 #[test]
 fn store_activity_is_blocked_while_a_human_is_asked_and_the_worst_session_wins() {
-    // ENG-1034: one state for a whole store. A pending hold blocks, and a
-    // block in any session outranks work or idleness elsewhere.
     let quiet = SessionId::from_bytes([3; 16]);
     let busy = SessionId::from_bytes([5; 16]);
     let run_id = RunId::from_bytes([4; 16]);
@@ -403,8 +380,6 @@ fn store_activity_is_blocked_while_a_human_is_asked_and_the_worst_session_wins()
     };
     assert_eq!(store.activity(), blocked);
 
-    // A snapshot reload rebuilds live status from the summary's holds, which
-    // the server projects exactly; the body's tool calls do not decide it.
     let snapshot = SessionSnapshot {
         approval_previews: Vec::new(),
         goal: None,
@@ -422,7 +397,6 @@ fn store_activity_is_blocked_while_a_human_is_asked_and_the_worst_session_wins()
     store.install_session_snapshot(snapshot.clone(), &[], 2);
     assert_eq!(store.activity(), blocked, "and still after a reload");
 
-    // Answered: work again, then idle once the run settles.
     store.reduce_event(
         &envelope(
             3,
@@ -438,8 +412,6 @@ fn store_activity_is_blocked_while_a_human_is_asked_and_the_worst_session_wins()
     store.upsert_summary(summary(busy), &[], 0);
     assert_eq!(store.activity(), StoreActivity::Idle);
 
-    // A client that attaches mid-hold knows it is blocked from the summary
-    // alone.
     let mut fresh = SessionStore::default();
     fresh.install_session_snapshot(snapshot, &[], 5);
     assert!(matches!(fresh.activity(), StoreActivity::Blocked { .. }));
@@ -447,9 +419,6 @@ fn store_activity_is_blocked_while_a_human_is_asked_and_the_worst_session_wins()
 
 #[test]
 fn store_activity_counts_sessions_whose_bodies_were_never_loaded() {
-    // Regression (PR #289 review): a session past the prewarmed bodies is
-    // summary-only. Its pending human hold and its running side question
-    // must still reach the aggregate, or herdr shows idle while QQ waits.
     let cold = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let held = ToolCallId::from_bytes([7; 16]);
@@ -467,7 +436,6 @@ fn store_activity_counts_sessions_whose_bodies_were_never_loaded() {
     );
     assert!(!store.get(&cold).unwrap().is_warm());
     assert!(matches!(store.activity(), StoreActivity::Blocked { .. }));
-    // Settled through the events every session reduces, warm or cold.
     store.reduce_event(
         &envelope(
             1,
@@ -494,8 +462,6 @@ fn store_activity_counts_sessions_whose_bodies_were_never_loaded() {
     );
     assert_eq!(store.activity(), StoreActivity::Working);
 
-    // An idle session answering a side question is working, and idle again
-    // once the question settles; the body never loads.
     store.upsert_summary(
         SessionSummary {
             running_side_question: Some(side),
@@ -563,9 +529,6 @@ fn a_child_resolves_to_its_root_and_an_unknown_parent_resolves_to_none() {
 
 #[test]
 fn store_activity_counts_a_child_whose_parent_is_not_loaded() {
-    // Regression (PR #289 review): the snapshot's bounded session list is
-    // chosen by recency, not ancestry, so a child can arrive without its
-    // parent. Tree order starts from loaded roots and would skip it.
     let orphan = SessionId::from_bytes([9; 16]);
     let mut store = SessionStore::default();
     store.upsert_summary(
@@ -619,7 +582,6 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
         text: "first".to_owned(),
     }));
     assert_eq!(store[&session_id].drafts, ["second"]);
-    // Unfocused: the finish is unread and the surface is asked for attention.
     assert_eq!(store[&session_id].unread, 1);
     assert!(store[&session_id].finished_unread);
     assert!(effects.iter().any(|effect| matches!(
@@ -627,8 +589,6 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
         StateEffect::Attention(Attention::RunFinished { .. })
     )));
 
-    // A run that leaves more queued keeps the drafts waiting; a focused,
-    // attentive surface gets neither unread nor attention.
     idle.queued_prompts = 1;
     let effects = store.reduce_event(
         &envelope(
@@ -661,10 +621,6 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
 
 #[test]
 fn compacting_is_the_activity_until_the_run_moves_on_and_an_inner_compaction_keeps_it() {
-    // CX4: a prompt run reports `Compacting` while it summarizes its own
-    // turns. The compaction run that does the work finishes while the
-    // prompt run still holds the session; that finish must not blank the
-    // prompt run's activity, while the prompt run's own finish does.
     let session_id = SessionId::from_bytes([3; 16]);
     let prompt = RunId::from_bytes([4; 16]);
     let compaction = RunId::from_bytes([5; 16]);
@@ -688,7 +644,6 @@ fn compacting_is_the_activity_until_the_run_moves_on_and_an_inner_compaction_kee
         store[&session_id].activity,
         Some((prompt, qq_protocol::RunActivity::Compacting))
     );
-    // The compaction run's own report does not take over the session.
     store.reduce_event(
         &envelope(
             2,
@@ -995,8 +950,6 @@ fn observed_turn_prices_survive_older_snapshot_replay_once() {
         store[&session_id].runs[&run_id].live_cost_usd_nanos,
         Some(100)
     );
-    // A stale response arrives after the newer event; the surface replays
-    // every retained event newer than the snapshot cursor.
     store.install_session_snapshot(snapshot.clone(), &[], 6);
     store.reduce_event(&turns[0], context(&[]));
     assert_eq!(
@@ -1291,10 +1244,6 @@ fn measured_internal_summary_turns_replay_without_taking_over_the_prompt() {
 
 #[test]
 fn a_failed_in_run_compaction_step_is_not_reported_as_the_end_of_the_work() {
-    // AC3: a transient summarizer outage settles one failed compaction run
-    // per attempt while the prompt run keeps the session. Those finishes
-    // must not ping, count as unread, raise an error notice or clear the
-    // prompt run's live state; the prompt run's own finish still does.
     let session_id = SessionId::from_bytes([3; 16]);
     let prompt = RunId::from_bytes([4; 16]);
     let compaction = RunId::from_bytes([5; 16]);
@@ -1344,7 +1293,6 @@ fn a_failed_in_run_compaction_step_is_not_reported_as_the_end_of_the_work() {
     );
     assert_eq!(store[&session_id].live.awaiting_approval.len(), 1);
 
-    // The prompt run's own pause still notifies and clears live state.
     let mut idle = summary(session_id);
     idle.status = SessionStatus::Idle;
     let effects = store.reduce_event(
@@ -1432,9 +1380,6 @@ fn a_no_progress_pause_warns_without_claiming_provider_retries() {
 
 #[test]
 fn cancelling_a_queued_prompt_leaves_the_active_runs_live_state() {
-    // A queued prompt cancelled while another run holds the session finishes
-    // with that run still active: it is not the end of the visible work, and
-    // the active run's tool and approval state stay.
     let session_id = SessionId::from_bytes([3; 16]);
     let active = RunId::from_bytes([4; 16]);
     let queued = RunId::from_bytes([6; 16]);
@@ -1546,7 +1491,6 @@ fn deleting_the_shown_session_refocuses_its_neighbour_and_fetches_a_cold_body() 
     );
 
     assert!(!store.contains_key(&b));
-    // The child is detached to a root, as the server does.
     assert_eq!(store[&child].summary.parent_id, None);
     assert_eq!(
         effects,
@@ -1560,7 +1504,6 @@ fn deleting_the_shown_session_refocuses_its_neighbour_and_fetches_a_cold_body() 
         ]
     );
 
-    // Deleting an unshown session neither refocuses nor fetches.
     let effects = store.reduce_event(
         &envelope(10, a, SessionEvent::SessionDeleted { session_id: a }),
         ReduceContext {
@@ -1575,7 +1518,6 @@ fn deleting_the_shown_session_refocuses_its_neighbour_and_fetches_a_cold_body() 
             tool_call_ids: Vec::new(),
         }]
     );
-    // Deleting the last shown session clears focus.
     let effects = store.reduce_event(
         &envelope(
             11,
@@ -1602,8 +1544,6 @@ fn warm_bodies_are_bounded_and_the_pinned_session_never_evicts() {
         store.warm_empty(*id);
         store.mark_focused(*id, clock as u64 + 1);
     }
-    // The oldest-focused session is pinned: it stays warm and one more of
-    // the others goes cold to make room.
     store.evict_cold_bodies(Some(ids[0]));
     let warm: Vec<SessionId> = ids
         .iter()
@@ -1660,8 +1600,6 @@ fn the_output_truncation_notice_names_the_cap_when_capabilities_are_known() {
     ));
 }
 
-/// Streaming deltas are body-only mutations: the derived tree index (sidebar
-/// order) must survive them, or every frame during a run rebuilds it.
 #[test]
 fn streaming_deltas_keep_the_tree_index() {
     let models: Vec<ModelOption> = Vec::new();
@@ -1710,7 +1648,6 @@ fn streaming_deltas_keep_the_tree_index() {
         ),
         context(&models),
     );
-    // Check before reading thread_order: reading would silently rebuild the cache.
     assert!(
         store.index.get().is_some(),
         "streaming must retain the index"
@@ -1726,7 +1663,6 @@ fn streaming_deltas_keep_the_tree_index() {
         "hello"
     );
 
-    // A summary change still rebuilds it.
     let mut moved = summary(child);
     moved.updated_at_ms = 5;
     store.reduce_event(
@@ -1805,7 +1741,6 @@ fn side_questions_are_evicted_with_the_body_and_ignored_while_cold() {
             },
         )
     };
-    // Summary-only: nothing accumulates.
     for byte in 0..80 {
         store.reduce_event(&update(u64::from(byte) + 1, byte), context(&[]));
     }
@@ -1968,10 +1903,6 @@ fn automatic_compaction_releases_drafts_only_after_its_queued_owner_is_cancelled
 
 #[test]
 fn a_body_the_snapshot_budget_starved_stays_cold_instead_of_empty() {
-    // One snapshot request shares a byte budget across its focused and
-    // pre-warmed bodies. A body the budget never reached carries no rows but
-    // `has_older_messages`; caching it rendered "Ask QQ to begin this
-    // session." for a session with history, and the warm view never refetched.
     let session_id = SessionId::from_bytes([7; 16]);
     let starved = SessionSnapshot {
         approval_previews: Vec::new(),
@@ -1990,8 +1921,6 @@ fn a_body_the_snapshot_budget_starved_stays_cold_instead_of_empty() {
     assert!(!view.is_warm(), "focusing it must fetch its own body");
     assert_eq!(view.summary.title, starved.summary.title);
 
-    // Transcripts are loaded before tools, so a later prewarmed body can
-    // have messages but no tool rows. It must still refetch on focus.
     let tool_starved = SessionSnapshot {
         messages: vec![message(8, session_id, RunId::from_bytes([9; 16]), "work")],
         has_older_messages: false,
@@ -2003,8 +1932,6 @@ fn a_body_the_snapshot_budget_starved_stays_cold_instead_of_empty() {
         "missing tool rows must not become a permanently warm transcript"
     );
 
-    // Partially truncated shared bodies must refetch, including when a
-    // previous isolated response already warmed the session.
     let partial = SessionSnapshot {
         messages: vec![message(8, session_id, RunId::from_bytes([9; 16]), "work")],
         has_older_tool_calls: false,
@@ -2018,7 +1945,6 @@ fn a_body_the_snapshot_budget_starved_stays_cold_instead_of_empty() {
     assert!(!store[&session_id].is_warm());
     assert_eq!(store[&session_id].loaded_through, 7);
 
-    // A genuinely empty session is still installed warm.
     let empty = SessionSnapshot {
         has_older_messages: false,
         has_older_tool_calls: false,

@@ -1122,8 +1122,6 @@ mod tests {
 
     #[test]
     fn http_canaries_target_the_endpoints_qq_ships() {
-        // The canary spells its endpoints out so it can run without loading
-        // configuration; this keeps that copy from drifting off the table.
         for case in CASES {
             let RecipeKind::Http {
                 endpoint,

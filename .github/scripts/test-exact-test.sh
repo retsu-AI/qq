@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Exercise the guard at its external Cargo boundary, without a compiler build.
 cargo() {
   if [[ $* != 'test --locked -p qq-core --lib fixture::case -- --exact --color never' ]]; then
     return 2

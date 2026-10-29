@@ -1,15 +1,3 @@
-//! Compile-once execution plans.
-//!
-//! A [`CompiledAgentPlan`] is everything about an agent's behavior that does
-//! not depend on the prompt: the compiled provider handle, the resolved model,
-//! the open workspace with its instructions, the complete tool catalog (built-
-//! ins plus every external host's admitted declarations), the skill index, the
-//! and the sub-agent routes. Compiling it does the filesystem,
-//! provider, and host-catalog work once; the run loop then executes directly
-//! from shared immutable data. Its [`AgentPlanDescriptor`] is the secret-free
-//! account of that behavior whose canonical digest identifies the plan for
-//! caching, traces, and the wire.
-
 mod descriptor;
 mod fingerprint;
 
@@ -49,16 +37,12 @@ use crate::{
     },
 };
 
-/// One external host and the catalog snapshot it contributed to this
-/// compile. The snapshot is taken by the caller (outside the compile, where
-/// it may await); the compile only validates and orders it.
 pub struct HostSnapshot {
     pub host: Arc<dyn ExternalToolHost>,
     pub catalog: HostCatalog,
 }
 
 impl HostSnapshot {
-    /// Snapshots `host` now, blocking for at most the host's own bounds.
     #[must_use]
     pub fn capture_blocking(host: Arc<dyn ExternalToolHost>) -> Self {
         let catalog = host.catalog_blocking();
@@ -66,24 +50,15 @@ impl HostSnapshot {
     }
 }
 
-/// The pack behind a selected profile, as the compiler needs it: identity for
-/// the descriptor, roots to index, a persona to read, and a tool policy to
-/// apply. Paths are absolute and were validated to stay inside the pack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackSelection {
     pub id: String,
     pub version: String,
-    /// Hex SHA-256 of the manifest bytes.
     pub manifest_digest: String,
-    /// Canonical pack directory; skill roots and the persona live under it.
     pub directory: PathBuf,
-    /// Pack-relative path of the persona document, if any.
     pub persona: Option<String>,
-    /// Pack-relative directories of `<name>/SKILL.md` documents.
     pub skill_roots: Vec<String>,
-    /// Pack-relative directories of `<name>.md` documents.
     pub command_roots: Vec<String>,
-    /// Exact names or `prefix*` rules; `deny` wins, empty `allow` means all.
     pub tool_allow: Vec<String>,
     pub tool_deny: Vec<String>,
 }
@@ -101,9 +76,6 @@ impl PackSelection {
     }
 }
 
-/// Typed, application-neutral input to plan compilation. The embedding
-/// application translates its configuration into this shape; core never sees
-/// configuration documents, secret values, or credential stores.
 pub struct AgentProfile {
     provider: Arc<dyn Provider>,
     provider_descriptor: ProviderDescriptor,
@@ -141,8 +113,6 @@ impl AgentProfile {
         self
     }
 
-    /// Starts a profile for a compiled provider. `workspace` must already be
-    /// the canonical absolute path the run will execute in.
     #[must_use]
     pub fn new(
         provider: Arc<dyn Provider>,
@@ -181,17 +151,12 @@ impl AgentProfile {
         }
     }
 
-    /// Backoff between turn retries after a transient provider fault.
     #[must_use]
     pub const fn with_turn_recovery(mut self, policy: crate::TurnRecoveryPolicy) -> Self {
         self.turn_recovery = policy;
         self
     }
 
-    /// The model's catalog output limit, bounded by policy: how far a run may
-    /// raise a turn's cap once when the whole cap went to hidden reasoning.
-    /// Not part of the digest: the plan's request cap is, and this only
-    /// bounds a recovery of it.
     #[must_use]
     pub const fn with_output_ceiling(
         mut self,
@@ -201,10 +166,6 @@ impl AgentProfile {
         self
     }
 
-    /// A profile for an embedded runtime built without configuration: the
-    /// descriptor records the provider as embedded and takes model identity
-    /// from the runtime. The runtime's hosts are snapshotted here, blocking.
-    /// Used by direct `Runtime::run*` entry points and tests.
     #[must_use]
     pub fn embedded(runtime: &Runtime, workspace: PathBuf) -> Self {
         Self {
@@ -246,61 +207,42 @@ impl AgentProfile {
         }
     }
 
-    /// Registers a bounded pre-turn context source for runs of this plan.
-    /// See [`Runtime::with_context_source`].
     #[must_use]
     pub fn with_context_source(mut self, source: Arc<dyn ContextSource>) -> Self {
         self.context_sources.push(source);
         self
     }
 
-    /// Shares a context cache across plans (the root passes one per factory).
     #[must_use]
     pub fn with_context_cache(mut self, cache: Arc<ContextCache>) -> Self {
         self.context_cache = Some(cache);
         self
     }
 
-    /// Selects an agent pack's resources for this plan. The persona is read
-    /// and the roots are indexed at compile; the tool policy filters the
-    /// catalog's exposed entries.
     #[must_use]
     pub fn with_pack(mut self, pack: PackSelection) -> Self {
         self.pack = Some(pack);
         self
     }
 
-    /// Indexes the user's global skills at `<dir>/skills/<name>/SKILL.md`,
-    /// where `dir` is the configuration directory (`~/.config/qq` on Linux).
-    /// Workspace and pack documents of the same name shadow them.
     #[must_use]
     pub fn with_global_config_dir(mut self, dir: PathBuf) -> Self {
         self.global_config_dir = Some(dir);
         self
     }
 
-    /// Protects every configured pack's canonical resources, including packs
-    /// not selected for this run. Directories outside the workspace are
-    /// already inaccessible to built-in file tools and are omitted.
     #[must_use]
     pub fn with_protected_pack_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.protected_pack_roots = roots;
         self
     }
 
-    /// Narrows catalog exposure to these exact names, intersected with the
-    /// selected pack's policy. An empty list exposes no tools and grants
-    /// cannot restore excluded tools. Names are checked during compilation.
     #[must_use]
     pub fn with_exposed_tools(mut self, tools: Vec<String>) -> Self {
         self.exposed_tools = Some(tools);
         self
     }
 
-    /// Managed hard denies a derived side-question plan must honor. Main
-    /// catalogs are unchanged: there managed denies filter grants, not
-    /// exposure (headless contract), so these apply only in
-    /// [`CompiledAgentPlan::side_question_plan`], which grants nothing.
     #[must_use]
     pub fn with_side_question_denies(mut self, names: Vec<String>) -> Self {
         self.side_question_denies = names;
@@ -319,95 +261,72 @@ impl AgentProfile {
         self
     }
 
-    /// Adds an external tool host with its already-captured catalog. Hosts
-    /// contribute in the order added; earlier hosts win catalog capacity.
     #[must_use]
     pub fn with_host(mut self, snapshot: HostSnapshot) -> Self {
         self.hosts.push(snapshot);
         self
     }
 
-    /// Records the secret-free descriptors of the configured MCP servers the
-    /// hosts realize. Declaration identity enters the digest independently of
-    /// the catalog the servers happen to serve.
     #[must_use]
     pub fn with_mcp_servers(mut self, servers: Vec<McpServerDescriptor>) -> Self {
         self.mcp_servers = servers;
         self
     }
 
-    /// Restricts model-visible sub-agent overrides to these canonical routes.
     #[must_use]
     pub fn with_spawn_model_routes(mut self, routes: Vec<String>) -> Self {
         self.spawn_model_routes = routes;
         self
     }
 
-    /// The delegation roster the agent may spawn from, with its bounds. When
-    /// the roster is non-empty it also restricts `spawn_agent`'s exact model
-    /// override to roster routes.
     #[must_use]
     pub fn with_delegation(mut self, delegation: DelegationRoster) -> Self {
         self.delegation = delegation;
         self
     }
 
-    /// When a root run's final answer is audited before completion.
     #[must_use]
     pub const fn with_audit(mut self, audit: AuditPolicy) -> Self {
         self.audit = audit;
         self
     }
 
-    /// Share one host producer's provenance across compiled plans and children.
     #[must_use]
     pub fn with_process_producer(mut self, producer: Arc<crate::ProcessProducer>) -> Self {
         self.process_producer = producer;
         self
     }
 
-    /// Exact host-approved self-contained native read implementations.
     #[must_use]
     pub fn with_approved_read_images(mut self, images: crate::runtime::ApprovedReadImages) -> Self {
         self.approved_read_images = images;
         self
     }
 
-    /// The shell environment allowlist and built-in preference.
     #[must_use]
     pub fn with_shell_policy(mut self, shell: ShellPolicy) -> Self {
         self.shell = shell;
         self
     }
 
-    /// The managed host denies `fetch` refuses under every mode.
     #[must_use]
     pub fn with_network_policy(mut self, network: crate::tools::network::NetworkPolicy) -> Self {
         self.network = network;
         self
     }
 
-    /// Human-readable, secret-free labels of the configuration layers that
-    /// produced this profile, in application order. They participate in the
-    /// digest so a plan compiled from a different source set is distinct.
     #[must_use]
     pub fn with_provenance(mut self, sources: Vec<String>) -> Self {
         self.provenance = sources;
         self
     }
 
-    /// The credential epoch the provider handle was authorized against. It is
-    /// carried beside the plan for rotation diagnosis and never enters the
-    /// behavioral digest.
     #[must_use]
     pub fn with_credential_epoch(mut self, epoch: CredentialEpoch) -> Self {
         self.credential_epoch = epoch;
         self
     }
 
-    /// The configured agent profile this plan realizes. Part of the digest:
-    /// two profiles that happen to resolve identically are still distinct
-    /// plans, because the caller selected them by name.
     #[must_use]
     pub fn with_profile_id(mut self, profile_id: AgentProfileId) -> Self {
         self.profile_id = profile_id;
@@ -415,10 +334,8 @@ impl AgentProfile {
     }
 }
 
-// Bound filesystem/catalog compilation independently of Tokio's blocking pool.
 pub(crate) static COMPILE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
-/// Why a profile could not be compiled into a plan.
 #[derive(Debug, Error)]
 pub enum PlanCompileError {
     #[error("plan compilation task did not finish: {source}")]
@@ -485,29 +402,16 @@ pub enum PlanCompileError {
     TooManyContextSources { count: usize, limit: usize },
 }
 
-/// The immutable live plan one or more runs execute from. It is never
-/// serialized: its [`descriptor`](Self::descriptor) is the durable, secret-free
-/// account, and the [`digest`](Self::digest) is its identity.
 pub struct CompiledAgentPlan {
     pub(crate) runtime: Runtime,
     pub(crate) workspace: Workspace,
     pub(crate) instructions: WorkspaceInstructions,
     pub(crate) catalog: Arc<ToolCatalog>,
     pub(crate) skills: Arc<SkillIndex>,
-    /// Opened pack roots the skill index refers to by position.
     pub(crate) pack_roots: Arc<[Workspace]>,
-    /// Pack persona text appended after workspace instructions, if any.
     pub(crate) persona: Option<Arc<Persona>>,
-    /// The rendered roster block for the Delegation prompt section, when a
-    /// roster is configured. Built once here; the run loop concatenates it.
     pub(crate) roster_text: Option<Arc<str>>,
-    /// Host handles indexed as `ToolHost::External { host }` names them.
     pub(crate) hosts: Arc<[Arc<dyn ExternalToolHost>]>,
-    /// The plan-constant system prompt per capability set, built on first
-    /// use and shared by every later run with the same set. Bounded by the
-    /// number of `PromptPrefixKey` values: 2⁷ tool filters plus none, times
-    /// guidance, three sub-agent states, four modes and the snapshot flag. In
-    /// practice a plan sees a handful: roots, read children and write children.
     prompt_prefixes: std::sync::Mutex<Vec<(PromptPrefixKey, Arc<crate::runtime::PromptPrefix>)>>,
     resolved_model: Arc<ResolvedModel>,
     descriptor: Arc<AgentPlanDescriptor>,
@@ -515,41 +419,26 @@ pub struct CompiledAgentPlan {
     digest: AgentPlanDigest,
     credential_epoch: CredentialEpoch,
     side_question_denies: Arc<[String]>,
-    /// Instruction files plus skill root directories: everything a cache
-    /// must `stat` to revalidate the workspace side of this plan.
     sources: Vec<SourceFingerprint>,
     estimated_bytes: usize,
-    /// The workspace is inside a Git work tree, so session runs snapshot it.
     in_git: bool,
 }
 
-/// What varies the plan-constant prompt between runs of one plan: which
-/// static tools the run may use, whether it may load guidance, and whether
-/// it is a model-spawned child (and with what authority).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PromptPrefixKey {
     pub(crate) tools: Option<crate::catalog::StaticFilter>,
     pub(crate) guidance: bool,
     pub(crate) subagent: Option<crate::runtime::SubagentAuthority>,
-    /// The session's approval mode, which the Environment section states.
     pub(crate) mode: qq_protocol::ApprovalMode,
-    /// The run snapshots the workspace before its first change (session
-    /// runs); the prompt says so only when the workspace is in Git.
     pub(crate) snapshots: bool,
 }
 
 impl CompiledAgentPlan {
-    /// The system prompt prefix for `key`, built once per key. `base_specs`
-    /// must be `catalog.base_specs(filter)` for the key's filter (or empty
-    /// without tools); the caller already has it and the prefix names those
-    /// tools, so the two must agree.
     pub(crate) fn prompt_prefix(
         &self,
         key: PromptPrefixKey,
         base_specs: &[qq_provider::ToolSpec],
     ) -> Arc<crate::runtime::PromptPrefix> {
-        // Never held across an await; a poisoned lock means a panic while
-        // building a prefix, which is a bug worth surfacing, not masking.
         let mut prefixes = self
             .prompt_prefixes
             .lock()
@@ -566,9 +455,6 @@ impl CompiledAgentPlan {
                     .and_then(|filter| self.catalog.eligible_index_text(filter))
                     .map(Arc::as_ref),
                 roster: self.roster_text.as_deref(),
-                // Disclosure follows the guidance capability: restricted runs
-                // (compaction, model-authored child tasks) neither list nor
-                // load skills.
                 skill_index: if key.guidance {
                     self.skills.disclosure_text()
                 } else {
@@ -619,9 +505,6 @@ impl CompiledAgentPlan {
         profile.credential_epoch = self.credential_epoch;
         profile.profile_id = self.descriptor.profile.clone();
         let mut profile = profile.for_side_question();
-        // Side authority is an intersection with the effective source catalog
-        // minus managed hard denies: a side question has no grant path, so a
-        // denied built-in is removed outright rather than restored.
         profile.exposed_tools = Some(
             ["read_file", "search", "tree"]
                 .into_iter()
@@ -638,8 +521,6 @@ impl CompiledAgentPlan {
         Self::compile(profile).await
     }
 
-    /// Compiles off the async executor, with at most four concurrent compiler tasks.
-    /// Dropping this future does not interrupt filesystem work already started.
     pub async fn compile(profile: AgentProfile) -> Result<Arc<Self>, PlanCompileError> {
         let permit = COMPILE_SLOTS
             .acquire()
@@ -656,11 +537,6 @@ impl CompiledAgentPlan {
         }
     }
 
-    /// Compiles a profile. This opens the workspace, reads its instruction
-    /// file, indexes its skill roots, builds the tool catalog from the static
-    /// declarations and the host snapshots, and encodes the descriptor. It
-    /// performs blocking filesystem work and must run off the async executor
-    /// (`spawn_blocking` or a dedicated thread).
     pub fn compile_blocking(profile: AgentProfile) -> Result<Arc<Self>, PlanCompileError> {
         let AgentProfile {
             provider,
@@ -776,9 +652,6 @@ impl CompiledAgentPlan {
         let cancelled = crate::RunCancellation::new();
         let (instructions, mut sources) =
             crate::workspace::load_instructions_with_sources(&opened, &cancelled)?;
-        // A selected pack contributes one opened root (capability-scoped like
-        // the workspace), its skill/command roots to the index, and a persona
-        // read once here. Every path it contributes is fingerprinted.
         let mut skill_roots = SkillRoot::workspace_defaults();
         let mut pack_roots: Vec<Workspace> = Vec::new();
         let mut persona = None;
@@ -830,8 +703,6 @@ impl CompiledAgentPlan {
         }
         if let Some(dir) = &global_config_dir {
             let global_skills = dir.join(crate::workspace::skills::GLOBAL_SKILLS_DIRECTORY);
-            // The configured path is watched as well as its canonical target,
-            // so creating it or re-pointing a symlinked one recompiles.
             sources.push(SourceFingerprint::capture(global_skills.clone()));
             if let Some(opened) = std::fs::canonicalize(&global_skills)
                 .ok()
@@ -847,8 +718,6 @@ impl CompiledAgentPlan {
 
         let mut static_tools: Vec<StaticTool> = tools::static_tools();
         let spawn_spec = tools::spawn_agent_spec(&runtime.spawn_model_routes, &runtime.delegation);
-        // Only roster-bearing declarations are bounded: the legacy flat route
-        // enum may legitimately list every authenticated model.
         if !runtime.delegation.roster.is_empty() {
             let bytes = spawn_spec.name().len()
                 + spawn_spec.description().len()
@@ -871,8 +740,6 @@ impl CompiledAgentPlan {
             ));
         }
         static_tools.push(spawn_tool);
-        // Waiting for and cancelling the run's own background children
-        // change nothing outside it (ADR-0054 § 4).
         static_tools.push(StaticTool::new(
             tools::wait_agents_spec(),
             ToolHost::WaitAgents,
@@ -883,8 +750,6 @@ impl CompiledAgentPlan {
             ToolHost::CancelAgent,
             EffectClass::ReadOnly,
         ));
-        // Waiting on, reading or cancelling the run's own yielded commands;
-        // starting one is what shell or exec was approved for.
         static_tools.push(StaticTool::new(
             tools::command_status_spec(),
             ToolHost::CommandStatus,
@@ -920,9 +785,6 @@ impl CompiledAgentPlan {
         let exposed_tools =
             exposed_tools.map(|names| names.into_iter().collect::<std::collections::BTreeSet<_>>());
         if let Some(names) = &exposed_tools {
-            // Validate before either restriction removes tools. load_skill
-            // is known even when this workspace has no disclosed skills; the
-            // tools that follow spawn_agent are not names of their own.
             let known = static_tools
                 .iter()
                 .filter(|tool| {
@@ -945,17 +807,8 @@ impl CompiledAgentPlan {
                 }
             }
         }
-        // A pack tool policy filters what the catalog exposes. Filtering the
-        // inputs (rather than the compiled catalog) keeps every catalog
-        // invariant intact and makes the digest reflect the policy. The
-        // selector and loader are never filtered out: they are how the model
-        // reaches what the policy does allow. `wait_agents` and
-        // `cancel_agent` follow `spawn_agent` through both restrictions:
-        // they act only on its children, so the three come and go together
-        // and the delegation prompt never names a tool the run lacks.
         let follows_spawn =
             |tool: &StaticTool| matches!(tool.host, ToolHost::WaitAgents | ToolHost::CancelAgent);
-        // `command_status` follows `shell` and `exec` the same way.
         let follows_shell = |tool: &StaticTool| tool.host == ToolHost::CommandStatus;
         if let Some(selection) = &pack {
             static_tools.retain(|tool| {
@@ -1115,11 +968,6 @@ impl CompiledAgentPlan {
             &runtime.delegation,
         )
         .map(Arc::from);
-        // The common session run (every static tool, guidance allowed) gets
-        // its prefix now, off the run path; other capability sets build
-        // theirs on first use. One prefix is counted for cache admission: a
-        // variant differs by at most the tool-name list and skill index, and
-        // the prefix copies instructions and persona already counted above.
         let full_key = PromptPrefixKey {
             tools: Some(crate::catalog::StaticFilter {
                 spawn_agent: true,
@@ -1151,7 +999,6 @@ impl CompiledAgentPlan {
             &instructions,
             persona.as_deref(),
         ));
-        // The canonical bytes are the JSON plus the fixed domain separator.
         let estimated_bytes = descriptor_json.len() * 2
             + instructions.content_len()
             + persona.as_ref().map_or(0, |persona| persona.text.len())
@@ -1197,7 +1044,6 @@ impl CompiledAgentPlan {
         self.credential_epoch
     }
 
-    /// The wire identity persisted on runs admitted from this plan.
     #[must_use]
     pub fn identity(&self) -> RunPlanIdentity {
         RunPlanIdentity {
@@ -1218,8 +1064,6 @@ impl CompiledAgentPlan {
         self.workspace.path()
     }
 
-    /// The opened workspace capability, for resolving input attachments.
-    /// The network policy the plan's `fetch` calls are judged by.
     pub(crate) fn network_policy(&self) -> Arc<crate::tools::network::NetworkPolicy> {
         Arc::clone(&self.runtime.network)
     }
@@ -1228,7 +1072,6 @@ impl CompiledAgentPlan {
         Arc::clone(&self.runtime.shell)
     }
 
-    /// The highest cap the empty-truncation recovery may raise a turn to.
     #[must_use]
     pub const fn output_ceiling(&self) -> Option<crate::OutputCeiling> {
         self.runtime.output_ceiling
@@ -1238,7 +1081,6 @@ impl CompiledAgentPlan {
         self.workspace.clone()
     }
 
-    /// The canonical descriptor JSON persisted beside a run's identity.
     #[must_use]
     pub fn descriptor_json(&self) -> &Arc<str> {
         &self.descriptor_json
@@ -1249,15 +1091,11 @@ impl CompiledAgentPlan {
         self.instructions.hash()
     }
 
-    /// The instruction files and skill roots this plan read or found absent,
-    /// for callers that revalidate a cached plan against the filesystem.
     #[must_use]
     pub fn instruction_sources(&self) -> &[SourceFingerprint] {
         &self.sources
     }
 
-    /// Whether every external host still serves the catalog generation this
-    /// plan was compiled from. Cheap and synchronous.
     #[must_use]
     pub fn hosts_are_current(&self) -> bool {
         self.catalog
@@ -1277,9 +1115,6 @@ impl CompiledAgentPlan {
         &self.skills
     }
 
-    /// A conservative accounting of the heap this plan holds, for cache
-    /// admission. It excludes the provider transport and host connections,
-    /// which are shared across generations.
     #[must_use]
     pub const fn estimated_bytes(&self) -> usize {
         self.estimated_bytes
@@ -1291,7 +1126,6 @@ impl CompiledAgentPlan {
     }
 }
 
-/// A pack persona: prompt text appended after workspace instructions.
 #[derive(Debug)]
 pub(crate) struct Persona {
     pub(crate) pack: String,
@@ -1315,7 +1149,6 @@ impl Persona {
     }
 }
 
-/// Largest pack persona document.
 pub const MAX_PERSONA_BYTES: usize = 64 * 1024;
 
 fn read_persona(
@@ -1371,10 +1204,6 @@ fn is_canonical_absolute(path: &Path) -> bool {
         })
 }
 
-/// Whether `workspace` is inside a Git work tree, judged the way Git
-/// discovers one: a `.git` directory or file in it or an ancestor.
-/// Snapshots need Git (`undo::snapshot`), so this decides whether the
-/// prompt promises one.
 fn in_git_work_tree(workspace: &Path) -> bool {
     workspace
         .ancestors()
@@ -1486,8 +1315,6 @@ mod tests {
         for result in results {
             assert_eq!(result.unwrap().digest(), expected);
         }
-        // Other tests compile against this same semaphore. Wait fairly for
-        // all slots instead of assuming they stayed idle after our joins.
         let released = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             COMPILE_SLOTS.acquire_many(4),
@@ -1524,8 +1351,6 @@ mod tests {
         .unwrap();
         let side = source.side_question_plan().await.unwrap();
         assert_eq!(side.catalog().names().collect::<Vec<_>>(), ["tree"]);
-        // Managed denies filter grants on the main run, not exposure: the
-        // main catalog and plan identity are exactly those without them.
         let plain = CompiledAgentPlan::compile_blocking(profile(workspace.path())).unwrap();
         assert!(source.catalog().lookup("read_file").is_some());
         assert!(source.catalog().lookup("search").is_some());
@@ -1595,10 +1420,6 @@ mod tests {
         assert_eq!(narrow.digest(), same.digest());
     }
 
-    /// Auto runs each execute in a fresh per-run task workspace directory.
-    /// The system prompt is the head of every provider's cached prefix, so
-    /// it must not name that directory: identical workspaces at different
-    /// paths render byte-identical prompts (tools take relative paths).
     #[test]
     fn the_system_prompt_is_identical_across_workspace_locations() {
         let first = canonical_temp();
@@ -1628,9 +1449,6 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// The full root prompt of an Auto session in a Git checkout, pinned in
-    /// `tests/golden/root_prompt.txt` so every prompt change is reviewed as
-    /// a text diff. Run with `QQ_UPDATE_GOLDENS=1` to rewrite it.
     #[test]
     #[cfg(feature = "tool-fetch")]
     fn the_root_prompt_matches_its_golden() {
@@ -1674,9 +1492,6 @@ mod tests {
         );
     }
 
-    /// `wait_agents` and `cancel_agent` are never named in policy: they
-    /// follow `spawn_agent` through exposure and pack filtering, so the three
-    /// delegation tools are always present together or absent together.
     #[test]
     fn the_delegation_tools_follow_spawn_agent_through_every_filter() {
         let workspace = canonical_temp();
@@ -1700,7 +1515,6 @@ mod tests {
         )
         .unwrap();
         assert!(delegation(&without).is_empty());
-        // They are not policy vocabulary of their own.
         assert!(matches!(
             CompiledAgentPlan::compile_blocking(
                 profile(workspace.path()).with_exposed_tools(vec!["wait_agents".to_owned()]),
@@ -1748,8 +1562,6 @@ mod tests {
         );
     }
 
-    /// A descriptor with fixed inputs, independent of the filesystem, so the
-    /// golden digest below is stable across machines.
     fn golden_descriptor() -> AgentPlanDescriptor {
         AgentPlanDescriptor {
             version: DESCRIPTOR_VERSION,
@@ -1869,11 +1681,6 @@ mod tests {
                 b"qq-agent-plan-descriptor-v16\0{\"version\":16,\"profile\":\"review\","
             )
         );
-        // The golden digest pins the canonical encoding. A change here means
-        // DESCRIPTOR_VERSION must be bumped and every recorded digest is
-        // from a different encoding. The descriptor also carries
-        // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (descriptor 16: configured pack mutation authority).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
             "1d313a6d0988d2bf68b1782a5129ee4b16d08c24ccaa2005d3ba9053e1af0295"
@@ -2179,7 +1986,6 @@ mod tests {
         }
     }
 
-    /// A source with a fixed identity and a requested budget; never fetched.
     struct NamedSource {
         name: String,
         policy: crate::FailPolicy,
@@ -2249,7 +2055,6 @@ mod tests {
             "{error}"
         );
 
-        // The direct runtime path compiles through the same check.
         let mut runtime = Runtime::new(SilentProvider, "m", 64).unwrap();
         for index in 0..=crate::MAX_CONTEXT_SOURCES {
             runtime = runtime.with_context_source(named_source(index));
@@ -2278,8 +2083,6 @@ mod tests {
         for (index, source) in sources.iter().enumerate() {
             assert_eq!(source.name, format!("source-{index}"));
             assert_eq!(source.version, "7");
-            // The descriptor records the clamped budget the runtime enforces,
-            // not the one the source asked for.
             assert_eq!(
                 source.budget,
                 ContextBudgetDescriptor {
@@ -2298,15 +2101,12 @@ mod tests {
                 }
             );
         }
-        // Without sources the field is absent from the canonical encoding.
         let bare =
             CompiledAgentPlan::compile_blocking(super::tests_support::profile(directory.path()))
                 .unwrap();
         assert!(bare.descriptor().context_sources.is_empty());
         assert!(!bare.descriptor_json().contains("context_sources"));
         assert_ne!(bare.digest(), plan.digest());
-        // The persisted JSON is the canonical bytes minus the domain
-        // separator: one serialization serves the digest and the store.
         assert_eq!(
             bare.descriptor_json().as_ref(),
             serde_json::to_string(bare.descriptor().as_ref()).unwrap()
@@ -2359,14 +2159,11 @@ mod tests {
         assert_eq!(plan.resolved_model().route, "custom/test-model");
         assert!(plan.estimated_bytes() > "Answer tersely.\n".len());
 
-        // Both instruction candidates and all five skill roots are
-        // fingerprinted, present or absent.
         let sources = plan.instruction_sources();
         assert_eq!(sources.len(), 7);
         assert!(sources[0].path().ends_with("AGENTS.md") && sources[0].is_present());
         assert!(sources[1].path().ends_with("CLAUDE.md") && !sources[1].is_present());
 
-        // The epoch is not part of behavioral identity.
         let other_epoch = CompiledAgentPlan::compile_blocking(
             profile(directory.path())
                 .with_spawn_model_routes(vec!["custom/worker".to_owned()])
@@ -2376,7 +2173,6 @@ mod tests {
         .unwrap();
         assert_eq!(other_epoch.digest(), plan.digest());
 
-        // Changing the instructions changes the digest.
         std::fs::write(directory.path().join("AGENTS.md"), "Answer verbosely.\n").unwrap();
         let edited = CompiledAgentPlan::compile_blocking(
             profile(directory.path())
@@ -2499,7 +2295,6 @@ mod pack_tests {
         );
         assert!(loaded.contains("Tidy.\n"));
 
-        // A symlinked skills directory (a dotfiles checkout) is followed.
         #[cfg(unix)]
         {
             let elsewhere = canonical_temp();
@@ -2558,7 +2353,6 @@ mod pack_tests {
         assert_eq!(pack.id, "review-kit");
         assert_eq!(pack.tool_allow, ["read_file", "search"]);
         assert!(pack.persona_hash.is_some());
-        // The policy filtered the static tools; the selector and loader stay.
         let names: Vec<&str> = plan.catalog().names().collect();
         assert!(names.contains(&"read_file") && names.contains(&"search"));
         assert!(!names.contains(&"shell") && !names.contains(&"edit_file"));
@@ -2577,7 +2371,6 @@ mod pack_tests {
             intersected.catalog().names().collect::<Vec<_>>(),
             ["read_file"]
         );
-        // Pack documents are indexed, disclosed, and provenance-labelled.
         let skills = plan.skills();
         assert_eq!(skills.len(), 2);
         assert_eq!(skills.disclosed_count(), 2);
@@ -2585,7 +2378,6 @@ mod pack_tests {
         assert_eq!(audit.source, "pack:review-kit/skills/audit/SKILL.md");
         assert_eq!(audit.root, Some(0));
         assert_eq!(audit.description, "Audit a change");
-        // Loading a pack document reads from the pack root.
         let loaded = crate::workspace::load_entry(
             &plan.workspace,
             &plan.pack_roots,
@@ -2595,7 +2387,6 @@ mod pack_tests {
         )
         .unwrap();
         assert!(loaded.render_for_tool().contains("Audit steps."));
-        // The persona is in the system prompt after workspace instructions.
         let persona = plan.persona.as_ref().unwrap();
         let mut prompt = String::new();
         plan.instructions.append_to_prompt(&mut prompt);
@@ -2604,7 +2395,6 @@ mod pack_tests {
         let persona_at = prompt.find("You review code.").unwrap();
         assert!(rules < persona_at);
         assert!(prompt.contains("Agent pack `review-kit` persona from prompts/persona.md"));
-        // Pack roots and the persona are fingerprinted for revalidation.
         assert!(
             plan.instruction_sources()
                 .iter()
@@ -2616,7 +2406,6 @@ mod pack_tests {
                 .any(|s| s.path().ends_with("skills"))
         );
 
-        // Same inputs, same digest; a persona edit changes it.
         let again =
             CompiledAgentPlan::compile_blocking(profile(workspace.path()).with_pack(selection()))
                 .unwrap();
@@ -2630,14 +2419,12 @@ mod pack_tests {
             CompiledAgentPlan::compile_blocking(profile(workspace.path()).with_pack(selection()))
                 .unwrap();
         assert_ne!(edited.digest(), plan.digest());
-        // No pack: no persona, no pack section, full static catalog.
         let plain = CompiledAgentPlan::compile_blocking(profile(workspace.path())).unwrap();
         assert!(plain.descriptor().pack.is_none());
         assert!(plain.persona.is_none());
         assert!(plain.catalog().names().any(|n| n == "shell"));
         drop(Arc::clone(&plain));
 
-        // A missing persona fails the compile with a typed error.
         let mut missing = selection();
         missing.persona = Some("prompts/absent.md".to_owned());
         assert!(matches!(

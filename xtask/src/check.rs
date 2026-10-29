@@ -1,22 +1,3 @@
-//! `cargo xtask check`: the fast, affected-only gate agents run after every
-//! change, and the exact full gate CI runs at merge.
-//!
-//! 1. Changed files come from `git diff` against the merge-base with the
-//!    base ref (default `origin/main`) plus uncommitted and untracked files.
-//! 2. Each path maps to the workspace package that owns it; reverse
-//!    dependencies (normal and dev, from `cargo metadata`) are added, so a
-//!    change to `qq-protocol` tests every crate that could observe it.
-//!    Paths that can affect any crate (manifests, the lockfile, toolchain,
-//!    cargo and nextest config) select the full workspace.
-//! 3. Gates run cheapest first and stop at the first failure: `fmt`, `lint`,
-//!    `clippy` on the selection, `nextest` on the selection, then the
-//!    minimal provider profile when `qq-provider` is selected.
-//!
-//! Every run writes `target/qq-check/last.json`: the selection and why, each
-//! gate's command, status, and duration, and for test failures the test
-//! name, its first panic lines, and the command that reruns only it.
-//! `--evidence` prints the same as a Markdown block for a PR body.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs, io,
@@ -91,19 +72,15 @@ pub enum CheckError {
     RevertsBase { base: String, files: String },
 }
 
-/// A workspace package as the selection needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Package {
     pub name: String,
-    /// Repository-relative directory; `""` for the root package.
     pub dir: String,
-    /// Workspace packages this one depends on (normal, build, or dev).
     pub deps: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scope {
-    /// No Rust package can observe the change (docs, website, CI scripts).
     None,
     Packages(BTreeSet<String>),
     Full,
@@ -112,14 +89,10 @@ pub enum Scope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
     pub scope: Scope,
-    /// Why each package (or the full workspace) was selected.
     pub reasons: BTreeMap<String, String>,
-    /// Run the minimal (no Bedrock) provider profile too.
     pub minimal_provider: bool,
 }
 
-/// Paths outside any crate directory that tests read at run time. Keep in
-/// sync with `CARGO_MANIFEST_DIR`/`include_str!` reads that leave a crate.
 const CROSS_CRATE_INPUTS: &[(&str, &str)] = &[
     (".github/scripts/test-pre-push.sh", "xtask"),
     ("docs/guide/", "qq"),
@@ -140,7 +113,6 @@ const CROSS_CRATE_INPUTS: &[(&str, &str)] = &[
     ("build.rs", "qq"),
 ];
 
-/// Paths that can change the build or test behavior of every package.
 const FULL_INPUTS: &[&str] = &[
     ".githooks/",
     "Cargo.toml",
@@ -153,11 +125,8 @@ const FULL_INPUTS: &[&str] = &[
     "nix/",
 ];
 
-/// Feature gates for the AWS family are spread across `qq-provider`, so any
-/// change there also checks the minimal (no Bedrock) profile.
 const MINIMAL_PROVIDER_INPUT: &str = "crates/qq-provider/";
 
-/// Pure selection: maps changed paths to the packages to check.
 pub fn select(packages: &[Package], changed: &[String], forced: &[String]) -> Selection {
     let mut direct: BTreeMap<String, String> = BTreeMap::new();
     let mut reasons = BTreeMap::new();
@@ -169,8 +138,6 @@ pub fn select(packages: &[Package], changed: &[String], forced: &[String]) -> Se
             minimal_provider = true;
         }
         if full.is_none() && FULL_INPUTS.iter().any(|input| matches_input(path, input)) {
-            // Only the root manifest is a full input (`matches_input` is
-            // exact); crate manifests map to their crate below.
             full = Some(path.clone());
             continue;
         }
@@ -251,9 +218,6 @@ fn matches_input(path: &str, input: &str) -> bool {
     }
 }
 
-/// The root package owns `src/`, `tests/`, `benches/`, and `examples/` at the
-/// repository root; everything else at the root (docs, CI, scripts) belongs
-/// to no package unless listed in [`CROSS_CRATE_INPUTS`].
 fn is_root_package_path(path: &str) -> bool {
     ["src/", "tests/", "benches/", "examples/"]
         .iter()
@@ -337,8 +301,6 @@ fn changed_files(root: &Path, base: &str) -> Result<Vec<String>, CheckError> {
             .current_dir(root),
         "git merge-base",
     );
-    // Without a merge-base the committed changes are unknown; checking only
-    // the working tree would pass untested commits, so refuse instead.
     let merge_base = match merge_base {
         Ok(merge_base) => merge_base,
         Err(error) => {
@@ -348,8 +310,6 @@ fn changed_files(root: &Path, base: &str) -> Result<Vec<String>, CheckError> {
             });
         }
     };
-    // `--no-renames` lists both sides of a move, so a file leaving a crate
-    // still selects that crate.
     let committed = capture(
         ProcessCommand::new("git")
             .args([
@@ -387,9 +347,6 @@ fn changed_files(root: &Path, base: &str) -> Result<Vec<String>, CheckError> {
     Ok(changed.into_iter().collect())
 }
 
-/// Files whose committed entries on HEAD equal an older base-side entry:
-/// the branch silently undoes work that landed on the base, typically by
-/// committing an old tree onto a newer base.
 fn reverted_base_changes(root: &Path, base: &str) -> Result<Vec<String>, CheckError> {
     let git = |args: &[&str]| {
         capture(
@@ -409,14 +366,11 @@ fn reverted_base_changes(root: &Path, base: &str) -> Result<Vec<String>, CheckEr
         merge_base,
         "HEAD",
     ])?;
-    // A tree entry includes permissions as well as object identity. The
-    // path is literal so metacharacters cannot select a different entry.
     let entry = |revision: &str, path: &str| {
         git(&["--literal-pathspecs", "ls-tree", revision, "--", path]).unwrap_or_default()
     };
     let mut reverted = Vec::new();
 
-    // An explicit committed trailer records a deliberate rollback per path.
     let acknowledgements = git(&[
         "log",
         "--format=%(trailers:key=QQ-Allow-Revert,valueonly)",
@@ -482,11 +436,8 @@ pub struct TestFailure {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
     pub head: String,
-    /// `git status --porcelain` was non-empty: the report covers
-    /// uncommitted changes that `head` does not contain.
     #[serde(default)]
     pub dirty: bool,
-    /// Digest of index, working-tree diffs and untracked bytes.
     #[serde(default)]
     pub tree_digest: String,
     pub base: String,
@@ -497,8 +448,6 @@ pub struct Report {
     pub seconds: f64,
 }
 
-/// nextest status words that end a test unsuccessfully (0.9.x human output,
-/// with `--color never`). `TRY n ` prefixes retries in the `ci` profile.
 const FAILURE_STATUSES: &[&str] = &[
     "FAIL",
     "SIGSEGV",
@@ -512,7 +461,6 @@ const FAILURE_STATUSES: &[&str] = &[
     "LEAK-FAIL",
 ];
 
-/// Lines that start another test's status block and so end a message.
 fn is_status_line(line: &str) -> bool {
     let line = strip_retry(line.trim_start());
     let word = line.split_whitespace().next().unwrap_or("");
@@ -529,9 +477,6 @@ fn strip_retry(line: &str) -> &str {
         .unwrap_or(line)
 }
 
-/// Parses failures from nextest's human output (`--color never`): each
-/// `<STATUS> [ time] (n/m) <binary> <test>` line with a failing status, plus
-/// the panic location and message that follow in the failure output.
 pub fn parse_nextest_failures(output: &str, rerun_flags: &str) -> Vec<TestFailure> {
     let mut failures: Vec<TestFailure> = Vec::new();
     let lines = output.lines().collect::<Vec<_>>();
@@ -581,8 +526,6 @@ pub fn parse_nextest_failures(output: &str, rerun_flags: &str) -> Vec<TestFailur
             }
         }
         let message = message.join("\n");
-        // nextest prints a failure once when it happens and again after the
-        // summary; only one of the two may carry the output, so merge.
         if let Some(existing) = failures
             .iter_mut()
             .find(|failure| failure.package == package && failure.test == test)
@@ -604,8 +547,6 @@ pub fn parse_nextest_failures(output: &str, rerun_flags: &str) -> Vec<TestFailur
     failures
 }
 
-/// Test counts from nextest's `Summary [ t] N tests run: P passed (…), …,
-/// S skipped` line.
 pub fn parse_nextest_counts(output: &str) -> Option<TestCounts> {
     let line = output
         .lines()
@@ -649,16 +590,13 @@ fn capture(command: &mut ProcessCommand, display: &str) -> Result<String, CheckE
 }
 
 enum GateKind {
-    /// A cargo subcommand run as a child process.
     Cargo(Vec<String>),
-    /// `cargo xtask lint`, run in-process (no rebuild of the running xtask).
     Lint,
 }
 
 struct Gate {
     name: &'static str,
     kind: GateKind,
-    /// Extra flags a rerun of one failing test needs (minimal profile).
     rerun_flags: &'static str,
 }
 
@@ -739,7 +677,6 @@ fn plan(selection: &Selection, args: &CheckArgs) -> Vec<Gate> {
     test.extend(packages);
     gates.push(Gate::cargo("test", test));
     if selection.scope == Scope::Full {
-        // nextest does not run doctests.
         gates.push(Gate::cargo(
             "doctest",
             strings(&["test", "--color", "never", "--workspace", "--doc"]),
@@ -776,8 +713,6 @@ fn plan(selection: &Selection, args: &CheckArgs) -> Vec<Gate> {
     gates
 }
 
-/// Lines of a failed gate's output kept in the report; the full output is
-/// in its log file.
 const TAIL_LINES: usize = 40;
 
 fn run_gate(root: &Path, gate: &Gate, log_dir: &Path) -> GateReport {
@@ -789,44 +724,39 @@ fn run_gate(root: &Path, gate: &Gate, log_dir: &Path) -> GateReport {
             Ok(_) => (true, String::new()),
             Err(error) => (false, error.to_string()),
         },
-        GateKind::Cargo(args) => {
-            // Output goes straight to the log file (bounded memory, readable
-            // while the gate runs); the report parses it afterwards.
-            match fs::File::create(&log_path) {
-                Ok(log) => {
-                    let stderr = log.try_clone();
-                    let mut command = ProcessCommand::new(cargo());
-                    command
-                        .args(args)
-                        .current_dir(root)
-                        .env("CARGO_TERM_COLOR", "never")
-                        .env_remove("NO_COLOR")
-                        .stdin(Stdio::null())
-                        .stdout(log);
-                    match stderr {
-                        Ok(stderr) => {
-                            command.stderr(stderr);
-                        }
-                        Err(_) => {
-                            command.stderr(Stdio::null());
-                        }
+        GateKind::Cargo(args) => match fs::File::create(&log_path) {
+            Ok(log) => {
+                let stderr = log.try_clone();
+                let mut command = ProcessCommand::new(cargo());
+                command
+                    .args(args)
+                    .current_dir(root)
+                    .env("CARGO_TERM_COLOR", "never")
+                    .env_remove("NO_COLOR")
+                    .stdin(Stdio::null())
+                    .stdout(log);
+                match stderr {
+                    Ok(stderr) => {
+                        command.stderr(stderr);
                     }
-                    let passed = match command.status() {
-                        Ok(status) => status.success(),
-                        Err(error) => {
-                            let _ =
-                                fs::write(&log_path, format!("failed to launch cargo: {error}"));
-                            false
-                        }
-                    };
-                    (passed, fs::read_to_string(&log_path).unwrap_or_default())
+                    Err(_) => {
+                        command.stderr(Stdio::null());
+                    }
                 }
-                Err(error) => (
-                    false,
-                    format!("cannot create {}: {error}", log_path.display()),
-                ),
+                let passed = match command.status() {
+                    Ok(status) => status.success(),
+                    Err(error) => {
+                        let _ = fs::write(&log_path, format!("failed to launch cargo: {error}"));
+                        false
+                    }
+                };
+                (passed, fs::read_to_string(&log_path).unwrap_or_default())
             }
-        }
+            Err(error) => (
+                false,
+                format!("cannot create {}: {error}", log_path.display()),
+            ),
+        },
     };
     let is_test = matches!(gate.name, "test" | "minimal-test");
     let failures = if is_test && !passed {
@@ -855,9 +785,6 @@ fn run_gate(root: &Path, gate: &Gate, log_dir: &Path) -> GateReport {
     }
 }
 
-/// Reports live in this checkout's `target/`, even when `CARGO_TARGET_DIR`
-/// points worktrees at a shared build cache, so agents in different
-/// worktrees never read each other's results.
 fn report_path(root: &Path) -> PathBuf {
     root.join("target/qq-check/last.json")
 }
@@ -1011,7 +938,6 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
         };
         let report: Report =
             serde_json::from_str(&text).map_err(|error| CheckError::Report(path.clone(), error))?;
-        // Evidence for a commit the report did not check is false evidence.
         let (head, dirty, tree_digest) = git_head(&root)?;
         if report.head != head || report.dirty != dirty || report.tree_digest != tree_digest {
             return Err(CheckError::StaleReport {
@@ -1027,7 +953,6 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
         print!("{}", evidence_markdown(&report));
         return Ok(());
     }
-    // Dry-run discovery must not destroy evidence from a real gate.
     if !args.dry_run {
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -1320,7 +1245,6 @@ mod tests {
         write("mine.rs", "old mine");
         git(&["add", "."]);
         git(&["commit", "-qm", "initial"]);
-        // Someone else's work lands on main.
         write("auth.rs", "new auth");
         git(&["commit", "-qam", "auth refactor"]);
 
@@ -1330,7 +1254,6 @@ mod tests {
         git(&["commit", "-qm", "second auth refactor"]);
         write("[id].tsx", "new literal");
         git(&["commit", "-qam", "literal file refactor"]);
-        // A clean branch from the new main touching only its own file passes.
         git(&["checkout", "-qb", "good"]);
         write("mine.rs", "new mine");
         git(&["commit", "-qam", "mine"]);
@@ -1338,7 +1261,6 @@ mod tests {
             super::reverted_base_changes(root, "main").unwrap(),
             Vec::<String>::new()
         );
-        // Modes belong to tree entries, not blob IDs.
         git(&["checkout", "main"]);
         git(&["update-index", "--chmod=+x", "mine.rs"]);
         git(&["commit", "-qm", "make auth executable"]);
@@ -1348,7 +1270,6 @@ mod tests {
         let reverted = super::reverted_base_changes(root, "main").unwrap();
         assert_eq!(reverted.len(), 1, "{reverted:?}");
         assert!(reverted[0].starts_with("mine.rs (undoes "), "{reverted:?}");
-        // A branch that commits its stale tree on top of the new main reverts it.
         git(&["checkout", "-qb", "bad", "main"]);
         write("auth.rs", "old auth");
         write("mine.rs", "new mine");
@@ -1375,14 +1296,12 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        // Acknowledgement is exact, not a wildcard or a blanket bypass.
         write("auth.rs", "old auth");
         git(&["commit", "-qam", "unacknowledged stale auth"]);
         let reverted = super::reverted_base_changes(root, "main").unwrap();
         assert_eq!(reverted.len(), 1, "{reverted:?}");
         assert!(reverted[0].starts_with("auth.rs (undoes "), "{reverted:?}");
 
-        // Deleting a file created on main is subtraction, not a stale blob.
         git(&["checkout", "-qb", "delete", "main"]);
         git(&["rm", "mine.rs"]);
         git(&["commit", "-qm", "remove obsolete auth"]);
@@ -1527,8 +1446,6 @@ mod tests {
         assert_eq!(selection.reasons["qq-client"], "depends on qq-server");
     }
 
-    /// Real nextest 0.9.140 output (`--color never`) for a crate with a
-    /// failing, an aborting, a timed-out, and a flaky test.
     const DEFAULT_PROFILE: &str = include_str!("../tests/fixtures/nextest-default.txt");
     const CI_PROFILE: &str = include_str!("../tests/fixtures/nextest-ci.txt");
 

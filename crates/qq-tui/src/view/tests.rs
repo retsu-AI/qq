@@ -42,9 +42,6 @@ fn app_with_messages(count: u8) -> App {
     app
 }
 
-/// Row text with runs of spaces collapsed so tool rows (a fixed subject
-/// column followed by a right-aligned metric) compare without counting
-/// padding.
 fn squash(row: &str) -> String {
     let mut out = String::with_capacity(row.len());
     let mut spaces = 0;
@@ -100,13 +97,10 @@ async fn completed_messages_render_plain_then_upgrade_to_highlighted() {
 
     let streaming = renderer.render_message(&message, 40);
 
-    // Re-rendered every frame while streaming: plain panel, no cache.
     assert_eq!(style_of(&streaming, "let"), Some(surface(normal())));
     assert!(renderer.markdown().is_empty());
     assert_eq!(renderer.highlighter.in_flight(), 0);
 
-    // Completion caches a plain layout immediately and schedules
-    // highlighting off the render path.
     message.state = MessageState::Complete;
     let complete = renderer.render_message(&message, 40);
     assert_eq!(style_of(&complete, "let"), Some(surface(normal())));
@@ -118,7 +112,6 @@ async fn completed_messages_render_plain_then_upgrade_to_highlighted() {
     let upgraded = renderer.render_message(&message, 40);
     assert_eq!(style_of(&upgraded, "let"), Some(surface(code_keyword())));
 
-    // A stale result (different width) is dropped, not installed.
     let stale = Highlighted {
         key: HighlightKey {
             message_id: message.id,
@@ -278,8 +271,6 @@ fn steering_rows_say_what_they_are_at_every_state() {
             .ends_with("steered")
     );
     assert!(header_before("late steer").contains("steering  run finished first"));
-    // A steering row never shows the plain "queued" of a queued prompt,
-    // which would read as a new run waiting its turn.
     assert!(!rows.iter().any(|row| row.contains("YOU  queued")));
 }
 
@@ -340,7 +331,6 @@ fn head_orphan_call_turns_render_before_the_runs_first_message() {
         call.turn_ordinal = turn;
         call
     };
-    // Arrival order is scrambled; rendering re-sorts by (turn, call).
     session.tool_calls = Some(vec![
         call(5, 2, "search", r#"{"query":"x"}"#, "No matches found.\n"),
         call(4, 1, "read_file", r#"{"path":"b.rs"}"#, "b\n"),
@@ -349,8 +339,6 @@ fn head_orphan_call_turns_render_before_the_runs_first_message() {
 
     let rows = squashed_rows(&transcript_lines(&app, 80));
 
-    // The call-only turn 1 renders before the run's first message (turn
-    // 2), so the transcript reads in execution order.
     assert_eq!(
         rows,
         [
@@ -391,13 +379,10 @@ fn consecutive_call_only_turns_merge_into_one_folded_group() {
         .collect::<Vec<_>>();
     session.tool_calls = Some(calls);
 
-    // By default every call is a row, in one contiguous block.
     let rows = squashed_rows(&transcript_lines(&app, 80));
     assert_eq!(rows.len(), 7, "{rows:?}");
     assert!(rows[3..].iter().all(|row| row.contains("Read a.rs")));
 
-    // Folded: the call-only turns 2 and 3 merge into turn 1's contiguous
-    // call group, and the four quiet calls fold as one, not per turn.
     app.tool_detail = ToolDetail::Folded;
     let rows = squashed_rows(&transcript_lines(&app, 80));
     assert_eq!(rows, [" QQ", " row 0", "", " ▸ Read ×4 a.rs",]);
@@ -468,14 +453,11 @@ fn completed_edit_results_color_diff_shaped_content_at_expanded_detail() {
             .find(|span| span.text.contains(needle))
             .map(|span| span.style)
     };
-    // Inside the detail panel: the diff tints win over the surface, and
-    // spans without their own background take it.
     assert_eq!(style_of(&lines, "@@ -1 +1 @@"), Some(surface(muted())));
     assert_eq!(style_of(&lines, "-old"), Some(diff_line_style("-")));
     assert_eq!(style_of(&lines, "+new"), Some(diff_line_style("+")));
     assert_eq!(style_of(&lines, " context"), Some(surface(normal())));
 
-    // Today's summary results are not diff-shaped and keep the raw style.
     let summary_call = tool_call_snapshot(
         2,
         "edit_file",
@@ -530,10 +512,8 @@ fn display_payload_diffs_replace_the_result_summary_at_expanded_detail() {
     };
     assert_eq!(style_of("- old line"), Some(diff_line_style("-")));
     assert_eq!(style_of("+ new line"), Some(diff_line_style("+")));
-    // The payload renders instead of the raw summary sentence.
     assert!(style_of("replaced 1 occurrence").is_none());
 
-    // Collapsed detail keeps the one-liner; the payload adds no rows.
     let lines = render_tool_calls_simple(
         &[&call],
         &HashMap::new(),
@@ -571,8 +551,6 @@ fn running_calls_show_a_live_output_tail_of_complete_lines() {
             &|_, _| Vec::new(),
         ));
         assert!(rows[0].contains("Run"), "the spinner one-liner stays");
-        // The tail sits in a detail panel: a blank surface row above and
-        // below the content rows (U7).
         let tail_start = rows.len() - MAX_LIVE_TAIL_ROWS - TOOL_PANEL_PADDING_ROWS;
         let tail: Vec<String> = rows[tail_start..]
             .iter()
@@ -587,8 +565,6 @@ fn running_calls_show_a_live_output_tail_of_complete_lines() {
                 "   ┃  four",
                 "   ┃  five",
                 "   ┃  six",
-                // Control characters are stripped; the mid-line chunk
-                // tail stays hidden until its newline arrives.
                 "   ┃  seven bell",
                 "   ┃",
             ]
@@ -596,8 +572,6 @@ fn running_calls_show_a_live_output_tail_of_complete_lines() {
         assert!(!rows.iter().any(|row| row.contains("partial")));
     }
 
-    // Overlong lines wrap literally at the character level (the wrap mark
-    // in the gutter) and the tail stays bounded in rows.
     let mut live = HashMap::new();
     live.insert(call.id, format!("{}\n", "x".repeat(40)));
     let rows = frame_rows(&render_tool_calls_simple(
@@ -612,8 +586,6 @@ fn running_calls_show_a_live_output_tail_of_complete_lines() {
     assert_eq!(rows[3], format!("   ↪  {}", "x".repeat(14)));
     assert!(rows.len() <= 1 + MAX_LIVE_TAIL_ROWS + TOOL_PANEL_PADDING_ROWS);
 
-    // Calls that are no longer running render no tail even if a stale
-    // buffer lingers.
     let mut finished = call.clone();
     finished.state = ToolCallState::Completed;
     finished.result = Some("ok\n".to_owned());
@@ -712,8 +684,6 @@ fn question_holds_render_numbered_options_and_the_answered_questions() {
         "second question waits: {rows:?}"
     );
 
-    // After the first answer the block moves on and shows the answer given;
-    // the free-text question puts the caret in the composer.
     app.question_answers.push("qq-core".to_owned());
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 24);
     let rows = frame_rows(&frame);
@@ -798,8 +768,6 @@ fn approval_prompts_render_edit_previews_as_colored_diffs() {
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 24);
     let rows = frame_rows(&frame);
 
-    // The approval is inline under the tool row: the transcript stays
-    // visible, the file and diff head follow, then the two choices.
     assert!(
         rows.iter().any(|row| row.contains("row 0")),
         "transcript stays: {rows:?}"
@@ -828,12 +796,10 @@ fn approval_prompts_render_edit_previews_as_colored_diffs() {
     assert_eq!(style_of("@@ -1 +1 @@"), Some(muted()));
     assert_eq!(style_of("-old"), Some(diff_line_style("-")));
     assert_eq!(style_of("+new"), Some(diff_line_style("+")));
-    // The block offers both decisions.
     assert!(rows.iter().any(|row| {
         let row = squash(row);
         row.contains("y approve") && row.contains("n deny")
     }));
-    // The composer is disabled while the approval owns input.
     assert!(rows.iter().any(|row| row.starts_with(" ✎ ")), "{rows:?}");
 }
 
@@ -973,7 +939,6 @@ fn unknown_tools_fall_back_to_the_first_string_argument_and_byte_size() {
 
     assert_eq!(rows, [" ● executor · run_query select 1 2.0 KB"]);
 
-    // A known tool without a diff payload keeps a size metric.
     let edit = tool_call_snapshot(
         2,
         "edit_file",
@@ -1037,16 +1002,12 @@ fn error_results_expand_under_the_summary_by_default() {
     ));
 
     assert_eq!(squash(&rows[0]), " ✕ Read gone.txt");
-    // The error tail is a detail panel: padding row, content, padding row.
     assert_eq!(rows.len(), 1 + 1 + TOOL_PANEL_PADDING_ROWS);
     assert_eq!(rows[1].trim_end(), "   ┃");
     assert_eq!(rows[2].trim_end(), "   ┃  path is not a file");
     assert_eq!(rows[3].trim_end(), "   ┃");
 }
 
-/// D9: a self-corrected argument is a muted `↻ corrected` with no panel, an
-/// outcome a warning `!` with its code and one line of reason, and only a
-/// failure keeps `✕` and the panel (above).
 #[test]
 fn error_rows_grade_by_kind_and_corrections_fold_into_their_retry() {
     let render = |calls: &[&ToolCallSnapshot], detail| {
@@ -1065,7 +1026,6 @@ fn error_rows_grade_by_kind_and_corrections_fold_into_their_retry() {
     let (rows, lines) = render(&[&corrected], SimpleDetail::Rows);
     assert_eq!(rows, [" ↻ Read a.rs corrected"]);
     assert_eq!(style_of(&lines, "↻"), Some(muted()));
-    // Expanded, the model-facing text is still there, muted.
     let (rows, _) = render(&[&corrected], SimpleDetail::Expanded);
     assert!(
         rows.iter().any(|row| row.contains("invalid_ranges")),
@@ -1083,13 +1043,9 @@ fn error_rows_grade_by_kind_and_corrections_fold_into_their_retry() {
     let (rows, lines) = render(&[&missing], SimpleDetail::Rows);
     assert_eq!(rows[0], " ! Read gone.rs path_not_found");
     assert_eq!(style_of(&lines, "!"), Some(warning()));
-    // One row of reason, the tail line, after the `…` that says there is
-    // more on expand, inside the panel padding.
     assert_eq!(rows.len(), 1 + 2 + TOOL_PANEL_PADDING_ROWS, "{rows:?}");
     assert!(rows[3].contains("closest: src/gone.rs"), "{rows:?}");
 
-    // The successful retry is the record; the correction before it folds
-    // away, and a block of retried reads still collapses to one summary.
     let mut retried = tool_call_snapshot(
         3,
         "read_file",
@@ -1098,15 +1054,12 @@ fn error_rows_grade_by_kind_and_corrections_fold_into_their_retry() {
         Some("read a.rs L1-1/1 h:000000000000\n1\tx\n"),
         false,
     );
-    // A sibling call in the same turn is not a retry: the model had not
-    // seen the error yet, so the correction keeps its row.
     let (rows, _) = render(&[&corrected, &retried], SimpleDetail::Rows);
     assert_eq!(rows.len(), 2, "{rows:?}");
     retried.turn_ordinal = corrected.turn_ordinal + 1;
     let (rows, _) = render(&[&corrected, &retried], SimpleDetail::Rows);
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert!(rows[0].starts_with(" ● Read a.rs"), "{rows:?}");
-    // A correction of a different tool is not absorbed.
     let other = tool_call_snapshot(
         4,
         "search",
@@ -1117,7 +1070,6 @@ fn error_rows_grade_by_kind_and_corrections_fold_into_their_retry() {
     );
     let (rows, _) = render(&[&corrected, &other], SimpleDetail::Rows);
     assert_eq!(rows.len(), 2, "{rows:?}");
-    // Folded: three good reads plus an absorbed correction fold like four.
     let reads: Vec<ToolCallSnapshot> = (5..9)
         .map(|byte| {
             let mut read = tool_call_snapshot(
@@ -1197,7 +1149,6 @@ fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
         ));
         assert!(rows[0].contains(label), "{rows:?}");
     }
-    // On a row too narrow for the metric, the label keeps the exit code.
     let long = tool_call_snapshot(
         3,
         "exec",
@@ -1215,8 +1166,6 @@ fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
         &|_, _| Vec::new(),
     ));
     assert!(rows[0].contains("exit=101"), "{rows:?}");
-    // The one-line reason under a batch-edit outcome survives header
-    // stripping, and a fetch 404 is labelled by its status.
     let stale = tool_call_snapshot(
         4,
         "edit_file",
@@ -1301,7 +1250,6 @@ fn denied_and_interrupted_keep_their_reason_and_outcomes_expand_to_full_output()
 
     let output = "exec exit=101 elapsed=2.0 bytes=90\nerror[E0308]: mismatched types\n --> src/lib.rs:3:5\nhelp: try this";
     let outcome = tool_call_snapshot(2, "exec", "{}", ToolCallState::Failed, Some(output), true);
-    // Collapsed: one line of the tail.
     let rows = squashed_rows(&render_tool_calls_simple(
         &[&outcome],
         &HashMap::new(),
@@ -1318,7 +1266,6 @@ fn denied_and_interrupted_keep_their_reason_and_outcomes_expand_to_full_output()
         !rows.iter().any(|row| row.contains("mismatched types")),
         "{rows:?}"
     );
-    // Expanded, in the inspector or inline: every diagnostic line.
     let row = ToolRow::derive(&outcome);
     for inline_detail in [false, true] {
         let context = ToolRowContext {
@@ -1346,7 +1293,6 @@ fn expanded_outcomes_use_the_result_budget_under_the_timing_line_without_repeati
     let diagnostics: String = (1..=10).map(|n| format!("diagnostic {n}\n")).collect();
     let result = format!("exec exit=101 elapsed=2.0 bytes=90\n{diagnostics}");
     let call = tool_call_snapshot(1, "exec", "{}", ToolCallState::Failed, Some(&result), true);
-    // The row names the exit once: the metric, not the label as well.
     let rows = squashed_rows(&render_tool_calls_simple(
         &[&call],
         &HashMap::new(),
@@ -1374,13 +1320,11 @@ fn expanded_outcomes_use_the_result_budget_under_the_timing_line_without_repeati
         selected: false,
     };
     let lines = squashed_rows(&tools::tool_expanded_lines(&call, context, 120));
-    // More than the six-row failure panel: the normal expanded budget.
     assert!(
         lines.iter().any(|line| line.contains("diagnostic 10"))
             && lines.iter().any(|line| line.contains("diagnostic 5")),
         "{lines:?}"
     );
-    // Timing comes first, then the detail panel.
     let timing = lines
         .iter()
         .position(|line| line.contains("started"))
@@ -1464,7 +1408,6 @@ fn quiet_runs_fold_into_a_single_counted_line() {
     }
     let references = calls.iter().collect::<Vec<_>>();
 
-    // The default shows one row per call; folding is opt-in.
     let rows = frame_rows(&render_tool_calls_simple(
         &references,
         &HashMap::new(),
@@ -1493,7 +1436,6 @@ fn quiet_runs_fold_into_a_single_counted_line() {
         [" ▸ Read ×4 Search ×2 a.rs"]
     );
 
-    // An active or failed call keeps every line visible even when folded.
     calls[5].state = ToolCallState::Running;
     let references = calls.iter().collect::<Vec<_>>();
     let rows = frame_rows(&render_tool_calls_simple(
@@ -1506,7 +1448,6 @@ fn quiet_runs_fold_into_a_single_counted_line() {
     ));
     assert_eq!(rows.len(), 6);
 
-    // Expanded detail never folds.
     calls[5].state = ToolCallState::Completed;
     let references = calls.iter().collect::<Vec<_>>();
     let rows = frame_rows(&render_tool_calls_simple(
@@ -1602,7 +1543,6 @@ fn expanding_a_read_shows_the_head_of_the_file_and_never_its_json() {
         "no body by default"
     );
 
-    // Ctrl-Up selects the call, Enter expands it alone.
     app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
         KeyCode::Up,
         KeyModifiers::CONTROL,
@@ -1629,7 +1569,6 @@ fn expanding_a_read_shows_the_head_of_the_file_and_never_its_json() {
         "known tools show no JSON: {text}"
     );
 
-    // Ctrl-O folds the block rather than expanding anything.
     app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
         KeyCode::Char('o'),
         KeyModifiers::CONTROL,
@@ -1701,8 +1640,6 @@ fn every_row_of_a_multi_line_prompt_keeps_the_accent_rail() {
     let lines = renderer.render_message(&message, 40);
     assert!(lines.len() > 4, "{:?}", frame_rows(&lines));
     for line in &lines {
-        // A list marker shares the rail's accent, so the two merge into one
-        // span; the rail is still the first three cells.
         assert!(
             line.spans[0].text.starts_with(" ▌ "),
             "{:?}",
@@ -1784,7 +1721,6 @@ fn tool_metrics_are_right_aligned_to_the_content_width() {
         assert!(row.ends_with("3 lines"), "{row:?}");
         assert!(squash(&row).ends_with("Read crates/qq-client/src/sse.rs 3 lines"));
     }
-    // A running call with a duration: the duration is the rightmost field.
     let mut running = call.clone();
     running.state = ToolCallState::Running;
     running.result = None;
@@ -1838,16 +1774,13 @@ fn narrow_tool_rows_drop_the_duration_then_the_metric_before_the_verb() {
         selected: false,
     };
     let at = |width| squash(&frame_rows(&[tool_summary_line(&call, lookup(&call), 0, width)])[0]);
-    // Everything fits: the path gives up its middle, the right side is whole.
     assert_eq!(at(40), " ● Read crates/…/sse.rs 3 lines 0.4s");
     assert_eq!(
         tool_summary_line(&call, lookup(&call), 0, 40).width(),
         40,
         "the duration ends at the content width"
     );
-    // Too narrow for the duration: the metric stays, right-aligned.
     assert_eq!(at(28), " ● Read …/sse.rs 3 lines");
-    // Too narrow for the metric too: verb and elided subject alone.
     assert_eq!(at(20), " ● Read …/sse.rs");
     assert!(
         (0..40).all(|width| tool_summary_line(&call, lookup(&call), 0, width).width() <= width)
@@ -1881,8 +1814,6 @@ fn the_transcript_starts_with_one_padding_row_that_scrolls_away() {
     assert_eq!(rows[1].trim_end(), "", "padding row under the top row");
     assert_eq!(rows[2].trim_end(), "   QQ", "{rows:#?}");
 
-    // A transcript taller than the viewport is tail-anchored, so the
-    // padding row is above the window until the user scrolls to the top.
     let mut app = app_with_messages(40);
     app.layout.rail = crate::view::PanePref::Hidden;
     let rows = frame_rows(&renderer.frame_and_commit(&mut app, 80, 24));
@@ -1911,8 +1842,6 @@ fn the_padding_row_leaves_a_short_streaming_transcript_tail_anchored() {
         .as_mut()
         .unwrap()[0];
     message.state = MessageState::Streaming;
-    // Grow the body past the visible rows one paragraph at a time; the tail
-    // must stay on screen with the padding row scrolling off first.
     for row in 0..30 {
         let message = &mut app
             .sessions
@@ -1950,8 +1879,6 @@ fn the_composer_gets_a_padding_row_only_at_twenty_rows_or_more() {
     assert!(short[18].starts_with(" › hi"), "{short:#?}");
     assert!(short[17].starts_with('─'), "{short:#?}");
 
-    // The compact composer still grows to its four rows at 80 × 24 and the
-    // body keeps what is left: 24 - top - rule - 4 - padding = 17 rows.
     app.composer.text = "one\ntwo\nthree\nfour\nfive".to_owned();
     let frame = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
     let rule = frame.iter().position(|row| row.starts_with('─')).unwrap();
@@ -2004,8 +1931,6 @@ fn completed_markdown_cache_is_bounded_and_keeps_one_width() {
     assert_eq!(renderer.markdown().len(), 1);
     assert_eq!(renderer.markdown()[&message.id].width, 80);
 
-    // The bound covers every pane's visible window at once, so panes on
-    // different sessions never evict each other's layouts.
     for byte in 2..=u8::try_from(MAX_CACHED_MESSAGES + 8).unwrap() {
         renderer.render_message(&completed_message(byte, byte.to_string()), 80);
     }
@@ -2293,24 +2218,18 @@ fn refreshed_chrome_shows_identity_status_and_session_metrics() {
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 12);
     let rows = frame_rows(&frame);
 
-    // One top row: brand, breadcrumb, then model and context on the right.
-    // No version, no "local", no layout name.
     assert!(rows[0].starts_with(" qq  Session"), "{:?}", rows[0]);
     assert!(!rows[0].contains(VERSION));
     assert!(!rows[0].contains("local"));
     assert!(rows[0].contains("openai/gpt-test"));
     assert!(rows[0].contains("50% ctx"), "{:?}", rows[0]);
     assert_eq!(frame[0].spans[0].style, brand().bold());
-    // Rule then composer: the bottom two rows. The rule carries the hints so
-    // no row is spent on them, and an idle session shows no state chip. An
-    // empty composer names `?` for help; typing swaps in the chord.
     assert!(rows[10].starts_with('─'), "{:?}", rows[10]);
     assert!(rows[10].contains("? help"), "{:?}", rows[10]);
     assert!(!rows[10].contains("F1 help"), "{:?}", rows[10]);
     assert!(rows[10].contains("^K commands"), "{:?}", rows[10]);
     assert!(!rows[10].contains("idle"), "{:?}", rows[10]);
     assert!(rows[11].starts_with(" › Ask QQ..."), "{:?}", rows[11]);
-    // Rows 1..=9 are transcript: nine body rows out of twelve.
     assert!(rows[1..10].iter().any(|row| row.contains("row 0")));
 
     app.composer.text = "h".to_owned();
@@ -2417,7 +2336,6 @@ fn composer_renders_hard_newlines_across_multiple_rows_and_reports_the_caret() {
     app.composer.text = "hello\nworld".to_owned();
     let (lines, caret) = composer(&app, 40, 8);
     let rows = frame_rows(&lines);
-    // No fake caret in the text; the real cursor sits after "world".
     assert_eq!(rows, vec![" › hello".to_owned(), "   world".to_owned()]);
     assert_eq!(caret, Some((3 + 5, 1)));
 }
@@ -2429,11 +2347,7 @@ fn the_terminal_cursor_follows_the_composer_caret_and_hides_under_overlays() {
     let mut renderer = FrameRenderer::default();
     let bytes = renderer.draw(&mut app, (80, 12)).unwrap();
     let text = String::from_utf8_lossy(&bytes);
-    // Composer is row 11 (0-based) in a 12-row frame; caret after "ab" is
-    // column 3 + 2 = 5, so the terminal cursor moves to row 12, column 6 in
-    // 1-based ANSI coordinates and is shown.
     assert!(text.contains("\x1b[12;6H\x1b[?25h"), "{text:?}");
-    // Moving the cursor left moves the terminal cursor with it.
     app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
         KeyCode::Left,
         KeyModifiers::NONE,
@@ -2441,7 +2355,6 @@ fn the_terminal_cursor_follows_the_composer_caret_and_hides_under_overlays() {
     let bytes = renderer.draw(&mut app, (80, 12)).unwrap();
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("\x1b[12;5H\x1b[?25h"), "{text:?}");
-    // An overlay owns input without a caret: the cursor hides.
     app.execute(Command::OpenCommands);
     let bytes = renderer.draw(&mut app, (80, 12)).unwrap();
     let text = String::from_utf8_lossy(&bytes);
@@ -2475,7 +2388,6 @@ fn an_80_by_24_frame_gives_the_transcript_at_least_twenty_rows() {
     app.layout.rail = crate::view::PanePref::Hidden;
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 24);
     let rows = frame_rows(&frame);
-    // Body rows are everything between the top row and the composer rule.
     let rule = rows
         .iter()
         .position(|row| row.starts_with('─'))
@@ -2503,8 +2415,6 @@ fn slash_autocomplete_is_filtered_above_the_composer() {
     app.composer.text = "/".to_owned();
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 30);
     let text = frame_text(&frame);
-    // The menu is a boxed list: a labelled rule, then at most eight rows
-    // with the cursor visible, so it never swallows the transcript.
     assert!(text.contains(" commands "));
     for command in ["/help", "/commands", "/sessions", "/resume", "/new"] {
         assert!(text.contains(command), "{command}");
@@ -2603,7 +2513,6 @@ fn session_picker_renders_delete_and_prune_confirmations() {
     let text = frame_text(&frame);
     assert!(text.contains("delete every empty session in this workspace?"));
 
-    // Without a pending confirmation the hint advertises both actions.
     app.overlay.as_mut().unwrap().set_confirm(None);
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 100, 12);
     let text = frame_text(&frame);
@@ -2741,8 +2650,6 @@ fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
             },
         )
     }));
-    // The child is cold (no body) but streams text; the sidebar must
-    // still show its tail.
     let message = MessageSnapshot {
         run_id,
         state: MessageState::Streaming,
@@ -2777,13 +2684,9 @@ fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
     let wide_frame = FrameRenderer::default().frame_and_commit(&mut app, 160, 24);
     let wide = frame_rows(&wide_frame).join("\n");
     assert!(wide.contains("WORKING  1"), "{wide}");
-    // The narrow frame shows the agent strip instead so the child is not
-    // invisible below the auto width.
     assert!(narrow.contains("2 agents"), "{narrow}");
     assert!(wide.contains("Survey callers"));
     assert!(wide.contains("Found twelve cal"), "{wide}");
-    // With the sidebar glued on, every body row is exactly the terminal
-    // width: the border column lines up and nothing overflows.
     for row in &wide_frame[1..wide_frame.len() - 3] {
         assert_eq!(
             row.width(),
@@ -2793,7 +2696,6 @@ fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
         );
     }
 
-    // Ctrl-\ hides it even when wide; a second press shows it again.
     let toggle = TerminalEvent::Key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL));
     app.handle_terminal_event(toggle.clone());
     assert!(!rows_at(&mut app, 160).contains("WORKING  1"));
@@ -2849,8 +2751,6 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
         None,
         false,
     );
-    // Four quiet reads plus the spawn call: without the child this run
-    // would fold into one counted line at collapsed detail.
     let mut calls = vec![spawn_call.clone()];
     for byte in 0x22..0x26 {
         calls.push(tool_call_snapshot(
@@ -2910,8 +2810,6 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
         "an inline child is not repeated below"
     );
 
-    // A child with no recorded call attaches nowhere in the transcript
-    // but still appears in related sessions.
     app.sessions.get_mut(&child_id).unwrap().summary.spawned_by = None;
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
     let spawn_row = rows.iter().position(|row| row.contains("Spawn")).unwrap();
@@ -2970,7 +2868,6 @@ fn background_approvals_surface_a_banner_that_ctrl_g_jumps_to() {
         },
     ));
 
-    // Focused on the parent: no modal, but the banner names the child.
     assert_eq!(app.mode(), Mode::Compose);
     let text = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 24)).join("\n");
     assert!(text.contains("Deploy helper needs approval"), "{text}");
@@ -2984,9 +2881,7 @@ fn background_approvals_surface_a_banner_that_ctrl_g_jumps_to() {
         .split();
     assert!(changed);
     assert_eq!(app.focused(), Some(child_id));
-    // The child is cold, so the jump fetches its body...
     assert_eq!(requests.len(), 1);
-    // ...and the banner no longer names the session we are now in.
     let text = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 24)).join("\n");
     assert!(!text.contains("approval needed in"));
 }
@@ -3035,13 +2930,11 @@ fn alt_arrows_walk_the_session_tree_in_spawn_order() {
     assert_eq!(app.focused(), Some(a), "siblings wrap");
     app.handle_terminal_event(key(KeyCode::Left));
     assert_eq!(app.focused(), Some(c));
-    // Esc walks up to the parent (Alt-Up belongs to the draft queue).
     app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
         KeyCode::Esc,
         KeyModifiers::NONE,
     )));
     assert_eq!(app.focused(), Some(root));
-    // A lone root has no siblings; the key is a no-op.
     let (changed, _) = app.handle_terminal_event(key(KeyCode::Right)).split();
     assert!(!changed);
     assert_eq!(app.focused(), Some(root));
@@ -3087,7 +2980,6 @@ fn reasoning_renders_collapsed_above_the_runs_message_and_expands_on_toggle() {
     assert!(reasoning_row < message_row, "{rows:?}");
     assert!(rows[reasoning_row].contains("First consider the callers."));
     assert!(!rows.iter().any(|row| row.contains("Then the tests.")));
-    // Reasoning never leaks into the assistant message body.
     assert!(
         !app.sessions[&session_id].messages.as_ref().unwrap()[0]
             .output
@@ -3100,8 +2992,6 @@ fn reasoning_renders_collapsed_above_the_runs_message_and_expands_on_toggle() {
     assert!(rows.iter().any(|row| row.contains("┆")));
 }
 
-/// `app_with_messages` plus a second warm session titled "Other" whose
-/// messages read `other N`.
 fn app_with_two_sessions(count: u8) -> (App, SessionId, SessionId) {
     let mut app = app_with_messages(count);
     let first = app.focused().unwrap();
@@ -3150,8 +3040,6 @@ fn a_height_only_resize_keeps_the_transcript_cache() {
     );
 }
 
-/// Two panes following the two warm sessions of `app_with_two_sessions`,
-/// each with `rows` lines of transcript so both can scroll.
 fn app_with_two_panes(rows: u8) -> (App, SessionId, SessionId) {
     let (mut app, first, other) = app_with_two_sessions(rows);
     app.layout.rail = crate::view::PanePref::Hidden;
@@ -3175,8 +3063,6 @@ fn panes_on_different_sessions_scroll_independently() {
     let (mut app, first, other) = app_with_two_panes(40);
     let mut renderer = FrameRenderer::default();
     renderer.frame_and_commit(&mut app, 80, 12);
-    // The layout offers one slot until L4, so only pane 0 was reconciled;
-    // the second pane keeps its untouched default state.
     assert!(app.panes[0].viewport.height() > 0);
     assert_eq!(app.panes[1].viewport, Viewport::default());
 
@@ -3185,8 +3071,6 @@ fn panes_on_different_sessions_scroll_independently() {
     assert!(scrolled > 0, "the focused pane scrolls");
     assert_eq!(app.panes[1].viewport.offset(), 0, "the other pane stays");
 
-    // Focus the second pane: the composer now acts on the other session and
-    // scrolling moves only that pane, after a frame has measured it.
     app.focused_pane = 1;
     assert_eq!(app.focused(), Some(other));
     let frame = frame_text(&renderer.frame_and_commit(&mut app, 80, 12));
@@ -3199,7 +3083,6 @@ fn panes_on_different_sessions_scroll_independently() {
     assert!(app.panes[1].viewport.offset() > 0);
     assert_eq!(app.panes[0].viewport.offset(), scrolled);
 
-    // Back to the first pane: its offset survived the detour.
     app.focused_pane = 0;
     assert_eq!(app.focused(), Some(first));
     renderer.frame_and_commit(&mut app, 80, 12);
@@ -3247,8 +3130,6 @@ fn a_pane_following_a_deleted_session_shows_the_empty_prompt() {
     let mut renderer = FrameRenderer::default();
     assert!(frame_text(&renderer.frame_and_commit(&mut app, 80, 12)).contains("other 1"));
 
-    // The session vanishes from the store without a refocus effect reaching
-    // this pane, as a second pane's session could after L4.
     app.sessions.remove(&other);
     assert_eq!(app.view(), View::Transcript(Some(other)));
 
@@ -3261,7 +3142,6 @@ fn a_pane_following_a_deleted_session_shows_the_empty_prompt() {
     assert_eq!(app.panes[0].viewport.offset(), 0);
 }
 
-/// An empty workspace as the first frame after bootstrap sees it.
 fn empty_workspace_app(options: TuiOptions) -> App {
     let mut app = App::new(options);
     app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
@@ -3275,8 +3155,6 @@ fn empty_workspace_app(options: TuiOptions) -> App {
 
 #[test]
 fn empty_state_names_the_missing_credential_for_the_configured_model() {
-    // OB2: model configured, provider unauthenticated. The transcript names
-    // the credential above the Alt-N hint and the composer rule repeats it.
     let mut app = empty_workspace_app(TuiOptions {
         model: ModelSelection {
             model_is_fallback: true,
@@ -3318,8 +3196,6 @@ fn empty_state_names_the_missing_credential_for_the_configured_model() {
 
 #[test]
 fn a_client_without_a_model_shows_no_model_and_the_picker_hint() {
-    // OB1: `(version: 1)`. Top row says `no model`; the composer rule says
-    // where to get one; the empty state still offers Alt-N.
     let mut app = empty_workspace_app(TuiOptions::default());
     let mut renderer = FrameRenderer::default();
     let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 12));
@@ -3346,7 +3222,6 @@ fn the_first_screen_says_where_commands_run_and_whether_undo_works() {
             .to_owned(),
         "Snapshots on: `qq undo` restores the workspace as it was before each run.".to_owned(),
     ];
-    // No session yet.
     let mut app = empty_workspace_app(TuiOptions {
         environment: environment.clone(),
         ..TuiOptions::default()
@@ -3357,7 +3232,6 @@ fn the_first_screen_says_where_commands_run_and_whether_undo_works() {
         assert!(text.contains(line.as_str()), "{line:?} not in {text}");
     }
 
-    // The first session, before its first prompt; narrow panes wrap.
     let mut app = app_with_messages(0);
     app.environment = environment.clone();
     app.layout.rail = crate::view::PanePref::Hidden;
@@ -3370,8 +3244,6 @@ fn the_first_screen_says_where_commands_run_and_whether_undo_works() {
 
 #[test]
 fn the_first_session_offers_try_these_until_the_first_prompt() {
-    // OB8: one session, nothing said yet. The transcript names the commands
-    // a new user wants first, spelled from the command table.
     let mut app = app_with_messages(0);
     app.layout.rail = crate::view::PanePref::Hidden;
     let mut renderer = FrameRenderer::default();
@@ -3402,8 +3274,6 @@ fn the_first_session_offers_try_these_until_the_first_prompt() {
     );
     assert!(!rows.iter().any(|row| row.contains("Ask QQ to begin")));
 
-    // Enter records the prompt synchronously: the cell is gone in the very
-    // next frame, before the server acknowledges anything.
     app.composer.text = "hello".to_owned();
     app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
         KeyCode::Enter,
@@ -3440,9 +3310,6 @@ fn a_second_empty_session_says_ask_qq_instead_of_try_these() {
 
 #[test]
 fn the_try_these_cell_keeps_the_credential_remedy_above_it() {
-    // A first session whose configured provider still lacks a credential
-    // shows the remedy first: the commands below are useless until it is
-    // fixed, and the rule already repeats it.
     let summary = fixtures::session_summary(SESSION);
     let mut app = App::new(TuiOptions {
         model: ModelSelection {
@@ -3521,7 +3388,6 @@ fn switching_theme_repaints_every_row_in_the_new_palette() {
     renderer.draw(&mut app, (80, 24)).unwrap();
     let brand_before = renderer.previous[0].spans[0].style.color;
     assert_eq!(brand_before, Some(Palette::TERMINAL.brand));
-    // A settled frame with nothing changed writes nothing.
     let idle = renderer.draw(&mut app, (80, 24)).unwrap();
     let idle_rows = String::from_utf8_lossy(&idle).matches("\x1b[2K").count();
     assert_eq!(idle_rows, 0);
@@ -3541,8 +3407,6 @@ fn switching_theme_repaints_every_row_in_the_new_palette() {
         b: 0xff,
     };
     assert_eq!(renderer.previous[0].spans[0].style.color, Some(magenta));
-    // Only the picker's swatches (painted in each theme's own colors)
-    // may show anything but the new palette.
     assert!(
         renderer
             .previous
@@ -3553,16 +3417,11 @@ fn switching_theme_repaints_every_row_in_the_new_palette() {
             .all(|color| color == magenta),
         "no row keeps a color from the previous theme"
     );
-    // Style helpers on this thread keep the last activated palette;
-    // restore the default so later tests see the compiled look.
     theme::activate(Palette::TERMINAL);
 }
 
 #[test]
 fn the_theme_picker_lists_ink_and_terminal_and_marks_the_default_rule_pick_active() {
-    // The composition root resolves the default rule (`ink` on truecolor)
-    // and passes that theme first; the picker must mark it, not `terminal`,
-    // and `qq` is an alias that never appears as a row.
     let ink = crate::Theme::from_roles(
         "ink",
         [
@@ -3598,8 +3457,6 @@ fn the_theme_picker_lists_ink_and_terminal_and_marks_the_default_rule_pick_activ
         "{}",
         row_for("terminal")
     );
-    // Every row with a swatch is a theme; none is the alias (the top row's
-    // `qq` is the brand mark, not a theme).
     let listed: Vec<&str> = rows
         .iter()
         .filter(|row| row.contains("██"))
@@ -3612,8 +3469,6 @@ fn the_theme_picker_lists_ink_and_terminal_and_marks_the_default_rule_pick_activ
         .collect();
     assert_eq!(listed, ["ink", "terminal"], "{rows:#?}");
 
-    // Explicit `terminal` first (the user asked, or truecolor is absent):
-    // the marker follows.
     let mut app = App::new(TuiOptions {
         unauthenticated_providers: Vec::new(),
         themes: vec![
@@ -3634,7 +3489,6 @@ fn the_theme_picker_lists_ink_and_terminal_and_marks_the_default_rule_pick_activ
     theme::activate(Palette::TERMINAL);
 }
 
-/// An app whose focused session has an active run, plus the ids to drive it.
 fn running_view_app() -> (App, SessionId, RunId, u64) {
     let mut app = app_with_messages(1);
     let session_id = app.focused().unwrap();
@@ -3694,7 +3548,6 @@ fn a_finished_run_ends_with_a_completion_line_and_a_running_one_does_not() {
     let mut summary = app.sessions[&session_id].summary.clone();
     summary.status = SessionStatus::Idle;
     summary.active_run_id = None;
-    // Three committed turns show as a count on the completion line.
     for turn in 1..=3 {
         app.apply_client_update(event(SessionEvent::ModelTurnCompleted {
             run_id,
@@ -3704,8 +3557,6 @@ fn a_finished_run_ends_with_a_completion_line_and_a_running_one_does_not() {
             estimated_cost_usd_nanos: None,
         }));
     }
-    // The run started at the fixture's occurred_at_ms (1) and finishes here;
-    // duration comes from the envelopes, tokens from usage.
     app.apply_client_update(event(SessionEvent::RunFinished {
         origin: None,
         session: Box::new(summary),
@@ -3736,8 +3587,6 @@ fn a_finished_run_ends_with_a_completion_line_and_a_running_one_does_not() {
 
 #[test]
 fn no_role_style_relies_on_dim_and_muted_is_a_color_step_only() {
-    // Dim is unreliable across terminals; every role reads by color and
-    // weight alone so a theme can map roles to any palette.
     for style in [
         normal(),
         muted(),
@@ -3767,7 +3616,6 @@ fn an_expanded_running_shell_shows_started_live_elapsed_and_last_output_times() 
             ..fixtures::envelope(sequence, session_id, event)
         })
     };
-    // 14:32:07 UTC on some day.
     let started = (14 * 3600 + 32 * 60 + 7) * 1000;
     app.apply_client_update(event(
         started - 1,
@@ -3801,12 +3649,10 @@ fn an_expanded_running_shell_shows_started_live_elapsed_and_last_output_times() 
             chunk: "Compiling qq-core\n".to_owned(),
         },
     ));
-    // Time passes: the animation tick advances the clock 125 ms at a time.
     for _ in 0..(12 * 8) {
         app.advance_animation();
     }
 
-    // Collapsed: relative duration only, no wall-clock time.
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 100, 24);
     let rows = frame_rows(&frame);
     let row = rows
@@ -3820,7 +3666,6 @@ fn an_expanded_running_shell_shows_started_live_elapsed_and_last_output_times() 
         "no wall-clock when collapsed: {row}"
     );
 
-    // Expanded: started, running, and last output timestamps.
     app.expanded_tool_calls.insert(call_id);
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 100, 24);
     let text = frame_rows(&frame).join("\n");
@@ -3828,7 +3673,6 @@ fn an_expanded_running_shell_shows_started_live_elapsed_and_last_output_times() 
     assert!(text.contains("running 4m12s"), "{text}");
     assert!(text.contains("last output 14:36:07"), "{text}");
 
-    // Another tick moves the elapsed clock.
     for _ in 0..8 {
         app.advance_animation();
     }
@@ -3860,7 +3704,6 @@ fn the_transcript_cursor_selects_a_call_and_enter_expands_only_that_one() {
         ),
     ]);
     let key = |code| TerminalEvent::Key(KeyEvent::new(code, KeyModifiers::CONTROL));
-    // Ctrl-Up from nothing selects the newest call.
     app.handle_terminal_event(key(KeyCode::Up));
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 24));
     let selected = rows
@@ -3868,7 +3711,6 @@ fn the_transcript_cursor_selects_a_call_and_enter_expands_only_that_one() {
         .find(|row| row.contains("▶"))
         .expect("cursor row");
     assert!(squash(selected).contains("Read b.rs"), "{selected}");
-    // Enter expands that call alone.
     app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
         KeyCode::Enter,
         KeyModifiers::NONE,
@@ -3876,7 +3718,6 @@ fn the_transcript_cursor_selects_a_call_and_enter_expands_only_that_one() {
     let text = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 24)).join("\n");
     assert!(text.contains("beta"), "{text}");
     assert!(!text.contains("alpha"), "{text}");
-    // Ctrl-Up again moves to the older call; Esc clears the cursor.
     app.handle_terminal_event(key(KeyCode::Up));
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 24));
     let selected = rows
@@ -3908,7 +3749,6 @@ fn diffs_render_head_first_with_new_file_line_numbers() {
             " 13 tail",
         ]
     );
-    // A long diff shows its head and says how much follows.
     let long: String = (0..30).map(|index| format!("+line {index}\n")).collect();
     let rows = frame_rows(&diff_lines(&format!("@@ -0,0 +1,30 @@\n{long}"), 5, 60));
     assert_eq!(rows.len(), 6);
@@ -3916,8 +3756,6 @@ fn diffs_render_head_first_with_new_file_line_numbers() {
     assert!(rows[5].contains("… 26 lines more"), "{:?}", rows[5]);
 }
 
-/// The rows of one expanded call rendered alone at `width` with a finished
-/// clock, so the timing line is present.
 fn expanded_call_rows(call: &ToolCallSnapshot, width: usize) -> Vec<Line> {
     let row = ToolRow::derive(call);
     let context = ToolRowContext {
@@ -3939,12 +3777,7 @@ fn expanded_call_rows(call: &ToolCallSnapshot, width: usize) -> Vec<Line> {
     tool_expanded_lines(call, context, width)
 }
 
-/// `line` is a tool detail panel row: the three-cell margin before the rail
-/// is on the terminal background, the rail is `border` on the surface, and
-/// every span after it carries a background (the surface, or a diff tint
-/// that wins over it).
 fn is_panel_row(line: &Line) -> bool {
-    // The margin before the rail rides in `indent` (terminal background).
     let mut spans = line.spans.iter();
     line.indent == 3
         && spans.next().is_some_and(|rail| {
@@ -3971,15 +3804,12 @@ fn expanded_read_detail_is_a_timing_line_above_a_surface_panel() {
     let lines = expanded_call_rows(&call, width);
     let rows = frame_rows(&lines);
 
-    // The timing line stays muted, outside the panel.
     assert_eq!(rows[0].trim_end(), "     started 12:04:11 · → 12:04:14");
     assert!(
         lines[0].spans.iter().all(|span| span.style == muted()),
         "{:?}",
         lines[0]
     );
-    // Then the panel: blank top row, content, blank bottom row, every row
-    // gutter-led and padded to the width on the surface.
     let panel = &lines[1..];
     assert_eq!(panel.len(), 5 + TOOL_PANEL_PADDING_ROWS);
     for line in panel {
@@ -3992,7 +3822,6 @@ fn expanded_read_detail_is_a_timing_line_above_a_surface_panel() {
     assert_eq!(rows[2].trim_end(), "   ┃  line 1");
     assert_eq!(rows[6].trim_end(), "   ┃  line 5");
     assert_eq!(rows[7].trim_end(), "   ┃");
-    // The timing line is the only detail row off the surface.
     assert!(
         lines[0]
             .spans
@@ -4018,7 +3847,6 @@ fn live_output_panels_keep_their_padding_rows_as_the_tail_grows() {
             Vec::new()
         })
     };
-    // The first complete line already has both padding rows.
     let first = render("Compiling qq-core\n");
     assert_eq!(first.len(), 1 + 1 + TOOL_PANEL_PADDING_ROWS);
     assert!(first[1..].iter().all(is_panel_row), "{first:?}");
@@ -4033,8 +3861,6 @@ fn live_output_panels_keep_their_padding_rows_as_the_tail_grows() {
             .all(|span| span.text.trim().is_empty())
     );
 
-    // Appending a line adds exactly one content row; the frame around it
-    // is unchanged.
     let second = render("Compiling qq-core\nCompiling qq-tui\n");
     assert_eq!(second.len(), first.len() + 1);
     assert_eq!(second[0], first[0]);
@@ -4043,8 +3869,6 @@ fn live_output_panels_keep_their_padding_rows_as_the_tail_grows() {
     assert_eq!(second.last(), first.last(), "bottom padding row persists");
     assert!(frame_rows(&second)[3].contains("Compiling qq-tui"));
 
-    // Past the budget the panel stops growing: content rows are capped and
-    // the padding rows stay.
     let many: String = (0..20).map(|n| format!("line {n}\n")).collect();
     let capped = render(&many);
     assert_eq!(
@@ -4057,8 +3881,6 @@ fn live_output_panels_keep_their_padding_rows_as_the_tail_grows() {
     assert!(rows[7].contains("line 19"), "{rows:?}");
     assert_eq!(rows[8].trim_end(), "   ┃");
 
-    // Nothing complete yet: no panel, so a frame with only a partial line
-    // does not paint an empty slab.
     assert_eq!(render("Compil").len(), 1);
 }
 
@@ -4089,7 +3911,6 @@ fn error_tails_keep_the_error_color_on_the_panel_surface() {
             "{needle}"
         );
     }
-    // The over-budget marker is muted, not error, and inside the panel too.
     let long: String = (0..10).map(|n| format!("e{n}\n")).collect();
     let mut call = call;
     call.result = Some(long);
@@ -4152,8 +3973,6 @@ fn edit_diffs_keep_line_numbers_and_tints_inside_the_panel() {
         style_of(&lines, "-old").map(|style| style.background),
         Some(Some(palette.diff_del_bg))
     );
-    // Line numbers are muted on the surface; the trailing padding returns
-    // to the surface so the slab stays solid.
     assert_eq!(style_of(&lines, " 11 "), Some(surface(muted())));
     assert_eq!(
         plus.spans.last().map(|span| span.style.background),
@@ -4201,7 +4020,6 @@ fn wrapped_detail_rows_carry_the_wrap_mark_in_the_gutter() {
 
 #[test]
 fn the_panel_adds_exactly_its_padding_rows_to_every_detail_budget() {
-    // A Read past the head budget: MAX rows + the "more" marker.
     let body = (1..=40)
         .map(|n| format!("line {n}"))
         .collect::<Vec<_>>()
@@ -4224,7 +4042,6 @@ fn the_panel_adds_exactly_its_padding_rows_to_every_detail_budget() {
     assert!(text.contains(&format!("line {MAX_TOOL_RESULT_ROWS}")));
     assert!(!text.contains(&format!("line {}", MAX_TOOL_RESULT_ROWS + 1)));
 
-    // A command past the tail budget: the "…" marker + MAX rows.
     let run = tool_call_snapshot(
         2,
         "shell",
@@ -4239,8 +4056,6 @@ fn the_panel_adds_exactly_its_padding_rows_to_every_detail_budget() {
         1 + 1 + MAX_TOOL_RESULT_ROWS + TOOL_PANEL_PADDING_ROWS
     );
 
-    // An MCP call: argument rows, a blank separator, the result, all in one
-    // panel; more arguments than the budget end in a marker.
     let arguments = (0..12)
         .map(|n| format!("\"k{n}\":\"v{n}\""))
         .collect::<Vec<_>>()
@@ -4269,7 +4084,6 @@ fn the_panel_adds_exactly_its_padding_rows_to_every_detail_budget() {
     assert_eq!(rows[1 + MAX_TOOL_ARGUMENT_ROWS + 2], "   ┃", "separator");
     assert_eq!(rows[1 + MAX_TOOL_ARGUMENT_ROWS + 3], "   ┃  ok");
 
-    // No body at all: the timing line alone, no empty slab.
     let quiet = tool_call_snapshot(
         4,
         "spawn_agent",
@@ -4298,8 +4112,6 @@ fn paths_elide_from_the_middle_and_keep_the_file_name() {
     assert_eq!(elide_path("crates/qq-tui/src/view/tools.rs", 8), "…ools.rs");
 }
 
-/// Regression: a width equal to `…/` plus the file name used to underflow
-/// the skip count and panic in debug builds.
 #[test]
 fn paths_elide_at_exact_tail_boundary_without_panicking() {
     assert_eq!(
@@ -4318,8 +4130,6 @@ fn paths_elide_at_exact_tail_boundary_without_panicking() {
     }
 }
 
-/// A parent with a child session that is running and waiting on a `shell`
-/// approval; the child's body is warm so the call is known client-side.
 fn app_with_child_awaiting_approval() -> (App, SessionId, SessionId, RunId, ToolCallId) {
     let mut app = app_with_messages(1);
     app.layout.rail = crate::view::PanePref::Hidden;
@@ -4338,7 +4148,6 @@ fn app_with_child_awaiting_approval() -> (App, SessionId, SessionId, RunId, Tool
         updated_at_ms: 2,
         ..fixtures::session_summary(child_id)
     };
-    // Warm the child through an included body so its calls are known.
     app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
         check_interruption: None,
         cursor: fixtures::cursor(1),
@@ -4384,7 +4193,6 @@ fn the_agent_strip_names_a_sibling_needing_approval_below_the_sidebar_width() {
         .unwrap_or_else(|| panic!("agent strip in {rows:#?}"));
     assert!(strip.contains("◇ 1"), "{strip}");
     assert!(strip.contains("Ctrl-G"), "{strip}");
-    // The rule offers the in-place answer chords.
     let rule = rows
         .iter()
         .find(|row| row.contains("needs approval"))
@@ -4416,8 +4224,6 @@ fn a_background_approval_is_answered_in_place_without_moving_focus() {
     ));
     assert!(
         !app.sessions_needing_attention().contains(&child_id) || {
-            // Answered approvals stop counting as needing attention once the
-            // server confirms; locally the row is already suppressed.
             app.pending_approval().is_none()
         }
     );
@@ -4433,7 +4239,6 @@ fn shift_n_denies_and_steers_with_an_amendment() {
     assert_eq!(app.mode(), Mode::Approval);
     let key = |code, modifiers| TerminalEvent::Key(KeyEvent::new(code, modifiers));
     app.handle_terminal_event(key(KeyCode::Char('N'), KeyModifiers::SHIFT));
-    // The composer becomes the amendment field and shows the caret.
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 24));
     assert!(
         rows.iter().any(|row| row.contains("deny and steer:")),
@@ -4445,7 +4250,6 @@ fn shift_n_denies_and_steers_with_an_amendment() {
     let (_, requests) = app
         .handle_terminal_event(key(KeyCode::Enter, KeyModifiers::NONE))
         .split();
-    // Decision first, then an interrupting steer with the note.
     assert_eq!(requests.len(), 2, "{requests:#?}");
     assert!(matches!(
         &requests[0],
@@ -4473,7 +4277,6 @@ fn shift_n_denies_and_steers_with_an_amendment() {
 fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
     let (mut app, parent, child_id, _, _) = app_with_child_awaiting_approval();
     app.layout.rail = crate::view::PanePref::Shown;
-    // A third session that finished while unfocused.
     let done_id = SessionId::from_bytes([0x50; 16]);
     let done_run = RunId::from_bytes([0x51; 16]);
     let mut done = SessionSummary {
@@ -4530,12 +4333,10 @@ fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
         .find("IDLE")
         .expect("idle group for the focused parent");
     assert!(needs < idle, "needs-you first: {text}");
-    // The awaiting child and the unread finish both need the user.
     assert!(text.contains("NEEDS YOU  2"), "{text}");
     assert!(text.contains("Deploy helper"), "{text}");
     assert!(text.contains("Refactor"), "{text}");
     assert!(text.contains("1 new"), "unread count: {text}");
-    // Focusing the finished session clears its unread state and moves it to DONE.
     app.focus_session(done_id);
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 160, 30));
     let text = rows.join("\n");
@@ -4544,15 +4345,8 @@ fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
     let _ = (parent, child_id);
 }
 
-/// A workspace with one session in every rail group, focused on the idle
-/// root: `Deploy helper` (child, awaiting approval) needs the user, `Survey
-/// callers` streams, the focused root is idle, and `Migrate` finished and
-/// was seen. `Refactor` finished unseen with spend, so it also needs the
-/// user and carries an unread badge. Returns the app and the ids in the
-/// order NEEDS YOU, WORKING, IDLE, DONE.
 fn app_with_every_rail_group() -> (App, [SessionId; 5]) {
     let (mut app, parent, child_id, _, _) = app_with_child_awaiting_approval();
-    // Events must arrive in sequence; the approval fixture ended at 2.
     let mut sequence = 2;
     let mut event = |session_id, run_id, event| {
         sequence += 1;
@@ -4641,15 +4435,12 @@ fn app_with_every_rail_group() -> (App, [SessionId; 5]) {
     };
     let refactor_id = finish(&mut app, &mut event, 0x70, "Refactor", 120_000_000);
     let migrate_id = finish(&mut app, &mut event, 0x80, "Migrate", 40_000_000);
-    // Looking at Migrate and coming back clears its unread state so it
-    // lists under DONE rather than NEEDS YOU.
     app.focus_session(migrate_id);
     app.focus_session(parent);
     app.layout.rail = PanePref::Auto;
     (app, [refactor_id, child_id, survey_id, parent, migrate_id])
 }
 
-/// The rail's cells of every body row, as text, for a frame at `width`.
 fn rail_rows(app: &mut App, width: usize, height: usize) -> Vec<String> {
     let frame = FrameRenderer::default().frame_and_commit(app, width, height);
     frame_rows(&frame)
@@ -4674,8 +4465,6 @@ fn the_rail_lists_groups_needs_you_working_idle_done_from_one_pass() {
         "{entries:?}"
     );
     assert_eq!(counts, [2, 1, 1, 1]);
-    // Within NEEDS YOU the root `Refactor` precedes the child of the other
-    // root: tree order, roots newest first.
     assert_eq!(
         entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
         [refactor, child, survey, parent, migrate]
@@ -4756,8 +4545,6 @@ fn unread_badges_are_accent_on_unfocused_rows_only() {
         .find(|row| row.contains("○ Session"))
         .unwrap_or_else(|| panic!("{rows:#?}"));
     assert!(!focused_row.contains("new"), "{focused_row:?}");
-    // Focusing Refactor clears its badge; the badge does not follow the
-    // selection background onto the focused row.
     app.focus_session(refactor);
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
     let refactor_row = rows
@@ -4827,7 +4614,6 @@ fn the_rail_is_one_row_per_session_at_regular_and_adds_tail_and_cost_at_wide() {
 fn a_pinned_rail_shows_at_compact_when_the_transcript_keeps_its_minimum() {
     let (mut app, _) = app_with_every_rail_group();
     app.layout.rail = PanePref::Shown;
-    // 80 columns: a 20-column rail leaves 60 for the transcript.
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 24);
     let rows = frame_rows(&frame);
     assert!(
@@ -4838,14 +4624,12 @@ fn a_pinned_rail_shows_at_compact_when_the_transcript_keeps_its_minimum() {
         !rows.iter().any(|row| row.contains("agents")),
         "no strip: {rows:#?}"
     );
-    // The narrow rail drops `new` from the badge and keeps the count.
     let refactor = rows
         .iter()
         .find(|row| row.contains("Refactor"))
         .unwrap_or_else(|| panic!("{rows:#?}"));
     assert!(refactor.trim_end().ends_with(" 1"), "{refactor:?}");
     assert!(!refactor.contains("new"), "{refactor:?}");
-    // 50 columns: the rail would leave fewer than 32, so the strip stays.
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 50, 24));
     assert!(
         !rows.iter().any(|row| row.contains("NEEDS YOU")),
@@ -4857,8 +4641,6 @@ fn a_pinned_rail_shows_at_compact_when_the_transcript_keeps_its_minimum() {
 #[test]
 fn the_attention_pane_lists_needs_most_urgent_first_and_the_changes_pane_flags_overlap() {
     let (mut app, _, child_id, _, _) = app_with_child_awaiting_approval();
-    // A completed edit in the parent and an edit to the same file in the
-    // child so the change board has an overlap to flag.
     let parent = app.focused().unwrap();
     for (session_id, byte) in [(parent, 0x61_u8), (child_id, 0x62)] {
         let mut calls = app.sessions[&session_id]
@@ -4897,7 +4679,6 @@ fn the_attention_pane_lists_needs_most_urgent_first_and_the_changes_pane_flags_o
     assert!(flagged.contains("+4 −2"), "{flagged}");
     assert!(flagged.contains("2 agents"), "{flagged}");
 
-    // Focusing a session returns to its transcript.
     app.focus_session(parent);
     assert_eq!(app.view(), View::Transcript(Some(parent)));
 }
@@ -4909,8 +4690,6 @@ fn the_composer_rule_carries_run_telemetry_notices_and_hints_in_priority_order()
         let rows = frame_rows(&FrameRenderer::default().frame_and_commit(app, width, 12));
         rows[rows.len() - 2].clone()
     };
-    // Running: activity glyph, elapsed since the run started, hints right.
-    // The chrome is two rows: no separate hint row exists below the composer.
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 12));
     assert!(
         rows[11].starts_with(" ⇥ "),
@@ -4969,7 +4748,6 @@ fn the_composer_rule_carries_run_telemetry_notices_and_hints_in_priority_order()
     assert!(rule.contains("? help"), "{rule}");
     assert!(rule.contains("─"), "{rule}");
 
-    // Committed turns and their running cost join the rule as the run goes.
     for (sequence, turn, cost) in [(7, 1, 40_000_000), (8, 2, 60_000_000)] {
         app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
             run_id: Some(run_id),
@@ -4990,8 +4768,6 @@ fn the_composer_rule_carries_run_telemetry_notices_and_hints_in_priority_order()
     let rule = rule_at(&mut app, 140);
     assert!(rule.contains("turn 2  $0.10"), "{rule}");
 
-    // CX4: while the run compacts its own context the rule says so. The
-    // sidebar row is pinned by the `sessions` golden.
     app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
         run_id: Some(run_id),
         occurred_at_ms: started + 5_000,
@@ -5019,14 +4795,12 @@ fn the_composer_rule_carries_run_telemetry_notices_and_hints_in_priority_order()
         )
     }));
 
-    // A notice takes the left side and the hints step aside.
     app.apply_notice(None, crate::app::NoticeLevel::Info, "saved".to_owned());
     let rule = rule_at(&mut app, 100);
     assert!(rule.starts_with(" saved "), "{rule}");
     assert!(!rule.contains(" help"), "{rule}");
     app.status = None;
 
-    // Cramped: status outranks hints, and some rule always shows.
     let rule = rule_at(&mut app, 40);
     assert!(rule.contains("generating"), "{rule}");
     assert!(!rule.contains(" help"), "{rule}");
@@ -5093,7 +4867,6 @@ fn top_row_names_a_non_default_profile_only() {
 fn approval_mode_picker_and_badge_name_the_mode_in_effect() {
     let mut app = app_with_messages(0);
     app.connection = crate::ConnectionState::Live;
-    // `auto` is the default and shows no badge.
     let plain = frame_rows(&[top_row(&app, 80)])[0].clone();
     assert!(
         !plain.contains("auto") && !plain.contains("read_only"),
@@ -5187,8 +4960,6 @@ fn skills_picker_groups_commands_before_skills_with_sources() {
     assert!(!text.contains("MCP:"), "{text}");
 }
 
-/// ENG-898: the skills picker names the degraded MCP server whose tools it
-/// cannot list.
 #[test]
 fn skills_picker_shows_a_degraded_mcp_host_under_the_search_row() {
     let mut app = app_with_messages(0);
@@ -5237,8 +5008,6 @@ fn skills_picker_shows_a_degraded_mcp_host_under_the_search_row() {
 fn shell_approvals_show_the_server_preview_not_the_arguments() {
     let mut app = app_with_messages(1);
     let session_id = app.focused().unwrap();
-    // The arguments say one thing; the server's preview (what will really
-    // run, after its own normalization) says another. The preview wins.
     let tool_call = tool_call_snapshot(
         9,
         "shell",
@@ -5314,7 +5083,6 @@ fn the_completion_line_names_the_plan_and_an_overridden_route() {
             ..fixtures::message(MessageId::from_bytes([0x73; 16]), session_id, "done")
         },
     }));
-    // The reviewer profile pins a different model than the session selected.
     app.apply_client_update(event(SessionEvent::ModelTurnCompleted {
         run_id,
         turn_ordinal: 1,
@@ -5344,8 +5112,6 @@ fn the_completion_line_names_the_plan_and_an_overridden_route() {
     assert!(line.contains("on anthropic/claude-opus"), "{line}");
     assert!(line.contains("as reviewer · plan abababab"), "{line}");
 
-    // A run on the session's own model with the default profile shows only
-    // the digest: nothing to call out.
     let session = app.sessions.get_mut(&session_id).unwrap();
     let stats = session.runs.get_mut(&run_id).unwrap();
     stats.resolved_route = session.summary.model.clone();
@@ -5365,8 +5131,6 @@ fn the_completion_line_names_the_plan_and_an_overridden_route() {
     );
 }
 
-/// One session with a completed read whose body is twenty numbered lines,
-/// for the inspector tests.
 fn app_with_expandable_read() -> (App, ToolCallId) {
     let mut app = app_with_messages(1);
     let session_id = app.focused().unwrap();
@@ -5387,9 +5151,6 @@ fn app_with_expandable_read() -> (App, ToolCallId) {
     (app, id)
 }
 
-/// The body rows of `frame` split at the pane borders: `(transcript,
-/// inspector)` text with runs of spaces squashed. The inspector column is
-/// empty when the layout shows none.
 fn transcript_and_inspector(frame: &[Line]) -> (String, String) {
     let rows = frame_rows(frame);
     let mut transcript = Vec::new();
@@ -5427,8 +5188,6 @@ fn the_inspector_shows_at_wide_by_default_and_the_toggle_cycles_it() {
         );
     }
 
-    // Alt-I: Auto → Hidden even at Wide; again → Shown, which wins over
-    // width; again → Hidden.
     let toggle = TerminalEvent::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
     app.handle_terminal_event(toggle.clone());
     assert_eq!(app.layout.inspector, PanePref::Hidden);
@@ -5449,8 +5208,6 @@ fn expanded_detail_moves_between_the_transcript_and_the_inspector_as_it_toggles(
     app.expanded_tool_calls.insert(call);
     let mut renderer = FrameRenderer::default();
 
-    // Wide: the transcript keeps the summary row; the inspector has the body
-    // under its own copy of the summary row.
     let wide = renderer.frame_and_commit(&mut app, 200, 60);
     let (transcript, inspector) = transcript_and_inspector(&wide);
     assert!(
@@ -5472,8 +5229,6 @@ fn expanded_detail_moves_between_the_transcript_and_the_inspector_as_it_toggles(
         "same row budget as inline: {inspector}"
     );
 
-    // Hide the inspector: the same renderer (same caches, same width) must
-    // repaint the detail inline on the very next frame.
     app.execute(Command::ToggleInspector);
     let hidden = renderer.frame_and_commit(&mut app, 200, 60);
     let (transcript, inspector) = transcript_and_inspector(&hidden);
@@ -5488,14 +5243,12 @@ fn expanded_detail_moves_between_the_transcript_and_the_inspector_as_it_toggles(
     );
     assert!(transcript.contains("… 8 lines more"), "{transcript}");
 
-    // And back again.
     app.execute(Command::ToggleInspector);
     let shown = renderer.frame_and_commit(&mut app, 200, 60);
     let (transcript, inspector) = transcript_and_inspector(&shown);
     assert!(!transcript.contains("line 1\n"), "{transcript}");
     assert!(inspector.contains("line 1\n"), "{inspector}");
 
-    // Collapsing the call empties the inspector to its hint.
     app.expanded_tool_calls.clear();
     let collapsed = renderer.frame_and_commit(&mut app, 200, 60);
     let (_, inspector) = transcript_and_inspector(&collapsed);
@@ -5507,8 +5260,6 @@ fn expanded_detail_moves_between_the_transcript_and_the_inspector_as_it_toggles(
 fn the_inspector_bounds_its_rows_to_the_pane_height() {
     let (mut app, call) = app_with_expandable_read();
     app.expanded_tool_calls.insert(call);
-    // 200 × 12: body is 9 rows; the read wants the header, the summary, and
-    // 13 detail rows, so it overflows.
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 200, 12);
     let (_, inspector) = transcript_and_inspector(&frame);
     let rows: Vec<&str> = inspector.lines().collect();
@@ -5539,8 +5290,6 @@ fn workspace_views_render_in_the_inspector_when_it_is_shown_and_inline_otherwise
     app.execute(Command::ShowAttention);
     assert_eq!(app.view(), View::Attention);
 
-    // Wide: the attention list is in the inspector and the transcript keeps
-    // showing the session the view replaced.
     let wide = renderer.frame_and_commit(&mut app, 200, 60);
     let (transcript, inspector) = transcript_and_inspector(&wide);
     assert!(inspector.contains("NEEDS YOU"), "{inspector}");
@@ -5555,14 +5304,12 @@ fn workspace_views_render_in_the_inspector_when_it_is_shown_and_inline_otherwise
         "the replaced session's prose: {transcript}"
     );
 
-    // Regular: no inspector, so the view takes the pane as before.
     let regular = renderer.frame_and_commit(&mut app, 120, 40);
     let (transcript, inspector) = transcript_and_inspector(&regular);
     assert!(inspector.trim().is_empty());
     assert!(transcript.contains("NEEDS YOU"), "{transcript}");
     assert!(!transcript.contains("row 0"), "{transcript}");
 
-    // Changes behaves the same way, and Esc still returns to the session.
     app.execute(Command::ShowChanges);
     let wide = renderer.frame_and_commit(&mut app, 200, 60);
     let (transcript, inspector) = transcript_and_inspector(&wide);
@@ -5609,14 +5356,10 @@ fn a_tool_row_reuses_its_panel_across_frames_and_relays_out_on_a_new_width() {
         fold: false,
         selected: false,
     };
-    // Two frames at one width: identical rows, and the panel rows are the
-    // cached ones (the timing line is rebuilt every frame; the panel is not).
     let first = tool_expanded_lines(&call, context(43_454_000), 80);
     let second = tool_expanded_lines(&call, context(43_455_000), 80);
     assert_eq!(first, second);
     assert!(first[1..].iter().all(is_panel_row), "{first:?}");
-    // A narrower width lays out again: rows fit the new width, the panel is
-    // the same text, and going back to the first width is still correct.
     let narrow = tool_expanded_lines(&call, context(43_455_000), 40);
     assert!(
         narrow[1..].iter().all(|line| line.width() == 40),
@@ -5716,7 +5459,6 @@ fn side_view_keeps_small_nonzero_costs_visible() {
         .iter()
         .flat_map(|row| row.spans.iter().map(|span| span.text.as_str()))
         .collect();
-    // $0.000012 would have rendered as $0.0000 with four float decimals.
     assert!(text.contains("cost $0.000012"), "{text}");
     assert!(text.contains("cost $1.234567"), "{text}");
 }

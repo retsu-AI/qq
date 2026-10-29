@@ -1,12 +1,3 @@
-//! Input modes. Exactly one overlay may be open; it captures keys, paste, and
-//! mouse input ahead of the composer and replaces the transcript body while
-//! visible. The approval prompt is not an overlay: it is derived from session
-//! data (`App::pending_approval`) and modelled as a mode only for dispatch.
-//!
-//! An overlay holds a typed [`Picker`] or the bounded goal specification form. One key handler ([`Overlay::handle_key`]) moves the
-//! cursor and edits the query for all of them; `Enter`, `Esc`, and the
-//! overlay-specific chords come back as a [`PickerOutcome`] for `App`.
-
 mod goal_form;
 pub(crate) use goal_form::{GoalForm, GoalFormRefresh};
 
@@ -18,19 +9,14 @@ use crate::{
     picker::{Picker, PickerItem},
 };
 
-/// A destructive session-picker action awaiting its inline y/n answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionConfirm {
     Delete(SessionId),
     Prune,
 }
 
-/// A row in the model picker: an index into `App::models`, plus the text
-/// the query matches so the picker does not need the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModelRow {
-    /// Index into the authenticated catalog, or `None` for a provider row
-    /// that only names a missing credential and cannot be selected.
     pub index: Option<usize>,
     pub provider: String,
     pub model: String,
@@ -47,14 +33,11 @@ impl PickerItem for ModelRow {
     }
 }
 
-/// A row in the profile picker: one profile the server advertises, copied
-/// from the capability document so the picker survives a refresh.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProfileRow {
     pub id: AgentProfileId,
     pub model: Option<String>,
     pub approval_mode: ApprovalMode,
-    /// `id@version` of the declaring pack, when there is one.
     pub pack: Option<String>,
 }
 
@@ -70,7 +53,6 @@ impl PickerItem for ProfileRow {
     }
 }
 
-/// A row in the approval-mode picker: one mode the server accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ApprovalModeRow {
     pub mode: ApprovalMode,
@@ -85,7 +67,6 @@ impl PickerItem for ApprovalModeRow {
     }
 }
 
-/// A row in the effort picker: one pin, or `None` to restore config/profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EffortRow {
     pub effort: Option<ReasoningEffort>,
@@ -100,7 +81,6 @@ impl PickerItem for EffortRow {
     }
 }
 
-/// A row in the skills picker: one indexed command or skill document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SkillRow {
     pub name: String,
@@ -118,7 +98,6 @@ impl PickerItem for SkillRow {
     }
 }
 
-/// A row in the theme picker: an index into `App::themes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ThemeRow {
     pub index: usize,
@@ -131,8 +110,6 @@ impl PickerItem for ThemeRow {
     }
 }
 
-/// A row in the session picker. Identity is the id, not the position: the
-/// tree reorders when sessions are created or deleted underneath the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionRow {
     pub id: SessionId,
@@ -145,7 +122,6 @@ impl PickerItem for SessionRow {
     }
 }
 
-/// A row in the prompt-history search (`Ctrl-R`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HistoryRow {
     pub text: String,
@@ -157,7 +133,6 @@ impl PickerItem for HistoryRow {
     }
 }
 
-/// A row in the command palette and help overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CommandRow {
     pub spec: &'static CommandSpec,
@@ -170,7 +145,6 @@ impl PickerItem for CommandRow {
     }
 }
 
-/// Frozen identity and command the user is reviewing for explicit check consent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GoalCheckTarget {
     pub session_id: SessionId,
@@ -224,34 +198,23 @@ pub(crate) enum Overlay {
     Profiles(Picker<ProfileRow>),
     ApprovalModes(Picker<ApprovalModeRow>),
     Effort(Picker<EffortRow>),
-    /// The workspace's indexed commands and skills. Enter puts a command in
-    /// the composer for its arguments or submits a skill.
     Skills(Picker<SkillRow>),
-    /// Theme picker. Moving the cursor previews the highlighted theme live;
-    /// `restore` is the theme to put back if the user cancels.
     Themes {
         picker: Picker<ThemeRow>,
         restore: usize,
     },
     Sessions {
         picker: Picker<SessionRow>,
-        /// When set, only this session and its descendants are listed: the
-        /// `/agents` view of one root's delegated work.
         scope: Option<SessionId>,
         confirm: Option<SessionConfirm>,
     },
-    /// Every command with its chord and slash name, filterable. `help` shows
-    /// the same list grouped by category with the query hidden.
     Commands {
         picker: Picker<CommandRow>,
         help: bool,
     },
-    /// Reverse search over the focused session's prompt history, newest
-    /// first. Enter puts the highlighted prompt in the composer.
     History(Picker<HistoryRow>),
 }
 
-/// What currently owns keyboard input, from highest to lowest priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
     GoalForm,
@@ -269,24 +232,16 @@ pub(crate) enum Mode {
     Compose,
 }
 
-/// What a key did to an overlay, for the parts `App` must act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PickerOutcome {
-    /// The cursor or query changed; the caller redraws (and previews).
     Changed,
-    /// Nothing this overlay understands.
     Ignored,
-    /// `Esc`: close without choosing.
     Cancel,
-    /// `Enter`: accept the highlighted item.
     Accept,
-    /// An overlay-specific chord the caller interprets, such as `Ctrl-N` in
-    /// the model picker or `Ctrl-D` in the session picker.
     Chord(KeyCode),
 }
 
 impl Overlay {
-    /// A session picker with the given query, highlight, and confirmation.
     #[cfg(test)]
     pub(crate) fn sessions(
         rows: Vec<SessionRow>,
@@ -337,8 +292,6 @@ impl Overlay {
         }
     }
 
-    /// One key handler for every picker. Navigation and query editing are
-    /// applied here; everything else is reported for the caller.
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> PickerOutcome {
         fn dispatch<T: PickerItem>(picker: &mut Picker<T>, key: KeyEvent) -> PickerOutcome {
             match key.code {
@@ -396,7 +349,6 @@ impl Overlay {
         }
     }
 
-    /// Paste into the query.
     pub(crate) fn push_query(&mut self, text: &str) -> bool {
         match self {
             Self::GoalForm(form) => form.push_text(text),
@@ -414,7 +366,6 @@ impl Overlay {
     }
 }
 
-/// The command palette: every command, in registry order.
 pub(crate) fn command_rows() -> Vec<CommandRow> {
     crate::commands::COMMANDS
         .iter()
@@ -423,8 +374,6 @@ pub(crate) fn command_rows() -> Vec<CommandRow> {
         .collect()
 }
 
-/// The wire spelling of an approval mode, which is also what `/approval`,
-/// the profile picker, and the status row show.
 pub(crate) const fn approval_mode_label(mode: ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::ReadOnly => "read_only",
@@ -434,8 +383,6 @@ pub(crate) const fn approval_mode_label(mode: ApprovalMode) -> &'static str {
     }
 }
 
-/// Every approval mode with the one-line meaning the picker shows. Order is
-/// least to most permissive.
 pub(crate) const fn approval_mode_row(mode: ApprovalMode) -> ApprovalModeRow {
     let (label, summary) = match mode {
         ApprovalMode::ReadOnly => (
@@ -462,8 +409,6 @@ pub(crate) const fn approval_mode_row(mode: ApprovalMode) -> ApprovalModeRow {
     }
 }
 
-/// The wire spelling of an effort pin, which is also what `/effort` and the
-/// status row show. `None` is the unremarkable configured default.
 pub(crate) const fn effort_label(effort: Option<ReasoningEffort>) -> &'static str {
     match effort {
         None => "configured",
@@ -471,8 +416,6 @@ pub(crate) const fn effort_label(effort: Option<ReasoningEffort>) -> &'static st
     }
 }
 
-/// One effort picker row. `None` restores the compiled plan's configured or
-/// profile choice.
 pub(crate) const fn effort_row(effort: Option<ReasoningEffort>) -> EffortRow {
     let summary = match effort {
         None => "use the configured or profile effort; omit the field",

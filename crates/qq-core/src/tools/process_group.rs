@@ -1,9 +1,3 @@
-//! Linux process-group teardown that counts a zombie as stopped. Signal zero
-//! still finds a killed descendant until something reaps it, and a container
-//! whose PID 1 never reaps would otherwise look like a group that will not die.
-//! The caller kills the group while its leader still pins the id; this only
-//! waits, and never signals a group by its number.
-
 fn group_member_identity(pid: u32) -> std::io::Result<Option<(i32, u64)>> {
     let file = match std::fs::File::open(format!("/proc/{pid}/stat")) {
         Ok(file) => file,
@@ -23,8 +17,6 @@ fn read_group_member_identity(file: std::fs::File) -> std::io::Result<Option<(i3
     let mut stat = Vec::new();
     match file.take(4097).read_to_end(&mut stat) {
         Ok(_) => {}
-        // procfs can retain an open inode after its task is reaped. That
-        // task is gone, even though opening stat succeeded moments earlier.
         Err(error)
             if error.kind() == std::io::ErrorKind::NotFound
                 || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) =>
@@ -93,9 +85,6 @@ pub(crate) fn confirm_linux_group_exit(
                 })
         };
         check_deadline()?;
-        // The caller killed the group while its leader still pinned the id.
-        // The leader is reaped by now, so the id may name someone else's
-        // group: never signal it, only wait for the members found in it.
         let mut members = Vec::new();
         let mut identities = std::collections::HashSet::new();
         for (index, entry) in std::fs::read_dir("/proc")?.enumerate() {
@@ -148,8 +137,6 @@ pub(crate) fn confirm_linux_group_exit(
             identities.insert((pid, started));
             members.push(descriptor);
         }
-        // A zombie thread-group leader can still have live threads. Only
-        // pidfd readiness proves the whole process has stopped executing.
         for member in &members {
             loop {
                 let remaining = check_deadline()?;
@@ -179,9 +166,6 @@ pub(crate) fn confirm_linux_group_exit(
                 }
             }
         }
-        // A complete rescan closes the fork-during-enumeration window. A
-        // recycled group id can only add an unrelated process to the scan,
-        // which is waited for, never signalled by group.
         if identities.is_subset(&confirmed) {
             return Ok(());
         }
@@ -191,13 +175,9 @@ pub(crate) fn confirm_linux_group_exit(
 
 #[cfg(test)]
 mod tests {
-    /// A killed background child that nobody reaps stays a zombie in the
-    /// group. Teardown must still confirm, as under a container's PID 1.
     #[test]
     fn a_zombie_descendant_counts_as_stopped() {
         if std::env::var_os("QQ_ZOMBIE_GROUP_WORKER").is_none() {
-            // The subreaper bit is process-wide; never set it in the shared
-            // test process.
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -210,7 +190,6 @@ mod tests {
             assert!(status.success());
             return;
         }
-        // Orphans reparent to this process, which never reaps them.
         rustix::process::set_child_subreaper(Some(rustix::process::getpid())).unwrap();
         use std::os::unix::process::CommandExt as _;
         let mut leader = std::process::Command::new("/bin/sh")
@@ -231,7 +210,6 @@ mod tests {
         let pgid = rustix::process::Pid::from_raw(i32::try_from(leader.id()).unwrap()).unwrap();
         rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL).unwrap();
         leader.wait().unwrap();
-        // The background child is now an unreaped zombie in the group.
         assert!(rustix::process::test_kill_process_group(pgid).is_ok());
         super::confirm_linux_group_exit(
             pgid,
@@ -243,9 +221,6 @@ mod tests {
 
 #[cfg(test)]
 mod reuse_tests {
-    /// After the leader is reaped its group id may be reused. Confirmation
-    /// reaches only processes it found and pinned, and a live one is waited
-    /// for, never killed: a reused id can delay teardown, not kill a stranger.
     #[test]
     fn confirmation_never_kills_a_live_process_in_a_reused_group() {
         use std::os::unix::process::CommandExt as _;

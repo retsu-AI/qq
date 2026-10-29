@@ -1,6 +1,3 @@
-//! Read-side projections: workspace and session snapshots, summaries, and
-//! accounting folds over persisted runs.
-
 use super::*;
 use crate::tools::output::escaped_len;
 
@@ -33,8 +30,6 @@ pub(super) fn load_snapshot(
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     let has_older_sessions = ids.len() > usize::from(request.session_limit);
-    // One grouped pass over the workspace's runs supplies every summary's
-    // accounting instead of a subtree query per session.
     let mut folds = load_accounting_folds(&transaction, None, request.workspace_id)?;
     let mut sessions = Vec::with_capacity(ids.len().min(usize::from(request.session_limit)));
     for id in ids.into_iter().take(usize::from(request.session_limit)) {
@@ -45,10 +40,6 @@ pub(super) fn load_snapshot(
             accounting,
         )?);
     }
-    // One byte budget spans every body in the response, spent by the focused
-    // body first and then by the included bodies in request order, so the
-    // response always fits the wire cap however large the transcripts are
-    // (F11). Each body keeps its newest rows and reports what it dropped.
     let mut budget = SnapshotBudget::new(SNAPSHOT_BODY_BUDGET_BYTES);
     let mut focused = request
         .focused_session_id
@@ -59,9 +50,6 @@ pub(super) fn load_snapshot(
             load_session_body(&transaction, session_id, request.message_limit, &mut budget)
         })
         .transpose()?;
-    // Extra bodies are best-effort: a session that left the workspace or was
-    // deleted since the client asked is skipped rather than failing the
-    // whole snapshot. The focused body keeps its strict contract above.
     let mut included = Vec::with_capacity(request.include_sessions.len());
     for session_id in &request.include_sessions {
         if Some(*session_id) == request.focused_session_id {
@@ -88,10 +76,6 @@ pub(super) fn load_snapshot(
             Err(error) => return Err(error),
         }
     }
-    // Tool calls spend what the transcripts left, in the same order. Their
-    // results are the heavy rows; admitting them per body before the next
-    // body's messages let one session's large reads starve every later body
-    // of its transcript, which a client then showed as an empty session.
     for body in focused.iter_mut().chain(included.iter_mut()) {
         load_tool_call_tail(&transaction, body, &mut budget)?;
     }
@@ -115,11 +99,6 @@ pub(super) fn load_snapshot(
     })
 }
 
-/// Remaining serialized bytes a snapshot response may still spend on body
-/// rows. Rows are admitted newest-first, so when the budget runs out the
-/// client holds the most recent history and a `has_older_*` flag telling it
-/// the rest is reachable through paging and recall, never a body the wire
-/// layer would refuse.
 pub(super) struct SnapshotBudget {
     remaining: usize,
 }
@@ -129,8 +108,6 @@ impl SnapshotBudget {
         Self { remaining: bytes }
     }
 
-    /// Charges one row whose variable text totals `text_bytes` (escaped) and
-    /// says whether it fits. The check never reserves a partial row.
     pub(super) fn admit(&mut self, text_bytes: usize) -> bool {
         let cost = text_bytes.saturating_add(SNAPSHOT_ROW_OVERHEAD_BYTES);
         if cost > self.remaining {
@@ -144,14 +121,12 @@ impl SnapshotBudget {
         self.remaining
     }
 
-    /// Charges rows admitted against a separate reserve.
     pub(super) fn charge(&mut self, text_bytes: usize, rows: usize) {
         let cost = text_bytes.saturating_add(rows.saturating_mul(SNAPSHOT_ROW_OVERHEAD_BYTES));
         self.remaining = self.remaining.saturating_sub(cost);
     }
 }
 
-/// One session body: transcript, run receipts, and its newest tool calls.
 #[cfg(test)]
 pub(super) fn load_session_snapshot(
     transaction: &Connection,
@@ -164,8 +139,6 @@ pub(super) fn load_session_snapshot(
     Ok(body)
 }
 
-/// A session body without tool calls: summary, side questions, the newest
-/// messages, and the run receipts they reference.
 fn load_session_body(
     transaction: &Connection,
     session_id: SessionId,
@@ -173,7 +146,6 @@ fn load_session_body(
     budget: &mut SnapshotBudget,
 ) -> Result<SessionSnapshot, SessionRuntimeError> {
     let summary = load_session_summary(transaction, session_id)?;
-    // Pending inputs and call rows take priority over transcript history.
     let mut approval_previews = Vec::with_capacity(summary.pending_holds.len());
     let mut pending_calls = Vec::with_capacity(summary.pending_holds.len());
     for hold in &summary.pending_holds {
@@ -196,12 +168,7 @@ fn load_session_body(
             });
         }
     }
-    // Side questions draw first from a reserved share so a long transcript
-    // cannot starve a running question out of a reconnect snapshot.
     let side_questions = side_questions::load_side_snapshots(transaction, session_id, budget)?;
-    // Messages order by run first, then by ordinal within the run, so a
-    // prompt queued while a run streams does not interleave with that run's
-    // later per-turn messages (which receive higher session ordinals).
     let mut statement = transaction.prepare(
         "SELECT m.id FROM messages m JOIN runs r ON r.id = m.run_id
              WHERE m.session_id = ?1 AND NOT (m.role = 'assistant' AND m.state = 'queued')
@@ -216,8 +183,6 @@ fn load_session_body(
     drop(statement);
     let mut has_older_messages = message_ids.len() > usize::from(message_limit);
     message_ids.truncate(usize::from(message_limit));
-    // A displayed message and its authoritative run receipt are admitted together.
-    // Reserve active-run metadata first; bounded bodies never contain orphan messages.
     let mut wanted_receipts = Vec::with_capacity(message_ids.len());
     if message_limit > 0
         && let Some(active) = summary.active_run_id
@@ -250,7 +215,6 @@ fn load_session_body(
     }
     messages.reverse();
     if wanted_receipts.is_empty() && message_limit > 0 {
-        // Standalone compaction can have no transcript messages at all.
         let terminal = transaction
             .query_row(
                 "SELECT id FROM runs WHERE session_id = ?1 AND outcome_json IS NOT NULL
@@ -316,7 +280,6 @@ fn load_session_body(
     })
 }
 
-/// Admit `body`'s newest tool calls, newest first, while the budget lasts.
 fn load_tool_call_tail(
     transaction: &Connection,
     body: &mut SessionSnapshot,
@@ -448,8 +411,6 @@ impl AccountingAggregate {
     }
 }
 
-/// Per-session direct and inclusive aggregates, folded from run rows. The
-/// default is known-zero: a session with no runs has spent nothing.
 pub(super) struct SessionAccountingFold {
     pub(super) direct: AccountingAggregate,
     pub(super) inclusive: AccountingAggregate,
@@ -473,9 +434,6 @@ impl SessionAccountingFold {
     }
 }
 
-/// The accounting query for one root or for every session in a workspace:
-/// each row is one run in the bounded subtree of `root`, tagged with that
-/// root so one pass can fold every session at once.
 pub(super) const ACCOUNTING_ROWS_SQL: &str = "WITH RECURSIVE subtree(root, id, depth) AS (
          SELECT id, id, 0 FROM sessions WHERE (?1 IS NULL AND workspace_id = ?2) OR id = ?1
          UNION ALL
@@ -505,18 +463,11 @@ pub(super) fn load_session_accounting(
         .total())
 }
 
-/// Folds run rows into per-root accounting. `Some(root)` scopes to one
-/// session's subtree; `None` covers every session in `workspace_id` in one
-/// grouped pass, which is what a snapshot needs.
 pub(super) fn load_accounting_folds(
     connection: &Connection,
     root: Option<SessionId>,
     workspace_id: WorkspaceId,
 ) -> Result<HashMap<String, SessionAccountingFold>, SessionRuntimeError> {
-    // Inclusive totals are the bounded subtree, computed from run rows every
-    // time: never a sum of cached child inclusives, which could double count
-    // or go stale. The depth bound is the runtime's, so a store touched by a
-    // deeper future build still reads back the same tree this build runs.
     let mut statement = connection.prepare_cached(ACCOUNTING_ROWS_SQL)?;
     let rows = statement.query_map(
         params![
@@ -554,11 +505,6 @@ pub(super) fn load_accounting_folds(
                     | "budget_exhausted"
                     | "paused"
             );
-            // Cancellation before provider admission preserves known prior
-            // accounting; an admitted goal/helper request remains uncertain.
-            // Other terminal
-            // rows without usage stay unknown for legacy/provider-failure
-            // compatibility; a committed turn is always an explicit unknown.
             if admitted
                 || saw_turn
                 || (terminal && status != "cancelled" && started_at_ms.is_some())
@@ -724,7 +670,6 @@ pub(super) fn load_session_summary_with_accounting(
                         .map(serde_json::from_str)
                         .transpose()?,
                     pending_holds: match holds {
-                        // Ids are hex and never hold the separator.
                         Some(holds) if active_run_id.is_some() => holds
                             .split(',')
                             .map(|id| {
@@ -744,9 +689,6 @@ pub(super) fn load_session_summary_with_accounting(
         )
 }
 
-/// Estimated cost of one usage report under `pricing`, in USD nanos. `None`
-/// when the pricing table lacks a rate the usage needs (a cached read without
-/// a cache price) or the arithmetic overflows.
 pub fn run_cost(usage: TokenUsage, pricing: &ModelPricing) -> Option<u64> {
     let total_input = usage
         .input_tokens
@@ -790,7 +732,6 @@ pub fn run_cost(usage: TokenUsage, pricing: &ModelPricing) -> Option<u64> {
     u64::try_from(total).ok()
 }
 
-/// Keyset pagination is bounded and stays on the store's blocking worker.
 pub(super) fn load_workspace_catalog(
     connection: &mut Connection,
     store_id: StoreId,

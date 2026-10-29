@@ -1,14 +1,3 @@
-//! Client-side session state reduced from server events, shared by every
-//! surface: the per-session view with its warm body, live status, run
-//! statistics, and reasoning; the store that indexes the tree they form; and
-//! the reducer that applies `SessionEvent`s and snapshots to it.
-//!
-//! The reducer is pure with respect to the surface: it takes the store, the
-//! event, and a [`ReduceContext`] describing what the surface is showing, and
-//! returns [`StateEffect`]s for everything that is the surface's business
-//! (notices, attention, refocus, snapshot requests, draft submission). It
-//! never touches the network, the clock, or rendering state.
-
 use std::{
     cell::OnceCell,
     collections::{BTreeSet, HashMap, VecDeque, hash_map},
@@ -27,36 +16,18 @@ mod tests;
 
 pub use reduce::{Attention, NoticeLevel, ReduceContext, StateEffect, StateEffects};
 
-/// Warm transcript bodies kept loaded at once. The focused session is always
-/// warm; the rest are the most recently focused sessions so switching back
-/// costs no round trip.
 pub const WARM_BODY_LIMIT: usize = 8;
-/// Bytes of assistant text retained per session for the live status tail.
 pub const LIVE_TAIL_BYTES: usize = 256;
-/// Bytes of reasoning text retained per run.
 pub const MAX_REASONING_BYTES: usize = 16 * 1024;
-/// Bytes of live tool output retained per running call.
 pub const MAX_LIVE_TOOL_OUTPUT_BYTES: usize = 4 * 1024;
-/// Prompts remembered per session for history browsing.
 pub const MAX_PROMPT_HISTORY: usize = 100;
-/// Drafts that may wait per session while it runs.
 pub const MAX_QUEUED_DRAFTS: usize = 8;
-/// Sessions a snapshot request asks for.
 pub const SNAPSHOT_SESSION_LIMIT: u16 = 512;
-/// Messages retained per warm body and requested per snapshot.
 pub const SNAPSHOT_MESSAGE_LIMIT: u16 = 256;
-/// Tool calls retained per warm body.
 pub const MAX_RECENT_TOOL_CALLS: usize = 64;
 
-/// Maps one character of streamed text to what the surface can show, or
-/// `None` to drop it. Surfaces supply this because what is safe differs: a
-/// terminal must drop control and bidi override characters, a DOM text node
-/// needs only the controls removed.
 pub type TextSanitizer = fn(char) -> Option<char>;
 
-/// Drops control characters (whitespace controls become a space) and the
-/// Unicode bidi override and isolate controls. Safe for terminals and text
-/// nodes alike; the default sanitizer.
 #[must_use]
 pub fn plain_text_character(character: char) -> Option<char> {
     if character.is_control() {
@@ -71,10 +42,6 @@ pub fn plain_text_character(character: char) -> Option<char> {
     Some(character)
 }
 
-/// A model the surface knows about: what the catalog said plus the selection
-/// that picks it. The reducer uses the catalog to derive each session's
-/// context window from its selected model; pickers use the advertised effort
-/// ladder to shape `/effort`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelOption {
     pub provider: String,
@@ -98,8 +65,6 @@ impl From<ModelDescriptor> for ModelOption {
     }
 }
 
-/// The effort ladder of the catalog entry whose selection names `model`.
-/// Empty when the model is unknown or advertises none.
 #[must_use]
 pub fn model_reasoning_efforts<'a>(
     models: &'a [ModelOption],
@@ -111,7 +76,6 @@ pub fn model_reasoning_efforts<'a>(
         .map_or(&[], |option| option.reasoning_efforts.as_slice())
 }
 
-/// The context window of the catalog entry whose selection names `model`.
 #[must_use]
 pub fn model_context_window(models: &[ModelOption], model: Option<&str>) -> Option<u32> {
     models
@@ -120,8 +84,6 @@ pub fn model_context_window(models: &[ModelOption], model: Option<&str>) -> Opti
         .context_window
 }
 
-/// The profile and the first eight hex digits of the plan digest: enough to
-/// tell two plans apart in a transcript without filling the line.
 #[must_use]
 pub fn plan_label(plan: &RunPlanIdentity) -> (AgentProfileId, String) {
     let digest = plan.digest.to_string();
@@ -131,13 +93,6 @@ pub fn plan_label(plan: &RunPlanIdentity) -> (AgentProfileId, String) {
     )
 }
 
-/// Every session the client knows about, with the tree indexes a sidebar,
-/// picker, or navigation reads every frame.
-///
-/// Reads go through `get`; writes go through `get_mut`, `insert`, `remove`,
-/// `entry`, and `values_mut`, each of which drops the cached tree index so
-/// the next read rebuilds it once. A frame therefore pays for the index at
-/// most once per batch of mutations instead of once per call site.
 #[derive(Debug)]
 pub struct SessionStore {
     sessions: HashMap<SessionId, SessionView>,
@@ -153,20 +108,15 @@ impl Default for SessionStore {
     }
 }
 
-/// Derived tree shape, valid until the next mutation.
 #[derive(Debug, Default)]
 struct TreeIndex {
-    /// Depth-first order: roots newest-first, children oldest-first.
     order: Vec<SessionId>,
     depth: HashMap<SessionId, usize>,
-    /// Children oldest-first, keyed by parent; `None` holds the roots.
     children: HashMap<Option<SessionId>, Vec<SessionId>>,
     spawned_by_call: HashMap<ToolCallId, SessionId>,
 }
 
 impl SessionStore {
-    /// A store whose live-status tails pass every character through
-    /// `sanitizer` before it is retained.
     #[must_use]
     pub fn with_sanitizer(sanitizer: TextSanitizer) -> Self {
         Self {
@@ -188,18 +138,11 @@ impl SessionStore {
         self.sessions.get(id)
     }
 
-    /// Mutable access that may change the tree: the summary's parent, origin,
-    /// timestamp, or title. Drops the derived index.
     pub fn get_mut(&mut self, id: &SessionId) -> Option<&mut SessionView> {
         self.index.take();
         self.sessions.get_mut(id)
     }
 
-    /// Mutable access for body state only — messages, live tail, tool
-    /// output, reasoning, timings, unread counters, run stats. The tree index
-    /// is derived from the summary alone, so it survives. Every streaming
-    /// delta lands here; taking the index on each would rebuild the sidebar
-    /// order on every frame while a run streams.
     pub fn body_mut(&mut self, id: &SessionId) -> Option<&mut SessionView> {
         self.sessions.get_mut(id)
     }
@@ -248,22 +191,16 @@ impl SessionStore {
         self.sessions.values_mut()
     }
 
-    /// Every session in tree order: roots newest-first, each followed by
-    /// its descendants oldest-first.
     #[must_use]
     pub fn thread_order(&self) -> &[SessionId] {
         &self.index().order
     }
 
-    /// Distance from the root; zero for roots and unknown sessions.
     #[must_use]
     pub fn depth(&self, id: SessionId) -> usize {
         self.index().depth.get(&id).copied().unwrap_or(0)
     }
 
-    /// The root of `id`'s tree, `id` itself for a root. `None` when `id` or
-    /// an ancestor is not loaded, so a caller never mistakes a child for a
-    /// root. Bounded by the tree depth.
     #[must_use]
     pub fn root_of(&self, mut id: SessionId) -> Option<SessionId> {
         for _ in 0..=self.depth(id) {
@@ -275,7 +212,6 @@ impl SessionStore {
         None
     }
 
-    /// Direct children of `parent`, oldest-first.
     #[must_use]
     pub fn children_of(&self, parent: SessionId) -> &[SessionId] {
         self.index()
@@ -284,19 +220,16 @@ impl SessionStore {
             .map_or(&[], Vec::as_slice)
     }
 
-    /// Root sessions, oldest-first.
     #[must_use]
     pub fn roots(&self) -> &[SessionId] {
         self.index().children.get(&None).map_or(&[], Vec::as_slice)
     }
 
-    /// The child session a `spawn_agent` call created, if any.
     #[must_use]
     pub fn child_spawned_by(&self, tool_call_id: ToolCallId) -> Option<SessionId> {
         self.index().spawned_by_call.get(&tool_call_id).copied()
     }
 
-    /// Sessions with a tool call awaiting approval, in tree order.
     #[must_use]
     pub fn awaiting_approval(&self) -> Vec<SessionId> {
         self.thread_order()
@@ -306,12 +239,6 @@ impl SessionStore {
             .collect()
     }
 
-    /// One state for everything this store follows, most urgent wins: any
-    /// hold waiting for a human, else any session running, queued, or
-    /// answering a side question, else idle. Reads only summary-level state, which
-    /// the server projects for every session, and every stored session,
-    /// including children whose parent is not loaded. A block names the most
-    /// recently updated blocked session, so the message is deterministic.
     #[must_use]
     pub fn activity(&self) -> StoreActivity {
         let mut working = false;
@@ -345,8 +272,6 @@ impl SessionStore {
         }
     }
 
-    /// Sessions that need the user, most urgent first and then in tree
-    /// order: approvals, then unread failures, then unread finishes.
     #[must_use]
     pub fn needing_attention(&self) -> Vec<SessionId> {
         let mut needing: Vec<(Need, usize, SessionId)> = self
@@ -359,8 +284,6 @@ impl SessionStore {
         needing.into_iter().map(|(_, _, id)| id).collect()
     }
 
-    /// Insert or refresh a summary. A new session starts summary-only with
-    /// `loaded_through` as its baseline cursor.
     pub fn upsert_summary(
         &mut self,
         summary: SessionSummary,
@@ -382,17 +305,12 @@ impl SessionStore {
         }
     }
 
-    /// Recompute every session's context window against a new catalog.
     pub fn apply_models(&mut self, models: &[ModelOption]) {
         for session in self.values_mut() {
             session.context_window = model_context_window(models, session.summary.model.as_deref());
         }
     }
 
-    /// Load one session's transcript body from a snapshot. Other warm bodies
-    /// are untouched; [`Self::evict_cold_bodies`] enforces the warm limit
-    /// afterwards. Focus-independent per-session state (drafts, focus stamp,
-    /// live output for still-running calls, approval previews) survives.
     pub fn install_session_snapshot(
         &mut self,
         snapshot: SessionSnapshot,
@@ -402,8 +320,6 @@ impl SessionStore {
         self.install_body(snapshot, models, loaded_through, false);
     }
 
-    /// An isolated fetch has the whole budget; preserve its usable rows even
-    /// if one row class still cannot fit, rather than retrying forever.
     pub fn install_isolated_session_snapshot(
         &mut self,
         snapshot: SessionSnapshot,
@@ -421,8 +337,6 @@ impl SessionStore {
         isolated: bool,
     ) {
         let session_id = snapshot.summary.id;
-        // Truncation flags do not distinguish count cuts from byte-budget
-        // cuts. Conservatively refetch every incomplete shared body alone.
         if !isolated && (snapshot.has_older_messages || snapshot.has_older_tool_calls) {
             self.upsert_summary(snapshot.summary, models, loaded_through);
             if let Some(view) = self.body_mut(&session_id) {
@@ -447,8 +361,6 @@ impl SessionStore {
         view.live = LiveStatus::from_body(&messages, &tool_calls, self.sanitizer);
         for run in &snapshot.runs {
             let stats = view.runs.entry(run.id).or_default();
-            // A running run outside the session's active slot is internal.
-            // Keep that identity if the prompt settles before its step does.
             stats.origin = run.origin;
             stats.owned_step = run
                 .origin
@@ -497,8 +409,6 @@ impl SessionStore {
             view.finished_unread = previous.finished_unread;
             view.last_focused = previous.last_focused;
             view.drafts = previous.drafts;
-            // Live tool output for calls this body no longer reports as
-            // running would render forever; keep only the running ones.
             view.live_tool_output = previous.live_tool_output;
             view.live_tool_output.retain(|id, _| {
                 tool_calls
@@ -511,8 +421,6 @@ impl SessionStore {
             .into_iter()
             .map(|pending| (pending.tool_call_id, pending.preview))
             .collect();
-        // The summary's holds are exact at this snapshot's cursor; the
-        // body's bounded tool-call window may not reach every one.
         view.live.set_holds(&view.summary.pending_holds);
         view.side_questions = snapshot.side_questions;
         view.goal = snapshot.goal;
@@ -521,8 +429,6 @@ impl SessionStore {
         self.insert(session_id, view);
     }
 
-    /// A session this client just created has an empty transcript by
-    /// construction, so it is warm immediately and needs no round trip.
     pub fn warm_empty(&mut self, session_id: SessionId) {
         if let Some(session) = self.body_mut(&session_id)
             && !session.is_warm()
@@ -532,8 +438,6 @@ impl SessionStore {
         }
     }
 
-    /// Stamp `session_id` with `focus_clock` and clear what the user has now
-    /// seen. The caller owns the clock so one counter can span stores.
     pub fn mark_focused(&mut self, session_id: SessionId, focus_clock: u64) {
         if let Some(session) = self.body_mut(&session_id) {
             session.last_focused = focus_clock;
@@ -542,9 +446,6 @@ impl SessionStore {
         }
     }
 
-    /// Drop transcript bodies beyond the warm limit, least recently focused
-    /// first. `pinned` is never evicted. Summaries and live status stay, so
-    /// lists and pickers keep working for cold sessions.
     pub fn evict_cold_bodies(&mut self, pinned: Option<SessionId>) {
         let mut warm: Vec<(u64, SessionId)> = self
             .values()
@@ -564,8 +465,6 @@ impl SessionStore {
         }
     }
 
-    /// Insert a message into its session's warm body, deduplicated by id and
-    /// placed after its run's last message so live order matches snapshots.
     pub fn push_message(&mut self, message: MessageSnapshot) {
         let Some(messages) = self
             .body_mut(&message.session_id)
@@ -580,11 +479,6 @@ impl SessionStore {
         {
             return;
         }
-        // Server snapshots order messages by run first, then by ordinal
-        // within the run, so a prompt queued mid-run sorts after that run's
-        // later per-turn messages. Mirror that live: a message whose run is
-        // already present slots in right after the run's last message, and a
-        // new run appends (runs are created in queue order).
         let position = messages
             .iter()
             .rposition(|candidate| candidate.run_id == message.run_id)
@@ -593,7 +487,6 @@ impl SessionStore {
         retain_recent_messages(messages);
     }
 
-    /// Replace or append a tool call in its session's warm body.
     pub fn upsert_tool_call(&mut self, tool_call: ToolCallSnapshot) {
         let Some(session) = self.body_mut(&tool_call.session_id) else {
             return;
@@ -601,7 +494,6 @@ impl SessionStore {
         let Some(tool_calls) = session.tool_calls.as_mut() else {
             return;
         };
-        // Updates target recent calls; scan from the tail.
         if let Some(existing) = tool_calls
             .iter_mut()
             .rev()
@@ -610,17 +502,12 @@ impl SessionStore {
             *existing = tool_call;
         } else {
             tool_calls.push(tool_call);
-            // Timings are bounded with the calls they describe: a call that
-            // left the retained window takes its timing row with it.
             for evicted in retain_recent_tool_calls(tool_calls) {
                 session.tool_timing.remove(&evicted);
             }
         }
     }
 
-    /// The streaming message is nearly always the newest, so scan from the
-    /// tail: a text delta then costs one comparison rather than a walk over
-    /// the retained history.
     fn message_mut(
         &mut self,
         session_id: SessionId,
@@ -634,9 +521,6 @@ impl SessionStore {
             .find(|message| message.id == message_id)
     }
 
-    /// Marks a run's still-streaming assistant messages complete through the
-    /// given turn: the server finalizes a turn's message in the same
-    /// transaction as the turn's tool calls, without a dedicated event.
     fn complete_streamed_turns(&mut self, session_id: SessionId, run_id: RunId, through_turn: u32) {
         let Some(messages) = self
             .body_mut(&session_id)
@@ -654,8 +538,6 @@ impl SessionStore {
         }
     }
 
-    /// How many times the tree index has been rebuilt; tests use it to prove
-    /// that body-only mutations leave the index alone.
     #[cfg(test)]
     pub(crate) fn index_rebuilds(&self) -> usize {
         self.index_rebuilds.get()
@@ -678,8 +560,6 @@ impl SessionStore {
                     index.spawned_by_call.insert(call, session.summary.id);
                 }
             }
-            // Ties on the timestamp fall back to the title so the list is stable
-            // across frames whatever the map's iteration order.
             for siblings in index.children.values_mut() {
                 siblings.sort_by(|a, b| {
                     let (a, b) = (&self.sessions[a].summary, &self.sessions[b].summary);
@@ -688,7 +568,6 @@ impl SessionStore {
                         .then_with(|| b.title.cmp(&a.title))
                 });
             }
-            // Roots are newest-first; popping from the back yields the newest.
             let mut stack: Vec<(SessionId, usize)> = index
                 .children
                 .get(&None)
@@ -701,8 +580,6 @@ impl SessionStore {
                 index.order.push(session_id);
                 index.depth.insert(session_id, depth);
                 if let Some(kids) = index.children.get(&Some(session_id)) {
-                    // Children render oldest-first, so push newest first to
-                    // be popped last.
                     stack.extend(kids.iter().rev().map(|id| (*id, depth + 1)));
                 }
             }
@@ -719,7 +596,6 @@ impl std::ops::Index<&SessionId> for SessionStore {
     }
 }
 
-/// Trim a warm body's messages to the snapshot window, oldest first.
 pub fn retain_recent_messages(messages: &mut Vec<MessageSnapshot>) {
     let excess = messages
         .len()
@@ -729,8 +605,6 @@ pub fn retain_recent_messages(messages: &mut Vec<MessageSnapshot>) {
     }
 }
 
-/// Trim a warm body's tool calls to the retained window, oldest first.
-/// Returns the ids of the calls dropped, oldest first.
 pub fn retain_recent_tool_calls(tool_calls: &mut Vec<ToolCallSnapshot>) -> Vec<ToolCallId> {
     let excess = tool_calls.len().saturating_sub(MAX_RECENT_TOOL_CALLS);
     if excess > 0 {
@@ -740,8 +614,6 @@ pub fn retain_recent_tool_calls(tool_calls: &mut Vec<ToolCallSnapshot>) -> Vec<T
     }
 }
 
-/// A snapshot request for one session's body, at the limits the store
-/// retains, so a surface never asks for more than it can keep.
 #[must_use]
 pub fn body_request(workspace_id: WorkspaceId, session_id: SessionId) -> SnapshotRequest {
     SnapshotRequest {
@@ -753,14 +625,10 @@ pub fn body_request(workspace_id: WorkspaceId, session_id: SessionId) -> Snapsho
     }
 }
 
-/// One run's displayable reasoning: text accumulated from `ReasoningDelta`
-/// events plus whether the block is still streaming.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reasoning {
     pub text: String,
     pub streaming: bool,
-    /// Surface animation ticks observed while streaming, for an elapsed
-    /// label. The reducer never touches this; the surface's tick does.
     pub ticks: usize,
 }
 
@@ -777,67 +645,37 @@ impl Reasoning {
     }
 }
 
-/// What is known about one run's timing and outcome, for the completion
-/// line under its last message. Timestamps are the server's `occurred_at_ms`
-/// of the run events; historical runs loaded from a snapshot carry only the
-/// outcome and usage until the protocol records run timing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunStats {
     pub origin: Option<qq_protocol::RunOrigin>,
-    /// An internal step observed outside the session's active-run slot.
-    /// Its finish remains bookkeeping after the active prompt settles.
     pub owned_step: bool,
     pub started_at_ms: Option<u64>,
-    /// When the first assistant text of the run arrived: time to first token.
     pub first_token_at_ms: Option<u64>,
     pub finished_at_ms: Option<u64>,
     pub outcome: Option<RunOutcome>,
     pub usage: Option<TokenUsage>,
-    /// Tool calls the run made, counted as their finished events arrive or
-    /// from the loaded body.
     pub tool_calls: u32,
-    /// Authoritative aggregate cost from the run snapshot; unknown until loaded.
     pub cost_usd_nanos: Option<u64>,
-    /// Highest model turn committed so far, from `ModelTurnCompleted`; zero
-    /// for historical runs loaded from a snapshot.
     pub turns: u32,
-    /// The profile the run was claimed under and the first eight hex digits
-    /// of its plan digest, from `RunStarted.plan` or the loaded run.
     pub plan: Option<(AgentProfileId, String)>,
-    /// The `provider/model` route actually executed, when the run recorded
-    /// it. Shown only when it differs from the session's selected model.
     pub resolved_route: Option<String>,
-    /// Cost accumulated from committed turns while the run is active. Shown
-    /// while active; never substituted for an unknown terminal aggregate.
     pub live_cost_usd_nanos: Option<u64>,
 }
 
-/// When a tool call started, last produced output, and finished, from the
-/// `occurred_at_ms` of the events that carried those transitions, and how
-/// its approval was settled. Historical calls loaded from a snapshot have
-/// none of this until the protocol records call timing; the rows then show no
-/// wall-clock time rather than a guess.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ToolCallTiming {
     pub started_at_ms: Option<u64>,
     pub last_output_at_ms: Option<u64>,
     pub finished_at_ms: Option<u64>,
-    /// How the hold was settled, from `tool_approval_resolved`. `None` for a
-    /// call that was never held or whose resolution predates the body load.
     pub settled: Option<ApprovalSettlement>,
 }
 
-/// How a held call was settled, so a surface can say "denied by timeout"
-/// rather than only "denied".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApprovalSettlement {
     pub resolution: ApprovalResolution,
 }
 
 impl ApprovalSettlement {
-    /// A short label for the row: `denied by you`, `denied by timeout`.
-    /// `None` for resolutions that need no remark (a once-approval by the
-    /// human, an answer).
     #[must_use]
     pub fn label(self) -> Option<String> {
         match self.resolution {
@@ -848,89 +686,47 @@ impl ApprovalSettlement {
     }
 }
 
-/// Cheap per-session liveness reduced from every event, whether or not the
-/// session's transcript body is loaded. This is what a sidebar or session
-/// list shows for the sessions the user is not looking at.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LiveStatus {
-    /// Last bytes of the newest assistant message, whitespace-collapsed.
     pub tail: String,
-    /// The previous append ended in whitespace that has not yet been emitted
-    /// as a separator.
     tail_space_pending: bool,
-    /// Name of the tool call currently running or awaiting approval.
     pub active_tool: Option<String>,
-    /// Tool calls awaiting an approval answer. A set rather than a count so
-    /// replayed or repeated events cannot drift it.
     pub awaiting_approval: BTreeSet<ToolCallId>,
 }
 
 pub use qq_protocol::ApprovalPreview;
 
-/// One session as the client sees it: the summary every surface lists, and
-/// the warm body, live status, and per-run detail a transcript shows.
 #[derive(Debug, Clone)]
 pub struct SessionView {
     pub goal: Option<Box<qq_protocol::GoalSnapshot>>,
     pub side_questions: Vec<qq_protocol::SideQuestionSnapshot>,
     pub summary: SessionSummary,
-    /// The last foreground slot identity, retained across idle summaries so
-    /// late internal completions remain bookkeeping after summary-only load.
     pub foreground_run_id: Option<RunId>,
-    /// `Some` only while the body is warm; `None` means summary-only.
     pub messages: Option<Vec<MessageSnapshot>>,
     pub tool_calls: Option<Vec<ToolCallSnapshot>>,
     pub context_window: Option<u32>,
-    /// Latest replaceable liveness state for the active run, seeded from the
-    /// summary on load and replaced by `RunActivityChanged` events.
     pub activity: Option<(RunId, RunActivity)>,
     pub live: LiveStatus,
-    /// Provider-exposed reasoning per run, bounded, kept only for runs whose
-    /// messages are loaded. Display-only: never fed back to the model.
     pub reasoning: HashMap<RunId, Reasoning>,
-    /// Timing and outcome per run, for completion lines. Bounded with
-    /// `reasoning`: runs whose messages were trimmed are dropped together.
     pub runs: HashMap<RunId, RunStats>,
-    /// Focus clock at the last time this session was focused; orders warm
-    /// body eviction. Zero for never-focused sessions.
     pub last_focused: u64,
-    /// Sequence of the snapshot this view was loaded from; events at or
-    /// below it are already reflected.
     pub loaded_through: u64,
-    /// Prompts this session has submitted, oldest first, for history browsing.
     pub prompt_history: VecDeque<String>,
-    /// Drafts held locally while the session runs; they submit in order when
-    /// it goes idle. Bounded by [`MAX_QUEUED_DRAFTS`].
     pub drafts: VecDeque<String>,
-    /// Bounded tails of live streamed output per running tool call, dropped
-    /// when the call reaches a terminal state or the body reloads.
     pub live_tool_output: HashMap<ToolCallId, String>,
-    /// Shell and edit previews carried by approval requests, kept only while
-    /// the call awaits an answer so a modal can show what it would do. The
-    /// server computes these; the client never re-derives them from arguments.
     pub approval_previews: HashMap<ToolCallId, ApprovalPreview>,
-    /// Observed timing per tool call, bounded with the warm body.
     pub tool_timing: HashMap<ToolCallId, ToolCallTiming>,
-    /// Assistant messages and run finishes that arrived while this session
-    /// was not shown, cleared when it is focused.
     pub unread: u32,
-    /// The last run finished while unfocused and has not been looked at.
     pub finished_unread: bool,
 }
 
-/// What a store's sessions amount to for an external status line: see
-/// [`SessionStore::activity`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreActivity {
     Idle,
     Working,
-    /// A held call waits for a human in the named session.
-    Blocked {
-        session_title: String,
-    },
+    Blocked { session_title: String },
 }
 
-/// Why a session needs the user, most urgent first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Need {
     Approval,
@@ -938,7 +734,6 @@ pub enum Need {
     FinishedUnread,
 }
 
-/// Which list group a session belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Group {
     NeedsYou,
@@ -994,7 +789,6 @@ impl SessionView {
         }
     }
 
-    /// The most urgent reason this session needs the user, if any.
     #[must_use]
     pub fn need(&self) -> Option<Need> {
         if !self.live.awaiting_approval.is_empty() {
@@ -1011,8 +805,6 @@ impl SessionView {
         None
     }
 
-    /// List group: needs attention, running, idle with no history, or
-    /// finished and already seen.
     #[must_use]
     pub fn group(&self) -> Group {
         if self.need().is_some() {
@@ -1030,9 +822,6 @@ impl SessionView {
         }
     }
 
-    /// Refresh the summary in place. Activity follows the summary when the
-    /// summary carries it or the run changed; a live event already applied
-    /// for the same run is kept when the summary is silent.
     pub fn set_summary(&mut self, summary: SessionSummary, context_window: Option<u32>) {
         if let Some(run_id) = summary.active_run_id {
             self.foreground_run_id = Some(run_id);
@@ -1056,7 +845,6 @@ impl SessionView {
         self.messages.is_some()
     }
 
-    /// Append a live output chunk for `tool_call_id`, keeping the tail bounded.
     pub fn append_live_tool_output(&mut self, tool_call_id: ToolCallId, chunk: &str) {
         let buffer = self.live_tool_output.entry(tool_call_id).or_default();
         buffer.push_str(chunk);
@@ -1069,7 +857,6 @@ impl SessionView {
         }
     }
 
-    /// Remember a submitted prompt, skipping consecutive duplicates.
     pub fn record_prompt(&mut self, prompt: &str) {
         if self
             .prompt_history
@@ -1084,7 +871,6 @@ impl SessionView {
         }
     }
 
-    /// Drop the warm body and everything keyed by its tool calls.
     pub fn evict_body(&mut self) {
         self.messages = None;
         self.tool_calls = None;
@@ -1096,7 +882,6 @@ impl SessionView {
 }
 
 impl LiveStatus {
-    /// Derive status from a loaded body, as after a snapshot.
     #[must_use]
     pub fn from_body(
         messages: &[MessageSnapshot],
@@ -1117,8 +902,6 @@ impl LiveStatus {
         live
     }
 
-    /// Replace the tail with the last [`LIVE_TAIL_BYTES`] of `text`, with
-    /// whitespace collapsed to single spaces so it fits one row.
     pub fn set_tail(&mut self, text: &str, sanitizer: TextSanitizer) {
         let mut start = text.len().saturating_sub(LIVE_TAIL_BYTES);
         while !text.is_char_boundary(start) {
@@ -1143,7 +926,6 @@ impl LiveStatus {
         }
     }
 
-    /// Append streamed text and trim the front back to the byte bound.
     pub fn append_tail(&mut self, text: &str, sanitizer: TextSanitizer) {
         if text.len() >= LIVE_TAIL_BYTES {
             self.set_tail(text, sanitizer);
@@ -1159,8 +941,6 @@ impl LiveStatus {
         }
     }
 
-    /// Replace the hold sets with a summary's projection, which is exact at
-    /// the summary's cursor; events after it move the sets on.
     pub fn set_holds(&mut self, holds: &[PendingHold]) {
         self.awaiting_approval = holds.iter().map(|hold| hold.tool_call_id).collect();
     }

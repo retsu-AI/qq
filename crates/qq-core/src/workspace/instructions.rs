@@ -67,7 +67,6 @@ impl WorkspaceInstructions {
         self.hash
     }
 
-    /// The instruction file that was selected, relative to the workspace root.
     pub(crate) fn source_path(&self) -> Option<&'static str> {
         self.selected.as_ref().map(|selected| selected.path)
     }
@@ -177,11 +176,6 @@ fn hash_instruction(selected: Option<&SelectedInstruction>) -> InstructionHash {
     InstructionHash::from_bytes(digest.finalize().into())
 }
 
-/// Loads instructions exactly like [`load`] and also returns the fingerprint
-/// of every candidate path it consulted, present or absent, so a cached
-/// result can be revalidated without re-reading. The fingerprints are taken
-/// before the read: a file that changes between the two observations is
-/// reported stale on the next check rather than silently trusted.
 pub(crate) fn load_with_sources(
     workspace: &Workspace,
     cancelled: &RunCancellation,

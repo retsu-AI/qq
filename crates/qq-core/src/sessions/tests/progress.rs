@@ -1,20 +1,10 @@
-//! Sub-agents that stop producing output answer their brief (ADR-0054 § 3),
-//! end to end through the session runtime: the parent's `spawn_agent`
-//! result is the child's final answer, or its latest report, labelled.
-
 use super::*;
 
-/// A read child that only ever reads. It answers report notices with
-/// `report` and its final-answer notice with `final_reply` (`None`: an
-/// empty reply). Every request is recorded.
 struct StuckReader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
     reports: StdMutex<usize>,
-    /// Set once the child has answered: a later run in its session (a user
-    /// follow-up) is answered with text instead of more reads.
     answered: std::sync::atomic::AtomicBool,
     final_reply: Option<&'static str>,
-    /// Reports numbered from 1, so the parent can tell which one it got.
     numbered_reports: bool,
 }
 
@@ -125,8 +115,6 @@ async fn delegate_to(
     (parent, child, outcome)
 }
 
-/// The child's answer as the parent received it: delivered at a later
-/// boundary (ADR-0054 § 4), `(text, is_error)`.
 fn spawn_result(parent_requests: &[ModelRequest]) -> (String, bool) {
     let (text, answered) = delivered_answers(parent_requests)
         .into_iter()
@@ -145,8 +133,6 @@ fn stuck_reader(final_reply: Option<&'static str>) -> StuckReader {
     }
 }
 
-/// (d) A read child that never stops reading answers its brief on its
-/// fourth report, well before 320 calls, and the parent receives the text.
 #[tokio::test]
 async fn a_stuck_read_child_answers_its_brief_and_the_parent_receives_it() {
     let (parent, child, outcome) =
@@ -170,13 +156,10 @@ async fn a_stuck_read_child_answers_its_brief_and_the_parent_receives_it() {
     assert!(results < 320, "{results} calls before the answer");
     let last = child.last().unwrap();
     assert_eq!(notice_of(last), Some(crate::SUBAGENT_FINAL_ANSWER_NOTICE));
-    // (e′) The final-answer request keeps its tools and asks for none.
     assert_eq!(last.tool_choice(), qq_provider::ToolChoice::None);
     assert_eq!(last.tools(), child[0].tools());
 }
 
-/// (e) The same child with an empty final turn: the parent receives the
-/// child's latest report, labelled as an interim report.
 #[tokio::test]
 async fn an_empty_final_answer_hands_the_parent_the_latest_report() {
     let (parent, _child, outcome) = delegate_to(stuck_reader(None)).await;
@@ -195,8 +178,6 @@ async fn an_empty_final_answer_hands_the_parent_the_latest_report() {
     );
 }
 
-/// With no report text either, the parent gets today's error: nothing the
-/// runtime could write would be the child's own output.
 #[tokio::test]
 async fn a_child_with_no_text_at_all_is_still_an_error() {
     struct Silent {
@@ -240,8 +221,6 @@ async fn a_child_with_no_text_at_all_is_still_an_error() {
     );
 }
 
-/// (c″) A successful blocking `spawn_agent` result is progress for the
-/// parent: 60 reads, a spawn, then 60 more reads get no stall report.
 #[tokio::test]
 async fn a_childs_answer_is_progress_for_the_parent() {
     let parent_requests = Arc::new(StdMutex::new(Vec::new()));
@@ -287,9 +266,6 @@ async fn a_childs_answer_is_progress_for_the_parent() {
     );
 }
 
-/// A child that ended on its final-answer turn replays byte-for-byte: a user
-/// follow-up in the child session sends the context the child saw, with
-/// every report, continuation, and final-answer notice in place.
 #[tokio::test]
 async fn a_child_that_answered_its_brief_replays_its_live_context() {
     let child = stuck_reader(Some("Widgets live in inventory.rs:12."));
@@ -345,8 +321,6 @@ async fn a_child_that_answered_its_brief_replays_its_live_context() {
     );
 }
 
-/// (m) An audit child never gets a stall report: it is bounded at a few
-/// turns already. This auditor reads 96 times before its verdict.
 #[tokio::test]
 async fn an_audit_child_never_gets_a_stall_report() {
     struct ReadingAuditor {
@@ -407,8 +381,6 @@ async fn an_audit_child_never_gets_a_stall_report() {
     );
 }
 
-/// A child whose last report was cut at the output limit and continued:
-/// its interim answer is the whole report, both parts joined in order.
 #[tokio::test]
 async fn a_continued_report_reaches_the_parent_whole() {
     struct CutsThirdReport {
@@ -481,9 +453,6 @@ async fn a_continued_report_reaches_the_parent_whole() {
     );
 }
 
-/// A report cut by a mid-stream provider fault is retried under "continue
-/// exactly from where it stopped": the parent's interim answer is both
-/// parts joined, not just the retry's tail.
 #[tokio::test]
 async fn a_report_retried_after_a_fault_reaches_the_parent_whole() {
     struct FaultsThirdReport {

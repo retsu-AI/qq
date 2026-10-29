@@ -1,8 +1,4 @@
 #![forbid(unsafe_code)]
-//! A detached daemon on Windows leaves the job of the process that started
-//! it. Terminals, SSH sessions and CI steps run their processes in a job that
-//! is killed when it closes; a daemon left in it would die with the shell
-//! that ran `qq daemon run --detach`.
 #![cfg(windows)]
 
 use std::{os::windows::io::AsRawHandle as _, path::Path, process::Command, time::Duration};
@@ -11,7 +7,6 @@ use win_custody::{Launch, Process, ProcessAccess, WaitOutcome};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// A kill-on-close job, as a console host or CI runner gives its processes.
 fn shell_job(permits_breakaway: bool) -> win32job::Job {
     let mut limits = win32job::ExtendedLimitInfo::new();
     limits.limit_kill_on_job_close();
@@ -29,10 +24,6 @@ fn pid_in(line: &str) -> u32 {
         .unwrap()
 }
 
-/// Runs `qq daemon run --detach` in `job` from its first instruction, as a
-/// shell in that job would, and returns the daemon's pid. Output goes to
-/// files: the daemon may inherit the starter's handles, and a pipe it holds
-/// would never reach end of file.
 fn start_in(job: &win32job::Job, home: &Path) -> u32 {
     let stdout_path = home.join("starter.out");
     let stderr_path = home.join("starter.err");
@@ -99,13 +90,9 @@ fn a_detached_daemon_leaves_a_job_that_permits_it_and_starts_in_one_that_does_no
             .contains(&usize::try_from(pid).unwrap());
         if permits_breakaway {
             assert!(!in_job, "the daemon stayed in the job that started it");
-            // Closing the shell's job kills everything still in it; the
-            // daemon keeps serving.
             drop(job);
             stop(home, pid);
         } else {
-            // Nothing leaves a job that forbids it, but the start must not
-            // fail for asking.
             assert!(in_job, "the daemon left a job that forbids breakaway");
             stop(home, pid);
             drop(job);

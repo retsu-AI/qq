@@ -1,9 +1,3 @@
-//! The run's cancellation token. One per run, cloned into every tool call,
-//! host call, and blocking helper the run starts. Cancelling sets a flag and
-//! wakes every waiter, so a call awaiting [`RunCancellation::cancelled`]
-//! returns at once instead of noticing on its next poll tick; blocking work
-//! that cannot await checks [`RunCancellation::is_cancelled`] between steps.
-
 use std::sync::{
     Arc,
     atomic::{AtomicU8, Ordering},
@@ -16,7 +10,6 @@ pub struct RunCancellation(Arc<Inner>);
 
 #[derive(Default)]
 struct Inner {
-    /// 0 running, 1 cancelled, 2 expired; the first stop reason wins.
     reason: AtomicU8,
     wake: Notify,
 }
@@ -36,7 +29,6 @@ impl RunCancellation {
         Self::default()
     }
 
-    /// A token that is already cancelled, for tests of the cancelled path.
     #[must_use]
     pub fn already_cancelled() -> Self {
         let token = Self::new();
@@ -44,7 +36,6 @@ impl RunCancellation {
         token
     }
 
-    /// Cancels the run. Idempotent; every current and future waiter wakes.
     pub fn cancel(&self) {
         let _ = self
             .0
@@ -53,8 +44,6 @@ impl RunCancellation {
         self.0.wake.notify_waiters();
     }
 
-    /// Stops the run because its time limit passed. A command it kills
-    /// reports a timeout; an earlier explicit cancel still wins.
     pub(crate) fn expire(&self) {
         let _ = self
             .0
@@ -72,23 +61,16 @@ impl RunCancellation {
         self.0.reason.load(Ordering::Acquire) != 0
     }
 
-    /// Whether two handles are the same token (clones of one run's token).
     #[cfg(test)]
     pub(crate) fn same_token(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
-    /// A handle that does not keep the token alive; `upgrade` fails once the
-    /// run has dropped every clone. For test hooks that must not extend a
-    /// run's lifetime.
     #[cfg(test)]
     pub(crate) fn downgrade(&self) -> WeakRunCancellation {
         WeakRunCancellation(Arc::downgrade(&self.0))
     }
 
-    /// Resolves once the run is cancelled. Registers with the notifier before
-    /// reading the flag, so a `cancel` between the check and the await is
-    /// not lost; a `cancel` before the first call resolves immediately.
     pub async fn cancelled(&self) {
         loop {
             let wake = self.0.wake.notified();

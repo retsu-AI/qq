@@ -1,11 +1,7 @@
-//! The committed model-facing replies and notice, independent of per-call rows.
-
 use super::*;
 use serde::{Deserialize, Serialize};
 
 pub(super) const MAX_PROJECTION_JSON_BYTES: usize = 2 * 1024 * 1024;
-/// Bound on a stored correction notice. Only rows written while Jev
-/// checkpoints existed carry one; new rows always store `null`.
 const MAX_CORRECTION_NOTICE_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -21,7 +17,6 @@ pub(super) struct SavedReply {
 pub(super) struct SavedProjection {
     pub(super) version: u8,
     pub(super) results: Vec<SavedReply>,
-    /// Historical: the Jev correction notice replayed after these replies.
     pub(super) correction_notice: Option<String>,
 }
 

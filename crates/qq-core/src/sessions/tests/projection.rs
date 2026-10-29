@@ -19,8 +19,6 @@ async fn historical_projection_fixture(version: u16) {
     descriptor.tool_output_projection = None;
     descriptor.prompt_version = qq_protocol::PromptVersion::new(19).unwrap();
     let (digest, descriptor_json) = descriptor.encode().unwrap();
-    // SQL loading recognizes historical identities independently of the
-    // current encoder, which only emits and decodes its retained domains.
     let mut stored_descriptor: serde_json::Value = serde_json::from_str(&descriptor_json).unwrap();
     stored_descriptor["version"] = serde_json::json!(version);
     let descriptor_json = stored_descriptor.to_string();
@@ -258,8 +256,6 @@ async fn ab2_replay_uses_exact_persisted_replies_and_a_legacy_correction_notice(
         .persist_tool_projection(&claimed, 1, projected)
         .await
         .unwrap();
-    // Rows written while Jev checkpoints existed carry a correction notice;
-    // replay keeps honouring it.
     let run = claimed.identity.run_id.to_string();
     store.call(Priority::Control, move |connection| {
         connection.execute("UPDATE model_turns SET tool_results_projection_json=json_set(tool_results_projection_json,'$.correction_notice','Correct the next action using the checkpoint feedback.') WHERE run_id=?1 AND turn_ordinal=1", [run])?;
@@ -393,7 +389,6 @@ async fn ab2_projection_retries_and_invalid_writes_preserve_first_commit() {
         connection.execute("UPDATE tool_calls SET result='original per-call text' WHERE run_id=?1 AND call_ordinal=1", [run])?;
         Ok(())
     }).await.unwrap();
-    // Worst-case control-character escaping still fits the serialized ceiling.
     let accepted = projection(&["call-0", "call-1"], &"\0".repeat(48 * 1024));
     store
         .persist_tool_projection(&claimed, 1, Arc::clone(&accepted))
@@ -545,7 +540,6 @@ async fn ab2_ambiguous_history_is_not_assigned_the_current_projection() {
         )
         .await
         .unwrap();
-    // A crash before the barrier with explicit policy remains reconstructible.
     store
         .call(Priority::Control, move |connection| {
             load_model_context(connection, session, u64::MAX)
@@ -648,12 +642,9 @@ async fn checkpoint_without_exact_projection_fails_closed(reviewed: bool) {
         connection.execute("UPDATE runs SET plan_descriptor_json=json_set(plan_descriptor_json,'$.checkpoint','custom/enforce') WHERE id=?1", [run])?;
         Ok(())
     }).await.unwrap();
-    // Jev checkpoints were removed; a store written before then still holds
-    // their events. Rewrite the run's latest event into the legacy shape.
     let kind = if reviewed {
         "checkpoint_reviewed"
     } else {
-        // The process died after the review started and before its verdict.
         "checkpoint_started"
     };
     let run = claimed.identity.run_id.to_string();

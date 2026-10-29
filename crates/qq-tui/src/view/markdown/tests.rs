@@ -47,9 +47,7 @@ fn wide_tables_wrap_cell_content_within_columns() {
     let rows = frame_rows(&lines);
 
     assert!(lines.iter().all(|line| line.width() <= width));
-    // The oversized description wraps into multiple physical rows.
     assert!(rows.iter().filter(|row| row.contains('│')).count() > 2);
-    // Every column separator sits at the same display position.
     let positions = rows
         .iter()
         .filter(|row| row.contains('│') || row.contains('┼'))
@@ -113,17 +111,14 @@ fn partial_streaming_table_input_never_panics_and_stays_bounded() {
 
 #[test]
 fn soft_breaks_reflow_paragraphs_to_the_render_width() {
-    // A source-wrapped paragraph joins into one row when it fits...
     assert_eq!(
         frame_rows(&markdown_lines("alpha beta\ngamma delta", 40, false)),
         ["alpha beta gamma delta"]
     );
-    // ...and rewraps at the terminal width, not the source width.
     assert_eq!(
         frame_rows(&markdown_lines("alpha beta\ngamma delta", 12, false)),
         ["alpha beta", "gamma delta"]
     );
-    // A hard break still forces an explicit line break.
     assert_eq!(
         frame_rows(&markdown_lines("alpha  \nbeta", 40, false)),
         ["alpha", "beta"]
@@ -164,8 +159,6 @@ fn fenced_code_renders_as_a_tinted_panel_with_a_language_label() {
             format!("┃ {}", " ".repeat(22)),
         ]
     );
-    // Every row is padded to the full width with the surface tint so the
-    // panel reads as one solid slab.
     assert!(lines.iter().all(|line| line.width() == width));
     assert!(
         lines
@@ -186,8 +179,6 @@ fn code_panels_carry_a_labelled_top_row_and_a_blank_bottom_row() {
     assert_eq!(rows[top - 1], "", "block gap above the panel");
     assert!(rows[top].starts_with("┃ "), "{:?}", rows[top]);
     assert_eq!(rows[top].chars().count(), width);
-    // The label is the last non-space run and ends one cell short of the
-    // right edge (the mirror of the padding cell after the gutter).
     assert_eq!(rows[top].trim_end(), format!("┃ {} rust", " ".repeat(22)));
     assert_eq!(rows[top + 1], format!("┃  let x = 1;{}", " ".repeat(17)));
     assert_eq!(rows[top + 2], format!("┃ {}", " ".repeat(28)));
@@ -203,7 +194,6 @@ fn code_panels_carry_a_labelled_top_row_and_a_blank_bottom_row() {
         assert_eq!(row.spans[0].text, "┃  ");
         assert_eq!(row.spans[0].style, surface(border()));
     }
-    // An untagged fence has a blank top row of the same shape.
     let plain = frame_rows(&markdown_lines("```\nlet x = 1;\n```", width, false));
     assert_eq!(plain[0], format!("┃ {}", " ".repeat(28)));
     assert_eq!(plain[0], plain[2]);
@@ -231,7 +221,6 @@ fn wrapped_code_rows_show_the_wrap_mark_in_the_gutter() {
         ]
     );
     assert!(lines.iter().all(|line| line.width() == width));
-    // Both rail glyphs share the border style on the surface.
     for line in &lines {
         assert_eq!(line.spans[0].style, surface(border()));
     }
@@ -257,7 +246,6 @@ fn diff_tints_win_over_the_surface_inside_the_panel() {
         style_of(&lines, "-old line").map(|style| style.background),
         Some(Some(palette.diff_del_bg))
     );
-    // The trailing padding returns to the surface so the slab stays solid.
     assert_eq!(
         plus.spans.last().map(|span| span.style.background),
         Some(Some(surface_color()))
@@ -275,14 +263,12 @@ fn streaming_and_completed_panels_render_the_same_rows() {
             whole.starts_with(&streaming),
             "width={width}\nstreaming={streaming:#?}\nwhole={whole:#?}"
         );
-        // The bottom padding row is already there while the fence is open.
         assert_eq!(
             streaming.last().map(String::as_str),
             Some(whole[streaming.len() - 1].as_str())
         );
         assert!(streaming.last().unwrap().starts_with("┃ "));
     }
-    // A fence that has only just opened already shows its label row.
     let just_opened = frame_rows(&markdown_lines("```rust\n", 24, false));
     assert_eq!(
         just_opened,
@@ -306,7 +292,6 @@ fn diff_fenced_blocks_color_lines_inside_the_panel() {
             .map(|span| span.style)
     };
     assert_eq!(style_of("@@ -1,2 +1,2 @@"), Some(surface(muted())));
-    // Diff tints bring their own background, which wins over the surface.
     assert_eq!(style_of("-old line"), Some(diff_line_style("-")));
     assert_eq!(style_of("+new line"), Some(diff_line_style("+")));
     assert_eq!(style_of(" context"), Some(surface(normal())));
@@ -329,12 +314,10 @@ fn unterminated_fences_render_panels_safely_mid_stream() {
             }
         }
     }
-    // A fence still streaming renders as a panel with the text so far.
     let rows = frame_rows(&markdown_lines("```rust\nfn main() {", 24, false));
     assert!(rows.iter().any(|row| row.starts_with("┃  fn main() {")));
 }
 
-/// Finds the style of the first span whose text contains `needle`.
 pub(crate) fn style_of(lines: &[Line], needle: &str) -> Option<Style> {
     lines
         .iter()
@@ -388,8 +371,6 @@ fn fence_tags_map_to_bundled_grammars_including_aliases() {
             "{alias} shares {canonical}'s configuration"
         );
     }
-    // Unknown tags render plain; diff keeps its dedicated coloring and
-    // ron has no maintained grammar crate.
     for tag in ["", "diff", "ron", "console", "brainfuck"] {
         assert!(fence_highlight_configuration(tag).is_none(), "{tag} plain");
     }
@@ -404,9 +385,6 @@ fn highlighted_rust_panels_style_keywords_strings_and_comments() {
     assert_eq!(style_of(&lines, "// note"), Some(surface(code_comment())));
     assert_eq!(style_of(&lines, "let"), Some(surface(code_keyword())));
     assert_eq!(style_of(&lines, "\"hi\""), Some(surface(code_string())));
-    // Every highlighted span still carries the panel tint, every row pads
-    // to the full width, and the panel structure (label row, gutter,
-    // padding rows) matches the plain rendering exactly.
     assert!(lines.iter().all(|line| line.width() == width));
     assert!(
         lines
@@ -427,14 +405,11 @@ fn punctuation_is_muted_operators_and_parameters_are_text_and_constants_are_not_
     let source = "```rust\nfn add(a: u8) -> u8 {\n    a + &1;\n    Some(0x1f)\n}\n```";
     let lines = markdown_lines(source, 48, true);
 
-    // Brackets and delimiters read in the punctuation role, which the
-    // default palette derives from `muted`.
     let punctuation = surface(code_punctuation());
     assert_eq!(punctuation.color, Some(theme::active().muted));
     assert_eq!(style_of(&lines, "("), Some(punctuation));
     assert_eq!(style_of(&lines, "{"), Some(punctuation));
     assert_eq!(style_of(&lines, ";"), Some(punctuation));
-    // Operators and parameters share the property (text) tone.
     let text = surface(code_property());
     assert_eq!(text.color, Some(theme::active().text));
     assert_eq!(style_of(&lines, "&"), Some(text));
@@ -447,7 +422,6 @@ fn punctuation_is_muted_operators_and_parameters_are_text_and_constants_are_not_
         Some(text),
         "parameter identifier"
     );
-    // Numbers take the constant role, which is never the error color.
     let constant = style_of(&lines, "0x1f").expect("number span");
     assert_eq!(constant, surface(code_constant()));
     assert_ne!(constant.color, Some(theme::active().error));
@@ -456,9 +430,6 @@ fn punctuation_is_muted_operators_and_parameters_are_text_and_constants_are_not_
 
 #[test]
 fn every_bundled_grammar_configures_the_extended_capture_list() {
-    // `configure` runs once per grammar; a capture list that trips a query
-    // would leave the cell `None` and the fence plain, so resolving every
-    // tag and highlighting a bracketed snippet under each proves the list.
     for tag in [
         "rust",
         "toml",
@@ -487,12 +458,10 @@ fn highlighted_long_lines_keep_character_wrapping_and_span_styles() {
     let lines = markdown_lines(source, width, true);
 
     assert!(lines.iter().all(|line| line.width() == width));
-    // Character wrapping, not reflow: the rows match the plain panel.
     assert_eq!(
         frame_rows(&lines),
         frame_rows(&markdown_lines(source, width, false))
     );
-    // The wrapped string literal keeps its style on every row it spans.
     let string_rows = lines
         .iter()
         .filter(|line| {
@@ -553,8 +522,6 @@ fn markdown_entities_cannot_emit_terminal_controls() {
 mod settled_prefix_tests {
     use super::*;
 
-    /// Render the prefix and suffix independently and concatenate them the
-    /// way the live renderer does.
     fn split_render(source: &str, width: usize) -> Vec<Line> {
         let split = settled_prefix_end(source);
         let mut lines = markdown_lines(&source[..split], width, false);
@@ -623,7 +590,6 @@ mod settled_prefix_tests {
     }
 }
 
-/// Every block element the transcript lays out, in one message.
 const GALLERY: &str = "\
 First paragraph of prose.
 
@@ -756,8 +722,6 @@ fn exactly_one_blank_row_separates_every_block_in_the_gallery() {
             "two consecutive blank rows in {rows:#?}"
         );
     }
-    // Each of these begins a block whose predecessor is a different block,
-    // so the row before it must be blank.
     for needle in [
         "Second paragraph",
         "Level one heading",
@@ -781,8 +745,6 @@ fn exactly_one_blank_row_separates_every_block_in_the_gallery() {
             "{needle:?} has no gap above: {rows:#?}"
         );
     }
-    // The horizontal rule spans the width; the H1 underline (title width)
-    // sits directly under its heading and is not a block of its own.
     let rule = rows
         .iter()
         .position(|r| *r == "─".repeat(80))
@@ -796,17 +758,12 @@ fn exactly_one_blank_row_separates_every_block_in_the_gallery() {
         .position(|r| r.contains("Level one heading"))
         .unwrap();
     assert_eq!(rows[h1 + 1], "─".repeat("Level one heading".len()));
-    // Rows inside one list and one table stay tight. `- Short bullet` and
-    // `- [ ] open task` are one CommonMark list despite the blank line
-    // between them, so the task items follow the bullets directly.
     let second = rows.iter().position(|r| r.contains("2. Second")).unwrap();
     assert!(!rows[second - 1].is_empty(), "list items stay tight");
     let open_task = rows.iter().position(|r| r.contains("☐ open task")).unwrap();
     assert_eq!(rows[open_task - 1], "• Short bullet");
     let text_row = rows.iter().position(|r| r.contains("text")).unwrap();
     assert!(!rows[text_row - 1].is_empty(), "table rows stay tight");
-    // The whole gallery renders identically whether laid out at once or
-    // through the settled prefix used while streaming.
     let split = settled_prefix_end(GALLERY);
     let mut streamed = markdown_lines(&GALLERY[..split], 80, false);
     streamed.extend(markdown_lines(&GALLERY[split..], 80, false));
@@ -825,7 +782,6 @@ fn inline_code_is_plain_text_on_the_surface() {
     assert_eq!(code.color, normal().color);
     assert_eq!(code.background, Some(surface_color()));
     assert!(!code.is_bold(), "inline code is not bold");
-    // Strong around code does not leak into the code span: the tint is the mark.
     assert_eq!(style_of(&lines, "Ok"), Some(inline_code()));
     assert_eq!(style_of(&lines, "Call "), Some(normal()));
 }
@@ -843,7 +799,6 @@ fn link_text_is_underlined_accent_and_the_url_is_dropped() {
     assert_eq!(guide, link());
     assert_eq!(guide.color, accent().color);
     assert!(guide.is_underline());
-    // Emphasis outside the link is replaced by the link style inside it.
     let inner = style_of(&lines, "emphasized").expect("link span");
     assert!(inner.is_underline() && !inner.is_italic());
     assert_eq!(style_of(&lines, "Read "), Some(normal()));

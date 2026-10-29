@@ -19,8 +19,6 @@ use rmcp::{
 
 use super::*;
 
-/// A tiny in-process MCP server spoken to over a duplex pipe, so client
-/// behavior is exercised without a subprocess or the network.
 #[derive(Clone)]
 struct FixtureServer {
     tools: Arc<StdMutex<Vec<Tool>>>,
@@ -125,8 +123,6 @@ impl rmcp::ServerHandler for FixtureServer {
     }
 }
 
-/// Handle for driving the fixture from a test: connection counting, scripted
-/// connect failures, killing the live server, and server-side notifications.
 #[derive(Clone)]
 struct Fixture {
     server: FixtureServer,
@@ -189,8 +185,6 @@ impl Fixture {
                     if let Ok(service) =
                         serve_server(server, AsyncRwTransport::new(server_read, server_write)).await
                     {
-                        // Holding the running service keeps the server alive;
-                        // `kill_server` drops it to sever the transport.
                         *running.lock().unwrap() = Some(service);
                     }
                 });
@@ -383,8 +377,6 @@ async fn refreshes_the_tool_cache_on_list_changed_notifications() {
 
     fixture.server.tools.lock().unwrap().push(tool("extra"));
     fixture.notify_tool_list_changed().await;
-    // The notification alone advances the generation: a plan compiled from
-    // the old listing knows to recompile before anyone refetches.
     poll_until(async || !manager.catalog_is_current(before.generation)).await;
     poll_until(async || {
         manager
@@ -439,8 +431,6 @@ async fn calls_succeed_fail_and_map_server_errors_without_reconnecting() {
     let malformed = manager.call("mcp__srv", "{}", not_cancelled()).await;
     assert!(malformed.is_error);
 
-    // Every error above was an answer from the live server or local
-    // validation: none may have torn down the shared connection.
     let after = manager
         .call("mcp__srv__echo", r#"{"text":"still up"}"#, not_cancelled())
         .await;
@@ -503,8 +493,6 @@ async fn cancellation_stops_a_call_without_wedging_the_shared_client() {
 
 #[tokio::test]
 async fn a_slow_connect_never_holds_a_call_permit() {
-    // The permit bounds in-flight calls, not connection attempts: a caller
-    // parked in connect must leave the whole bound available to others.
     let fixture = Fixture::new(&["echo"]);
     let gate = Arc::new(tokio::sync::Notify::new());
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -550,8 +538,6 @@ async fn a_slow_connect_never_holds_a_call_permit() {
 
 #[tokio::test]
 async fn one_server_is_bounded_while_distinct_servers_run_in_parallel() {
-    // Per-server bound: with one permit, two concurrent slow calls must
-    // never overlap inside the fixture.
     let fixture = Fixture::new(&["slow"]);
     let mut bounded = settings("srv");
     bounded.max_concurrent_calls = 1;
@@ -572,8 +558,6 @@ async fn one_server_is_bounded_while_distinct_servers_run_in_parallel() {
         "one server's calls must serialize under its bound"
     );
 
-    // Distinct servers: each slow call blocks on a shared barrier that only
-    // releases when both servers are executing simultaneously.
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let mut left = Fixture::new(&["slow"]);
     left.server.barrier = Some(Arc::clone(&barrier));
@@ -615,9 +599,6 @@ async fn reconnects_after_a_dead_server_and_a_failed_connect() {
     assert_eq!(first.content, "one");
     assert_eq!(fixture.connects(), 1);
 
-    // The server dies: the next call fails as a tool error, and the one
-    // after reconnects (with the fixture refusing once to exercise the
-    // backoff-then-retry path).
     fixture.kill_server();
     let dead = manager
         .call("mcp__srv__echo", r#"{"text":"two"}"#, not_cancelled())
@@ -643,8 +624,6 @@ async fn reconnects_after_a_dead_server_and_a_failed_connect() {
 
 #[tokio::test]
 async fn stdio_spawn_failures_become_call_errors_over_the_real_transport() {
-    // No test connector here: this exercises the real child-process path
-    // with a command that cannot exist.
     let mut missing = settings("srv");
     missing.transport = McpTransportSettings::Stdio {
         command: "qq-mcp-test-no-such-binary".to_owned(),
@@ -659,10 +638,6 @@ async fn stdio_spawn_failures_become_call_errors_over_the_real_transport() {
 
 #[tokio::test]
 async fn an_unresolvable_bearer_keeps_the_server_declared_but_unavailable() {
-    // The composition root could not resolve the configured credential. The
-    // server keeps its grants and name, contributes no tools, and every call
-    // is a typed `Unavailable` carrying the resolution failure verbatim. A
-    // healthy sibling is unaffected.
     let reason = "credential `linear/default` is not registered; run `qq auth set linear/default`";
     let mut degraded = settings("linear");
     degraded.transport = McpTransportSettings::Http {
@@ -673,8 +648,6 @@ async fn an_unresolvable_bearer_keeps_the_server_declared_but_unavailable() {
     };
     degraded.allow = vec!["create_issue".to_owned()];
     let healthy = Fixture::new(&["echo"]);
-    // No test connector on the degraded handle: the real `connect` path is
-    // what must refuse before any transport is built.
     let mut sibling = ServerHandle::new(settings("srv"));
     sibling.connector = Some(healthy.connector());
     let manager = McpManager {
@@ -718,7 +691,6 @@ async fn an_unresolvable_bearer_keeps_the_server_declared_but_unavailable() {
     assert!(!sibling.is_error);
 }
 
-/// Digest of what `manager` currently lists for the single fixture server.
 async fn listed_digest(manager: &McpManager, server: &str) -> McpToolSetDigest {
     let catalog = manager.catalog().await;
     catalog
@@ -757,7 +729,6 @@ fn tool_set_digest_ignores_listing_order_and_tracks_every_field() {
         McpToolSetDigest::of_tools(std::slice::from_ref(&echo))
     );
 
-    // Sorted-key `Value` encoding makes key order in the schema irrelevant.
     let reordered_schema = spec(
         "mcp__srv__echo",
         "echoes",
@@ -860,7 +831,6 @@ async fn a_drifted_pin_quarantines_the_catalog_and_every_call() {
     let probe_manager = manager_with(vec![(settings("srv"), probe.connector())]);
     let expected = listed_digest(&probe_manager, "srv").await;
 
-    // The live server grew a tool; `echo` itself is unchanged.
     let fixture = Fixture::new(&["echo", "fail"]);
     let mut pinned = settings("srv");
     pinned.pin = Some(expected);
@@ -904,7 +874,6 @@ async fn a_drifted_pin_quarantines_the_catalog_and_every_call() {
     );
     assert!(manager.catalog_is_current(catalog.generation));
 
-    // The unchanged tool fails closed too: the quarantine is per server.
     let outcome = manager
         .call("mcp__srv__echo", r#"{"text":"nope"}"#, not_cancelled())
         .await;
@@ -926,8 +895,6 @@ async fn a_drifted_pin_quarantines_the_catalog_and_every_call() {
     assert_eq!(sibling.failure, None);
     assert_eq!(sibling.content, "alive");
 
-    // The server drops the extra tool and announces it: the listing matches
-    // the pin again and the server leaves quarantine without a restart.
     fixture.server.tools.lock().unwrap().pop();
     fixture.notify_tool_list_changed().await;
     poll_until(async || manager.catalog().await.quarantined.is_empty()).await;
@@ -956,9 +923,6 @@ async fn a_list_changed_drift_quarantines_before_the_next_call() {
         .await;
     assert_eq!(outcome.failure, None);
 
-    // The server changes `echo`'s description under the same name and
-    // notifies. No catalog is fetched in between: the call path itself must
-    // notice the dirty listing and re-verify.
     {
         let mut tools = fixture.server.tools.lock().unwrap();
         tools[0].description = Some("a changed fixture tool".to_owned().into());
@@ -1199,8 +1163,6 @@ async fn listings_bound_pages_tool_count_and_bytes_without_partial_pins() {
 fn descriptor_bytes_are_counted_without_an_encoded_copy() {
     use std::io::Write;
 
-    // Exactly the budget passes; one byte more fails at the write that
-    // crosses it, leaving the sink spent rather than allocating.
     let mut budget = ByteBudget { remaining: 8 };
     assert_eq!(budget.write(b"12345").unwrap(), 5);
     assert_eq!(budget.write(b"678").unwrap(), 3);
@@ -1217,7 +1179,6 @@ fn descriptor_bytes_are_counted_without_an_encoded_copy() {
         error.is_io(),
         "budget exhaustion surfaces as an io error: {error}"
     );
-    // The write that crosses the budget is rejected whole, never partially.
     assert!(budget.remaining > 0 && budget.remaining < MAX_LIST_BYTES);
 
     let mut budget = ByteBudget {

@@ -49,7 +49,6 @@ pub(crate) struct ExecutionContextFacts {
     pub(crate) locale: Locale,
     pub(crate) cwd: CwdIdentity,
     pub(crate) verdict: ExecutionVerdict,
-    /// Host process owning this invocation; native backends may run the payload in descendants.
     pub(crate) pid: u32,
 }
 
@@ -176,7 +175,6 @@ impl ExecutionContextReceipt {
     }
 }
 
-/// Canonical parsed arguments bind the receipt without copying raw request text.
 pub(crate) fn arguments_digest(tool: &str, arguments: &str) -> Option<ContentHash> {
     argument_identity(tool, arguments).map(|(digest, _)| digest)
 }
@@ -207,9 +205,6 @@ pub(super) enum OwnedLaunch {
     Exec(ExecArgs),
 }
 
-/// The command and its capabilities are prepared together. Keeping this value
-/// alive through reap prevents later path/env changes from replacing a verified
-/// image or working directory.
 pub(crate) struct PreparedLaunch {
     command: Option<tokio::process::Command>,
     receipt: ExecutionContextReceipt,
@@ -219,7 +214,6 @@ pub(crate) struct PreparedLaunch {
 }
 
 impl PreparedLaunch {
-    /// Only stream/process supervision settings may change after verification.
     pub(crate) async fn spawn(
         &mut self,
         piped_stdin: bool,
@@ -342,8 +336,6 @@ pub(super) fn prepare(
         OwnedLaunch::Exec(args) => (args.cwd.as_deref(), serde_json::to_vec(args)),
     };
     let encoded = encoded.map_err(PreparationError::Arguments)?;
-    // Commands inherit the server's whole environment. A verified read runs
-    // with only these base names, so no variable can point it at helpers.
     let mut environment = Vec::<(OsString, OsString)>::with_capacity(BASE_ENV.len());
     let mut bytes = 0_usize;
     let mut base_env_present = 0;
@@ -448,9 +440,6 @@ pub(super) fn prepare(
     if matches!(verdict, ExecutionVerdict::VerifiedRead { .. }) {
         command.env_clear().envs(environment);
     } else {
-        // Output goes to a pipe the model reads: plain text, no pager. TERM
-        // is always replaced because a terminal's own value is nearly always
-        // set; the rest yield to values the user already chose.
         command.env("TERM", "dumb");
         for (name, value) in PLAIN_OUTPUT_ENV {
             if std::env::var_os(name).is_none() {
@@ -532,8 +521,6 @@ fn bind_read_image(
     {
         return Err(UnverifiedReason::Arguments);
     }
-    // Native exec's relative/default PATH semantics are deliberately unverified.
-    // Only an absolute explicit path or a wholly absolute captured PATH is bound.
     let candidates = if args.program.contains('/') {
         let path = PathBuf::from(&args.program);
         if !path.is_absolute() {
@@ -635,8 +622,6 @@ fn bind_read_image(
     {
         return Err(UnverifiedReason::Image);
     }
-    // Hash only after sealing: another same-user process cannot alter the
-    // bytes between identity verification and kernel execution.
     bound.rewind().map_err(|_| UnverifiedReason::Image)?;
     let size = rustix::fs::fstat(&bound)
         .map_err(|_| UnverifiedReason::Image)?
@@ -659,8 +644,6 @@ fn bind_read_image(
     Ok((bound, approved.family, hash))
 }
 
-/// This format guard rejects loaders; the host's behavioral attestation is
-/// still necessary. A static ELF image can itself write or load executable code.
 #[cfg(target_os = "linux")]
 fn static_native_elf(bytes: &[u8]) -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -745,7 +728,6 @@ mod tests {
     #[test]
     fn ab1_verified_image_is_bound_and_unverified_effects_count_as_work() {
         if std::env::var_os("QQ_CONTEXT_IMAGE_WORKER").is_none() {
-            // The C locale is a process input. Never mutate a shared test process.
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "tools::process_context::tests::ab1_verified_image_is_bound_and_unverified_effects_count_as_work", "--nocapture"])
                 .env("QQ_CONTEXT_IMAGE_WORKER", "1").env("LANG", "C").status().unwrap();
@@ -800,8 +782,6 @@ mod tests {
             prepared.receipt.facts().verdict,
             ExecutionVerdict::VerifiedRead { .. }
         ));
-        // A verified read runs with only the base names, so no variable can
-        // point it at helpers; unverified work inherits the whole environment.
         let explicit = |launch: &PreparedLaunch| {
             let command = launch.command.as_ref().unwrap().as_std();
             let mut names = command
@@ -876,8 +856,6 @@ mod tests {
         assert!(!root.join("work/cwd.txt").exists());
         let old_cwd = prepared.receipt.facts().cwd;
         assert!(matches!(old_cwd, CwdIdentity::HeldDirectory { .. }));
-        // Replace the selected pathname after preparation. Execution still uses
-        // the sealed, approved bytes, never this new executable.
         std::fs::write(&program, "#!/bin/sh\nprintf changed > written.txt\n").unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -979,8 +957,6 @@ mod tests {
     }
 }
 
-/// Prepare an explicitly authorized session check with the ordinary minimal
-/// process environment and captured workspace capability.
 #[cfg(unix)]
 pub(crate) fn prepare_goal_check(
     workspace: Workspace,

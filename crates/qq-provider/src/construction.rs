@@ -1,9 +1,3 @@
-//! Shared construction for compiled direct HTTP providers.
-//!
-//! This module owns protocol/authentication compatibility and concrete adapter
-//! selection. Callers must resolve endpoints and supply an HTTP client before
-//! entering this boundary.
-
 use std::borrow::Cow;
 
 use crate::{
@@ -29,7 +23,6 @@ const CACHE_ROUTING_PROTOCOL_MESSAGE: &str =
 const AUTHORIZER_WITH_AUTH_MESSAGE: &str =
     "internal request authorization cannot be combined with HTTP authentication";
 
-/// Fully resolved inputs for constructing one compiled HTTP provider.
 pub(crate) struct HttpConstructionSpec {
     pub(crate) protocol: HttpProtocol,
     pub(crate) endpoint: reqwest::Url,
@@ -41,14 +34,11 @@ pub(crate) struct HttpConstructionSpec {
     pub(crate) cache_routing: CacheRouting,
 }
 
-/// The static headers and per-attempt authorizer one adapter sends.
 struct ResolvedHttpAuth {
     auth: StaticAuth,
     authorizer: RequestAuthorizer,
 }
 
-// Only the Mantle adapter selects a retry mode at construction; the HTTP
-// families take the canary path through `without_retries` directly.
 #[cfg(feature = "provider-bedrock")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HttpRetryMode {
@@ -56,7 +46,6 @@ pub(crate) enum HttpRetryMode {
     Disabled,
 }
 
-/// The concrete HTTP provider selected by compiled construction.
 pub(crate) enum CompiledHttpProvider {
     OpenAiResponses(OpenAi),
     OpenAiChatCompletions(OpenAiChatCompletions),
@@ -80,7 +69,6 @@ impl CompiledHttpProvider {
         self.with_attempt_policy(AttemptPolicy::disabled())
     }
 
-    /// Replaces the single retry owner for every send this provider makes.
     #[must_use]
     pub(crate) fn with_attempt_policy(self, policy: AttemptPolicy) -> Self {
         let mut provider = self;
@@ -106,9 +94,6 @@ impl Provider for CompiledHttpProvider {
     }
 }
 
-/// Constructs one HTTP adapter from resolved inputs without creating clients or
-/// performing network I/O.
-// Recipe compilation is a measured startup path with multiple facade call sites.
 #[inline(always)]
 pub(crate) fn construct_http_provider(
     client: reqwest::Client,
@@ -166,7 +151,6 @@ pub(crate) fn construct_http_provider(
     })
 }
 
-/// The header a protocol carries a plain API key in.
 fn api_key_auth(protocol: HttpProtocol, secret: crate::SecretLiteral) -> StaticAuth {
     match protocol {
         HttpProtocol::OpenAiResponses | HttpProtocol::OpenAiChatCompletions => {

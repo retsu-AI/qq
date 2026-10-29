@@ -21,27 +21,15 @@ use crate::{
 const TUI_REQUEST_CAPACITY: usize = 64;
 const TUI_UPDATE_CAPACITY: usize = 256;
 const TUI_CONCURRENT_REQUESTS: usize = 8;
-/// Other sessions whose bodies the bootstrap snapshot pre-warms alongside the
-/// focused one. Kept below the TUI's warm-body limit so nothing is evicted
-/// on arrival.
 const PREWARM_SESSIONS: usize = 4;
 
 type ReconnectFuture = Pin<Box<dyn Future<Output = Option<Connection>> + Send + 'static>>;
 type ConnectionResolver = Arc<dyn Fn() -> ReconnectFuture + Send + Sync + 'static>;
 
-/// Which session the TUI shows first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InitialSession {
-    /// Create a fresh session with this model before the first snapshot. This
-    /// is bare `qq`: every launch starts a new conversation, and earlier ones
-    /// stay reachable from the session list or by id.
     New(ModelSelection),
-    /// Focus this existing session. Rejected at bootstrap when it is not a
-    /// session of the workspace, so the TUI never paints a wrong session.
     Open(SessionId),
-    /// Focus whatever the workspace already has (newest first) and create
-    /// nothing. Used by clients that attach to a server they do not own, and
-    /// by every reconnect after the first bootstrap.
     Existing,
 }
 
@@ -171,9 +159,6 @@ async fn run_tui_client(
         }
     };
     let mut cursor = snapshot.cursor;
-    // An attached client with an empty workspace creates one session once
-    // the catalog has validated the model. `New` already created; `Open`
-    // never creates.
     let create_after_validation =
         initial == InitialSession::Existing && snapshot.sessions.is_empty();
     if updates
@@ -367,10 +352,6 @@ async fn load_tui_models(
     create_initial_session: bool,
     updates: mpsc::Sender<ClientUpdate>,
 ) {
-    // Capabilities ride the same background task as the catalog: neither
-    // gates first paint, and both restart together after a recovery. A
-    // failure leaves them unadvertised, which the TUI treats as absent. The
-    // workspace scope is what makes profiles and skills part of the document.
     if let Ok(capabilities) = client.capabilities(Some(workspace_id)).await
         && updates
             .send(ClientUpdate::Capabilities(Arc::new(capabilities)))
@@ -493,8 +474,6 @@ async fn bootstrap_tui(
             session_id
         }
         InitialSession::Open(session_id) => {
-            // Only root sessions are openable; a sub-agent session is shown
-            // under its parent, never as the entry point.
             match snapshot
                 .sessions
                 .iter()
@@ -510,8 +489,6 @@ async fn bootstrap_tui(
             None => return Ok((workspace_id, snapshot)),
         },
     };
-    // Pre-warm the most recent other sessions so the first few switches in
-    // the TUI cost no round trip. Sessions arrive newest-first.
     let include_sessions = snapshot
         .sessions
         .iter()
@@ -531,10 +508,6 @@ async fn bootstrap_tui(
     Ok((workspace_id, snapshot))
 }
 
-/// Re-bootstraps after a stream failure. Always [`InitialSession::Existing`]:
-/// the first bootstrap already created or opened what was asked for, and a
-/// reconnect must neither create a second session nor fail on an id that
-/// has since been deleted.
 async fn recover_tui_client(
     current: &SessionClient,
     workspace: &Path,
@@ -583,16 +556,12 @@ fn dispatch_tui_request(
             ClientRequest::Snapshot(_) => ClientUpdate::SnapshotFailed(TuiClientFailure::new(
                 "too many client requests are active",
             )),
-            // A refresh that cannot run now is simply not delivered: the TUI
-            // keeps the document it has and the user can ask again.
             ClientRequest::Capabilities | ClientRequest::Models(_) => return,
         };
         let _ = updates.try_send(update);
         return;
     };
     tokio::spawn(async move {
-        // A newly created session has an empty transcript by construction, so
-        // the TUI adopts it from the receipt alone; no follow-up snapshot.
         let update = match request {
             ClientRequest::Command(command) => ClientUpdate::CommandResult {
                 command_id: command.command_id,
@@ -616,9 +585,6 @@ fn dispatch_tui_request(
                     workspace: workspace.to_string_lossy().into_owned(),
                     selection: selection.clone(),
                 };
-                // Same validity rule as bootstrap: the default is kept only
-                // when the catalog lists it, so the TUI never offers Alt-N a
-                // route the server would refuse.
                 match client.models(request).await {
                     Ok(models) => {
                         let selected = models

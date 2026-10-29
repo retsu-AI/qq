@@ -1,13 +1,8 @@
-//! Exact task inputs are a projection of durable source rows, independent
-//! of the model's narrative and the bounded file/failure record.
-
 use super::*;
 
 pub(in crate::sessions) const EXACT_INPUTS_HEADER: &str =
     "[QQ original inputs: verbatim, in conversation order; later corrections take precedence]";
 
-/// Rebuild even legacy summaries from their sources. Never truncate an
-/// instruction to fit: an irreducible context limit leaves history intact.
 pub(in crate::sessions) fn with_exact_inputs(
     connection: &Connection,
     session: &str,
@@ -114,8 +109,6 @@ pub(in crate::sessions) fn with_exact_inputs(
                 .checked_sub(summary.len() + framing.len() + 1)
                 .ok_or(SessionRuntimeError::ContextTooLarge)?;
             let statement = if is_answer { &mut answer } else { &mut message };
-            // SQLite substr counts characters, so room+1 always fetches
-            // enough to distinguish a complete UTF-8 input from a prefix.
             let (text, bytes): (String, usize) =
                 statement.query_row(params![id, room + 1], |row| Ok((row.get(0)?, row.get(1)?)))?;
             if bytes > room {

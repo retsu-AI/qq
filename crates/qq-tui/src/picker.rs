@@ -1,20 +1,8 @@
-//! Shared state and behaviour for every filterable selection list: the model,
-//! theme, session, and command pickers, and the slash autocomplete cursor.
-//!
-//! A `Picker<T>` owns its items, the query, and the cursor into the *filtered*
-//! view of those items. Every picker answers the same keys the same way
-//! (`Up`/`Down` move, `Backspace` and typing edit the query); the caller
-//! decides what `Enter` means and how a row is drawn.
-
 use crate::app::terminal_safe_character;
 
-/// Maximum bytes accepted into a picker search query.
 pub(crate) const MAX_QUERY_BYTES: usize = 256;
 
-/// Something a picker can list and filter.
 pub(crate) trait PickerItem {
-    /// Text the query is matched against, case-insensitively, as a
-    /// subsequence. Return every spelling a user might type.
     fn search_text<'a>(&'a self, out: &mut Vec<&'a str>);
 }
 
@@ -26,9 +14,7 @@ impl PickerItem for usize {
 pub(crate) struct Picker<T = ()> {
     items: Vec<T>,
     pub query: String,
-    /// Cursor into the filtered list.
     selected: usize,
-    /// Indices into `items` matching `query`, in item order.
     filtered: Vec<usize>,
 }
 
@@ -43,16 +29,12 @@ impl<T> Default for Picker<T> {
     }
 }
 
-/// A picker with no items: the slash autocomplete cursor, whose list is
-/// computed from the composer text by the caller.
 impl Picker<()> {
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    /// Cursor into a filtered list of `len` entries. Clamps to the last entry
-    /// so a shrinking list never leaves the cursor dangling.
     #[must_use]
     pub(crate) fn selected(&self, len: usize) -> usize {
         self.selected.min(len.saturating_sub(1))
@@ -82,8 +64,6 @@ impl<T: PickerItem> Picker<T> {
         picker
     }
 
-    /// Replace the items, keeping the cursor on the same logical item where
-    /// `identity` still finds it in the new list.
     pub(crate) fn replace_items<K: PartialEq>(
         &mut self,
         items: Vec<T>,
@@ -106,20 +86,17 @@ impl<T: PickerItem> Picker<T> {
         &self.items
     }
 
-    /// Filtered items in order, each with its index into `items`.
     pub(crate) fn filtered(&self) -> impl ExactSizeIterator<Item = (usize, &T)> + '_ {
         self.filtered
             .iter()
             .map(|index| (*index, &self.items[*index]))
     }
 
-    /// Position of the cursor within the filtered list.
     #[must_use]
     pub(crate) fn cursor(&self) -> usize {
         self.selected.min(self.filtered.len().saturating_sub(1))
     }
 
-    /// The highlighted item, if any.
     #[must_use]
     pub(crate) fn current(&self) -> Option<&T> {
         self.filtered
@@ -127,7 +104,6 @@ impl<T: PickerItem> Picker<T> {
             .map(|index| &self.items[*index])
     }
 
-    /// Move the cursor to the item at `index` in `items`, if it is visible.
     pub(crate) fn select_item(&mut self, index: usize) -> bool {
         match self
             .filtered
@@ -154,9 +130,6 @@ impl<T: PickerItem> Picker<T> {
         self.selected != before
     }
 
-    /// Append sanitized characters to the query, bounded by
-    /// [`MAX_QUERY_BYTES`]. Resets the cursor because the filtered list
-    /// changed shape. Returns whether the query changed.
     pub(crate) fn push_query(&mut self, text: &str) -> bool {
         let before = self.query.len();
         for character in text.chars() {
@@ -175,8 +148,6 @@ impl<T: PickerItem> Picker<T> {
         true
     }
 
-    /// Remove the last query character and reset the cursor. Returns whether
-    /// anything was removed.
     pub(crate) fn pop_query(&mut self) -> bool {
         if self.query.pop().is_none() {
             return false;
@@ -204,8 +175,6 @@ impl<T: PickerItem> Picker<T> {
     }
 }
 
-/// Case-insensitive subsequence match: every query character appears in
-/// `candidate` in order. `"mdl"` matches `"models"`; `"lsd"` does not.
 #[must_use]
 pub(crate) fn fuzzy_matches(query: &str, candidate: &str) -> bool {
     let mut query = query.chars();

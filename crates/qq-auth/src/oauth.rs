@@ -1,5 +1,3 @@
-//! Transport and bookkeeping shared by the provider OAuth flows.
-
 use std::{
     io::Read,
     time::{Duration, Instant, SystemTime, SystemTimeError, UNIX_EPOCH},
@@ -10,17 +8,9 @@ use serde::de::DeserializeOwned;
 
 use super::{AuthError, validate_credential_name};
 
-/// One built-in provider whose stored credentials are OAuth token sets that
-/// QQ refreshes. Logins, refreshes, rotations and removals of one provider's
-/// credentials are serialised through its process mutex and its derived
-/// `{provider}.lock` file. A new OAuth provider is one row in
-/// [`Self::ALL`]: every operation lock, including the generic `set` and
-/// `remove` paths, finds it from there.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct OAuthProvider {
-    /// The provider half of its `PROVIDER/PROFILE` credential names.
     name: &'static str,
-    /// The error a poisoned process lock is reported as.
     lock_unavailable: fn() -> AuthError,
 }
 
@@ -41,7 +31,6 @@ impl OAuthProvider {
         name: "xai",
         lock_unavailable: || super::xai::XaiAuthError::RefreshLockUnavailable.into(),
     };
-    /// A provider with no legacy lock file, for tests of the derived lock.
     #[cfg(test)]
     pub(crate) const FIXTURE: Self = Self {
         name: "fixture-oauth",
@@ -57,7 +46,6 @@ impl OAuthProvider {
         self.name
     }
 
-    /// Position in [`Self::ALL`], for per-provider process locks.
     pub(crate) fn index(self) -> usize {
         Self::ALL
             .iter()
@@ -65,7 +53,6 @@ impl OAuthProvider {
             .expect("every OAuth provider is a row of OAuthProvider::ALL")
     }
 
-    /// The provider whose credentials are stored under `name`, if any.
     pub(crate) fn for_credential(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|provider| {
             name.strip_prefix(provider.name)
@@ -78,22 +65,15 @@ impl OAuthProvider {
     }
 }
 
-/// The operation lock file of the OAuth provider whose credentials are
-/// stored as `{provider}/{profile}`.
 pub(crate) fn lock_file_name(provider: &str) -> String {
     format!("{provider}.lock")
 }
 
-/// One OAuth endpoint call: a POST with a form or JSON body.
 pub(crate) struct OAuthRequest<'a> {
     pub(crate) url: &'a str,
     pub(crate) body: OAuthBody,
     pub(crate) headers: &'a [(&'static str, &'static str)],
-    /// The caller's deadline for the whole call, e.g. a login's remaining
-    /// time. It only ever shortens [`REQUEST_TIMEOUT`]; running it out is
-    /// [`TransportError::DeadlineReached`], running out the cap is not.
     pub(crate) timeout: Option<Duration>,
-    /// The largest response body read; a longer one reads as `None`.
     pub(crate) max_body: usize,
 }
 
@@ -103,7 +83,6 @@ pub(crate) enum OAuthBody {
 }
 
 impl OAuthBody {
-    /// The value of field `name`, for fakes that route on the grant.
     #[cfg(test)]
     pub(crate) fn field(&self, name: &str) -> Option<String> {
         match self {
@@ -116,8 +95,6 @@ impl OAuthBody {
     }
 }
 
-/// An OAuth endpoint's answer: its status and its body, `None` when the body
-/// could not be read or exceeded the request's bound.
 pub(crate) struct OAuthResponse {
     pub(crate) status: u16,
     pub(crate) body: Option<Vec<u8>>,
@@ -128,19 +105,10 @@ impl OAuthResponse {
         self.status >= 200 && self.status < 300
     }
 
-    /// The body decoded as JSON; `None` covers an unreadable, oversized or
-    /// malformed body alike, which every caller reports as its own
-    /// "invalid response" error.
     pub(crate) fn json<T: DeserializeOwned>(&self) -> Option<T> {
         serde_json::from_slice(self.body.as_deref()?).ok()
     }
 
-    /// Reads at most `limit` bytes of `response`. The request's timeout
-    /// stays active while the body streams, so a success body that stalls
-    /// past it is a timeout (`timed_out` says which kind), not an unreadable
-    /// body. A rejection keeps its status whatever happens to its body:
-    /// providers map most rejections from the status alone, as they did
-    /// before the body was read.
     pub(crate) fn read(
         mut response: Response,
         limit: usize,
@@ -162,7 +130,6 @@ impl OAuthResponse {
     }
 }
 
-/// Whether a body read failed because the request's timeout passed.
 fn is_timeout(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::TimedOut
         || error
@@ -171,27 +138,18 @@ fn is_timeout(error: &std::io::Error) -> bool {
             .is_some_and(reqwest::Error::is_timeout)
 }
 
-/// Why an OAuth call produced no response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransportError {
-    /// The call failed, or ran out the transport's own [`REQUEST_TIMEOUT`].
     Failed,
-    /// The call ran out the shorter deadline its request carried, e.g. a
-    /// device login's remaining lifetime.
     DeadlineReached,
 }
 
-/// The one contract every OAuth token exchange, refresh, device start and
-/// device poll goes through. Providers own only their endpoint specs and
-/// response mapping; a store holds one transport for all of them.
 pub(crate) trait OAuthTransport: Send + Sync {
     fn post(&self, request: OAuthRequest<'_>) -> Result<OAuthResponse, TransportError>;
 }
 
-/// The HTTPS transport real stores use.
 pub(crate) struct SystemTransport {
     client: Option<Client>,
-    /// The longest any one call may take: [`REQUEST_TIMEOUT`] outside tests.
     cap: Duration,
 }
 
@@ -203,7 +161,6 @@ impl SystemTransport {
         }
     }
 
-    /// A transport over `client`, for loopback fixtures that are not HTTPS.
     #[cfg(test)]
     pub(crate) const fn with_client(client: Client) -> Self {
         Self {
@@ -212,8 +169,6 @@ impl SystemTransport {
         }
     }
 
-    /// The same transport with a shorter per-call cap, so a test can run
-    /// the cap out quickly.
     #[cfg(test)]
     pub(crate) const fn with_cap(mut self, cap: Duration) -> Self {
         self.cap = cap;
@@ -235,7 +190,6 @@ impl OAuthTransport for SystemTransport {
             OAuthBody::Form(fields) => builder.form(&fields),
             OAuthBody::Json(value) => builder.json(&value),
         };
-        // The caller's deadline can only shorten the transport's cap.
         builder = builder.timeout(
             request
                 .timeout
@@ -254,11 +208,6 @@ impl OAuthTransport for SystemTransport {
     }
 }
 
-/// What a timed-out call reports. Only a timeout the caller's own deadline
-/// caused reaches it: the call must have run out that deadline, and that
-/// deadline must have been shorter than the transport's cap. Every other
-/// timeout (the 30-second connect bound, the cap itself) is an ordinary
-/// transport failure, however much of the caller's deadline is left.
 fn classify_timeout(
     deadline: Option<Duration>,
     cap: Duration,
@@ -270,7 +219,6 @@ fn classify_timeout(
     }
 }
 
-/// One RFC 8628 device-authorization poll result.
 pub(crate) enum DeviceStep<T> {
     Pending,
     SlowDown,
@@ -279,7 +227,6 @@ pub(crate) enum DeviceStep<T> {
     Complete(T),
 }
 
-/// How a device poll loop reports each way it can end without a grant.
 pub(crate) struct DevicePollErrors<E> {
     pub(crate) timed_out: fn() -> E,
     pub(crate) cancelled: fn() -> E,
@@ -287,19 +234,12 @@ pub(crate) struct DevicePollErrors<E> {
     pub(crate) expired: fn() -> E,
 }
 
-/// The clock, cancellation check and sleep a device poll loop runs on,
-/// injectable so tests are deterministic.
 pub(crate) struct DevicePollRuntime<N, C, S> {
     pub(crate) now: N,
     pub(crate) cancelled: C,
     pub(crate) sleep: S,
 }
 
-/// Polls a device authorization until it completes, is denied or expires,
-/// the deadline passes or the caller cancels. Each round waits one interval
-/// (bounded by the deadline) before polling, re-checking cancellation and
-/// the deadline around every wait and poll. `slow_down` adds five seconds to
-/// the interval, up to `max_interval`. `poll` receives the time left.
 pub(crate) fn poll_device<T, E, N, C, S>(
     deadline: Instant,
     mut interval: Duration,
@@ -350,9 +290,6 @@ where
     }
 }
 
-/// The HTTPS-only, redirect-free client every OAuth token and device endpoint
-/// is called with. Built per call: logins and refreshes are rare, and a
-/// shared client would outlive the store that owns its configuration.
 pub(super) fn http_client() -> Result<Client, reqwest::Error> {
     Client::builder()
         .use_rustls_tls()
@@ -364,25 +301,18 @@ pub(super) fn http_client() -> Result<Client, reqwest::Error> {
         .build()
 }
 
-/// The longest any one OAuth call may take. A request's own timeout only
-/// ever shortens it.
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Whether `value` is an absolute HTTPS URL with a host. Verification URLs
-/// shown to the user come from the authorization server's response; only
-/// HTTPS ones are opened or printed.
 pub(super) fn is_https_url(value: &str) -> bool {
     reqwest::Url::parse(value).is_ok_and(|url| url.scheme() == "https" && url.host().is_some())
 }
 
-/// Seconds since the Unix epoch.
 pub(super) fn unix_time() -> Result<u64, SystemTimeError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
 }
 
-/// The stored credential name for `provider`'s `profile`: `PROVIDER/PROFILE`.
 pub(super) fn profile_credential_name(
     provider: OAuthProvider,
     profile: &str,
@@ -392,9 +322,6 @@ pub(super) fn profile_credential_name(
     Ok(name)
 }
 
-/// Sends every request to a loopback server whose body stalls, through a
-/// [`SystemTransport`] with a short cap, so provider code runs the real
-/// timeout path.
 #[cfg(test)]
 pub(crate) struct StalledBodyTransport(pub(crate) Duration);
 
@@ -429,9 +356,6 @@ pub(crate) mod tests {
         expired: || Ended::Expired,
     };
 
-    /// Runs the loop on a virtual clock that only sleeps advance, answering
-    /// polls from `steps`. Returns the result, every sleep, and every
-    /// remaining time a poll was given.
     fn run(
         timeout: Duration,
         interval: Duration,
@@ -532,7 +456,6 @@ pub(crate) mod tests {
             None,
         );
         assert_eq!(result, Err(Ended::TimedOut));
-        // The last wait is cut to the deadline and no poll runs after it.
         assert_eq!(sleeps, [5, 5, 2].map(Duration::from_secs));
         assert_eq!(remaining.len(), 2);
 
@@ -553,8 +476,6 @@ pub(crate) mod tests {
         assert_eq!(before, Err(Ended::Cancelled));
         assert!(sleeps.is_empty() && remaining.is_empty());
 
-        // Cancelled while the first poll was in flight: its answer is not
-        // used, even a completed grant.
         let (during, _, remaining) = run(
             Duration::from_secs(60),
             Duration::from_secs(5),
@@ -565,9 +486,6 @@ pub(crate) mod tests {
         assert_eq!(remaining.len(), 1);
     }
 
-    /// Posts to a loopback server that sends response headers and one body
-    /// byte, then holds the connection open until the client has returned,
-    /// so the body read can only end by timing out.
     pub(crate) fn post_to_a_stalled_body(
         transport: &SystemTransport,
         timeout: Option<Duration>,
@@ -575,7 +493,6 @@ pub(crate) mod tests {
         post_to_a_stalled_status(transport, 200, timeout)
     }
 
-    /// [`post_to_a_stalled_body`] with response status `status`.
     pub(crate) fn post_to_a_stalled_status(
         transport: &SystemTransport,
         status: u16,
@@ -622,8 +539,6 @@ pub(crate) mod tests {
         )
     }
 
-    /// A body that stalls past the request's own deadline reaches that
-    /// deadline, rather than reading as an unreadable body.
     #[test]
     fn a_body_that_stalls_past_the_request_deadline_reaches_it() {
         let result =
@@ -631,9 +546,6 @@ pub(crate) mod tests {
         assert_eq!(result.err(), Some(TransportError::DeadlineReached));
     }
 
-    /// A request's deadline never extends the transport's cap: a call with
-    /// hours left still ends at the cap, as an ordinary failure, and so does
-    /// a call with no deadline at all.
     #[test]
     fn a_long_deadline_still_ends_at_the_transport_cap() {
         let transport = loopback_transport().with_cap(Duration::from_millis(200));
@@ -643,24 +555,18 @@ pub(crate) mod tests {
         }
     }
 
-    /// A timeout reaches the caller's deadline only if the call ran it out
-    /// and it was the shorter bound: a connect timeout with time left, or
-    /// the cap, is a transport failure.
     #[test]
     fn only_a_timeout_the_deadline_caused_reaches_it() {
         let secs = Duration::from_secs;
         let cap = secs(60);
-        // A poll with 45 s left reaches its deadline at 45 s...
         assert_eq!(
             classify_timeout(Some(secs(45)), cap, secs(45)),
             TransportError::DeadlineReached
         );
-        // ...but the 30 s connect bound firing first is a failure.
         assert_eq!(
             classify_timeout(Some(secs(45)), cap, secs(30)),
             TransportError::Failed
         );
-        // A deadline at or beyond the cap never wins, nor does no deadline.
         assert_eq!(
             classify_timeout(Some(secs(1800)), cap, secs(60)),
             TransportError::Failed
@@ -671,8 +577,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// A rejection whose body stalls keeps its status, so the provider maps
-    /// it from the status as before instead of waiting it out as a timeout.
     #[test]
     fn a_rejection_with_a_stalled_body_keeps_its_status() {
         let response =

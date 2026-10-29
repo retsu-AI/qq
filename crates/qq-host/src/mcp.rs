@@ -1,15 +1,3 @@
-//! Wires configuration-declared MCP servers into the core tool-host seam.
-//!
-//! The composition root translates `ConfigSnapshot` MCP declarations into
-//! `qq-mcp` settings (resolving bearer secrets like every other credential;
-//! one that does not resolve degrades only its server) and adapts the
-//! resulting [`McpManager`] to `qq-core`'s
-//! [`ExternalToolHost`] trait. Registries are cached by exact live declarations,
-//! so every plan built from identical declarations shares one manager — and
-//! therefore one client connection per server — for the whole server
-//! process. Plans snapshot the manager's catalog at compile and revalidate
-//! against its generation.
-
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -30,11 +18,8 @@ use qq_provider::SecretRef;
 use crate::McpBuildError;
 
 const MAX_CACHED_REGISTRIES: usize = 8;
-/// Bound on one catalog snapshot from a blocking compile thread: connect,
-/// list, and namespace every declared server.
 const CATALOG_SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
-/// Adapts the shared [`McpManager`] to the `qq-core` tool-host seam.
 pub struct WiredMcpRegistry {
     manager: Arc<McpManager>,
 }
@@ -45,9 +30,6 @@ impl ExternalToolHost for WiredMcpRegistry {
     }
 
     fn catalog_blocking(&self) -> HostCatalog {
-        // Compiles run on blocking threads inside a Tokio process; the
-        // manager's connections live on the async runtime, so the fetch is
-        // driven from there and awaited here under a hard bound.
         let manager = Arc::clone(&self.manager);
         let fetch =
             async move { tokio::time::timeout(CATALOG_SNAPSHOT_TIMEOUT, manager.catalog()).await };
@@ -151,8 +133,6 @@ impl ExternalToolHost for WiredMcpRegistry {
     ) -> HostCallObservation {
         let manager = Arc::clone(&self.manager);
         HostCallObservation::Observed(Box::pin(async move {
-            // qq-mcp takes a plain future so it stays free of core's token
-            // type; the token's wait is that future.
             let signal = Box::pin(async move { cancelled.cancelled().await });
             let outcome = manager.call(&name, &arguments, signal).await;
             match outcome.failure {
@@ -194,22 +174,17 @@ impl ExternalToolHost for WiredMcpRegistry {
     }
 }
 
-/// A wired registry plus the secret-free descriptors of the servers it holds.
 pub struct WiredMcp {
     pub registry: Arc<WiredMcpRegistry>,
     pub servers: Vec<McpServerDescriptor>,
 }
 
-/// Live-only equality includes inline bearers and full endpoints, which the
-/// durable descriptors intentionally omit. Never hash, serialize, or format
-/// this key; stored credential changes remain tracked by the separate epoch.
 #[derive(PartialEq, Eq)]
 struct RegistryKey {
     declarations: Vec<(String, McpServerConfig)>,
     epoch: CredentialEpoch,
 }
 
-/// Process-wide cache of wired registries with exact live binding equality.
 pub struct McpRegistryCache {
     cache: Mutex<VecDeque<(RegistryKey, Arc<WiredMcpRegistry>)>>,
     #[cfg(test)]
@@ -231,13 +206,6 @@ impl McpRegistryCache {
         }
     }
 
-    /// Returns the shared registry for the snapshot's MCP declarations with
-    /// their secret-free descriptors, or `None` when no servers are declared.
-    /// `epoch` is the credential epoch the bearer secrets are resolved under.
-    /// `subset` restricts the plan to the named servers (a pack profile's
-    /// `mcp` list); `None` admits every declared server. The registry key
-    /// covers the admitted set, so two profiles with different subsets hold
-    /// different managers and never share a connection they were not given.
     pub fn registry_for_snapshot(
         &self,
         credentials: &CredentialStore,
@@ -282,7 +250,6 @@ impl McpRegistryCache {
             }
         }
 
-        // Secrets are resolved only on a miss, after the key is known.
         let mut settings = Vec::with_capacity(admitted.len());
         for (name, server) in &admitted {
             settings.push(resolve_server(name, server, credentials));
@@ -295,8 +262,6 @@ impl McpRegistryCache {
             .cache
             .lock()
             .map_err(|_| McpBuildError::CacheUnavailable)?;
-        // Resolve outside the lock, but construct only after this recheck:
-        // manager construction can spawn eager background connections.
         if let Some(index) = cache.iter().position(|(cached, _)| *cached == key) {
             let (cached_key, registry) = cache
                 .remove(index)
@@ -312,7 +277,6 @@ impl McpRegistryCache {
         });
         #[cfg(test)]
         if self.eager_publish_barrier.is_some() {
-            // Finish eager startup before the fixture counts HTTP initializes.
             let catalog = registry.catalog_blocking();
             assert!(matches!(catalog.readiness, HostReadiness::Ready));
         }
@@ -327,16 +291,12 @@ impl McpRegistryCache {
     }
 }
 
-/// Loads only trusted configuration and resolves only the requested server's
-/// credential. Called on a blocking thread; no model or store is opened.
 pub fn inspection_settings(
     name: &str,
     request: &qq_config::LoadRequest,
 ) -> Result<McpServerSettings, Box<dyn std::error::Error>> {
     let loader = qq_config::ConfigLoader::system()?;
     let snapshot = loader.load_for_client(request)?;
-    // MCP inspection needs no selected model. Use the client snapshot's
-    // effective declarations rather than compiling an agent plan.
     let server = snapshot
         .mcp_servers()
         .get(name)
@@ -347,8 +307,6 @@ pub fn inspection_settings(
     Ok(settings)
 }
 
-/// Connects to one server, lists its tools, and renders the inspection
-/// report; the pin is reported, never enforced, and no tool is called.
 pub async fn inspect_server(
     settings: McpServerSettings,
 ) -> Result<serde_json::Value, std::io::Error> {
@@ -378,8 +336,6 @@ async fn inspect_report(settings: McpServerSettings) -> Result<serde_json::Value
     result
 }
 
-/// Descriptions and schemas are the server's own words: the report says so
-/// and the digest it prints authorizes nothing until an operator pins it.
 const INSPECTION_WARNING: &str = "Untrusted server declarations. Review every descriptor before copying the digest into pin. This does not verify server code or grant execution permission.";
 
 fn inspection_report(inspection: &qq_mcp::McpInspection) -> serde_json::Value {
@@ -459,10 +415,6 @@ fn resolve_server(
             env: env.clone(),
         },
         McpTransport::Http { url, bearer } => {
-            // A bearer that does not resolve is this server's problem alone:
-            // it stays declared (grants, tool names) and never connects,
-            // while the rest of the plan compiles. The reason is what the
-            // readiness message and tool errors show.
             let bearer = match bearer {
                 None => McpBearer::None,
                 Some(reference) => match credentials.resolve_with_endpoint(reference, Some(url)) {
@@ -496,9 +448,6 @@ fn resolve_server(
     settings
 }
 
-/// Why a declared HTTP bearer did not resolve on this machine, split into
-/// the problem and its remedy so the readiness message and `qq doctor` word
-/// the same failure the same way.
 pub struct BearerFailure {
     pub problem: String,
     pub remedy: String,
@@ -522,8 +471,6 @@ impl BearerFailure {
                     crate::describe_endpoint(url)
                 ),
             ),
-            // Only reached for an endpoint-bound record: the binding cannot be
-            // checked against a URL carrying a query, fragment, or userinfo.
             AuthError::InvalidEndpoint => (
                 match reference {
                     SecretRef::Stored(name) => {
@@ -546,9 +493,6 @@ impl BearerFailure {
                 error.to_string(),
                 format!("export {variable} in this shell"),
             ),
-            // Store-level failures (a corrupt index, an unreadable state
-            // file, a keyring fault, a secret that is not text) already
-            // describe themselves; the remedy follows the reference kind.
             other => (
                 other.to_string(),
                 match reference {
@@ -719,8 +663,6 @@ mod tests {
     impl ConfigFixture {
         fn new() -> Self {
             let root = tempfile::tempdir().unwrap();
-            // A caller may set TMPDIR inside a configured checkout. Bound
-            // project discovery to this fixture regardless of its parent.
             fs::create_dir(root.path().join(".git")).unwrap();
             let paths = ConfigPaths::new(
                 root.path().join("global"),
@@ -993,12 +935,6 @@ mod tests {
         registries[0].shutdown().await;
     }
 
-    /// Regression for ENG-861: a `Stored` bearer that is not registered on
-    /// this machine used to fail plan compilation with an authentication
-    /// error for every run in the workspace. It now degrades only its
-    /// server — declared, granted, never connected — while the sibling
-    /// serves; and once the credential is stored, the next compile under the
-    /// new credential epoch resolves it without restarting.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unregistered_stored_bearer_degrades_only_its_server_until_it_is_set() {
         let server = HttpFixture::new().await;
@@ -1069,9 +1005,6 @@ mod tests {
                 .starts_with("Bearer inline-secret ")
         );
 
-        // `qq auth set linear/default` on this machine: the index revision
-        // advances, so the epoch the next compile reads differs and the
-        // registry key misses; the fresh manager resolves the credential.
         fixture
             .credentials
             .set_with_metadata("linear/default", b"stored-secret", false, None, None)
@@ -1124,9 +1057,6 @@ mod tests {
         fresh.registry.shutdown().await;
     }
 
-    /// The shared host suite over a real manager whose HTTP bearer did not
-    /// resolve: the snapshot is not Ready, every call is a typed
-    /// `Unavailable`, shutdown is bounded and invalidates the generation.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wired_mcp_adapter_passes_the_availability_subset_for_an_unresolved_bearer() {
         let fixture = ConfigFixture::new();
@@ -1156,9 +1086,6 @@ mod tests {
         .unwrap();
     }
 
-    /// `qq mcp inspect` reports the live digest and every descriptor without
-    /// enforcing the pin: a mismatched pin is reported as `matches_pin: false`
-    /// while the tools are still listed, and no `tools/call` is ever sent.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn inspection_reports_descriptors_and_pin_status_without_calling_a_tool() {
         let server = HttpFixture::new().await;
@@ -1191,7 +1118,6 @@ mod tests {
         assert_eq!(report["tools"][0]["hints"]["read_only"], false);
         assert_eq!(server.initializations.load(Ordering::SeqCst), 1);
 
-        // The digest the report printed is the pin that admits this listing.
         let report = tokio::time::timeout(
             Duration::from_secs(10),
             inspect_report(http(Some(digest.clone()))),
@@ -1224,11 +1150,6 @@ mod tests {
         assert!(error.to_string().contains("srv"), "{error}");
     }
 
-    /// The adapter runs the shared host suite against a real manager whose
-    /// stdio server cannot start: the snapshot reports the backend as
-    /// unavailable rather than Ready, every call is a typed `Unavailable`
-    /// (never a success or a panic), shutdown is bounded, and a shut-down
-    /// manager invalidates the catalog generation a plan was compiled from.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wired_mcp_adapter_passes_the_availability_subset_over_the_real_transport() {
         let mut settings = McpServerSettings::new(

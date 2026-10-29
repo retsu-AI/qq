@@ -1,5 +1,3 @@
-//! Authenticated, best-effort model discovery.
-
 use std::{
     collections::{BTreeMap, VecDeque},
     io::Read,
@@ -27,9 +25,6 @@ const MAX_DISCOVERED_MODELS: usize = 4_096;
 const MAX_CACHE_ENTRIES: usize = 32;
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const FAILURE_CACHE_TTL: Duration = Duration::from_secs(5);
-// Codex gates `/models` on a supported Codex client version, not QQ's package
-// version. Keep this at least as high as the newest listed model's
-// `minimal_client_version`.
 const CODEX_MODELS_CLIENT_VERSION: &str = "0.159.0";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,9 +40,6 @@ pub(crate) struct ModelDiscovery {
     cache_key: [u8; 32],
 }
 
-// A cache-only probe must not reopen the keyring. Configuration, credential
-// revision and environment identify the discovery snapshot; requests still
-// resolve and validate their credentials independently.
 #[derive(PartialEq, Eq)]
 struct CacheProbe {
     provider_id: String,
@@ -107,8 +99,6 @@ impl ModelDiscovery {
         if let Some(models) = self.cached(provider_id, provider, credentials) {
             return Some(models);
         }
-        // Capture before resolving: a concurrent credential rotation must
-        // invalidate this snapshot, rather than attach it to the new epoch.
         let probe = self.cache_probe(provider_id, provider.kind(), access, credentials);
         let auth = resolve_auth(access, credentials)?;
         let Some(key) = cache_key(
@@ -162,8 +152,6 @@ impl ModelDiscovery {
             return None;
         };
         if cache_probe_requires_secure_store(access.auth()) {
-            // Cold plan compilation must not reread the credential index
-            // for every provider merely to find an empty or unrelated cache.
             if !self.cache.lock().ok()?.iter().any(|entry| {
                 entry.expires_at > Instant::now()
                     && entry.probe.as_ref().is_some_and(|probe| {
@@ -269,13 +257,10 @@ impl ModelDiscovery {
             }
             _ => {}
         }
-        // Blocking clients own an internal runtime, so keep their lifetime
-        // inside the blocking discovery call rather than RuntimeFactory.
         let client = discovery_client(direct)?;
         let mut models = Vec::new();
         let mut cursor: Option<String> = None;
         let mut total_bytes = 0_usize;
-        // Bound the entire pagination walk, not just each response.
         let deadline = Instant::now() + Duration::from_secs(10);
         for _ in 0..16 {
             let mut url = endpoint.clone();
@@ -522,7 +507,6 @@ fn parse_models(
     } else {
         body.get("data")?.as_array()?
     };
-    // A partial response must not evict the bundled fallback catalog.
     if shape.is_authoritative() && entries.len() > MAX_DISCOVERED_MODELS {
         return None;
     }
@@ -692,7 +676,6 @@ mod tests {
         ProviderKind::Builtin(qq_config::builtin_provider(id).unwrap())
     }
 
-    /// The unpatched credential of built-in provider `id`.
     fn builtin(id: &str) -> HttpCredential {
         HttpCredential::Builtin {
             provider: qq_config::builtin_provider(id).unwrap(),
@@ -1106,8 +1089,6 @@ mod tests {
             ))),
         );
         let xai = test_provider(builtin_kind("xai"), endpoint.clone(), builtin("xai"));
-        // A built-in API key with no explicit reference probes the store
-        // (`openai/default`), so cache-only discovery must not use it.
         let builtin_fallback =
             test_provider(builtin_kind("openai"), endpoint.clone(), builtin("openai"));
         let safe = test_provider(

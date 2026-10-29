@@ -1,8 +1,3 @@
-//! Durable delegation through public runtime APIs, with compilation and store
-//! setup outside the timer. The three latency cases add no provider delay.
-//! A separate barrier case proves read-child overlap without timing sleeps.
-//! Run with `--samples N` and optionally `--case CASE`; output is JSONL.
-
 use std::{
     sync::{
         Arc,
@@ -172,8 +167,6 @@ impl Provider for FakeProvider {
             if children == 0 {
                 yield Ok(ProviderEvent::OutputTextDelta { text: "done".to_owned() });
             }
-            // Core may retain a completed stream during tool execution.
-            // Count actual streaming, not the lifetime of that container.
             drop(guard);
             yield Ok(ProviderEvent::Completed { usage: Some(USAGE) });
         })
@@ -469,11 +462,6 @@ async fn run_sample(case: Case) -> Sample {
         measured.deepest_child,
         if case == Case::DepthTwo { 2 } else { 1 }
     );
-    // Each provider turn spends 5. Bounded cases block on their children:
-    // the root spends two turns. An unbounded root does not block
-    // (ADR-0054 § 4): its reply while children run waits for the next
-    // answer and runs another turn, so it takes two to five turns, by when
-    // the children settle.
     let children_spend = if case == Case::DepthTwo { 15 } else { 20 };
     let root_turns = match case {
         Case::FiniteRead | Case::DepthTwo => 2..=2,

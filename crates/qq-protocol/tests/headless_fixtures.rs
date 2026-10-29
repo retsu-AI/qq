@@ -1,18 +1,3 @@
-//! Golden `qq run --format jsonl` streams for the current protocol version.
-//!
-//! Each `tests/fixtures/headless/v<PROTOCOL_VERSION>/<scenario>.jsonl` is a
-//! complete trial stream exactly as the binary writes it: compact records,
-//! one per line, `trial` first and `outcome` last. The test decodes every
-//! line as a strict [`HeadlessRecord`], re-encodes it, and requires byte
-//! equality, so a field rename, reorder, default change, or new tag fails
-//! here before any supervisor notices. Set `QQ_UPDATE_FIXTURES=1` to rewrite
-//! the files from the Rust values after an intentional protocol change (and
-//! bump `PROTOCOL_VERSION`).
-//!
-//! Older directories are never rewritten: `historical_streams_still_decode`
-//! proves that a stream a peer on that version recorded is still accepted,
-//! which is the compatibility statement `headless-contract.md` makes.
-
 use std::{fs, path::PathBuf};
 
 use qq_protocol::{
@@ -128,9 +113,6 @@ fn usage() -> TokenUsage {
     }
 }
 
-/// The events every completed stream shares: the run starts, the assistant
-/// answers, the run finishes. Real streams carry more (tool calls, session
-/// updates); the goldens pin the shapes, not a transcript.
 fn run_events(outcome: RunOutcome, final_output: Option<Box<FinalOutput>>) -> Vec<HeadlessRecord> {
     let message = |state: MessageState, output: &str| MessageSnapshot {
         id: MessageId::from_bytes([0xae; 16]),
@@ -251,10 +233,6 @@ fn check(name: &str, stream: &[HeadlessRecord]) {
     );
 }
 
-/// What every stream promises: one trailing `outcome` whose exit code
-/// matches its status; and unless startup failed before a session existed
-/// (`invalid_configuration`, where the outcome is the whole stream), one
-/// leading `trial` with nothing but events between. Returns the trial.
 fn assert_well_formed<'a>(
     path: &std::path::Path,
     stream: &'a [HeadlessRecord],
@@ -316,7 +294,6 @@ fn current_version_streams_match_their_goldens() {
         stream
     };
 
-    // The default payload: no optional flag given, no optional field present.
     check(
         "completed",
         &stream(
@@ -338,7 +315,6 @@ fn current_version_streams_match_their_goldens() {
         ),
     );
 
-    // Every optional trial field the flags can set, plus an audited answer.
     check(
         "completed_with_every_option",
         &stream(
@@ -375,7 +351,6 @@ fn current_version_streams_match_their_goldens() {
         ),
     );
 
-    // `--output-schema`: the trial names the contract, the answer validated.
     let valid = Box::new(FinalOutput::Valid {
         value: serde_json::json!({"fixed": true, "files": ["src/auth.rs"]}),
         repair_turns: 1,
@@ -396,8 +371,6 @@ fn current_version_streams_match_their_goldens() {
         ),
     );
 
-    // The answer never satisfied the contract: the run completed, the
-    // invocation is `task_failed`, and the errors are on both records.
     let invalid = Box::new(FinalOutput::Invalid {
         errors: vec![
             "/: missing required property \"fixed\"".to_owned(),
@@ -427,7 +400,6 @@ fn current_version_streams_match_their_goldens() {
         ),
     );
 
-    // The agent reported a failure.
     check(
         "task_failed",
         &stream(
@@ -451,7 +423,6 @@ fn current_version_streams_match_their_goldens() {
         ),
     );
 
-    // Exit 3 is shared: the status field tells the two apart.
     check(
         "timed_out",
         &stream(
@@ -496,7 +467,6 @@ fn current_version_streams_match_their_goldens() {
         ),
     );
 
-    // Cancellation: the interrupt lands before any answer.
     check(
         "interrupted",
         &stream(
@@ -528,8 +498,6 @@ fn current_version_streams_match_their_goldens() {
         ),
     );
 
-    // Protocol 21: the model asked the user and nobody was there. The
-    // question is on the stream; the run is cancelled at that point.
     check(
         "needs_input",
         &stream(
@@ -593,10 +561,6 @@ fn current_version_streams_match_their_goldens() {
         ),
     );
 
-    // Version 31: the run compacted its own earlier turns mid-run. The
-    // prompt run reports `compacting`, the compaction run starts, finishes
-    // and records the compaction inside it, and the prompt run's next turn
-    // waits again.
     check(
         "completed_after_in_run_compaction",
         &stream(
@@ -604,8 +568,6 @@ fn current_version_streams_match_their_goldens() {
             {
                 const COMPACTION: RunId = RunId::from_bytes([0xaf; 16]);
                 let mut events = run_events(RunOutcome::Completed, None);
-                // The session's active run is the prompt run, which already
-                // reports `compacting`, so the compaction run's summaries do.
                 let compacting = || SessionSummary {
                     activity: Some(RunActivity::Compacting),
                     ..summary(SessionStatus::Running, true)
@@ -680,7 +642,6 @@ fn current_version_streams_match_their_goldens() {
                     ),
                 ];
                 events.splice(1..1, middle);
-                // Renumber the shared tail after the inserted records.
                 for (index, record) in events.iter_mut().enumerate() {
                     if let HeadlessRecord::Event { envelope } = record {
                         envelope.cursor.sequence = index as u64 + 1;
@@ -693,7 +654,6 @@ fn current_version_streams_match_their_goldens() {
         ),
     );
 
-    // QQ itself failed after the run was accepted: the stream still closes.
     check(
         "harness_failure",
         &stream(
@@ -709,7 +669,6 @@ fn current_version_streams_match_their_goldens() {
         ),
     );
 
-    // Startup failed before a session existed: the outcome is the only record.
     check(
         "invalid_configuration",
         &[HeadlessRecord::Outcome(Box::new(HeadlessOutcome {
@@ -786,13 +745,8 @@ fn decode_stream(path: &std::path::Path) -> Vec<HeadlessRecord> {
         .collect()
 }
 
-/// A stream recorded by a retained earlier version still decodes and still
-/// obeys the framing rules. New fields are additive and optional, so an older
-/// stream is a valid current stream with those fields absent.
 #[test]
 fn historical_streams_still_decode() {
-    // Same retention rule as `wire_fixtures.rs`: every `v<N>/` directory
-    // present with `N < PROTOCOL_VERSION` must decode, and `N - 1` must exist.
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/headless");
     let mut versions: Vec<u16> = std::fs::read_dir(&root)
         .unwrap()
@@ -819,7 +773,6 @@ fn historical_streams_still_decode() {
     }
 }
 
-/// Every exit code the contract publishes, in one place a consumer can diff.
 #[test]
 fn the_exit_table_matches_the_contract() {
     let table: Vec<(&str, u8)> = HeadlessStatus::ALL

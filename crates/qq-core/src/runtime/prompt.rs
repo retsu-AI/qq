@@ -17,70 +17,18 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// The base agent prompt, now at version 28. History: 10 → 11 covers the tool-layer
-/// series: read_file hashes and ranges, edit_file batches, search/tree
-/// guidance, spill handles, the shell environment and forbidden tiers;
-/// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
-/// batch independent calls and names the 16-call executable cap; 14 → 15
-/// adds the sub-agent section for child runs, drops the implement-instead
-/// line for read children, and asks parents for a question-shaped brief;
-/// 15 → 16 says a read sub-agent runs in the background and its answer
-/// arrives later as a runtime notice; 16 → 17 adds interim reports,
-/// wait_agents, and cancel_agent; 17 → 18 makes delegation guidance reflect
-/// the spawn schema's write authority; 18 → 19 says an unread or changed
-/// file takes a unique exact edit, and how to recover from a refusal (T19).
-/// 19 → 20 adds action and exploration conventions, built-in mapping, nested
-/// instruction discovery and a header naming present read tools (AB2).
-/// 20 → 21 states actual read-only, unattended and declared-tool authority (AB4).
-/// 21 → 22 removes write-child guidance from read-only delegation and freezes
-/// the restricted spawn declaration to its actual authority (AB4).
-/// 22 → 23 describes native Auto execution and normal tool environments without
-/// a command-name veto or human approval wait.
-/// 23 → 24 drops the absolute workspace root from the header: Auto runs
-/// execute in per-run task directories, and naming one made every run's
-/// prompt (the head of each provider's cached prefix) unique.
-/// 24 → 25 describes write children as Auto within parent authority, without
-/// requiring a reviewer for their authorized edits and commands.
-/// 25 → 26 says commands run in the workspace as the user with the inherited
-/// environment and host network, and drops the credential-grant sentence.
-/// 26 → 27 states the environment once (checkout, user and network, edits
-/// in place, snapshot, mode, fixed stops, denials), shortens nested
-/// instruction discovery, drops approval wording from tool phrases, and adds
-/// the final-answer rule. `tests/golden/root_prompt.txt` holds the full text.
-/// 27 → 28 has the skill index tell the model to load a matching skill
-/// before acting, and gives load_skill an `arguments` field.
-/// The text is versioned in code, not configuration: bump this note and
-/// review the diff whenever it changes.
-///
-/// `tool_index` is the progressive-exposure index of external tools not yet
-/// callable; `roster_text` is the compiled delegation roster block (routes,
-/// roles, relative cost) when one is configured; `skill_index` lists
-/// disclosed skills the model may load.
-/// Compiled prompt sections a run appends to the base prompt: none of them
-/// is authored per turn.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct PromptSections<'a> {
-    /// Progressive-exposure index of external tools not yet callable.
     pub(crate) tool_index: Option<&'a str>,
-    /// The rendered delegation roster (see `delegation_roster_text`).
     pub(crate) roster: Option<&'a str>,
-    /// Disclosed skills the model may load.
     pub(crate) skill_index: Option<&'a str>,
-    /// Set for a model-spawned child run: it answers a waiting parent, not a
-    /// user. `None` for roots and for a user's own prompt in a child session.
     pub(crate) subagent: Option<SubagentAuthority>,
     pub(crate) read_only: bool,
     pub(crate) unattended: bool,
-    /// The session's approval mode, stated in the Environment section.
-    /// `read_only` overrides it.
     pub(crate) mode: ApprovalMode,
-    /// The workspace is in a Git work tree, so a run's first change is
-    /// preceded by a snapshot `qq undo` can restore.
     pub(crate) snapshots: bool,
 }
 
-/// What a sub-agent may do, as far as its prompt is concerned. A read child
-/// cannot implement anything; a write child can, within parent authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubagentAuthority {
     Read,
@@ -102,13 +50,6 @@ pub(crate) fn agent_system_prompt(
     prompt
 }
 
-/// The plan-constant part of the system prompt: everything
-/// [`agent_system_prompt`] emits before per-run guidance. A plan builds it
-/// once per tool filter and every run appends its suffix (guidance, context
-/// blocks, output contract) to a copy, so the header, tool index, skill
-/// index, workspace instructions, and persona are neither rebuilt nor
-/// re-hashed per run. `hasher` continues the SHA-256 of these
-/// bytes so the run's `system_prompt_hash` equals a digest of the full text.
 #[derive(Debug, Clone)]
 pub(crate) struct PromptPrefix {
     text: Arc<str>,
@@ -131,15 +72,10 @@ impl PromptPrefix {
         }
     }
 
-    /// Bytes of prefix text, for plan-cache admission.
     pub(crate) fn len(&self) -> usize {
         self.text.len()
     }
 
-    /// The full prompt and its digest for one run: the prefix followed by
-    /// `suffix`, hashed by continuing the prefix's SHA-256 state over the
-    /// suffix alone. Equals `Sha256::digest(prefix ++ suffix)`; a test pins
-    /// that against [`agent_system_prompt`].
     pub(crate) fn complete(&self, suffix: &str) -> (Arc<str>, ContentHash) {
         let mut hasher = self.hasher.clone();
         hasher.update(suffix.as_bytes());
@@ -268,9 +204,6 @@ fn agent_prompt_prefix(
     } else {
         ""
     };
-    // With a roster the model chooses by role and the roster line (built once
-    // at plan compile) names each role's route and relative cost; without one
-    // the legacy worker/parent fallback text applies.
     let model_guidance = match (has_spawn, roster_text) {
         (true, Some(roster)) => format!(
             "- Choose the sub-agent by spawn_agent's role argument; omit it for the default role. \
@@ -326,7 +259,6 @@ fn agent_prompt_prefix(
     } else {
         String::new()
     };
-    // A read child answers its brief; the root action contract would keep it reading.
     let action = if subagent == Some(SubagentAuthority::Read) {
         ""
     } else if read_only {
@@ -499,8 +431,6 @@ fn agent_prompt_prefix(
     prompt
 }
 
-/// The Environment section: where work happens and what stops it, stated
-/// once so tool descriptions need not repeat it.
 fn environment_section(
     mode: ApprovalMode,
     snapshots: bool,
@@ -522,7 +452,6 @@ fn environment_section(
     if changes && mode != ApprovalMode::ReadOnly {
         text.push_str("- Changes apply to the checkout immediately; nothing is staged for later.");
         text.push_str(if subagent.is_some() {
-            // The parent's snapshot, taken before it spawned, covers a child.
             "\n"
         } else if snapshots {
             " Before the first change of each request QQ snapshots the working tree with Git (untracked files included; ignored and very large files not), and the user can restore it with qq undo.\n"
@@ -557,8 +486,6 @@ fn environment_section(
     text
 }
 
-/// Appended for a model-spawned child run (ADR-0054 § 5). The parent is
-/// blocked on this run and receives only its last reply.
 const SUBAGENT_SECTION: &str = "\n\nSub-agent:\n\
 - You are a sub-agent. Another agent is waiting for you, and only your final reply reaches it; \
 nothing else you say or read in this run does. Your first message is its brief.\n\
@@ -569,7 +496,6 @@ establish.\n\
 - Do not re-read text that is still in your context. Re-read a file only for lines you have not \
 seen or that may have changed.";
 
-/// Appended after [`SUBAGENT_SECTION`] for a read child.
 const SUBAGENT_READ_ONLY_LINE: &str = "\n\
 - You cannot change files or run commands. If the brief asks for a change, answer with what \
 should change and where, and stop.";
@@ -584,8 +510,6 @@ pub(crate) fn tool_schema_measurement(specs: &[ToolSpec]) -> ToolSchemaMeasureme
     measure_tool_schemas(specs.iter().map(|spec| (spec, spec.input_schema().get())))
 }
 
-/// Measures declarations whose schemas are already serialized, so callers
-/// that serialized them once (the catalog compiler) need not do it again.
 pub(crate) fn measure_tool_schemas<'a>(
     specs: impl Iterator<Item = (&'a ToolSpec, &'a str)>,
 ) -> ToolSchemaMeasurement {
@@ -616,10 +540,6 @@ pub(crate) fn measure_tool_schemas<'a>(
     }
 }
 
-/// Renders the delegation roster for the system prompt: the spawning model's
-/// own identity first (so it can judge relative cost), then every roster
-/// entry with its role, route, context window, relative cost, and note.
-/// Built once at plan compile; the run loop only concatenates it.
 pub(crate) fn delegation_roster_text(
     current_route: &str,
     current_context_window: Option<u32>,
@@ -808,7 +728,6 @@ mod ab2_header_authority {
         );
         assert!(read_only.contains("- Mode: read-only. Only reads run."));
         assert!(!read_only.contains("qq undo"));
-        // Only an acting Auto root is told to take the next step itself.
         let take = "take it instead of offering it";
         assert!(
             agent_system_prompt(

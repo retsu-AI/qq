@@ -1,14 +1,3 @@
-//! The single table of user-invocable commands.
-//!
-//! Every command surface — slash autocomplete, key chords, the command
-//! palette, the help overlay, and footer hints — reads this table. Adding a
-//! command means adding one row here and one arm in `App::execute`. Slash
-//! names remain reserved in `qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS`; a
-//! test keeps the two in agreement without coupling them by array index.
-//!
-//! Chords listed here are defaults. A command with an [`Action`] can be
-//! rebound through `tui.ron`; `Settings` overrides the table for those.
-
 use std::borrow::Cow;
 
 use crossterm::event::KeyEvent;
@@ -20,16 +9,9 @@ pub(crate) enum Command {
     OpenHelp,
     OpenCommands,
     OpenModels,
-    /// Choose an agent profile for the focused session, or the default for
-    /// new sessions. Lists what the server advertises.
     OpenProfiles,
-    /// Choose the approval mode for the focused session, or the default for
-    /// new sessions. Lists what the server advertises.
     OpenApprovalModes,
-    /// Choose reasoning effort for the focused session, or the default for
-    /// new sessions. Pins the next run; `default` restores config/profile.
     OpenEffort,
-    /// List the workspace's commands and skills as the server indexes them.
     OpenSkills,
     OpenThemes,
     OpenSessions,
@@ -38,29 +20,19 @@ pub(crate) enum Command {
     NewRootSession,
     NewChildSession,
     CompactSession,
-    /// Discard the focused session's newest compaction.
     RollbackCompaction,
     CancelRun,
     ToggleToolDetail,
-    /// Move the transcript cursor to the previous / next tool call of the
-    /// focused session; Enter then expands or collapses that call alone.
     CursorUp,
     CursorDown,
     ToggleReasoning,
     ToggleSidebar,
-    /// Show or hide the inspector pane that holds expanded tool detail and
-    /// the workspace views beside the transcript.
     ToggleInspector,
     ToggleMouse,
-    /// Show the workspace attention list or the cross-agent change board in
-    /// the focused pane.
     ShowAttention,
     ShowChanges,
     ShowSideQuestions,
-    /// View the focused session's authoritative durable goal and progress.
     ShowGoal,
-    /// Leave `/btw-new ` in the composer: the question starts a new side
-    /// thread, so the command never runs without one.
     NewSideThread,
     CancelSideQuestion,
     FocusParent,
@@ -68,27 +40,14 @@ pub(crate) enum Command {
     FocusNextSibling,
     FocusPreviousSibling,
     FocusNextApproval,
-    /// Answer the first approval waiting in another session without moving
-    /// focus: approve once, or deny.
     ApproveBackground,
     DenyBackground,
-    /// Hold the composer text locally until the active run finishes.
     QueueDraft,
-    /// Pull the newest locally queued draft back into the composer.
     DequeueDraft,
-    /// Add the composer text to the active run at its next model/tool
-    /// boundary. Available only while the server advertises boundary
-    /// steering; `Submit` falls back to queueing otherwise.
     SteerRun,
-    /// Abort the active run's in-flight turn now and steer it with the
-    /// composer text. Available only while the server advertises interrupt
-    /// steering.
     InterruptRun,
-    /// Edit the draft in `$VISUAL` or `$EDITOR`.
     OpenEditor,
-    /// Reverse-search the focused session's prompt history.
     SearchHistory,
-    /// Delete every empty session in the workspace after confirmation.
     PruneSessions,
     Quit,
 }
@@ -123,15 +82,8 @@ pub(crate) struct CommandSpec {
     pub command: Command,
     pub title: &'static str,
     pub category: Category,
-    /// Slash spellings that invoke the command from the composer. The first
-    /// entry is canonical; the rest are aliases shown as separate rows so a
-    /// user typing either prefix sees a match.
     pub slash: &'static [&'static str],
-    /// Default chords in compose mode, in `KeyChord` syntax. The first is the
-    /// one shown in hints.
     pub chords: &'static [&'static str],
-    /// Configurable keybinding action that triggers this command, if any.
-    /// When set, `Settings` chords replace `chords`.
     pub action: Option<Action>,
 }
 
@@ -150,8 +102,6 @@ macro_rules! spec {
     (@action $action:ident) => { Some(Action::$action) };
 }
 
-/// Presentation order is invocation frequency within a category, and the
-/// palette shows categories in this order too.
 pub(crate) const COMMANDS: [CommandSpec; 44] = [
     spec!(
         OpenHelp,
@@ -425,21 +375,13 @@ pub(crate) const COMMANDS: [CommandSpec; 44] = [
     ),
 ];
 
-/// What accepting a slash entry does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SlashAction {
-    /// A client command: runs immediately.
     Client(Command),
-    /// A workspace command the runtime resolves; it may take arguments, so
-    /// accepting leaves `/name ` in the composer for the user to finish.
     WorkspaceCommand,
-    /// A workspace skill the runtime resolves; accepting submits `/name`.
     Skill,
 }
 
-/// One slash spelling, as shown in the autocomplete list: a client command
-/// from the registry or a workspace command/skill from the capability
-/// document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SlashEntry {
     pub name: Cow<'static, str>,
@@ -447,7 +389,6 @@ pub(crate) struct SlashEntry {
     pub action: SlashAction,
 }
 
-/// Every client slash spelling in presentation order.
 pub(crate) fn slash_entries() -> impl Iterator<Item = SlashEntry> {
     COMMANDS.iter().flat_map(|spec| {
         spec.slash.iter().map(move |name| SlashEntry {
@@ -458,16 +399,10 @@ pub(crate) fn slash_entries() -> impl Iterator<Item = SlashEntry> {
     })
 }
 
-/// Every client slash spelling, canonical names and aliases alike, for the
-/// user guide's docs-truth test.
 pub fn slash_names() -> impl Iterator<Item = &'static str> {
     COMMANDS.iter().flat_map(|spec| spec.slash.iter().copied())
 }
 
-/// One registry row as the user guide shows it: what it does, its slash
-/// spellings, and its default chords (`tui.ron` may rebind the ones with an
-/// action). For the docs-truth test that holds the guide's command table
-/// to this registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandRow {
     pub title: &'static str,
@@ -475,7 +410,6 @@ pub struct CommandRow {
     pub default_chords: &'static [&'static str],
 }
 
-/// Every registry command in presentation order.
 pub fn command_rows() -> impl Iterator<Item = CommandRow> {
     COMMANDS.iter().map(|spec| CommandRow {
         title: spec.title,
@@ -487,13 +421,6 @@ pub fn command_rows() -> impl Iterator<Item = CommandRow> {
     })
 }
 
-/// Slash entries matching `token` as a subsequence after the `/`. `token`
-/// must start with `/` and contain no whitespace, otherwise nothing matches:
-/// a slash token followed by arguments is a prompt for the runtime, not a
-/// client command. Prefix matches sort first so `/s` still lists `/sessions`
-/// ahead of `/models`; within each group client commands precede `extra`
-/// (the workspace's commands and skills), matching how the runtime resolves
-/// a collision.
 pub(crate) fn matching_slash_entries(
     token: &str,
     extra: impl Iterator<Item = SlashEntry>,
@@ -516,7 +443,6 @@ pub(crate) fn matching_slash_entries(
     prefix
 }
 
-/// The specification row for `command`.
 pub(crate) fn spec(command: Command) -> &'static CommandSpec {
     COMMANDS
         .iter()
@@ -524,7 +450,6 @@ pub(crate) fn spec(command: Command) -> &'static CommandSpec {
         .expect("every command has a registry row")
 }
 
-/// The command bound to a configurable keybinding action.
 pub(crate) fn command_for_action(action: Action) -> Command {
     COMMANDS
         .iter()
@@ -533,8 +458,6 @@ pub(crate) fn command_for_action(action: Action) -> Command {
         .expect("every keybinding action has a command row")
 }
 
-/// The command `key` invokes in compose mode: a configured action first,
-/// then a default chord from the table.
 pub(crate) fn command_for_key(settings: &Settings, key: KeyEvent) -> Option<Command> {
     if let Some(action) = settings.action_for(key) {
         return Some(command_for_action(action));
@@ -545,9 +468,6 @@ pub(crate) fn command_for_key(settings: &Settings, key: KeyEvent) -> Option<Comm
         .map(|(command, _)| *command)
 }
 
-/// The default chords of every command without a configurable action, parsed
-/// once. The table keeps them as strings for readability and the test below
-/// checks them; this is what a keypress consults.
 fn default_chords() -> &'static [(Command, KeyChord)] {
     static PARSED: std::sync::LazyLock<Vec<(Command, KeyChord)>> = std::sync::LazyLock::new(|| {
         COMMANDS
@@ -563,8 +483,6 @@ fn default_chords() -> &'static [(Command, KeyChord)] {
     &PARSED
 }
 
-/// The chord shown for `command` in hints and the palette: the configured
-/// one for actions, otherwise the first default.
 pub(crate) fn chord_label(settings: &Settings, command: Command) -> Option<String> {
     let spec = spec(command);
     match spec.action {
@@ -613,9 +531,6 @@ mod tests {
 
     #[test]
     fn every_command_has_one_row_reachable_from_the_palette_and_a_way_in() {
-        // Commands whose only direct key is contextual (Enter steers while a
-        // run is active; Esc walks to the parent) are reachable from the
-        // palette, which lists every row.
         let contextual = [Command::SteerRun, Command::FocusParent];
         let mut seen = BTreeSet::new();
         for spec in &COMMANDS {
@@ -631,8 +546,6 @@ mod tests {
 
     #[test]
     fn default_chords_parse_and_do_not_collide() {
-        // Configured actions own their chords too; a default chord in the
-        // table must not shadow one of those either.
         let settings = Settings::default();
         let mut chords: Vec<(KeyChord, Command)> = Vec::new();
         for spec in &COMMANDS {
@@ -705,7 +618,6 @@ mod tests {
             },
         ];
         let names = entry_names(matching_slash_entries("/s", extra.iter().cloned()));
-        // Prefix matches: client rows first, then the workspace rows.
         let sessions = names.iter().position(|n| n == "/sessions").unwrap();
         let ship = names.iter().position(|n| n == "/ship").unwrap();
         let audit = names.iter().position(|n| n == "/sessions-audit").unwrap();

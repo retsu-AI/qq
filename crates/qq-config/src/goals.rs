@@ -1,9 +1,7 @@
-//! Goal defaults and administrator ceilings, independent of runtime ownership.
 use crate::{ConfigError, SourceIdentity};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Default limits for one goal-sponsored run; absent fields impose no extra cap.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GoalRunLimits {
@@ -19,7 +17,6 @@ pub struct GoalRunLimits {
     pub max_concurrent_children: Option<u16>,
 }
 
-/// Effective defaults for new goals. Durations are in seconds unless named otherwise.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GoalsConfig {
     pub default_deadline_seconds: u64,
@@ -50,7 +47,6 @@ impl Default for GoalsConfig {
     }
 }
 
-/// Only managed configuration may declare these monotonic goal ceilings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GoalCeilings {

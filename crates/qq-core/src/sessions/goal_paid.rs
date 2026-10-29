@@ -1,4 +1,3 @@
-//! Current paid-request allowances; this input carries no goal-writing authority.
 use super::store::Priority;
 use super::*;
 use crate::runtime::ChildBudget;
@@ -199,7 +198,6 @@ impl GoalPaidInput {
             if let Some(hook) = hook
                 && hook.entered.send(identity.run_id).is_ok()
             {
-                // Dropping the fixture release is a normal test teardown.
                 let _ = hook.release.await;
             }
         }
@@ -299,8 +297,6 @@ pub(super) fn remaining_goal_limits(
         }
         let mut tokens = goal.counters.usage.and_then(total_tokens);
         let mut cost = goal.counters.estimated_cost_usd_nanos;
-        // Each direct run/helper aggregate is folded once. Terminal rows are already
-        // in goal counters; inclusive owner receipts must never be added again.
         if goal.budget.max_total_tokens.is_some() || goal.budget.max_cost_usd_nanos.is_some() {
             let mut statement = connection.prepare(&format!("{} SELECT r.usage_json,r.estimated_cost_usd_nanos,
             r.goal_request_pending OR EXISTS(SELECT 1 FROM model_turns WHERE run_id=r.id AND work_disposition='uncertain')

@@ -1,10 +1,7 @@
-//! Command-line parsing and dispatch.
-
 use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-/// `<crate version> (<short sha> <commit date>)`; see `build.rs`.
 pub const VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
@@ -14,11 +11,6 @@ pub const VERSION: &str = concat!(
     ")"
 );
 
-/// The same information as [`VERSION`] without whitespace, as semver build
-/// metadata: `<crate version>+<short sha>.<commit date>`. This is what the
-/// server reports in `/v1/health`, the discovery file, and capabilities, so a
-/// TUI and a long-running server built from different commits are
-/// distinguishable even when their protocol versions agree.
 pub const BUILD_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "+",
@@ -27,7 +19,6 @@ pub const BUILD_VERSION: &str = concat!(
     env!("QQ_BUILD_DATE")
 );
 
-/// This executable's identity, handed to the runtime it hosts.
 pub const HOST_BUILD: qq_host::HostBuild = qq_host::HostBuild {
     source_revision: env!("QQ_SOURCE_REVISION"),
     version: BUILD_VERSION,
@@ -563,11 +554,6 @@ fn removed_allow_host(_: &str) -> Result<std::convert::Infallible, String> {
     )
 }
 
-/// Splits one `--correlation KEY=VALUE` argument on its first `=`. Per-entry
-/// and aggregate bounds are the protocol's ([`qq_protocol::Correlation::new`])
-/// and are applied once every entry is collected, so an over-limit set is
-/// reported as one error naming the rule rather than failing on the ninth
-/// flag.
 fn parse_correlation_entry(argument: &str) -> Result<(String, String), String> {
     match argument.split_once('=') {
         Some((key, value)) if !key.is_empty() => Ok((key.to_owned(), value.to_owned())),
@@ -576,9 +562,6 @@ fn parse_correlation_entry(argument: &str) -> Result<(String, String), String> {
     }
 }
 
-/// The lines a surface prints when it hands a session back to the user, so
-/// the id becomes visible somewhere a human can copy it. Every surface prints
-/// the same text.
 #[must_use]
 pub fn resume_hint(session_id: qq_protocol::SessionId) -> String {
     format!(
@@ -587,8 +570,6 @@ pub fn resume_hint(session_id: qq_protocol::SessionId) -> String {
 }
 
 impl RunArgs {
-    /// The validated correlation set for the session and run. A key given
-    /// twice is an error rather than a silent last-wins merge.
     pub fn correlation(&self) -> Result<qq_protocol::Correlation, String> {
         let mut entries = std::collections::BTreeMap::new();
         for (key, value) in &self.correlation {
@@ -693,14 +674,8 @@ mod tests {
 
     use super::*;
 
-    /// Long flags deliberately absent from the user guide, keyed by their
-    /// subcommand path (`"run --trace"`), each with a reason. Empty today:
-    /// hidden arguments are skipped automatically and everything visible is
-    /// documented.
     const UNDOCUMENTED_FLAGS: &[&str] = &[];
 
-    /// Every subcommand name and every visible long flag reachable from
-    /// `qq`, as `(category, name, allow-list key)`.
     fn cli_surface() -> Vec<(&'static str, String, String)> {
         fn walk(
             command: &clap::Command,
@@ -825,7 +800,6 @@ mod tests {
         let rendered = error.to_string();
         let expected = format!("qq {}", env!("CARGO_PKG_VERSION"));
         assert!(rendered.starts_with(&expected), "{rendered:?}");
-        // `(<sha> <date>)`, both non-empty; `unknown` is the tarball fallback.
         let suffix = rendered[expected.len()..].trim();
         let inner = suffix
             .strip_prefix('(')
@@ -991,7 +965,6 @@ mod tests {
         assert_eq!(cli.session, Some(id));
         assert_eq!(Cli::try_parse_from(["qq"]).unwrap().session, None);
 
-        // `qq run --session` belongs to the run command, not the top level.
         let cli = Cli::try_parse_from(["qq", "run", "task", "--session", &id.to_string()]).unwrap();
         assert_eq!(cli.session, None);
         let Some(Command::Run(args)) = cli.command else {
@@ -1076,11 +1049,9 @@ mod tests {
         );
         assert!(run(&[]).unwrap().correlation().unwrap().is_empty());
 
-        // Shape errors fail at parse time, before any session exists.
         assert!(run(&["--correlation", "novalue"]).is_err());
         assert!(run(&["--correlation", "=empty-key"]).is_err());
 
-        // Duplicates and protocol bounds fail at validation with a reason.
         let duplicate = run(&["--correlation", "job=a", "--correlation", "job=b"]).unwrap();
         assert!(duplicate.correlation().unwrap_err().contains("job"));
         let nine: Vec<String> = (0..9).map(|index| format!("k{index}=v")).collect();

@@ -1,7 +1,3 @@
-//! Column codecs for the store: string forms of every persisted enum and
-//! identifier, run limits and correlation JSON, and the persisted content-block
-//! shape. Every parse maps to `SessionRuntimeError::CODEC`.
-
 use super::*;
 
 #[cfg(test)]
@@ -18,8 +14,6 @@ pub(super) fn parse_run_kind(value: &str) -> Result<RunKind, SessionRuntimeError
     }
 }
 
-/// Encodes a correlation map for its column: NULL for the empty map so
-/// historical rows and unattributed rows are indistinguishable.
 pub(super) fn encode_correlation(
     correlation: &Correlation,
 ) -> Result<Option<String>, SessionRuntimeError> {
@@ -54,8 +48,6 @@ pub(super) fn parse_input_parts(
     }
 }
 
-/// NULL is the historical unlimited run; stored JSON is authoritative and a
-/// malformed row is a persistence fault rather than a silent default.
 pub(super) fn parse_run_limits(encoded: Option<&str>) -> Result<RunLimits, SessionRuntimeError> {
     match encoded {
         None => Ok(RunLimits::default()),
@@ -100,11 +92,6 @@ pub(super) enum PersistedContentBlock {
     Text {
         text: String,
     },
-    /// `arguments` is stored as the JSON object itself, not a string. It is a
-    /// `Value` here because serde buffers the content of an internally tagged
-    /// enum, which a `RawValue` cannot survive; the transcript block keeps
-    /// the compact text and the conversion happens once at load, not per
-    /// request.
     ToolCall {
         id: String,
         name: String,
@@ -128,8 +115,6 @@ impl From<&ContentBlock> for PersistedContentBlock {
             } => Self::ToolCall {
                 id: id.clone(),
                 name: name.clone(),
-                // The text is canonical serde_json output; parsing cannot
-                // fail, and a corrupted block must not be persisted silently.
                 arguments: serde_json::from_str(arguments.get())
                     .expect("transcript tool-call arguments are valid JSON"),
             },
@@ -237,8 +222,6 @@ pub(super) fn parse_approval_mode(value: &str) -> Result<ApprovalMode, SessionRu
     }
 }
 
-/// NULL is omission (provider/config defaults). A stored value is the session's
-/// explicit pin for the next claim.
 pub(super) fn parse_reasoning_effort(
     encoded: Option<&str>,
 ) -> Result<Option<qq_provider::ReasoningEffort>, SessionRuntimeError> {
@@ -262,8 +245,6 @@ pub(super) fn reasoning_effort_column(
     effort.map(qq_provider::ReasoningEffort::as_str)
 }
 
-/// Authority order of approval modes: a higher rank executes strictly more
-/// without a human than a lower one.
 pub(super) const fn approval_rank(mode: ApprovalMode) -> u8 {
     match mode {
         ApprovalMode::ReadOnly => 0,
@@ -282,8 +263,6 @@ pub(super) const fn approval_resolution_str(resolution: ApprovalResolution) -> &
     }
 }
 
-/// Rows written before protocol 41 may hold the removed grant and reviewer
-/// resolutions; they read as the plain approval or denial they were.
 pub(super) fn parse_approval_resolution(
     value: &str,
 ) -> Result<ApprovalResolution, SessionRuntimeError> {

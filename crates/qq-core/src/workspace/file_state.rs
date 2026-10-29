@@ -4,11 +4,6 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
-/// Content hashes for every workspace file one session has read, keyed by
-/// canonical workspace-relative path. `read_file` records into it on each
-/// successful read, applied edits refresh it, and a future `@` file
-/// attachment records through the same [`FileState::record`] seam so pinned
-/// files satisfy the read-before-write rule without a redundant read.
 #[derive(Default)]
 pub(crate) struct FileState {
     entries: Mutex<HashMap<String, String>>,
@@ -37,8 +32,6 @@ impl FileState {
     }
 }
 
-/// A file-state map entry produced by a successful tool execution, carried on
-/// the tool result so session persistence can record it durably.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FileStateUpdate {
     pub(crate) path: String,

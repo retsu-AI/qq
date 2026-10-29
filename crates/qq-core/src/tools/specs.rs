@@ -21,17 +21,9 @@ use super::{
 };
 use crate::catalog::{EffectClass, StaticTool, ToolHost};
 
-/// The sub-agent tool. Not a [`BuiltInTool`]: it is declared only for runs
-/// that may spawn (never for child sessions), and it dispatches to the
-/// session layer rather than to a workspace execution.
 pub(crate) const SPAWN_AGENT_TOOL: &str = "spawn_agent";
-/// Waits for background sub-agents (ADR-0054 § 4). Declared with
-/// [`SPAWN_AGENT_TOOL`] and dispatched to the same spawner.
 const WAIT_AGENTS_TOOL: &str = "wait_agents";
-/// Cancels one background sub-agent (ADR-0054 § 4).
 const CANCEL_AGENT_TOOL: &str = "cancel_agent";
-/// The longest one `wait_agents` call blocks its turn. Command execution
-/// deadlines are independent of this observation bound.
 pub(crate) const MAX_WAIT_AGENTS_SECS: u64 = 600;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -322,12 +314,8 @@ impl BuiltInTool {
     }
 }
 
-/// Byte bound on the `spawn_agent` declaration (name, description, schema).
-/// The roster is bounded upstream; this catches a description that grows
-/// past what every turn should pay for.
 pub(crate) const MAX_SPAWN_AGENT_SCHEMA_BYTES: usize = 2 * 1024;
 
-/// The exact overrides the tool advertises, retained unchanged for admission.
 pub(crate) fn spawn_model_routes<'a>(
     model_routes: &'a [String],
     delegation: &'a DelegationRoster,
@@ -343,11 +331,6 @@ pub(crate) fn spawn_model_routes<'a>(
     }
 }
 
-/// The declaration for [`SPAWN_AGENT_TOOL`]. Kept out of [`specs`] because it
-/// joins the tool list only when the run may spawn: child sessions and
-/// session-less runs never see it. With a roster, `role` is the model's
-/// primary selector and the exact `model` override is limited to roster
-/// routes; without one, `model` spans every authenticated route as before.
 pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationRoster) -> ToolSpec {
     let mut properties = serde_json::Map::from_iter([(
         "task".to_owned(),
@@ -380,8 +363,6 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
             }),
         );
     }
-    // Write authority is advertised only when the roster permits it; a model
-    // never sees an option the spawner would refuse.
     if delegation.write_children {
         properties.insert(
             "authority".to_owned(),
@@ -442,7 +423,6 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
     )
 }
 
-/// The declaration for [`WAIT_AGENTS_TOOL`].
 pub(crate) fn wait_agents_spec() -> ToolSpec {
     ToolSpec::new(
         WAIT_AGENTS_TOOL,
@@ -472,7 +452,6 @@ pub(crate) fn wait_agents_spec() -> ToolSpec {
     )
 }
 
-/// The declaration for `command_status`. Declared with `shell` or `exec`.
 pub(crate) fn command_status_spec() -> ToolSpec {
     ToolSpec::new(
         "command_status",
@@ -499,7 +478,6 @@ pub(crate) fn command_status_spec() -> ToolSpec {
     )
 }
 
-/// The declaration for [`CANCEL_AGENT_TOOL`].
 pub(crate) fn cancel_agent_spec() -> ToolSpec {
     ToolSpec::new(
         CANCEL_AGENT_TOOL,
@@ -545,8 +523,6 @@ pub(crate) struct SpawnAgentArgs {
     pub(crate) authority: ChildAuthority,
 }
 
-/// The smallest call each tool accepts, shown when the same argument error
-/// repeats: a model that misreads the schema twice copies a shape instead.
 pub(crate) fn minimal_call(name: &str) -> Option<&'static str> {
     Some(match name {
         "read_file" => r#"{"path":"README.md"}"#,
@@ -578,8 +554,6 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
         .clone()
 }
 
-/// The built-in tools as the catalog compiler receives them, each carrying
-/// the effect policy will classify it by.
 pub(crate) fn static_tools() -> Vec<StaticTool> {
     static TOOLS: OnceLock<Vec<StaticTool>> = OnceLock::new();
     TOOLS
@@ -593,8 +567,6 @@ pub(crate) fn static_tools() -> Vec<StaticTool> {
         .clone()
 }
 
-/// The effect of a test-only tool, which dispatch executes but the catalog
-/// never advertises.
 #[cfg(test)]
 pub(crate) fn test_tool_effect(name: &str) -> Option<EffectClass> {
     match BuiltInTool::from_name(name)? {

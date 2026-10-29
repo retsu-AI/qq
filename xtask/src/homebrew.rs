@@ -1,11 +1,3 @@
-//! `cargo xtask homebrew-formula`: render the `retsu-ai/homebrew-qq` formula
-//! for one release from its `SHA256SUMS`.
-//!
-//! The release workflow runs this after publishing and pushes the output as
-//! `Formula/qq.rb` to the tap repository. The formula is generated, never
-//! hand-edited: every field comes from the version and the checksum file the
-//! release produced, so the tap can only describe archives that exist.
-
 use std::{
     collections::HashMap,
     io::{self, Write},
@@ -45,8 +37,6 @@ pub enum HomebrewError {
     Write(#[source] io::Error),
 }
 
-/// The four archives Homebrew can install, in the order the formula lists
-/// them. Windows is not a Homebrew platform.
 const TARGETS: [(&str, &str, &str); 4] = [
     ("on_macos", "on_arm", "aarch64-apple-darwin"),
     ("on_macos", "on_intel", "x86_64-apple-darwin"),
@@ -69,8 +59,6 @@ pub fn run(args: HomebrewArgs) -> Result<(), HomebrewError> {
         .map_err(HomebrewError::Write)
 }
 
-/// Parses `sha256sum`-style lines. The Windows archive is hashed on a runner
-/// whose `sha256sum` marks binary mode with `*`, so the marker is stripped.
 fn parse_sums(sums: &str) -> Result<HashMap<&str, &str>, HomebrewError> {
     let mut entries = HashMap::new();
     for (index, line) in sums.lines().enumerate() {

@@ -1,5 +1,3 @@
-//! xAI API-key and OAuth credentials.
-
 use std::{
     thread,
     time::{Duration, Instant},
@@ -127,7 +125,6 @@ pub(super) enum DevicePoll {
     Complete(TokenSet),
 }
 
-/// xAI's endpoint specs over the shared OAuth transport.
 fn post(
     store: &CredentialStore,
     url: &str,
@@ -163,9 +160,6 @@ fn start_device(store: &CredentialStore) -> Result<DeviceAuthorization, XaiAuthE
     body.try_into()
 }
 
-/// One device poll, bounded by the time left on the device code as well as
-/// the transport's own cap: a stalled token endpoint ends the login at its
-/// deadline as a timeout, and otherwise fails the poll at the cap.
 fn poll_device(
     store: &CredentialStore,
     device_code: &str,
@@ -310,8 +304,6 @@ impl XaiLogin {
             .ok_or(XaiAuthError::DeviceResponseInvalid)?;
         let errors = oauth::DevicePollErrors {
             timed_out: || XaiAuthError::AuthorizationTimedOut.into(),
-            // xAI logins are not cancellable from the CLI; a cancelled
-            // runtime reads as the user giving up, a timeout.
             cancelled: || XaiAuthError::AuthorizationTimedOut.into(),
             denied: || XaiAuthError::AuthorizationDenied.into(),
             expired: || XaiAuthError::AuthorizationExpired.into(),
@@ -428,8 +420,6 @@ impl CredentialStore {
         profile: &str,
         explicit: Option<SecretRef>,
     ) -> SharedRequestCredentialProvider {
-        // Remedy text is authored here, once, so the request path never
-        // formats provider-specific guidance.
         let remedies = MissingCredentialRemedies::new(
             "xai",
             profile,
@@ -455,10 +445,6 @@ impl CredentialStore {
             .map(|(secret, _)| secret)
     }
 
-    /// Whether a request for `profile` could find an xAI credential, by the
-    /// same precedence [`Self::resolve_xai`] uses, without refreshing a
-    /// stored OAuth login: an expired one passes, an unreadable one fails.
-    /// It therefore performs no network I/O.
     pub fn check_xai_credential(
         &self,
         profile: &str,
@@ -476,10 +462,6 @@ impl CredentialStore {
             .map(|_| ())
     }
 
-    /// [`Self::resolve_xai`] plus, for a stored OAuth credential, the epoch
-    /// and refresh deadline a request cache may reuse it until. Every other
-    /// source (an explicit reference, a stored API key, the environment)
-    /// returns `None`: the credential epoch cannot see those change.
     fn resolve_xai_with_reuse(
         &self,
         profile: &str,
@@ -518,10 +500,6 @@ impl CredentialStore {
             .map(|(secret, _)| secret)
     }
 
-    /// The stored xAI OAuth access token, refreshed when due, with the epoch
-    /// of the index it was read from and the time it next needs refreshing.
-    /// `reload` bypasses the store's read memo for the first read, as a
-    /// request cache does once it has found its own value stale.
     fn resolve_xai_oauth_with_epoch(
         &self,
         profile: &str,
@@ -551,9 +529,6 @@ impl CredentialStore {
             "xai-oauth".to_owned(),
             XAI_CREDENTIAL_ENDPOINT.to_owned(),
         )?;
-        // Bind the cache candidate to the exact durable value and epoch read
-        // under one state lock: another process may rotate or remove it
-        // immediately after this refresh write.
         let (credential, epoch) = self.load_xai_oauth(&name, true)?;
         if credential.needs_refresh(unix_time()?) {
             return Err(XaiAuthError::TokenResponseInvalid.into());
@@ -619,8 +594,6 @@ pub(super) fn request_credentials_for_test(
     )
 }
 
-/// xAI as a [`RequestCredentialSource`]. Only a stored OAuth credential is
-/// reusable across requests; see [`CredentialStore::resolve_xai_with_reuse`].
 pub(super) struct XaiSource {
     profile: String,
     explicit: Option<SecretRef>,
@@ -670,7 +643,6 @@ fn map_request_credential_error(
         | AuthError::ProviderCredentialMissing { .. }
         | AuthError::StoredCredentialNotRegistered { .. }
         | AuthError::StoredCredentialMissing { .. } => remedies.missing(&error),
-        // Only the refresh path reaches here; device-login errors cannot.
         AuthError::XAi(XaiAuthError::RefreshRejected) => RequestCredentialError::RefreshRejected,
         AuthError::XAi(XaiAuthError::RefreshRequestFailed | XaiAuthError::TokenResponseInvalid) => {
             RequestCredentialError::RefreshUnavailable
@@ -714,9 +686,6 @@ mod tests {
         assert_eq!(authorization.interval, 5);
     }
 
-    /// Answers every poll as a stalled token endpoint does: the call runs
-    /// until the shorter of its deadline and the transport cap, and reports
-    /// which one ended it. Records each request's deadline.
     struct StalledTokenEndpoint {
         timeouts: std::sync::Mutex<Vec<Option<Duration>>>,
     }
@@ -776,9 +745,6 @@ mod tests {
         (error, timeouts, directory)
     }
 
-    /// With more time left than the transport's cap, a stalled poll fails at
-    /// the cap as a failed request; the device lifetime never lengthens a
-    /// single call.
     #[test]
     fn xai_device_polls_with_a_long_lifetime_fail_at_the_transport_cap() {
         let (error, timeouts, directory) = stalled_login(1800);
@@ -790,9 +756,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
-    /// A device poll is bounded by the time left on the device code, and a
-    /// poll that runs out that time ends the login as a timeout, not as a
-    /// failed request.
     #[test]
     fn xai_device_polls_are_bounded_by_the_remaining_lifetime() {
         let (error, timeouts, directory) = stalled_login(40);

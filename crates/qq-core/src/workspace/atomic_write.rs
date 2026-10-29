@@ -30,9 +30,6 @@ pub(crate) struct ExpectedFile<'a> {
     pub permissions: &'a cap_std::fs::Permissions,
 }
 
-/// Install complete bytes through the admitted directory capability. Callers
-/// hold the workspace apply lock. Recheck the expected bytes after staging;
-/// this detects edits during staging, not an atomic CAS against external writers.
 pub(crate) fn apply_atomically(
     workspace: &Workspace,
     target: &WriteTarget,
@@ -59,8 +56,6 @@ pub(crate) fn apply_atomically(
     #[cfg(windows)]
     {
         use cap_std::fs::OpenOptionsExt as _;
-        // No reader can open the new file before its DACL is installed.
-        // GENERIC_WRITE | READ_CONTROL | WRITE_DAC.
         options.access_mode(0x4006_0000).share_mode(0);
     }
     #[cfg(windows)]
@@ -149,8 +144,6 @@ fn set_security(
         constants::{SeObjectType, SecurityInformation},
         wrappers::SetSecurityInfo,
     };
-    // Freeze the admitted access list: inheritance from a broader parent
-    // must not expose replacement bytes. New files default to this user only.
     SetSecurityInfo(
         file,
         SeObjectType::SE_FILE_OBJECT,
@@ -162,8 +155,6 @@ fn set_security(
     )
 }
 
-// Bounded by the already-admitted bytes, without following a late symlink or
-// blocking on a FIFO substituted for the destination.
 fn matches_expected(target: &WriteTarget, expected: Option<ExpectedFile<'_>>) -> io::Result<bool> {
     let metadata = match target.directory.symlink_metadata(&target.name) {
         Ok(metadata) => metadata,

@@ -41,8 +41,6 @@ impl TuiConfigSettings {
         &self.bindings
     }
 
-    /// The selected theme name; the `qq` default alias when no layer set one
-    /// (see `theme::default_theme_name` for what it resolves to).
     #[must_use]
     pub fn theme(&self) -> &str {
         &self.theme
@@ -233,9 +231,6 @@ impl Document {
     }
 }
 
-/// Keys the TUI used to accept and now rejects. The parser's "unexpected
-/// field" error names the key; this adds what to do about it, so a config
-/// written for an older `qq` fails with instructions rather than a schema.
 const REMOVED_KEYS: [(&str, &str); 5] = [
     (
         "layout",

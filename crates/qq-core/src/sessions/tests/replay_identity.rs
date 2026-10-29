@@ -147,8 +147,6 @@ async fn check_repeated_call_replay(missing_first_result: bool) {
     drop(events);
     drop(runtime);
     if missing_first_result {
-        // Legacy crash fixture: the assistant turn committed, but the old
-        // writer never created its tool row. Exercise recovery via reopen.
         let connection = Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
         connection.execute("UPDATE model_turns SET tool_results_projection_json=NULL WHERE run_id=?1 AND turn_ordinal=1", [first_run.unwrap().to_string()]).unwrap();
         assert_eq!(
@@ -237,9 +235,6 @@ async fn check_repeated_call_replay(missing_first_result: bool) {
     }
 }
 
-/// One turn of `count` `read_file` calls, then text. Every provider request
-/// is captured so the test can compare what the model saw live against
-/// what later runs replay.
 struct FanOutReadsProvider {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
     count: usize,
@@ -301,8 +296,6 @@ impl RuntimeLoader for FanOutReadsLoader {
     }
 }
 
-/// The `(call_id, content)` of every `ToolResult` block in a request, in
-/// order.
 fn tool_result_blocks(request: &ModelRequest) -> Vec<(String, String)> {
     request
         .messages()
@@ -317,13 +310,6 @@ fn tool_result_blocks(request: &ModelRequest) -> Vec<(String, String)> {
         .collect()
 }
 
-/// F23 (ENG-804): four ~30 KiB reads in one turn (each inside `read_file`'s
-/// own 32 KiB bound) exceed the 96 KiB per-turn output budget, so the live
-/// request re-bounds the late results.
-/// The follow-up run, the reopened store, and the compaction summarizer
-/// must all replay exactly the bytes the model saw live — not the larger
-/// per-call results — and every span the budget cut must stay recoverable
-/// through `read_tool_result`.
 #[tokio::test]
 async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen() {
     let directory = tempfile::tempdir().unwrap();
@@ -357,8 +343,6 @@ async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen()
         .unwrap();
     let first = queue_prompt(&runtime, session_id, "read all four".to_owned()).await;
     let observed = collect_until(&mut events, finished_for(first)).await;
-    // Reads overlap, so finished events arrive in any order; index them by
-    // call ordinal, which is the order results enter context.
     let mut finished: Vec<ToolCallSnapshot> = observed
         .iter()
         .filter_map(|event| match &event.event {
@@ -378,7 +362,6 @@ async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen()
         );
     }
 
-    // The live request that followed the tool turn is the oracle.
     let live = {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
@@ -404,7 +387,6 @@ async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen()
         );
     }
 
-    // Follow-up run in the same process: assembly replays the turn.
     let second = queue_prompt(&runtime, session_id, "continue".to_owned()).await;
     collect_until(&mut events, finished_for(second)).await;
     let replayed = {
@@ -420,8 +402,6 @@ async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen()
     drop(events);
     drop(runtime);
 
-    // Reopened store: assembly from disk alone, and the joined loader
-    // agrees with the reference oracle.
     assert_assembly_matches_reference(&directory.path().join("sessions.sqlite3"), session_id);
     let runtime = SessionRuntime::open(options(), loader).await.unwrap();
     let third = queue_prompt(&runtime, session_id, "and again".to_owned()).await;
@@ -442,8 +422,6 @@ async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen()
         "a reopened store must replay the live projection byte for byte"
     );
 
-    // Every cut span keeps a recall path: the marker names a handle the
-    // store answers with the complete output.
     for index in &cut {
         let content = &live[*index].1;
         let marker = content
@@ -464,9 +442,6 @@ async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen()
         let crate::runtime::SpillRead::Found { text, .. } = read else {
             panic!("the cut output is stored: {read:?}");
         };
-        // The call did not spill (its own bound left it whole), so the recall
-        // path returns the persisted per-call result: exactly the bytes the
-        // turn budget cut from.
         assert_eq!(&text, finished[*index].result.as_deref().unwrap());
         assert!(text.len() > content.len());
     }
@@ -516,7 +491,6 @@ async fn repeated_call_ids_keep_pruning_effects_and_arguments_local_to_each_turn
         "inspect",
     ] {
         if prompt == "inspect" {
-            // A seam before the last prompt: assembly stubs up to it.
             super::mark_prune_seam(&directory.path().join("sessions.sqlite3"), session_id);
         }
         runtime

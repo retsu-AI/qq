@@ -1,4 +1,3 @@
-//! AC4 guard refusals persist without inventing started work.
 use super::*;
 
 #[tokio::test]

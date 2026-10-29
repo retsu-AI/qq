@@ -1,9 +1,3 @@
-//! Overlay pickers: models, profiles, approval modes, skills, themes,
-//! sessions, and the command palette. One
-//! key handler in `Overlay` moves the cursor and edits the query; this module
-//! owns opening each picker with its rows and interpreting `Accept`,
-//! `Cancel`, and picker-specific chords.
-
 use crossterm::event::{KeyCode, KeyEvent};
 use qq_protocol::{
     AgentProfileId, ApprovalMode, GuidanceKind, ModelDescriptor, ModelSelection, ReasoningEffort,
@@ -197,7 +191,6 @@ impl App {
         )
     }
 
-    /// A receipt may follow its live event; only this form's exact request owns it.
     pub(super) fn finish_goal_form(
         &mut self,
         command: qq_protocol::CommandId,
@@ -367,9 +360,7 @@ impl App {
         )
     }
 
-    /// Route a key to the open overlay. Called only while one is open.
     pub(super) fn handle_overlay_key(&mut self, key: KeyEvent) -> Effects {
-        // A pending yes/no question in the session picker captures every key.
         if let Some(confirm) = self.session_picker_confirm() {
             return self.handle_session_picker_confirm_key(key, confirm);
         }
@@ -380,7 +371,6 @@ impl App {
         match (outcome, overlay) {
             (PickerOutcome::Ignored, _) => Effects::none(),
             (PickerOutcome::Changed, Overlay::Themes { picker, .. }) => {
-                // Moving the cursor previews the highlighted theme live.
                 if let Some(row) = picker.current() {
                     let index = row.index;
                     self.set_theme(index);
@@ -474,8 +464,6 @@ impl App {
                 self.overlay = None;
                 self.execute(command)
             }
-            // Ctrl-N in the model picker always creates a session with the
-            // highlighted model, even when a session is focused.
             (PickerOutcome::Chord(KeyCode::Char('n' | 'N')), Overlay::Models(picker)) => {
                 let Some(row) = picker.current().cloned() else {
                     return Effects::none();
@@ -493,8 +481,6 @@ impl App {
         }
     }
 
-    // --- models ---
-
     pub(super) fn open_models(&mut self) -> Effects {
         if self.models.is_empty() && self.unauthenticated_providers.is_empty() {
             self.set_warning("no authenticated providers have selectable models".to_owned());
@@ -504,9 +490,6 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// Selectable rows for every authenticated model. When there are none,
-    /// the admitted built-ins that lack a credential are listed instead so
-    /// the picker names the fix rather than showing an empty list.
     fn model_rows(&self) -> Vec<ModelRow> {
         if self.models.is_empty() {
             return self
@@ -532,9 +515,6 @@ impl App {
             .collect()
     }
 
-    /// Apply the model at `index`: to the focused session, or by creating a
-    /// session when `create` is set or nothing is focused. A `needs
-    /// credential` row has no index; choosing it repeats the remedy.
     fn accept_model(&mut self, row: &ModelRow, create: bool) -> Effects {
         let Some(index) = row.index else {
             let remedy = self
@@ -587,14 +567,11 @@ impl App {
             session.context_window =
                 super::model_context_window(&self.models, session.summary.model.as_deref());
         }
-        // A refreshed catalog keeps the open picker's cursor on the same model.
         let rows = self.model_rows();
         if let Some(Overlay::Models(picker)) = &mut self.overlay {
             picker.replace_items(rows, |row| (row.provider.clone(), row.model.clone()));
         }
     }
-
-    // --- profiles ---
 
     pub(crate) fn open_profiles(&mut self) -> Effects {
         let Some(capabilities) = self.capabilities.as_deref() else {
@@ -603,16 +580,12 @@ impl App {
             );
             return Effects::redraw(Redraw::Immediate);
         };
-        // The server always lists `default`; an absent list means it answered
-        // without a workspace, which this client never asks for.
         let rows = profile_rows(capabilities);
         if rows.is_empty() {
             self.set_warning("the server advertised no profiles for this workspace".to_owned());
             return Effects::redraw(Redraw::Immediate);
         }
         let mut picker = Picker::with_items(rows);
-        // Start on the profile in effect: the focused session's, or the
-        // default for the next session.
         let current = self
             .focused()
             .and_then(|session_id| self.sessions.get(&session_id))
@@ -624,16 +597,12 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// Apply `profile` to the focused idle session, or record it as the
-    /// default for sessions created next when nothing is focused.
     fn accept_profile(&mut self, profile: AgentProfileId) -> Effects {
         let focused = self
             .focused()
             .and_then(|session_id| self.sessions.get(&session_id).map(|s| (session_id, s)));
         match focused {
             Some((_, session)) if session.summary.status == SessionStatus::Running => {
-                // The runtime refuses a profile change mid-run; say so here
-                // rather than round-tripping a command that will fail.
                 self.set_warning(
                     "wait for the run to finish before changing the profile".to_owned(),
                 );
@@ -668,7 +637,6 @@ impl App {
         }
     }
 
-    /// A refreshed capability document keeps an open profile picker current.
     pub(super) fn refresh_profile_picker(&mut self) {
         let Some(Overlay::Profiles(picker)) = &mut self.overlay else {
             return;
@@ -678,8 +646,6 @@ impl App {
         };
         picker.replace_items(profile_rows(capabilities), |row| row.id.clone());
     }
-
-    // --- approval modes ---
 
     pub(crate) fn open_approval_modes(&mut self) -> Effects {
         let Some(capabilities) = self.capabilities.as_deref() else {
@@ -708,17 +674,12 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// The approval mode in effect: the focused session's, or the default
-    /// for the next session.
     pub(crate) fn effective_approval_mode(&self) -> ApprovalMode {
         self.focused()
             .and_then(|session_id| self.sessions.get(&session_id))
             .map_or(self.approval_mode, |session| session.summary.approval_mode)
     }
 
-    /// Apply `mode` to the focused session (the runtime reads it at the next
-    /// held call, so a running session may change too), or record it as the
-    /// default for sessions created next when nothing is focused.
     fn accept_approval_mode(&mut self, mode: ApprovalMode) -> Effects {
         self.overlay = None;
         let focused = self
@@ -751,10 +712,6 @@ impl App {
         }
     }
 
-    // --- effort ---
-
-    /// Offer only model-advertised choices. Default/inheritance is distinct
-    /// from the explicit `none` value, which some models reject.
     pub(crate) fn open_effort(&mut self) -> Effects {
         let advertised = self.focused_model_efforts();
         let levels = advertised.iter().copied().map(Some);
@@ -772,9 +729,6 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// The effort ladder the catalog advertises for the focused session's
-    /// model (or the default model when nothing is focused). Empty when
-    /// unknown.
     pub(crate) fn focused_model_efforts(&self) -> &[ReasoningEffort] {
         let model = self
             .focused()
@@ -785,8 +739,6 @@ impl App {
         super::model_reasoning_efforts(&self.models, model)
     }
 
-    /// The effort pin in effect: the focused session's, or the default for the
-    /// next session.
     pub(crate) fn effective_effort(&self) -> Option<ReasoningEffort> {
         self.focused()
             .and_then(|session_id| self.sessions.get(&session_id))
@@ -795,9 +747,6 @@ impl App {
             })
     }
 
-    /// Apply `effort` to the focused idle session, or record it as the default
-    /// for sessions created next when nothing is focused. A running session
-    /// keeps the effort it started with, so refuse mid-run like profile.
     fn accept_effort(&mut self, effort: Option<ReasoningEffort>) -> Effects {
         let focused = self
             .focused()
@@ -836,8 +785,6 @@ impl App {
         }
     }
 
-    // --- skills ---
-
     pub(crate) fn open_skills(&mut self) -> Effects {
         let Some(capabilities) = self.capabilities.as_deref() else {
             self.set_warning(
@@ -875,8 +822,6 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    // --- themes ---
-
     pub(super) fn open_themes(&mut self) -> Effects {
         if self.themes.len() < 2 {
             self.set_info(
@@ -903,8 +848,6 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// The active theme. The theme picker previews by moving `theme`, so
-    /// this is always what the next frame should paint with.
     pub(crate) fn theme(&self) -> &Theme {
         &self.themes[self.theme.min(self.themes.len() - 1)]
     }
@@ -918,14 +861,10 @@ impl App {
         true
     }
 
-    // --- sessions ---
-
     pub(super) fn open_sessions(&mut self) -> Effects {
         self.open_session_picker(None)
     }
 
-    /// `/agents`: the focused session's root and every descendant, so the
-    /// user can see and jump between the agents one task fanned out into.
     pub(super) fn open_agents(&mut self) -> Effects {
         let Some(focused) = self.focused() else {
             self.set_warning("focus a session to view its agents".to_owned());
@@ -957,8 +896,6 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// Rows for the session picker in tree order, restricted to `scope`'s
-    /// subtree when set.
     fn session_rows(&self, scope: Option<SessionId>) -> Vec<SessionRow> {
         self.sessions
             .thread_order()
@@ -974,8 +911,6 @@ impl App {
             .collect()
     }
 
-    /// Rebuild the open session picker's rows after the tree changed,
-    /// keeping the cursor on the same session.
     pub(super) fn refresh_session_picker(&mut self) {
         let scope = match &self.overlay {
             Some(Overlay::Sessions { scope, .. }) => *scope,
@@ -1001,7 +936,6 @@ impl App {
         false
     }
 
-    /// The highlighted session in the picker, if any.
     #[cfg(test)]
     pub(crate) fn session_picker_selected(&self) -> Option<SessionId> {
         match &self.overlay {
@@ -1035,8 +969,6 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// `/prune` from the composer: opens the session picker with the prune
-    /// question armed so the user sees what the workspace holds first.
     pub(super) fn request_prune_confirmation(&mut self) -> Effects {
         if !matches!(self.overlay, Some(Overlay::Sessions { .. })) {
             self.open_session_picker(None);
@@ -1092,9 +1024,6 @@ impl App {
         )
     }
 
-    // --- history ---
-
-    /// `Ctrl-R`: search the focused session's prompts, newest first.
     pub(super) fn open_history(&mut self) -> Effects {
         let Some(session) = self.focused().and_then(|id| self.sessions.get(&id)) else {
             self.set_info("no session history to search".to_owned());
@@ -1114,7 +1043,6 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// Rows of the open history search, for the renderer.
     pub(crate) fn history_picker(&self) -> Option<&Picker<HistoryRow>> {
         match &self.overlay {
             Some(Overlay::History(picker)) => Some(picker),
@@ -1122,10 +1050,6 @@ impl App {
         }
     }
 
-    // --- commands ---
-
-    /// The command palette (`help` false) or the help overlay (`help` true):
-    /// the same rows, the help view grouped by category with no query.
     pub(super) fn open_commands(&mut self, help: bool) -> Effects {
         self.overlay = Some(Overlay::Commands {
             picker: Picker::with_items(command_rows()),
@@ -1134,7 +1058,6 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// Rows of the open command palette, for the renderer.
     pub(crate) fn command_picker(&self) -> Option<(&Picker<CommandRow>, bool)> {
         match &self.overlay {
             Some(Overlay::Commands { picker, help }) => Some((picker, *help)),
@@ -1142,7 +1065,6 @@ impl App {
         }
     }
 
-    /// Hint label for `command`: its chord under the current settings.
     pub(crate) fn chord_label(&self, command: Command) -> Option<String> {
         crate::commands::chord_label(&self.settings, command)
     }
@@ -1150,7 +1072,6 @@ impl App {
 
 #[cfg(test)]
 impl App {
-    /// Sessions visible in the open session picker, in row order.
     pub(crate) fn filtered_sessions(&self) -> Vec<SessionId> {
         match &self.overlay {
             Some(Overlay::Sessions { picker, .. }) => {
@@ -1160,7 +1081,6 @@ impl App {
         }
     }
 
-    /// Indexes into `models` visible in the open model picker.
     pub(crate) fn filtered_models(&self) -> Vec<usize> {
         match &self.overlay {
             Some(Overlay::Models(picker)) => {
@@ -1170,7 +1090,6 @@ impl App {
         }
     }
 
-    /// Indexes into `themes` visible in the open theme picker.
     pub(crate) fn filtered_themes(&self) -> Vec<usize> {
         match &self.overlay {
             Some(Overlay::Themes { picker, .. }) => {
@@ -1180,7 +1099,6 @@ impl App {
         }
     }
 
-    /// Open the session picker with `query` typed and `selected` highlighted.
     pub(crate) fn open_session_picker_with(
         &mut self,
         query: &str,
@@ -1196,8 +1114,6 @@ impl App {
     }
 }
 
-/// Rows for every advertised profile; `default` first, the rest in server
-/// order (sorted by name).
 fn profile_rows(capabilities: &ServerCapabilities) -> Vec<ProfileRow> {
     capabilities
         .profiles

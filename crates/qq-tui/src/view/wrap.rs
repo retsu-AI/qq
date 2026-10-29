@@ -1,15 +1,7 @@
-//! Width-aware line manipulation: wrapping, truncation, indentation, and
-//! viewport slicing. Every function preserves span styles across breaks and
-//! never emits a row wider than the requested width.
-
 use unicode_width::UnicodeWidthChar;
 
 use crate::render::{Line, Style, muted};
 
-/// One whitespace or word run inside a single span: a byte range plus its
-/// display width. Tokens never cross span boundaries so styles are preserved
-/// by construction; a word spanning two spans becomes two tokens that the
-/// fitter treats as one group.
 struct WrapToken {
     span: usize,
     range: std::ops::Range<usize>,
@@ -17,9 +9,6 @@ struct WrapToken {
     width: usize,
 }
 
-/// Wraps prose at whitespace, preserving span styles across breaks. A single
-/// word wider than the width falls back to character breaking, and the
-/// whitespace a break lands on is dropped rather than carried over.
 pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
     if line.width() <= width {
         return vec![line];
@@ -120,8 +109,6 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
     output
 }
 
-/// Character wrapping for literal content (code blocks, table rows) where
-/// dropping or moving whitespace would break alignment.
 pub(crate) fn wrap_line_chars(line: Line, width: usize) -> Vec<Line> {
     let mut output = vec![Line::default()];
     let mut current_width = 0;
@@ -158,8 +145,6 @@ pub(crate) fn indent_lines(
         .into_iter()
         .map(|line| {
             let mut indented = Line::styled(prefix, prefix_style);
-            // A row's own margin (`Line::indent`) sits after the prefix, so
-            // it becomes cells here rather than being dropped.
             if line.indent > 0 {
                 indented.push(" ".repeat(line.indent), prefix_style);
             }

@@ -12,11 +12,8 @@ fn occupancy_reuse_requires_exact_shape_and_prefix_and_follows_byte_deltas() {
     };
     assert_eq!(
         compatible_context_tokens(occupancy, shape, prefix, 1_024),
-        // 24 appended bytes are charged at the byte-ratio estimate.
         Some(100 + context::estimate_tokens(24))
     );
-    // A shrunken request (assembly-time pruning) keeps the measurement and
-    // credits the removed bytes at the estimate ratio.
     assert_eq!(
         compatible_context_tokens(occupancy, shape, prefix, 996),
         Some(99)
@@ -40,8 +37,6 @@ fn unknown_provider_identity_repeats_overflow_but_never_seeds_occupancy() {
     let prefix = test_static_prefix(2, Some(3));
     let basis = context_occupancy_basis(shape.digest, prefix, 1_000);
 
-    // Overflow suppression: the same route-level shape and prefix repeat
-    // the known overflow even when pruning shrank the request.
     assert!(repeats_context_basis(basis, shape, prefix));
     assert!(repeats_context_basis(
         context_occupancy_basis(shape.digest, prefix, 5_000),
@@ -61,7 +56,6 @@ fn unknown_provider_identity_repeats_overflow_but_never_seeds_occupancy() {
         prefix
     ));
 
-    // Reuse: a route-level identity cannot prove tokenization shape.
     let occupancy = ContextOccupancy {
         context_tokens: 100,
         basis,
@@ -71,8 +65,6 @@ fn unknown_provider_identity_repeats_overflow_but_never_seeds_occupancy() {
         None
     );
 
-    // A known identity for the same route lives in a different digest
-    // domain: neither direction can match the other.
     let exact = context_request_shape(&test_resolved_model("test/model", "wire-model", 256, None));
     assert!(exact.provider_identity);
     assert_ne!(exact.digest, shape.digest);
@@ -127,8 +119,6 @@ fn occupancy_shape_excludes_pricing_but_invalidates_wire_affecting_changes() {
     for changed in variants {
         assert_ne!(context_request_shape(&changed).digest, base_shape.digest);
     }
-    // Historical and foreign-version identities degrade to the
-    // route-level fallback instead of vanishing.
     let mut historical = base.clone();
     historical.version = qq_protocol::ResolvedModelVersion::new(1).unwrap();
     let historical_shape = context_request_shape(&historical);
@@ -228,8 +218,6 @@ async fn compatible_occupancy_seeds_the_first_turn_after_restart_and_pricing_ref
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     runtime.shutdown().await.unwrap();
     drop(runtime);
-    // A live subscription holds the store open (reads stay available after
-    // shutdown), which holds the store's ownership; drop it before reopening.
     drop(events);
 
     *pricing.lock().unwrap() = Some(ModelPricing {
@@ -391,8 +379,6 @@ fn store_accounting_projects_direct_and_subtree_runs_after_restart_and_pruning()
             estimated_cost_usd_nanos: Some(5),
         }
     );
-    // Inclusive is the whole bounded subtree: parent, both children, and
-    // the grandchild under the first child.
     assert_eq!(parent.inclusive.usage, Some(usage(49, 62)));
     assert_eq!(parent.inclusive.estimated_cost_usd_nanos, None);
 
@@ -414,7 +400,6 @@ fn store_accounting_projects_direct_and_subtree_runs_after_restart_and_pruning()
         )
         .unwrap();
     let pruned = load_session_accounting(&connection, parent_id).unwrap();
-    // Parent 2/3 + first child 7/11 + grandchild 23/29; cost 5 + 13 + 31.
     assert_eq!(pruned.inclusive.usage, Some(usage(32, 43)));
     assert_eq!(pruned.inclusive.estimated_cost_usd_nanos, Some(49));
 }

@@ -1,5 +1,3 @@
-//! Native OpenAI Codex OAuth credentials.
-
 use std::{
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
@@ -116,8 +114,6 @@ pub(super) struct RefreshedTokens {
     pub refresh_token: Option<String>,
 }
 
-/// The token exchange of an authorization-code grant (loopback or device),
-/// bounded by `timeout` when the login has a deadline.
 pub(super) fn exchange(
     store: &CredentialStore,
     code: &str,
@@ -147,9 +143,6 @@ pub(super) fn exchange(
             timeout,
             max_body: MAX_TOKEN_RESPONSE_BYTES,
         })
-        // Only an exchange carrying a device login's deadline can reach it;
-        // the browser flow's exchange has none, so its timeouts are ordinary
-        // request failures.
         .map_err(|error| match error {
             oauth::TransportError::DeadlineReached => CodexAuthError::DeviceAuthorizationTimedOut,
             oauth::TransportError::Failed => CodexAuthError::TokenRequestFailed {
@@ -390,7 +383,6 @@ fn decode_token_response<T: DeserializeOwned>(
         .ok_or(CodexAuthError::TokenResponseInvalid { operation })
 }
 
-/// A short-lived loopback OAuth login awaiting the browser callback.
 pub struct CodexLogin {
     listener: TcpListener,
     authorization_url: String,
@@ -478,10 +470,6 @@ impl CodexLogin {
             }
             match self.listener.accept() {
                 Ok((mut stream, _)) => {
-                    // BSD-family platforms may propagate O_NONBLOCK from the
-                    // listener to an accepted socket. The callback reader is
-                    // deadline-bounded with socket timeouts and must wait for
-                    // a browser that connected just before writing its request.
                     stream
                         .set_nonblocking(false)
                         .map_err(|_| CodexAuthError::CallbackFailed)?;
@@ -559,7 +547,6 @@ impl CodexLogin {
     }
 }
 
-/// An OpenAI Codex device authorization that does not require a loopback callback.
 pub struct CodexDeviceLogin {
     authorization: DeviceAuthorization,
 }
@@ -665,8 +652,6 @@ impl CodexDeviceLogin {
         let errors = oauth::DevicePollErrors {
             timed_out: || CodexAuthError::DeviceAuthorizationTimedOut.into(),
             cancelled: || CodexAuthError::DeviceAuthorizationCancelled.into(),
-            // Codex's device endpoint has no denial or expiry status: it
-            // answers 403 or 404 until the user approves.
             denied: || CodexAuthError::DeviceAuthorizationTimedOut.into(),
             expired: || CodexAuthError::DeviceAuthorizationTimedOut.into(),
         };
@@ -1019,8 +1004,6 @@ fn id_token_claims(token: &str) -> Result<IdTokenClaims, CodexAuthError> {
         chatgpt_account_is_fedramp: bool,
     }
 
-    // These tokens come directly from the fixed HTTPS token endpoint. Like the
-    // upstream Codex client, QQ decodes claims here rather than acting as an OIDC verifier.
     let claims: Claims = decode_jwt_payload(token).ok_or(CodexAuthError::IdTokenInvalid)?;
     let auth = claims.auth.ok_or(CodexAuthError::AccountIdMissing)?;
     Ok(IdTokenClaims {
@@ -1052,7 +1035,6 @@ fn decode_jwt_payload<T: DeserializeOwned>(token: &str) -> Option<T> {
     serde_json::from_slice(&payload).ok()
 }
 
-/// Runtime-only Codex bearer material.
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct CodexCredential {
@@ -1090,10 +1072,6 @@ impl CredentialStore {
             .map(|(credential, _epoch)| credential)
     }
 
-    /// Whether `profile` has a stored Codex login that a request could use:
-    /// present, bound to the Codex audience, and parseable. An expired one
-    /// passes, since a request refreshes it; this check never does, so it
-    /// performs no network I/O.
     pub fn check_codex_login(&self, profile: &str) -> Result<(), AuthError> {
         self.load_codex_with_epoch(&credential_name(profile)?)
             .map(|_| ())
@@ -1166,9 +1144,6 @@ impl CredentialStore {
             "openai-codex".to_owned(),
             CREDENTIAL_ENDPOINT.to_owned(),
         )?;
-        // Bind the cache candidate to the exact durable value and epoch read
-        // under one state lock. A separate process may rotate or remove it
-        // immediately after our refresh write.
         let (credential, epoch) = self.load_codex_with_epoch_uncached(&name)?;
         let now = unix_time()?;
         if credential.needs_refresh(now) {
@@ -1207,9 +1182,6 @@ impl CredentialStore {
     }
 }
 
-/// OpenAI Codex as a [`RequestCredentialSource`]: every resolution comes
-/// from the stored OAuth credential, so it is always cached until its epoch
-/// moves or its refresh deadline passes.
 pub(super) struct CodexSource {
     profile: String,
     remedies: MissingCredentialRemedies,
@@ -1219,8 +1191,6 @@ pub(super) type CodexRequestCredentials = CachedRequestCredentials<CodexSource>;
 
 impl CodexRequestCredentials {
     pub(super) fn for_profile(store: &CredentialStore, profile: &str) -> Self {
-        // Remedy text is authored here, once, so the request path never
-        // formats provider-specific guidance. Codex has no API-key variable.
         CachedRequestCredentials::new(
             store,
             CodexSource {
@@ -1292,8 +1262,6 @@ fn map_request_credential_error(
     remedies: &MissingCredentialRemedies,
 ) -> RequestCredentialError {
     match error {
-        // Only the refresh path reaches here; login-only errors such as a
-        // denied authorization or a callback timeout cannot.
         AuthError::Codex(CodexAuthError::TokenRequestRejected { .. }) => {
             RequestCredentialError::RefreshRejected
         }

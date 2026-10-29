@@ -11,17 +11,8 @@ use super::{
 };
 use crate::sessions::{SessionRuntimeError, feed};
 
-/// Output jobs the worker folds into one transaction when they are already
-/// queued. Bounded so a burst cannot hold the commit open indefinitely and a
-/// control job is admitted between groups.
 pub(super) const OUTPUT_GROUP_LIMIT: usize = 16;
 
-/// What a job leaves for the worker once its statements have run: whether
-/// they succeeded (so the worker keeps or rolls back the job's savepoint) and
-/// the deferred settlement that publishes its staged events and replies to
-/// the caller. Settlement runs only after the enclosing commit, so a caller
-/// never sees an acknowledgement, and a subscriber never sees an event, for
-/// work that is not yet durable.
 pub(super) struct JobOutcome {
     pub(super) error: Option<SessionRuntimeError>,
     pub(super) settle: Box<dyn FnOnce(Result<(), SessionRuntimeError>) + Send + 'static>,
@@ -29,24 +20,10 @@ pub(super) struct JobOutcome {
 
 pub(super) type DatabaseJob = Box<dyn FnOnce(&mut Connection) -> JobOutcome + Send + 'static>;
 
-/// Whether a control-lane job may run inside an output group that is
-/// forming when it reaches the head of its queue.
-///
-/// A write joins: its `begin_unit` becomes a savepoint, and it settles on
-/// the group's commit, so an acknowledgement shares the group's fsync
-/// instead of adding one. A read never joins: it must observe committed
-/// state, and it runs on its own immediately after the group commits.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Joins {
-    /// A read a caller is waiting on. Runs alone; closes a forming group so
-    /// it is answered right after that group's commit.
     Never,
-    /// A write. Joins a forming group as a savepoint.
     OutputGroup,
-    /// A read issued by the runtime's own scheduling loop (a claim attempt),
-    /// not by a waiting client. Runs alone after any forming group commits
-    /// but does not cut the group short: it is a wakeup, and closing every
-    /// group for it costs a full fsync per stream per round.
     AfterGroup,
 }
 
@@ -83,9 +60,6 @@ pub(super) fn start(
         .spawn(move || {
             #[cfg(test)]
             crate::sessions::codec::TEST_EPOCH.with(|slot| slot.replace(epoch));
-            // Ownership precedes the database open, and therefore precedes
-            // the recovery sweep the runtime runs next: a second process
-            // never mutates a store another process is serving.
             let ownership = acquire_ownership(&path);
             match ownership.and_then(|ownership| open_database(&path).map(|db| (ownership, db))) {
                 Ok((ownership, (mut connection, store_id))) => {
@@ -97,8 +71,6 @@ pub(super) fn start(
                         &output_rx,
                         &shutdown_rx,
                     );
-                    // Release ownership only after the connection is closed
-                    // so a successor never sees a live WAL writer.
                     drop(connection);
                     drop(ownership);
                 }
@@ -165,9 +137,6 @@ fn database_worker(
             Err(TryRecvError::Disconnected) => channel_disconnected = true,
             Err(TryRecvError::Empty) => {}
         }
-        // `Store::close` first rejects new admission, then signals here. Jobs
-        // already accepted into either bounded queue remain authoritative and
-        // are drained before the worker reports closed.
         if shutdown_requested || channel_disconnected {
             return;
         }
@@ -191,10 +160,6 @@ fn database_worker(
     }
 }
 
-/// Dispatches one dequeued control message. A read runs alone in its own
-/// transaction. A write opens a group so that other writes already waiting
-/// in either lane share its commit; when nothing else is waiting the group
-/// is just that one job and costs exactly what a lone transaction did.
 fn run_control(
     connection: &mut Connection,
     feed: &feed::WorkspaceFeed,
@@ -214,8 +179,6 @@ fn run_control(
     }
 }
 
-/// A control read runs in its own transaction and settles at once: it
-/// observes committed state and never waits behind streamed output.
 fn run_control_message(
     connection: &mut Connection,
     feed: &feed::WorkspaceFeed,
@@ -226,7 +189,6 @@ fn run_control_message(
         capacity_permit,
         ..
     } = message;
-    // Capacity counts queued jobs, not the operation currently executing.
     drop(capacity_permit);
     let outcome = job(connection);
     let staged = feed::take_staged();
@@ -240,21 +202,6 @@ fn run_control_message(
     (outcome.settle)(Ok(()));
 }
 
-/// Runs `first` and every write already queued behind it in either lane, up
-/// to `OUTPUT_GROUP_LIMIT`, inside one transaction with one commit and fsync.
-///
-/// Each job's own `begin_unit` becomes a savepoint here. An ordinary failure
-/// rolls back that savepoint and leaves its siblings unaffected. If SQLite
-/// aborts the transaction or the outer commit fails, every job in the group
-/// receives that error and nothing staged is published. Unstarted jobs stay
-/// queued for the next group.
-///
-/// Waiting control writes (`Joins::OutputGroup`) are taken before more
-/// output so an acknowledgement is never starved by a stream; they run as
-/// savepoints in queue order and settle on the same commit, costing no fsync
-/// of their own. The first waiting control *read* ends the group: it runs
-/// alone immediately after the commit, so control-lane FIFO order holds and
-/// no read observes an uncommitted group.
 fn run_output_group(
     connection: &mut Connection,
     feed: &feed::WorkspaceFeed,
@@ -265,14 +212,9 @@ fn run_output_group(
     let mut group: Vec<(JobOutcome, Vec<std::sync::Arc<feed::PublishedEvent>>)> =
         Vec::with_capacity(OUTPUT_GROUP_LIMIT);
     if connection.execute_batch("BEGIN").is_err() {
-        // No transaction could open: run the job alone under its own unit
-        // so it still commits or fails on its own terms.
         run_control_message(connection, feed, first);
         return;
     }
-    // A control read dequeued while the group was forming; it runs after
-    // the commit. At most one is ever held, and once one is held no further
-    // control message is dequeued, so the control lane never reorders.
     let mut deferred_read: Option<WorkerMessage> = None;
     let mut next = Some(first);
     let mut aborted = None;
@@ -285,9 +227,6 @@ fn run_output_group(
         drop(capacity_permit);
         let outcome = job(connection);
         let staged = feed::take_staged();
-        // SQLITE_FULL, IOERR and other failures may roll back the entire
-        // transaction, including earlier jobs' released savepoints. Do not
-        // run another queued job outside the transaction we promised it.
         if connection.is_autocommit() {
             aborted = Some(
                 outcome
@@ -303,9 +242,6 @@ fn run_output_group(
         if group.len() >= OUTPUT_GROUP_LIMIT {
             break;
         }
-        // Waiting control work has priority over more output. A write joins
-        // the group; a client read closes it; a scheduler wakeup is held and
-        // runs after the commit without cutting the group short.
         if deferred_read.is_none() {
             match control.try_recv() {
                 Ok(

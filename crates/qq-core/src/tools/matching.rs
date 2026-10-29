@@ -1,14 +1,5 @@
-//! The `edit_file` matching cascade: where in a file does `old` live? Each
-//! strategy is tried in order and the first that yields exactly one match
-//! wins; more than one match at any level is ambiguity and fails, because a
-//! looser strategy must never silently pick between candidates the stricter
-//! one could not tell apart. Every non-exact match is named in the result so
-//! the model sees its own drift.
-
 use std::time::Instant;
 
-/// Byte span of the match in the original text, the text that should replace
-/// it (re-indented for `indent_flexible`), and the strategy that found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Match {
     pub(super) start: usize,
@@ -23,10 +14,8 @@ pub(super) enum Strategy {
     LineTrimmed,
     WhitespaceNormalized,
     IndentFlexible,
-    /// Curly quotes, en/em dashes and `…` read as their ASCII forms.
     Punctuation,
     BlockAnchor,
-    /// `old` carried the `read_file` line-number gutter; matched without it.
     LineNumbers,
 }
 
@@ -46,19 +35,14 @@ impl Strategy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum MatchError {
-    /// No strategy found `old`. `closest` is the best-scoring line for the
-    /// first line of `old` (line number, similarity 0–1, a 3-line excerpt)
-    /// so the retry needs no read.
-    NotFound { closest: Option<Closest> },
-    /// A strategy found several candidates; the 1-based lines they start on.
-    /// Exact diagnostics stop at three candidates, so that count is a lower bound.
+    NotFound {
+        closest: Option<Closest>,
+    },
     Ambiguous {
         via: Strategy,
         count: usize,
         lines: Vec<usize>,
     },
-    /// A fuzzy candidate spans far more text than `old`: the strategy matched
-    /// the wrong thing.
     Disproportionate {
         via: Strategy,
         span_lines: usize,
@@ -69,21 +53,16 @@ pub(super) enum MatchError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Closest {
     pub(super) line: usize,
-    /// Normalized similarity of the closest line to `old`'s first line.
     pub(super) distance_percent: u8,
     pub(super) excerpt: String,
 }
 
-/// Files above this many lines skip `block_anchor`, whose scan is quadratic
-/// in the worst case.
 pub(super) const BLOCK_ANCHOR_MAX_LINES: usize = 20_000;
-/// Soft deadline for the whole cascade on one edit.
 pub(super) const CASCADE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 const BLOCK_ANCHOR_MIN_LINES: usize = 3;
 const BLOCK_ANCHOR_MIN_SIMILARITY: f64 = 0.7;
 const BLOCK_ANCHOR_MAX_SIZE_DELTA: f64 = 0.25;
 
-/// Unlike `match_indices`, includes overlapping occurrences at UTF-8 boundaries.
 pub(super) fn exact_starts<'a>(text: &'a str, old: &'a str) -> impl Iterator<Item = usize> + 'a {
     let mut offset = 0;
     std::iter::from_fn(move || {
@@ -93,11 +72,6 @@ pub(super) fn exact_starts<'a>(text: &'a str, old: &'a str) -> impl Iterator<Ite
     })
 }
 
-/// Finds `old` in `text`. `fuzzy=false` stops after `exact`.
-///
-/// A fuzzy match against CRLF text writes `new` with CRLF line endings, and
-/// an `old` copied with `read_file`'s line-number gutter is retried without
-/// it, as the last strategy.
 pub(super) fn find(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Match, MatchError> {
     let found = match find_in(text, old, new, fuzzy) {
         Err(MatchError::NotFound { closest }) if fuzzy => {
@@ -119,8 +93,6 @@ pub(super) fn find(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Matc
     Ok(crlf_replacement(text, found))
 }
 
-/// `old` with the `read_file` gutter (`<right-aligned number>\t`) removed
-/// from every line, when every non-blank line carries one.
 fn strip_gutter(old: &str) -> Option<String> {
     let mut out = String::with_capacity(old.len());
     let mut any = false;
@@ -142,8 +114,6 @@ fn strip_gutter(old: &str) -> Option<String> {
     any.then_some(out)
 }
 
-/// A fuzzy match forgave line endings, so the replacement takes the
-/// matched line's: an LF `new` spliced into CRLF text would mix them.
 fn crlf_replacement(text: &str, mut found: Match) -> Match {
     let crlf = text[found.start..]
         .find('\n')
@@ -156,12 +126,9 @@ fn crlf_replacement(text: &str, mut found: Match) -> Match {
 
 fn find_in(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Match, MatchError> {
     let started = Instant::now();
-    // exact
     let mut exact = exact_starts(text, old);
     if let Some(start) = exact.next() {
         if let Some(second) = exact.next() {
-            // Ambiguity is already proven. Bound diagnostics rather than
-            // repeatedly scanning a large overlapping pattern for a count.
             let lines: Vec<_> = [Some(start), Some(second), exact.next()]
                 .into_iter()
                 .flatten()
@@ -196,11 +163,6 @@ fn find_in(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Match, Match
         });
     }
 
-    // Each line strategy compares `old`'s lines to a same-length window of
-    // the file with one key function; the window's byte span is the match.
-    // `line_trimmed` forgives line endings and trailing blanks; it keeps
-    // indentation so that `indent_flexible` is the one strategy that moves
-    // text between depths and re-indents the replacement to match.
     let strategies: [(Strategy, LineKey); 4] = [
         (Strategy::LineTrimmed, |line| line.trim_end().to_owned()),
         (Strategy::WhitespaceNormalized, normalize_inner_whitespace),
@@ -230,8 +192,6 @@ fn find_in(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Match, Match
             [only] => {
                 let (start, _) = lines.spans[*only];
                 let (_, end) = lines.spans[*only + old_line_count - 1];
-                // Without a trailing newline on `old`, the match ends where
-                // the last line's content does, not at the file's newline.
                 let end = if old.ends_with('\n') {
                     end
                 } else {
@@ -260,8 +220,6 @@ fn find_in(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Match, Match
         }
     }
 
-    // block_anchor: first and last trimmed lines anchor a candidate block of
-    // any length; the middle must be similar enough and not wildly larger.
     if old_line_count >= BLOCK_ANCHOR_MIN_LINES
         && lines.len() <= BLOCK_ANCHOR_MAX_LINES
         && started.elapsed() <= CASCADE_DEADLINE
@@ -281,8 +239,6 @@ fn find_in(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Match, Match
             if text[*start..*end].trim() != first {
                 continue;
             }
-            // The nearest closing anchor after the opener, within the span
-            // guard; a farther one would be a different block.
             let Some(close) =
                 (index + BLOCK_ANCHOR_MIN_LINES - 1..lines.len()).find(|&candidate| {
                     text[lines.spans[candidate].0..lines.spans[candidate].1].trim() == last
@@ -352,10 +308,8 @@ fn find_in(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Match, Match
     })
 }
 
-/// How one line strategy normalizes a line before comparing.
 type LineKey = fn(&str) -> String;
 
-/// Line byte spans of `text`, each including its newline when present.
 struct Lines {
     spans: Vec<(usize, usize)>,
 }
@@ -386,8 +340,6 @@ fn trim_line_end(text: &str, start: usize, end: usize) -> usize {
     start + trimmed.len()
 }
 
-/// Keeps the leading indentation (tabs and spaces as written) and collapses
-/// every later run of whitespace to one space.
 fn normalize_inner_whitespace(line: &str) -> String {
     let indent = leading_whitespace(line);
     let mut out = String::with_capacity(line.len());
@@ -396,7 +348,6 @@ fn normalize_inner_whitespace(line: &str) -> String {
     out
 }
 
-/// Collapses every run of whitespace to one space and trims the ends.
 fn normalize_whitespace(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut pending_space = false;
@@ -414,9 +365,6 @@ fn normalize_whitespace(line: &str) -> String {
     out
 }
 
-/// Re-indents `new` by the indentation delta between `old`'s first line and
-/// the matched block's first line, so an edit written against a dedented
-/// copy lands at the file's depth.
 fn reindent(new: &str, old_lines: &[&str], matched: &str) -> String {
     let old_indent = leading_whitespace(old_lines[0]);
     let file_indent = leading_whitespace(matched);
@@ -432,14 +380,10 @@ fn reindent(new: &str, old_lines: &[&str], matched: &str) -> String {
         }
         let own = &line[..line.len() - content.len()];
         match own.strip_prefix(old_indent) {
-            // At or below old's depth: swap old's indent for the file's and
-            // keep the line's own extra indentation.
             Some(extra) => {
                 out.push_str(file_indent);
                 out.push_str(extra);
             }
-            // Shallower than old's first line: rebase by the same delta as
-            // far as the file indent allows.
             None => {
                 let shallower = old_indent.len().saturating_sub(own.len());
                 let keep = file_indent.len().saturating_sub(shallower);
@@ -456,8 +400,6 @@ fn leading_whitespace(line: &str) -> &str {
     &line[..line.len() - content.len()]
 }
 
-/// Typographic quotes, dashes and ellipses folded to ASCII, so an `old`
-/// typed with straight quotes finds text written with curly ones and back.
 fn fold_punctuation(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     for ch in line.chars() {
@@ -472,8 +414,6 @@ fn fold_punctuation(line: &str) -> String {
     out
 }
 
-/// Fraction of `expected` lines that appear in `actual` in order (an LCS
-/// over normalized lines), 1.0 when both are empty.
 fn line_similarity(expected: &[String], actual: &[String]) -> f64 {
     if expected.is_empty() && actual.is_empty() {
         return 1.0;
@@ -501,9 +441,6 @@ pub(super) fn lcs_len<T: PartialEq>(a: &[T], b: &[T]) -> usize {
     previous[b.len()]
 }
 
-/// The file line most similar to `old`'s first non-blank line, by
-/// character-level LCS, with a 3-line excerpt around it. `None` when the
-/// file is empty or nothing scores above zero.
 fn closest_line(text: &str, old: &str) -> Option<Closest> {
     let target = old.lines().map(str::trim).find(|line| !line.is_empty())?;
     let target_chars: Vec<char> = target.chars().take(200).collect();
@@ -560,7 +497,6 @@ mod tests {
                 lines: vec![1, 2],
             })
         );
-        // fuzzy=false stops at exact: a trailing-blank drift is not found.
         let text = "let a = 1;   \n";
         assert!(matches!(
             find(text, "let a = 1;\n", "NEW", false),
@@ -622,7 +558,6 @@ mod tests {
     fn block_anchor_matches_a_drifted_middle_and_guards_disproportion() {
         let text =
             "fn a() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n    call(x, y, z);\n}\n";
-        // Middle drifted: one line differs, similarity 3/4 ≥ 0.7.
         let (strategy, matched) = via(
             text,
             "fn a() {\n    let x = 1;\n    let y = 20;\n    let z = 3;\n    call(x, y, z);\n}\n",
@@ -630,7 +565,6 @@ mod tests {
         .unwrap();
         assert_eq!(strategy, Strategy::BlockAnchor);
         assert_eq!(matched, text);
-        // Anchors match but the block is far larger than old.
         let huge = format!("fn a() {{\n{}}}\n", "    filler();\n".repeat(40));
         assert!(matches!(
             via(&huge, "fn a() {\n    filler();\n}\n"),
@@ -639,7 +573,6 @@ mod tests {
                 ..
             })
         ));
-        // Too dissimilar a middle is not a match.
         assert!(matches!(
             via(
                 text,
@@ -677,9 +610,6 @@ mod tests {
         assert_eq!(found.via, Strategy::IndentFlexible);
         assert_eq!(&text[found.start..found.end], "  foo();");
         assert_eq!(found.replacement, "  baz();\n  qux();");
-        // An exact substring is spliced literally: exact means exact, so an
-        // unindented `old` inside an indented line leaves continuation lines
-        // where the model put them.
         let found = find(text, "foo();", "baz();\nqux();", true).unwrap();
         assert_eq!(found.via, Strategy::Exact);
         assert_eq!(&text[found.start..found.end], "foo();");
@@ -698,7 +628,6 @@ mod tests {
         .unwrap();
         assert_eq!(found.via, Strategy::LineTrimmed);
         assert_eq!(found.replacement, "fn a() {\r\n    more();\r\n}\r\n");
-        // An exact match, or a new that already carries CR, is left alone.
         let found = find(text, "body();", "x();\ny();", true).unwrap();
         assert_eq!(found.replacement, "x();\ny();");
     }
@@ -731,11 +660,9 @@ mod tests {
         assert_eq!(found.via, Strategy::LineNumbers);
         assert_eq!(&text[found.start..found.end], "beta\ngamma\n");
         assert_eq!(found.replacement, "BETA\ngamma\n");
-        // Text that really starts with digits and a tab is matched as is.
         let text = "1\tone\n2\ttwo\n";
         let found = find(text, "2\ttwo\n", "NEW\n", true).unwrap();
         assert_eq!(found.via, Strategy::Exact);
-        // Not every line numbered: no stripping.
         assert!(matches!(
             find("beta\ngamma\n", "2\tbeta\ngamma\n", "x", true),
             Err(MatchError::NotFound { .. })

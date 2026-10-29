@@ -1,7 +1,3 @@
-//! Shared AWS implementation: configuration loading, region rules, credential
-//! leasing, SigV4 signing, and the static AWS HTTP client. Consumed by the
-//! Bedrock and Mantle adapters.
-
 use std::{
     sync::{Arc, LazyLock},
     time::{Duration, SystemTime},
@@ -44,7 +40,6 @@ pub(crate) const INVALID_REGION_MESSAGE: &str = "AWS region must be a valid DNS 
 static AWS_CONFIG_BUILD_PERMITS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(AWS_CONFIG_BUILD_CONCURRENCY)));
 static DIRECT_AWS_HTTP_CLIENT: LazyLock<SharedHttpClient> = LazyLock::new(|| {
-    // This client stays proxy-disabled unless proxy configuration is explicitly installed.
     SmithyHttpClientBuilder::new()
         .tls_provider(tls::Provider::Rustls(
             tls::rustls_provider::CryptoMode::AwsLc,
@@ -332,7 +327,6 @@ struct AwsCredentialLeaseInner {
     state: Mutex<CredentialLoadState>,
 }
 
-/// The only owner of a raw AWS credential provider after configuration loading.
 #[derive(Clone)]
 pub(crate) struct AwsCredentialLease {
     inner: Arc<AwsCredentialLeaseInner>,
@@ -458,8 +452,6 @@ impl AwsCredentialLease {
                 Err(_) => return CredentialLoadOutcome::RuntimeConstructionFailure,
             };
             runtime.block_on(async move {
-                // The deadline preempts cooperative futures only. A synchronous poll keeps this
-                // worker and permit occupied, bounding damage to the global permit count.
                 match tokio::time::timeout(provider_deadline, async move {
                     provider.provide_credentials().await
                 })

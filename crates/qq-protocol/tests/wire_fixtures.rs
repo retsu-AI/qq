@@ -1,16 +1,3 @@
-//! Golden wire encodings for the current protocol version, plus decode-only
-//! coverage of every retained historical version.
-//!
-//! Each fixture under `tests/fixtures/v<PROTOCOL_VERSION>/` is the exact JSON
-//! a conforming peer sends or receives. The test decodes every fixture into
-//! its Rust type, re-encodes it, and requires byte equality with the file, so
-//! a field rename, reorder, or default change fails here before any client
-//! notices. Set `QQ_UPDATE_FIXTURES=1` to rewrite the files from the Rust
-//! values after an intentional protocol change (and bump `PROTOCOL_VERSION`).
-//!
-//! Older directories are never rewritten: `historical_fixtures_still_decode`
-//! proves that a record a peer on that version produced is still accepted.
-
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use qq_protocol::{
@@ -148,14 +135,6 @@ fn fixture_dir(version: u16) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/v{version}"))
 }
 
-/// Every `v<N>/` directory under `root` with `N < PROTOCOL_VERSION`, ascending.
-///
-/// Retention rule: a fixture directory is never deleted while a released
-/// binary may still emit that version; the oldest retained one is the floor
-/// of what this crate promises to decode. Deriving the list from the
-/// filesystem means a directory cannot silently fall out of the test when a
-/// version is added — the current version's directory must exist and every
-/// older one present must still decode.
 fn retained_versions(root: &std::path::Path) -> Vec<u16> {
     let mut versions: Vec<u16> = fs::read_dir(root)
         .unwrap_or_else(|error| panic!("{}: {error}", root.display()))
@@ -482,7 +461,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
         ),
     );
-    // Version 21: the answer to an `ask_user` question.
     check(
         "command_respond_tool_approval_answer",
         &command(
@@ -660,7 +638,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
         ),
     );
-    // Version 20: the shell preview says why the gate is asking.
     check(
         "event_tool_approval_requested_shell",
         &envelope(
@@ -692,8 +669,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
         ),
     );
-    // Version 32: a summary says who each held call waits on and whether a
-    // side question runs, for clients that never load the body.
     check(
         "event_session_updated_with_holds",
         &envelope(
@@ -714,7 +689,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
         ),
     );
-    // Version 21: an `ask_user` hold carries its questions.
     check(
         "event_tool_approval_requested_question",
         &envelope(
@@ -748,7 +722,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
         ),
     );
-    // Version 22: a held `fetch` carries the URL and the host a grant names.
     check(
         "event_tool_approval_requested_fetch",
         &envelope(
@@ -877,7 +850,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
         ),
     );
-    // Version 31: a run reports `compacting` while QQ summarizes context.
     check(
         "event_run_activity_compacting",
         &envelope(
@@ -1235,14 +1207,11 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
     let decoded: ServerCapabilities = serde_json::from_value(newer).unwrap();
     assert_eq!(decoded.protocol_version, PROTOCOL_VERSION);
 
-    // Events and snapshots stay strict: a server never sends what a client
-    // cannot name, and both bump the version together.
     let started =
         fs::read_to_string(fixture_dir(PROTOCOL_VERSION).join("event_run_started.json")).unwrap();
     let mut event: serde_json::Value = serde_json::from_str(&started).unwrap();
     event["event"]["plan"]["future"] = serde_json::json!(1);
     assert!(serde_json::from_value::<SessionEventEnvelope>(event).is_err());
-    // Historical envelopes without plan identity still decode.
     let mut legacy: serde_json::Value = serde_json::from_str(&started).unwrap();
     legacy["event"].as_object_mut().unwrap().remove("plan");
     legacy["event"]["session"]
@@ -1262,10 +1231,6 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
     assert!(session.correlation.is_empty());
 }
 
-/// Every retained historical fixture directory still decodes into today's
-/// types. This is decode-only: older encodings are not required to round-trip
-/// byte-for-byte (a widened field or an added optional field changes the
-/// current encoding without invalidating what an older peer produced).
 #[test]
 fn historical_fixtures_still_decode() {
     const REMOVED_IN_41: [&str; 4] = [
@@ -1290,11 +1255,6 @@ fn historical_fixtures_still_decode() {
         for path in entries {
             let name = path.file_stem().unwrap().to_str().unwrap();
             let stored = fs::read_to_string(&path).unwrap();
-            // Protocol 41 removed approval grants and `approval_delegate`:
-            // commands, receipts and capability lists naming them are rejected
-            // now, and so is a strict summary naming a delegate. Their other
-            // recorded events still decode, as `retired`; stores strip the
-            // summary fields on upgrade.
             let removed = (!name.starts_with("event_")
                 && REMOVED_IN_41.iter().any(|removed| stored.contains(removed)))
                 || stored.contains("\"delegated\": true")
@@ -1318,7 +1278,6 @@ fn historical_fixtures_still_decode() {
                     }
                 };
             }
-            // The prefix selects the type exactly as the golden test named it.
             if name.starts_with("workspace_catalog_request") {
                 decode!(qq_protocol::WorkspaceCatalogRequest);
             } else if name.starts_with("workspace_catalog_") {
@@ -1362,10 +1321,6 @@ fn historical_fixtures_still_decode() {
     }
 }
 
-/// Version 18 widened the model-turn limit and ordinals to `u32`. A limit or
-/// ordinal above the old `u16` range is accepted on the wire and round-trips;
-/// a value above `u32` is rejected. No turns are executed here: this pins the
-/// accepted range, not the runtime's ability to reach it.
 #[test]
 fn model_turn_limits_and_ordinals_accept_the_full_u32_range() {
     const ABOVE_U16: u32 = 65_536;

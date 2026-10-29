@@ -1,10 +1,3 @@
-//! Identity vocabulary for compiled agent plans.
-//!
-//! These types name a plan without describing it. The behavioral descriptor
-//! itself lives in the runtime crate; only its digest and the opaque
-//! credential epoch are shared vocabulary because accepted runs and snapshots
-//! carry them as [`RunPlanIdentity`].
-
 use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -12,10 +5,6 @@ use thiserror::Error;
 
 use crate::ContentHash;
 
-/// SHA-256 of one canonical encoding of a secret-free agent plan descriptor.
-/// Two runs with equal digests were admitted with behaviorally identical
-/// plans: same provider shape, model, prompt version, instructions, tool
-/// catalog, policy, and adapter build. Credential rotation does not change it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AgentPlanDigest(ContentHash);
@@ -38,13 +27,6 @@ impl fmt::Display for AgentPlanDigest {
     }
 }
 
-/// Opaque, monotonic identity of the credential set a plan was compiled
-/// against. Owned by the credential store: every durable credential mutation
-/// advances it, so a cached plan can be reauthorized after rotation without
-/// hashing secret material or changing the plan's behavioral digest.
-///
-/// The value carries no meaning beyond equality and ordering, and `0` means
-/// "no credential store contributed" (embedded runtimes and test fixtures).
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -52,7 +34,6 @@ impl fmt::Display for AgentPlanDigest {
 pub struct CredentialEpoch(u64);
 
 impl CredentialEpoch {
-    /// The epoch of a runtime that resolves no stored credentials.
     pub const NONE: Self = Self(0);
 
     #[must_use]
@@ -72,18 +53,12 @@ impl fmt::Display for CredentialEpoch {
     }
 }
 
-/// Longest agent profile identifier in bytes.
 pub const MAX_PROFILE_ID_BYTES: usize = 64;
 
-/// Name of a configured agent profile: a named bundle of model, approval,
-/// and limit defaults selected per session. Lowercase ASCII letters, digits,
-/// and hyphens; must start with a letter or digit. `default` always exists
-/// and denotes the configuration's top-level values.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AgentProfileId(String);
 
 impl AgentProfileId {
-    /// The implicit profile every configuration has.
     pub const DEFAULT: &'static str = "default";
 
     pub fn new(value: impl Into<String>) -> Result<Self, AgentProfileIdError> {
@@ -177,15 +152,10 @@ pub enum AgentProfileIdError {
     InvalidCharacter,
 }
 
-/// The behavioral identity a run was admitted with: which profile was
-/// selected, the digest of the secret-free plan compiled from it, and the
-/// opaque credential epoch that authorized it. Fixed when the run starts; a
-/// later configuration or credential refresh never changes an accepted run.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunPlanIdentity {
     pub profile: AgentProfileId,
-    /// Encoding version of the descriptor the digest was computed over.
     pub descriptor_version: u16,
     pub digest: AgentPlanDigest,
     pub credential_epoch: CredentialEpoch,

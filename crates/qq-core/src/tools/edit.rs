@@ -22,13 +22,10 @@ use super::{
 
 pub(super) const MAX_EDIT_FILE_BYTES: u64 = MAX_READ_SCAN_BYTES;
 pub(super) const MAX_EDITS: usize = 32;
-/// Per-file side of the unified diff carried as the UI payload.
 pub(super) const MAX_DIFF_BYTES: usize = 256 * 1024;
 #[cfg(test)]
 type PlannedHook = (PathBuf, Box<dyn FnOnce() + Send>);
 
-/// Runs once between an `edit_file` plan and its apply-time exclusive
-/// section in `workspace`, standing in for a writer that lands in between.
 #[cfg(test)]
 static PLANNED_HOOKS: std::sync::Mutex<Vec<PlannedHook>> = std::sync::Mutex::new(Vec::new());
 
@@ -50,11 +47,6 @@ pub(super) struct EditFileArgs {
     dry_run: bool,
 }
 
-/// Models sometimes send `edit_file`'s `edits` JSON-encoded as a string, or
-/// as one edit object without its array; both mean the list they decode
-/// to. The runtime rewrites the arguments to that list before the call is
-/// stored, so approval previews, clients and compaction see one shape.
-/// Anything else is left for the strict decoder to refuse.
 pub(crate) fn normalize_edits(arguments: &mut serde_json::Value) {
     let Some(edits) = arguments.get_mut("edits") else {
         return;
@@ -94,7 +86,6 @@ pub(super) struct Edit {
     if_hash: Option<String>,
 }
 
-/// The one form an edit takes once validated.
 enum Form<'a> {
     Replace { old: &'a str, new: &'a str },
     InsertBefore { anchor: &'a str, new: &'a str },
@@ -102,12 +93,8 @@ enum Form<'a> {
 }
 
 impl Edit {
-    /// `None` is a replace whose `old` equals `new`: there is nothing to
-    /// write, so the edit is skipped rather than failing its batch.
     fn form(&self) -> Result<Option<Form<'_>>, String> {
         let new = self.new.as_deref();
-        // An empty string in an unused form is a filled-in default, not a
-        // second form: models that send every optional field send `""`.
         match (
             self.old.as_deref().filter(|old| !old.is_empty()),
             self.insert_before
@@ -135,7 +122,6 @@ impl Edit {
                 let new = new.ok_or("invalid_edit: insert_after requires new")?;
                 Ok(Some(Form::InsertAfter { anchor, new }))
             }
-            // Every form empty: the only one given has no reading.
             (None, None, None) if self.old.is_some() => {
                 Err("invalid_edit: old must not be empty".to_owned())
             }
@@ -153,8 +139,6 @@ impl Edit {
     }
 }
 
-/// One file's planned change: its original bytes and permissions, the text
-/// after every edit in the batch, and the per-edit summaries for the result.
 struct Planned {
     target: WriteTarget,
     key: String,
@@ -163,35 +147,22 @@ struct Planned {
     text: String,
     changes: Vec<Change>,
     freshness: Freshness,
-    /// The weakest freshness any applied edit relied on, so a later
-    /// `if_hash` that proves the file does not erase how earlier edits were
-    /// admitted. Reported as the header's note.
     admitted: Freshness,
 }
 
-/// What proves the model saw the bytes a file's edits replace (ADR-0058).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Freshness {
-    /// A recorded read of this exact content, or a matching `if_hash`.
     Proven,
-    /// No recorded read and no `if_hash`: only edits whose `old` matches
-    /// exactly once by `exact` may apply.
     Unread,
-    /// A recorded read of other content and no `if_hash`: the same rule.
     ChangedSinceRead,
 }
 
-/// `L<line> -<removed>+<added>[ via=<strategy>]` for one applied edit,
-/// measured against the text as it stood when the edit applied.
 struct Change {
     line: usize,
     removed: usize,
     added: usize,
     via: Strategy,
     count: usize,
-    /// The edit's index in the batch, and every span it wrote in the text as
-    /// it stood after it applied — so a later edit whose match falls inside
-    /// text this one produced is a conflict, not a coincidence.
     index: usize,
     wrote: Vec<std::ops::Range<usize>>,
 }
@@ -208,8 +179,6 @@ pub(super) fn edit_file(
     if arguments.edits.len() > MAX_EDITS {
         return ToolOutput::refused(format!("invalid_edit: at most {MAX_EDITS} edits per call"));
     }
-    // Phase 1, no lock: resolve, verify currency, and apply every edit in
-    // memory in order, so later edits see earlier results.
     let mut planned: BTreeMap<String, Planned> = BTreeMap::new();
     let mut identical_skipped = false;
     for (index, edit) in arguments.edits.iter().enumerate() {
@@ -255,10 +224,6 @@ pub(super) fn edit_file(
                 Err(error) => return ToolOutput::error(format!("edit {index}: {error}")),
             };
             let before_hash = content_hash(&original.bytes);
-            // Currency: a recorded read of this exact content, or an if_hash
-            // (checked per edit below) that proves the model saw it some
-            // other way (an @ mention). Without either, each edit must prove
-            // it on its own.
             let freshness = match file_state.recorded(&key) {
                 Some(recorded) if recorded == before_hash => Freshness::Proven,
                 Some(_) => Freshness::ChangedSinceRead,
@@ -288,13 +253,8 @@ pub(super) fn edit_file(
             );
         }
         let file = planned.get_mut(&key).expect("just inserted");
-        // Every edit's if_hash is an assertion about the plan-time bytes, not
-        // only the first one for its file: a later mismatch is still stale,
-        // and a later match proves the file for the edits that follow.
         if let Some(if_hash) = if_hash {
             if if_hash != &file.before_hash[..12] {
-                // The current hash is not named: passed back as if_hash it
-                // would prove a version the model never saw.
                 return ToolOutput::error(format!(
                     "edit {index}: stale_file: {} is not h:{if_hash} now; read_file it again (or use an old that matches exactly once)",
                     edit.path
@@ -302,22 +262,9 @@ pub(super) fn edit_file(
             }
             file.freshness = Freshness::Proven;
         }
-        // ADR-0058: an `old` that occurs exactly once, byte for byte, shows
-        // the model has the region it replaces. An anchor, a fuzzy match,
-        // or a repeated `old` shows nothing, so those still need a read.
-        // It must be unique in the plan-time bytes (what the model can have
-        // seen) and in the text as earlier edits left it (so the apply takes
-        // the exact path, never the cascade). The apply re-hashes against
-        // `before_hash`, so a writer that lands after planning still fails.
         let unique_exact = || match form {
             Form::Replace { old, .. } => {
                 let once = |text: &str| matching::exact_starts(text, old).take(2).count() == 1;
-                // After earlier edits, the current match must also be a span
-                // the model saw: unique in the plan-time bytes, and not
-                // touching any earlier edit's written span. A deletion
-                // writes an empty span, so `A--AB--B` with `--AB--` deleted
-                // forms a new `AB` from bytes either side of it. A match
-                // that only shares an edge with an earlier edit is fine.
                 let untouched = |text: &str| {
                     text.find(old).is_some_and(|start| {
                         let end = start + old.len();
@@ -326,11 +273,8 @@ pub(super) fn edit_file(
                             .flat_map(|change| &change.wrote)
                             .all(|wrote| {
                                 if wrote.is_empty() {
-                                    // A deletion point joins bytes only when it
-                                    // lies strictly inside the match.
                                     !(start < wrote.start && wrote.start < end)
                                 } else {
-                                    // Written text: ordinary half-open overlap.
                                     end <= wrote.start || wrote.end <= start
                                 }
                             })
@@ -343,9 +287,6 @@ pub(super) fn edit_file(
             }
             Form::InsertBefore { .. } | Form::InsertAfter { .. } => false,
         };
-        // A refusal names the fix but never the current hash: handing it
-        // back would let the next call pass it as if_hash and apply the same
-        // fuzzy edit without the model seeing any content.
         let refusal = match file.freshness {
             Freshness::Proven => None,
             Freshness::Unread if !unique_exact() => Some(format!(
@@ -382,9 +323,6 @@ pub(super) fn edit_file(
             "invalid_edit: old and new are identical in every edit; there is nothing to change",
         );
     }
-    // `form()` succeeded for every edit, so an empty string left in any form
-    // field was an unused filled-in default. Notes are header fields, built
-    // before the result is bounded so a spilled copy carries them too.
     let mut notes: Vec<&str> = Vec::new();
     if arguments.edits.iter().any(|edit| {
         [&edit.old, &edit.insert_before, &edit.insert_after]
@@ -445,8 +383,6 @@ pub(super) fn edit_file(
             hook();
         }
     }
-    // Phase 2, under the apply lock: re-hash every file, then temp+rename
-    // each in path order. A rename failure midway is reported honestly.
     let guard = workspace
         .apply_lock()
         .lock()
@@ -538,10 +474,6 @@ fn push_file_line(text: &mut String, file: &Planned, hash: &str) {
     text.push('\n');
 }
 
-/// Applies one edit to `file.text` in memory and records its change line.
-/// A replacement whose match lands inside text an earlier edit wrote is
-/// refused as `conflicting_edits`: the model is rewriting its own edit,
-/// which is never what a batch means. Inserting next to it is fine.
 fn apply_one(
     file: &mut Planned,
     index: usize,
@@ -573,8 +505,6 @@ fn apply_one(
             let line = line_of(text, first);
             let removed = old.lines().count().max(1);
             let added = new.lines().count();
-            // Map every prior span once. Repeated shifting per occurrence
-            // would become quadratic for large replace_all batches.
             for change in &mut file.changes {
                 for wrote in &mut change.wrote {
                     for offset in [&mut wrote.start, &mut wrote.end] {
@@ -637,12 +567,6 @@ fn apply_one(
             let before = matches!(form, Form::InsertBefore { .. });
             let found =
                 matching::find(text, anchor, "", fuzzy).map_err(|error| describe(error, text))?;
-            // Anchoring on text an earlier edit wrote is fine: nothing of it
-            // is removed, and "replace the fn, then insert after the new fn"
-            // is the natural way to write a batch.
-            // Insertions land on line boundaries: before the anchor's first
-            // line, or after its last line (adding a newline if the anchor
-            // ended the file without one).
             let at = if before {
                 text[..found.start].rfind('\n').map_or(0, |index| index + 1)
             } else {
@@ -684,8 +608,6 @@ fn conflict_check(
     span: std::ops::Range<usize>,
 ) -> Result<(), String> {
     for change in &file.changes {
-        // Touching at an edge is fine; replacing any previously written
-        // occurrence is a conflict, including later replace_all matches.
         let next = change
             .wrote
             .partition_point(|wrote| wrote.end <= span.start);
@@ -703,8 +625,6 @@ fn conflict_check(
     Ok(())
 }
 
-/// Keeps earlier edits' written spans pointing at the same text after a
-/// later edit replaced `removed` bytes at `at` with `added` bytes.
 fn shift_written(changes: &mut [Change], at: usize, removed: usize, added: usize) {
     for change in changes {
         for wrote in &mut change.wrote {
@@ -712,7 +632,6 @@ fn shift_written(changes: &mut [Change], at: usize, removed: usize, added: usize
                 wrote.start = wrote.start + added - removed;
                 wrote.end = wrote.end + added - removed;
             } else if removed == 0 && at < wrote.end {
-                // Inserting within earlier output moves its tail too.
                 wrote.end += added;
             }
         }
@@ -772,8 +691,6 @@ fn describe(error: MatchError, _text: &str) -> String {
     }
 }
 
-/// Appends a unified diff of `before` → `after` for `path` to `out`, one
-/// hunk per changed region with 3 lines of context, bounded per file.
 pub(super) fn unified_diff(
     out: &mut String,
     path: &str,
@@ -792,7 +709,6 @@ pub(super) fn unified_diff(
     out.push_str("\n+++ b/");
     out.push_str(path);
     out.push('\n');
-    // Common prefix and suffix bound the LCS to the changed middle.
     let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
     let suffix = a[prefix..]
         .iter()
@@ -848,9 +764,6 @@ enum DiffOp<'a> {
     Add(&'a str),
 }
 
-/// Line-level diff ops for two changed regions via LCS; degrades to a plain
-/// remove-all/add-all when the regions are large enough that the quadratic
-/// table would be the cost.
 fn diff_ops<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<DiffOp<'a>> {
     const MAX_CELLS: usize = 4_000_000;
     if a.is_empty() || b.is_empty() || a.len().saturating_mul(b.len()) > MAX_CELLS {
@@ -955,8 +868,6 @@ mod tests {
         format!("h:{}", &content_hash(bytes)[..12])
     }
 
-    /// A refusal must not hand back the current hash: passed as if_hash on
-    /// the next call, it would apply the refused edit with no content seen.
     fn assert_no_current_hash(refused: &ToolOutput, current: &[u8]) {
         assert!(refused.is_error, "{}", refused.model_text);
         assert!(
@@ -1097,9 +1008,6 @@ mod tests {
         }
     }
 
-    /// (a) The traced shape: the model reads a file, rewrites it itself
-    /// with a shell `python3` script, then edits text it can see in the
-    /// new content. A unique exact match applies and says so.
     #[test]
     fn an_exact_edit_after_an_outside_rewrite_applies_as_changed_since_read() {
         let directory = tempfile::tempdir().unwrap();
@@ -1128,7 +1036,6 @@ mod tests {
         assert_eq!(state.recorded("a.py"), Some(content_hash(after)));
     }
 
-    /// (b) Never read in this session; the `old` is unique and exact.
     #[test]
     fn a_unique_exact_edit_on_an_unread_file_applies_as_unread() {
         let directory = tempfile::tempdir().unwrap();
@@ -1155,7 +1062,6 @@ mod tests {
         assert_eq!(state.recorded("a.rs"), Some(content_hash(after)));
         assert_eq!(edited.file_states.len(), 1);
 
-        // The applied edit recorded the new hash: the next edit is proven.
         let next = run(
             &workspace,
             &state,
@@ -1166,8 +1072,6 @@ mod tests {
         assert!(!next.model_text.contains("note="), "{}", next.model_text);
     }
 
-    /// The dry run follows the same rule and names the note too, and an
-    /// existing note joins it with a comma.
     #[test]
     fn an_unread_dry_run_and_an_ignored_form_combine_their_notes() {
         let directory = tempfile::tempdir().unwrap();
@@ -1196,8 +1100,6 @@ mod tests {
         assert_eq!(state.recorded("a.txt"), None);
     }
 
-    /// (c) A duplicate `old` proves nothing about which copy the model saw:
-    /// on an unread file it is `not_read`, not `ambiguous`.
     #[test]
     fn a_duplicate_old_on_an_unread_file_is_not_read() {
         let directory = tempfile::tempdir().unwrap();
@@ -1222,8 +1124,6 @@ mod tests {
             "item\nitem\n"
         );
 
-        // An earlier edit in the batch can make a repeated `old` unique; the
-        // model still could not tell which copy it saw.
         fs::write(directory.path().join("keys.txt"), "x1\nkey\nkey\n").unwrap();
         let refused = run(
             &workspace,
@@ -1244,8 +1144,6 @@ mod tests {
         );
     }
 
-    /// (d) A fuzzy-only match means the model's text differs from the file:
-    /// it does not prove the region was seen.
     #[test]
     fn a_fuzzy_only_match_on_an_unread_file_is_not_read() {
         let directory = tempfile::tempdir().unwrap();
@@ -1265,7 +1163,6 @@ mod tests {
             refused.model_text
         );
         assert_no_current_hash(&refused, b"    let x = 1;\n");
-        // An exact `old` that is simply absent is also no proof.
         let absent = run(
             &workspace,
             &state,
@@ -1283,8 +1180,6 @@ mod tests {
         );
     }
 
-    /// The same holds for a recorded read that went stale: no unique exact
-    /// match, `stale_file`, and no current hash.
     #[test]
     fn a_fuzzy_only_match_on_a_changed_file_is_stale_without_its_hash() {
         let directory = tempfile::tempdir().unwrap();
@@ -1307,8 +1202,6 @@ mod tests {
         assert_no_current_hash(&refused, b"    let x = 1;\nlet y;\n");
     }
 
-    /// (e) An `if_hash` is an assertion of a version: a mismatch is
-    /// `stale_file` even when `old` would match exactly once.
     #[test]
     fn an_if_hash_mismatch_is_still_stale_file() {
         let directory = tempfile::tempdir().unwrap();
@@ -1326,15 +1219,12 @@ mod tests {
             refused.model_text,
             "edit 0: stale_file: a.txt is not h:0123456789ab now; read_file it again (or use an old that matches exactly once)"
         );
-        // Review (#281): the mismatch must not name the current hash either,
-        // or the next call passes it and proves a version it never saw.
         assert_no_current_hash(&refused, b"alpha\nbeta\n");
         assert_eq!(
             fs::read_to_string(directory.path().join("a.txt")).unwrap(),
             "alpha\nbeta\n"
         );
 
-        // The same on write_file.
         let refused = run(
             &workspace,
             &state,
@@ -1348,9 +1238,6 @@ mod tests {
         assert_no_current_hash(&refused, b"alpha\nbeta\n");
     }
 
-    /// Review (#280): every edit's if_hash is checked, not only the one that
-    /// first plans the file. A correct hash first and a stale one second
-    /// refuses the whole batch.
     #[test]
     fn a_later_same_file_if_hash_mismatch_refuses_the_batch() {
         let directory = tempfile::tempdir().unwrap();
@@ -1379,8 +1266,6 @@ mod tests {
         assert_eq!(fs::read(directory.path().join("a.txt")).unwrap(), before);
     }
 
-    /// Review (#281): a match formed across an earlier deletion is made of
-    /// bytes either side of what the model removed, not a region it showed.
     #[test]
     fn a_match_formed_across_an_earlier_deletion_is_not_read() {
         let directory = tempfile::tempdir().unwrap();
@@ -1403,8 +1288,6 @@ mod tests {
             fs::read_to_string(directory.path().join("a.txt")).unwrap(),
             "A--AB--B\n"
         );
-        // Review (#281): an edit adjacent to an earlier replacement, or
-        // ending exactly at an earlier deletion point, still applies.
         fs::write(directory.path().join("c.txt"), "abcd\n").unwrap();
         let adjacent = run(
             &workspace,
@@ -1425,7 +1308,6 @@ mod tests {
             r#"{"edits":[{"path":"d.txt","old":"YY","new":""},{"path":"d.txt","old":"xx","new":"X"}]}"#,
         );
         assert!(!after_deletion.is_error, "{}", after_deletion.model_text);
-        // Disjoint edits in one batch still apply.
         fs::write(directory.path().join("b.txt"), "one\ntwo\nthree\n").unwrap();
         let applied = run(
             &workspace,
@@ -1436,8 +1318,6 @@ mod tests {
         assert!(!applied.is_error, "{}", applied.model_text);
     }
 
-    /// Review (#281): overlapping occurrences are repeats. `aa` occurs at
-    /// offsets 0 and 1 of `aaa`; `match_indices` would report it once.
     #[test]
     fn an_overlapping_old_on_an_unread_file_is_not_read() {
         let directory = tempfile::tempdir().unwrap();
@@ -1460,7 +1340,6 @@ mod tests {
             fs::read_to_string(directory.path().join("a.txt")).unwrap(),
             "aaa\n"
         );
-        // A multi-byte overlap too: `éé` twice in `ééé`.
         fs::write(directory.path().join("b.txt"), "ééé\n").unwrap();
         let refused = run(
             &workspace,
@@ -1473,7 +1352,6 @@ mod tests {
             "{}",
             refused.model_text
         );
-        // Non-overlapping and unique still applies.
         fs::write(directory.path().join("c.txt"), "aab\n").unwrap();
         let applied = run(
             &workspace,
@@ -1484,9 +1362,6 @@ mod tests {
         assert!(!applied.is_error, "{}", applied.model_text);
     }
 
-    /// Review (#281): a later edit's matching if_hash proves the file for
-    /// the edits that follow, but the earlier edit was admitted by the
-    /// exact-match exception, and the header still says so.
     #[test]
     fn a_later_if_hash_keeps_the_earlier_freshness_note() {
         let directory = tempfile::tempdir().unwrap();
@@ -1514,8 +1389,6 @@ mod tests {
         );
     }
 
-    /// (f) An insert names only an anchor; no text is replaced, so nothing
-    /// proves the model saw where it lands.
     #[test]
     fn an_anchor_only_insert_on_an_unread_file_is_not_read() {
         let directory = tempfile::tempdir().unwrap();
@@ -1526,7 +1399,6 @@ mod tests {
         for arguments in [
             r#"{"edits":[{"path":"a.txt","insert_after":"alpha","new":"x"}]}"#,
             r#"{"edits":[{"path":"a.txt","insert_before":"beta","new":"x"}]}"#,
-            // One qualifying replace does not carry an insert in the same file.
             r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma"},{"path":"a.txt","insert_after":"alpha","new":"x"}]}"#,
         ] {
             let refused = run(&workspace, &state, "edit_file", arguments);
@@ -1546,8 +1418,6 @@ mod tests {
         );
     }
 
-    /// (g) `write_file` replaces the whole file, so it proves nothing about
-    /// what was there. Neither refusal hands back the hash.
     #[test]
     fn a_write_over_an_unread_or_changed_file_is_refused_without_its_hash() {
         let directory = tempfile::tempdir().unwrap();
@@ -1588,8 +1458,6 @@ mod tests {
         );
     }
 
-    /// (h) A batch qualifies file by file, and fails whole: one file with a
-    /// unique exact match does not carry another without one.
     #[test]
     fn a_mixed_batch_fails_whole_and_writes_nothing() {
         let directory = tempfile::tempdir().unwrap();
@@ -1651,8 +1519,6 @@ mod tests {
         assert_eq!(state.recorded("a.txt"), None);
     }
 
-    /// (i) The match proves what the model saw at plan time. A writer that
-    /// lands before the apply-time re-hash still fails the edit.
     #[test]
     fn a_write_between_plan_and_apply_is_stale_and_not_clobbered() {
         let directory = tempfile::tempdir().unwrap();
@@ -1746,8 +1612,6 @@ mod tests {
         }
     }
 
-    /// v0.1.8 failed 17 batches in 11 runs over one edit whose old equalled
-    /// its new, usually beside four to six real edits.
     #[test]
     fn an_identical_edit_is_skipped_and_the_rest_of_the_batch_applies() {
         let directory = tempfile::tempdir().unwrap();
@@ -1776,8 +1640,6 @@ mod tests {
         );
     }
 
-    /// An earlier build refused an edit_file call whose `edits` arrived as a
-    /// JSON-encoded string; a lone edit object is the same slip.
     #[test]
     fn edits_sent_as_a_string_or_a_single_object_become_the_list() {
         let list = serde_json::json!({"edits":[{"path":"a.txt","old":"a","new":"b"}]});
@@ -2013,8 +1875,6 @@ mod promoted_directory_race_tests {
                     .starts_with(".qq-apply-")),
             "temporary file must be cleaned through the retained capability"
         );
-        // The original protected identity is intact, but the live protected
-        // namespace now refers to the admitted ordinary directory instead.
         assert_eq!(
             std::fs::read_to_string(directory.path().join("held-git/config")).unwrap(),
             "trusted configuration"

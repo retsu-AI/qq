@@ -1,58 +1,26 @@
-//! Responsive frame geometry.
-//!
-//! The terminal's size selects a [`Tier`], and the tier selects which panes
-//! are on screen and how wide each is. Width selects layout, never features:
-//! every action is reachable at every size; a wider terminal shows more at
-//! once. Height selects density (composer rows), never structure.
-//!
-//! `compute_layout` is a pure function of `(size, prefs, session count)` and
-//! runs once per frame; every pane then paints inside its own [`Rect`]. Panes
-//! the current slice does not yet fill (the inspector, extra transcript
-//! slots) are reserved here so later slices change only the painters.
-
-/// Terminal columns at which the layout gains a sessions rail beside the
-/// transcript rather than a one-row strip beneath it.
 pub(crate) const REGULAR_MIN_WIDTH: usize = 90;
-/// Columns at which the layout gains an inspector pane for tool detail.
 pub(crate) const WIDE_MIN_WIDTH: usize = 160;
-/// Columns at which the layout shows more than one transcript side by side.
 pub(crate) const ULTRA_MIN_WIDTH: usize = 240;
 
-/// Narrowest usable rail; below this the strip is used instead.
 pub(crate) const RAIL_MIN_WIDTH: usize = 20;
-/// Widest the rail grows; the rest goes to the transcript.
 pub(crate) const RAIL_MAX_WIDTH: usize = 28;
-/// The inspector takes this share of the width past the transcript's
-/// measure, bounded so tool output stays readable without starving prose.
 pub(crate) const INSPECTOR_MIN_WIDTH: usize = 40;
 pub(crate) const INSPECTOR_MAX_WIDTH: usize = 80;
 
-/// Widest a transcript pane lays prose out. Wider panes center the measure;
-/// the width-keyed caches see one width across every pane at least this wide.
 pub(crate) const TRANSCRIPT_MEASURE: usize = 100;
 
-/// Rows the composer may grow to before it scrolls around the caret, by
-/// height: a short terminal gives fewer rows to input so the transcript
-/// keeps its context.
 pub(crate) const MAX_COMPOSER_ROWS_COMPACT: usize = 4;
 pub(crate) const MAX_COMPOSER_ROWS: usize = 8;
-/// Below this many rows the composer is compact regardless of width.
 pub(crate) const SHORT_HEIGHT: usize = 30;
 
-/// Terminals below this cannot hold the chrome and a usable body.
 pub(crate) const MIN_WIDTH: usize = 32;
 pub(crate) const MIN_HEIGHT: usize = 9;
 
-/// Which layout family the terminal's width selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Tier {
-    /// One column; sessions as a strip; below [`REGULAR_MIN_WIDTH`].
     Compact,
-    /// Transcript plus a sessions rail.
     Regular,
-    /// Rail, transcript, and an inspector for tool detail.
     Wide,
-    /// Rail, two or three transcripts, and an inspector.
     Ultra,
 }
 
@@ -71,7 +39,6 @@ impl Tier {
     }
 }
 
-/// How a user wants an optional pane shown. `Auto` follows the tier.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum PanePref {
     #[default]
@@ -81,10 +48,6 @@ pub(crate) enum PanePref {
 }
 
 impl PanePref {
-    /// Cycle as a toggle command does: `Auto` and `Shown` hide, `Hidden`
-    /// shows. From `Auto` the first press always hides, which is what a user
-    /// reaching for the toggle wants when the pane is in the way; it never
-    /// depends on knowing the terminal width.
     #[must_use]
     pub(crate) const fn toggled(self) -> Self {
         match self {
@@ -94,16 +57,12 @@ impl PanePref {
     }
 }
 
-/// The user's standing layout choices. Runtime toggles; not persisted.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct LayoutPrefs {
-    /// The sessions rail beside the transcript.
     pub rail: PanePref,
-    /// The inspector pane for tool detail (Wide and up when `Auto`).
     pub inspector: PanePref,
 }
 
-/// A rectangle of terminal cells; `x`/`y` are zero-based from the top-left.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Rect {
     pub x: usize,
@@ -129,70 +88,43 @@ impl Rect {
     }
 }
 
-/// Where one transcript pane paints: its cells, and the narrower column the
-/// prose lays out in when the slot is wider than the measure. The pane's
-/// state (what it follows, scroll) is `viewport::TranscriptPane`; this is
-/// only geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TranscriptSlot {
     pub area: Rect,
-    /// Columns from the pane's left edge to where content starts.
     pub inset: usize,
-    /// Width content lays out at; `area.width - 2 * inset` or less.
     pub content_width: usize,
 }
 
-/// Where everything goes this frame. Rows are absolute; the body region is
-/// what remains between the top row and the drafts/composer block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Layout {
     pub tier: Tier,
     pub width: usize,
     pub height: usize,
-    /// Row 0.
     pub top_row: Rect,
-    /// The region between the top row and the drafts; panes divide it.
     pub body: Rect,
-    /// The sessions rail on the right edge of the body, when shown.
     pub rail: Option<Rect>,
-    /// The inspector between the transcript and the rail, when shown.
     pub inspector: Option<Rect>,
-    /// Transcript slots left to right; one until slice L4, never more than
-    /// `viewport::MAX_PANES`.
     pub transcripts: Vec<TranscriptSlot>,
-    /// Whether the one-row agent strip replaces the rail (Compact with more
-    /// than one session and no rail pinned).
     pub strip: bool,
-    /// Rows the composer may grow to at this size.
     pub max_composer_rows: usize,
 }
 
 impl Layout {
-    /// Whether the rail is on screen.
     #[must_use]
     pub(crate) const fn rail_visible(&self) -> bool {
         self.rail.is_some()
     }
 }
 
-/// Fixed rows that never belong to the body: the top row and the composer
-/// rule. The composer's own rows are counted by the caller after it is laid
-/// out, because it grows with wrapped input.
 pub(crate) const FIXED_CHROME_ROWS: usize = 2;
 
-/// From this many rows the composer gets one blank padding row beneath it;
-/// shorter terminals give that row to the transcript.
 pub(crate) const COMPOSER_PADDING_MIN_HEIGHT: usize = 20;
 
-/// Fixed chrome rows at `height`: [`FIXED_CHROME_ROWS`] plus the composer
-/// padding row when the terminal is tall enough to spare it.
 #[must_use]
 pub(crate) const fn fixed_chrome_rows(height: usize) -> usize {
     FIXED_CHROME_ROWS + composer_padding_rows(height)
 }
 
-/// Blank rows under the composer at `height`: one at
-/// [`COMPOSER_PADDING_MIN_HEIGHT`] and up, none below.
 #[must_use]
 pub(crate) const fn composer_padding_rows(height: usize) -> usize {
     if height >= COMPOSER_PADDING_MIN_HEIGHT {
@@ -202,9 +134,6 @@ pub(crate) const fn composer_padding_rows(height: usize) -> usize {
     }
 }
 
-/// Rows the composer may grow to at this size. Known before the layout
-/// because the composer is laid out first: its row count is part of the
-/// chrome the body must leave room for.
 #[must_use]
 pub(crate) const fn max_composer_rows(width: usize, height: usize) -> usize {
     if height < SHORT_HEIGHT || matches!(Tier::of(width), Tier::Compact) {
@@ -214,11 +143,6 @@ pub(crate) const fn max_composer_rows(width: usize, height: usize) -> usize {
     }
 }
 
-/// Lay out a frame of `width` × `height` cells. `chrome_rows` are the rows
-/// below the body already claimed by drafts, the rule, and the composer; the
-/// layout subtracts the agent strip itself when it decides to show one, so
-/// the body gets what remains. The caller passes the current session count
-/// because `Auto` panes hide when there is nothing to list.
 #[must_use]
 pub(crate) fn compute_layout(
     width: usize,
@@ -234,8 +158,6 @@ pub(crate) fn compute_layout(
         PanePref::Shown => true,
         PanePref::Hidden => false,
     };
-    // The rail takes a quarter of the terminal within its bounds, but never
-    // so much that the transcript drops below the minimum usable width.
     let rail_width = if rail_wanted {
         let quarter = (width / 4).clamp(RAIL_MIN_WIDTH, RAIL_MAX_WIDTH);
         if width.saturating_sub(quarter) >= MIN_WIDTH {
@@ -253,17 +175,12 @@ pub(crate) fn compute_layout(
         .saturating_sub(usize::from(strip));
     let body = Rect::new(0, 1, width, body_height);
 
-    // `Auto` shows the inspector from Wide: it holds the focused session's
-    // expanded tool detail and the workspace views so the prose column
-    // stays prose. `Shown` opens it at any width that can carve one.
     let inspector_wanted = match prefs.inspector {
         PanePref::Auto => tier >= Tier::Wide,
         PanePref::Shown => true,
         PanePref::Hidden => false,
     };
     let remaining = width.saturating_sub(rail_width);
-    // The inspector is carved from the space past one full measure so the
-    // transcript never narrows below its measure to make room for it.
     let inspector_width = if inspector_wanted {
         let spare = remaining.saturating_sub(TRANSCRIPT_MEASURE + 2);
         if spare >= INSPECTOR_MIN_WIDTH {
@@ -300,12 +217,6 @@ pub(crate) fn compute_layout(
     }
 }
 
-/// Place the measure inside `area` when the pane is wider than it. The
-/// content sits one third of the way across rather than dead center: the
-/// eye starts at the left where the brand and the composer caret are, and a
-/// lone pane on an ultra-wide display should read as anchored, not adrift.
-/// Until slice L4 fills the remaining width with more panes this keeps the
-/// single-transcript frame legible.
 fn transcript_slot(area: Rect) -> TranscriptSlot {
     let content_width = area.width.min(TRANSCRIPT_MEASURE);
     let inset = (area.width - content_width) / 3;
@@ -381,8 +292,6 @@ mod tests {
         let tight = compute_layout(60, 24, 2, prefs, 3);
         assert_eq!(tight.rail, Some(Rect::new(40, 1, 20, 21)));
         assert_eq!(tight.transcripts[0].area.width, 40);
-        // Narrower still: the rail gives way rather than the transcript,
-        // and the strip returns.
         let tiny = compute_layout(50, 24, 2, prefs, 3);
         assert!(tiny.rail.is_none());
         assert!(tiny.strip);
@@ -414,11 +323,9 @@ mod tests {
         let inspector = wide.inspector.expect("inspector");
         let transcript = wide.transcripts[0];
         assert_eq!(rail.width, 28);
-        // 200 - 28 = 172 remaining; 172 - 102 = 70 spare, within bounds.
         assert_eq!(inspector.width, 70);
         assert_eq!(transcript.area.width, 102);
         assert_eq!(transcript.content_width, TRANSCRIPT_MEASURE);
-        // Left to right with no gaps or overlap.
         assert_eq!(transcript.area.x, 0);
         assert_eq!(inspector.x, transcript.area.right());
         assert_eq!(rail.x, inspector.right());

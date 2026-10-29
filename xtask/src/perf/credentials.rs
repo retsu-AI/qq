@@ -1,15 +1,3 @@
-//! Request-credential workloads (plan slice AP4b).
-//!
-//! Both metrics run against in-memory fakes and a loopback server, so they
-//! measure QQ's credential path, not a keyring or a provider network:
-//!
-//! - resolving a stored, unexpired xAI OAuth credential through the
-//!   `CredentialStore` request-credential provider, one request at a time
-//!   and as a concurrent batch on one provider;
-//! - one streamed HTTP request whose authorization is resolved at send
-//!   time (`HttpAuth::RequestTimeBearer`), from `Provider::stream` to the
-//!   terminal event.
-
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -27,13 +15,11 @@ use tempfile::TempDir;
 
 use super::{CorrectnessCheck, MetricResult, PerfError, elapsed_ns, fixture_error, with_timeout};
 
-/// Requests issued together in the concurrent resolution case.
 pub(super) const CONCURRENT_RESOLUTIONS: usize = 8;
 const PROFILE: &str = "bench";
 const ACCESS_TOKEN: &str = "perf-xai-access-token";
 const SSE_BODY: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
 
-/// A keyring that never leaves the process.
 #[derive(Default)]
 struct MemoryKeyring {
     values: Mutex<BTreeMap<String, Vec<u8>>>,
@@ -66,10 +52,6 @@ impl KeyringBackend for MemoryKeyring {
     }
 }
 
-/// A credential store holding one unexpired xAI OAuth credential for
-/// `PROFILE`. The token is valid for a day, so no sample should refresh; the
-/// store's token clients are offline, so a refresh fails instead of reaching
-/// a real authorization server, and the returned counter records it.
 fn xai_oauth_store(directory: &TempDir) -> Result<(CredentialStore, OfflineTokenCalls), PerfError> {
     let (store, token_calls) = CredentialStore::with_backend(
         CredentialPaths::new(directory.path()),
@@ -164,10 +146,6 @@ pub(super) async fn credential_resolution_workloads(
     ))
 }
 
-/// A keep-alive HTTP/1.1 loopback that answers every request with one small
-/// Chat Completions SSE body and records each request's `Authorization`.
-/// It runs as one task on the caller's runtime and stops, with every
-/// connection it opened, when [`KeepAliveSse::shutdown`] runs or it drops.
 struct KeepAliveSse {
     base_url: String,
     authorizations: Arc<Mutex<Vec<String>>>,
@@ -175,7 +153,6 @@ struct KeepAliveSse {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
-/// Connections the loopback accepts; the workload reuses one.
 const MAX_LOOPBACK_CONNECTIONS: usize = 4;
 
 impl KeepAliveSse {
@@ -214,7 +191,6 @@ impl KeepAliveSse {
         })
     }
 
-    /// Stops accepting, closes every connection and waits for the task.
     async fn shutdown(mut self) -> Result<(), PerfError> {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -230,7 +206,6 @@ impl KeepAliveSse {
 
 impl Drop for KeepAliveSse {
     fn drop(&mut self) {
-        // Reached only on an early return; the normal path awaits `shutdown`.
         if let Some(task) = self.task.take() {
             task.abort();
         }

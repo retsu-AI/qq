@@ -7,9 +7,6 @@ use super::{
 use crate::runtime::RunDeadline;
 use crate::tools;
 
-/// Denies every tool call. Compaction runs summarize existing context; a
-/// call the instruction forbade costs one denied round trip and persists
-/// nothing.
 struct CompactionRunGate;
 
 #[cfg(all(test, unix))]
@@ -22,9 +19,6 @@ struct BufferedToolOutputHook {
 #[cfg(all(test, unix))]
 static BUFFERED_TOOL_OUTPUT_HOOKS: Mutex<Vec<BufferedToolOutputHook>> = Mutex::new(Vec::new());
 
-/// Holds the execution loop immediately after one call's live output enters
-/// the bounded batch. Tests use this exact handoff to make cancellation-versus-
-/// timer ordering deterministic without adding production sleeps or hooks.
 #[cfg(all(test, unix))]
 pub(super) fn hold_buffered_tool_output(
     tool_call_id: ToolCallId,
@@ -66,12 +60,6 @@ impl ToolGate for CompactionRunGate {
     }
 }
 
-/// The prompt prefix a session's prompt runs use, for a summarizer that must
-/// share their provider cache (ADR-0056 § 5). It mirrors the capabilities
-/// `prepare_execution` gives a prompt run: a root session's prompts are the
-/// user's, a child session's are its parent's task. A user prompt typed into
-/// a child session uses the user key instead, so its compaction only misses
-/// the cache. The golden tests hold the two derivations equal.
 fn session_prompt_prefix_key(
     claimed: &ClaimedRun,
     loaded: &LoadedRuntime,
@@ -102,7 +90,6 @@ fn session_prompt_prefix_key(
     }
 }
 
-// Kept through child drain; removed on completion, panic or owner abort.
 struct GoalDeadlineRegistration {
     inner: Arc<SessionRuntimeInner>,
     run: RunId,
@@ -144,14 +131,10 @@ pub(super) enum ExecutionCleanupError {
     Children(#[source] crate::runtime::ChildCleanupError),
 }
 
-/// Proof that a run's tools and children were drained. The store requires it
-/// to settle a started run, so a terminal event cannot be published while
-/// execution is still in flight; only `RunResources::drain` / `stop` mint it.
 #[derive(Clone, Debug)]
 pub(super) struct TeardownComplete(Vec<(ToolCallId, crate::tools::ToolOutput)>);
 
 impl TeardownComplete {
-    /// Store-level tests settle claims that never ran anything.
     #[cfg(test)]
     pub(super) const fn nothing_ran() -> Self {
         Self(Vec::new())
@@ -237,9 +220,6 @@ async fn prepare_execution(
     }
     let tool_cancellation = RunCancellation::new();
     let internal = claimed.identity.kind == RunKind::Compaction;
-    // Take the only full transcript before cloning run metadata into gates or
-    // spawners. ClaimedRun clones after this point stay scalar/empty instead
-    // of duplicating up to 4 MiB per tool call.
     let mut messages = std::mem::take(&mut claimed.messages);
     let inherited_effects = std::mem::take(&mut claimed.message_effects);
     let input = std::mem::take(&mut claimed.input);
@@ -254,8 +234,6 @@ async fn prepare_execution(
             loaded.plan.shell_policy(),
         ))
     };
-    // The claim carried the session's file hashes, so nothing here waits on
-    // the store; a cancel already recorded settles before any preparation.
     if *cancellation.borrow() {
         tool_cancellation.cancel();
         return Err(RunOutcome::Cancelled);
@@ -263,15 +241,6 @@ async fn prepare_execution(
     let file_state = Arc::new(FileState::with_entries(std::mem::take(
         &mut claimed.file_state,
     )));
-    // Structured input resolves here, before the first provider request:
-    // file parts are read through the plan's workspace capability and
-    // recorded in the session file state. The assembled context already ends
-    // with the rendered prompt text (placeholders for attachments); the
-    // resolved text replaces it. A missing, changed, or oversized attachment
-    // fails the run with a typed outcome and no provider work. The result is
-    // kept on the claim: a retry after automatic compaction reloads the
-    // placeholder from the store and must send the bytes the first attempt
-    // read, not a second read of a file that may have changed since.
     if !internal
         && (claimed.resolved_input.is_some()
             || input
@@ -281,8 +250,6 @@ async fn prepare_execution(
         let resolved = if let Some(resolved) = &claimed.resolved_input {
             Arc::clone(resolved)
         } else {
-            // Explicit attachments belong to the project selected by the
-            // human, including ignored files and read-only policy inputs.
             let workspace = input_workspace.clone();
             let state = Arc::clone(&file_state);
             let parts = input;
@@ -295,7 +262,6 @@ async fn prepare_execution(
                 biased;
                 () = RunDeadline::wait(deadline) => {
                     tool_cancellation.cancel();
-                    // Blocking work cannot be forcibly cancelled or detached.
                     let _ = resolution.await;
                     return Err(RunOutcome::BudgetExhausted {
                         exhaustion: Box::new(deadline.expect("only a finite deadline wakes").exhaustion()),
@@ -365,9 +331,6 @@ async fn prepare_execution(
                 loaded.resolved_model().context_window,
             ))
     } else {
-        // A hard cost cap without pricing cannot be enforced. Reject it
-        // before any provider work rather than pretend, exactly as the
-        // headless adapter did before core owned the contract.
         if claimed.limits.max_cost_usd_nanos.is_some() && loaded.resolved_model().pricing.is_none()
         {
             tool_cancellation.cancel();
@@ -381,11 +344,6 @@ async fn prepare_execution(
                 },
             });
         }
-        // A run may delegate while its depth is below the roster's effective
-        // maximum (itself capped at the runtime ceiling; zero disables
-        // delegation for the whole tree). Only depth-one children may hold
-        // write authority, so deeper spawners never offer it; grandchildren
-        // are read-only by construction.
         let delegation = &loaded.plan.descriptor().delegation;
         let effective_depth = delegation.max_depth.min(MAX_CHILD_DEPTH);
         let spawner = if claimed.depth < effective_depth {
@@ -415,15 +373,10 @@ async fn prepare_execution(
         } else {
             RunCapabilities::user(spawner)
         };
-        // A model-spawned task run answers its parent, not a user. Audit
-        // children keep their fixed brief and reply shape, and a user's own
-        // prompt in a child session is a user run.
         let base = if claimed.depth > 0
             && !claimed.user_initiated
             && claimed.purpose == SessionPurpose::Task
         {
-            // Read children are ReadOnly; write children use Auto with internal
-            // review. A client may only lower a child's mode, never raise it.
             base.for_subagent(match claimed.approval_mode {
                 ApprovalMode::ReadOnly => crate::runtime::SubagentAuthority::Read,
                 ApprovalMode::Ask | ApprovalMode::Auto | ApprovalMode::Full => {
@@ -434,30 +387,19 @@ async fn prepare_execution(
             && !claimed.user_initiated
             && claimed.purpose == SessionPurpose::Audit
         {
-            // An auditor is bounded at a few turns already (ADR-0054 § 1).
             base.stall_exempt()
         } else {
             base
         };
-        // A read-only session (every read child) never sees the schemas its
-        // policy denies; the catalog filter is part of the request, not a
-        // gate-time refusal. A write child keeps the full catalog: its
-        // mutating calls are held, not denied.
         let base = if claimed.approval_mode == ApprovalMode::ReadOnly {
             base.read_only()
         } else {
             base
         };
         let (sender, receiver) = crate::runtime::steering_channel();
-        // Steering recorded up to the claim (the run was already `running`
-        // for admission purposes) rode the claim and is queued into the
-        // channel now so the first boundary applies it. Steering recorded
-        // after the claim reaches the channel through `steer`, which the
-        // registration below makes possible.
         for message in std::mem::take(&mut claimed.pending_steering) {
             match sender.messages.try_send(message) {
                 Ok(()) => {}
-                // The channel and the durable bound are the same size.
                 Err(_) => break,
             }
         }
@@ -492,9 +434,6 @@ async fn prepare_execution(
                     loaded,
                 ),
             ));
-        // Only user-initiated roots are audited: children answer to their
-        // parent, internal runs to the runtime, and an audit child auditing
-        // itself would recurse.
         if claimed.depth == 0 && claimed.user_initiated && claimed.purpose == SessionPurpose::Task {
             base.with_audit_hook(Arc::new(SessionAuditHook::new(
                 Arc::clone(inner),
@@ -507,15 +446,11 @@ async fn prepare_execution(
         }
     }
     .with_literal_slash(claimed.literal_slash)
-    // One key per session: every turn and run of the conversation, and its
-    // compactions, reach the provider cache that holds their prefix.
     .with_cache_key(claimed.identity.session_id.to_string())
     .with_execution_started(execution_started)
     .with_tool_tasks(resources.tools.clone())
     .with_output(claimed.output.clone())
     .with_inherited_effects(inherited_effects);
-    // Only roots snapshot (see the tool-start handler below); a child's
-    // changes are covered by its root's snapshot, which it cannot restore.
     if !claimed.identity.child {
         capabilities = capabilities.in_session(claimed.approval_mode);
     } else {
@@ -543,9 +478,6 @@ async fn prepare_execution(
         capabilities =
             capabilities.with_max_output_tokens(u32::try_from(tokens).unwrap_or(u32::MAX));
     }
-    // The claimed workspace is the plan's workspace: the loader compiled the
-    // plan for exactly this session's canonical root, so no per-run
-    // canonicalization or directory open happens here.
     let mut events = loaded.plan.execute(
         messages,
         tool_cancellation.clone(),
@@ -579,10 +511,6 @@ async fn prepare_execution(
                 mut weight,
             }) => {
                 let mut resolved_model = loaded.resolved_model().as_ref().clone();
-                // Internal compaction deliberately reserves a smaller output
-                // budget. Its immutable descriptor records the effective cap
-                // actually sent on every provider turn, not the model's
-                // larger configured ceiling.
                 resolved_model.max_output_tokens = weight.max_output_tokens;
                 let context_shape = context_request_shape(&resolved_model);
                 if claimed.identity.kind == RunKind::Prompt
@@ -788,7 +716,6 @@ pub(super) async fn execute_run(
         () = RunDeadline::wait(deadline) => {
             let unfinished_stage = load_progress.stage();
             load_progress.cancel();
-            // The loader owns construction until it returns, even after expiry.
             let _ = load.await;
             let mut exhaustion = deadline.expect("only a finite deadline wakes").exhaustion();
             exhaustion.message.push_str("; runtime preparation was still ");
@@ -813,7 +740,6 @@ pub(super) async fn execute_run(
         },
         changed = cancellation.changed() => {
             if changed.is_ok() && *cancellation.borrow() {
-                // A terminal event releases the session, so construction must exit first.
                 load_progress.cancel();
                 let _ = load.await;
                 finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
@@ -827,9 +753,6 @@ pub(super) async fn execute_run(
         return;
     }
 
-    // A compiled plan is built from its resolved model, so the two cannot
-    // disagree; the loader is still accountable for compiling the plan for
-    // this run's workspace.
     if loaded.plan.workspace_path() != Path::new(&claimed.workspace) {
         finish_reserved_run(
             &inner,
@@ -869,12 +792,7 @@ pub(super) async fn execute_run(
         }
     }
     let mut bounded_manual_compaction = false;
-    // Admission may downgrade a prompt's context once; it may not refuse the
-    // prompt because earlier runs overflowed. After the fold is exhausted the
-    // run starts from the latest summary alone (RR6).
     let mut summary_only_admission = false;
-    // The proactive-threshold seam runs at most once per run: it moves the
-    // prune watermark to the session's newest turn and reassembles.
     let mut watermark_advanced = false;
     loop {
         let mut prepared = match prepare_execution(
@@ -915,9 +833,6 @@ pub(super) async fn execute_run(
                 compaction_disposition(&claimed)
             },
         });
-        // A summary-only downgrade is a strictly smaller request than the one
-        // the provider rejected, so the shape-level basis (deliberately
-        // independent of request bytes) no longer proves a repeat.
         let repeats_known_overflow = matches!(plan, context::ContextPlan::Send { .. })
             && !summary_only_admission
             && claimed.context_overflow_basis.is_some_and(|basis| {
@@ -931,10 +846,6 @@ pub(super) async fn execute_run(
         if repeats_known_overflow {
             let disposition = compaction_disposition(&claimed);
             if let context::CompactionDisposition::Exhausted(exhaustion) = disposition {
-                // The fold cannot help and the provider already said this
-                // shape overflows. Downgrade to summary-only history once;
-                // the downgraded shape differs from the recorded basis, so
-                // the next pass judges it on its own.
                 if !summary_only_admission {
                     summary_only_admission = true;
                     drop(prepared);
@@ -975,11 +886,6 @@ pub(super) async fn execute_run(
             }
             continue;
         }
-        // A manual compaction whose transcript is estimated past the window
-        // reads one window of it at a unit boundary instead, exactly as an
-        // automatic step does; the summary covers that span and a further
-        // `/compact` folds the rest. Once per run: the bounded reload is
-        // itself judged by the provider.
         if let context::ContextPlan::Send { estimate } = plan
             && claimed.identity.kind == RunKind::Compaction
             && !bounded_manual_compaction
@@ -1007,8 +913,6 @@ pub(super) async fn execute_run(
                 Ok(summarizer) => {
                     bounded_manual_compaction = true;
                     claimed.messages = summarizer.messages;
-                    // A summarizer request is one turn with every call
-                    // rejected; nothing is live-pruned, so no effects.
                     claimed.message_effects = Vec::new();
                     claimed.compaction_cutoff_ordinal = summarizer.cutoff_ordinal;
                 }
@@ -1083,8 +987,6 @@ pub(super) async fn execute_run(
                         return;
                     }
                     Ok(Err(claim::GoalStartRefusal::Reprepare { limits, final_slot })) => {
-                        // The stream has not been polled. Reassemble under the
-                        // tighter bounds while retaining resolved input bytes.
                         drop(prepared);
                         claimed.limits = *limits;
                         if let Some(goals::GoalAdmission::Allowed {
@@ -1166,8 +1068,6 @@ pub(super) async fn execute_run(
                 {
                     Ok(cancelled) => cancelled || *cancellation.borrow(),
                     Err(error) => {
-                        // The row is started but the provider stream was
-                        // never polled: dropping it is the whole teardown.
                         let Ok(teardown) = resources.stop(&mut prepared.events).await else {
                             inner.failed.send_replace(true);
                             return;
@@ -1221,10 +1121,6 @@ pub(super) async fn execute_run(
             context::ContextPlan::Compact { .. } if claimed.identity.kind == RunKind::Prompt => {
                 let audit = prepared.audit.clone();
                 drop(prepared);
-                // Stubbing stale reads is cheaper than a summarizer and is
-                // the seam where the watermark may move (ADR-0056 § 6). If
-                // the stubbed context fits, it is sent; otherwise the
-                // reassembled request compacts as before.
                 if !watermark_advanced {
                     watermark_advanced = true;
                     match inner
@@ -1235,8 +1131,6 @@ pub(super) async fn execute_run(
                         Ok(false) => {}
                         Ok(true) => match inner.store.reload_reserved_messages(&claimed).await {
                             Ok(Some((messages, effects, _))) => {
-                                // Occupancy reuse credits the stubbed
-                                // bytes at its ratio, as for any rewrite.
                                 claimed.messages = messages;
                                 claimed.message_effects = effects;
                                 continue;
@@ -1294,11 +1188,6 @@ pub(super) async fn execute_run(
                     return;
                 }
             }
-            // The fold ran and the retained transcript still does not fit.
-            // Rather than wedge the session, start this prompt from the latest
-            // summary alone with a notice; every row stays in the store. The
-            // downgraded request is judged by the planner again on the next
-            // pass and, if it too overflows, fails with its own reason.
             context::ContextPlan::Reject {
                 reason:
                     context::ContextRejectReason::Exhausted(
@@ -1327,11 +1216,6 @@ pub(super) async fn execute_run(
     }
 }
 
-/// Replaces the reserved prompt's assembled context with the latest
-/// between-run summary and a notice, keeping the prompt itself. Settles the
-/// run and returns `false` when the store cannot supply either. Nothing is
-/// deleted: the session's rows are untouched and a later prompt reassembles
-/// from them as usual.
 async fn admit_with_summary_only_history(
     inner: &Arc<SessionRuntimeInner>,
     claimed: &mut ClaimedRun,
@@ -1377,12 +1261,6 @@ async fn admit_with_summary_only_history(
     true
 }
 
-/// Whether the prompt may spend another summarizer step. Each step reads a
-/// window of transcript after the latest cutoff and commits a summary that
-/// advances it, so a further step is new input as long as the transcript is
-/// not fully summarized, no step for this prompt has failed, and the step
-/// cap is not reached. Any of those exhausts the fold; the reason names
-/// which so the failure is actionable.
 pub(super) fn compaction_disposition(claimed: &ClaimedRun) -> context::CompactionDisposition {
     if let Some(bytes) = claimed.context_compaction_oversized_unit_bytes {
         return context::CompactionDisposition::Exhausted(
@@ -1422,10 +1300,6 @@ async fn run_auto_compaction(
         .await;
         return false;
     }
-    // The summarizer reads at most one window of transcript: the budget is
-    // the window less the summarizer's output reserve and the fixed prefix
-    // the prompt's own preparation just measured. Without a declared window
-    // the whole transcript is read and the storage backstop alone applies.
     let summarizer = inner
         .store
         .load_summarizer_input(
@@ -1592,7 +1466,6 @@ async fn run_auto_compaction(
     } else {
         inner.failed.send_replace(true);
         let outcome = internal_failure("run cancellation registry is unavailable");
-        // Started row, unpolled provider stream: dropping it is the teardown.
         let Ok(teardown) = resources.stop(&mut prepared.events).await else {
             return false;
         };
@@ -1674,9 +1547,6 @@ async fn run_auto_compaction(
             original.context_compaction_attempted = progress.steps;
             original.context_compaction_failed = progress.failed;
             original.context_compaction_remaining = progress.remaining;
-            // A step that sent one unit larger than the budget and still
-            // got rejected has proven that unit irreducible; remember it so
-            // the prompt's failure names it instead of a step count.
             original.compaction_cutoff_ordinal = None;
             if !compacted && let Some(bytes) = summarizer.oversized_unit_bytes {
                 original.context_compaction_oversized_unit_bytes = Some(bytes);
@@ -1688,8 +1558,6 @@ async fn run_auto_compaction(
             true
         }
         Ok(None) => {
-            // The helper has drained; a cancelled owner still holds its
-            // preparation reservation until this terminal write commits.
             finish_prepared_run(inner, original, &original_audit, RunOutcome::Cancelled).await;
             false
         }
@@ -1772,9 +1640,6 @@ async fn finish_prepared_run(
             clear_run_registration(inner, claimed.identity.run_id);
         }
         Err(error) => {
-            // A trigger or storage failure on one descriptor/identity column
-            // must still terminally settle the queued run without pretending
-            // the failed audit write was durable.
             finish_reserved_run(
                 inner,
                 claimed,
@@ -1828,9 +1693,6 @@ async fn execute_started_run(
         .await;
         return;
     }
-    // A compaction run reported `compacting` in the transaction that
-    // started it and reports nothing else: the summarizer's own provider
-    // activity is not the session's.
     let internal = claimed.identity.kind == RunKind::Compaction;
     let mut pending_text = String::new();
     let mut pending_channel = None;
@@ -1839,24 +1701,12 @@ async fn execute_started_run(
     let mut pending_reasoning_kind = None;
     let mut pending_reasoning_text = String::new();
     let mut flush_at = None;
-    // One assistant message per model turn: the message row is created
-    // lazily at the turn's first text delta (so call-only turns persist no
-    // message row) and finalized when the turn's `persist_model_turn`
-    // commits. `current_turn` is the 1-based ordinal of the turn currently
-    // streaming; text deltas always belong to it.
     let mut current_turn: u32 = 1;
     let mut current_message: Option<MessageId> = None;
     let mut current_occupancy_basis = Some(initial_occupancy_basis);
-    // Live tool output batches on the same timer as model text. Text and tool
-    // output never accumulate at the same time: a turn's text is fully
-    // flushed when the turn completes, before any of its calls execute.
     let mut pending_tool_call: Option<ToolCallId> = None;
     let mut pending_tool_output = String::new();
     let mut snapshot_taken = false;
-    // An internal run's streamed output never joins the transcript; the
-    // summary accumulates here and persists as a compaction row instead. A
-    // turn cut at the output limit is continued mid-token, so its successor
-    // is appended verbatim; completed turns are separated by a newline.
     let mut summary_text = String::new();
     let mut summary_continues_truncated_turn = false;
     loop {
@@ -2117,8 +1967,6 @@ async fn execute_started_run(
                     .await;
                     return;
                 }
-                // Buffered live tool output is dropped rather than flushed:
-                // the interrupted call's terminal result replaces it.
                 let outcome = if matches!(stopped, RunInput::Cancelled) {
                     RunOutcome::Cancelled
                 } else {
@@ -2205,9 +2053,6 @@ async fn execute_started_run(
                 static_prefix,
                 weight,
             })) => {
-                // A preceding rejection was durably settled before this preparation.
-                // Do not let it clear a new pending admission if cancellation wins
-                // before GoalRequestAdmitted is consumed.
                 accounting.goal_request_rejected = false;
                 if let Some(identity) = identity
                     && let Err(error) = inner.store.record_prompt_identity(&claimed, identity).await
@@ -2234,13 +2079,6 @@ async fn execute_started_run(
                     reducible_message_bytes: weight.reducible_message_bytes,
                     irreducible_message_bytes: weight.irreducible_message_bytes,
                     compatible_input_tokens: weight.compatible_input_tokens,
-                    // A later turn that still overflows here already tried
-                    // stubbing and in-run compaction inside the loop (the
-                    // loop fails itself when the compactor cannot help), so
-                    // reaching this point over the window means the run has
-                    // no more to give: fail closed without polling the
-                    // provider. The summarizer's own request is planned
-                    // against storage only.
                     compaction: if internal {
                         context::CompactionDisposition::Summarizing
                     } else {
@@ -2272,9 +2110,6 @@ async fn execute_started_run(
                 );
                 current_occupancy_basis = Some(basis);
                 accounting.request_basis = basis;
-                // Each turn's durable model record names the cap actually
-                // sent. The empty-truncation recovery raises it mid-run, so
-                // the claim-time value would misstate the retried turn.
                 claimed.model.max_output_tokens = Some(weight.max_output_tokens);
             }
             RunInput::Event(Some(RuntimeEvent::GoalRequestAdmitted { cursor })) => {
@@ -2490,10 +2325,6 @@ async fn execute_started_run(
                 reserved_goal_notices,
             })) => {
                 if internal {
-                    // Usage, cost, and provider-turn identity persist like
-                    // any run. The turn's text joins the summary instead of
-                    // the transcript, and compaction tool calls remain
-                    // non-authoritative and unpublished.
                     let turn_cost = usage.and_then(|usage| {
                         accounting
                             .pricing
@@ -2508,9 +2339,6 @@ async fn execute_started_run(
                         accounting.record_unattributed(None, None);
                     }
                     if calls.is_empty() {
-                        // A fresh response supersedes the previous portion,
-                        // even when the provider emits no text. Continuations
-                        // append every block verbatim to the visible prefix.
                         if !summary_continues_truncated_turn {
                             summary_text.clear();
                         }
@@ -2521,9 +2349,6 @@ async fn execute_started_run(
                         }
                         summary_continues_truncated_turn = truncated;
                     } else {
-                        // The summarizer called a tool, which was rejected:
-                        // it abandoned its reply, and the next turn starts a
-                        // new one, so nothing written so far is kept.
                         summary_text.clear();
                         summary_continues_truncated_turn = false;
                     }
@@ -2610,18 +2435,10 @@ async fn execute_started_run(
                     accounting.record_unattributed(None, None);
                 }
                 let turn_accounting = accounting.snapshot();
-                // The completed turn's usage measures the context the run now
-                // occupies; the turn transaction publishes it so the meter
-                // moves while the tool loop is still running.
                 let context_tokens = usage.map(turn_context_tokens);
-                // Only an exact provider identity may seed a later request;
-                // a route-level fallback basis is never persisted for reuse.
                 let occupancy_basis = usage
                     .and(current_occupancy_basis.take())
                     .filter(|_| context_shape.provider_identity);
-                // The completed turn's message (if any) finalizes inside the
-                // same transaction as the turn row; the next turn's text will
-                // lazily start a fresh message.
                 let turn_message = current_message.take();
                 current_turn = turn_ordinal.saturating_add(1);
                 match inner
@@ -2701,14 +2518,9 @@ async fn execute_started_run(
                     inner.remove_approval(id);
                 }
             }
-            // Approval transitions (including denials) are persisted and
-            // published by the tool gate before this event is emitted.
             RunInput::Event(Some(
                 RuntimeEvent::ToolCallDenied { .. } | RuntimeEvent::ToolCallAnswered { .. },
             )) => {}
-            // The audit record is durable on the run before the run settles
-            // or revises. Its spend is stored on the audit child and included
-            // by subtree accounting, never duplicated in the parent's direct totals.
             RunInput::Event(Some(RuntimeEvent::Audited {
                 outcome,
                 findings,
@@ -2749,16 +2561,8 @@ async fn execute_started_run(
                 if internal {
                     continue;
                 }
-                // The run loop polls this stream before the call executes,
-                // so the snapshot sees the workspace as the run found it.
-                // Children change the root's workspace; the root's snapshot,
-                // taken before its write spawn, covers them.
                 if may_change_files && !snapshot_taken && !claimed.identity.child {
                     snapshot_taken = true;
-                    // A cancel, or the run's duration budget running out,
-                    // drops the snapshot's Git steps and returns to the loop,
-                    // which then sees the cancel or the budget exhaustion. The
-                    // call does not start: the stream waits on this handler.
                     let mut stop = cancellation.clone();
                     let cancelled = tokio::select! {
                         biased;
@@ -2886,8 +2690,6 @@ async fn execute_started_run(
                 if internal {
                     continue;
                 }
-                // Any buffered live output flushes first so replay preserves
-                // the chunk-then-result order.
                 if let Err(error) = flush_pending_tool_output(
                     &inner,
                     &claimed,
@@ -2958,15 +2760,10 @@ async fn execute_started_run(
                     RuntimeEvent::RefusalDelta { text } => (TextChannel::Refusal, text),
                     _ => unreachable!("matched text event"),
                 };
-                // Internal runs stream no transcript text; the summary is
-                // captured from the completed turn instead.
                 if internal || text.is_empty() {
                     continue;
                 }
                 if current_message.is_none() {
-                    // A turn's first delta persists immediately: it creates
-                    // the turn's message row and publishes the new message
-                    // without batching latency.
                     if let Err(error) = persist_text(
                         &inner,
                         &claimed,
@@ -3049,14 +2846,9 @@ async fn execute_started_run(
                 }
             }
             RunInput::Event(Some(RuntimeEvent::ContextPruned { turn_ordinal })) => {
-                // A summarizer's request is not a transcript: no prompt run
-                // replays or extends it, and it has no prompt row to anchor
-                // a watermark. Its live prune is not a seam.
                 if internal {
                     continue;
                 }
-                // Durable before the pruned request is sent: the loop is not
-                // polled again until this commits.
                 if let Err(error) = inner
                     .store
                     .advance_prune_watermark(&claimed, turn_ordinal.saturating_sub(1))
@@ -3077,19 +2869,11 @@ async fn execute_started_run(
                 }
             }
             RunInput::Event(Some(RuntimeEvent::InRunCompacted { .. })) => {
-                // The compactor committed the marker and settled its own run
-                // before the loop resumed; the run's measured occupancy is
-                // re-seeded by the next turn's usage.
                 current_occupancy_basis = None;
             }
-            // The provider's verdict on the window: the measured chain that
-            // said the request fit is wrong for this transcript, and the loop
-            // is about to compact. The run continues; nothing to persist.
             RunInput::Event(Some(RuntimeEvent::ProviderOverflow { .. })) => {
                 current_occupancy_basis = None;
                 if internal {
-                    // A split restarts summarization, not the abandoned
-                    // truncated response's continuation.
                     summary_text.clear();
                     summary_continues_truncated_turn = false;
                 }
@@ -3122,9 +2906,6 @@ async fn execute_started_run(
                 }
             }
             RunInput::Event(Some(RuntimeEvent::Interrupted { turn_ordinal })) => {
-                // The partial turn's text was committed by the preceding
-                // `AssistantTurnCompleted`; drop any buffered live tool output
-                // (the interrupted result replaces it) and settle the rows.
                 pending_tool_call = None;
                 pending_tool_output.clear();
                 match inner.store.record_interrupted(&claimed, turn_ordinal).await {
@@ -3174,9 +2955,6 @@ async fn execute_started_run(
                     }
                 }
             }
-            // The partial turn is already committed via AssistantTurnCompleted;
-            // the retry notice is display and replay evidence. An internal
-            // (compaction) run has no transcript of its own to annotate.
             RunInput::Event(Some(RuntimeEvent::TurnRetrying {
                 turn_ordinal,
                 attempt,
@@ -3185,8 +2963,6 @@ async fn execute_started_run(
                 message,
             })) => {
                 if internal {
-                    // A faulted response is resumed just like an output-cut
-                    // response. Keep its visible prefix when the retry arrives.
                     summary_continues_truncated_turn = true;
                     continue;
                 }
@@ -3212,8 +2988,6 @@ async fn execute_started_run(
                     }
                 }
             }
-            // Every completed turn is durable; the session accepts the next
-            // prompt as a continuation. Settles like an exhausted budget.
             RunInput::Event(Some(RuntimeEvent::Paused { pause })) => {
                 if let Err(error) = flush_pending_text(
                     &inner,
@@ -3252,9 +3026,6 @@ async fn execute_started_run(
                 .await;
                 return;
             }
-            // The failing turn is already committed via AssistantTurnCompleted;
-            // the repair notice is a runtime message this run alone sees, so
-            // nothing further is persisted or published here.
             RunInput::Event(Some(RuntimeEvent::OutputRepairRequested { .. })) => {}
             RunInput::Event(Some(RuntimeEvent::Completed { final_output })) => {
                 if internal {
@@ -3494,9 +3265,6 @@ async fn execute_started_run(
     }
 }
 
-/// Records the run's workspace for `qq undo`. Best effort: a workspace
-/// outside Git has nothing to record, and a failed snapshot must not stop
-/// the run, so failures are logged.
 async fn snapshot_workspace(claimed: &ClaimedRun) {
     let workspace = Path::new(&claimed.workspace);
     let run = claimed.identity.run_id;
@@ -3561,8 +3329,6 @@ async fn flush_pending_text(
     .await
 }
 
-/// Publishes any buffered live tool output as one batched
-/// `ToolCallOutputDelta` event.
 async fn flush_pending_tool_output(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
@@ -3583,8 +3349,6 @@ async fn flush_pending_tool_output(
     Ok(())
 }
 
-/// Persists model text into the current turn's assistant message, creating
-/// that message on the turn's first chunk.
 async fn persist_text(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
@@ -3622,8 +3386,6 @@ async fn persist_text(
     Ok(())
 }
 
-/// Settles a started run. `teardown` proves the run's tools and children were
-/// drained first; the store will not settle a started run without it.
 pub(super) async fn finish_run(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
@@ -3633,9 +3395,6 @@ pub(super) async fn finish_run(
     finish_run_accounted(inner, claimed, outcome, None, teardown).await;
 }
 
-/// Persists commands that finished after the run stopped listening: a
-/// cancelled or expired run drops the stream that would have carried their
-/// results, but they ran, so their real results precede settlement.
 pub(super) async fn persist_finished_results(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
@@ -3672,7 +3431,6 @@ pub(super) async fn persist_finished_results(
             )
             .await
         {
-            // Already settled through the event stream.
             Ok(_) | Err(SessionRuntimeError::ToolCallNotFound) => {}
             Err(error) => return Err(error),
         }
@@ -3730,12 +3488,7 @@ pub(super) struct RunAccounting {
     pub(super) context_tokens: Option<u64>,
     pub(super) estimated_cost_usd_nanos: Option<u64>,
     pub(super) saw_turn: bool,
-    /// Basis of the most recently prepared provider request. A provider
-    /// overflow persists it so the retry cannot repeat the same request.
     pub(super) request_basis: ContextOccupancyBasis,
-    /// The typed-output verdict the runtime reached with `Completed`; set
-    /// only for runs claimed with a contract, persisted in the settlement
-    /// transaction.
     pub(super) final_output: Option<Box<FinalOutput>>,
 }
 
@@ -3764,8 +3517,6 @@ impl RunAccountingAccumulator {
         }
     }
 
-    /// Starts the totals as a known zero spend, so a goal run that settles
-    /// before any turn still records an exact receipt.
     pub(super) fn with_zero_spend(mut self) -> Self {
         self.usage = Some(TokenUsage::default());
         self.estimated_cost_usd_nanos = Some(0);
@@ -3773,9 +3524,6 @@ impl RunAccountingAccumulator {
         self
     }
 
-    /// Adds provider spend that is not a turn of this run (context occupancy
-    /// is untouched) but that the run is accountable for; unknown spend makes
-    /// the totals unknown.
     pub(super) fn record_unattributed(
         &mut self,
         usage: Option<TokenUsage>,
@@ -3797,16 +3545,10 @@ impl RunAccountingAccumulator {
         self.saw_spend = true;
         let Some(usage) = usage else {
             self.usage = None;
-            // A newer completed request without usage makes the run's and
-            // session's current occupancy unknown. Retaining an older exact
-            // turn would present stale state as authoritative.
             self.context_tokens = None;
             self.estimated_cost_usd_nanos = None;
             return;
         };
-        // Context occupancy is the latest reported turn's input total, not a
-        // sum: every model request re-sends the whole conversation, so the
-        // last measured request describes what the context window held.
         self.context_tokens = Some(turn_context_tokens(usage));
         self.usage = self.usage.and_then(|total| add_usage(total, usage));
         if self.usage.is_none() {
@@ -3834,8 +3576,6 @@ impl RunAccountingAccumulator {
     }
 }
 
-/// The input-token total of one model turn (fresh input plus cache reads and
-/// writes): what that turn's request occupied of the model context window.
 const fn turn_context_tokens(usage: TokenUsage) -> u64 {
     usage
         .input_tokens
@@ -3853,8 +3593,6 @@ pub(crate) fn add_usage(left: TokenUsage, right: TokenUsage) -> Option<TokenUsag
             .cache_write_input_tokens
             .checked_add(right.cache_write_input_tokens)?,
         output_tokens: left.output_tokens.checked_add(right.output_tokens)?,
-        // A known reasoning total stays known only while every turn reports
-        // one; a single turn without it makes the sum unknown, never a lie.
         reasoning_tokens: match (left.reasoning_tokens, right.reasoning_tokens) {
             (Some(left), Some(right)) => Some(left.checked_add(right)?),
             _ => None,
@@ -3871,10 +3609,6 @@ pub(super) fn internal_failure(message: &str) -> RunOutcome {
     }
 }
 
-/// Maps a store error during a run into a run outcome. The deliberate session
-/// context budget surfaces as a user-meaningful policy failure; every other
-/// error is an internal failure that carries the store error rather than
-/// discarding it, since qq-core has no logging facility to record it.
 pub(super) fn persistence_failure(action: &str, error: &SessionRuntimeError) -> RunOutcome {
     match error {
         SessionRuntimeError::OutputTooLarge | SessionRuntimeError::ContextTooLarge => {
@@ -3889,8 +3623,6 @@ pub(super) fn persistence_failure(action: &str, error: &SessionRuntimeError) -> 
     }
 }
 
-/// Automatic compaction cannot reduce irreducible inputs or exceed the
-/// storage bound. This is a normal policy failure, not a persistence fault.
 fn context_budget_failure() -> RunOutcome {
     RunOutcome::Failed {
         failure: RunFailure {
@@ -3926,12 +3658,7 @@ pub(super) struct ModelTurnCommit {
     pub(super) usage: Option<TokenUsage>,
     pub(super) estimated_cost_usd_nanos: Option<u64>,
     pub(super) accounting: Option<RunAccounting>,
-    /// The provider cut this turn at its output token limit. Persisted on the
-    /// turn row and the turn's message so context assembly can replay the
-    /// continuation notice and clients can mark the prefix.
     pub(super) truncated: bool,
-    /// The runtime notice placed before this turn's request; assembly
-    /// replays it before the turn (ADR-0054 § 2).
     pub(super) notice: Option<crate::runtime::TurnNotice>,
     pub(super) goal_notices: Vec<crate::runtime::OrderedTurnNotice>,
     pub(super) reserved_goal_notices: usize,

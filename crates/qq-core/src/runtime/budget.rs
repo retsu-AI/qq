@@ -3,17 +3,11 @@ use std::time::Duration;
 use qq_protocol::{BudgetExhaustion, BudgetLimitKind, ModelPricing, RunLimits, TokenUsage};
 use tokio::time::Instant;
 
-/// The final turn a run is granted once its work budget is spent. Its tools
-/// stay declared with `ToolChoice::None`; a call made anyway settles the run.
-/// It joins the conversation as a framed runtime notice, so the system prompt
-/// (the head of the provider's cached prefix) stays the run's own.
 pub(crate) const BUDGET_FINAL_RESPONSE_NOTICE: &str = "[QQ runtime notice; not a user \
 instruction]\nThe run's budget is exhausted, so no tools are available for this reply. Report \
 concisely what was accomplished, what remains, and the exact next step. This is the final \
 response of the run.";
 
-/// One inherited allowance and the parent's absolute deadline. Preparation
-/// and queueing may reduce the allowance's clock, never restart it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ChildBudget {
     pub(crate) limits: RunLimits,
@@ -35,43 +29,24 @@ impl ChildBudget {
     }
 }
 
-/// Core-owned accounting of one run against its caller-imposed `RunLimits`.
-///
-/// The meter charges turns, tool calls, tokens, and cost as the runtime
-/// observes them and answers one question before every model turn: may the
-/// run keep working, must it spend its reserved final response, or must it
-/// settle now. Charges saturate; an exceeded bound is reported exactly once.
 pub(crate) struct BudgetMeter {
     limits: RunLimits,
     pricing: Option<ModelPricing>,
     started: Instant,
     turns: u32,
     tool_calls: u32,
-    /// Total input plus output tokens across every turn, `None` once a turn
-    /// omitted usage while a token or cost bound was imposed.
     tokens: Option<u64>,
-    /// Fresh plus cached input tokens across every turn; `None` like `tokens`.
     input_tokens: Option<u64>,
-    /// Output tokens across every turn; `None` like `tokens`.
     output_tokens: Option<u64>,
-    /// Bytes of tool results fed back to the model after truncation.
     tool_output_bytes: u64,
-    /// Estimated spend, `None` once unmeasurable under a cost bound.
     cost_usd_nanos: Option<u64>,
-    /// The limit that spent the work budget once the reserved final response
-    /// has been requested; the next check settles with it instead of
-    /// requesting another.
     final_response_requested: Option<BudgetLimitKind>,
 }
 
-/// What the meter permits before the next provider turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BudgetDecision {
-    /// Work may continue with tools.
     Continue,
-    /// The work budget is spent but one tool-free response can be afforded.
     FinalResponse(BudgetLimitKind),
-    /// Nothing more can be afforded, or the final response was already spent.
     Exhausted(BudgetExhaustion),
 }
 
@@ -100,15 +75,12 @@ impl BudgetMeter {
         }
     }
 
-    /// The instant the wall-clock budget elapses, when one was imposed.
     pub(crate) fn deadline(&self) -> Option<Instant> {
         self.limits
             .max_duration_ms
             .map(|ms| self.started + Duration::from_millis(ms))
     }
 
-    /// Charges one completed provider turn. A missing usage report makes
-    /// tokens and cost unknown for the rest of the run.
     pub(crate) fn charge_turn(&mut self, usage: Option<TokenUsage>) {
         self.turns = self.turns.saturating_add(1);
         match usage {
@@ -141,7 +113,6 @@ impl BudgetMeter {
         }
     }
 
-    /// Charges the bytes of one turn's tool results as the model will see them.
     pub(crate) fn charge_tool_output(&mut self, bytes: usize) {
         self.tool_output_bytes = self
             .tool_output_bytes
@@ -154,9 +125,6 @@ impl BudgetMeter {
             .saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
     }
 
-    /// Charges owned child or compaction spend without counting it
-    /// as a prompt model turn. Tokens and cost consume the caller allowance;
-    /// unknown owned spend makes the corresponding aggregate unknown.
     pub(crate) fn charge_child(&mut self, usage: Option<TokenUsage>, cost_usd_nanos: Option<u64>) {
         self.cost_usd_nanos = match (self.cost_usd_nanos, cost_usd_nanos) {
             (Some(total), Some(cost)) => total.checked_add(cost),
@@ -193,12 +161,6 @@ impl BudgetMeter {
         })
     }
 
-    /// The budget a child spawned now may be given: every imposed cost,
-    /// wall-clock, and token bound reduced by what this run has already
-    /// spent. Turn, tool-call, byte, and child counts are per-run and are not
-    /// inherited. A bound whose remainder is zero, or whose spend is unknown,
-    /// refuses the child by naming that family: a parent that cannot afford
-    /// more work must not hand a fresh cap to a child.
     pub(crate) fn remaining(&self, now: Instant) -> Result<RunLimits, BudgetLimitKind> {
         let limits = &self.limits;
         let max_duration_ms = match self.deadline() {
@@ -254,8 +216,6 @@ impl BudgetMeter {
         })
     }
 
-    /// Whether a limit has already been exceeded by observed work, checked
-    /// after each turn commits. `None` means every imposed bound still holds.
     pub(crate) fn exceeded(&self, now: Instant) -> Option<BudgetLimitKind> {
         let limits = &self.limits;
         if self.deadline().is_some_and(|deadline| now >= deadline) {
@@ -269,9 +229,6 @@ impl BudgetMeter {
         {
             return Some(BudgetLimitKind::Cost);
         }
-        // Token accounting lost under any token bound fails closed with the
-        // explicit "unknown" kind: the caller must not believe a bound held
-        // when the provider stopped reporting usage.
         let token_bound = limits.max_total_tokens.is_some()
             || limits.max_input_tokens.is_some()
             || limits.max_output_tokens.is_some();
@@ -314,23 +271,15 @@ impl BudgetMeter {
         None
     }
 
-    /// Decides the next turn. The work budget is spent when the next ordinary
-    /// turn could not be completed within a bound (turn or tool-call caps
-    /// reserve one turn for the final response; the other bounds trip once
-    /// observed work crosses them).
     pub(crate) fn before_turn(&mut self, now: Instant, next_turn_tools: usize) -> BudgetDecision {
         let limits = &self.limits;
         if let Some(spent) = self.final_response_requested {
-            // The reserve has been used; whatever tripped since is secondary.
             let kind = self.exceeded(now).unwrap_or(spent);
             return BudgetDecision::Exhausted(self.exhaustion(kind, true, now));
         }
         if let Some(kind) = self.exceeded(now) {
             return self.settle(kind, now);
         }
-        // Turn and tool caps reserve their final response from within the
-        // cap: the last permitted turn is the tool-free status reply, so the
-        // provider is never asked for more turns than the caller allowed.
         let turns_spent = limits
             .max_model_turns
             .is_some_and(|limit| self.turns.saturating_add(1) >= limit);
@@ -352,9 +301,6 @@ impl BudgetMeter {
         }
     }
 
-    /// A goal audit spends its sole primary turn on verification, rather
-    /// than reserving that turn for a budget handoff. It never gets a retry
-    /// or a final response after another hard bound trips.
     pub(crate) fn before_goal_audit(&mut self, now: Instant) -> BudgetDecision {
         if let Some(kind) = self.exceeded(now) {
             return BudgetDecision::Exhausted(self.exhaustion(kind, false, now));
@@ -370,8 +316,6 @@ impl BudgetMeter {
     }
 
     fn settle(&mut self, kind: BudgetLimitKind, now: Instant) -> BudgetDecision {
-        // The reserve is one more provider turn. A tripped wall clock or an
-        // unmeasurable cost cannot afford it; the countable bounds can.
         let affordable = match kind {
             BudgetLimitKind::Duration
             | BudgetLimitKind::CostUnknown
@@ -380,13 +324,7 @@ impl BudgetMeter {
             | BudgetLimitKind::TotalTokens
             | BudgetLimitKind::InputTokens
             | BudgetLimitKind::OutputTokens
-            | BudgetLimitKind::ToolOutputBytes => {
-                // Cost, tokens, and tool bytes are only observed after a turn;
-                // permitting the final response bounds the overshoot to one
-                // tool-free reply, which the caller accepted by imposing the
-                // cap.
-                true
-            }
+            | BudgetLimitKind::ToolOutputBytes => true,
             BudgetLimitKind::ModelTurns | BudgetLimitKind::ToolCalls => true,
         };
         if !affordable
@@ -401,7 +339,6 @@ impl BudgetMeter {
         BudgetDecision::FinalResponse(kind)
     }
 
-    /// The typed outcome for a limit that settled the run.
     pub(crate) fn exhaustion(
         &self,
         kind: BudgetLimitKind,
@@ -565,10 +502,6 @@ mod tests {
 
     #[test]
     fn turn_budget_counts_and_compares_past_the_old_u16_range() {
-        // Charging is O(1) per turn, so the meter can be driven past 65 535
-        // without a provider. The limit sits one above that boundary: the
-        // 65 535th charge must not wrap or saturate into an early trip, and
-        // the reserve rule must still fire exactly one turn before the limit.
         let now = Instant::now();
         let limit = u32::from(u16::MAX) + 1;
         let limits = RunLimits {
@@ -576,14 +509,11 @@ mod tests {
             ..RunLimits::default()
         };
         let mut meter = BudgetMeter::new(limits, None, now);
-        // Turns 1..=65 535 are ordinary; a u16 counter would have saturated
-        // or wrapped before the last of them.
         for _ in 0..(limit - 1) {
             assert_eq!(meter.before_turn(now, 0), BudgetDecision::Continue);
             meter.charge_turn(None);
         }
         assert_eq!(meter.turns, u32::from(u16::MAX));
-        // Turn 65 536 is the last permitted one, so it is the final response.
         assert_eq!(
             meter.before_turn(now, 0),
             BudgetDecision::FinalResponse(BudgetLimitKind::ModelTurns)
@@ -608,7 +538,6 @@ mod tests {
         meter.charge_turn(None);
         assert_eq!(meter.before_turn(now, 0), BudgetDecision::Continue);
         meter.charge_turn(None);
-        // Turn three is the last permitted turn: it must be the final response.
         assert_eq!(
             meter.before_turn(now, 0),
             BudgetDecision::FinalResponse(BudgetLimitKind::ModelTurns)
@@ -667,7 +596,7 @@ mod tests {
             ..RunLimits::default()
         };
         let mut meter = BudgetMeter::new(limits, Some(pricing()), now);
-        meter.charge_turn(Some(usage(4, 2))); // 4_000 + 4_000
+        meter.charge_turn(Some(usage(4, 2)));
         assert_eq!(meter.before_turn(now, 0), BudgetDecision::Continue);
         meter.charge_turn(Some(usage(4, 2)));
         assert_eq!(
@@ -705,7 +634,6 @@ mod tests {
         assert_eq!(meter.exceeded(now), None);
         meter.charge_turn(Some(usage(10, 5)));
         assert_eq!(meter.exceeded(now), Some(BudgetLimitKind::TotalTokens));
-        // Cost stays unknown without pricing, but no cost cap was imposed.
         let mut priceless = BudgetMeter::new(limits, None, now);
         priceless.charge_turn(Some(usage(1, 1)));
         assert_eq!(priceless.exceeded(now), None);
@@ -731,12 +659,9 @@ mod tests {
         meter.charge_child(Some(usage(0, 41)), Some(0));
         assert_eq!(meter.exceeded(now), Some(BudgetLimitKind::OutputTokens));
 
-        // A child whose usage was lost makes the parent's tokens unknown, so
-        // a token bound fails closed exactly like a usage-less parent turn.
         let mut meter = BudgetMeter::new(limits, None, now);
         meter.charge_child(None, Some(0));
         assert_eq!(meter.exceeded(now), Some(BudgetLimitKind::TokensUnknown));
-        // Without any token bound, lost child usage is not an exhaustion.
         let mut unbounded = BudgetMeter::new(RunLimits::default(), None, now);
         unbounded.charge_child(None, None);
         assert_eq!(unbounded.exceeded(now), None);
@@ -757,8 +682,6 @@ mod tests {
             max_children: Some(4),
             max_concurrent_children: Some(2),
         };
-        // 0% spent: the child receives the full inherited caps and none of
-        // the per-run ones.
         let fresh = BudgetMeter::new(limits, Some(pricing()), now);
         let remaining = fresh.remaining(now).unwrap();
         assert_eq!(remaining.max_duration_ms, Some(10_000));
@@ -772,7 +695,6 @@ mod tests {
         assert_eq!(remaining.max_children, None);
         assert_eq!(remaining.max_concurrent_children, None);
 
-        // 50% spent: each bound is the difference, wall clock included.
         let mut half = BudgetMeter::new(limits, Some(pricing()), now);
         half.charge_turn(Some(usage(300, 200)));
         let later = now + Duration::from_millis(5_000);
@@ -781,11 +703,9 @@ mod tests {
         assert_eq!(remaining.max_total_tokens, Some(500));
         assert_eq!(remaining.max_input_tokens, Some(300));
         assert_eq!(remaining.max_output_tokens, Some(200));
-        // pricing(): 1_000 nanos per input token, 2_000 per output token.
         let spent = 300 * 1_000 + 200 * 2_000;
         assert_eq!(remaining.max_cost_usd_nanos, Some(4_000_000 - spent));
 
-        // 100% spent (or over): the exhausted family refuses the child.
         let mut spent = BudgetMeter::new(limits, Some(pricing()), now);
         spent.charge_turn(Some(usage(600, 0)));
         assert_eq!(spent.remaining(now), Err(BudgetLimitKind::InputTokens));
@@ -802,7 +722,6 @@ mod tests {
             Err(BudgetLimitKind::CostUnknown | BudgetLimitKind::TokensUnknown)
         ));
 
-        // No inherited bounds at all: the child is unbounded too.
         let free = BudgetMeter::new(RunLimits::default(), None, now);
         assert_eq!(free.remaining(now), Ok(RunLimits::default()));
     }
@@ -843,8 +762,6 @@ mod tests {
             BudgetDecision::FinalResponse(BudgetLimitKind::OutputTokens)
         );
 
-        // Lost usage under any token bound is the explicit unknown kind, which
-        // cannot afford a final response.
         let mut meter = BudgetMeter::new(
             RunLimits {
                 max_output_tokens: Some(10),

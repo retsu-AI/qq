@@ -1,9 +1,3 @@
-//! `qq init`: write a commented starter `config.ron` with the chosen model.
-//!
-//! The command writes one file and validates the result with the same loader
-//! every other path uses; it never edits an existing document. Paths and
-//! streams are injected so the tests run against a temporary tree.
-
 use std::{
     fs,
     io::{self, BufRead, Write},
@@ -14,9 +8,6 @@ use qq_config as config;
 
 use crate::cli;
 
-/// Built-in providers offered by the chooser, in `qq auth login` order:
-/// name, an example model from the shipped catalog, and the API-key
-/// variable when the provider reads one. Derived from the provider table.
 static CHOICES: std::sync::LazyLock<Vec<(&str, &str, Option<&str>)>> =
     std::sync::LazyLock::new(|| {
         config::builtin_providers()
@@ -58,9 +49,6 @@ pub enum InitError {
     },
 }
 
-/// Writes the starter file and prints where it went and what to do next.
-/// `chooser` is stdin when it is a terminal; `None` means a missing `--model`
-/// is an error rather than a prompt.
 pub fn run<R: BufRead, W: Write>(
     paths: &config::ConfigPaths,
     cwd: &Path,
@@ -113,8 +101,6 @@ pub fn run<R: BufRead, W: Write>(
         Some(_) | None => return Err(InitError::InvalidModelRoute { route }),
     };
 
-    // The route comes from the user; escape it so a quote cannot end the
-    // string literal and change the document's meaning.
     let mut escaped = String::with_capacity(route.len() + 2);
     escaped.push('"');
     for character in route.chars() {
@@ -162,14 +148,6 @@ pub fn run<R: BufRead, W: Write>(
          )\n"
     );
 
-    // A symlinked `.qq` or `config.ron` (a repository can ship either) would
-    // make `--force` write through to wherever it points. On Unix both
-    // refusals are atomic with the write: the directory is opened with
-    // O_NOFOLLOW|O_DIRECTORY and the file is opened relative to that handle
-    // with O_NOFOLLOW, so neither path can be swapped for a link after it is
-    // checked (another writer in the directory could otherwise redirect the
-    // truncation to any file this user can write). Elsewhere a pre-open
-    // check is the best available.
     for candidate in [&directory, &path] {
         match fs::symlink_metadata(candidate) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -187,8 +165,6 @@ pub fn run<R: BufRead, W: Write>(
             }
         }
     }
-    // The global directory holds credentials-adjacent state, so it is created
-    // private like the data directory; a project's `.qq` is repository content.
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -220,9 +196,6 @@ pub fn run<R: BufRead, W: Write>(
     }
     drop(file);
 
-    // Validate through the real loader so the file the user will run with is
-    // the one checked. A project file that sets `model` is pending trust by
-    // design; its document has already parsed by the time that is reported.
     match config::ConfigLoader::new(paths.clone()).check(&config::LoadRequest::new(cwd)) {
         Ok(_) | Err(config::ConfigError::TrustRequired { .. }) => {}
         Err(source) => {
@@ -272,9 +245,6 @@ pub fn run<R: BufRead, W: Write>(
     }
 }
 
-/// Opens `path` (inside `directory`) for writing without following a symlink
-/// at either level. `force` truncates an existing file; otherwise the file
-/// must be new. `private` creates it `0o600`.
 #[cfg(unix)]
 fn open_config_file(
     directory: &Path,
@@ -321,8 +291,6 @@ fn open_config_file(
         .open(path)
 }
 
-/// ELOOP (final component is a symlink under O_NOFOLLOW) or ENOTDIR (the
-/// directory handle was a symlink under O_NOFOLLOW|O_DIRECTORY).
 fn is_symlink_refusal(error: &io::Error) -> bool {
     #[cfg(unix)]
     {
@@ -477,7 +445,6 @@ mod tests {
         assert!(document.contains("qq trust"), "{document}");
         assert!(document.contains("*-local.ron"), "{document}");
         assert!(!fixture.global_file().exists());
-        // The written file parses; the model waits on trust, as documented.
         assert!(matches!(
             fixture.check(),
             Err(qq_config::ConfigError::TrustRequired { .. })
@@ -549,8 +516,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn force_refuses_to_write_through_a_symlinked_project_config() {
-        // A repository can ship `.qq/config.ron` as a link to a file
-        // elsewhere; `--force` must not truncate the link's target.
         let fixture = Fixture::new();
         let outside = fixture.workspace.parent().unwrap().join("outside.txt");
         fs::write(&outside, "precious").unwrap();
@@ -565,7 +530,6 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(&outside).unwrap(), "precious");
 
-        // A symlinked `.qq` directory is refused the same way.
         fs::remove_dir_all(&project).unwrap();
         let elsewhere = fixture.workspace.parent().unwrap().join("elsewhere");
         fs::create_dir_all(&elsewhere).unwrap();
@@ -581,14 +545,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_open_itself_refuses_links_swapped_in_after_the_check() {
-        // Review (#217): the pre-open check can be raced, so the open must
-        // refuse on its own. Calling it on paths that are already links is
-        // exactly the state a swap after the check leaves behind.
         let root = tempfile::tempdir().unwrap();
         let outside = root.path().join("outside.txt");
         fs::write(&outside, "precious").unwrap();
 
-        // The file became a link.
         let project = root.path().join("project");
         fs::create_dir_all(&project).unwrap();
         let config = project.join("config.ron");
@@ -597,7 +557,6 @@ mod tests {
         assert!(is_symlink_refusal(&error), "{error:?}");
         assert_eq!(fs::read_to_string(&outside).unwrap(), "precious");
 
-        // The directory became a link.
         let elsewhere = root.path().join("elsewhere");
         fs::create_dir_all(&elsewhere).unwrap();
         let linked = root.path().join("linked");
@@ -606,7 +565,6 @@ mod tests {
         assert!(is_symlink_refusal(&error), "{error:?}");
         assert!(!elsewhere.join("config.ron").exists());
 
-        // A regular target still opens, and `force: false` refuses to clobber.
         let real = project.join("real.ron");
         open_config_file(&project, &real, false, true).unwrap();
         let again = open_config_file(&project, &real, false, true).unwrap_err();
@@ -657,8 +615,6 @@ mod tests {
     #[test]
     fn escapes_quotes_in_the_model_so_the_document_still_parses() {
         let fixture = Fixture::new();
-        // A quote or backslash in the route must reach the loader as data,
-        // not end the string literal or change the document's meaning.
         let route = "openai/say-\"hi\"\\now";
         let (result, stdout) = fixture.run(args(false, Some(route), false));
         result.unwrap();

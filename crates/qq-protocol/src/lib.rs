@@ -1,5 +1,3 @@
-//! Commands, events, identifiers, and versioned wire types.
-
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
@@ -83,18 +81,10 @@ pub use workspaces::{
 
 pub const PROTOCOL_VERSION: u16 = 41;
 
-/// SSE control frame requesting a fresh snapshot after journal expiry.
 pub const SNAPSHOT_REQUIRED_SSE_EVENT: &str = "snapshot_required";
 
-/// Most retries one turn may spend on a transient provider fault after the
-/// stream has started; a completed turn resets the count. Exhaustion settles
-/// the run `paused`. Declared here so clients can render `run_turn_retrying`
-/// against the same bound the runtime enforces.
 pub const MAX_TURN_RETRIES: u16 = 5;
 
-/// Slash commands owned by interactive clients rather than the shared
-/// runtime. Keeping this vocabulary in the transport-neutral protocol avoids
-/// a client/runtime drift where one side forwards a name the other reserves.
 pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 27] = [
     "/goal",
     "/btw",
@@ -125,8 +115,6 @@ pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 27] = [
     "/exit",
 ];
 
-/// Starts one model run from user input. The in-process form of a prompt:
-/// `new` wraps one text part, `from_parts` carries validated structured input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCommand {
     input: Vec<InputPart>,
@@ -140,7 +128,6 @@ impl RunCommand {
         }
     }
 
-    /// Wraps structured input after checking the shared bounds.
     pub fn from_parts(input: Vec<InputPart>) -> Result<Self, InputError> {
         validate_input(&input)?;
         Ok(Self { input })
@@ -157,7 +144,6 @@ impl RunCommand {
     }
 }
 
-/// Provider-independent events produced by one model run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunEvent {
@@ -199,36 +185,20 @@ pub enum RunFailureKind {
     Authentication,
     Policy,
     Server,
-    /// A fail-closed context source could not supply its context before the
-    /// run's first provider request.
     ContextSource,
     ProviderConfiguration,
     ProviderAuthentication,
     ProviderRateLimited,
     ProviderInvalidRequest,
-    /// The assembled request exceeded the model's context window. The
-    /// session layer treats this as recoverable: it compacts and retries
-    /// before ever surfacing this kind as terminal.
     ProviderContextExceeded,
     ProviderUnavailable,
     ProviderTransport,
     ProviderApi,
     ProviderResponse,
     ProviderProtocol,
-    /// The provider stopped at its output token limit on every continuation
-    /// the runtime allowed. The partial turns are persisted in the transcript.
     ProviderOutputTruncated,
 }
 
-/// Version information returned by the server health endpoint. Tolerates
-/// unknown fields so an older client can read a newer server's answer and
-/// report the version skew instead of a decode failure.
-///
-/// `server_id` is the durable identity of the store this server owns: it
-/// survives restarts, endpoint changes, and token rotation, and it is the
-/// same value every `EventCursor` from this server carries. Clients key a
-/// saved server profile by it, never by address. `display_name` is a
-/// human label (configured, else the host name) and carries no identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerInfo {
     pub protocol_version: u16,
@@ -238,17 +208,11 @@ pub struct ServerInfo {
     pub display_name: String,
 }
 
-/// `POST` asks a daemon or `qq serve` to stop; it answers `202` with its
-/// `ServerInfo` before stopping. A server embedded in another client answers
-/// `404`. The body is ignored.
 pub const DAEMON_SHUTDOWN_PATH: &str = "/v1/daemon/shutdown";
 
-/// Longest `ServerInfo.display_name` a server may advertise, in bytes.
 pub const MAX_DISPLAY_NAME_BYTES: usize = 64;
 
 impl ServerInfo {
-    /// Whether every field satisfies the wire invariants: a nonzero pid, a
-    /// printable bounded version, and a printable bounded display name.
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
         self.pid != 0
@@ -257,8 +221,6 @@ impl ServerInfo {
     }
 }
 
-/// Whether `version` may be advertised in `ServerInfo.version`: 1..=256 bytes
-/// of printable ASCII without spaces.
 #[must_use]
 pub fn valid_process_version(version: &str) -> bool {
     !version.is_empty()
@@ -273,8 +235,6 @@ pub(crate) fn valid_display_name(name: &str) -> bool {
         && name.trim() == name
 }
 
-/// Reduces an arbitrary host or configured label to a valid display name,
-/// or `None` when nothing printable remains.
 #[must_use]
 pub fn sanitize_display_name(candidate: &str) -> Option<String> {
     let trimmed = candidate.trim();
@@ -316,7 +276,6 @@ mod tests {
         let clamped = sanitize_display_name(&long).unwrap();
         assert_eq!(clamped.len(), MAX_DISPLAY_NAME_BYTES);
 
-        // A multi-byte character that would straddle the bound is dropped whole.
         let mixed = format!("{}é", "x".repeat(MAX_DISPLAY_NAME_BYTES - 1));
         assert_eq!(
             sanitize_display_name(&mixed),

@@ -70,8 +70,6 @@ impl std::error::Error for CursorError {}
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSelection {
-    /// The route is a configured fallback, not a user pin. Routing still
-    /// requires independent trusted opt-in. Legacy selections remain pinned.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub model_is_fallback: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,19 +86,11 @@ pub struct TokenUsage {
     pub input_tokens: u64,
     pub cache_read_input_tokens: u64,
     pub cache_write_input_tokens: u64,
-    /// Every generated token, including hidden reasoning tokens when the
-    /// provider reports them. Billing and budgets use this total.
     pub output_tokens: u64,
-    /// The reasoning-token portion of `output_tokens` when the provider
-    /// reports it separately; `None` when it does not. Observational: it is
-    /// never added to `output_tokens` again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
 }
 
-/// Usage and estimated cost derived from the durable runs owned by a session.
-/// A missing usage or cost means the aggregate is unavailable or unknown; it
-/// is never interchangeable with a known zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountingTotal {
@@ -110,10 +100,6 @@ pub struct AccountingTotal {
     pub estimated_cost_usd_nanos: Option<u64>,
 }
 
-/// Direct accounting covers runs owned by this session. Inclusive accounting
-/// adds runs owned directly by its immediate children. Both are explicit so
-/// consumers never need to join the session tree or guess which total a field
-/// represents.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionAccounting {
@@ -147,7 +133,6 @@ pub struct ModelPricingTier {
     pub cache_write_usd_nanos_per_token: Option<u64>,
 }
 
-/// Version of the secret-free resolved-model projection persisted for a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ResolvedModelVersion(NonZeroU16);
@@ -167,10 +152,6 @@ impl ResolvedModelVersion {
     }
 }
 
-/// Version of the opaque provider request-shape identity carried by a
-/// resolved model. The identity is deliberately separate from the resolved
-/// model schema so its digest domain can evolve without reinterpreting old
-/// rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ProviderRequestShapeVersion(NonZeroU16);
@@ -190,8 +171,6 @@ impl ProviderRequestShapeVersion {
     }
 }
 
-/// Secret-free, opaque identity of the provider adapter and immutable
-/// deployment configuration that determine its wire request shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderRequestShapeIdentity {
@@ -199,7 +178,6 @@ pub struct ProviderRequestShapeIdentity {
     pub digest: ContentHash,
 }
 
-/// Whether QQ's selected provider codec can express one generation control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilitySupport {
@@ -207,14 +185,12 @@ pub enum CapabilitySupport {
     Unsupported,
 }
 
-/// Generation controls implemented by the selected provider codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationCapabilities {
     pub reasoning_effort: CapabilitySupport,
 }
 
-/// Prompt-cache controls and accounting fields implemented by the codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptCacheCapabilities {
@@ -223,23 +199,16 @@ pub struct PromptCacheCapabilities {
     pub cache_write_usage: bool,
 }
 
-/// Immutable, secret-free account of the exact model execution admitted for
-/// one run. `route` is QQ's effective `provider/model` selection while
-/// `provider_model` is the identifier sent to the provider codec.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedModel {
     pub version: ResolvedModelVersion,
-    /// Absent for historical rows and deployments whose exact shape cannot be
-    /// represented without deriving an identity from secret-bearing config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_shape: Option<ProviderRequestShapeIdentity>,
     pub route: String,
     pub provider_model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization: Option<String>,
-    /// Non-secret named credential profile when the configured provider has
-    /// one. Literal credentials and credential values are never represented.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_profile: Option<String>,
     pub max_output_tokens: u32,
@@ -268,35 +237,21 @@ pub struct ModelDescriptor {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
-    /// Effort values this route is known to accept, lowest to highest. Empty
-    /// when the catalog does not advertise a set: the adapter never transmits
-    /// effort, or the provider has not published one. Clients use this to
-    /// shape an effort picker; the runtime rejects a pin outside a non-empty
-    /// set at claim rather than letting the provider fail the turn. Additive
-    /// in protocol 27; absent on older servers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<qq_reasoning::ReasoningEffort>,
     pub selection: ModelSelection,
 }
 
-/// Per-session policy for tool calls that mutate state or leave the workspace.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
     ReadOnly,
-    /// Every non-read action needs a fresh explicit human approval.
     Ask,
-    /// Default: permitted actions run without human approval prompts; fixed
-    /// stops are denied.
     #[default]
     Auto,
-    /// Every tool call proceeds without approval prompts within execution boundaries.
     Full,
 }
 
-/// The authority a parent grants a spawned child: `read` yields a `ReadOnly`
-/// child; `write` yields a child that follows its own approval mode within
-/// its ancestors' ceilings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChildAuthority {
@@ -315,44 +270,29 @@ impl ChildAuthority {
     }
 }
 
-/// A client's answer to one pending tool approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApprovalDecision {
     ApproveOnce,
     Deny,
-    /// The user's answers to an `ask_user` question (protocol 21), one per
-    /// question in order: an option's text or free text. Settles the call
-    /// as completed with the answers as its result.
-    Answer {
-        answers: Vec<String>,
-    },
+    Answer { answers: Vec<String> },
 }
 
-/// The durable outcome of one tool approval request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalResolution {
-    /// Also accepts the session-grant, workspace-grant and reviewer
-    /// approvals recorded before protocol 41 removed them.
     #[serde(
         alias = "approved_for_session",
         alias = "approved_for_workspace",
         alias = "approved_by_reviewer"
     )]
     ApprovedOnce,
-    /// Also accepts reviewer denials recorded before protocol 41.
     #[serde(alias = "denied_by_reviewer")]
     Denied,
     DeniedTimeout,
-    /// The user answered an `ask_user` question (protocol 21); the call
-    /// completed with the answers as its result.
     Answered,
 }
 
-/// Shell details carried by an approval request so clients can decide in
-/// place: the command, its directory, and (protocol 20) why the gate is
-/// asking: the classifier's verdict and the rules that produced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShellCommandPreview {
@@ -361,13 +301,10 @@ pub struct ShellCommandPreview {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<ShellVerdict>,
-    /// Rule identifiers (snake_case) in the order the classifier hit them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<String>,
 }
 
-/// The classifier's tier for a shell command: `allow` runs unprompted under
-/// `auto`; `prompt` asks; `forbidden` is refused under every mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellVerdict {
@@ -376,8 +313,6 @@ pub enum ShellVerdict {
     Forbidden,
 }
 
-/// Edit details carried by an approval request so clients can decide in place:
-/// the workspace-relative path and a bounded unified-diff-style preview.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EditPreview {
@@ -385,30 +320,21 @@ pub struct EditPreview {
     pub diff: String,
 }
 
-/// The request an awaiting `fetch` call would make (protocol 22), so a client
-/// can offer to grant the host without parsing the call's arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FetchPreview {
     pub url: String,
-    /// The lowercase host the policy judged; the natural grant value.
     pub host: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
 }
 
-/// The questions an `ask_user` call puts to the human (protocol 21), carried
-/// by the approval request so clients render them without parsing the call's
-/// arguments. Answered with `ApprovalDecision::Answer`, one answer per
-/// question in order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuestionPreview {
     pub questions: Vec<Question>,
 }
 
-/// One question: a prompt, the options offered, and whether a typed answer
-/// outside the options is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Question {
@@ -421,8 +347,6 @@ pub struct Question {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionCommand {
-    /// Confirms that the operator has resolved an interrupted check's uncertain
-    /// effects. Releases only the named workspace hold; it does not resume goals.
     AcknowledgeCheckInterruption {
         workspace_id: WorkspaceId,
         run_id: RunId,
@@ -432,7 +356,6 @@ pub enum SessionCommand {
         objective: String,
         #[serde(default)]
         check: Option<crate::GoalCheck>,
-        /// Apply explicit check consent in the same transaction that admits the goal.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         check_approval: Option<crate::GoalCheckScope>,
         budget: Box<crate::GoalBudget>,
@@ -465,14 +388,8 @@ pub enum SessionCommand {
         model: ModelSelection,
         #[serde(default)]
         approval_mode: ApprovalMode,
-        /// Configured agent profile the session runs under. `default` when
-        /// omitted. Rejected when the workspace configuration does not declare
-        /// the profile.
         #[serde(default, skip_serializing_if = "AgentProfileId::is_default")]
         profile: AgentProfileId,
-        /// Explicit reasoning effort for the session's next run. Absent means
-        /// the compiled plan's configured or profile choice; present pins the
-        /// next claim. Added in protocol 26.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<qq_reasoning::ReasoningEffort>,
         #[serde(default, skip_serializing_if = "Correlation::is_empty")]
@@ -480,29 +397,14 @@ pub enum SessionCommand {
     },
     SubmitPrompt {
         session_id: SessionId,
-        /// Bounded typed input; see [`crate::validate_input`] for the limits
-        /// the server enforces before durable admission.
         input: Vec<InputPart>,
-        /// Core-owned budgets for the run this prompt creates. Every accepted
-        /// limit settles as a typed `RunOutcome::BudgetExhausted`; an absent
-        /// or empty value imposes no limit beyond the runtime's own bounds.
         #[serde(default, skip_serializing_if = "RunLimits::is_empty")]
         limits: RunLimits,
         #[serde(default, skip_serializing_if = "Correlation::is_empty")]
         correlation: Correlation,
-        /// Optional typed-output contract: the run's final answer must
-        /// satisfy `schema` and the outcome carries a [`FinalOutput`]. Absent
-        /// means the default free-text contract. Added in protocol 19.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<Box<OutputContract>>,
     },
-    /// Adds user input to a run that is already executing. The input is
-    /// injected as a user message at the next safe model/tool boundary, so a
-    /// provider request already in flight is never rewritten. With
-    /// `interrupt`, the in-flight provider stream or tool is aborted first so
-    /// the boundary arrives now; partial assistant text is kept and unstarted
-    /// tool calls settle as interrupted. Distinct from `SubmitPrompt`, which
-    /// queues a new run, and `CancelRun`, which ends the run.
     SteerRun {
         run_id: RunId,
         input: Vec<InputPart>,
@@ -521,48 +423,28 @@ pub enum SessionCommand {
         session_id: SessionId,
         mode: ApprovalMode,
     },
-    /// Repoints the session's model. Takes effect when the next run is
-    /// claimed; a run already executing keeps the model it started with.
     SetSessionModel {
         session_id: SessionId,
         model: ModelSelection,
     },
-    /// Repoints the session's agent profile. Takes effect when the next run
-    /// is claimed. Rejected when the workspace configuration does not declare
-    /// the profile.
     SetSessionProfile {
         session_id: SessionId,
         profile: AgentProfileId,
     },
-    /// Pins or clears the session's reasoning effort. Takes effect when the
-    /// next run is claimed; a run already executing keeps the effort it started
-    /// with. `None` restores configured/profile defaults.
     SetSessionEffort {
         session_id: SessionId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<qq_reasoning::ReasoningEffort>,
     },
-    /// Deletes an idle session and every row it owns. Refused while the
-    /// session has an active run; the client cancels first.
     DeleteSession {
         session_id: SessionId,
     },
-    /// Deletes every idle session in the workspace that never received a
-    /// message (the residue of creating sessions without prompting them).
     PruneSessions {
         workspace_id: WorkspaceId,
     },
-    /// Compacts the session's model context: an internal summarization run
-    /// replaces everything before a new cutoff marker with a structured
-    /// summary. Valid only while the session is idle; refused while a run is
-    /// active or queued. The client transcript is untouched.
     CompactSession {
         session_id: SessionId,
     },
-    /// Discards the newest compaction so assembly falls back to the prior
-    /// retained one (or to the verbatim transcript when none remains). Valid
-    /// only while the session is idle; refused when there is nothing to roll
-    /// back. The client transcript is untouched.
     RollbackCompaction {
         session_id: SessionId,
     },
@@ -597,8 +479,6 @@ impl SessionCommand {
     }
 }
 
-/// The tag vocabulary of [`SessionCommand`], advertised by server capabilities
-/// and used by transports to check that a body matches its route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionCommandKind {
@@ -624,7 +504,6 @@ pub enum SessionCommandKind {
 }
 
 impl SessionCommandKind {
-    /// Every command this protocol revision routes, in declaration order.
     pub const ALL: [Self; 19] = [
         Self::AcknowledgeCheckInterruption,
         Self::SetGoal,
@@ -647,11 +526,6 @@ impl SessionCommandKind {
         Self::RollbackCompaction,
     ];
 
-    /// Whether this command admits new work into the store (a workspace,
-    /// session, prompt, steering message, model or profile change, or
-    /// compaction run) as opposed to stopping, resolving, or removing work
-    /// that already exists. Stores bound the two classes separately so a full
-    /// store can still be cancelled, approved, and cleaned up.
     #[must_use]
     pub const fn creates_work(self) -> bool {
         match self {
@@ -677,9 +551,6 @@ impl SessionCommandKind {
         }
     }
 
-    /// The HTTP route that carries this command. One table for the client that
-    /// posts and the server that routes; the server test asserts its router
-    /// equals this table so the two cannot drift.
     #[must_use]
     pub const fn route(self) -> &'static str {
         match self {
@@ -706,8 +577,6 @@ impl SessionCommandKind {
     }
 }
 
-/// Every command route this protocol revision serves, in [`SessionCommandKind::ALL`]
-/// order. Routes are wire data: changing one is a protocol change.
 pub const COMMAND_ROUTES: [(SessionCommandKind, &str); SessionCommandKind::ALL.len()] = {
     let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); SessionCommandKind::ALL.len()];
     let mut index = 0;
@@ -737,7 +606,6 @@ pub struct CommandReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandOutcome {
-    /// The named interrupted check no longer holds its workspace.
     CheckInterruptionAcknowledged {
         workspace_id: WorkspaceId,
         run_id: RunId,
@@ -754,8 +622,6 @@ pub enum CommandOutcome {
     SideQuestionCancelled {
         side_question_id: RunId,
     },
-    /// The cancel found the question already settled; `state` is how it
-    /// ended. Nothing was changed.
     SideQuestionAlreadyFinished {
         side_question_id: RunId,
         state: SideQuestionState,
@@ -775,8 +641,6 @@ pub enum CommandOutcome {
         run_id: RunId,
         queue_position: u16,
     },
-    /// The steering input was recorded and will be applied at the run's next
-    /// boundary (or now, when interruption was requested).
     SteeringQueued {
         run_id: RunId,
         message_id: MessageId,
@@ -822,7 +686,6 @@ pub enum CommandOutcome {
     },
     CompactionRolledBack {
         session_id: SessionId,
-        /// Compactions still retained after the rollback.
         remaining: u16,
     },
 }
@@ -845,57 +708,30 @@ pub enum RunStatus {
     Failed,
     Interrupted,
     BudgetExhausted,
-    /// Turn recovery gave up on a transient provider fault; the transcript
-    /// is durable and the session accepts the next prompt.
     Paused,
 }
 
-/// Per-run budgets imposed by the caller and enforced by the core runtime.
-/// Each accepted limit yields exactly one typed terminal outcome, so every
-/// client observes the same bound the same way. A limit the active model
-/// cannot account for is rejected before provider work rather than ignored.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunLimits {
-    /// Wall-clock budget from run start, spanning provider retries, tool
-    /// execution, and sub-agent work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_duration_ms: Option<u64>,
-    /// Provider turns this run may make in total. The last permitted turn is
-    /// reserved as a tool-free final status response when work remains.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_model_turns: Option<u32>,
-    /// Tool calls the model may request across the whole run. The meter
-    /// reserves a tool-free final response before the cap would be crossed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tool_calls: Option<u32>,
-    /// Total input plus output tokens, summed over every provider turn of the
-    /// run and its sub-agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_total_tokens: Option<u64>,
-    /// Estimated spend cap in USD nanos. Requires configured pricing; a turn
-    /// whose usage the provider omits settles as `cost_unknown`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_cost_usd_nanos: Option<u64>,
-    /// Fresh input plus cache-read plus cache-write tokens, summed over every
-    /// provider turn of the run and its sub-agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_input_tokens: Option<u64>,
-    /// Output tokens summed over every provider turn of the run and its
-    /// sub-agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
-    /// Bytes of tool results fed back to the model across the run, after the
-    /// runtime's per-result truncation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tool_output_bytes: Option<u64>,
-    /// Sub-agents this run may spawn in total. Capped by the runtime's hard
-    /// ceiling; a refused spawn is reported to the model as a tool error, not
-    /// as a terminal outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_children: Option<u16>,
-    /// Sub-agents this run may have executing at once. Capped by the
-    /// runtime's hard ceiling; excess spawns wait for a slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_children: Option<u16>,
 }
@@ -916,31 +752,17 @@ impl RunLimits {
     }
 }
 
-/// Most bytes of schema JSON an [`OutputContract`] may carry.
 pub const MAX_OUTPUT_SCHEMA_BYTES: usize = 64 * 1024;
-/// Deepest nesting an output schema may declare.
 pub const MAX_OUTPUT_SCHEMA_DEPTH: usize = 32;
-/// Most JSON values (objects, arrays, and scalars, including enum members) an
-/// output schema may contain.
 pub const MAX_OUTPUT_SCHEMA_VALUES: usize = 4096;
-/// Hard ceiling on [`OutputContract::repair_turns`].
 pub const MAX_OUTPUT_REPAIR_TURNS: u8 = 8;
-/// Default [`OutputContract::repair_turns`].
 pub const DEFAULT_OUTPUT_REPAIR_TURNS: u8 = 2;
-/// Most bytes of validation detail one [`FinalOutput::Invalid`] payload or
-/// one rendered repair notice may carry.
 pub const MAX_OUTPUT_ERROR_BYTES: usize = 8 * 1024;
 
-/// A caller's typed-output contract for one run: the final answer must be a
-/// JSON document satisfying `schema`. The schema is carried verbatim; the
-/// runtime compiles and bounds it at admission, before any model work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputContract {
-    /// JSON Schema document (the runtime's supported subset).
     pub schema: serde_json::Value,
-    /// Most additional model turns the runtime may spend repairing an answer
-    /// that fails validation, for the entire run (0–8).
     #[serde(default = "OutputContract::default_repair_turns")]
     pub repair_turns: u8,
 }
@@ -951,22 +773,14 @@ impl OutputContract {
     }
 }
 
-/// How a run's final answer satisfied its [`OutputContract`]. Carried on
-/// `run_finished` and the run snapshot only when a contract was imposed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum FinalOutput {
-    /// The final answer parsed as JSON and satisfied the schema. `value` is
-    /// the parsed document.
     Valid {
         value: serde_json::Value,
-        /// Repair turns the runtime spent before this answer validated.
         #[serde(default)]
         repair_turns: u8,
     },
-    /// The final answer did not satisfy the schema after every permitted
-    /// repair turn. `errors` are bounded human-readable validation failures
-    /// against the last answer, each as `<json pointer>: <message>`.
     Invalid {
         errors: Vec<String>,
         #[serde(default)]
@@ -974,14 +788,10 @@ pub enum FinalOutput {
     },
 }
 
-/// Which budget settled a run and how far it got.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BudgetExhaustion {
     pub limit: BudgetLimitKind,
-    /// Whether the run was granted its reserved final status response after
-    /// the work budget ran out. False when even the final turn could not be
-    /// afforded, or when the limit tripped mid-turn.
     pub final_response: bool,
     pub message: String,
 }
@@ -994,19 +804,14 @@ pub enum BudgetLimitKind {
     ToolCalls,
     TotalTokens,
     Cost,
-    /// A cost cap was imposed but a provider turn omitted usage, so spend
-    /// could no longer be measured. Never labelled a provider failure.
     CostUnknown,
     InputTokens,
     OutputTokens,
-    /// A token cap was imposed but a provider turn omitted usage, so the
-    /// count could no longer be measured. Never labelled a provider failure.
     TokensUnknown,
     ToolOutputBytes,
 }
 
 impl BudgetLimitKind {
-    /// Every kind this protocol revision can settle, in declaration order.
     pub const ALL: [Self; 10] = [
         Self::Duration,
         Self::ModelTurns,
@@ -1020,7 +825,6 @@ impl BudgetLimitKind {
         Self::ToolOutputBytes,
     ];
 
-    /// The wire name of this kind, for messages that name a budget family.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -1041,19 +845,10 @@ impl BudgetLimitKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunActivity {
-    /// The request is being assembled or QQ is waiting for the provider's
-    /// first meaningful stream event.
     WaitingForProvider,
-    /// The provider is streaming displayable reasoning or a reasoning summary.
     Reasoning,
-    /// The provider is streaming user-visible assistant text.
     GeneratingResponse,
-    /// The provider is constructing one or more tool calls. Arguments may be
-    /// incomplete and are deliberately not exposed by this status channel.
     PreparingToolCall,
-    /// QQ is summarizing earlier context so the session fits its window:
-    /// a between-run or manual compaction run, or a prompt run compacting its
-    /// own earlier turns. The next activity or the run's end replaces it.
     Compacting,
 }
 
@@ -1063,22 +858,9 @@ pub enum RunOutcome {
     Completed,
     Cancelled,
     Interrupted,
-    Failed {
-        failure: RunFailure,
-    },
-    /// A caller-imposed `RunLimits` bound settled the run. Distinct from
-    /// `Failed`: the harness, model, and provider all behaved; the caller's
-    /// budget ran out.
-    BudgetExhausted {
-        exhaustion: Box<BudgetExhaustion>,
-    },
-    /// Turn-level recovery retried a transient provider fault until its
-    /// allowance ran out. Distinct from `Failed`: every turn the run
-    /// completed is durable, nothing QQ or the model did was wrong, and the
-    /// next prompt continues from where it stopped.
-    Paused {
-        pause: Box<RunPause>,
-    },
+    Failed { failure: RunFailure },
+    BudgetExhausted { exhaustion: Box<BudgetExhaustion> },
+    Paused { pause: Box<RunPause> },
 }
 
 #[cfg(test)]
@@ -1140,7 +922,6 @@ mod pause_contract_tests {
     }
 }
 
-/// Why execution paused, separate from a terminal failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "reason",
@@ -1186,8 +967,6 @@ impl std::fmt::Display for RunPause {
     }
 }
 
-// Persisted pre-33 outcomes have no reason tag. New serialization always uses
-// the public tagged enum; legacy decoding is only the old provider shape.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum StoredRunPause {
@@ -1304,19 +1083,12 @@ pub struct WorkspaceSummary {
     pub path: String,
 }
 
-/// The parent run and tool call that spawned a child session. Lets a client
-/// render the child inline under the `spawn_agent` call that created it and
-/// attribute its work to the parent run without inferring from timestamps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnOrigin {
     pub run_id: RunId,
-    /// Absent for children created before the spawning call was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<ToolCallId>,
-    /// Nesting depth of the spawned session (1 = a root's child). Defaults to
-    /// 1 on decode, which is what every session recorded before depth
-    /// existed was.
     #[serde(default = "default_spawn_depth")]
     pub depth: u16,
 }
@@ -1328,85 +1100,50 @@ const fn default_spawn_depth() -> u16 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSummary {
-    /// The route is a configured fallback, not a user pin. Routing still
-    /// requires independent trusted opt-in. Legacy selections remain pinned.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub model_is_fallback: bool,
     pub id: SessionId,
     pub workspace_id: WorkspaceId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<SessionId>,
-    /// Set on child sessions created by a parent run; `None` for roots and
-    /// for summaries produced by older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<SpawnOrigin>,
-    /// Why the session exists; `task` unless it is an audit child.
     #[serde(default, skip_serializing_if = "SessionPurpose::is_task")]
     pub purpose: SessionPurpose,
     pub title: String,
     pub status: SessionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_run_id: Option<RunId>,
-    /// Latest liveness state of the active run, so a client that loads or
-    /// reconnects mid-run shows the right label without waiting for the next
-    /// `RunActivityChanged`. `None` when idle or unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<RunActivity>,
     pub queued_prompts: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Agent profile the session's next run is claimed under. `default` on
-    /// rows written before profiles existed.
     #[serde(default, skip_serializing_if = "AgentProfileId::is_default")]
     pub profile: AgentProfileId,
-    /// Approval policy the session's tool calls are held against. Changed by
-    /// `SetApprovalMode`, which publishes the updated summary. Defaults on
-    /// decode because persisted events written before version 15 lack it and
-    /// still replay; `auto` was the only value those sessions could have been
-    /// created with by the shipped clients.
     #[serde(default)]
     pub approval_mode: ApprovalMode,
-    /// Explicit reasoning effort for the session's next run. Absent means the
-    /// compiled plan's configured or profile choice. Added in protocol 26;
-    /// omitted on historical summaries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<qq_reasoning::ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Correlation::is_empty")]
     pub correlation: Correlation,
-    /// Input-token total of the latest measured prompt turn for this
-    /// session. This is session state rather than arbitrary run history:
-    /// compaction and model changes clear it until the next prompt turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
-    /// Structured durable accounting. Absent on payloads written before
-    /// inclusive accounting was introduced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounting: Option<SessionAccounting>,
-    /// Compatibility alias for `accounting.direct.estimated_cost_usd_nanos`.
-    /// New consumers should choose direct or inclusive accounting explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_cost_usd_nanos: Option<u64>,
     pub updated_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_outcome: Option<RunOutcome>,
-    /// Held calls of the active run still waiting for a decision (protocol
-    /// 32), calls a human is asked first, at most [`MAX_PENDING_HOLDS`].
-    /// Exact at the summary's cursor, so a client that never loaded the
-    /// session's body still knows it is waiting; later `tool_approval_*` and
-    /// `tool_call_*` events move it on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_holds: Vec<PendingHold>,
-    /// The side question running for this session, if any (protocol 32).
-    /// Later `side_question_updated` events move it on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running_side_question: Option<RunId>,
 }
 
-/// Bound on [`SessionSummary::pending_holds`]: one model turn's tool calls,
-/// the most a run can hold at once.
 pub const MAX_PENDING_HOLDS: usize = 16;
 
-/// One held call in [`SessionSummary::pending_holds`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PendingHold {
@@ -1416,10 +1153,8 @@ pub struct PendingHold {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunSnapshot {
-    /// Immutable creation provenance. Missing on historical records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<RunOrigin>,
-    /// Immutable goal binding, independent of authority granted by origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<crate::GoalIdentity>,
     pub id: RunId,
@@ -1427,47 +1162,28 @@ pub struct RunSnapshot {
     pub status: RunStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<RunOutcome>,
-    /// Shared system-prompt version and workspace-instruction identity. Absent
-    /// on historical runs and runs that failed before prompt preparation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_identity: Option<Box<RunPromptIdentity>>,
-    /// Exact resolved model admitted before provider work. Absent on
-    /// historical runs and runs that failed before runtime resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model: Option<Box<ResolvedModel>>,
-    /// Profile, plan digest, and credential epoch the run was admitted with.
-    /// Absent while queued, on historical runs, and on runs that failed
-    /// before plan compilation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Box<RunPlanIdentity>>,
     #[serde(default, skip_serializing_if = "Correlation::is_empty")]
     pub correlation: Correlation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<TokenUsage>,
-    /// Input-token total (fresh input + cache reads + cache writes) of the
-    /// run's final completed model turn. Distinct from `usage`, which sums
-    /// every turn for billing. An internal compaction run measures its
-    /// pre-compaction request, not the session state after compaction; clients
-    /// use `SessionSummary::context_tokens` for the session meter. Absent on
-    /// runs persisted before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_cost_usd_nanos: Option<u64>,
-    /// Budgets the caller imposed on this run. Absent for historical runs and
-    /// runs submitted without limits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<Box<RunLimits>>,
-    /// How the final answer was audited, when the run was audited at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<Box<AuditRecord>>,
-    /// How the final answer met the run's typed-output contract. Present only
-    /// on settled runs that were submitted with one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_output: Option<Box<FinalOutput>>,
 }
 
-/// Why a run was created; model arguments cannot supply this authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RunOrigin {
@@ -1508,21 +1224,14 @@ impl RunOrigin {
     }
 }
 
-/// How the root run's final answer was audited before it was presented as
-/// complete. Advisory: the audit can send the run back for one revision but
-/// never fails it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditRecord {
     pub outcome: AuditOutcome,
-    /// The auditor's findings, bounded; empty on `pass` or `unavailable`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<String>,
-    /// How many revision cycles the audit sent the run through (0 or 1 with
-    /// the default `max_revisions`).
     #[serde(default)]
     pub revisions: u16,
-    /// The audit child run's usage and cost, charged to the audited run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<TokenUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1532,23 +1241,16 @@ pub struct AuditRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditOutcome {
-    /// The auditor verified the answer's claims.
     Pass,
-    /// The auditor found problems; the run revised its answer (once) and the
-    /// revision stands unaudited.
     Revised,
-    /// The auditor could not answer (failed, timed out, unparseable) and the
-    /// answer stands as given. Fail-open, recorded rather than hidden.
     Unavailable,
 }
 
-/// Why a session exists, when it is not an ordinary user or delegated task.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionPurpose {
     #[default]
     Task,
-    /// A read-only child spawned to audit its parent's final answer.
     Audit,
 }
 
@@ -1567,7 +1269,6 @@ impl SessionPurpose {
     }
 }
 
-/// Version of the provider-neutral system prompt prepared for a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PromptVersion(NonZeroU16);
@@ -1587,9 +1288,6 @@ impl PromptVersion {
     }
 }
 
-/// A 32-byte SHA-256 identity with a fixed 64-character lowercase hex wire
-/// form. Two are declared below; they are distinct types on purpose so an
-/// instruction hash cannot be passed where a content hash is expected.
 macro_rules! sha256_identity {
     ($(#[$doc:meta])* $name:ident, $error:ident, $message:literal) => {
         $(#[$doc])*
@@ -1661,15 +1359,12 @@ macro_rules! sha256_identity {
 }
 
 sha256_identity!(
-    /// SHA-256 identity of ordered workspace-instruction paths and bytes.
     InstructionHash,
     InstructionHashError,
     "instruction hash must be exactly 64 lowercase hexadecimal characters"
 );
 
 sha256_identity!(
-    /// Validated SHA-256 identity for a prompt, tool declaration set, or selected
-    /// guidance document.
     ContentHash,
     ContentHashError,
     "content hash must be exactly 64 lowercase hexadecimal characters"
@@ -1690,7 +1385,6 @@ pub enum GuidanceKind {
     Skill,
 }
 
-/// Provenance for one explicitly selected command or skill document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuidanceIdentity {
@@ -1702,17 +1396,13 @@ pub struct GuidanceIdentity {
     pub content_hash: ContentHash,
 }
 
-/// How a plan's external tools reach the model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolExposure {
-    /// Every external schema is in every request.
     Full,
-    /// Requests carry an index; the model pins schemas with `select_tools`.
     Progressive,
 }
 
-/// How one context source contributed to a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextSourceOutcome {
@@ -1726,7 +1416,6 @@ pub enum ContextSourceOutcome {
     Invalid,
 }
 
-/// One context source consulted before a run's first provider request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextSourceRecord {
@@ -1735,35 +1424,27 @@ pub struct ContextSourceRecord {
     pub outcome: ContextSourceOutcome,
     pub items: u32,
     pub bytes: u64,
-    /// Hash of the items that entered the prompt, when any did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<ContentHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
 
-/// All-or-none identity of the system prefix prepared for one run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunPromptIdentity {
     pub version: PromptVersion,
     pub instruction_hash: InstructionHash,
-    /// Absent only on rows written before protocol version 7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_hash: Option<ContentHash>,
-    /// Hash of the tool schemas in the run's first request. Absent only on
-    /// rows written before protocol version 7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_schema_hash: Option<ContentHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_guidance: Option<Box<GuidanceIdentity>>,
-    /// Digest of the plan's complete tool catalog (every tool the run could
-    /// reach, exposed or not). Absent on rows written before protocol 14.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_digest: Option<ContentHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exposure: Option<ToolExposure>,
-    /// Context sources consulted for this run, in registration order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_sources: Vec<ContextSourceRecord>,
 }
@@ -1774,21 +1455,12 @@ pub struct MessageSnapshot {
     pub id: MessageId,
     pub session_id: SessionId,
     pub run_id: RunId,
-    /// The model turn this message belongs to within its run. User messages
-    /// (and assistant messages persisted before per-turn messages existed)
-    /// carry 0; assistant turns are 1-based, matching tool-call ordinals.
     #[serde(default)]
     pub turn_ordinal: u32,
     pub role: MessageRole,
     pub state: MessageState,
-    /// A user message added by `SteerRun` while the run executed, rather than
-    /// the prompt that created the run. `queued` until applied at a boundary,
-    /// then `complete`; `cancelled` when the run finished first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub steering: bool,
-    /// The provider cut this assistant message at its output token limit.
-    /// The text is a valid prefix; the run either continued in the next turn
-    /// or settled as `provider_output_truncated`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
     pub output: String,
@@ -1796,14 +1468,9 @@ pub struct MessageSnapshot {
     pub created_at_ms: u64,
 }
 
-/// A UI-facing rendering payload carried alongside a tool call's result.
-/// Display-only: model context assembly never includes it, so it can hold
-/// richer content than the bounded result string the model sees.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolCallDisplay {
-    /// A bounded unified-diff-style rendering of a completed
-    /// `edit_file`/`write_file` call.
     Diff { path: String, diff: String },
 }
 
@@ -1826,40 +1493,21 @@ pub struct ToolCallSnapshot {
     pub display: Option<ToolCallDisplay>,
 }
 
-/// How serious an error result is, for rendering only: the model sees the
-/// same text whatever the kind. Derived from the result's leading error code
-/// (tool errors are `code: message`), so it needs no wire field and applies
-/// to every stored row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolErrorKind {
-    /// The arguments broke the tool's contract (`invalid_*`, `bad_glob`,
-    /// `not executed`, ...). The model corrects them and retries.
     Correction,
-    /// A well-formed call whose answer was "no": `path_not_found`,
-    /// `stale_file`, a non-zero exit, ...
     Outcome,
-    /// Anything else: I/O errors, external tool failures, refusals.
     Failure,
 }
 
 impl ToolErrorKind {
-    /// Classifies an error result's text. Unknown codes are `Failure`, so a
-    /// new error is never quieter than today until it is listed here.
     #[must_use]
     pub fn of(name: &str, result: &str) -> Self {
-        // QQ's own pre-dispatch rejections (`not executed: this …` from the
-        // run loop, `unknown tool "…"` from the catalog) are persisted under
-        // whatever name the model requested. A name that cannot be an external
-        // tool (those always start `mcp__`/`ext__`, which the catalog requires)
-        // never reached a host, so the text is QQ's. An external name's text
-        // may come from the server and is never trusted.
         if !(name.starts_with("mcp__") || name.starts_with("ext__"))
             && (result.starts_with("not executed: this ") || result.starts_with("unknown tool \""))
         {
             return Self::Correction;
         }
-        // External tools own arbitrary error text; never infer a recoverable
-        // QQ contract error from an external server's message.
         if !matches!(
             name,
             "read_file"
@@ -1883,7 +1531,6 @@ impl ToolErrorKind {
         ) {
             return Self::Failure;
         }
-        // A batch edit prefixes its code with the failing edit's index.
         let text = result
             .strip_prefix("edit ")
             .and_then(|rest| rest.split_once(": "))
@@ -1901,8 +1548,6 @@ impl ToolErrorKind {
             "not executed:",
             "not_read:",
             "tool arguments exceed",
-            // Argument bounds of `write_file`/`edit_file`: shallower path,
-            // smaller content. An existing oversized file is an outcome below.
             "too_deep:",
             "too_large: content exceeds",
             "too_large: the edited ",
@@ -1924,14 +1569,9 @@ impl ToolErrorKind {
             "id must be a sub-agent id",
             "ids must be sub-agent ids",
             "ids may name at most",
-            // `spawn_agent` routing the model can change on retry; a spent
-            // budget or an unavailable spawner is a refusal and stays a failure.
             "no delegation roster is configured",
             "no roster entry declares the ",
         ];
-        // Policy refusals (`env_not_allowed:`, `use_builtin:`) and the
-        // workspace boundary (`path_escapes_workspace`) are deliberately in
-        // neither list: a refused operation stays a visible failure.
         const OUTCOME: &[&str] = &[
             "path_not_found",
             "not_a_file",
@@ -1947,16 +1587,12 @@ impl ToolErrorKind {
             "spill_missing",
             "spill_evicted",
         ];
-        // A command that ran and exited with a number other than zero is an
-        // answer; a timeout, signal, or unknown ending is an execution failure.
         let command_exit = ["shell exit=", "exec exit="].iter().any(|prefix| {
             text.strip_prefix(prefix)
                 .and_then(|rest| rest.split_whitespace().next())
                 .and_then(|code| code.parse::<i32>().ok())
                 .is_some_and(|code| code != 0)
         });
-        // `fetch <url> status=<n>`: a missing page is an answer; auth, rate
-        // limit, and server errors stay failures.
         let fetch_missing = name == "fetch"
             && text.starts_with("fetch ")
             && text
@@ -1968,10 +1604,7 @@ impl ToolErrorKind {
                         .find_map(|token| token.strip_prefix("status="))
                 })
                 .is_some_and(|status| matches!(status, "404" | "410"));
-        // Well-formed "no" answers of the orchestration tools: a skill that
-        // is not disclosed, and a child that is not outstanding.
         let skill_no = name == "load_skill" && text.starts_with("unknown command or skill /");
-        // `model "x" is not on the delegation roster; choose a role instead`.
         let route_correction = name == "spawn_agent"
             && text.starts_with("model ")
             && text.contains(" is not on the delegation roster");
@@ -1994,9 +1627,6 @@ impl ToolErrorKind {
 }
 
 impl ToolCallSnapshot {
-    /// The severity of this call's error result; `None` when it succeeded or
-    /// has not finished. Denials and interruptions are their own states and
-    /// are not classified.
     #[must_use]
     pub fn error_kind(&self) -> Option<ToolErrorKind> {
         match self.state {
@@ -2041,7 +1671,6 @@ pub struct SideQuestionSnapshot {
     pub finished_at_ms: Option<u64>,
 }
 
-/// What one `ToolApprovalRequested` event said the call would do.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalPreview {
@@ -2049,17 +1678,12 @@ pub struct ApprovalPreview {
     pub shell: Option<ShellCommandPreview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit: Option<EditPreview>,
-    /// Present when the hold is an `ask_user` question rather than a
-    /// permission: the client collects answers instead of a yes/no.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<QuestionPreview>,
-    /// Present when the held call is `fetch`: the URL and the host a grant
-    /// would name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch: Option<FetchPreview>,
 }
 
-/// Original inputs for an unresolved approval at the snapshot cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PendingApprovalPreview {
@@ -2089,7 +1713,6 @@ pub struct SessionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSnapshot {
-    /// Oldest unacknowledged completion check holding this workspace, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_interruption: Option<crate::CheckInterruption>,
     pub cursor: EventCursor,
@@ -2097,16 +1720,11 @@ pub struct WorkspaceSnapshot {
     pub sessions: Vec<SessionSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focused: Option<SessionSnapshot>,
-    /// Bodies for every session named in `SnapshotRequest::include_sessions`,
-    /// in request order, so a client can keep several transcripts warm from
-    /// one round trip. Sessions outside the workspace are omitted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub included: Vec<SessionSnapshot>,
     pub has_older_sessions: bool,
 }
 
-/// Upper bound on `SnapshotRequest::include_sessions`; requests above it are
-/// rejected rather than truncated.
 pub const MAX_INCLUDED_SESSIONS: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2115,9 +1733,6 @@ pub struct SnapshotRequest {
     pub workspace_id: WorkspaceId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focused_session_id: Option<SessionId>,
-    /// Additional sessions whose bodies should be returned in
-    /// `WorkspaceSnapshot::included`, each bounded by `message_limit`. At
-    /// most [`MAX_INCLUDED_SESSIONS`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include_sessions: Vec<SessionId>,
     pub session_limit: u16,
@@ -2125,7 +1740,6 @@ pub struct SnapshotRequest {
 }
 
 impl SnapshotRequest {
-    /// A workspace snapshot with an optional focused body and no extras.
     #[must_use]
     pub fn new(
         workspace_id: WorkspaceId,
@@ -2166,7 +1780,6 @@ pub struct SessionEventEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
-    /// Current oldest unresolved hold, or none after all holds are acknowledged.
     CheckInterruptionChanged {
         interruption: Option<crate::CheckInterruption>,
     },
@@ -2184,15 +1797,9 @@ pub enum SessionEvent {
     SessionCreated {
         session: Box<SessionSummary>,
     },
-    /// A non-run mutation of the session row (today: its model selection).
-    /// Carries the full updated summary so clients re-render without a
-    /// round trip.
     SessionUpdated {
         session: Box<SessionSummary>,
     },
-    /// The session and every row it owned were deleted. Earlier events for
-    /// the session remain in the workspace log; replaying them and then this
-    /// event converges every client on the deleted state.
     SessionDeleted {
         session_id: SessionId,
     },
@@ -2207,55 +1814,31 @@ pub enum SessionEvent {
         origin: Option<RunOrigin>,
         session: Box<SessionSummary>,
         run_id: RunId,
-        /// Fixed behavioral identity of the run. Absent only on envelopes
-        /// written before plan identity was recorded.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan: Option<Box<RunPlanIdentity>>,
     },
-    /// Steering input was durably recorded against an executing run.
     SteeringQueued {
         run_id: RunId,
         message: MessageSnapshot,
     },
-    /// Queued steering entered model context at the given boundary. The
-    /// message's state moves to `complete`.
     SteeringApplied {
         run_id: RunId,
         message_id: MessageId,
-        /// The model turn whose request first carried the steering.
         turn_ordinal: u32,
     },
-    /// The run finished before the steering could be applied. The message's
-    /// state moves to `cancelled`.
     SteeringSuperseded {
         run_id: RunId,
         message_id: MessageId,
     },
-    /// An interrupting steer aborted the in-flight provider stream or tool
-    /// calls of the given turn. Partial assistant text of that turn stands;
-    /// tool calls that had not finished settle as interrupted.
     RunInterrupted {
         run_id: RunId,
         turn_ordinal: u32,
     },
-    /// The provider stopped turn `turn_ordinal` at its output token limit.
-    /// The partial turn is committed (its text stands in the transcript) and
-    /// the run continues with turn `turn_ordinal + 1` asking the model to
-    /// resume. `continuation` counts continuations so far in this run
-    /// (1-based) against `LimitCapabilities::max_output_continuations`.
     RunOutputTruncated {
         run_id: RunId,
         turn_ordinal: u32,
         continuation: u16,
     },
-    /// A transient provider fault ended turn `turn_ordinal` after it had
-    /// started streaming. Whatever text arrived is committed as a partial
-    /// turn; the run sleeps `delay_ms` and re-issues the turn as
-    /// `turn_ordinal + 1`. `attempt` is 1-based within this turn's recovery;
-    /// a turn that completes resets it. Exhaustion settles the run `paused`.
-    /// The in-run compaction step before turn `turn_ordinal` is retried the
-    /// same way with its own count: then nothing is committed, the same
-    /// summarizer request is re-sent, and `message` names the summarizer.
     RunTurnRetrying {
         run_id: RunId,
         turn_ordinal: u32,
@@ -2264,32 +1847,22 @@ pub enum SessionEvent {
         kind: RunFailureKind,
         message: String,
     },
-    /// The run's candidate final answer is being audited by a read-only
-    /// child before it is presented as complete. `audit_session_id` is that
-    /// child; its transcript is the audit.
     RunAuditStarted {
         run_id: RunId,
         audit_session_id: SessionId,
     },
-    /// The audit settled and its record is durable on the run. On `revised`
-    /// the run continues with the findings; otherwise it completes.
     RunAuditCompleted {
         run_id: RunId,
         audit: AuditRecord,
     },
-    /// Replaceable liveness information for an active run. This describes
-    /// harness/provider state, not assistant transcript content.
     RunActivityChanged {
         run_id: RunId,
         activity: RunActivity,
     },
-    /// A displayable reasoning block began. This is not assistant transcript
-    /// content and must not be fed back into model context implicitly.
     ReasoningStarted {
         run_id: RunId,
         kind: ReasoningKind,
     },
-    /// A bounded chunk of provider-exposed reasoning text.
     ReasoningDelta {
         run_id: RunId,
         kind: ReasoningKind,
@@ -2307,10 +1880,6 @@ pub enum SessionEvent {
         channel: TextChannel,
         text: String,
     },
-    /// One provider inference committed durably. This is the authoritative
-    /// per-turn audit seam used by trajectory exporters: model selection,
-    /// usage, and cost stay attributable even when a turn contains only tool
-    /// calls and therefore has no assistant message row.
     ModelTurnCompleted {
         run_id: RunId,
         turn_ordinal: u32,
@@ -2325,18 +1894,12 @@ pub enum SessionEvent {
     },
     ToolApprovalRequested {
         tool_call: ToolCallSnapshot,
-        /// Boxed (protocol 22, wire-identical) so the largest event variant
-        /// stays within the size bound as previews accrete.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell: Option<Box<ShellCommandPreview>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         edit: Option<EditPreview>,
-        /// Present when the held call is `ask_user`: the run is waiting for
-        /// an answer, not a permission. Boxed so the rare variant does not
-        /// grow every event (`session_events_are_bounded_by_the_boxed_summary`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         question: Option<Box<QuestionPreview>>,
-        /// Present when the held call is `fetch` (protocol 22).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fetch: Option<Box<FetchPreview>>,
     },
@@ -2347,9 +1910,6 @@ pub enum SessionEvent {
     ToolCallStarted {
         tool_call: ToolCallSnapshot,
     },
-    /// A chunk of live tool output (streamed shell output), batched like text
-    /// deltas. Chunks are display-only: the authoritative bounded result
-    /// arrives on the `ToolCallFinished` snapshot.
     ToolCallOutputDelta {
         tool_call_id: ToolCallId,
         chunk: String,
@@ -2357,14 +1917,6 @@ pub enum SessionEvent {
     ToolCallFinished {
         tool_call: ToolCallSnapshot,
     },
-    /// Decode-only: a journal entry from a removed feature. Protocol 36
-    /// removed Jev routing and checkpoints (`routing_started`,
-    /// `routing_completed`, `checkpoint_started`, `checkpoint_reviewed`);
-    /// protocol 41 removed the approval reviewer, `approval_delegate` and
-    /// approval grants (`tool_approval_escalated`, `workspace_grant_promoted`,
-    /// `approval_delegate_set`). Their recorded events still decode, as this,
-    /// so old stores and recorded streams replay. QQ never writes it; clients
-    /// ignore it.
     #[serde(
         rename = "retired",
         alias = "routing_started",
@@ -2380,10 +1932,6 @@ pub enum SessionEvent {
         session: Box<SessionSummary>,
         run_id: RunId,
     },
-    /// A compaction committed: the session's context assembly now starts from
-    /// a fresh summary. Carries the refreshed summary (the compaction run has
-    /// finished by the time this is published), a bounded excerpt of the
-    /// summary text, and the assembled context size before and after.
     SessionCompacted {
         session: Box<SessionSummary>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2391,24 +1939,14 @@ pub enum SessionEvent {
         before_bytes: u64,
         after_bytes: u64,
     },
-    /// The newest compaction was discarded. `remaining` compactions still
-    /// apply; assembly now reads the newest of them, or the full transcript
-    /// when none remain. The session meter is unknown until the next prompt.
     SessionCompactionRolledBack {
         session: Box<SessionSummary>,
         remaining: u16,
     },
-    /// A measured model turn committed mid-run: the run's per-turn context
-    /// audit value moved. `context_tokens` is the completed turn's input-token
-    /// total (fresh input + cache reads + cache writes). This does not update
-    /// the session meter; clients use `SessionContextUpdated` for that.
     RunContextUpdated {
         run_id: RunId,
         context_tokens: u64,
     },
-    /// A prompt turn committed against the session's currently selected
-    /// model. `None` explicitly makes occupancy unknown when the provider did
-    /// not report usage. Deliberately small: no snapshots.
     SessionContextUpdated {
         run_id: RunId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2422,14 +1960,8 @@ pub enum SessionEvent {
         outcome: RunOutcome,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<TokenUsage>,
-        /// The final completed model turn's input-token total for this run,
-        /// as opposed to `usage`, which sums every turn. The accompanying
-        /// session summary owns the current session-meter value.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_tokens: Option<u64>,
-        /// The typed-output verdict for a run submitted with an
-        /// `OutputContract`; absent otherwise and on every non-completed
-        /// outcome. Persisted on the run row before this event is published.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         final_output: Option<Box<FinalOutput>>,
     },
@@ -2462,10 +1994,6 @@ mod tests {
 
     use super::*;
 
-    /// The summary-carrying variants are boxed so the event enum stays small:
-    /// every event is cloned into each subscriber's replay ring and queue.
-    /// Unboxed, the enum was 536 bytes (the 408-byte summary plus the
-    /// `RunFinished` tail); boxed it is bounded by `ToolApprovalRequested`.
     #[test]
     fn session_events_are_bounded_by_the_boxed_summary() {
         assert!(
@@ -2480,8 +2008,6 @@ mod tests {
         );
     }
 
-    /// The work/control split is what lets a full store still be stopped and
-    /// cleaned up (F07). Pinned so a new command kind must choose a side.
     #[test]
     fn command_kinds_split_into_work_and_control() {
         let creating: Vec<_> = SessionCommandKind::ALL
@@ -2535,7 +2061,6 @@ mod tests {
         paths.sort_unstable();
         paths.dedup();
         assert_eq!(paths.len(), COMMAND_ROUTES.len(), "routes must be distinct");
-        // Pinned: these strings are wire data.
         assert_eq!(
             SessionCommandKind::RollbackCompaction.route(),
             "/v1/sessions/compact/rollback"
@@ -2711,9 +2236,6 @@ mod tests {
         );
     }
 
-    /// D9: corrections are the argument-contract codes the model fixes
-    /// itself, outcomes are well-formed "no" answers, and anything else
-    /// (including an unlisted code) stays a failure.
     #[test]
     fn placeholder_spill_handles_are_argument_corrections() {
         assert_eq!(
@@ -2773,11 +2295,9 @@ mod tests {
             "edit x: invalid_edit: not an index",
             "edit : stale_file: missing index",
             "forbidden: this command is refused under every approval mode",
-            // Refusals stay visible failures, not routine corrections.
             "env_not_allowed: GH_TOKEN is not in policy.shell_env",
             "use_builtin: rg is refused under policy.builtin_preference=strict",
             "path_escapes_workspace: ../secret",
-            // Only a numeric nonzero exit is an outcome.
             "shell exit=0 elapsed=0.1 bytes=0\n",
             "shell exit=timeout elapsed=30.0 bytes=0\n",
             "exec exit=signal:9 elapsed=0.1 bytes=0\n",
@@ -2801,7 +2321,6 @@ mod tests {
             );
         }
 
-        // Semantic argument errors of the other QQ-owned tools.
         for (name, result) in [
             ("ask_user", "ask_user needs 1-4 questions, got 0"),
             ("ask_user", "question 1 is empty or longer than 512 bytes"),
@@ -2823,8 +2342,6 @@ mod tests {
             );
         }
 
-        // A fetch that reached the server and found nothing is an answer;
-        // auth, rate-limit, and server errors stay failures.
         for status in ["404", "410"] {
             assert_eq!(
                 ToolErrorKind::of(
@@ -2850,9 +2367,6 @@ mod tests {
             ToolErrorKind::Failure
         );
 
-        // QQ's own pre-dispatch rejections keep their provenance for names
-        // that cannot be external; text under an `mcp__`/`ext__` name may come
-        // from the server and is never trusted, even when it looks the same.
         for name in ["made_up", "shell_v2"] {
             for result in [
                 "unknown tool \"made_up\"",
@@ -2884,7 +2398,6 @@ mod tests {
             }
         }
 
-        // The remaining orchestration validation errors and "no" answers.
         for result in [
             "ids may name at most 8 sub-agents",
             "ids must be sub-agent ids from spawn_agent results",
@@ -2917,7 +2430,6 @@ mod tests {
             ToolErrorKind::Failure
         );
 
-        // `spawn_agent` routing the model can change, versus refusals it cannot.
         for (name, result, kind) in [
             (
                 "write_file",
@@ -2980,9 +2492,6 @@ mod tests {
             ToolErrorKind::Failure
         );
 
-        // Every QQ-owned tool is graded; external tools live under `mcp__`
-        // and `ext__`, which the catalog requires, so they cannot take these
-        // names.
         for name in [
             "select_tools",
             "search_history",
@@ -3044,7 +2553,6 @@ mod tests {
             call(ToolCallState::Completed, "invalid_ranges", false).error_kind(),
             None
         );
-        // Denials and interruptions are states of their own, not errors to grade.
         assert_eq!(
             call(ToolCallState::Denied, "invalid_x", true).error_kind(),
             None
@@ -3083,15 +2591,12 @@ mod tests {
             tool_call
         );
 
-        // Calls persisted before the protocol carried a display payload must
-        // still decode; legacy snapshots default to no payload.
         let mut legacy = serde_json::to_value(&tool_call).unwrap();
         legacy.as_object_mut().unwrap().remove("display");
         let decoded = serde_json::from_value::<ToolCallSnapshot>(legacy).unwrap();
         assert_eq!(decoded.display, None);
         assert_eq!(decoded.result, tool_call.result);
 
-        // Snapshots without a payload keep their previous wire shape.
         let bare = ToolCallSnapshot {
             display: None,
             ..tool_call
@@ -3178,8 +2683,6 @@ mod tests {
             edit_requested
         );
 
-        // Protocol 21: an `ask_user` hold carries its questions; the answer
-        // decision carries one string per question and settles as answered.
         let question_requested = SessionEvent::ToolApprovalRequested {
             tool_call: tool_call.clone(),
             shell: None,
@@ -3229,8 +2732,6 @@ mod tests {
             serde_json::from_value::<SessionEvent>(encoded).unwrap(),
             resolved
         );
-        // Protocol 41: resolutions of the removed reviewer and grants still
-        // decode, as the plain approval or denial they were.
         for (legacy, expected) in [
             ("approved_for_session", ApprovalResolution::ApprovedOnce),
             ("approved_for_workspace", ApprovalResolution::ApprovedOnce),
@@ -3253,8 +2754,6 @@ mod tests {
                 ..
             }
         ));
-        // Protocols 36 and 41: recorded events of removed features replay as
-        // `Retired`, whatever fields they carried.
         for legacy in [
             r#"{"type":"routing_started","run_id":"run_00000000000000000000000000000000"}"#,
             r#"{"type":"routing_completed","decision":{"outcome":"selected"}}"#,
@@ -3355,8 +2854,6 @@ mod tests {
             event
         );
 
-        // Events persisted before the protocol carried turn_ordinal must
-        // still decode; legacy messages default to turn 0.
         let mut legacy = serde_json::to_value(&message).unwrap();
         legacy.as_object_mut().unwrap().remove("turn_ordinal");
         let decoded = serde_json::from_value::<MessageSnapshot>(legacy).unwrap();
@@ -3560,8 +3057,6 @@ mod tests {
             event
         );
 
-        // The summary excerpt is optional and absent from the wire when the
-        // event omits it.
         let bare = SessionEvent::SessionCompacted {
             session: match &event {
                 SessionEvent::SessionCompacted { session, .. } => session.clone(),
@@ -3783,7 +3278,6 @@ mod tests {
             serde_json::from_value::<SessionSummary>(encoded).unwrap(),
             current
         );
-        // A spawn origin without a recorded tool call is still valid.
         let bare = serde_json::json!({ "run_id": id::<RunId>(8) });
         assert_eq!(
             serde_json::from_value::<SpawnOrigin>(bare).unwrap(),
@@ -4036,8 +3530,6 @@ mod tests {
         assert_eq!(legacy_identity.tool_schema_hash, None);
         assert_eq!(legacy_identity.selected_guidance, None);
 
-        // Runs persisted before the protocol carried context tokens must
-        // still decode; legacy snapshots default to no value.
         let mut legacy = serde_json::to_value(&run).unwrap();
         legacy.as_object_mut().unwrap().remove("context_tokens");
         legacy.as_object_mut().unwrap().remove("prompt_identity");
@@ -4048,7 +3540,6 @@ mod tests {
         assert_eq!(decoded.resolved_model, None);
         assert_eq!(decoded.usage, run.usage);
 
-        // Snapshots without a value keep their previous wire shape.
         let bare = RunSnapshot {
             context_tokens: None,
             prompt_identity: None,
@@ -4086,54 +3577,6 @@ mod tests {
         invalid["resolved_model"]["version"] = serde_json::json!(0);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
 
-        // Adding request-shape identity to the nested descriptor breaks older
-        // `deny_unknown_fields` clients, so negotiation rejects version 8 peers.
-        // Version 12 added optional `spawned_by`/`activity` on summaries and
-        // `include_sessions`/`included` on snapshots. Version 13 replaced the
-        // prompt string with input parts and added profiles, plan identity,
-        // steering, correlation, and capabilities.
-        // Version 15 added `approval_mode` on summaries. Version 16 added
-        // output continuation: `run_output_truncated`, `MessageSnapshot.
-        // truncated`, and the `provider_output_truncated` failure kind.
-        // Version 17 added the durable `server_id` and `display_name` to
-        // `ServerInfo` so clients can key a server profile by identity.
-        // Version 18 widened `RunLimits.max_model_turns` and every
-        // `turn_ordinal` from u16 to u32; the accepted wire range grew, so
-        // every version-17 record still decodes.
-        // Version 19 added the optional typed-output contract:
-        // `SubmitPrompt.output`, `RunFinished.final_output`, and
-        // `RunSnapshot.final_output`; strict decoders reject the new fields
-        // on older versions, so the version moves.
-        // Version 20 added `verdict` and `reasons` to `ShellCommandPreview`
-        // (why the gate is asking) for the shell classifier; the struct is
-        // `deny_unknown_fields`, so older clients reject the new fields.
-        // Version 21 added `range` to `InputPart::WorkspaceFile` (`@path:a-b`
-        // mentions) and the `ask_user` question round trip: `question` on
-        // `tool_approval_requested`, `ApprovalDecision::Answer`, and
-        // `ApprovalResolution::Answered`.
-        // Version 22 added `ApprovalGrant::Host` and the `fetch` preview on
-        // `tool_approval_requested` for the network tool.
-        // Version 24 adds review start markers and typed spend receipts.
-        // Version 26 adds turn recovery: the `run_turn_retrying` event and
-        // the `paused` run outcome and status.
-        // Version 27 adds optional session reasoning_effort, set_session_effort,
-        // and session_effort_set.
-        // Version 28 adds the approval delegate surfaces: `delegate` on
-        // `tool_approval_resolved` for the reviewer resolutions, the advisory
-        // `tool_approval_escalated` event, `set_approval_delegate` /
-        // `approval_delegate_set`, and the optional
-        // `SessionSummary.approval_delegate` override. Older clients reject
-        // the new command, outcome, event tag, and summary field.
-        // Version 36 removes Jev routing and checkpoint events; recorded ones
-        // decode as `retired`.
-        // Version 37 makes Ask human-only per call and moves write-child
-        // supervision out of the public approval modes.
-        // Version 38 adds store-qualified workspace discovery.
-        // Version 39 includes unresolved approval details in session snapshots.
-        // Version 40 distinguishes task-scoped Auto check authority from consent.
-        // Version 41 removes the approval reviewer, `approval_delegate`,
-        // session and workspace grants; recorded events decode as `retired`
-        // and recorded grant or reviewer resolutions as plain ones.
         assert_eq!(crate::PROTOCOL_VERSION, 41);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
@@ -4142,8 +3585,6 @@ mod tests {
 
     #[test]
     fn run_limits_and_budget_exhaustion_round_trip_and_stay_additive() {
-        // Version-9 clients submit prompts without limits; the field defaults
-        // to empty and stays off the wire when unset.
         let historical = serde_json::json!({
             "type": "submit_prompt",
             "session_id": SessionId::generate().unwrap(),
@@ -4350,8 +3791,6 @@ mod tests {
                 event
             );
         }
-        // Legacy run_started envelopes carry no plan; new ones carry the
-        // identity verbatim.
         let legacy = serde_json::json!({
             "type": "run_started",
             "session": serde_json::to_value(SessionSummary {

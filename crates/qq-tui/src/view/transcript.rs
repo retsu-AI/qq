@@ -1,36 +1,15 @@
 use super::*;
 use crate::render::Span;
 
-/// Retained rendering shared by every transcript pane: completed messages
-/// cached by width, derived tool rows, and the settled prefix of streaming
-/// messages. Per-pane state (scroll, live-row anchors) lives on the
-/// [`TranscriptPane`] the app owns; the cache only reads it and hands back a
-/// [`PaneUpdate`] per frame.
-///
-/// Layouts key on message id and carry their width. Two panes showing one
-/// session at different content widths would relay out its messages every
-/// frame; the layout gives every transcript slot the same content width
-/// (`layout::TranscriptSlot::content_width`), so panes share layouts instead
-/// of fighting over them, and a frame holds at most `MAX_VISIBLE_MESSAGES`
-/// per pane.
 #[derive(Default)]
 pub(crate) struct TranscriptCache {
     pub(super) markdown: HashMap<MessageId, CachedMarkdown>,
-    /// Derived tool rows keyed by call, refreshed when a call's state or
-    /// result changes so JSON parsing stays off the per-frame path.
     tool_rows: HashMap<ToolCallId, (ToolRowKey, ToolRow)>,
-    /// Sum of `CachedMarkdown::bytes` over `markdown`.
     cached_bytes: usize,
-    /// Monotonic counter bumped per `prepare_markdown`; stamps cache use.
     clock: u64,
-    /// Settled rows of messages still streaming, keyed by message. Each entry
-    /// holds the layout of the message's block-boundary-settled prefix so a
-    /// frame only lays out the trailing open block.
     live: HashMap<MessageId, LiveMarkdown>,
 }
 
-/// What one pane's frame reconciled: the scroll state to hand back and the
-/// live-row anchors the next frame compares against.
 pub(crate) struct PaneUpdate {
     pub viewport: Viewport,
     pub live_message_ranges: HashMap<MessageId, Range<usize>>,
@@ -38,14 +17,8 @@ pub(crate) struct PaneUpdate {
 
 pub(super) struct LiveMarkdown {
     width: usize,
-    /// Bytes of the combined output+refusal text covered by `rows`.
     settled_bytes: usize,
-    /// Rendered, indented rows for the settled prefix.
     rows: Vec<Line>,
-    /// The unsettled text past `settled_bytes`, as collected by the refresh
-    /// that produced `rows`, with the source length it was taken at. The
-    /// same frame's `live_lines` lays this out instead of collecting the
-    /// tail a second time.
     tail: String,
     tail_source_len: usize,
 }
@@ -56,20 +29,12 @@ pub(super) struct CachedMarkdown {
     refusal_bytes: usize,
     loaded_through: u64,
     body: CachedMessageBody,
-    /// A highlighted layout has been requested or applied; `false` means a
-    /// later frame should try again once the highlighter has capacity.
     highlight_requested: bool,
-    /// Frame counter at last use, for least-recently-used eviction.
     last_used: u64,
-    /// Approximate heap bytes held by `body`, for the byte budget.
     bytes: usize,
 }
 
-/// Heap bytes the cache may hold in completed-message layouts. Larger than
-/// any single message the cache admits so the newest message always fits.
 const MAX_CACHE_BYTES: usize = 8 * 1024 * 1024;
-/// Completed-message layouts the cache holds: the visible window of every
-/// pane the layout can show at once, so panes never evict each other.
 pub(super) const MAX_CACHED_MESSAGES: usize = MAX_VISIBLE_MESSAGES * MAX_PANES;
 
 impl CachedMessageBody {
@@ -217,10 +182,6 @@ impl<'a> MessageText<'a> {
     }
 }
 
-/// Sparse row index for oversized completed messages. It stores one byte
-/// checkpoint per bounded group of visual rows and reconstructs only the
-/// requested viewport. Checkpoints are compacted as the message grows, so the
-/// source is scanned once while retained memory stays predictable.
 pub(super) struct PlainTextIndex {
     content_width: usize,
     rows: usize,
@@ -382,13 +343,6 @@ impl<'a> VirtualBody<'a> {
         self.segments.append(&mut other.segments);
     }
 
-    /// One blank row ahead of everything, so the transcript breathes under
-    /// the top row. As a body row it is on screen exactly when the viewport
-    /// reaches the first row and scrolls away like any other; offsets count
-    /// from the tail, so the anchor is untouched.
-    ///
-    /// Kept out of line: inlined into `body` it perturbed the streaming
-    /// layout path enough to read +7 % on `streaming_run_on_32kb`.
     #[inline(never)]
     fn pad_top(&mut self) {
         for (_, range) in &mut self.live_message_ranges {
@@ -424,24 +378,19 @@ impl<'a> VirtualBody<'a> {
                         prefix,
                         prefix_style,
                         width,
-                    } => {
-                        // The message can only vanish between prepare and
-                        // viewport if a snapshot replaced the session inside
-                        // one frame; blank rows are the safe degradation.
-                        match find_message(app, *message_id) {
-                            Some(message) => rendered.extend(index.render(
-                                MessageText::new(message),
-                                local_start..local_end,
-                                prefix,
-                                *prefix_style,
-                                *width,
-                            )),
-                            None => rendered.extend(std::iter::repeat_n(
-                                Line::default(),
-                                local_end - local_start,
-                            )),
-                        }
-                    }
+                    } => match find_message(app, *message_id) {
+                        Some(message) => rendered.extend(index.render(
+                            MessageText::new(message),
+                            local_start..local_end,
+                            prefix,
+                            *prefix_style,
+                            *width,
+                        )),
+                        None => rendered.extend(std::iter::repeat_n(
+                            Line::default(),
+                            local_end - local_start,
+                        )),
+                    },
                 }
             }
             if segment_end >= end {
@@ -452,14 +401,9 @@ impl<'a> VirtualBody<'a> {
         fit_height(rendered, height)
     }
 }
-/// Per-frame grouping of a session's messages and tool calls by run, built
-/// once per transcript layout so per-message questions are O(1).
 struct TurnIndex<'a> {
-    /// Index of the first assistant message of each run.
     first_assistant: HashMap<RunId, usize>,
-    /// Indices of every assistant message, in transcript order, per run.
     assistant_indices: HashMap<RunId, Vec<usize>>,
-    /// Tool calls per run sorted by (turn, call) ordinal.
     calls: HashMap<RunId, Vec<&'a ToolCallSnapshot>>,
 }
 
@@ -494,8 +438,6 @@ impl<'a> TurnIndex<'a> {
         self.first_assistant.get(&run_id).copied()
     }
 
-    /// The turn ordinal of the next assistant message of the same run after
-    /// `index`, or `u16::MAX` when `index` holds the run's last one.
     fn next_assistant_turn(&self, messages: &[MessageSnapshot], index: usize) -> u32 {
         let run_id = messages[index].run_id;
         self.assistant_indices
@@ -513,19 +455,6 @@ impl<'a> TurnIndex<'a> {
 }
 
 impl TranscriptCache {
-    /// Render one pane's main area: the session transcript or a workspace
-    /// view, scrolled to the pane's viewport. Every row is exactly `width`
-    /// cells wide. Returns the rows and the pane's reconciled state, which
-    /// the caller hands back to the app after composition so rendering never
-    /// writes into the model mid-frame.
-    ///
-    /// A pane following a session that no longer exists shows the empty
-    /// prompt: the id is stale navigation state, not a body to wait for.
-    ///
-    /// `inline_detail` is false while the inspector pane is on screen: the
-    /// inspector then holds expanded tool bodies and the workspace views, so
-    /// the transcript keeps its summary rows and a pane on a workspace view
-    /// shows the session that view replaced.
     pub(super) fn body(
         &mut self,
         highlighter: &mut Highlighter,
@@ -538,8 +467,6 @@ impl TranscriptCache {
         let view = shown_view(app, pane, inline_detail);
         let session_id = view.session();
         let mut viewport = pane.viewport.clone();
-        // Workspace-wide views are cheap lists; they draw without the
-        // transcript caches and scroll like any other body.
         let workspace_rows = match view {
             View::Attention => Some(attention_body(app, width)),
             View::Changes => Some(changes_body(app, width)),
@@ -560,9 +487,6 @@ impl TranscriptCache {
                 },
             );
         }
-        // `width` is already the pane's content width: the layout caps it at
-        // the measure and centers it, so the width-keyed caches see one width
-        // across every pane at least that wide.
         let content_width = width;
         let mut body = self.threadline(
             highlighter,
@@ -578,8 +502,6 @@ impl TranscriptCache {
         let live_message_ranges = body.live_message_ranges.iter().cloned().collect();
         let mut rows = body.viewport(app, height, offset);
         drop(body);
-        // Scrolled up while the session runs: a pill on the last row says
-        // how much has arrived below, so the user knows to jump back.
         let running = session_id
             .and_then(|id| app.sessions.get(&id))
             .is_some_and(|session| session.summary.active_run_id.is_some());
@@ -605,11 +527,6 @@ impl TranscriptCache {
         )
     }
 
-    /// The derived row for `call`, when the cache holds a current one. The
-    /// inspector reads rows through this so it never re-parses JSON the
-    /// transcript already parsed; a row cached for an earlier state of the
-    /// call (an overlay kept the transcript from laying out this frame) is
-    /// not returned.
     pub(super) fn tool_row(&self, call: &ToolCallSnapshot) -> Option<&ToolRow> {
         self.tool_rows
             .get(&call.id)
@@ -617,9 +534,6 @@ impl TranscriptCache {
             .map(|(_, row)| row)
     }
 
-    /// Drop every cached layout. Live-row anchors live on the panes, so an
-    /// overlay that hides the transcript still lets a completion behind it
-    /// preserve the user's viewport when the transcript returns.
     pub(super) fn prune_all(&mut self) {
         self.markdown.clear();
         self.cached_bytes = 0;
@@ -627,9 +541,6 @@ impl TranscriptCache {
         self.tool_rows.clear();
     }
 
-    /// Keep only the layouts for messages and calls some pane can show this
-    /// frame. Runs once per frame over every shown session, so two panes on
-    /// different sessions never evict each other's layouts.
     pub(super) fn retain_visible(&mut self, app: &App, shown: &[Option<SessionId>]) {
         let mut visible = std::collections::HashSet::new();
         let mut any_warm = false;
@@ -663,9 +574,6 @@ impl TranscriptCache {
             keep
         });
         self.live.retain(|id, _| visible.contains(id));
-        // A scan over the shown sessions' calls: the rows are bounded by the
-        // calls themselves, and building a set per frame costs more than the
-        // compares on the tool-heavy scenes the render bench measures.
         self.tool_rows.retain(|id, _| {
             warm()
                 .filter_map(|session| session.tool_calls.as_deref())
@@ -673,9 +581,6 @@ impl TranscriptCache {
         });
     }
 
-    /// Lay out what `session_id` needs this frame and report whether a live
-    /// message the pane was following settled in place, so the pane keeps
-    /// its tail anchor rather than its top row.
     fn prepare_markdown(
         &mut self,
         highlighter: &mut Highlighter,
@@ -723,9 +628,6 @@ impl TranscriptCache {
         preserve_tail_anchor
     }
 
-    /// Extend the settled-prefix layout of a streaming message. Only the bytes
-    /// past the previous settled boundary are examined, and only blocks that
-    /// became settled since the last frame are laid out.
     fn refresh_live(&mut self, message: &MessageSnapshot, width: usize) {
         let source = MessageText::new(message);
         let content_width = width.saturating_sub(3).max(1);
@@ -742,9 +644,6 @@ impl TranscriptCache {
             entry.settled_bytes = 0;
             entry.rows.clear();
         }
-        // The live view shows at most the last MAX_LIVE_MARKDOWN_BYTES; a
-        // settled prefix beyond that is never displayed, so skip ahead rather
-        // than lay out rows that would be dropped.
         let visible_start = source.len().saturating_sub(MAX_LIVE_MARKDOWN_BYTES);
         if entry.settled_bytes < visible_start {
             entry.settled_bytes = 0;
@@ -766,7 +665,6 @@ impl TranscriptCache {
         if settled == 0 {
             return;
         }
-        // Rows past the display bound are never shown again while streaming.
         let excess = entry.rows.len().saturating_sub(MAX_LIVE_MARKDOWN_ROWS);
         if excess > 0 {
             entry.rows.drain(..excess);
@@ -787,8 +685,6 @@ impl TranscriptCache {
             && cached.loaded_through == loaded_through
         {
             cached.last_used = self.clock;
-            // Layout is current; retry a highlight request that was skipped
-            // because the highlighter was saturated.
             if !cached.highlight_requested {
                 let key = cached.key(message.id);
                 cached.highlight_requested = Self::request_highlight(
@@ -803,8 +699,6 @@ impl TranscriptCache {
         let source = MessageText::new(message);
         let content_width = width.saturating_sub(3).max(1);
         let (prefix, prefix_style, _, _) = message_presentation(message.role);
-        // Plain layout first so the frame never waits on tree-sitter; the
-        // highlighted layout replaces it when the blocking job finishes.
         let mut needs_highlight = false;
         let body = if source.len() <= MAX_FULL_MARKDOWN_BYTES {
             let content = source.as_cow();
@@ -822,8 +716,6 @@ impl TranscriptCache {
         if let Some(previous) = self.markdown.remove(&message.id) {
             self.cached_bytes = self.cached_bytes.saturating_sub(previous.bytes);
         }
-        // Evict least-recently-used layouts until both the entry count and
-        // the byte budget admit the new one.
         while !self.markdown.is_empty()
             && (self.markdown.len() >= MAX_CACHED_MESSAGES
                 || self.cached_bytes + bytes > MAX_CACHE_BYTES)
@@ -909,7 +801,6 @@ impl TranscriptCache {
         let mut body = VirtualBody::default();
         body.extend_virtual(transcript);
         if let Some(focused) = session_id {
-            // Children already shown under their spawn call are not repeated.
             let children: Vec<SessionId> = app
                 .sessions
                 .children_of(focused)
@@ -949,9 +840,6 @@ impl TranscriptCache {
             ..VirtualBody::default()
         };
         let Some(session_id) = session_id else {
-            // A configured model whose provider has no credential is the one
-            // state Alt-N cannot fix; name the credential first so the next
-            // command is obvious.
             if let Some(remedy) = app.configured_provider_remedy() {
                 body.push_line(Line::styled(format!("  {}", remedy.message()), warning()));
             }
@@ -989,8 +877,6 @@ impl TranscriptCache {
         }
         self.append_messages(&mut body, app, session, messages, width, inline_detail);
         for prompt in app.pending_prompts(session_id) {
-            // A pending prompt is a YOU boundary: the same two blank lines
-            // that precede any user turn.
             if !body.is_empty() {
                 body.push_line(Line::default());
                 body.push_line(Line::default());
@@ -1006,11 +892,6 @@ impl TranscriptCache {
             ));
         }
         if body.is_empty() {
-            // The first session in a workspace is the one screen a new user
-            // sees with nothing to learn from; name the commands they will
-            // want first. A pure render-time predicate: `record_prompt` runs
-            // synchronously on Enter, so the cell is gone before the pending
-            // prompt paints, and a second session never shows it.
             let first_session = app.sessions.len() == 1 && session.prompt_history.is_empty();
             if first_session {
                 if let Some(remedy) = app.configured_provider_remedy() {
@@ -1044,8 +925,6 @@ impl TranscriptCache {
         body
     }
 
-    /// Append the visible window of `messages` (the last
-    /// `MAX_VISIBLE_MESSAGES`) with their runs' tool calls.
     fn append_messages<'a>(
         &'a self,
         body: &mut VirtualBody<'a>,
@@ -1085,26 +964,16 @@ impl TranscriptCache {
                 selected: app.transcript_cursor == Some(call.id),
             }
         };
-        // One pass over messages and calls answers every per-message question
-        // below (first assistant message of a run, next assistant turn, calls
-        // by run) so the loop is linear in messages plus calls.
         let turns = TurnIndex::build(messages, tool_calls);
         for index in indices {
             let message = &messages[index];
             if !body.is_empty() {
                 body.push_line(Line::default());
-                // A user prompt starts a new turn; extra spacing keeps
-                // prompt/response boundaries scannable.
                 if message.role == MessageRole::User {
                     body.push_line(Line::default());
                 }
             }
             if message.role == MessageRole::Assistant {
-                // Group calls under the assistant message of their turn.
-                // Calls from turns without a message of their own (call-only
-                // turns, legacy turn 0 messages) attach after the nearest
-                // preceding assistant message of the run; the run's first
-                // rendered message also collects any earlier orphan turns.
                 let first_of_run = turns.first_assistant(message.run_id) == Some(index);
                 let next_turn = turns.next_assistant_turn(messages, index);
                 let run_calls: Vec<&ToolCallSnapshot> = turns
@@ -1116,9 +985,6 @@ impl TranscriptCache {
                     })
                     .copied()
                     .collect();
-                // Call-only turns before the run's first message executed
-                // before its text streamed: render that head group ahead of
-                // the message so execution order holds from the first block.
                 let head = if first_of_run {
                     run_calls
                         .iter()
@@ -1159,7 +1025,6 @@ impl TranscriptCache {
                         &|call_id, width| approval_rows(app, call_id, width),
                     ));
                 }
-                // The run's last assistant message carries its completion line.
                 if next_turn == u32::MAX
                     && let Some(line) = run_completion_line(session, message.run_id, width)
                 {
@@ -1197,9 +1062,6 @@ impl TranscriptCache {
         let content_start = body.rows;
         if message_is_terminal(message) {
             let Some(cached) = self.markdown.get(&message.id) else {
-                // `prepare_markdown` caches every visible terminal message;
-                // a miss means the cache was evicted under memory pressure
-                // this frame. Show the header and recover next frame.
                 body.push_line(message_ellipsis(prefix, prefix_style));
                 return;
             };
@@ -1220,11 +1082,6 @@ impl TranscriptCache {
                 }
             }
         } else {
-            // Still streaming: the settled prefix comes from the live cache and
-            // only the open trailing block is laid out this frame. Tree-sitter
-            // stays off so per-frame work is bounded by one block, not the
-            // message. Any hidden live prefix becomes reachable through the
-            // completed-message cache once the message settles.
             let lines = self.live_lines(message, width);
             if lines.is_empty() {
                 body.push_line(message_ellipsis(prefix, prefix_style));
@@ -1236,9 +1093,6 @@ impl TranscriptCache {
         }
     }
 
-    /// Rows for a streaming message: cached settled rows followed by the
-    /// freshly laid-out open tail, bounded to the live display budget with a
-    /// marker when earlier rows were dropped.
     fn live_lines(&self, message: &MessageSnapshot, width: usize) -> Vec<Line> {
         let source = MessageText::new(message);
         let content_width = width.saturating_sub(3).max(1);
@@ -1326,7 +1180,6 @@ impl TranscriptCache {
     }
 }
 
-/// Where commands run and whether undo works, under the empty-state hints.
 fn push_environment(body: &mut VirtualBody<'_>, app: &App, width: usize) {
     if app.environment.is_empty() {
         return;
@@ -1347,12 +1200,6 @@ fn push_environment(body: &mut VirtualBody<'_>, app: &App, width: usize) {
     }
 }
 
-/// What `pane` paints this frame. A session that no longer exists reads as
-/// the empty prompt: the id is stale navigation state, not a body to wait
-/// for. While the inspector is on screen (`inline_detail` false) it holds the
-/// workspace views, so a pane on one keeps showing the session the view
-/// replaced; the frame and the cache's retention both resolve through here
-/// so the layouts of that session stay warm.
 pub(super) fn shown_view(app: &App, pane: &TranscriptPane, inline_detail: bool) -> View {
     match pane.view {
         View::Transcript(Some(session_id)) if !app.sessions.contains_key(&session_id) => {
@@ -1385,9 +1232,6 @@ pub(super) const fn message_is_terminal(message: &MessageSnapshot) -> bool {
     )
 }
 
-/// Rail, rail style, role label, and label style for a message's rows. The
-/// user rail is the transcript's structural accent; `QQ` in `brand` is the
-/// one warm mark per turn.
 pub(super) fn message_presentation(
     role: MessageRole,
 ) -> (&'static str, Style, &'static str, Style) {
@@ -1402,10 +1246,6 @@ pub(super) fn message_ellipsis(prefix: &'static str, prefix_style: Style) -> Lin
     ellipsis.push("...", muted());
     ellipsis
 }
-/// Rows for a run's provider-exposed reasoning. Collapsed: one line with the
-/// state and length, or the first sentence when there is room. Expanded: the
-/// bounded text laid out as plain prose under a dimmed rail. Empty when the
-/// run produced no reasoning.
 pub(super) fn reasoning_rows(
     app: &App,
     session_id: SessionId,
@@ -1437,7 +1277,6 @@ pub(super) fn reasoning_rows(
     }
     match app.reasoning_detail {
         crate::app::ReasoningDetail::Collapsed => {
-            // First paragraph only: the collapsed row is a glance, not the text.
             let first = reasoning.text.split("\n\n").next().unwrap_or_default();
             let summary = preview(first, width.saturating_sub(header.width() + 12));
             if !summary.is_empty() {
@@ -1470,9 +1309,6 @@ pub(super) fn reasoning_rows(
         }
     }
 }
-/// `✓ 42s · 8 tools · 12.3k tok · $0.04` under the last message of a finished
-/// run. Each field appears only when known; a run still executing, or one
-/// with nothing measurable, produces no row.
 pub(super) fn run_completion_line(
     session: &SessionView,
     run_id: RunId,
@@ -1517,8 +1353,6 @@ pub(super) fn run_completion_line(
     {
         parts.push(format_cost(cost));
     }
-    // Speed telemetry: time to first token, and output tokens per second of
-    // generation (first token to finish).
     if let (Some(started), Some(first)) = (stats.started_at_ms, stats.first_token_at_ms) {
         parts.push(format!(
             "ttft {}",
@@ -1535,9 +1369,6 @@ pub(super) fn run_completion_line(
             parts.push(format!("{per_second} tok/s"));
         }
     }
-    // Provenance: which profile and plan ran, and the model route when it is
-    // not the one the session selected (a profile override, or a change made
-    // since). Both come from the run's own records, never inferred.
     if let Some(route) = &stats.resolved_route
         && session.summary.model.as_deref() != Some(route.as_str())
     {
@@ -1572,7 +1403,6 @@ pub(super) fn run_completion_line(
     Some(truncate_line(line, width))
 }
 
-/// `0.4s`, `42s`, `4m12s`, `1h03m`.
 pub(super) fn format_duration_ms(ms: u64) -> String {
     if ms < 10_000 {
         return format!("{}.{}s", ms / 1000, (ms % 1000) / 100);
@@ -1588,7 +1418,6 @@ pub(super) fn format_duration_ms(ms: u64) -> String {
     format!("{}h{:02}m", minutes / 60, minutes % 60)
 }
 
-/// `999`, `12.3k`, `1.2M`.
 pub(super) fn format_count(count: u64) -> String {
     if count < 1_000 {
         count.to_string()
@@ -1599,8 +1428,6 @@ pub(super) fn format_count(count: u64) -> String {
     }
 }
 
-/// The inline approval block under the call the user must answer, when
-/// `call_id` is that call; otherwise nothing.
 fn approval_rows(app: &App, call_id: ToolCallId, width: usize) -> Vec<Line> {
     match app.pending_approval() {
         Some(call) if call.id == call_id => approval_block(app, width),
@@ -1608,10 +1435,6 @@ fn approval_rows(app: &App, call_id: ToolCallId, width: usize) -> Vec<Line> {
     }
 }
 
-/// The `▌ YOU  streaming` style row that opens a message. Steering rows keep
-/// the user prefix but say what they are: injected mid-run, not a new prompt,
-/// with a lifecycle (waiting for a boundary, applied, superseded) in words the
-/// run's own messages never use.
 pub(super) fn message_header(message: &MessageSnapshot) -> Line {
     let (prefix, prefix_style, role, role_style) = message_presentation(message.role);
     let mut header = Line::styled(prefix, prefix_style);

@@ -1,10 +1,5 @@
 use super::*;
 
-/// The attention pane: every reason a session needs the user across the
-/// workspace, most urgent first. Each item is one row (session and reason)
-/// plus one row of detail (the waiting command or the outcome). Enter on the
-/// focused pane jumps to the session; approvals answer in place with the
-/// background chords.
 pub(super) fn attention_body(app: &App, width: usize) -> Vec<Line> {
     let mut lines = vec![section("NEEDS YOU", "most urgent first"), Line::default()];
     let needing = app.sessions_needing_attention();
@@ -87,9 +82,6 @@ fn failure_style() -> Style {
     failure()
 }
 
-/// The changes pane: every file any agent edited in a loaded session,
-/// grouped by path with per-agent `+N −M`. A path touched by more than one
-/// agent is flagged so overlapping work is visible before it collides.
 pub(super) fn changes_body(app: &App, width: usize) -> Vec<Line> {
     let mut lines = vec![
         section("CHANGES", "every edit across agents"),
@@ -163,7 +155,6 @@ pub(super) fn changes_body(app: &App, width: usize) -> Vec<Line> {
     lines
 }
 
-/// One agent's net edit to a path on the change board.
 struct AgentEdit {
     agent: String,
     added: usize,
@@ -186,14 +177,6 @@ fn diff_counts(diff: &str) -> (usize, usize) {
     (added, removed)
 }
 
-/// The inspector column at Wide and above (or wherever it is pinned): the
-/// focused pane's detail, beside the transcript so the prose column stays
-/// prose. It shows the workspace view the pane is on, or else the expanded
-/// body of every expanded tool call in the pane's session, each under its
-/// summary row, through the same `tool_expanded_lines` the inline path uses.
-/// Always `height` rows so it zips onto the body; rows past the height are
-/// dropped behind a count (the inspector does not scroll yet), and no row is
-/// built past what fits.
 pub(super) fn inspector_pane(
     app: &App,
     cache: &TranscriptCache,
@@ -237,9 +220,6 @@ pub(super) fn inspector_pane(
                     if !app.expanded_tool_calls.contains(&call.id) {
                         continue;
                     }
-                    // Rows are derived for the transcript this frame; a call
-                    // the focused pane did not lay out (an overlay is up)
-                    // derives once here.
                     let derived;
                     let row = match cache.tool_row(call) {
                         Some(row) => row,
@@ -300,7 +280,6 @@ pub(super) fn inspector_pane(
     lines
 }
 
-/// Separate projection: side text is never rendered as main-agent messages.
 pub(super) fn side_questions_body(app: &App, session_id: SessionId, width: usize) -> Vec<Line> {
     let mut rows = vec![
         section("SIDE QUESTIONS", "main agent continues"),
@@ -548,8 +527,6 @@ pub(super) fn goal_body(app: &App, session_id: SessionId, width: usize) -> Vec<L
     rows.into_iter()
         .flat_map(|row| {
             let mut lines = vec![Line::default()];
-            // Goal fields include shell output and model text. Sanitize before
-            // layout while retaining explicit line breaks and span styles.
             for span in row.spans {
                 for (index, text) in span.text.split('\n').enumerate() {
                     if index > 0 {

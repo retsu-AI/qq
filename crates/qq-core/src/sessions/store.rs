@@ -111,10 +111,6 @@ pub(super) fn hold_outcome_read(
     (entered_rx, release, attempted_rx)
 }
 
-/// Holds a reserved-run start attempt and then fails it, so a test can
-/// order a sibling's fatal settlement against a start that is still in
-/// flight. `Overloaded` cannot be produced here any more (lifecycle store
-/// calls wait for admission), so the held attempt fails with `Persistence`.
 #[cfg(test)]
 struct ReservedStartHoldHook {
     run_id: RunId,
@@ -233,9 +229,7 @@ struct StoreInner {
     control_slots: Arc<Semaphore>,
     output: Sender<WorkerMessage>,
     output_slots: Arc<Semaphore>,
-    /// Live subscribers, fed by the worker after each committing job.
     feed: Arc<WorkspaceFeed>,
-    /// Subscriber catch-up pages read, for tests that bound them.
     #[cfg(test)]
     catch_up_reads: std::sync::atomic::AtomicU64,
     shutdown: Sender<()>,
@@ -249,7 +243,6 @@ struct StoreInner {
 #[derive(Clone, Copy)]
 pub(super) enum Priority {
     Control,
-    /// An already-owned child must survive transient admission pressure.
     AwaitControl,
     Output,
 }
@@ -300,8 +293,6 @@ impl Store {
                 )?;
                 present.store(enabled, Ordering::Release);
                 if enabled {
-                    // Capture committed workspace boundaries before recovery or
-                    // scheduling appends events. Journal rows may be retired.
                     let mut statement =
                         connection.prepare_cached("SELECT id,next_sequence FROM workspaces")?;
                     let sequences = statement
@@ -364,14 +355,6 @@ impl Store {
         self.inner.feed.retained_workspaces()
     }
 
-    /// Attaches a subscriber at `sequence` with its first catch-up page.
-    ///
-    /// Warm path: when the workspace ring already covers the cursor, both come
-    /// from memory and no store job runs; a ring exists only for a workspace
-    /// the store validated for an earlier subscriber. Cold path: one control
-    /// job validates the workspace, reads the page, and joins the ring before
-    /// any later commit can publish, so nothing is missed between the two.
-    /// Dropping the reply also releases the receiver if the caller has gone.
     pub(super) async fn attach_feed(
         &self,
         workspace_id: WorkspaceId,
@@ -396,8 +379,6 @@ impl Store {
         .await
     }
 
-    /// A catch-up page, from the ring when it covers `sequence` and from
-    /// SQLite otherwise.
     pub(super) async fn published_events_after(
         &self,
         workspace_id: WorkspaceId,
@@ -428,11 +409,6 @@ impl Store {
             .await
     }
 
-    /// A control-lane job that writes. When the worker is forming an output
-    /// group, a waiting write joins it as a savepoint and settles on the
-    /// group's commit instead of paying its own fsync; the reply still waits
-    /// for durability. Reads never join: they must observe a committed
-    /// state, not a group in progress.
     pub(super) async fn call_write<T, F>(
         &self,
         priority: Priority,
@@ -447,9 +423,6 @@ impl Store {
             .await
     }
 
-    /// A control-lane read issued by the scheduler rather than a waiting
-    /// client. It never joins a group and never cuts one short; see
-    /// [`worker::Joins::AfterGroup`].
     pub(super) async fn call_after_group<T, F>(
         &self,
         priority: Priority,
@@ -464,7 +437,6 @@ impl Store {
             .await
     }
 
-    /// Accepted work stays owned even when a side caller's deadline expires.
     pub(super) async fn enqueue_side_write<T, F>(
         &self,
         deadline: Option<tokio::time::Instant>,
@@ -493,8 +465,6 @@ impl Store {
             None => acquire.await,
         }
         .map_err(|_| SessionRuntimeError::Unavailable)?;
-        // No await from accepted handoff through receipt return: cancellation
-        // can only discard work before it enters the worker queue.
         let admission = self
             .inner
             .admission
@@ -529,17 +499,10 @@ impl Store {
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
     {
-        // Only the reply type is generic. Admission, queueing, and settlement
-        // run in one shared body so ~60 call sites do not each carry a copy
-        // of the hot path.
         let (reply, response) = oneshot::channel();
         let span = tracing::Span::current();
         let job: worker::DatabaseJob = Box::new(move |connection| {
             let result = span.in_scope(|| operation(connection));
-            // The worker settles this after the enclosing commit: the
-            // reply and the staged events wait for durability. A commit
-            // failure replaces the result so no caller is told a write
-            // landed when it did not.
             worker::JobOutcome {
                 error: result.as_ref().err().cloned(),
                 settle: Box::new(move |commit| {
@@ -596,9 +559,6 @@ impl Store {
             Priority::Control | Priority::AwaitControl => &self.inner.control,
             Priority::Output => &self.inner.output,
         };
-        // Enqueue and close share this short, synchronous admission boundary.
-        // If this call wins, the worker must drain it; if close wins, this
-        // call cannot enter a queue after the shutdown signal.
         let admission = self
             .inner
             .admission
@@ -618,9 +578,6 @@ impl Store {
         Ok(())
     }
 
-    /// Stops the database worker without synchronously joining it from an
-    /// async executor thread. Runtime settlement remains a separate operation;
-    /// after final close, every store call fails as unavailable.
     pub(super) async fn close(&self) -> Result<(), SessionRuntimeError> {
         {
             let _admission = self
@@ -700,7 +657,6 @@ impl Store {
         .await
     }
 
-    /// Applies one command with default admission.
     #[cfg(test)]
     pub(super) async fn command(
         &self,
@@ -711,7 +667,6 @@ impl Store {
             .await
     }
 
-    /// Goal command replay must not wait on configuration resolution.
     pub(super) async fn command_is_recorded(
         &self,
         command_id: CommandId,
@@ -745,8 +700,6 @@ impl Store {
             .await
     }
 
-    /// A `CancelRun` the runtime issues while settling: exempt from the
-    /// receipt bound (see `CommandOrigin`).
     pub(super) async fn settlement_cancel(
         &self,
         command_id: CommandId,
@@ -769,13 +722,6 @@ impl Store {
         origin: CommandOrigin,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
         let store_id = self.store_id;
-        // Workspace canonicalization is filesystem I/O; it runs on a blocking
-        // thread before the command reaches the single store worker, which
-        // must never block on the disk outside SQLite itself.
-        // A path that does not resolve is carried as its error rather than
-        // returned here: the worker checks the command journal first, so a
-        // replayed or conflicting command id is answered as such even when
-        // the directory has since disappeared.
         let canonical_workspace = match &command {
             SessionCommand::ResolveWorkspace { path } => {
                 let trimmed = path.trim().to_owned();
@@ -1078,9 +1024,6 @@ impl Store {
         .await
     }
 
-    /// Reserves the next queued run whose session sits at exactly `depth`
-    /// (0 = roots). The scheduler reserves per depth so each permit pool
-    /// stays independent.
     pub(super) fn has_goals(&self) -> bool {
         self.inner.goals_present.load(Ordering::Acquire)
     }
@@ -1118,7 +1061,6 @@ impl Store {
         .await
     }
 
-    /// Test convenience: roots, or depth-one children.
     #[cfg(test)]
     pub(super) async fn reserve_next_run(
         &self,
@@ -1271,10 +1213,6 @@ impl Store {
         .await
     }
 
-    /// Persists a side answer update. `usage`/`cost` are the committed totals,
-    /// or `None` while a provider request is in flight (spend unknown). A row
-    /// that is no longer running (cancelled, or deleted with its session)
-    /// takes no update and publishes nothing.
     pub(super) async fn record_side_turn(
         &self,
         id: RunId,
@@ -1300,12 +1238,6 @@ impl Store {
         }).await
     }
 
-    /// Settles a running side question and returns its effective state. When
-    /// `spend_known` is false a provider request may have been in flight, so
-    /// persisted usage and cost become unknown. A completion at or past
-    /// `duration_ms` from admission settles as timed out. A row deleted with
-    /// its session (possible only after cancellation released it) reports
-    /// `Cancelled`.
     pub(super) async fn finish_side_question(
         &self,
         id: RunId,
@@ -1410,8 +1342,6 @@ impl Store {
         .await
     }
 
-    /// A reduced history for exhausted admission: narrative plus every
-    /// earlier task input, including inputs after the summary's cutoff.
     pub(super) async fn summary_only_history(
         &self,
         identity: RunIdentity,
@@ -1436,8 +1366,6 @@ impl Store {
         .await
     }
 
-    /// Full-transcript recall for `search_history`, on the control lane so a
-    /// saturated output queue cannot starve a running tool call.
     pub(super) async fn search_history(
         &self,
         session_id: SessionId,
@@ -1527,9 +1455,6 @@ impl Store {
         .await
     }
 
-    /// Creates the current turn's assistant message with its first text chunk
-    /// in one transaction, emitting `AssistantMessageStarted` then
-    /// `TextAppended`.
     pub(super) async fn begin_assistant_message(
         &self,
         claimed: &ClaimedRun,
@@ -1569,16 +1494,6 @@ impl Store {
         .await
     }
 
-    /// Persists a completed model turn together with every tool call it
-    /// requested in one transaction. A crash must never commit the turn's
-    /// ToolCall blocks without their tool_calls rows: such orphans would replay
-    /// as `tool_use` without `tool_result` and poison every later request.
-    /// The turn's assistant message (when the turn streamed text) is finalized
-    /// in the same transaction so no crash window can leave a committed turn
-    /// with a message still marked streaming.
-    /// The turn's cumulative usage, cost, and reported context occupancy ride
-    /// the same transaction. This keeps live budgets and run snapshots on the
-    /// same committed boundary as the model work they measure.
     pub(super) async fn persist_model_turn(
         &self,
         claimed: &ClaimedRun,
@@ -1592,8 +1507,6 @@ impl Store {
         .await
     }
 
-    /// Internal summaries never join the prompt transcript. Their own text
-    /// is bounded by the summarizer, not the prompt's context reservation.
     pub(super) async fn persist_in_run_summary_turn(
         &self,
         claimed: &ClaimedRun,
@@ -1605,8 +1518,6 @@ impl Store {
             if claimed.identity.kind != RunKind::Compaction {
                 return Err(SessionRuntimeError::CONSTRAINT);
             }
-            // The worker executes this check and persistence without another
-            // job interleaving. A dropped executor cannot append after settlement.
             let running = connection
                 .query_row(
                     "SELECT status = 'running' AND outcome_json IS NULL
@@ -1628,9 +1539,6 @@ impl Store {
         .await
     }
 
-    /// A send has not completed yet: any earlier exact usage is only a
-    /// prefix. Keep its turn rows, but mark aggregate spend unknown before
-    /// the provider is called so cancellation/recovery cannot claim zero.
     pub(super) async fn start_in_run_summary_request(
         &self,
         claimed: &ClaimedRun,
@@ -1657,8 +1565,6 @@ impl Store {
         }).await
     }
 
-    /// Moves the session's prune watermark to `through_turn` of the claimed
-    /// prompt run, the live overflow-prune seam. Never moves it backwards.
     pub(super) async fn advance_prune_watermark(
         &self,
         claimed: &ClaimedRun,
@@ -1671,9 +1577,6 @@ impl Store {
         .await
     }
 
-    /// Moves the session's prune watermark to the newest committed turn
-    /// before the reserved prompt, the proactive-threshold seam. Returns
-    /// whether it moved; when it did, the prompt must be reassembled.
     pub(super) async fn advance_prune_watermark_before_prompt(
         &self,
         claimed: &ClaimedRun,
@@ -1700,8 +1603,6 @@ impl Store {
         .await
     }
 
-    /// Commits the exact system-prompt identity before the runtime is polled
-    /// far enough to begin provider work.
     pub(super) async fn record_prompt_identity(
         &self,
         claimed: &ClaimedRun,
@@ -1764,8 +1665,6 @@ impl Store {
         .await
     }
 
-    /// Records that the runtime is continuing past a turn the provider cut at
-    /// its output token limit. The counter and the event commit together.
     pub(super) async fn record_output_truncated(
         &self,
         claimed: &ClaimedRun,
@@ -1780,8 +1679,6 @@ impl Store {
         .await
     }
 
-    /// Publishes that the runtime is re-issuing a turn after a transient
-    /// provider fault cut it short.
     pub(super) async fn record_turn_retrying(
         &self,
         claimed: &ClaimedRun,
@@ -1808,10 +1705,6 @@ impl Store {
         .await
     }
 
-    /// The steering messages of a run that are recorded but not yet applied,
-    /// with their provider-visible text, in order. Used once when the run
-    /// loop starts so steering that arrived between claim and start is not
-    /// stranded.
     pub(super) async fn append_reasoning(
         &self,
         claimed: &ClaimedRun,
@@ -1850,9 +1743,6 @@ impl Store {
         .await
     }
 
-    /// Publishes one batched chunk of live tool output. Chunks are
-    /// display/replay events only: they never touch the tool_call row, whose
-    /// bounded result is persisted by `finish_tool_call`.
     pub(super) async fn append_tool_output(
         &self,
         claimed: &ClaimedRun,
@@ -1867,8 +1757,6 @@ impl Store {
         .await
     }
 
-    /// Persists a tool result and, when the runtime kept the complete output
-    /// its marker cites, that spill in the same transaction.
     #[expect(
         clippy::too_many_arguments,
         reason = "one persisted row update; bundling the columns adds nothing"
@@ -1916,9 +1804,6 @@ impl Store {
         .await
     }
 
-    /// One stored complete output for `read_tool_result`, scoped to the
-    /// calling session. On the control lane so a saturated output queue
-    /// cannot starve a running tool call.
     pub(super) async fn read_tool_spill(
         &self,
         session_id: SessionId,
@@ -1931,7 +1816,6 @@ impl Store {
         .await
     }
 
-    /// Read local and inherited authority together on the serialized worker.
     pub(super) async fn tool_approval_policy(
         &self,
         session_id: SessionId,
@@ -2005,7 +1889,6 @@ impl Store {
         .await
     }
 
-    /// Persists the final-answer audit record on the run and publishes it.
     pub(super) async fn record_audit(
         &self,
         claimed: &ClaimedRun,
@@ -2042,9 +1925,6 @@ impl Store {
         .await
     }
 
-    /// Settles a started run. `TeardownComplete` is only minted by draining
-    /// the run's execution resources, so a terminal `RunFinished` cannot be
-    /// committed while tools or children are still running.
     pub(super) async fn finish_run(
         &self,
         claimed: &ClaimedRun,
@@ -2060,8 +1940,6 @@ impl Store {
         .await
     }
 
-    /// Starts the internal run of an in-run compaction for a `running`
-    /// prompt run. Never takes the session's active-run slot.
     #[cfg(test)]
     pub(super) async fn start_in_run_compaction(
         &self,
@@ -2096,10 +1974,6 @@ impl Store {
         .await
     }
 
-    /// Commits an in-run summary as a marker scoped to the prompt run and
-    /// settles the internal run. The internal run ran no tools and owned no
-    /// children, so no teardown proof is needed. Returns the events and, when
-    /// the marker stands, the stored summary (narrative plus record).
     pub(super) async fn finish_in_run_compaction(
         &self,
         claimed: &ClaimedRun,
@@ -2128,8 +2002,6 @@ impl Store {
         .await
     }
 
-    /// Settles an in-run compaction whose summarizer request failed before
-    /// any summary existed.
     pub(super) async fn finish_in_run_compaction_failed(
         &self,
         claimed: &ClaimedRun,
@@ -2174,8 +2046,6 @@ impl Store {
         .await
     }
 
-    /// Typed pre-work rejection restores the exact prefix under the same
-    /// terminal guard that charges the helper's historical owner.
     pub(super) async fn finish_rejected_in_run_compaction(
         &self,
         claimed: &ClaimedRun,
@@ -2194,9 +2064,6 @@ impl Store {
         .await
     }
 
-    /// Atomically commits a compaction summary with its cutoff marker and
-    /// settles the internal run, publishing `RunFinished` and
-    /// `SessionCompacted` from the same transaction.
     pub(super) async fn finish_compaction_run(
         &self,
         claimed: &ClaimedRun,
@@ -2220,9 +2087,6 @@ impl Store {
         .await
     }
 
-    /// A settled run's outcome and its exact owned descendants' spend.
-    /// Later user prompts in a child session are separate runs and do not
-    /// enter this receipt. Missing usage or cost remains unknown.
     pub(super) async fn run_outcome(
         &self,
         run_id: RunId,
@@ -2259,8 +2123,6 @@ impl Store {
                 .optional()?
                 .ok_or(SessionRuntimeError::RunNotFound)?;
             let Some(encoded) = outcome else {
-                // A malformed live accounting row is already a hard read
-                // failure; do not wait for a hanging child to settle first.
                 if let Some(encoded) = usage {
                     serde_json::from_str::<TokenUsage>(&encoded)?;
                 }
@@ -2285,13 +2147,6 @@ impl Store {
         read.await
     }
 
-    /// Delivers up to `limit` settled detached children of the running
-    /// parent into its next request (turn `turn_ordinal`), then, as
-    /// `reports` says, the newest closed report of each child still running,
-    /// in one transaction.
-    /// Nothing for a parent that is no longer running: its settlement
-    /// delivers the answers instead, and reports from children that are
-    /// about to answer are moot.
     pub(super) async fn deliver_children(
         &self,
         claimed: &ClaimedRun,
@@ -2342,8 +2197,6 @@ impl Store {
         .await
     }
 
-    /// What a settled child left its parent: the same answer a delivered
-    /// notice carries (`deliveries::child_answer`).
     pub(super) async fn child_answer(
         &self,
         run_id: RunId,
@@ -2355,9 +2208,6 @@ impl Store {
         .await
     }
 
-    /// Stops the worker as a crash would: no settlement, no final commit.
-    /// The caller joins the handle so ownership is released before a
-    /// successor opens the store.
     pub(super) fn stop_worker_for_test(&self) -> Option<std::thread::JoinHandle<()>> {
         self.inner.closing.store(true, Ordering::Release);
         self.inner.output_slots.close();
@@ -2367,15 +2217,6 @@ impl Store {
     }
 }
 
-/// One store operation's unit of work.
-///
-/// Every mutating operation begins one of these and commits it. Alone, that
-/// is a real transaction. Inside the worker's output-lane group commit the
-/// connection already has a transaction open, and the unit is a savepoint:
-/// its `commit` releases the savepoint into the group, and the group's single
-/// `COMMIT` makes every unit durable at once. A failed unit rolls back its
-/// own savepoint and leaves its siblings intact. Operation code is identical
-/// in both modes.
 pub(super) enum Unit<'connection> {
     Transaction(rusqlite::Transaction<'connection>),
     Savepoint(rusqlite::Savepoint<'connection>),
@@ -2401,8 +2242,6 @@ impl std::ops::Deref for Unit<'_> {
     }
 }
 
-/// Begins the unit of work for one operation: a savepoint inside a group
-/// transaction, a deferred transaction otherwise.
 pub(super) fn begin_unit(connection: &mut Connection) -> Result<Unit<'_>, SessionRuntimeError> {
     if connection.is_autocommit() {
         connection
@@ -2441,7 +2280,6 @@ mod tests {
         assert!(matches!(second, Err(SessionRuntimeError::StoreBusy)));
         let elapsed = started.elapsed();
         assert!(elapsed >= schema::OWNERSHIP_WAIT, "{elapsed:?}");
-        // Nothing about the database changed: the loser never opened it.
         assert_eq!(
             std::fs::metadata(&path).unwrap().modified().unwrap(),
             modified_before
@@ -2452,16 +2290,13 @@ mod tests {
                 .map(|metadata| metadata.len()),
             wal_before
         );
-        // The first owner is unaffected by the refused attempt.
         assert_eq!(
             first.unfinished_run_ids().await.unwrap(),
             Vec::<RunId>::new()
         );
 
-        // A clean close hands ownership over.
         first.close().await.unwrap();
         let successor = Store::open(path.clone()).await.unwrap();
-        // So does dropping the last handle without closing (process exit).
         drop(successor);
         let after_drop = Store::open(path).await.unwrap();
         after_drop.close().await.unwrap();
@@ -2471,9 +2306,6 @@ mod tests {
     async fn a_busy_store_is_refused_before_the_database_is_created() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sessions.sqlite3");
-        // Another process holds ownership but has not created the database
-        // yet (or the database was removed under it). The candidate must not
-        // create it either.
         let _foreign = schema::acquire_ownership(&path).unwrap();
 
         assert!(matches!(
@@ -2483,7 +2315,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// A raw job with nothing to settle, for queue-shape tests.
     fn raw_job(job: impl FnOnce(&mut Connection) + Send + 'static) -> worker::DatabaseJob {
         Box::new(move |connection| {
             job(connection);
@@ -2502,8 +2333,6 @@ mod tests {
         }
     }
 
-    /// Holds the worker on a control job so output jobs pile up behind it and
-    /// are dequeued as one group when it releases.
     async fn hold_worker(
         store: &Store,
     ) -> (
@@ -2544,8 +2373,6 @@ mod tests {
             .collect()
     }
 
-    /// D2: output jobs queued together commit as one group; a job that fails
-    /// rolls back only its own savepoint, and its siblings stay durable.
     #[tokio::test]
     async fn grouped_output_jobs_commit_once_and_a_failing_job_rolls_back_alone() {
         let directory = tempfile::tempdir().unwrap();
@@ -2571,16 +2398,12 @@ mod tests {
                 store
                     .call(Priority::Output, move |connection| {
                         let unit = begin_unit(connection)?;
-                        // Inside a group every unit is a savepoint.
                         assert!(matches!(unit, Unit::Savepoint(_)));
                         unit.execute("INSERT INTO scratch(n) VALUES (?1)", [n])?;
                         if n == 4 {
-                            // Dropping the unit uncommitted rolls this
-                            // savepoint back; the group continues.
                             return Err(SessionRuntimeError::OutputTooLarge);
                         }
                         unit.commit()?;
-                        // Autocommit is still off: the group owns the commit.
                         if !connection.is_autocommit() {
                             commits.fetch_add(1, Ordering::SeqCst);
                         }
@@ -2619,10 +2442,6 @@ mod tests {
         );
     }
 
-    /// H20: a control *write* that is waiting when an output group forms
-    /// joins that group as a savepoint and settles on the group's single
-    /// commit, so an acknowledgement and the streamed output share one fsync.
-    /// A control *read* keeps its own immediate path and never joins.
     #[tokio::test]
     async fn a_waiting_control_write_joins_the_output_group_and_a_read_does_not() {
         let directory = tempfile::tempdir().unwrap();
@@ -2637,8 +2456,6 @@ mod tests {
             })
             .await
             .unwrap();
-        // Hold the worker inside an *output* job so the group is already
-        // forming when the control write and read arrive.
         let (entered_tx, entered_rx) = oneshot::channel();
         let (release, release_rx) = std::sync::mpsc::channel();
         let blocked_store = store.clone();
@@ -2676,8 +2493,6 @@ mod tests {
             write_store
                 .call_write(Priority::Control, |connection| {
                     let unit = begin_unit(connection)?;
-                    // Joined the group: the unit is a savepoint and the
-                    // connection is mid-transaction.
                     let joined = matches!(unit, Unit::Savepoint(_));
                     unit.execute("INSERT INTO scratch(n) VALUES (?1)", [10_i64])?;
                     unit.commit()?;
@@ -2689,7 +2504,6 @@ mod tests {
         let read = tokio::spawn(async move {
             read_store
                 .call(Priority::Control, |connection| {
-                    // A read never runs inside someone else's group.
                     Ok(connection.is_autocommit())
                 })
                 .await
@@ -2717,8 +2531,6 @@ mod tests {
         store.close().await.unwrap();
     }
 
-    /// D2: when the group's outer commit fails, every job in it is told
-    /// `Persistence` and nothing it staged is published.
     #[tokio::test]
     async fn a_failed_group_commit_fails_every_job_and_publishes_nothing() {
         let directory = tempfile::tempdir().unwrap();
@@ -2726,8 +2538,6 @@ mod tests {
             .await
             .unwrap();
         let workspace_id = WorkspaceId::generate().unwrap();
-        // A deferred foreign key makes the outer COMMIT itself fail while
-        // every statement inside the group succeeds.
         store
             .call(Priority::Control, |connection| {
                 connection
@@ -2752,9 +2562,6 @@ mod tests {
                 store
                     .call(Priority::Output, move |connection| {
                         let unit = begin_unit(connection)?;
-                        // Stage an event as `append_event` would, then make
-                        // the outer COMMIT impossible by ending the
-                        // transaction underneath the group.
                         feed::stage(Arc::new(feed::PublishedEvent {
                             envelope: SessionEventEnvelope {
                                 cursor: EventCursor {
@@ -2793,8 +2600,6 @@ mod tests {
         );
     }
 
-    /// D2: a waiting control job bounds the group; it is admitted before the
-    /// next output job rather than behind the whole backlog.
     #[tokio::test]
     async fn a_waiting_control_job_is_admitted_between_output_groups() {
         let directory = tempfile::tempdir().unwrap();
@@ -2881,11 +2686,6 @@ mod tests {
         blocked.await.unwrap().unwrap();
     }
 
-    /// Run-lifecycle store calls (cancellation reads, reserved starts,
-    /// settlements, compaction, history search) are issued by the runtime on
-    /// behalf of already-admitted work. Under control-lane saturation they
-    /// wait for a capacity wake instead of being told to retry; only new
-    /// client commands keep the immediate `Overloaded` rejection.
     #[tokio::test]
     async fn lifecycle_store_calls_wait_for_capacity_while_client_commands_are_rejected() {
         let directory = tempfile::tempdir().unwrap();
@@ -2899,7 +2699,6 @@ mod tests {
             assert!(futures_util::poll!(call.as_mut()).is_pending());
             queued.push(call);
         }
-        // A client command is admission-rejected immediately.
         assert!(matches!(
             store
                 .command(
@@ -2911,7 +2710,6 @@ mod tests {
                 .await,
             Err(SessionRuntimeError::Overloaded)
         ));
-        // Every lifecycle read or settlement waits instead.
         let run_id = RunId::generate().unwrap();
         let session_id = SessionId::generate().unwrap();
         let mut cancellation = Box::pin(store.cancellation_requested(run_id));
@@ -2921,8 +2719,6 @@ mod tests {
         assert!(futures_util::poll!(search.as_mut()).is_pending());
         assert!(futures_util::poll!(reload.as_mut()).is_pending());
         release.send(()).unwrap();
-        // Once capacity returns they run and fail on their own terms (the
-        // run and session do not exist), never with `Overloaded`.
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(2), cancellation)
                 .await

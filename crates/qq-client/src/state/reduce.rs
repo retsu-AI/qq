@@ -1,8 +1,3 @@
-//! Reduces durable `SessionEvent`s into the store: session summaries, loaded
-//! transcript bodies, tool calls, live output tails, and the effects a
-//! transition warrants. Every arm is idempotent against replay because the
-//! caller has already deduplicated by cursor.
-
 use std::{collections::HashSet, sync::Arc};
 
 use qq_protocol::{
@@ -16,10 +11,8 @@ use super::{
     plan_label, tool_call_state_is_terminal,
 };
 
-/// Characters of the compaction summary shown in its notice.
 const MAX_COMPACTION_EXCERPT_CHARS: usize = 96;
 
-/// Severity of a transient notice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeLevel {
     Info,
@@ -27,18 +20,13 @@ pub enum NoticeLevel {
     Error,
 }
 
-/// An event worth interrupting the user for while the surface is not being
-/// looked at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attention {
-    /// A tool call is waiting for the user to approve it.
     ApprovalRequested { session_title: String },
-    /// A run finished in a session; the user may want to read the result.
     RunFinished { session_title: String },
 }
 
 impl Attention {
-    /// One-line text for a desktop notification.
     #[must_use]
     pub fn summary(&self) -> String {
         match self {
@@ -50,67 +38,41 @@ impl Attention {
     }
 }
 
-/// What the surface is showing and knows, read by the reducer to decide
-/// what is unread, who is watching, and whose command an event answers.
 #[derive(Debug, Clone, Copy)]
 pub struct ReduceContext<'a> {
-    /// The session whose transcript is on screen, if any. Events for other
-    /// sessions count as unread.
     pub focused: Option<SessionId>,
-    /// Whether the user is looking at the surface. When false, approvals and
-    /// finishes also produce [`StateEffect::Attention`].
     pub attentive: bool,
-    /// The workspace this store follows, once known; needed to request a
-    /// replacement body after a focused session is deleted.
     pub workspace_id: Option<WorkspaceId>,
-    /// The server's capability document, for limit-aware notice text.
     pub capabilities: Option<&'a Arc<ServerCapabilities>>,
-    /// Model catalog, for each session's context window.
     pub models: &'a [ModelOption],
-    /// Whether this surface issued the command the event answers, when the
-    /// surface tracks its own pending commands. `SessionCreated` uses it to
-    /// decide whether to adopt the new session.
     pub caused_by_me: bool,
 }
 
-/// Something the reducer needs the surface to do. The store is already
-/// updated when these are returned; the surface applies them in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateEffect {
     CheckInterruptionChanged(Option<qq_protocol::CheckInterruption>),
-    /// A transient notice for `session` (or the focused session).
     Notice {
         session: Option<SessionId>,
         level: NoticeLevel,
         text: String,
     },
-    /// Ring for something that happened while the surface was inattentive.
     Attention(Attention),
-    /// Fetch this body from the server (the refocus target is cold).
     RequestSnapshot(SnapshotRequest),
-    /// Show this session (or the empty prompt): a shown session was deleted
-    /// and its neighbour in thread order takes its place.
     Refocus(Option<SessionId>),
-    /// This surface created the session; it is warm and should be shown.
     AdoptCreated(SessionId),
-    /// The session's run finished idle and a queued draft is ready: submit it.
     SubmitDraft {
         session_id: SessionId,
         text: String,
     },
-    /// A session left the store; drop anything keyed by it or its calls.
     SessionRemoved {
         session_id: SessionId,
         tool_call_ids: Vec<qq_protocol::ToolCallId>,
     },
 }
 
-/// The effects of one reduction, in application order.
 pub type StateEffects = Vec<StateEffect>;
 
 impl SessionStore {
-    /// Rebuild a replaced body from retained events already observed live.
-    /// Keep local unread state and drafts; preserve receipt refresh and deletion effects.
     pub fn replay_event(
         &mut self,
         envelope: &SessionEventEnvelope,
@@ -146,8 +108,6 @@ impl SessionStore {
             .collect()
     }
 
-    /// Apply one durable event. The caller has already deduplicated by cursor
-    /// and checked the workspace.
     pub fn reduce_event(
         &mut self,
         envelope: &SessionEventEnvelope,
@@ -157,8 +117,6 @@ impl SessionStore {
         let session_id = envelope.session_id;
         match &envelope.event {
             SessionEvent::SideQuestionUpdated { side_question } => {
-                // Whether one runs is summary state, kept for every session
-                // so the aggregate sees cold sessions too.
                 if let Some(view) = self.body_mut(&session_id) {
                     let running = side_question.state == SideQuestionState::Running;
                     match view.summary.running_side_question {
@@ -169,8 +127,6 @@ impl SessionStore {
                         Some(_) | None => {}
                     }
                 }
-                // Side bodies follow the transcript body: a summary-only view
-                // holds none, so cold sessions cannot accumulate them.
                 if let Some(view) = self.get_mut(&session_id)
                     && view.is_warm()
                 {
@@ -255,10 +211,6 @@ impl SessionStore {
                 self.upsert_summary((**session).clone(), context.models, 0);
             }
             SessionEvent::RunActivityChanged { run_id, activity } => {
-                // The activity names the session's active run. An in-run
-                // compaction run reports its own while the prompt run still
-                // holds the session; the prompt run already said
-                // `compacting`, so that report is not the session's.
                 if let Some(session) = self.body_mut(&session_id)
                     && session
                         .summary
@@ -268,9 +220,6 @@ impl SessionStore {
                     session.activity = Some((*run_id, *activity));
                 }
             }
-            // Reasoning is display-only and must never enter the assistant
-            // transcript. It accumulates per run for warm sessions so the
-            // collapsed row above the run's message can expand on demand.
             SessionEvent::ReasoningStarted { run_id, .. } => {
                 if let Some(session) = self.body_mut(&session_id).filter(|s| s.is_warm()) {
                     session.reasoning.entry(*run_id).or_default().streaming = true;
@@ -293,9 +242,6 @@ impl SessionStore {
             }
             SessionEvent::AssistantMessageStarted { message } => {
                 let shown = context.focused == Some(session_id);
-                // A new turn's message means every earlier turn of the run
-                // has committed; the server finalized those messages inside
-                // the turn persist without a dedicated event.
                 self.complete_streamed_turns(
                     session_id,
                     message.run_id,
@@ -323,8 +269,6 @@ impl SessionStore {
                             stats.first_token_at_ms = Some(envelope.occurred_at_ms);
                         }
                     }
-                    // Live status reduces for every session, warm or cold, so
-                    // a sidebar tracks children the user is not looking at.
                     if *channel == TextChannel::Output {
                         view.live.append_tail(text, sanitizer);
                     }
@@ -364,9 +308,6 @@ impl SessionStore {
                 }
                 self.upsert_tool_call(tool_call.clone());
             }
-            // Live tool output chunks are display-only: they feed the bounded
-            // tail under a running call's line, and the call's authoritative
-            // bounded result arrives on ToolCallFinished regardless.
             SessionEvent::ToolCallOutputDelta {
                 tool_call_id,
                 chunk,
@@ -394,8 +335,6 @@ impl SessionStore {
                             timing.finished_at_ms = Some(envelope.occurred_at_ms);
                             view.runs.entry(tool_call.run_id).or_default().tool_calls += 1;
                         }
-                        // How the hold was settled, so the row can say so once
-                        // the call has run.
                         SessionEvent::ToolApprovalResolved { resolution, .. } => {
                             timing.settled = Some(ApprovalSettlement {
                                 resolution: *resolution,
@@ -405,8 +344,6 @@ impl SessionStore {
                     }
                 }
                 if matches!(envelope.event, SessionEvent::ToolCallRequested { .. }) {
-                    // Calls are persisted with their completed turn, so the
-                    // turn's message (same ordinal) is finalized by then.
                     self.complete_streamed_turns(
                         session_id,
                         tool_call.run_id,
@@ -418,15 +355,12 @@ impl SessionStore {
                         session.approval_previews.remove(&tool_call.id);
                     }
                     if tool_call_state_is_terminal(tool_call.state) {
-                        // The persisted bounded result takes over from the tail.
                         session.live_tool_output.remove(&tool_call.id);
                     }
                     session.live.note_tool_call(tool_call);
                 }
                 self.upsert_tool_call(tool_call.clone());
             }
-            // Steering rows are user messages of the active run, installed
-            // from the event so they are durable before they are shown.
             SessionEvent::SteeringQueued { message, .. } => {
                 self.push_message(message.clone());
             }
@@ -446,12 +380,7 @@ impl SessionStore {
                     message.state = state;
                 }
             }
-            // The interrupted turn's tool calls arrive as ordinary finished
-            // events; nothing else changes.
             SessionEvent::RunInterrupted { .. } => {}
-            // An audit child announces itself on the parent; its own session
-            // arrives through ordinary events. Its verdict is a notice on the
-            // audited session.
             SessionEvent::RunAuditStarted { .. } => {}
             SessionEvent::RunAuditCompleted { audit, .. } => {
                 let text = match audit.outcome {
@@ -469,12 +398,7 @@ impl SessionStore {
                     text,
                 });
             }
-            // A journal row from a removed feature changes nothing.
             SessionEvent::Retired => {}
-            // The truncated turn's message was already completed with its
-            // `truncated` flag by the turn commit; the next turn's message
-            // continues the same answer. Surface the continuation so the
-            // user knows why the answer paused.
             SessionEvent::RunOutputTruncated {
                 run_id,
                 turn_ordinal,
@@ -506,9 +430,6 @@ impl SessionStore {
                     },
                 });
             }
-            // The partial turn's message was already completed by the turn
-            // commit; the next turn's message continues the same answer.
-            // Surface why the run went quiet.
             SessionEvent::RunTurnRetrying {
                 attempt,
                 delay_ms,
@@ -532,9 +453,6 @@ impl SessionStore {
                 after_bytes,
             } => {
                 self.upsert_summary((**session).clone(), context.models, 0);
-                // The excerpt is the model's own statement of what it kept;
-                // one bounded line of it tells the user what the compaction
-                // preserved without opening anything.
                 let mut text = format!(
                     "compacted: {} -> {}",
                     format_bytes(*before_bytes),
@@ -558,9 +476,6 @@ impl SessionStore {
                     text: format!("compaction rolled back; {remaining} retained"),
                 });
             }
-            // Each committed model turn advances the run's live audit: how
-            // many turns so far and what they have cost. `RunFinished` still
-            // settles the authoritative totals.
             SessionEvent::ModelTurnCompleted {
                 run_id,
                 turn_ordinal,
@@ -570,8 +485,6 @@ impl SessionStore {
             } => {
                 if let Some(view) = self.body_mut(&session_id) {
                     let stats = view.runs.entry(*run_id).or_default();
-                    // The turn names the route it ran on, which a profile may
-                    // have overridden away from the session's selection.
                     if let Some(route) = &model.model {
                         stats.resolved_route = Some(route.clone());
                     }
@@ -584,9 +497,6 @@ impl SessionStore {
                     stats.turns = stats.turns.max(*turn_ordinal);
                 }
             }
-            // The run-level context audit is not session state: old persisted
-            // events may predate the authoritative session field, so replaying
-            // one must not repopulate the meter.
             SessionEvent::RunContextUpdated { .. } => {}
             SessionEvent::SessionContextUpdated { context_tokens, .. } => {
                 if let Some(session) = self.get_mut(&session_id) {
@@ -602,14 +512,6 @@ impl SessionStore {
                 ..
             } => {
                 let shown = context.focused == Some(session_id);
-                // A run that finishes while another run holds the session is
-                // bookkeeping, not the end of the visible work: an in-run
-                // compaction step (its prompt run keeps the slot; a retried
-                // summarizer outage reports through the prompt run's
-                // `run_turn_retrying` and final outcome instead), or a queued
-                // prompt cancelled or interrupted behind the active run. No
-                // attention, unread count or notice, and the active run's
-                // live tool and approval state stay.
                 let owned_step = origin.is_some_and(qq_protocol::RunOrigin::is_in_run_compaction)
                     || session
                         .active_run_id
@@ -620,8 +522,6 @@ impl SessionStore {
                         .is_some_and(|stats| stats.owned_step);
                 let owned_step = owned_step
                     || self.get(&session_id).is_some_and(|view| {
-                        // Cancelling the last queued prompt has no RunStarted;
-                        // its queue transition still releases the idle slot.
                         let finished_queued = view.summary.queued_prompts > session.queued_prompts;
                         !finished_queued
                             && view
@@ -647,11 +547,7 @@ impl SessionStore {
                 stats.finished_at_ms = Some(envelope.occurred_at_ms);
                 stats.outcome = Some(outcome.clone());
                 stats.usage = *usage;
-                // A session delta includes owned summaries and concurrent
-                // routing/review spend. Only the run snapshot is authoritative.
                 stats.cost_usd_nanos = None;
-                // An in-run compaction run finishes while its prompt run
-                // still holds the session; that run's activity stays.
                 if view.activity.is_some_and(|(active, _)| active == *run_id) {
                     view.activity = None;
                 }
@@ -663,8 +559,6 @@ impl SessionStore {
                     reasoning.streaming = false;
                 }
                 if let Some(messages) = view.messages.as_mut() {
-                    // Reasoning for runs whose messages were trimmed away is
-                    // unreachable from the transcript; drop it.
                     let retained: HashSet<_> =
                         messages.iter().map(|message| message.run_id).collect();
                     view.reasoning.retain(|run, _| retained.contains(run));
@@ -683,9 +577,6 @@ impl SessionStore {
                         .iter_mut()
                         .filter(|message| message.run_id == *run_id)
                     {
-                        // Turns finalized before the run ended keep their own
-                        // state; the outcome only settles the still-streaming
-                        // current turn (and queued rows).
                         let settled = message.role == MessageRole::Assistant
                             && !matches!(
                                 message.state,
@@ -712,7 +603,6 @@ impl SessionStore {
                     }
                     effects.push(StateEffect::RequestSnapshot(request));
                 }
-                // One draft per foreground run, in order.
                 if session.active_run_id.is_none()
                     && session.queued_prompts == 0
                     && let Some(text) = view.drafts.pop_front()
@@ -757,9 +647,6 @@ impl SessionStore {
         effects
     }
 
-    /// Drops a deleted session, mirroring the server's cascade: its children
-    /// become roots, and a shown deleted session gives way to its neighbour
-    /// in thread order (fetched if cold).
     fn remove_session(
         &mut self,
         session_id: SessionId,
@@ -800,8 +687,6 @@ impl SessionStore {
                 .map(|call| call.id)
                 .collect(),
         });
-        // The server detaches children on delete; mirror it so they stay
-        // reachable as roots until the next summary refresh.
         for session in self.values_mut() {
             if session.summary.parent_id == Some(session_id) {
                 session.summary.parent_id = None;
@@ -823,8 +708,6 @@ impl SessionStore {
     }
 }
 
-/// A byte count for a notice: whole bytes below 1 KiB, one decimal of
-/// KiB/MiB/GiB above it.
 #[must_use]
 pub fn format_bytes(bytes: u64) -> String {
     const UNITS: [(&str, u64); 3] = [
@@ -842,8 +725,6 @@ pub fn format_bytes(bytes: u64) -> String {
     format!("{bytes} B")
 }
 
-/// One line of `text`, whitespace collapsed, cut to `width` characters with
-/// an ellipsis.
 fn excerpt(text: &str, width: usize) -> String {
     let plain = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if plain.chars().count() <= width {

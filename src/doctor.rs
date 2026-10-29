@@ -1,10 +1,3 @@
-//! `qq doctor`: is QQ ready to run here? One local check per line, each
-//! `ok` / `warn` / `fail` / `skipped`, with a remedy when it is not `ok`.
-//!
-//! Every check reads the filesystem, the environment, or the credential
-//! store; none contacts a model provider or changes state. The report is a
-//! value so the same checks serve the text and JSON renderers and the tests.
-
 use std::{
     io::{self, Write},
     path::Path,
@@ -17,9 +10,6 @@ use serde::Serialize;
 
 use crate::{cli, environment::Environment};
 
-/// The outcome of one check. `Skipped` is for a check whose inputs an
-/// earlier failure removed (no model, so no credential to look for); it
-/// neither passes nor fails the run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -45,10 +35,8 @@ pub struct Check {
     pub name: &'static str,
     pub status: Status,
     pub summary: String,
-    /// Extra lines under the summary (one per pending file, for example).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub details: Vec<String>,
-    /// What to do about it; `None` when the status needs no action.
     pub remedy: Option<String>,
 }
 
@@ -111,16 +99,12 @@ pub struct DoctorReport {
 }
 
 impl DoctorReport {
-    /// Exit status for the process: 0 when nothing failed, 1 otherwise.
-    /// Warnings never fail the run; they describe degraded but usable setups.
     #[must_use]
     pub const fn passed(&self) -> bool {
         self.failed == 0
     }
 }
 
-/// Check names in the order they are reported; the text renderer aligns on
-/// the longest.
 pub const CHECK_NAMES: [&str; 11] = [
     "configuration",
     "project trust",
@@ -135,7 +119,6 @@ pub const CHECK_NAMES: [&str; 11] = [
     "data",
 ];
 
-/// Why the model and credential checks have nothing to examine.
 #[derive(Clone, Copy)]
 enum NotLoaded {
     NoModel,
@@ -143,9 +126,6 @@ enum NotLoaded {
     Failed,
 }
 
-/// Runs every check against injected roots. Blocking: reads files, takes the
-/// credential-store lock, and probes the server's health endpoint over
-/// loopback. Call it from a blocking context.
 pub fn run_checks(
     loader: &config::ConfigLoader,
     store: &auth::CredentialStore,
@@ -157,7 +137,6 @@ pub fn run_checks(
     let mut checks = Vec::with_capacity(CHECK_NAMES.len());
     let global_config = loader.paths().global_dir().join("config.ron");
 
-    // Configuration, project trust, model: one load answers all three.
     let loaded = match loader.check(request) {
         Ok(snapshot) => {
             let sources = snapshot
@@ -254,9 +233,6 @@ pub fn run_checks(
         }
     }
 
-    // `list` reads the index only. The keyring itself is exercised by the
-    // credential check above when the model's credential lives there; a
-    // blind probe could raise an unlock prompt from a read-only command.
     checks.push(match store.list() {
         Ok(items) => {
             let keyring = items
@@ -285,9 +261,6 @@ pub fn run_checks(
         ),
     });
 
-    // Declared MCP servers: an HTTP bearer that does not resolve here
-    // degrades that server at run time (the run proceeds without it), so the
-    // finding is a warning that names the same remedy the runtime shows.
     checks.push(match &loaded {
         Ok(snapshot) => mcp_check(store, snapshot),
         Err(NotLoaded::NoModel) => Check::skipped("mcp", "not checked; no model is configured"),
@@ -321,10 +294,6 @@ pub fn run_checks(
     }
 }
 
-/// Whether the model's provider can authenticate right now, mirroring the
-/// runtime's spawn gate: stored `PROVIDER/default` first, then the built-in
-/// environment variable; declared providers resolve their `SecretRef`;
-/// Bedrock consults the AWS credential chain's inputs without calling AWS.
 fn credential_check(
     store: &auth::CredentialStore,
     snapshot: &config::ConfigSnapshot,
@@ -338,8 +307,6 @@ fn credential_check(
             "choose a built-in provider id or declare this one under `providers`",
         );
     };
-    // `variables` is the provider's environment variable followed by its
-    // aliases, in resolution order; the remedy names them all.
     let stored_then_env = |stored_name: &str, variables: &[&str], audience: Option<&str>| {
         let variable = variables[0];
         let set_hint = match &variables[1..] {
@@ -501,10 +468,6 @@ fn credential_check(
     }
 }
 
-/// Whether every declared HTTP MCP server's bearer resolves on this machine.
-/// Stdio servers and bearer-less HTTP servers need nothing; inline values
-/// always resolve. Mirrors `mcp::resolve_server`: a failure here is exactly
-/// what degrades that server at run time, so it warns rather than fails.
 fn mcp_check(store: &auth::CredentialStore, snapshot: &config::ConfigSnapshot) -> Check {
     const NAME: &str = "mcp";
     let servers = snapshot.mcp_servers();
@@ -564,9 +527,6 @@ fn mcp_check(store: &auth::CredentialStore, snapshot: &config::ConfigSnapshot) -
 
 fn server_check(paths: &server::ServerPaths) -> Check {
     const NAME: &str = "server";
-    // Discovery is async only because the health probe is; the doctor runs
-    // on a blocking thread, so a private single-threaded runtime is the
-    // cheapest way to drive it without touching the caller's executor.
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -650,7 +610,6 @@ fn workspace_check(cwd: &Path) -> Check {
     let mut found = Vec::new();
     for marker in [".qq/config.ron", ".qq", "AGENTS.md", "CLAUDE.md"] {
         if canonical.join(marker).exists() {
-            // `.qq/config.ron` implies `.qq`; report the more specific one.
             if marker == ".qq" && found.contains(&".qq/config.ron") {
                 continue;
             }
@@ -715,8 +674,6 @@ fn data_check(data_dir: &Path) -> Check {
             );
         }
     }
-    // A write probe is the only honest answer to "writable"; the file is
-    // removed immediately and never named anything qq reads.
     let probe = data_dir.join(format!(".doctor-{}.tmp", std::process::id()));
     if let Err(error) = std::fs::write(&probe, b"") {
         return Check::fail(
@@ -753,8 +710,6 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Renders the report as aligned text. `color` adds ANSI colour to the
-/// status column; pass `false` when stdout is not a terminal.
 pub fn render_text(report: &DoctorReport, color: bool, out: &mut impl Write) -> io::Result<()> {
     let width = CHECK_NAMES.iter().map(|name| name.len()).max().unwrap_or(0);
     writeln!(
@@ -1034,9 +989,6 @@ mod tests {
     fn missing_credential_names_login_and_the_environment_variable() {
         let fixture = Fixture::new(Arc::new(MemoryKeyring::default()));
         fixture.write_global("(version: 1, model: \"openai/gpt-5.6\")");
-        // OPENAI_API_KEY may be set in the developer's shell; the check must
-        // then legitimately pass, so only assert the failure shape when the
-        // variable is absent.
         if std::env::var_os("OPENAI_API_KEY").is_some() {
             return;
         }
@@ -1123,9 +1075,6 @@ mod tests {
     fn unavailable_keyring_fails_the_credential_but_still_lists_the_store() {
         let fixture = Fixture::new(Arc::new(UnavailableKeyring));
         fixture.write_global("(version: 1, model: \"openai/gpt-5.6\")");
-        // `list` reads the index only; an empty index does not touch the
-        // keyring. Register a keyring-backed record by hand to exercise the
-        // unavailable path through resolution.
         let index = fixture.store.paths().index_file().to_owned();
         std::fs::write(
             &index,
@@ -1148,8 +1097,6 @@ mod tests {
         let remedy = credential.remedy.as_deref().unwrap();
         assert!(remedy.contains("--allow-file"), "{remedy}");
         assert!(remedy.contains("OPENAI_API_KEY"), "{remedy}");
-        // Listing does not need the keyring, so the store check still passes
-        // and reports the registered entry.
         let store = check(&report, "credential store");
         assert_eq!(store.status, Status::Ok, "{store:#?}");
         assert_eq!(store.summary, "1 stored (keyring)");
@@ -1212,8 +1159,6 @@ mod tests {
         assert_eq!(lines.last(), Some(&"1 check failed"), "{text}");
         assert!(!text.contains('\x1b'));
 
-        // A fully green report says so, and the colour switch adds ANSI codes
-        // only to the status column.
         let mut passing = report.clone();
         for check in &mut passing.checks {
             check.status = Status::Ok;
@@ -1400,8 +1345,6 @@ mod tests {
         let remedy = mcp.remedy.as_deref().unwrap();
         assert!(remedy.contains("qq auth set linear/default"), "{remedy}");
         assert!(remedy.contains("runs proceed"), "{remedy}");
-        // A warning: the failure count only reflects the missing model
-        // credential (OPENAI_API_KEY may legitimately be set in the shell).
         assert!(
             !report
                 .checks
@@ -1409,7 +1352,6 @@ mod tests {
                 .any(|check| check.name == "mcp" && check.status == Status::Fail)
         );
 
-        // Two failures list each server under one warning.
         fixture.write_global(
             r#"(version: 1, model: "openai/gpt-5.6", mcp: {
                 "linear": Http(url: "https://mcp.linear.test/mcp", bearer: Stored("linear/default")),

@@ -1,16 +1,3 @@
-//! `cargo xtask lint`: repository rules that rustfmt and Clippy cannot see.
-//!
-//! Each rule exists because an agent or reviewer had to correct it by hand.
-//! A rule here is the enforcer named in `AGENTS.md` § Rules → enforcers; prose that a
-//! rule enforces is not repeated there. Rules read tracked files only (via
-//! `git ls-files`, plus untracked files git does not ignore, so a new file
-//! is checked before it is committed), so they run in well under a second
-//! and never see `target/`.
-//!
-//! Counted rules (`sleep-in-tests`) carry a ceiling in [`SLEEP_CEILING`]:
-//! existing violations are tolerated, new ones fail, and the ceiling must
-//! equal the count, so removing a violation forces the ceiling down.
-
 use std::{
     fmt, fs, io,
     path::{Path, PathBuf},
@@ -19,14 +6,6 @@ use std::{
 
 use thiserror::Error;
 
-/// Fixed-duration sleeps in test code at the time the rule landed. Lower
-/// this when a test moves to paused time or an explicit signal; never raise
-/// it. A sleep that is genuinely required (mtime granularity, a real
-/// process) is marked `// lint: allow(sleep) <reason>` on the same or the
-/// preceding line and is not counted.
-// Baseline correction: compound native tests add one previously missed sleep;
-// test-only functions add three; syncing main adds four existing sleeps.
-// No new sleeps are introduced by this change.
 pub const SLEEP_CEILING: usize = 11;
 
 #[derive(Debug, Error)]
@@ -115,15 +94,11 @@ impl fmt::Display for Finding {
     }
 }
 
-/// One tracked file the rules inspect: its repository-relative path and
-/// text (`None` for files the rules only check by name).
 pub struct Source<'a> {
     pub path: &'a str,
     pub text: Option<&'a str>,
 }
 
-/// Runs every rule over `files` and returns the findings plus the counted
-/// sleep total. Pure: callers supply the file list and contents.
 pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, usize) {
     let mut findings = Vec::new();
     let mut sleeps = Vec::new();
@@ -146,7 +121,6 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
         if !path.ends_with(".rs") {
             continue;
         }
-        // Benchmarks sleep as part of the workload they measure.
         let bench = path.starts_with("benches/") || path.contains("/benches/");
         if path == "mod.rs" || path.ends_with("/mod.rs") {
             findings.push(Finding {
@@ -325,18 +299,10 @@ fn is_test_path(path: &str) -> bool {
         || path.contains("test_support")
 }
 
-/// The file's lines with string-literal contents removed, so rules never
-/// match text inside a literal (fixtures, messages). State carries across
-/// lines, so multi-line and `\`-continued literals stay literals. Handles
-/// `"..."`, raw `r#"..."#` (any number of `#`), and char literals such as
-/// `'"'`.
 fn strip_strings(text: &str) -> Vec<String> {
     enum State {
         Code,
-        Plain {
-            escaped: bool,
-        },
-        /// Inside a raw string closed by `"` plus this many `#`.
+        Plain { escaped: bool },
         Raw(usize),
         BlockComment(usize),
     }
@@ -417,7 +383,6 @@ fn strip_strings(text: &str) -> Vec<String> {
                         }
                     }
                     if byte == b'\'' {
-                        // A char literal holding a quote or escape: `'"'`, `'\''`.
                         let literal = if bytes.get(index + 1) == Some(&b'\\') {
                             4
                         } else {
@@ -434,7 +399,6 @@ fn strip_strings(text: &str) -> Vec<String> {
                     if byte == b'"' {
                         state = State::Plain { escaped: false };
                     }
-                    // Only ASCII bytes change state; copy the rest verbatim.
                     let width = line[index..].chars().next().map_or(1, char::len_utf8);
                     out.push_str(&line[index..index + width]);
                     index += width;
@@ -446,11 +410,6 @@ fn strip_strings(text: &str) -> Vec<String> {
     lines
 }
 
-/// Which lines sit inside an inline `#[cfg(test)] mod … { … }` block.
-/// Out-of-line `#[cfg(test)] mod tests;` declarations are not test code;
-/// their file is classified by its own path. Braces inside strings are
-/// ignored via [`strip_strings`]; char literals and comments containing
-/// braces are rare enough here to accept.
 fn inline_test_lines(text: &str) -> Vec<bool> {
     let mut marks = Vec::new();
     let mut cfg_test = false;
@@ -469,8 +428,6 @@ fn inline_test_lines(text: &str) -> Vec<bool> {
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect::<String>();
-        // Only predicates that require `test` may exempt production code.
-        // Be conservative for nested/unknown predicates, especially any(test, …).
         let test_only = cfg == "#[cfg(test)]"
             || cfg
                 .strip_prefix("#[cfg(all(")
@@ -498,8 +455,6 @@ fn inline_test_lines(text: &str) -> Vec<bool> {
             marks.push(false);
             continue;
         }
-        // Keep the attribute through a multiline function signature; a
-        // semicolon ends out-of-line modules and test-only declarations.
         if cfg_test && code.contains('{') {
             marks.push(true);
             let open = code.matches('{').count() as i64 - code.matches('}').count() as i64;
@@ -637,8 +592,6 @@ fn skill_copies(root: &Path, paths: &[String]) -> Result<Vec<Finding>, LintError
     Ok(findings)
 }
 
-/// Lints the repository at `root`, printing findings. Returns the counted
-/// sleep total on success.
 pub fn run(root: &Path) -> Result<usize, LintError> {
     let paths = tracked_files(root)?;
     let mut texts = Vec::with_capacity(paths.len());

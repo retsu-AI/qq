@@ -1,23 +1,11 @@
-//! One bounded read for every file the runtime loads whole: instructions,
-//! guidance, personas, input attachments, and editable files. Each caller
-//! maps the outcome into its own error vocabulary; the read itself — size the
-//! buffer from the metadata, take one byte past the cap so an over-limit file
-//! is detected without reading it all, then check — is written once.
-
 use std::io::Read;
 
-/// Why a bounded read did not produce the whole file.
 #[derive(Debug)]
 pub(crate) enum BoundedReadError {
-    /// The file has more than `limit` bytes; at most `limit + 1` were read.
-    TooLarge {
-        limit: usize,
-    },
+    TooLarge { limit: usize },
     Io(std::io::Error),
 }
 
-/// Reads all of `reader` into a buffer pre-sized from `size_hint`, refusing
-/// any input longer than `limit` bytes. Reads at most `limit + 1` bytes.
 pub(crate) fn read_bounded(
     reader: impl Read,
     limit: usize,

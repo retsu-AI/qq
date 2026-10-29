@@ -107,7 +107,6 @@ async fn measured_occupancy_basis_persists_atomically_and_reloads_with_the_reser
     assert_eq!(occupancy.basis, basis);
     assert_eq!(
         compatible_context_tokens(occupancy, shape, static_prefix, 1_024),
-        // 24 appended bytes are charged at the byte-ratio estimate.
         Some(100 + context::estimate_tokens(24))
     );
     reopened
@@ -633,9 +632,6 @@ fn interrupted_compaction_commits_no_marker_and_can_be_retried() {
             [workspace_id.to_string()],
         )
         .unwrap();
-    // A compaction run crashed mid-summarization: still marked running,
-    // and — because summary and marker commit atomically with the run's
-    // completion — no session_compactions row exists.
     connection
         .execute(
             "INSERT INTO sessions(id, workspace_id, title, status, active_run_id,
@@ -695,7 +691,6 @@ fn interrupted_compaction_commits_no_marker_and_can_be_retried() {
         "idle"
     );
 
-    // The command can simply be retried.
     let applied = execute_command(
         &mut connection,
         store_id,
@@ -764,7 +759,6 @@ async fn session_files_keep_the_newest_paths_and_updates_never_evict() {
     let (retained, oldest_present, newest_present, after_update) = store
         .call(Priority::Control, move |connection| {
             let transaction = connection.transaction()?;
-            // One past the bound, in ascending time order.
             for index in 0..=MAX_SESSION_FILES {
                 let update = FileStateUpdate {
                     path: format!("src/file_{index}.rs"),
@@ -791,8 +785,6 @@ async fn session_files_keep_the_newest_paths_and_updates_never_evict() {
             let oldest_present = present(&transaction, "src/file_0.rs")?;
             let newest_present =
                 present(&transaction, &format!("src/file_{MAX_SESSION_FILES}.rs"))?;
-            // Re-recording a known path is an update: the set cannot grow and
-            // nothing is evicted, whatever timestamp it carries.
             record_session_file(
                 &transaction,
                 session_id,

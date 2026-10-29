@@ -1,16 +1,3 @@
-//! Workspace snapshots and `qq undo`.
-//!
-//! Before a run first changes anything, the runtime records the workspace's
-//! working tree, untracked files included, as a commit under
-//! `refs/qq/snapshots/`. Restoring a snapshot first records the current state
-//! the same way, so an undo can itself be undone.
-//!
-//! The user's index, stash, branches and HEAD are never touched: snapshots
-//! are written through a temporary index file, and restores only rewrite
-//! files under the workspace. Ignored files and anything outside the
-//! workspace are not covered. A workspace outside a Git work tree gets no
-//! snapshot.
-
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
@@ -20,19 +7,12 @@ use std::{
 
 use thiserror::Error;
 
-/// Snapshot refs live here. Shared by every worktree of the repository so
-/// their objects survive `git gc`; the workspace path in each commit keeps
-/// one worktree's snapshots apart from another's.
 pub const SNAPSHOT_REF_PREFIX: &str = "refs/qq/snapshots/";
 
-/// Snapshots kept per repository; older ones are deleted after each new one.
 pub const MAX_SNAPSHOTS: usize = 50;
 
-/// Untracked files larger than this are left out of snapshots, and restores
-/// leave them alone.
 pub const MAX_UNTRACKED_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
-/// One Git step may take this long before the snapshot is abandoned.
 const GIT_STEP_TIMEOUT: Duration = Duration::from_secs(30);
 
 const WORKSPACE_TRAILER: &str = "QQ-Workspace: ";
@@ -40,47 +20,29 @@ const RUN_TRAILER: &str = "QQ-Run: ";
 const HEAD_TRAILER: &str = "QQ-Head: ";
 const KIND_TRAILER: &str = "QQ-Kind: ";
 const CREATED_TRAILER: &str = "QQ-Created-Ms: ";
-/// A path the snapshot left out (ignored, or too large), hex-encoded so any
-/// filename fits on one line. Restoring the snapshot leaves these alone.
 const PROTECTED_TRAILER: &str = "QQ-Protected: ";
 
-/// Why a snapshot was taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotKind {
-    /// Before a run's first change.
     Run(qq_protocol::RunId),
-    /// Before `qq undo` restored an older snapshot.
     BeforeUndo,
 }
 
-/// A recorded snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
-    /// The ref name below [`SNAPSHOT_REF_PREFIX`]: the run id, or
-    /// `undo-<unix ms>` for a snapshot taken by an undo.
     pub name: String,
     pub commit: String,
     pub kind: SnapshotKind,
-    /// The workspace directory the snapshot covers.
     pub workspace: PathBuf,
-    /// HEAD when the snapshot was taken; `None` before the first commit.
     pub head: Option<String>,
-    /// Milliseconds since the Unix epoch.
     pub created_at_ms: u64,
-    /// Untracked files over [`MAX_UNTRACKED_FILE_BYTES`] that were left out,
-    /// relative to the workspace. Empty for listed snapshots.
     pub skipped: Vec<PathBuf>,
 }
 
-/// What a restore changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Restored {
-    /// The state before the restore, which `qq undo <name>` brings back.
     pub before: Snapshot,
-    /// `git diff --name-status` lines, relative to the workspace.
     pub changes: Vec<String>,
-    /// HEAD moved since the snapshot was taken: (then, now). The restore
-    /// changed files only.
     pub head_moved: Option<(Option<String>, Option<String>)>,
 }
 
@@ -100,15 +62,12 @@ pub enum UndoError {
     UnrecordablePath(PathBuf),
 }
 
-/// Where the workspace sits in its repository.
 struct Repository {
     workspace: PathBuf,
     index: PathBuf,
     git_dir: PathBuf,
 }
 
-/// Records the workspace's working tree. `Ok(None)` when the workspace is
-/// not in a Git work tree.
 pub async fn snapshot(workspace: &Path, kind: SnapshotKind) -> Result<Option<Snapshot>, UndoError> {
     let Some(repository) = discover(workspace).await? else {
         return Ok(None);
@@ -118,14 +77,10 @@ pub async fn snapshot(workspace: &Path, kind: SnapshotKind) -> Result<Option<Sna
     Ok(Some(snapshot))
 }
 
-/// Whether runs in `directory` get snapshots: it is inside a Git work tree
-/// and `git` runs.
 pub async fn covers(directory: &Path) -> Result<bool, UndoError> {
     Ok(discover(directory).await?.is_some())
 }
 
-/// Snapshots that cover `directory`: those whose workspace is `directory`
-/// or its nearest ancestor that has any. Newest first.
 pub async fn list(directory: &Path) -> Result<Vec<Snapshot>, UndoError> {
     if discover(directory).await?.is_none() {
         return Err(UndoError::NotGit(directory.to_owned()));
@@ -143,29 +98,16 @@ pub async fn list(directory: &Path) -> Result<Vec<Snapshot>, UndoError> {
     Ok(snapshots)
 }
 
-/// Restores `target`'s workspace to the snapshot, after recording the
-/// current state as a [`SnapshotKind::BeforeUndo`] snapshot.
 pub async fn restore(target: &Snapshot) -> Result<Restored, UndoError> {
     let Some(repository) = discover(&target.workspace).await? else {
         return Err(UndoError::NotGit(target.workspace.clone()));
     };
     let before = record(&repository, SnapshotKind::BeforeUndo).await?;
-    // The scratch index lists every current file, untracked ones included,
-    // so the restore deletes files the snapshot does not have.
     let index = ScratchIndex::copy(&repository).await?;
     let mut excluded = stage_workspace(&repository, &index).await?;
-    // The backup above could not hold the skipped files or anything now
-    // ignored, so the restore leaves them alone even where the snapshot has
-    // an older version (a file ignored since the snapshot was taken).
     excluded.extend(ignored(&repository, &index).await?);
-    // Nor did the snapshot hold what it left out, even if those paths are no
-    // longer ignored: restoring must not delete them for being absent.
     excluded.extend(protected(&repository, &target.commit).await?);
-    // Nested repositories are recorded as gitlinks only; replacing or
-    // deleting one would lose its files and history.
     excluded.extend(gitlinks(&repository, &index).await?);
-    // Excluding a path does not keep the restore from replacing its parent
-    // directory with a file the snapshot has there, which would delete it.
     let replaced = replaced_ancestors(&repository, &target.commit, &excluded).await?;
     excluded.extend(replaced);
     git_with_input(
@@ -174,8 +116,6 @@ pub async fn restore(target: &Snapshot) -> Result<Restored, UndoError> {
         "restore",
         &[
             "restore",
-            // Submodule working trees are not in the snapshot (only their
-            // gitlinks are), so the restore must not reset them.
             "--no-recurse-submodules",
             "--no-overlay",
             "--source",
@@ -302,8 +242,6 @@ async fn record(repository: &Repository, kind: SnapshotKind) -> Result<Snapshot,
         message.push('\n');
     }
     let tree = tree.trim();
-    // The message goes through stdin: a long protected list would overflow
-    // an argument.
     let mut arguments = vec!["commit-tree", "--no-gpg-sign", tree, "-F", "-"];
     if let Some(head) = &head {
         arguments.extend(["-p", head.as_str()]);
@@ -388,7 +326,6 @@ async fn all_snapshots(directory: &Path) -> Result<Vec<Snapshot>, UndoError> {
             skipped: Vec::new(),
         });
     }
-    // Newest first; the name breaks ties within a millisecond.
     snapshots.sort_by(|a, b| (b.created_at_ms, &b.name).cmp(&(a.created_at_ms, &a.name)));
     Ok(snapshots)
 }
@@ -407,19 +344,10 @@ async fn prune(directory: &Path, keep: usize) -> Result<(), UndoError> {
     Ok(())
 }
 
-/// Stages every file under the workspace into the scratch index, except
-/// untracked files over [`MAX_UNTRACKED_FILE_BYTES`], which it returns.
-/// Leaving them out of the index also keeps a `--no-overlay` restore from
-/// deleting them.
 async fn stage_workspace(
     repository: &Repository,
     index: &ScratchIndex,
 ) -> Result<Vec<PathBuf>, UndoError> {
-    // `assume-unchanged` and `skip-worktree` make `add` keep the indexed
-    // content instead of the file's. Clear them in the copy only; the user's
-    // index keeps its bits. Skip-worktree entries whose file is absent (a
-    // sparse checkout) keep the bit, so they stay recorded and are not
-    // checked out by a restore.
     let listing = git_bytes(
         &repository.workspace,
         Some(&index.path),
@@ -435,7 +363,6 @@ async fn stage_workspace(
             continue;
         };
         let (tag, path) = (&entry[..space], &entry[space + 1..]);
-        // A lowercase tag marks an assume-unchanged entry; `S` skip-worktree.
         if tag.iter().all(u8::is_ascii_lowercase) {
             assumed.extend_from_slice(path);
             assumed.push(0);
@@ -499,10 +426,6 @@ async fn stage_workspace(
     Ok(skipped)
 }
 
-/// Untracked ignored paths under the workspace, relative to it. A wholly
-/// ignored directory is one entry, without Git's trailing `/`: excluding
-/// `dir` also keeps a restore from replacing the directory with a file of
-/// that name, which excluding `dir/` does not.
 async fn ignored(repository: &Repository, index: &ScratchIndex) -> Result<Vec<PathBuf>, UndoError> {
     let listing = git_bytes(
         &repository.workspace,
@@ -526,7 +449,6 @@ async fn ignored(repository: &Repository, index: &ScratchIndex) -> Result<Vec<Pa
         .collect())
 }
 
-/// Gitlinks (submodules and embedded repositories) in the scratch index.
 async fn gitlinks(
     repository: &Repository,
     index: &ScratchIndex,
@@ -539,7 +461,6 @@ async fn gitlinks(
         Vec::new(),
     )
     .await?;
-    // `<mode> <object> <stage>\t<path>`
     Ok(nul_separated(&listing)
         .filter(|entry| entry.starts_with(b"160000 "))
         .filter_map(|entry| {
@@ -549,7 +470,6 @@ async fn gitlinks(
         .collect())
 }
 
-/// The paths `commit`, a snapshot, left out.
 async fn protected(repository: &Repository, commit: &str) -> Result<Vec<PathBuf>, UndoError> {
     let object = git(
         &repository.workspace,
@@ -571,8 +491,6 @@ async fn protected(repository: &Repository, commit: &str) -> Result<Vec<PathBuf>
         .collect())
 }
 
-/// Ancestors of `paths`, relative to the workspace, that `commit` holds as
-/// something other than a directory: a file, symlink or submodule.
 async fn replaced_ancestors(
     repository: &Repository,
     commit: &str,
@@ -603,7 +521,6 @@ async fn replaced_ancestors(
         objects,
     )
     .await?;
-    // One answer per object, in order: a type, or `<object> missing`.
     Ok(ancestors
         .into_iter()
         .zip(types.split(|byte| *byte == 0))
@@ -612,15 +529,12 @@ async fn replaced_ancestors(
         .collect())
 }
 
-/// The non-empty entries of `git ... -z` output.
 fn nul_separated(listing: &[u8]) -> impl Iterator<Item = &[u8]> {
     listing
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
 }
 
-/// A path as Git printed it. Unix filenames are bytes and may not be UTF-8;
-/// Git for Windows prints UTF-8.
 fn path_from_bytes(bytes: &[u8]) -> PathBuf {
     #[cfg(unix)]
     {
@@ -645,7 +559,6 @@ fn path_bytes(path: &Path) -> Vec<u8> {
     }
 }
 
-/// The workspace minus `excluded`, as NUL-separated pathspecs.
 fn pathspecs(excluded: &[PathBuf]) -> Vec<u8> {
     let mut pathspecs = b".\0".to_vec();
     for relative in excluded {
@@ -656,9 +569,6 @@ fn pathspecs(excluded: &[PathBuf]) -> Vec<u8> {
     pathspecs
 }
 
-/// A copy of the repository's index under the Git directory, removed on
-/// drop. Copying keeps Git's stat cache, so recording a large tree costs
-/// about as much as `git status`.
 struct ScratchIndex {
     path: PathBuf,
     removed: bool,
@@ -683,7 +593,6 @@ impl ScratchIndex {
         })
     }
 
-    /// Removes the file off the Tokio workers.
     async fn remove(mut self) {
         self.removed = true;
         let _ = tokio::fs::remove_file(&self.path).await;
@@ -691,8 +600,6 @@ impl ScratchIndex {
 }
 
 impl Drop for ScratchIndex {
-    /// A cancelled snapshot drops the index without [`ScratchIndex::remove`];
-    /// the file is removed on the blocking pool.
     fn drop(&mut self) {
         if self.removed {
             return;
@@ -712,8 +619,6 @@ impl Drop for ScratchIndex {
 fn command(directory: &Path, index: Option<&Path>) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("git");
     command.current_dir(directory);
-    // Inherited repository overrides (a hook's GIT_DIR, GIT_INDEX_FILE)
-    // would aim every step at some other repository or index.
     for name in [
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_CONFIG",
@@ -736,8 +641,6 @@ fn command(directory: &Path, index: Option<&Path>) -> tokio::process::Command {
     if let Some(index) = index {
         command.env("GIT_INDEX_FILE", index);
     }
-    // Snapshots run on the host before the agent's call, whatever sandbox
-    // that call gets: no repository hooks or fsmonitor helper may run.
     command.args([
         "-c",
         if cfg!(windows) {
@@ -747,9 +650,6 @@ fn command(directory: &Path, index: Option<&Path>) -> tokio::process::Command {
         },
         "-c",
         "core.fsmonitor=false",
-        // A snapshot holds the working tree byte for byte. Git for Windows
-        // sets core.autocrlf=true system-wide, which would turn LF into
-        // CRLF on restore.
         "-c",
         "core.autocrlf=false",
     ]);
@@ -786,7 +686,6 @@ async fn git_with_input(
     Ok(String::from_utf8_lossy(&output).into_owned())
 }
 
-/// Like [`git_with_input`], but returns stdout undecoded, for path listings.
 async fn git_bytes(
     directory: &Path,
     index: Option<&Path>,
@@ -803,8 +702,6 @@ async fn git_bytes(
     let run = async {
         let mut child = command.spawn()?;
         let stdin = child.stdin.take();
-        // Feed input while draining output: a batch command such as
-        // `cat-file` answers as it reads and would block on a full pipe.
         let feed = async {
             if let Some(mut stdin) = stdin {
                 stdin.write_all(&input).await?;
@@ -840,7 +737,6 @@ fn timeout(step: &'static str) -> UndoError {
 pub(crate) mod test_support {
     use std::path::Path;
 
-    /// Runs git in `directory` with a fixture identity and no user config.
     pub(crate) fn git(directory: &Path, arguments: &[&str]) -> String {
         let output = std::process::Command::new("git")
             .current_dir(directory)
@@ -864,7 +760,6 @@ pub(crate) mod test_support {
         String::from_utf8(output.stdout).unwrap()
     }
 
-    /// A repository with one commit holding `tracked.txt`.
     pub(crate) fn repository(directory: &Path) {
         git(directory, &["init", "-q", "--template=", "."]);
         git(directory, &["config", "commit.gpgSign", "false"]);
@@ -887,8 +782,6 @@ mod tests {
         std::fs::read_to_string(path).ok()
     }
 
-    /// Git for Windows sets core.autocrlf=true for every repository; the
-    /// restore must still write back the bytes the snapshot recorded.
     #[tokio::test]
     async fn restore_keeps_line_endings_byte_for_byte_under_autocrlf() {
         let fixture = directory();
@@ -934,7 +827,6 @@ mod tests {
         assert_eq!(taken.name, run.to_string());
         assert_eq!(git(root, &["ls-files", "--stage"]), index_before);
 
-        // What an agent might do.
         std::fs::write(root.join("tracked.txt"), "changed\n").unwrap();
         std::fs::remove_file(root.join("untracked.txt")).unwrap();
         std::fs::write(root.join("created.txt"), "new\n").unwrap();
@@ -949,9 +841,7 @@ mod tests {
         );
         assert_eq!(read(&root.join("staged.txt")).as_deref(), Some("staged\n"));
         assert_eq!(read(&root.join("created.txt")), None);
-        // Ignored files are outside the snapshot and stay as they are.
         assert_eq!(read(&root.join("ignored.txt")).as_deref(), Some("agent\n"));
-        // Restores rewrite files only: the agent's `git add` stays staged.
         assert!(git(root, &["diff", "--cached", "--name-only"]).contains("tracked.txt"));
         assert!(git(root, &["stash", "list"]).is_empty());
         let mut changes = restored.changes.clone();
@@ -962,7 +852,6 @@ mod tests {
         );
         assert_eq!(restored.head_moved, None);
 
-        // The undo is itself undoable.
         restore(&restored.before).await.unwrap();
         assert_eq!(
             read(&root.join("tracked.txt")).as_deref(),
@@ -1122,8 +1011,6 @@ mod tests {
 
         let restored = restore(&taken).await.unwrap();
         assert_eq!(read(&root.join("tracked.txt")).as_deref(), Some("base\n"));
-        // The before-undo snapshot could not hold it, so the restore must
-        // not overwrite it.
         assert_eq!(restored.before.skipped, [PathBuf::from("grown.bin")]);
         assert_eq!(
             std::fs::metadata(&grown).unwrap().len(),
@@ -1155,7 +1042,6 @@ mod tests {
         assert_eq!(read(&root.join("tracked.txt")).as_deref(), Some("draft\n"));
         restore(&restored.before).await.unwrap();
         assert_eq!(read(&root.join("tracked.txt")).as_deref(), Some("agent\n"));
-        // The user's index keeps its bit.
         assert!(git(root, &["ls-files", "-v", "tracked.txt"]).starts_with("h "));
     }
 
@@ -1181,8 +1067,6 @@ mod tests {
 
         restore(&taken).await.unwrap();
         assert_eq!(read(&root.join("tracked.txt")).as_deref(), Some("base\n"));
-        // The before-undo snapshot could not hold them, so the restore must
-        // not overwrite them.
         assert_eq!(read(&root.join("notes.txt")).as_deref(), Some("newer\n"));
         assert_eq!(read(&root.join("cache/entry")).as_deref(), Some("newer\n"));
     }
@@ -1203,11 +1087,9 @@ mod tests {
         std::fs::write(root.join(".gitignore"), "notes\n").unwrap();
         std::fs::write(root.join("notes"), "newer\n").unwrap();
 
-        // The undo removes `.gitignore` but leaves the now-ignored `notes`.
         let restored = restore(&taken).await.unwrap();
         assert_eq!(read(&root.join(".gitignore")), None);
         assert_eq!(read(&root.join("notes")).as_deref(), Some("newer\n"));
-        // `notes` is no longer ignored; reversing must still not delete it.
         restore(&restored.before).await.unwrap();
         assert_eq!(read(&root.join(".gitignore")).as_deref(), Some("notes\n"));
         assert_eq!(read(&root.join("notes")).as_deref(), Some("newer\n"));
@@ -1227,7 +1109,6 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        // The agent removes the ignore rule and edits the file.
         std::fs::remove_file(root.join(".gitignore")).unwrap();
         std::fs::write(root.join("local.env"), "agent\n").unwrap();
 
@@ -1236,7 +1117,6 @@ mod tests {
             read(&root.join(".gitignore")).as_deref(),
             Some("local.env\n")
         );
-        // Outside the snapshot, so left as it is rather than deleted.
         assert_eq!(read(&root.join("local.env")).as_deref(), Some("agent\n"));
     }
 
@@ -1269,8 +1149,6 @@ mod tests {
         repository(root);
         let repository = discover(root).await.unwrap().unwrap();
         let head = git(root, &["rev-parse", "HEAD"]).trim().to_owned();
-        // Each missing ancestor is answered with `<object> missing`, which
-        // overflows a pipe buffer long before the input is written.
         let paths: Vec<PathBuf> = (0..5_000)
             .map(|n| PathBuf::from(format!("absent-{n:05}/file")))
             .collect();
@@ -1299,8 +1177,6 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        // `foo` becomes a directory with an ignored and a tracked-able file;
-        // `nested/bar` a directory holding a file too large to snapshot.
         std::fs::remove_file(root.join("foo")).unwrap();
         std::fs::create_dir(root.join("foo")).unwrap();
         std::fs::write(root.join("foo/secret"), "secret\n").unwrap();
@@ -1362,7 +1238,6 @@ mod tests {
             &["update-index", "--skip-worktree", "sparse/absent.txt"],
         );
         std::fs::write(root.join("tracked.txt"), "draft\n").unwrap();
-        // As in a sparse checkout: indexed, not on disk.
         std::fs::remove_file(root.join("sparse/absent.txt")).unwrap();
 
         let taken = snapshot(
@@ -1379,7 +1254,6 @@ mod tests {
         restore(&taken).await.unwrap();
         assert_eq!(read(&root.join("tracked.txt")).as_deref(), Some("draft\n"));
         assert_eq!(read(&root.join("sparse/absent.txt")), None);
-        // The user's index keeps its bits.
         let listing = git(root, &["ls-files", "-v"]);
         assert!(listing.contains("S tracked.txt"), "{listing}");
         assert!(listing.contains("S sparse/absent.txt"), "{listing}");
@@ -1395,12 +1269,10 @@ mod tests {
         repository(root);
         let hooks = root.join(".git/hooks");
         std::fs::create_dir_all(&hooks).unwrap();
-        // Outside the workspace, where a restore cannot remove it.
         let marker = fixture.path().join("hook-ran");
         let hook = hooks.join("reference-transaction");
         std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // The hook is live for ordinary Git.
         git(root, &["update-ref", "refs/fixture/probe", "HEAD"]);
         assert!(marker.exists());
         std::fs::remove_file(&marker).unwrap();
@@ -1448,7 +1320,6 @@ mod tests {
         std::fs::write(root.join("tracked.txt"), "changed\n").unwrap();
         restore(&taken).await.unwrap();
         assert_eq!(read(&root.join("tracked.txt")).as_deref(), Some("base\n"));
-        // Not in the snapshot, so not reset to the submodule's commit.
         assert_eq!(
             read(&root.join("sub/tracked.txt")).as_deref(),
             Some("dirty\n")

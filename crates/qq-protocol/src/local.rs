@@ -5,10 +5,6 @@ use thiserror::Error;
 
 const TOKEN_HEX_BYTES: usize = 64;
 
-/// Authenticated coordinates for a running local QQ server.
-///
-/// This is a process-local capability, not an externally versioned HTTP wire
-/// type. Its formatted representations always redact the bearer token.
 #[derive(Clone, PartialEq, Eq)]
 pub struct LocalServerConnection {
     address: SocketAddr,
@@ -64,9 +60,6 @@ impl LocalServerConnection {
         format!("http://{}{}", self.address, path)
     }
 
-    /// Exposes the bearer token to transport adapters that must authorize a
-    /// request. Do not log or persist the returned value outside the private
-    /// local-server metadata file.
     #[must_use]
     pub fn expose_bearer_token(&self) -> &str {
         &self.bearer_token
@@ -77,8 +70,6 @@ impl LocalServerConnection {
         constant_time_eq(candidate, self.bearer_token.as_bytes())
     }
 
-    /// The transport-neutral connection a client attaches with. Loopback is
-    /// the one place plain HTTP is permitted, so this cannot fail.
     #[must_use]
     pub fn to_server_connection(&self) -> ServerConnection {
         ServerConnection {
@@ -95,18 +86,9 @@ impl From<LocalServerConnection> for ServerConnection {
     }
 }
 
-/// Longest `ServerConnection` base URL accepted, in bytes.
 pub const MAX_BASE_URL_BYTES: usize = 2048;
-/// Longest client credential accepted, in bytes.
 pub const MAX_CREDENTIAL_BYTES: usize = 512;
 
-/// Authenticated coordinates for any QQ server a client may attach to: the
-/// local loopback instance or a remote one reached over TLS.
-///
-/// `base_url` is `scheme://host[:port]` with no path, userinfo, query, or
-/// fragment. Plain `http` is accepted only for loopback hosts; every other
-/// host must use `https`, so a plaintext credential can never leave the
-/// machine by construction. Formatted representations redact the credential.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ServerConnection {
     base_url: String,
@@ -145,7 +127,6 @@ impl ServerConnection {
         })
     }
 
-    /// `scheme://host[:port]` without a trailing slash.
     #[must_use]
     pub fn base_url(&self) -> &str {
         &self.base_url
@@ -161,15 +142,11 @@ impl ServerConnection {
         self.base_url.starts_with("http://")
     }
 
-    /// `path` must begin with `/`.
     #[must_use]
     pub fn endpoint(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
 
-    /// Exposes the credential to transport adapters that must authorize a
-    /// request. Do not log or persist the returned value outside a client's
-    /// private credential store.
     #[must_use]
     pub fn expose_credential(&self) -> &str {
         &self.credential
@@ -211,8 +188,6 @@ pub enum ServerConnectionError {
     ProtocolMismatch { expected: u16, found: u16 },
 }
 
-/// Validates `scheme://host[:port][/]` without pulling in a URL crate: the
-/// grammar accepted here is deliberately narrow.
 fn normalize_base_url(candidate: &str) -> Result<String, ServerConnectionError> {
     let candidate = candidate.trim();
     if candidate.is_empty() || candidate.len() > MAX_BASE_URL_BYTES {

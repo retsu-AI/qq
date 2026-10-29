@@ -34,24 +34,15 @@ use crate::{
 };
 mod pickers;
 
-/// Expanded tool-call details the transcript remembers across sessions.
-/// Toggling is per keypress, so this only bounds a very long interactive
-/// session; past it, expansions for calls no longer retained are dropped.
 const MAX_EXPANDED_TOOL_CALLS: usize = 256;
 
 const MAX_INPUT_BYTES: usize = 64 * 1024;
-/// Milliseconds the loop's animation tick advances `now_ms` by; matches
-/// `terminal::ANIMATION_INTERVAL`.
 pub(crate) const ANIMATION_INTERVAL_MS: u64 = 125;
 const MAX_RECENT_EVENTS: usize = 1024;
 const MOUSE_SCROLL_ROWS: usize = 3;
-/// Notices are deliberately ephemeral. At the 125 ms UI tick this keeps each
-/// notice visible for five seconds without making it permanent UI.
 const NOTICE_TICKS: u16 = 40;
-/// Animation ticks (125 ms) within which a second Esc cancels the active run.
 const ESC_CANCEL_TICKS: usize = 16;
 
-/// Configuration-neutral defaults and ceilings for the goal form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoalDefaults {
     pub duration_ms: u64,
@@ -84,24 +75,12 @@ pub struct TuiOptions {
     pub settings: Settings,
     pub model: ModelSelection,
     pub models: Vec<ModelOption>,
-    /// Built-in providers with no credential, each with the command or
-    /// environment variable that would supply one. The empty state and
-    /// `/models` show these where the provider's models would otherwise be.
     pub unauthenticated_providers: Vec<ProviderRemedy>,
-    /// Every selectable theme; the first is active at startup. An empty list
-    /// means the compiled `terminal` theme.
     pub themes: Vec<Theme>,
-    /// The canonical workspace root `@` mentions resolve against. `None`
-    /// (a remote client without the tree) leaves `@` as literal text.
     pub workspace_root: Option<std::path::PathBuf>,
-    /// Where commands run and whether the workspace has snapshots, one
-    /// sentence per line; the first-run screen shows them under its hints.
     pub environment: Vec<String>,
 }
 
-/// A provider the configuration admits but that has no credential, and how
-/// to give it one. `remedy` is imperative and complete (`run qq auth login
-/// openai or set OPENAI_API_KEY`); the TUI prefixes it with the provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderRemedy {
     pub provider: String,
@@ -109,19 +88,14 @@ pub struct ProviderRemedy {
 }
 
 impl ProviderRemedy {
-    /// The one-line guidance shown in the empty state and as a warning.
     #[must_use]
     pub fn message(&self) -> String {
         format!("{} needs a credential: {}", self.provider, self.remedy)
     }
 }
 
-/// The composer notice a client without a configured model starts with.
 pub(crate) const CHOOSE_MODEL_NOTICE: &str = "choose a model with /models";
 
-/// Runs the TUI to exit. Returns the session focused at exit, after the
-/// terminal has been restored, so the caller can tell the user how to
-/// continue it.
 pub async fn run<P>(client: P, options: TuiOptions) -> Result<Option<SessionId>, TuiError>
 where
     P: ClientPort,
@@ -133,18 +107,10 @@ where
 pub enum TuiError {
     #[error("terminal I/O failed")]
     Terminal(#[from] std::io::Error),
-    /// The client's update stream closed. Carries the last failure the client
-    /// reported before closing, when there was one, so a startup that never
-    /// reached a usable state (a bad `--session`, an unreachable server) is
-    /// explained on the restored terminal rather than as a bare "stopped".
     #[error("TUI client stopped{}", .0.as_ref().map(|reason| format!(": {reason}")).unwrap_or_default())]
     ClientStopped(Option<String>),
 }
 
-/// How the transcript shows a run's tool calls. One row per call is the
-/// default: while an agent works, what it is doing is the content. Folding
-/// collapses finished quiet blocks to one summary row for reading back a
-/// long transcript. A call's body is shown per call, never globally.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum ToolDetail {
     #[default]
@@ -169,7 +135,6 @@ impl ToolDetail {
     }
 }
 
-/// Whether reasoning blocks render as a collapsed one-liner or in full.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum ReasoningDetail {
     #[default]
@@ -177,11 +142,9 @@ pub(crate) enum ReasoningDetail {
     Expanded,
 }
 
-/// The `@` completion popup's state.
 #[derive(Debug, Default)]
 pub(crate) struct MentionCompletion {
     pub(crate) candidates: Vec<String>,
-    /// The token the candidates answer.
     pub(crate) query: Option<String>,
     pub(crate) cursor: Picker,
 }
@@ -193,16 +156,11 @@ impl MentionCompletion {
         self.cursor.select(0);
     }
 
-    /// The token changed under the popup: keep showing the old list until
-    /// the new one arrives, but a stale accept must not fire.
     fn invalidate(&mut self) {
         self.query = None;
     }
 }
 
-/// Paths this session's completed edits and writes touched, newest first,
-/// so `@` completion ranks the files the agent is working on ahead of the
-/// rest of the tree.
 fn recently_edited_paths(session: &qq_client::state::SessionView, limit: usize) -> Vec<String> {
     let mut paths: Vec<String> = Vec::new();
     for call in session
@@ -241,8 +199,6 @@ fn recently_edited_paths(session: &qq_client::state::SessionView, limit: usize) 
     paths
 }
 
-/// Whether a prompt needs mention resolution at all: an `@` that the grammar
-/// could accept. Cheap so plain prompts never pay for a blocking hop.
 fn has_mention_syntax(text: &str) -> bool {
     !qq_protocol::parse_mentions(text).mentions.is_empty()
 }
@@ -255,8 +211,6 @@ enum PendingIntent {
     GoalSet {
         session_id: SessionId,
     },
-    /// A side question in flight; `text` returns to the composer if the
-    /// server refuses it.
     Side {
         session_id: SessionId,
         text: String,
@@ -272,8 +226,6 @@ enum PendingIntent {
     Cancel {
         session_id: SessionId,
     },
-    /// A steering message in flight; `text` returns to the composer if the
-    /// server refuses it.
     Steer {
         session_id: SessionId,
         text: String,
@@ -302,7 +254,6 @@ enum PendingIntent {
     Delete {
         session_id: SessionId,
     },
-    /// Workspace-wide; failures attach to the focused session.
     Prune,
 }
 
@@ -310,122 +261,56 @@ pub(crate) struct App {
     pub settings: Settings,
     pub model: ModelSelection,
     pub models: Vec<ModelOption>,
-    /// Admitted built-in providers that lack a credential, with the remedy.
-    /// Read-only after startup: a credential added while the TUI runs takes
-    /// effect at the next launch, like the catalog it gates.
     pub(crate) unauthenticated_providers: Vec<ProviderRemedy>,
-    /// Startup facts the first-run screen states: where commands run and
-    /// whether the workspace has snapshots.
     pub(crate) environment: Vec<String>,
-    /// Profile new sessions are created with. `/profile` with nothing focused
-    /// sets it; the server validates the name when the session is created.
     pub profile: AgentProfileId,
-    /// Approval mode new sessions are created with; `/approval` with nothing
-    /// focused sets it.
     pub approval_mode: ApprovalMode,
-    /// Reasoning effort new sessions are created with; `/effort` with nothing
-    /// focused sets it. `None` leaves the compiled plan's configured choice.
     pub reasoning_effort: Option<ReasoningEffort>,
     pub workspace_id: Option<WorkspaceId>,
     pub workspace_path: String,
     pub check_interruption: Option<qq_protocol::CheckInterruption>,
-    /// Local root for `@` mention resolution and completion, when this
-    /// client has the tree.
     pub(crate) workspace_root: Option<std::path::PathBuf>,
     pub sessions: SessionStore,
-    /// Transcript panes left to right, each following its own view with its
-    /// own scroll state; the renderer reconciles them every frame. One pane
-    /// until slice L4 splits the body; never more than `viewport::MAX_PANES`.
     pub(crate) panes: Vec<TranscriptPane>,
-    /// Index into `panes` of the pane the composer, approvals, footers,
-    /// scrolling, and tree navigation act on.
     pub(crate) focused_pane: usize,
-    /// The session a workspace view replaced, so Esc can return to it.
     view_return: Option<SessionId>,
-    /// Monotonic counter bumped on every focus change; stamps `last_focused`.
     focus_clock: u64,
-    /// The open overlay, if any. At most one overlay owns input at a time.
     pub overlay: Option<Overlay>,
     pub composer: Composer,
-    /// An approval decision waiting for a steering amendment: `Y` or `N`
-    /// armed it, the composer collects the text, Enter sends the decision
-    /// and then steers the run with the text.
     pub(crate) approval_amendment: Option<ApprovalChoice>,
-    /// Answers collected so far for a pending `ask_user` hold, one per
-    /// question in order; the composer holds a free-text answer in progress.
     pub(crate) question_answers: Vec<String>,
     history_position: Option<usize>,
     history_draft: Option<String>,
-    /// Cursor into the slash autocomplete list. The query is the composer
-    /// text itself, so only the cursor lives here.
     slash: Picker,
-    /// The `@` completion popup: candidates for the token at the cursor and
-    /// the query they answer, so a stale reply is ignored.
     pub(crate) mention: MentionCompletion,
-    /// Prompts whose `@` mentions are resolving off the executor. The
-    /// composer is already cleared; a failure puts the text back.
     resolving: usize,
-    /// Tick at which Esc was last pressed with nothing to dismiss; a second
-    /// press within [`ESC_CANCEL_TICKS`] cancels the active run.
     esc_armed_at: Option<usize>,
-    /// The server's workspace-scoped capability document. `None` until it
-    /// arrives, which reads as "unavailable": `Submit` queues instead of
-    /// steering, and the profile and approval pickers say why.
     capabilities: Option<Arc<ServerCapabilities>>,
-    /// The degraded-tool-host message last raised as a warning, so a
-    /// re-fetched capability document with the same reason does not nag.
     shown_host_warning: Option<String>,
     pub connection: ConnectionState,
     pub status: Option<String>,
-    /// Session owning the current transient notice. A notice never follows
-    /// the user into another session.
     status_session_id: Option<SessionId>,
     pub(crate) status_level: NoticeLevel,
     status_ticks_left: u16,
     pub animation_tick: usize,
-    /// Wall-clock estimate in server milliseconds: the newest event's
-    /// `occurred_at_ms`, advanced by the animation interval between events
-    /// so running rows show a live elapsed time without a system clock in
-    /// the frame path. Zero until the first event.
     pub(crate) now_ms: u64,
     pub(crate) goal_now_ms: u64,
     pub(crate) goal_defaults: GoalDefaults,
     pub tool_detail: ToolDetail,
-    /// Tool calls expanded individually (Enter on a selected row), on top of
-    /// the global `tool_detail` toggle.
     pub(crate) expanded_tool_calls: std::collections::HashSet<qq_protocol::ToolCallId>,
-    /// The tool call the transcript cursor rests on, if any. Ctrl-Up/Down
-    /// move it through the focused session's calls; Enter toggles expansion.
     pub(crate) transcript_cursor: Option<qq_protocol::ToolCallId>,
     pub reasoning_detail: ReasoningDetail,
-    /// Session sidebar visibility. `Auto` shows it when the terminal is wide
-    /// enough; the toggle command cycles through explicit on and off.
-    /// Standing layout choices: rail and inspector visibility. `Auto` follows
-    /// the terminal's tier (`view::layout`).
     pub layout: crate::view::LayoutPrefs,
-    /// Whether the terminal reports mouse events to us. On by default so the
-    /// wheel scrolls the transcript; `/mouse` turns it off for native
-    /// selection and copy (most terminals also select with Shift held).
     pub(crate) mouse_capture: bool,
-    /// Terminal width from the last resize event, so update paths can decide
-    /// whether a change to an unshown session is visible at all. Zero until
-    /// the first resize, which reads as "assume visible".
     terminal_width: usize,
-    /// Selectable themes and the index of the active one. Changing the
-    /// index bumps `theme_generation` so the renderer repaints everything.
     pub(crate) themes: Vec<Theme>,
     pub(crate) theme: usize,
     pub(crate) theme_generation: u64,
-    /// Whether the terminal window has keyboard focus, from the terminal's
-    /// focus events. Assumed focused until told otherwise.
     terminal_focused: bool,
     last_sequence: u64,
     recent_events: VecDeque<SessionEventEnvelope>,
     pending: HashMap<CommandId, PendingIntent>,
     answered_approvals: std::collections::HashSet<qq_protocol::ToolCallId>,
-    /// The side question each session's submission receipt acknowledged, so
-    /// `/btw-cancel` can target it before its first update is reduced. At
-    /// most one per session; dropped when a terminal update for it arrives.
     acknowledged_side_questions: HashMap<SessionId, RunId>,
 }
 
@@ -493,10 +378,6 @@ impl App {
         }
     }
 
-    /// Requests queued by [`Self::apply_client_update`]; the terminal loop
-    /// drains and sends them after each update.
-    /// Who owns keyboard input right now. Overlays win over the approval
-    /// prompt, which wins over the composer.
     pub(crate) fn mode(&self) -> Mode {
         match &self.overlay {
             Some(overlay) => overlay.mode(),
@@ -505,13 +386,10 @@ impl App {
         }
     }
 
-    /// The external editor could not deliver text; the draft stays as it was.
     pub fn note_editor_failure(&mut self, reason: &str) {
         self.set_warning(reason.to_owned());
     }
 
-    /// Install text returned by the external editor. `None` means it exited
-    /// without changing the draft.
     pub fn apply_editor_result(&mut self, text: Option<String>) -> bool {
         let Some(text) = text else {
             self.set_info("external editor made no changes".to_owned());
@@ -559,9 +437,6 @@ impl App {
             }
             ClientUpdate::Capabilities(capabilities) => {
                 self.capabilities = Some(capabilities);
-                // A degraded tool host (an MCP server that did not start or
-                // authenticate) explains itself once on the rule; the same
-                // reason arriving again after a refresh stays quiet.
                 match self.tool_host_warning() {
                     Some(warning) => {
                         if self.shown_host_warning.as_deref() != Some(warning.as_str()) {
@@ -625,8 +500,6 @@ impl App {
                             _ => None,
                         };
                         if matches!(receipt.outcome, CommandOutcome::RunAlreadyFinished { .. }) {
-                            // A steer that lost the race to the finishing run was never
-                            // applied; hand the text back rather than losing it.
                             if let Some(PendingIntent::Steer { session_id, text }) = intent
                                 && self.focused() == Some(session_id)
                                 && self.composer.text.is_empty()
@@ -763,8 +636,6 @@ impl App {
             self.set_warning("server returned a snapshot for another workspace".to_owned());
             return Effects::redraw(Redraw::Scheduled);
         }
-        // A replaced body already loaded through a newer cursor needs no
-        // replay from this older response; keep its authoritative receipt.
         let body_is_current = |body: &qq_protocol::SessionSnapshot| {
             self.sessions
                 .get(&body.summary.id)
@@ -782,15 +653,12 @@ impl App {
                     .as_ref()
                     .is_some_and(|body| body.summary.id == form.session)
             {
-                // The local body is already newer than the requested refresh.
                 form.refresh = crate::input::GoalFormRefresh::Ready;
             }
             snapshot.focused = None;
         }
         let snapshot_focus = snapshot.focused.as_ref().map(|focused| focused.summary.id);
 
-        // Retry a budget-starved startup/multi-body response in isolation.
-        // Never retry an already isolated response indefinitely.
         let may_refetch_focused = initial || !snapshot.included.is_empty();
         let installed_sessions: Vec<_> = snapshot
             .included
@@ -798,8 +666,6 @@ impl App {
             .map(|body| body.summary.id)
             .chain(snapshot_focus)
             .collect();
-        // A late snapshot for a session no longer shown is stale navigation
-        // output; installing it would yank focus back.
         if !initial
             && self.focused().is_some()
             && snapshot_focus.is_some_and(|id| self.focused() != Some(id))
@@ -826,9 +692,6 @@ impl App {
             })
             .collect::<Vec<_>>();
         let snapshot_sequence = snapshot.cursor.sequence;
-        // Every body this snapshot installs replaces live state with a view
-        // as of its cursor; events after it that already reached the store
-        // are replayed below so a stale body never wins over them.
         if initial {
             self.workspace_id = Some(snapshot.workspace.id);
             self.workspace_path = snapshot.workspace.path;
@@ -868,10 +731,6 @@ impl App {
                     snapshot_sequence,
                 );
             }
-            // The body may have been fetched for a non-focused pane (the
-            // user moved on before it arrived); only the initial snapshot
-            // and a still-focused pane move focus.
-            // A side view over this session keeps showing side questions.
             let side_view =
                 matches!(self.view(), View::SideQuestions(id) | View::Goal(id) if id == focused_id);
             if !side_view
@@ -935,7 +794,6 @@ impl App {
                             .iter()
                             .position(|session| *session == event.session_id)
                         {
-                            // One latest body fetch covers all retained terminal events.
                             rewarmed_sessions.swap_remove(index);
                             effects.push(Effect::Send(ClientRequest::Snapshot(request)));
                         }
@@ -952,9 +810,6 @@ impl App {
         effects
     }
 
-    /// Reduce one event into the store and apply what the reducer asks of the
-    /// surface: notices land in the status line here, focus and picker state
-    /// update here, and the rest become loop effects.
     fn reduce_event(&mut self, envelope: &SessionEventEnvelope) -> Effects {
         let caused_by_me = envelope
             .caused_by
@@ -963,8 +818,6 @@ impl App {
         let reduced = self.sessions.reduce_event(
             envelope,
             ReduceContext {
-                // Only a shown transcript reads its events; a side view
-                // leaves the source session's arrivals unread.
                 focused: self.view().transcript(),
                 attentive: self.terminal_focused,
                 workspace_id: self.workspace_id,
@@ -984,7 +837,6 @@ impl App {
             self.acknowledged_side_questions
                 .remove(&side_question.session_id);
         }
-        // Summaries and deletions reshape the tree the picker lists.
         if matches!(
             envelope.event,
             SessionEvent::SessionCreated { .. }
@@ -1046,8 +898,6 @@ impl App {
                     tool_call_ids,
                 } => {
                     self.acknowledged_side_questions.remove(&session_id);
-                    // The reducer only refocuses a shown transcript; a side
-                    // view over the deleted session gives way here.
                     if matches!(self.view(), View::SideQuestions(id) | View::Goal(id) if id == session_id)
                     {
                         effects.extend(self.leave_workspace_view());
@@ -1072,9 +922,6 @@ impl App {
         effects
     }
 
-    /// A session this client just created has an empty transcript by
-    /// construction, so it is warm immediately: focus moves in this frame and
-    /// no snapshot round trip is needed before the user can type.
     pub(super) fn adopt_created_session(&mut self, session_id: SessionId) {
         self.sessions.warm_empty(session_id);
         self.set_focus(session_id);
@@ -1082,9 +929,6 @@ impl App {
         self.evict_cold_bodies();
     }
 
-    /// Show `session_id` and stamp it so warm-body eviction keeps the most
-    /// recently viewed sessions. Does not request anything. Focusing a
-    /// session always means reading it, so a workspace view gives way.
     fn set_focus(&mut self, session_id: SessionId) {
         self.set_view(View::Transcript(Some(session_id)));
         self.set_focus_clock(session_id);
@@ -1139,10 +983,6 @@ impl App {
         effects
     }
 
-    /// Whether applying `event` can change anything on screen. Streaming text
-    /// and tool output for a session no pane shows only matter when the
-    /// sidebar (which shows every session's live tail) is visible; every
-    /// other event may move focus, attention, or chrome and always redraws.
     fn event_is_visible(&self, event: &SessionEventEnvelope) -> bool {
         let background_only = matches!(
             event.event,
@@ -1157,7 +997,6 @@ impl App {
         if self.focused() == Some(event.session_id) {
             return true;
         }
-        // A child's live status renders under its spawn call in the parent.
         if self
             .sessions
             .get(&event.session_id)
@@ -1174,9 +1013,6 @@ impl App {
         self.status = Some(text);
         self.status_session_id = session_id;
         self.status_level = level;
-        // Errors are sticky: a failure must stay visible until the user acts
-        // (a new prompt, an interrupt, or another notice replaces it).
-        // Informational notices expire on their own.
         self.status_ticks_left = match level {
             NoticeLevel::Error => 0,
             NoticeLevel::Info | NoticeLevel::Warning => NOTICE_TICKS,
@@ -1187,8 +1023,6 @@ impl App {
         self.set_notice_for(self.focused(), text, level);
     }
 
-    /// Show a notice produced as an effect. `None` attaches it to the
-    /// focused session.
     pub(crate) fn apply_notice(
         &mut self,
         session: Option<SessionId>,
@@ -1221,8 +1055,6 @@ impl App {
         self.status.as_deref().map(|text| (text, self.status_level))
     }
 
-    /// The remedy for the client default model's provider when that provider
-    /// has no credential: the reason Alt-N cannot create a session yet.
     pub(crate) fn configured_provider_remedy(&self) -> Option<&ProviderRemedy> {
         let provider = self.model.model.as_deref()?.split_once('/')?.0;
         self.unauthenticated_providers
@@ -1230,10 +1062,6 @@ impl App {
             .find(|remedy| remedy.provider == provider)
     }
 
-    /// What a client that cannot create a session yet should do: name the
-    /// missing credential for the configured model, or point at `/models`
-    /// when no model is configured at all. `None` once a model with an
-    /// authenticated provider is in hand.
     pub(crate) fn startup_guidance(&self) -> Option<String> {
         if let Some(remedy) = self.configured_provider_remedy() {
             return Some(remedy.message());
@@ -1290,7 +1118,6 @@ impl App {
                 self.composer.replace(text);
             }
             Some(PendingIntent::Approval { tool_call_id }) => {
-                // Re-open the prompt so the user can answer again.
                 self.answered_approvals.remove(&tool_call_id);
             }
             _ => {}
@@ -1311,8 +1138,6 @@ impl App {
                 Effects::changed_now(changed)
             }
             Event::Mouse(mouse) if self.overlay.is_none() => {
-                // The wheel scrolls the transcript wherever the pointer is, so
-                // a wheel over the chrome still does something useful.
                 let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(isize::MAX);
                 let changed = match mouse.kind {
                     MouseEventKind::ScrollUp => self.viewport_mut().scroll(rows),
@@ -1359,8 +1184,6 @@ impl App {
     }
 
     fn handle_compose_key(&mut self, key: KeyEvent) -> Effects {
-        // Newline chords insert into the composer. Handle them before slash
-        // completion and configured bindings so they never submit.
         if is_composer_newline_key(key) {
             let changed = self.push_input('\n');
             return Effects::changed_now(changed);
@@ -1374,12 +1197,9 @@ impl App {
         if let Some(result) = self.handle_slash_key(key.code) {
             return result;
         }
-        // `?` on an empty composer opens help; typed into text it is a
-        // character like any other.
         if key.code == KeyCode::Char('?') && self.composer.text.is_empty() {
             return self.execute(Command::OpenHelp);
         }
-        // Every chord lives in the command table; configured actions win.
         if let Some(command) = commands::command_for_key(&self.settings, key) {
             return self.execute(command);
         }
@@ -1388,15 +1208,12 @@ impl App {
                 if self.transcript_cursor.take().is_some() {
                     return Effects::redraw(Redraw::Immediate);
                 }
-                // A workspace view returns to the session it replaced.
                 if matches!(
                     self.view(),
                     View::Attention | View::Changes | View::SideQuestions(_) | View::Goal(_)
                 ) {
                     return self.leave_workspace_view();
                 }
-                // A sticky error notice dismisses first: acknowledging the
-                // failure is the most immediate intent Esc can carry.
                 if self.status.is_some()
                     && self.status_level == NoticeLevel::Error
                     && self.status_session_id == self.focused()
@@ -1404,8 +1221,6 @@ impl App {
                     self.status = None;
                     return Effects::redraw(Redraw::Immediate);
                 }
-                // While a run is active, Esc twice within a short window cancels
-                // it; the first press only arms and shows the hint.
                 let running = self
                     .focused()
                     .and_then(|id| self.sessions.get(&id))
@@ -1431,20 +1246,15 @@ impl App {
                 }
                 Effects::none()
             }
-            // With a tool row selected and nothing typed, Enter toggles that
-            // call's detail; otherwise it submits.
             KeyCode::Enter if self.transcript_cursor.is_some() && self.composer.text.is_empty() => {
                 let Some(call) = self.transcript_cursor else {
                     return Effects::none();
                 };
-                // A spawn call opens its child; every other call toggles detail.
                 if let Some(child) = self.sessions.child_spawned_by(call) {
                     self.transcript_cursor = None;
                     return self.focus_session(child);
                 }
                 if !self.expanded_tool_calls.remove(&call) {
-                    // Bounded: an expansion for a call no session still
-                    // retains has nothing to render and is dropped first.
                     if self.expanded_tool_calls.len() >= MAX_EXPANDED_TOOL_CALLS {
                         let live: std::collections::HashSet<_> = self
                             .sessions
@@ -1512,7 +1322,6 @@ impl App {
             }
             KeyCode::Left => Effects::changed_now(self.composer.move_left()),
             KeyCode::Right => Effects::changed_now(self.composer.move_right()),
-            // Ctrl-Home/End jump the transcript; plain Home/End edit the line.
             KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Effects::changed_now(self.viewport_mut().scroll(isize::MAX))
             }
@@ -1552,8 +1361,6 @@ impl App {
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 let changed = self.push_input(character);
-                // Typing on an `@` token asks for candidates; the reply is
-                // matched to the token as it stands when it arrives.
                 if changed && self.composer.mention_token().is_some() {
                     return self.request_mention_completion();
                 }
@@ -1563,14 +1370,10 @@ impl App {
         }
     }
 
-    /// The session shown in the focused pane; what every focus-dependent
-    /// surface (composer, approvals, footers, tree navigation) acts on.
     pub(crate) fn focused(&self) -> Option<SessionId> {
         self.view().session()
     }
 
-    /// The focused transcript pane. `panes` always holds at least one and
-    /// `focused_pane` is kept in range, so this never fails.
     pub(crate) fn pane(&self) -> &TranscriptPane {
         &self.panes[self.focused_pane.min(self.panes.len() - 1)]
     }
@@ -1580,25 +1383,18 @@ impl App {
         &mut self.panes[index]
     }
 
-    /// What the focused pane shows.
     pub(crate) fn view(&self) -> View {
         self.pane().view
     }
 
-    /// The session a workspace view replaced in the focused pane, if one is
-    /// up. The renderer keeps that transcript on screen while the inspector
-    /// holds the view.
     pub(crate) fn view_return(&self) -> Option<SessionId> {
         self.view_return
     }
 
-    /// Point the focused pane at `view`. Its viewport returns to the tail on
-    /// the next frame, as `Viewport::update` does for any view change.
     pub(crate) fn set_view(&mut self, view: View) {
         self.pane_mut().view = view;
     }
 
-    /// Scroll state of the focused pane, as of its last frame.
     pub(crate) fn viewport(&self) -> &Viewport {
         &self.pane().viewport
     }
@@ -1613,8 +1409,6 @@ impl App {
             .map(|capabilities| capabilities.steering)
     }
 
-    /// Show a workspace-wide view. Invoking the one already shown returns to
-    /// the transcript, so `/attention` toggles.
     fn show_workspace_view(&mut self, view: View) -> Effects {
         if self.view() == view {
             return self.leave_workspace_view();
@@ -1626,8 +1420,6 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// Return from a workspace view to the session it replaced, or to the
-    /// first session when that one is gone.
     fn leave_workspace_view(&mut self) -> Effects {
         let target = self
             .view_return
@@ -1643,8 +1435,6 @@ impl App {
         }
     }
 
-    /// Test view of the focused pane's viewport through the renderer's
-    /// reconcile step.
     #[cfg(test)]
     pub(crate) fn update_transcript_viewport(
         &mut self,
@@ -1667,9 +1457,6 @@ impl App {
         self.viewport_mut().scroll(if up { page } else { -page })
     }
 
-    /// Run one command from the registry. Every command surface — keybinding,
-    /// slash entry, and later the palette — ends here so behavior cannot drift
-    /// between them.
     pub(crate) fn execute(&mut self, command: Command) -> Effects {
         match command {
             Command::ShowGoal => match self.focused().or(self.view_return) {
@@ -1830,9 +1617,6 @@ impl App {
         }
     }
 
-    /// Send one session command, remembering `intent` so the receipt or
-    /// failure is attributed to the right session and can undo optimistic
-    /// state. Every request that carries a `CommandId` goes through here.
     fn send(&mut self, intent: PendingIntent, command: SessionCommand) -> Effects {
         let Ok(command_id) = CommandId::generate() else {
             self.set_warning("secure randomness is unavailable".to_owned());
@@ -1852,8 +1636,6 @@ impl App {
 
     fn set_session_model(&mut self, session_id: SessionId, mut model: ModelSelection) -> Effects {
         model.model_is_fallback = false;
-        // Remember the pick as the client default so /new and later creates
-        // keep using it until the user chooses another model.
         self.model = model.clone();
         self.send(
             PendingIntent::SetModel { session_id },
@@ -1861,8 +1643,6 @@ impl App {
         )
     }
 
-    /// Focus a session. A warm body renders immediately with no request; a
-    /// cold one shows its summary and live tail while its body is fetched.
     pub(crate) fn focus_session(&mut self, session_id: SessionId) -> Effects {
         self.set_focus(session_id);
         self.reset_history_browse();
@@ -1888,10 +1668,6 @@ impl App {
         self.create_session_with_model(parent_id, model)
     }
 
-    /// Choose the model for an implicit create (`/new` and create shortcuts).
-    /// An explicit/configured client default wins. If none is available (for
-    /// example while reattaching before model discovery completes), inherit
-    /// the focused session's route.
     fn model_for_new_session(&self) -> ModelSelection {
         if self.model.model.as_deref().is_some_and(valid_model_route) {
             return self.model.clone();
@@ -1937,8 +1713,6 @@ impl App {
             self.set_warning("choose a model with /models before creating a session".to_owned());
             return Effects::redraw(Redraw::Immediate);
         };
-        // A route on a provider known to lack a credential would only fail at
-        // the server; name the fix here instead.
         if let Some(remedy) = route.split_once('/').and_then(|(provider, _)| {
             self.unauthenticated_providers
                 .iter()
@@ -1951,8 +1725,6 @@ impl App {
             self.set_warning("workspace is still connecting".to_owned());
             return Effects::redraw(Redraw::Immediate);
         };
-        // Keep the chosen model as the client default for the rest of this TUI
-        // process until /models picks something else.
         self.model = model.clone();
         self.send(
             PendingIntent::Create,
@@ -1998,8 +1770,6 @@ impl App {
                 return Effects::redraw(Redraw::Immediate);
             };
             let question = question.trim();
-            // A bare `/btw-new` has nothing to start the thread with; opening
-            // the view would let the next question continue the old thread.
             if question.is_empty() && name == "/btw-new" {
                 self.set_warning("use /btw-new QUESTION to start a new side thread".to_owned());
                 return Effects::redraw(Redraw::Immediate);
@@ -2028,10 +1798,6 @@ impl App {
                 },
             );
         }
-        // Reserved composer commands stay client-side. Every other leading
-        // slash is submitted through the ordinary command path so the shared
-        // runtime can resolve an explicit command or skill consistently for
-        // direct, embedded, and remote clients.
         if prompt.starts_with('/') {
             let name = prompt.split_whitespace().next().unwrap_or(&prompt);
             if let Some(SlashAction::Client(command)) = commands::slash_entries()
@@ -2047,9 +1813,6 @@ impl App {
             self.set_warning("create a session before sending a prompt".to_owned());
             return Effects::redraw(Redraw::Immediate);
         };
-        // Enter during an active run steers when the server supports it and
-        // otherwise holds the draft locally until the run finishes. Sending
-        // it to the server queue now would lose the ability to edit it.
         let running = self
             .sessions
             .get(&session_id)
@@ -2063,9 +1826,6 @@ impl App {
         self.submit_text(session_id, prompt)
     }
 
-    /// Send the draft to the focused session's active run as steering. The
-    /// caller has checked the capability; this only checks there is a run.
-    /// With `interrupt`, the run's in-flight turn is aborted first.
     fn steer_run(&mut self, interrupt: bool) -> Effects {
         let text = self.composer.expanded().trim().to_owned();
         if text.is_empty() {
@@ -2074,7 +1834,6 @@ impl App {
         self.steer_with_text(text, interrupt)
     }
 
-    /// Send `text` as steering for the focused session's active run.
     fn steer_with_text(&mut self, text: String, interrupt: bool) -> Effects {
         let Some(session_id) = self.focused() else {
             self.set_warning("create a session before steering a run".to_owned());
@@ -2114,18 +1873,14 @@ impl App {
         )
     }
 
-    /// Send `prompt` to `session_id` as a new run.
     fn submit_text(&mut self, session_id: SessionId, prompt: String) -> Effects {
         self.record_prompt(session_id, &prompt);
         self.composer.clear();
         self.mention.clear();
         self.reset_history_browse();
-        // Submitting a new prompt acknowledges any sticky failure notice.
         if self.status_level == NoticeLevel::Error && self.status_session_id == Some(session_id) {
             self.status = None;
         }
-        // `@` mentions resolve off the executor (file reads, a git call);
-        // the loop calls back with parts. Plain text goes straight out.
         if self.workspace_root.is_some() && has_mention_syntax(&prompt) {
             self.resolving += 1;
             return Effects::resolve_mentions(PendingSubmit {
@@ -2140,8 +1895,6 @@ impl App {
         )
     }
 
-    /// Send resolved parts as a new run; `text` is what returns to the
-    /// composer if the server refuses the command.
     fn submit_parts(
         &mut self,
         session_id: SessionId,
@@ -2160,9 +1913,6 @@ impl App {
         )
     }
 
-    /// Mention resolution came back from the loop. Notes (a literal left in
-    /// place, a directory too wide) show as a warning; the prompt still goes
-    /// unless nothing resolvable remained.
     pub(crate) fn apply_resolved_mentions(
         &mut self,
         submit: PendingSubmit,
@@ -2183,7 +1933,6 @@ impl App {
             self.set_warning(resolved.notes.join("; "));
         }
         let mut parts = resolved.parts;
-        // `@skill:name` at the start becomes a `/name` slash command.
         if let Some(skill) = resolved.skill {
             let rest: String = parts
                 .iter()
@@ -2238,8 +1987,6 @@ impl App {
         }
     }
 
-    /// Candidates for the `@` token came back. Dropped when the composer's
-    /// token no longer matches the query they answer.
     pub(crate) fn apply_mention_completions(
         &mut self,
         query: String,
@@ -2258,7 +2005,6 @@ impl App {
         true
     }
 
-    /// Hold the composer text for the focused session until its run ends.
     fn queue_draft(&mut self) -> Effects {
         let prompt = self.composer.expanded().trim().to_owned();
         if prompt.is_empty() {
@@ -2284,8 +2030,6 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// Pull the newest queued draft back into the composer for editing. A
-    /// non-empty composer is queued first so nothing is lost.
     fn dequeue_draft(&mut self) -> Effects {
         let Some(session_id) = self.focused() else {
             return Effects::none();
@@ -2294,8 +2038,6 @@ impl App {
             if self.queue_draft().is_empty() {
                 return Effects::none();
             }
-            // The draft just queued is newest; rotate so the previously
-            // newest one comes back.
             if let Some(session) = self.sessions.get_mut(&session_id)
                 && session.drafts.len() > 1
                 && let Some(just_queued) = session.drafts.pop_back()
@@ -2314,7 +2056,6 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// Drafts waiting for `session_id` in submission order.
     pub(crate) fn queued_drafts(&self, session_id: SessionId) -> impl Iterator<Item = &str> {
         self.sessions
             .get(&session_id)
@@ -2416,8 +2157,6 @@ impl App {
         )
     }
 
-    /// Remember the side question a submission receipt acknowledged, unless
-    /// its terminal update already arrived (events may precede receipts).
     fn acknowledge_side_question(&mut self, session_id: SessionId, side_question_id: RunId) {
         let settled = self.sessions.get(&session_id).is_some_and(|session| {
             session
@@ -2431,9 +2170,6 @@ impl App {
         }
     }
 
-    /// Cancel the focused session's running side question: the newest one the
-    /// reduced projection shows running, else the one a receipt acknowledged
-    /// before its update arrived (SSE lag or a reconnect).
     fn cancel_side_question(&mut self) -> Effects {
         let Some(session_id) = self.focused().or(self.view_return) else {
             self.set_warning("create a session before cancelling a side question".to_owned());
@@ -2487,9 +2223,6 @@ impl App {
         )
     }
 
-    /// The shown transcript's oldest unanswered tool approval, if any. A side
-    /// view does not render the approval block, so it never captures input
-    /// there; the banner and background chords answer it instead.
     pub(crate) fn pending_approval(&self) -> Option<&ToolCallSnapshot> {
         let session = self.sessions.get(&self.view().transcript()?)?;
         session.tool_calls.as_ref()?.iter().find(|tool_call| {
@@ -2498,8 +2231,6 @@ impl App {
         })
     }
 
-    /// The diff preview carried by the pending approval's request, if any.
-    /// The server-computed preview of what the pending approval would do.
     pub(crate) fn pending_approval_preview(&self) -> Option<&ApprovalPreview> {
         let tool_call = self.pending_approval()?;
         self.sessions
@@ -2508,7 +2239,6 @@ impl App {
             .get(&tool_call.id)
     }
 
-    /// The pending hold's question, when it is an `ask_user` call.
     pub(crate) fn pending_question(&self) -> Option<&QuestionPreview> {
         self.pending_approval_preview()?.question.as_ref()
     }
@@ -2520,8 +2250,6 @@ impl App {
         if let Some(question) = self.pending_question() {
             return self.handle_question_key(key, question.clone());
         }
-        // With an amendment armed, the composer collects the steering text;
-        // Enter sends the decision then the steer, Esc drops the amendment.
         if let Some(choice) = self.approval_amendment.clone() {
             return match key.code {
                 KeyCode::Enter => {
@@ -2553,8 +2281,6 @@ impl App {
         match key.code {
             KeyCode::Char('y') => self.respond_to_approval(ApprovalChoice::Once),
             KeyCode::Char('n') | KeyCode::Esc => self.respond_to_approval(ApprovalChoice::Deny),
-            // Shift-Y / Shift-N: decide and then steer the run with a note,
-            // for "yes, but…" and "no, do this instead".
             KeyCode::Char('Y') => {
                 self.approval_amendment = Some(ApprovalChoice::Once);
                 Effects::redraw(Redraw::Immediate)
@@ -2567,9 +2293,6 @@ impl App {
         }
     }
 
-    /// Answer the first approval waiting in a session other than the focused
-    /// one, without moving focus. The banner names that session; this is
-    /// its inline answer.
     fn respond_to_background_approval(&mut self, approve: bool) -> Effects {
         let Some(session_id) = self.sessions_needing_attention().into_iter().find(|id| {
             Some(*id) != self.view().transcript()
@@ -2589,8 +2312,6 @@ impl App {
                 })
             })
         else {
-            // The session is waiting but its body is cold: focus it so the
-            // body loads and the inline block appears.
             return self.focus_session(session_id);
         };
         let tool_call_id = call.id;
@@ -2620,10 +2341,6 @@ impl App {
         )
     }
 
-    /// Keys while an `ask_user` hold is pending: a digit picks that option
-    /// for the current question, typed text is a free answer Enter submits,
-    /// Esc declines the whole question set. Answers accumulate until every
-    /// question has one, then the decision is sent.
     fn handle_question_key(&mut self, key: KeyEvent, question: QuestionPreview) -> Effects {
         let index = self.question_answers.len();
         let Some(current) = question.questions.get(index) else {
@@ -2646,8 +2363,6 @@ impl App {
                     .get(usize::from(digit as u8 - b'1'))
                     .cloned()
                 else {
-                    // A digit past the option list starts a free answer if
-                    // one is allowed; otherwise nothing.
                     return if current.free_text {
                         Effects::changed_now(self.push_input(digit))
                     } else {
@@ -2679,8 +2394,6 @@ impl App {
         }
     }
 
-    /// Sends the collected answers once every question has one; otherwise
-    /// redraws so the block shows the next question.
     fn send_answers(&mut self) -> Effects {
         let total = self
             .pending_question()
@@ -2728,10 +2441,6 @@ impl App {
         true
     }
 
-    /// Insert pasted text. The sanitized content goes through the composer's
-    /// paste path, which collapses large pastes to a placeholder; the byte
-    /// bound applies to the expanded content so a placeholder cannot hide an
-    /// oversized prompt.
     fn push_composer_text(&mut self, text: &str) -> bool {
         let mut sanitized = String::with_capacity(text.len().min(MAX_INPUT_BYTES));
         let budget = MAX_INPUT_BYTES.saturating_sub(self.composer.expanded().len());
@@ -2751,8 +2460,6 @@ impl App {
         changed
     }
 
-    /// Up/Down/Tab/Enter on the `@` popup; Esc closes it. Returns `None`
-    /// when no popup is showing so the key falls through.
     fn handle_mention_key(&mut self, code: KeyCode) -> Option<Effects> {
         if self.mention.candidates.is_empty() || self.composer.mention_token().is_none() {
             return None;
@@ -2770,8 +2477,6 @@ impl App {
                 let index = self.mention.cursor.selected(self.mention.candidates.len());
                 let candidate = self.mention.candidates[index].clone();
                 let (span, _) = self.composer.mention_token()?;
-                // A directory keeps the popup open one level deeper; a file
-                // closes it and adds the trailing space the grammar ends on.
                 let is_dir = candidate.ends_with('/');
                 let replacement = if is_dir {
                     format!("@{candidate}")
@@ -2793,7 +2498,6 @@ impl App {
         }
     }
 
-    /// Ask the loop for candidates for the `@` token at the cursor.
     fn request_mention_completion(&mut self) -> Effects {
         if self.workspace_root.is_none() {
             return Effects::redraw(Redraw::Immediate);
@@ -2802,7 +2506,6 @@ impl App {
             self.mention.clear();
             return Effects::redraw(Redraw::Immediate);
         };
-        // Special refs complete nothing.
         if token.starts_with("web:")
             || token.starts_with("skill:")
             || token == "diff"
@@ -2824,8 +2527,6 @@ impl App {
     }
 
     fn handle_slash_key(&mut self, code: KeyCode) -> Option<Effects> {
-        // Only navigation and acceptance keys consult the list; ordinary typing
-        // must not pay for building it.
         if !matches!(
             code,
             KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Tab
@@ -2855,8 +2556,6 @@ impl App {
         }
     }
 
-    /// Run a client command, submit a skill, or leave a workspace command in
-    /// the composer for its arguments.
     pub(super) fn accept_slash(&mut self, action: SlashAction, name: &str) -> Effects {
         self.slash.select(0);
         match action {
@@ -2875,15 +2574,10 @@ impl App {
         }
     }
 
-    /// Slash entries matching the composer text: client commands first, then
-    /// the workspace's commands and skills as the server indexed them. Empty
-    /// unless the composer holds a bare `/token`.
     pub(crate) fn filtered_slash_commands(&self) -> Vec<SlashEntry> {
         commands::matching_slash_entries(&self.composer.text, self.guidance_slash_entries())
     }
 
-    /// The workspace's indexed commands and skills as slash entries. Nothing
-    /// until the capability document arrives.
     fn guidance_slash_entries(&self) -> impl Iterator<Item = SlashEntry> + '_ {
         self.capabilities
             .as_deref()
@@ -2901,15 +2595,10 @@ impl App {
             })
     }
 
-    /// Highlighted row in the slash autocomplete list, clamped to `len`.
     pub(crate) fn slash_selected(&self, len: usize) -> usize {
         self.slash.selected(len)
     }
 
-    /// Why one or more external tool hosts are degraded, as the server
-    /// reported it (`unavailable MCP servers: linear (…)`), joined when
-    /// several hosts carry a reason. `None` while every host is healthy or
-    /// before capabilities arrive.
     pub(crate) fn tool_host_warning(&self) -> Option<String> {
         let tools = self.capabilities.as_deref()?.workspace_tools.as_ref()?;
         let mut warning = String::new();
@@ -2969,8 +2658,6 @@ impl App {
             })
     }
 
-    /// Prompts and steering sent to `session_id` whose receipt has not
-    /// arrived; shown optimistically until the server's row replaces them.
     pub fn pending_prompts(&self, session_id: SessionId) -> impl Iterator<Item = &str> {
         self.pending
             .values()
@@ -3008,8 +2695,6 @@ impl App {
         Some((session.summary.context_tokens?, session.context_window?))
     }
 
-    /// The focused session's sibling `offset` places away in spawn order
-    /// (oldest-first), wrapping at either end. Roots are siblings of roots.
     fn sibling(&self, offset: isize) -> Option<SessionId> {
         let focused = self.focused()?;
         let parent = self.sessions.get(&focused)?.summary.parent_id;
@@ -3025,24 +2710,16 @@ impl App {
         Some(siblings[next])
     }
 
-    /// Sessions with a tool call awaiting approval, in tree order.
     pub(crate) fn sessions_awaiting_approval(&self) -> Vec<SessionId> {
         self.sessions.awaiting_approval()
     }
 
-    /// Sessions that need the user, most urgent first and then in tree
-    /// order: approvals, then unread failures, then unread finishes.
     pub(crate) fn sessions_needing_attention(&self) -> Vec<SessionId> {
         self.sessions.needing_attention()
     }
 
-    /// The next session (after the focused one, wrapping) that needs the
-    /// user, excluding the focused session itself. Approvals come first so
-    /// Ctrl-G always lands on the most urgent thing.
     fn next_session_needing_attention(&self) -> Option<SessionId> {
         let waiting = self.sessions_needing_attention();
-        // A side view does not show its source's transcript, so that
-        // session is a valid jump target from there.
         let shown = self.view().transcript();
         let others: Vec<SessionId> = waiting
             .iter()
@@ -3052,8 +2729,6 @@ impl App {
         if others.is_empty() {
             return None;
         }
-        // Cycle: the item after the shown one in the priority list, or the
-        // first when the shown session is not in the list.
         let position = shown.and_then(|shown| waiting.iter().position(|id| *id == shown));
         match position {
             Some(index) => waiting
@@ -3072,7 +2747,6 @@ impl App {
 pub(crate) enum ApprovalChoice {
     Once,
     Deny,
-    /// Answers to an `ask_user` hold; empty declines.
     Answer(Vec<String>),
 }
 
@@ -3095,11 +2769,6 @@ pub(crate) fn terminal_safe_character(character: char) -> Option<char> {
     Some(character)
 }
 
-/// Sanitizes characters for the prompt composer.
-///
-/// Unlike [`terminal_safe_character`], hard newlines are preserved so Shift-Enter
-/// and multiline paste can build multi-line prompts. Carriage returns are dropped
-/// so CRLF paste collapses to a single newline.
 fn composer_character(character: char) -> Option<char> {
     match character {
         '\n' => Some('\n'),
@@ -3108,17 +2777,11 @@ fn composer_character(character: char) -> Option<char> {
     }
 }
 
-/// Keys that insert a hard newline in the composer without submitting.
-///
-/// Shift-Enter is the primary chord. Without kitty keyboard enhancement many
-/// terminals cannot report Shift on Enter, so Alt-Enter and Ctrl-J (the raw
-/// line-feed / historical newline) are accepted as fallbacks.
 fn is_composer_newline_key(key: KeyEvent) -> bool {
     match key.code {
         KeyCode::Enter => key
             .modifiers
             .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT),
-        // In raw mode a bare LF arrives as Ctrl-J rather than Enter.
         KeyCode::Char('j' | 'J') if key.modifiers == KeyModifiers::CONTROL => true,
         KeyCode::Char('\n') => true,
         _ => false,
@@ -3129,9 +2792,6 @@ fn is_composer_newline_key(key: KeyEvent) -> bool {
 mod tests;
 
 impl App {
-    /// Move the transcript cursor to the adjacent tool call of the focused
-    /// session in transcript order (the order the server persisted them).
-    /// From no selection, up starts at the newest call and down at the oldest.
     fn move_transcript_cursor(&mut self, down: bool) -> bool {
         let Some(session) = self
             .view()
@@ -3163,13 +2823,11 @@ impl App {
         true
     }
 
-    /// What Enter does in the composer right now, for the prompt glyph.
     pub(crate) fn composer_mode(&self) -> crate::view::ComposerMode {
         use crate::view::ComposerMode;
         if self.pending_approval().is_some() {
             return ComposerMode::Approval;
         }
-        // Enter in the side view asks a side question, whatever the run does.
         if matches!(self.view(), View::SideQuestions(_)) {
             return ComposerMode::Send;
         }

@@ -67,8 +67,6 @@ fn paste_preserves_newlines_in_the_composer() {
     assert!(requests.is_empty());
     assert_eq!(app.composer.text, "alpha\nbeta");
 
-    // Three or more lines collapse to a placeholder; the submitted prompt
-    // carries the real content with CRLF normalized.
     app.composer.clear();
     app.handle_terminal_event(Event::Paste("alpha\r\nbeta\ngamma".to_owned()));
     assert_eq!(app.composer.text, "[Pasted #1 3 lines]");
@@ -117,7 +115,6 @@ fn approval_prompt_captures_keys_and_sends_the_decision() {
         Some(tool_call.id)
     );
 
-    // The prompt captures ordinary typing instead of the composer.
     let (_, requests) = app
         .handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
         .split();
@@ -138,14 +135,12 @@ fn approval_prompt_captures_keys_and_sends_the_decision() {
             decision: ApprovalDecision::ApproveOnce,
         }
     );
-    // Answered approvals stop prompting until the server responds.
     assert!(app.pending_approval().is_none());
     let (_, requests) = app
         .handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
         .split();
     assert!(requests.is_empty());
 
-    // A failed command re-opens the prompt so the user can answer again.
     app.apply_client_update(ClientUpdate::CommandResult {
         command_id: request.command_id,
         result: Err(ClientFailure::new("offline")),
@@ -269,7 +264,6 @@ fn a_question_hold_collects_one_answer_per_question_and_sends_them_together() {
     app.apply_live_event(hold(tool_call.clone()));
     assert!(app.pending_question().is_some());
 
-    // The first question takes a digit; `y` is not an approval key here.
     let (_, requests) = app
         .handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
         .split();
@@ -280,7 +274,6 @@ fn a_question_hold_collects_one_answer_per_question_and_sends_them_together() {
     assert!(requests.is_empty(), "one more question to answer");
     assert_eq!(app.question_answers, ["qq-tui"]);
 
-    // The second is free text through the composer; Enter submits both.
     for character in "speed".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }
@@ -305,7 +298,6 @@ fn a_question_hold_collects_one_answer_per_question_and_sends_them_together() {
     assert!(app.composer.text.is_empty());
     assert!(app.pending_approval().is_none());
 
-    // Esc on a fresh hold declines with an empty answer set.
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
     app.apply_live_event(hold(tool_call.clone()));
@@ -455,8 +447,6 @@ fn warning_notices_expire_but_error_notices_stick_until_dismissed() {
     assert_eq!(app.visible_status(), None, "warning notice remained");
     assert!(!app.has_activity());
 
-    // An error notice never expires on its own: a failure must stay
-    // visible until the user acknowledges it (Esc) or replaces it.
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
     app.set_notice("model request failed".to_owned(), NoticeLevel::Error);
@@ -554,7 +544,6 @@ fn session_compacted_events_surface_the_shrink_in_the_status_line() {
         Some("compacted: 3.1 MiB -> 240.0 KiB; intent: keep going")
     );
 
-    // A long excerpt is bounded to one line; an absent one adds nothing.
     let session = app.sessions[&app.focused().unwrap()].summary.clone();
     app.apply_live_event(SessionEventEnvelope {
         occurred_at_ms: 3,
@@ -620,7 +609,6 @@ fn rollback_sends_for_an_idle_session_and_reports_the_receipt() {
         Some("compaction rolled back; full history restored")
     );
 
-    // A server refusal (nothing to roll back) surfaces as the failure notice.
     let (_, requests) = app.execute(Command::RollbackCompaction).split();
     let [ClientRequest::Command(request)] = requests.as_slice() else {
         panic!("expected one rollback command")
@@ -636,7 +624,6 @@ fn rollback_sends_for_an_idle_session_and_reports_the_receipt() {
             .contains("no compaction to roll back")
     );
 
-    // A running session is refused locally.
     let (mut running, _, _, _) = running_app();
     let (_, requests) = running.execute(Command::RollbackCompaction).split();
     assert!(requests.is_empty());
@@ -704,7 +691,6 @@ fn slash_clear_is_a_client_alias_for_a_new_session() {
     let (_, requests) = app
         .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .split();
-    // Handled client-side: never forwarded as a prompt.
     assert!(matches!(
         &requests[0],
         ClientRequest::Command(CommandRequest {
@@ -744,7 +730,6 @@ fn slash_autocomplete_filters_selects_and_executes_commands() {
         app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
     }
     assert_eq!(app.slash_selected(usize::MAX), 0);
-    // Down twice lands on /sessions (help, commands, sessions); Tab runs it.
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -826,7 +811,6 @@ fn session_picker_deletes_the_highlighted_session_after_a_confirm() {
     let session_id = app.focused().unwrap();
     app.open_sessions();
 
-    // The confirm gate: Ctrl-D asks, n keeps, y deletes.
     let (changed, requests) = app
         .handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
         .split();
@@ -884,8 +868,6 @@ fn session_picker_prunes_empty_sessions_after_a_confirm() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
     let workspace_id = app.workspace_id.unwrap();
-    // `/prune` opens the picker with the question armed; Ctrl-P no longer
-    // carries a destructive meaning anywhere.
     app.composer.text = "/prune".to_owned();
     let (changed, requests) = app
         .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -956,7 +938,6 @@ fn session_deleted_event_drops_state_and_refocuses_a_neighbor() {
     assert!(!app.sessions.contains_key(&deleted));
     assert_eq!(app.focused(), Some(neighbor));
     assert_eq!(app.session_picker_selected(), Some(neighbor));
-    // The refocus fetches the neighbor's transcript.
     let requests = effects.into_requests();
     assert!(matches!(
         requests.as_slice(),
@@ -1048,8 +1029,6 @@ fn context_usage_uses_last_turn_tokens_live_updates_and_the_model_limit() {
     let mut app = context_meter_app();
     let mut initial = snapshot();
     let session_id = initial.focused.as_ref().unwrap().summary.id;
-    // The snapshot rehydrates the meter from session-owned state, not the
-    // run's multi-turn billing sum (12_500 here).
     initial.focused.as_mut().unwrap().runs.push(RunSnapshot {
         outcome: Some(RunOutcome::Completed),
         usage: Some(TokenUsage {
@@ -1069,7 +1048,6 @@ fn context_usage_uses_last_turn_tokens_live_updates_and_the_model_limit() {
 
     assert_eq!(app.focused_context_usage(), Some((9_000, 128_000)));
 
-    // A committed model turn moves the meter while the run is still going.
     app.apply_live_event(SessionEventEnvelope {
         run_id: Some(id(8, RunId::from_bytes)),
         occurred_at_ms: 2,
@@ -1084,11 +1062,7 @@ fn context_usage_uses_last_turn_tokens_live_updates_and_the_model_limit() {
     });
     assert_eq!(app.focused_context_usage(), Some((15_000, 128_000)));
 
-    // RunFinished settles the meter on the final turn's figure even
-    // though the run's summed usage is larger (24_000 here).
     summary.context_tokens = Some(18_000);
-    // A persisted pre-v5 run audit event must not transiently repopulate
-    // the authoritative session meter during replay.
     app.apply_live_event(SessionEventEnvelope {
         run_id: Some(id(8, RunId::from_bytes)),
         occurred_at_ms: 3,
@@ -1203,9 +1177,6 @@ fn legacy_cumulative_usage_is_not_presented_as_context_occupancy() {
     app.models[0].context_window = Some(272_000);
     let mut initial = snapshot();
     let session_id = initial.focused.as_ref().unwrap().summary.id;
-    // A run persisted before context_tokens existed reports only its
-    // cumulative billing usage. Four model turns around tools can easily
-    // total 20% of the window even when the last request occupied 5%.
     initial.focused.as_mut().unwrap().runs.push(RunSnapshot {
         outcome: Some(RunOutcome::Completed),
         usage: Some(TokenUsage {
@@ -1281,8 +1252,6 @@ fn compaction_run_usage_does_not_become_session_context() {
                     output_tokens: 2_000,
                     reasoning_tokens: None,
                 }),
-                // This is the compaction request's pre-summary input, not
-                // the session occupancy after the summary replaced it.
                 context_tokens: Some(60_000),
                 final_output: None,
             },
@@ -1398,8 +1367,6 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
         .split();
 
     assert_eq!(app.model, selection);
-    // A session is focused, so Enter applies the preserved selection to
-    // it rather than creating a new session.
     let focused = app.focused().unwrap();
     assert!(matches!(
         &requests[0],
@@ -1459,8 +1426,6 @@ fn model_picker_applies_to_the_focused_session_and_ctrl_n_creates() {
     app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
     assert_eq!(app.filtered_models(), vec![0]);
 
-    // Enter with a focused session repoints that session's model and
-    // remembers it as the client default for later /new creates.
     let focused = app.focused().unwrap();
     let (_, requests) = app
         .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -1476,7 +1441,6 @@ fn model_picker_applies_to_the_focused_session_and_ctrl_n_creates() {
     assert_eq!(app.model, selection);
     assert!(app.overlay.is_none());
 
-    // Ctrl-N creates a fresh session with the selected model instead.
     app.open_models();
     let (_, requests) = app
         .handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
@@ -1640,8 +1604,6 @@ fn create_without_a_default_or_focused_session_still_requires_a_model() {
     );
 }
 
-/// OB2 fixture: `openai/gpt-5.6` configured, no credential for any built-in,
-/// so the catalog is empty and every built-in carries a remedy.
 fn unauthenticated_app() -> App {
     let mut initial = snapshot();
     initial.sessions.clear();
@@ -1702,8 +1664,6 @@ fn models_picker_lists_unauthenticated_builtins_and_never_creates_a_session() {
         .collect();
     assert_eq!(rows, [("anthropic", None), ("openai", None)]);
 
-    // Enter and Ctrl-N on a `needs credential` row repeat the remedy and
-    // send nothing; the picker stays open so the user can read the list.
     let (_, requests) = app
         .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .split();
@@ -1722,8 +1682,6 @@ fn models_picker_lists_unauthenticated_builtins_and_never_creates_a_session() {
 
 #[test]
 fn a_client_without_a_model_points_at_the_picker_until_one_is_chosen() {
-    // OB1: `(version: 1)` opens the TUI with no client default. The standing
-    // guidance says what to do; choosing a model from `/models` clears it.
     let selection = ModelSelection {
         model_is_fallback: false,
         model: Some("anthropic/claude-sonnet-5".to_owned()),
@@ -1883,9 +1841,6 @@ fn live_tool_output_keeps_a_bounded_tail_and_drops_on_terminal_states() {
         Some("hello world\n")
     );
 
-    // Overflow drops the head — the tail is a live view, not a record —
-    // and trimming lands on a character boundary even when the bound
-    // falls inside a multi-byte character.
     app.apply_live_event(delta(4, &"€".repeat(2 * MAX_LIVE_TOOL_OUTPUT_BYTES / 3)));
     let buffer = app.sessions[&session_id]
         .live_tool_output
@@ -1895,7 +1850,6 @@ fn live_tool_output_keeps_a_bounded_tail_and_drops_on_terminal_states() {
     assert!(buffer.len() > MAX_LIVE_TOOL_OUTPUT_BYTES - 4);
     assert!(buffer.chars().all(|character| character == '€'));
 
-    // A terminal state hands display over to the persisted result.
     app.apply_live_event(event(
         5,
         SessionEvent::ToolCallFinished {
@@ -1911,7 +1865,6 @@ fn live_tool_output_keeps_a_bounded_tail_and_drops_on_terminal_states() {
     ));
     assert!(app.sessions[&session_id].live_tool_output.is_empty());
 
-    // A session snapshot reload replaces live per-call state wholesale.
     app.apply_live_event(delta(6, "restarted\n"));
     assert!(!app.sessions[&session_id].live_tool_output.is_empty());
     let mut reloaded = initial;
@@ -2066,8 +2019,6 @@ fn mid_run_queued_prompts_stay_after_the_streaming_runs_turn_messages() {
         MessageState::Complete,
         "turn one",
     ));
-    // A prompt queued mid-run arrives before the run's later per-turn
-    // messages...
     app.sessions.push_message(message(
         8,
         queued_run,
@@ -2085,8 +2036,6 @@ fn mid_run_queued_prompts_stay_after_the_streaming_runs_turn_messages() {
         "turn two",
     ));
 
-    // ...yet the live list keeps the snapshot's run-first order: the
-    // whole streaming run, then the queued prompt's run.
     let outputs = app.sessions[&session_id]
         .messages
         .as_ref()
@@ -2115,7 +2064,6 @@ fn ctrl_o_cycles_tool_detail_and_yields_to_overlays() {
     app.handle_key(ctrl_o);
     assert_eq!(app.tool_detail, ToolDetail::Rows);
 
-    // Pickers own the keyboard; the toggle must not fire underneath them.
     app.open_session_picker_with("", None, None);
     app.handle_key(ctrl_o);
     assert_eq!(app.tool_detail, ToolDetail::Rows);
@@ -2307,8 +2255,6 @@ fn creating_a_session_adopts_it_without_a_snapshot_round_trip() {
     let mut summary = summary_named(0x42, "New session");
     summary.updated_at_ms = 99;
 
-    // The durable event arrives first (the SSE stream is usually ahead of
-    // the HTTP receipt); focus moves and the body is already warm.
     let effects = app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
         caused_by: Some(request.command_id),
         ..fixtures::envelope(
@@ -2327,7 +2273,6 @@ fn creating_a_session_adopts_it_without_a_snapshot_round_trip() {
         "no snapshot after create"
     );
 
-    // The receipt confirms without changing anything or requesting more.
     let effects = app.apply_client_update(ClientUpdate::CommandResult {
         command_id: request.command_id,
         result: Ok(qq_protocol::CommandReceipt {
@@ -2340,7 +2285,6 @@ fn creating_a_session_adopts_it_without_a_snapshot_round_trip() {
     });
     assert_eq!(app.focused(), Some(created));
     assert!(effects.requests().next().is_none());
-    // The previously focused session keeps its body warm.
     let previous = snapshot().sessions[0].id;
     assert!(app.sessions[&previous].is_warm());
 }
@@ -2363,7 +2307,6 @@ fn a_tool_starved_focused_snapshot_requests_its_own_body_once() {
             focused_session_id: Some(id), include_sessions, ..
         })] if *id == session_id && include_sessions.is_empty()
     ));
-    // Even an oversized single-body response must not trigger a fetch loop.
     let expected_messages = retry.focused.as_ref().unwrap().messages.clone();
     let (_, requests) = app.apply_snapshot(retry).split();
     assert!(requests.is_empty());
@@ -2415,7 +2358,6 @@ fn warm_bodies_are_bounded_and_evict_least_recently_focused() {
         })
         .collect();
     app.apply_snapshot(initial);
-    // Focus each in turn, loading a body every time.
     for session_id in &ids {
         app.focus_session(*session_id);
         let summary = app.sessions[session_id].summary.clone();
@@ -2427,11 +2369,9 @@ fn warm_bodies_are_bounded_and_evict_least_recently_focused() {
     }
     let warm: Vec<_> = app.sessions.values().filter(|s| s.is_warm()).collect();
     assert_eq!(warm.len(), WARM_BODY_LIMIT);
-    // The most recent WARM_BODY_LIMIT are warm; the earliest two are not.
     assert!(!app.sessions[&ids[0]].is_warm());
     assert!(!app.sessions[&ids[1]].is_warm());
     assert!(app.sessions[ids.last().unwrap()].is_warm());
-    // Cold sessions keep their summary and status.
     assert_eq!(app.sessions[&ids[0]].summary.title, "s");
 }
 
@@ -2496,7 +2436,6 @@ fn live_status_tracks_cold_sessions_and_activity_seeds_from_snapshots() {
     assert_eq!(live.tail, "Reading the repository layout");
     assert_eq!(live.active_tool.as_deref(), Some("search"));
     assert_eq!(live.awaiting_approval.len(), 1);
-    // Still cold: deltas did not create a body.
     assert!(!app.sessions[&child.id].is_warm());
 
     let finished = ToolCallSnapshot {
@@ -2510,7 +2449,6 @@ fn live_status_tracks_cold_sessions_and_activity_seeds_from_snapshots() {
     assert_eq!(live.active_tool, None);
     assert!(live.awaiting_approval.is_empty());
 
-    // A long stream keeps the tail bounded.
     app.apply_client_update(event(SessionEvent::TextAppended {
         message_id: id(0x73, MessageId::from_bytes),
         channel: TextChannel::Output,
@@ -2534,7 +2472,6 @@ fn agents_picker_lists_only_the_focused_roots_subtree() {
         .extend([child.clone(), grandchild.clone(), other_root.clone()]);
     app.apply_snapshot(initial);
 
-    // From deep in the tree, /agents scopes to the whole root's subtree.
     app.focus_session(grandchild.id);
     app.execute(Command::OpenAgents);
     let mut listed = app.filtered_sessions();
@@ -2544,13 +2481,10 @@ fn agents_picker_lists_only_the_focused_roots_subtree() {
     assert_eq!(listed, expected);
     assert!(!app.filtered_sessions().contains(&other_root.id));
 
-    // /sessions lists everything.
     app.execute(Command::OpenSessions);
     assert_eq!(app.filtered_sessions().len(), 4);
 }
 
-/// A snapshot whose one session is mid-run, plus the envelope builder for
-/// follow-up events on it.
 fn running_app() -> (
     App,
     SessionId,
@@ -2600,7 +2534,6 @@ fn enter_during_a_run_queues_the_draft_and_it_submits_when_the_run_ends() {
         ["follow up"]
     );
 
-    // Ctrl-Enter queues explicitly as well; drafts keep order.
     app.composer.text = "second".to_owned();
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
     assert_eq!(
@@ -2608,7 +2541,6 @@ fn enter_during_a_run_queues_the_draft_and_it_submits_when_the_run_ends() {
         ["follow up", "second"]
     );
 
-    // Alt-Up brings the newest back for editing.
     app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
     assert_eq!(app.composer.text, "second");
     assert_eq!(
@@ -2617,7 +2549,6 @@ fn enter_during_a_run_queues_the_draft_and_it_submits_when_the_run_ends() {
     );
     app.composer.clear();
 
-    // The run finishes idle: the oldest draft becomes the next run.
     let mut summary = app.sessions[&session_id].summary.clone();
     summary.status = SessionStatus::Idle;
     summary.active_run_id = None;
@@ -2651,7 +2582,6 @@ fn esc_twice_cancels_the_active_run_but_once_only_arms() {
     assert!(requests.is_empty());
     assert!(app.status.as_deref().unwrap().contains("Esc again"));
 
-    // Typing disarms.
     app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
     let (_, requests) = app.handle_key(esc).split();
     assert!(requests.is_empty(), "disarmed by intervening input");
@@ -2666,7 +2596,6 @@ fn esc_twice_cancels_the_active_run_but_once_only_arms() {
     ));
     assert!(app.sessions[&session_id].summary.active_run_id.is_some());
 
-    // Too slow: the arm expires.
     let (_, _) = app.handle_key(esc).split();
     for _ in 0..=ESC_CANCEL_TICKS {
         app.advance_animation();
@@ -2692,9 +2621,6 @@ fn steer_falls_back_to_queueing_until_the_server_advertises_it() {
             .contains("does not support steering")
     );
 
-    // A server that steers at boundaries but cannot interrupt: Alt-S
-    // queues with its own explanation rather than sending a plain steer
-    // the user did not ask for.
     app.apply_client_update(ClientUpdate::Capabilities(std::sync::Arc::new(
         fixtures::capabilities(SteeringCapabilities {
             boundary: true,
@@ -2749,8 +2675,6 @@ fn enter_steers_the_active_run_when_the_server_advertises_it() {
             interrupt: false,
         }
     );
-    // Nothing is queued locally, the composer is clear, and the text
-    // shows as pending until the server's steering row replaces it.
     assert_eq!(app.queued_drafts(session_id).count(), 0);
     assert!(app.composer.text.is_empty());
     assert_eq!(
@@ -2800,7 +2724,6 @@ fn steer_with_an_empty_draft_or_no_run_sends_nothing() {
     assert!(idle.status.as_deref().unwrap().contains("no active run"));
     assert_eq!(idle.composer.text, "hello");
 
-    // Enter on an idle session still submits a new prompt.
     let (_, requests) = idle
         .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .split();
@@ -2832,8 +2755,6 @@ fn refused_or_late_steering_returns_the_draft_to_the_composer() {
         Some("too many pending steering messages")
     );
 
-    // The run finished before the steer landed: the receipt is a success
-    // that applied nothing, so the text comes back with a warning.
     let (_, requests) = app.execute(Command::SteerRun).split();
     let [ClientRequest::Command(request)] = requests.as_slice() else {
         panic!("expected one steer command");
@@ -2852,8 +2773,6 @@ fn refused_or_late_steering_returns_the_draft_to_the_composer() {
     assert_eq!(app.composer.text, "first");
     assert!(app.status.as_deref().unwrap().contains("draft restored"));
 
-    // A steer that was recorded clears the pending row; the transcript
-    // row arrives through `steering_queued` like any other message.
     let (_, requests) = app.execute(Command::SteerRun).split();
     let [ClientRequest::Command(request)] = requests.as_slice() else {
         panic!("expected one steer command");
@@ -2877,7 +2796,6 @@ fn alt(character: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT)
 }
 
-/// Two warm root sessions; the first is focused. Returns their ids.
 fn two_session_app() -> (App, SessionId, SessionId) {
     let mut app = App::new(TuiOptions::default());
     let mut initial = snapshot();
@@ -3119,11 +3037,6 @@ fn the_shown_session_is_pinned_warm_while_others_evict() {
 
 #[test]
 fn an_included_body_older_than_live_events_is_caught_up_by_replay() {
-    // Regression (PR #289 review): a snapshot that installs another
-    // session's body replaces its hold state as of the snapshot's cursor.
-    // Events after that cursor already applied must be replayed for every
-    // installed body, not only the focused one, or a hold requested while
-    // the snapshot was in flight disappears.
     let (mut app, _, other) = two_session_app();
     let base = app.last_sequence;
     let run_id = id(4, RunId::from_bytes);
@@ -3153,7 +3066,6 @@ fn an_included_body_older_than_live_events_is_caught_up_by_replay() {
         qq_client::state::StoreActivity::Blocked { .. }
     ));
 
-    // A snapshot cut before that event arrives with the other body included.
     let summary = app.sessions[&other].summary.clone();
     let mut stale = snapshot();
     stale.cursor.sequence = base;
@@ -3180,7 +3092,6 @@ fn a_body_fetched_for_a_session_the_user_left_is_dropped_without_moving_focus() 
     });
     let (_, requests) = app.focus_session(cold.id).split();
     assert_eq!(requests.len(), 1, "cold body is requested");
-    // The user moves back before the body arrives.
     app.focus_session(first);
     assert_eq!(app.focused(), Some(first));
 
@@ -3198,7 +3109,6 @@ fn a_body_fetched_for_a_session_the_user_left_is_dropped_without_moving_focus() 
         "focus stays where the user put it"
     );
 
-    // Likewise for a session that was never shown.
     let gone = summary_named(0x78, "gone");
     app.apply_snapshot(WorkspaceSnapshot {
         check_interruption: None,
@@ -3226,7 +3136,6 @@ fn deleting_the_shown_session_moves_to_its_neighbour() {
     }));
     assert!(!app.sessions.contains_key(&first));
     assert_eq!(app.focused(), Some(other));
-    // The replacement is warm, so nothing is fetched.
     assert!(effects.requests().next().is_none());
 }
 
@@ -3277,7 +3186,6 @@ fn the_mouse_wheel_scrolls_the_transcript_from_anywhere_on_screen() {
             .redraws()
     );
     assert_eq!(app.transcript_scroll_offset(), MOUSE_SCROLL_ROWS);
-    // Over the chrome the wheel still moves the transcript.
     app.handle_terminal_event(mouse(MouseEventKind::ScrollUp, 10, 0));
     assert_eq!(app.transcript_scroll_offset(), 2 * MOUSE_SCROLL_ROWS);
     app.handle_terminal_event(mouse(MouseEventKind::ScrollDown, 150, 39));
@@ -3312,21 +3220,17 @@ fn the_theme_picker_previews_live_and_esc_restores() {
     assert_eq!(app.mode(), Mode::Themes);
     let generation = app.theme_generation;
 
-    // Down previews the next theme immediately.
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.theme().name, "rose-pine");
     assert_eq!(app.theme_generation, generation + 1);
-    // Typing filters and the highlighted theme follows the filter.
     app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
     assert_eq!(app.filtered_themes().len(), 1);
     assert_eq!(app.theme().name, "mono");
-    // Esc puts the original back.
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.mode(), Mode::Compose);
     assert_eq!(app.theme().name, "terminal");
 
-    // Enter keeps the preview and tells the user how to persist it.
     app.execute(Command::OpenThemes);
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -3373,11 +3277,9 @@ fn attention_is_requested_only_while_the_terminal_is_unfocused() {
             _ => None,
         })
     };
-    // Focused: nothing to report.
     let effects = app.apply_client_update(event(finish(run_id)));
     assert_eq!(attention(effects), None);
 
-    // Unfocused: a finished run asks for attention with the title.
     app.handle_terminal_event(Event::FocusLost);
     let effects = app.apply_client_update(event(finish(run_id)));
     assert_eq!(
@@ -3387,7 +3289,6 @@ fn attention_is_requested_only_while_the_terminal_is_unfocused() {
         })
     );
 
-    // An approval request while unfocused also asks.
     let effects = app.apply_client_update(event(SessionEvent::ToolApprovalRequested {
         tool_call: ToolCallSnapshot {
             run_id,
@@ -3409,7 +3310,6 @@ fn attention_is_requested_only_while_the_terminal_is_unfocused() {
         attention(effects),
         Some(Attention::ApprovalRequested { .. })
     ));
-    // Focused again: silent.
     app.handle_terminal_event(Event::FocusGained);
     let effects = app.apply_client_update(event(finish(run_id)));
     assert_eq!(attention(effects), None);
@@ -3427,7 +3327,6 @@ fn a_rejected_model_change_or_deletion_is_attributed_to_its_session_not_the_focu
     let (mut app, first, other) = two_session_app();
     assert_eq!(app.focused(), Some(first));
 
-    // Change `other`'s model while `first` stays focused.
     let request = |effects: Effects| {
         let requests = effects.into_requests();
         let [ClientRequest::Command(request)] = requests.as_slice() else {
@@ -3447,7 +3346,6 @@ fn a_rejected_model_change_or_deletion_is_attributed_to_its_session_not_the_focu
         command_id: set.command_id,
         result: Err(ClientFailure::new("model rejected")),
     });
-    // The failure belongs to `other`, so the focused session shows nothing.
     assert_eq!(
         app.visible_status(),
         None,
@@ -3459,7 +3357,6 @@ fn a_rejected_model_change_or_deletion_is_attributed_to_its_session_not_the_focu
         Some((text, NoticeLevel::Error)) if text.contains("model rejected")
     ));
 
-    // Same for a deletion refused by the server.
     app.focus_session(first);
     let delete = request(app.delete_session(other));
     app.apply_client_update(ClientUpdate::CommandResult {
@@ -3477,7 +3374,6 @@ fn a_rejected_model_change_or_deletion_is_attributed_to_its_session_not_the_focu
         Some((text, NoticeLevel::Error)) if text.contains("delete refused")
     ));
 
-    // Prune is workspace-wide, so its failure lands on the focused session.
     let prune = request(app.prune_sessions());
     app.apply_client_update(ClientUpdate::CommandResult {
         command_id: prune.command_id,
@@ -3530,7 +3426,6 @@ fn the_reducer_returns_notices_and_attention_as_effects_instead_of_mutating_them
         },
     );
 
-    // Pure: the reducer changed the model but left notice state alone.
     assert_eq!(
         app.sessions[&session_id].summary.status,
         SessionStatus::Idle
@@ -3546,8 +3441,6 @@ fn the_reducer_returns_notices_and_attention_as_effects_instead_of_mutating_them
         qq_client::state::StateEffect::Attention(Attention::RunFinished { .. })
     )));
 
-    // The app applies the notice to its status line and passes attention on
-    // to the loop.
     let effects = app.reduce_event(&envelope);
     assert!(matches!(
         app.visible_status(),
@@ -3576,7 +3469,6 @@ fn background_streaming_for_an_unshown_session_does_not_redraw_when_the_sidebar_
             ..fixtures::envelope(sequence, other, event)
         })
     };
-    // Structural changes always redraw: focus, chrome, or attention may move.
     let started = app.apply_client_update(event(SessionEvent::AssistantMessageStarted {
         message: MessageSnapshot {
             run_id,
@@ -3586,15 +3478,12 @@ fn background_streaming_for_an_unshown_session_does_not_redraw_when_the_sidebar_
     }));
     assert!(started.redraws());
 
-    // A text delta for a session shown in no pane, with the sidebar hidden,
-    // changes nothing on screen.
     let delta = app.apply_client_update(event(SessionEvent::TextAppended {
         message_id,
         channel: TextChannel::Output,
         text: "more".to_owned(),
     }));
     assert!(!delta.redraws(), "nothing visible changed");
-    // The model still advanced.
     assert!(
         app.sessions[&other]
             .messages
@@ -3604,7 +3493,6 @@ fn background_streaming_for_an_unshown_session_does_not_redraw_when_the_sidebar_
             .any(|message| message.output == "more")
     );
 
-    // With the sidebar showing, the live tail is visible and the delta redraws.
     app.layout.rail = crate::view::PanePref::Shown;
     let delta = app.apply_client_update(event(SessionEvent::TextAppended {
         message_id,
@@ -3613,7 +3501,6 @@ fn background_streaming_for_an_unshown_session_does_not_redraw_when_the_sidebar_
     }));
     assert!(delta.redraws());
 
-    // And a delta for the shown session redraws regardless.
     app.layout.rail = crate::view::PanePref::Hidden;
     let shown = app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
         run_id: Some(run_id),
@@ -3640,7 +3527,6 @@ fn ctrl_k_opens_the_palette_and_enter_runs_the_highlighted_command() {
         Some(Overlay::Commands { help: false, .. })
     ));
 
-    // Typing filters by title or slash name as a subsequence.
     for character in "thm".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }
@@ -3648,7 +3534,6 @@ fn ctrl_k_opens_the_palette_and_enter_runs_the_highlighted_command() {
     let titles: Vec<_> = picker.filtered().map(|(_, row)| row.spec.title).collect();
     assert!(titles.contains(&"choose a theme"), "{titles:?}");
 
-    // Enter executes the highlighted command; the palette closes first.
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
     app.execute(Command::OpenCommands);
@@ -3678,7 +3563,6 @@ fn help_opens_from_question_mark_on_an_empty_composer_only() {
     assert!(app.overlay.is_none());
     assert_eq!(app.composer.text, "what?");
 
-    // F1 and /help open the same view.
     app.composer.clear();
     app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
     assert!(matches!(
@@ -3714,7 +3598,6 @@ fn shift_arrows_scroll_the_transcript_without_the_mouse() {
     assert_eq!(app.transcript_scroll_offset(), MOUSE_SCROLL_ROWS);
     assert!(app.handle_terminal_event(key(KeyCode::Down)).redraws());
     assert_eq!(app.transcript_scroll_offset(), 0);
-    // Plain Up still browses history / moves the caret, not the transcript.
     app.handle_terminal_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
     assert_eq!(app.transcript_scroll_offset(), 0);
 }
@@ -3726,15 +3609,12 @@ fn workspace_views_toggle_and_esc_returns_to_the_session_they_replaced() {
     app.execute(Command::ShowAttention);
     assert_eq!(app.view(), View::Attention);
     assert_eq!(app.focused(), None, "no session while a view is up");
-    // Esc goes back to where the user was, not to the first session.
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.focused(), Some(other));
-    // The same command twice toggles.
     app.execute(Command::ShowChanges);
     assert_eq!(app.view(), View::Changes);
     app.execute(Command::ShowChanges);
     assert_eq!(app.focused(), Some(other));
-    // Switching between views keeps the original return point.
     app.execute(Command::ShowChanges);
     app.execute(Command::ShowAttention);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -3788,7 +3668,6 @@ fn profile_picker_waits_for_capabilities_and_lists_advertised_profiles() {
     let names: Vec<&str> = picker.items().iter().map(|row| row.id.as_str()).collect();
     assert_eq!(names, ["default", "reviewer"]);
     assert_eq!(picker.items()[1].pack.as_deref(), Some("review-kit@1.0.0"));
-    // The cursor starts on the profile in effect: the focused session's.
     assert_eq!(picker.cursor(), 0);
 }
 
@@ -3812,10 +3691,8 @@ fn profile_picker_sets_the_focused_idle_session_profile_and_refuses_running_ones
             if *session_id == focused && profile.as_str() == "reviewer"
     ));
     assert!(app.overlay.is_none());
-    // The choice also becomes the default for sessions created next.
     assert_eq!(app.profile.as_str(), "reviewer");
 
-    // The receipt names the profile; the summary update carries it.
     app.apply_client_update(ClientUpdate::CommandResult {
         command_id: request.command_id,
         result: Ok(qq_protocol::CommandReceipt {
@@ -3832,7 +3709,6 @@ fn profile_picker_sets_the_focused_idle_session_profile_and_refuses_running_ones
         Some("session profile set to reviewer")
     );
 
-    // A running session cannot change profile; nothing is sent.
     let (mut running, _, _, _) = running_app();
     running.apply_client_update(ClientUpdate::Capabilities(capabilities_with_profiles()));
     running.open_profiles();
@@ -3919,7 +3795,6 @@ fn effort_picker_sets_the_focused_idle_session_effort_and_refuses_running_ones()
     }];
     let focused = app.focused().unwrap();
     app.execute(Command::OpenEffort);
-    // Rows: default, none, minimal, low, medium, high, xhigh. Jump to xhigh.
     for _ in 0..7 {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
@@ -4031,9 +3906,6 @@ fn effort_chosen_without_a_focused_session_applies_to_the_next_create() {
     ));
 }
 
-/// When the catalog advertises a ladder for the focused model, `/effort`
-/// offers exactly `default`, `none`, and that ladder — not every level. A
-/// model with no advertised ladder still gets the full set.
 #[test]
 fn effort_picker_is_shaped_by_the_focused_models_advertised_ladder() {
     use qq_protocol::ReasoningEffort as E;
@@ -4124,7 +3996,6 @@ fn a_refreshed_capability_document_updates_the_open_profile_picker() {
         panic!("picker stays open across a refresh")
     };
     assert_eq!(picker.items().len(), 3);
-    // The cursor follows the highlighted profile, not its position.
     assert_eq!(picker.current().unwrap().id.as_str(), "reviewer");
 }
 
@@ -4132,7 +4003,6 @@ fn a_refreshed_capability_document_updates_the_open_profile_picker() {
 fn approval_picker_sets_the_focused_session_mode_and_the_summary_update_lands() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
-    // Nothing until the capability document arrives.
     app.composer.text = "/approval".to_owned();
     let (_, requests) = app
         .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -4147,7 +4017,6 @@ fn approval_picker_sets_the_focused_session_mode_and_the_summary_update_lands() 
     };
     let labels: Vec<&str> = picker.items().iter().map(|row| row.label).collect();
     assert_eq!(labels, ["read_only", "ask", "auto", "full"]);
-    // The cursor starts on the session's current mode.
     assert_eq!(picker.current().unwrap().mode, ApprovalMode::Auto);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
@@ -4181,7 +4050,6 @@ fn approval_picker_sets_the_focused_session_mode_and_the_summary_update_lands() 
         Some("session approval mode set to read_only")
     );
 
-    // The published summary is what the session state reads from.
     let mut summary = fixtures::session_summary(focused);
     summary.approval_mode = ApprovalMode::ReadOnly;
     app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
@@ -4193,7 +4061,6 @@ fn approval_picker_sets_the_focused_session_mode_and_the_summary_update_lands() 
     )));
     assert_eq!(app.effective_approval_mode(), ApprovalMode::ReadOnly);
 
-    // Picking the mode already in effect sends nothing.
     app.open_approval_modes();
     let (_, requests) = app
         .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -4224,7 +4091,6 @@ fn approval_mode_chosen_without_a_focused_session_applies_to_the_next_create() {
     app.apply_snapshot(empty);
     app.apply_client_update(ClientUpdate::Capabilities(capabilities_with_profiles()));
     app.open_approval_modes();
-    // The cursor starts on the default (`auto`); one down is `full`.
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     let (_, requests) = app
         .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -4283,7 +4149,6 @@ fn slash_completion_offers_workspace_commands_and_skills_after_client_commands()
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
     let session_id = app.focused().unwrap();
-    // Before the document arrives only client commands complete.
     app.composer.text = "/".to_owned();
     assert_eq!(
         app.filtered_slash_commands().len(),
@@ -4302,7 +4167,6 @@ fn slash_completion_offers_workspace_commands_and_skills_after_client_commands()
     );
     assert_eq!(&names[names.len() - 2..], ["/ship", "/qq-verify"]);
 
-    // Accepting a workspace command leaves it in the composer for arguments.
     app.composer.text = "/shi".to_owned();
     app.slash.select(0);
     let (_, requests) = app
@@ -4311,7 +4175,6 @@ fn slash_completion_offers_workspace_commands_and_skills_after_client_commands()
     assert!(requests.is_empty());
     assert_eq!(app.composer.text, "/ship ");
 
-    // Accepting a skill submits it as the prompt the runtime resolves.
     app.composer.replace("/qq-v".to_owned());
     app.slash.select(0);
     let (_, requests) = app
@@ -4348,7 +4211,6 @@ fn skills_picker_lists_indexed_guidance_and_accepts_like_completion() {
         panic!("expected the skills picker")
     };
     assert_eq!(picker.items().len(), 2);
-    // Search text covers the source and description too.
     app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
     let (_, requests) = app
@@ -4359,8 +4221,6 @@ fn skills_picker_lists_indexed_guidance_and_accepts_like_completion() {
     assert_eq!(app.composer.text, "/ship ");
 }
 
-/// ENG-898: a degraded MCP server's reason reaches the rule once per distinct
-/// message; healthy hosts and repeated documents stay quiet.
 #[test]
 fn degraded_tool_hosts_warn_once_per_distinct_reason() {
     const REASON: &str = "unavailable MCP servers: linear (credential `linear/default` is not \
@@ -4399,8 +4259,6 @@ fn degraded_tool_hosts_warn_once_per_distinct_reason() {
     assert_eq!(app.visible_status(), Some((REASON, NoticeLevel::Warning)));
     assert_eq!(app.tool_host_warning().as_deref(), Some(REASON));
 
-    // Another notice takes the rule; the same document arriving again
-    // (a catalog refresh) does not reclaim it.
     app.set_info("something else".to_owned());
     app.apply_client_update(ClientUpdate::Capabilities(degraded()));
     assert_eq!(
@@ -4408,7 +4266,6 @@ fn degraded_tool_hosts_warn_once_per_distinct_reason() {
         Some(("something else", NoticeLevel::Info))
     );
 
-    // Recovery clears the memory, so a later regression warns again.
     app.apply_client_update(ClientUpdate::Capabilities(healthy()));
     assert_eq!(
         app.visible_status(),
@@ -4428,15 +4285,12 @@ fn composer_finds_the_mention_token_at_the_cursor() {
             .map(|(span, token)| (span, token.to_owned())),
         Some((4..11, "src/li".to_owned()))
     );
-    // Mid-word `@` (an email) and `@@` are not tokens.
     composer.replace("me@example".to_owned());
     assert!(composer.mention_token().is_none());
     composer.replace("@@lit".to_owned());
     assert!(composer.mention_token().is_none());
-    // A completed token followed by a space is no longer under the cursor.
     composer.replace("@a.rs done".to_owned());
     assert!(composer.mention_token().is_none());
-    // Replacing the span leaves the cursor after the insertion.
     composer.replace("see @sr".to_owned());
     let (span, _) = composer.mention_token().unwrap();
     composer.replace_span(span, "@src/lib.rs ");
@@ -4463,20 +4317,16 @@ fn typing_an_at_token_requests_completion_and_tab_accepts_a_candidate() {
             );
         }
     }
-    // A stale reply (for an older query) is dropped; the current one lands.
     assert!(!app.apply_mention_completions("s".to_owned(), vec!["src/".to_owned()]));
     assert!(app.apply_mention_completions(
         "sr".to_owned(),
         vec!["src/".to_owned(), "srv.rs".to_owned()],
     ));
     assert_eq!(app.mention.candidates.len(), 2);
-    // Down selects the file; Tab inserts it with the trailing space and
-    // closes the popup.
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.composer.text, "see @srv.rs ");
     assert!(app.mention.candidates.is_empty());
-    // Accepting a directory keeps completing one level down.
     app.composer.replace("see @sr".to_owned());
     assert!(app.apply_mention_completions("sr".to_owned(), vec!["src/".to_owned()]));
     let effects = app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -4485,7 +4335,6 @@ fn typing_an_at_token_requests_completion_and_tab_accepts_a_candidate() {
         effect,
         Effect::CompleteMention { query, .. } if query == "src/"
     )));
-    // Esc closes the popup without touching the text.
     assert!(app.apply_mention_completions("src/".to_owned(), vec!["src/lib.rs".to_owned()]));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.mention.candidates.is_empty());
@@ -4500,7 +4349,6 @@ fn prompts_with_mentions_resolve_off_the_loop_and_submit_the_parts() {
     });
     app.apply_snapshot(snapshot());
     let session_id = app.focused().unwrap();
-    // Plain text never pays for the blocking hop.
     app.composer.replace("hello".to_owned());
     let effects = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(effects.requests_anything());
@@ -4524,7 +4372,6 @@ fn prompts_with_mentions_resolve_off_the_loop_and_submit_the_parts() {
     assert_eq!(submit.target, SubmitTarget::Prompt { session_id });
     assert!(app.composer.text.is_empty());
 
-    // The loop calls back with parts; they go out as the prompt.
     let resolved = qq_core::mentions::ResolvedPrompt {
         parts: vec![
             qq_protocol::InputPart::text("explain @src/lib.rs:1-3"),
@@ -4550,14 +4397,12 @@ fn prompts_with_mentions_resolve_off_the_loop_and_submit_the_parts() {
     ));
     assert_eq!(app.status.as_deref(), Some("attached 1 file"));
 
-    // A failure returns the text to the empty composer.
     let requests = app
         .apply_resolved_mentions(submit, Err("disk gone".to_owned()))
         .into_requests();
     assert!(requests.is_empty());
     assert_eq!(app.composer.text, "explain @src/lib.rs:1-3");
 
-    // `@skill:name` at the start becomes a slash command.
     let skilled = PendingSubmit {
         text: "@skill:review this".to_owned(),
         target: SubmitTarget::Prompt { session_id },
@@ -4785,7 +4630,6 @@ fn side_view_keeps_session_commands_on_its_source_session() {
     assert_eq!(app.view(), View::SideQuestions(id));
     assert_eq!(app.focused(), Some(id));
 
-    // `/models` repoints the source session instead of creating a root.
     app.open_models();
     let request = only_command(press(&mut app, KeyCode::Enter));
     assert!(matches!(
@@ -4793,7 +4637,6 @@ fn side_view_keeps_session_commands_on_its_source_session() {
         SessionCommand::SetSessionModel { session_id, .. } if session_id == id
     ));
 
-    // `/approval` changes the source session, not the next-session default.
     app.open_approval_modes();
     press(&mut app, KeyCode::Char('r'));
     let request = only_command(press(&mut app, KeyCode::Enter));
@@ -4802,7 +4645,6 @@ fn side_view_keeps_session_commands_on_its_source_session() {
         SessionCommand::SetApprovalMode { session_id, mode: ApprovalMode::ReadOnly }
             if session_id == id
     ));
-    // Still on the side view; Esc returns to the unchanged transcript.
     assert_eq!(app.view(), View::SideQuestions(id));
     press(&mut app, KeyCode::Esc);
     assert_eq!(app.view(), View::Transcript(Some(id)));
@@ -4819,8 +4661,6 @@ fn side_view_does_not_capture_input_for_its_sources_approval() {
     });
     assert_eq!(app.mode(), Mode::Approval);
     app.execute(Command::ShowSideQuestions);
-    // The side view never renders the approval block, so typing asks a
-    // side question rather than answering an approval the user cannot see.
     assert_eq!(app.mode(), Mode::Compose);
     app.composer.text = "why?".to_owned();
     let request = only_command(press(&mut app, KeyCode::Enter));
@@ -4840,7 +4680,6 @@ fn side_cancel_uses_the_acknowledged_id_before_its_update_arrives() {
     app.composer.text = "/btw slow?".to_owned();
     let submit = only_command(press(&mut app, KeyCode::Enter));
     let side = RunId::generate().unwrap();
-    // The receipt beats the SSE update: the reduced list is still empty.
     app.apply_client_update(submitted_receipt(submit.command_id, side));
     assert!(app.sessions[&id].side_questions.is_empty());
     let cancel = only_command(app.execute(Command::CancelSideQuestion));
@@ -4849,8 +4688,6 @@ fn side_cancel_uses_the_acknowledged_id_before_its_update_arrives() {
         SessionCommand::CancelSideQuestion { side_question_id } if side_question_id == side
     ));
 
-    // The running update then its terminal update arrive late; the terminal
-    // one releases the acknowledged id so nothing stale is cancelled.
     app.apply_client_update(side_update(
         2,
         side_item(id, side, qq_protocol::SideQuestionState::Running),
@@ -4876,7 +4713,6 @@ fn a_cancel_that_loses_the_race_releases_the_acknowledged_id() {
     let side = RunId::generate().unwrap();
     app.apply_client_update(submitted_receipt(submit.command_id, side));
     let cancel = only_command(app.execute(Command::CancelSideQuestion));
-    // The question completed before the cancel committed.
     app.apply_client_update(ClientUpdate::CommandResult {
         command_id: cancel.command_id,
         result: Ok(qq_protocol::CommandReceipt {
@@ -4904,7 +4740,6 @@ fn a_receipt_after_the_terminal_update_is_not_retained_for_cancel() {
     app.composer.text = "/btw quick?".to_owned();
     let submit = only_command(press(&mut app, KeyCode::Enter));
     let side = RunId::generate().unwrap();
-    // Replayed events land first; the receipt follows a finished question.
     app.apply_client_update(side_update(
         2,
         side_item(id, side, qq_protocol::SideQuestionState::Running),
@@ -4938,14 +4773,12 @@ fn btw_new_autocomplete_leaves_the_command_for_its_question() {
             if question == "fresh start?"
     ));
 
-    // A bare `/btw-new` never opens a view that would continue the thread.
     press(&mut app, KeyCode::Esc);
     app.composer.replace("/btw-new".to_owned());
     let (_, requests) = app.submit_prompt().split();
     assert!(requests.is_empty());
     assert_eq!(app.view(), View::Transcript(Some(id)));
 
-    // `/btw` and `/ask` still open the side view on accept.
     for alias in ["/btw", "/as"] {
         press(&mut app, KeyCode::Esc);
         app.composer.replace(alias.to_owned());

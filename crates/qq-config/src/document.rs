@@ -261,19 +261,12 @@ struct ModelPatch {
     pricing: Field<ModelPricing>,
 }
 
-/// One provider entry in a configuration document. A built-in HTTP provider
-/// is written as its table row's variant (`OpenAi(api_key: ..)`) and accepts
-/// only that row's fields (ADR-0064 §2); every other kind keeps its own
-/// derived variant. The serialised form, which trust digests hash, is the
-/// externally tagged enum it has always been.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ProviderEntryPatch {
     Builtin(BuiltinEntryPatch),
     Other(OtherProviderPatch),
 }
 
-/// A built-in HTTP provider patch: the fields its row does not accept stay
-/// `Missing`, because parsing rejects them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BuiltinEntryPatch {
     provider: BuiltinProvider,
@@ -356,8 +349,6 @@ impl ProviderEntryPatch {
     }
 }
 
-/// Every variant name a provider entry accepts: each table row's, then the
-/// derived kinds'.
 static PROVIDER_PATCH_VARIANTS: std::sync::LazyLock<Vec<&'static str>> =
     std::sync::LazyLock::new(|| {
         crate::providers::BUILTIN_HTTP_PROVIDERS
@@ -462,8 +453,6 @@ impl<'de> Deserialize<'de> for ProviderEntryPatch {
     }
 }
 
-/// An enum variant whose name has already been read, replayed so a derived
-/// enum can deserialise the rest.
 struct NamedVariant<A> {
     name: String,
     access: A,
@@ -485,7 +474,6 @@ where
     }
 }
 
-/// The fields of one built-in patch, accepting only its row's.
 struct BuiltinFieldsVisitor {
     provider: BuiltinProvider,
 }
@@ -527,7 +515,6 @@ impl<'de> Visitor<'de> for BuiltinFieldsVisitor {
     }
 }
 
-/// A struct field name, read as an identifier.
 struct FieldName(String);
 
 impl<'de> Deserialize<'de> for FieldName {
@@ -556,9 +543,6 @@ impl<'de> Deserialize<'de> for FieldName {
     }
 }
 
-/// One declared MCP server. Entries replace whole declarations by name
-/// (unlike provider patches there is no per-field layering) and `Remove`
-/// deletes a server declared by an earlier layer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) enum McpServerPatch {
@@ -609,10 +593,6 @@ impl McpServerPatch {
     }
 }
 
-/// Every key a `policy` section accepts, as spelled in RON, in declaration
-/// order. The user guide must name each; the docs-truth test in the root
-/// crate reads this list, and a unit test here holds it equal to the field
-/// list the `Deserialize` derive reports.
 pub const POLICY_FIELD_NAMES: [&str; 12] = [
     "allowed_providers",
     "exposed_tools",
@@ -628,9 +608,6 @@ pub const POLICY_FIELD_NAMES: [&str; 12] = [
     "goals",
 ];
 
-/// The `policy` keys only managed and MDM sources may set; anywhere else is
-/// [`ConfigError::PolicyOutsideManaged`](crate::ConfigError). The user guide
-/// marks exactly these as administrator-only.
 pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 9] = [
     "allowed_providers",
     "denied_providers",
@@ -643,8 +620,6 @@ pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 9] = [
     "goals",
 ];
 
-/// Every top-level key a configuration document accepts, as spelled in RON,
-/// in declaration order. See [`POLICY_FIELD_NAMES`].
 pub const DOCUMENT_FIELD_NAMES: [&str; 15] = [
     "version",
     "organization",
@@ -663,10 +638,6 @@ pub const DOCUMENT_FIELD_NAMES: [&str; 15] = [
     "policy",
 ];
 
-/// Keys earlier releases accepted, each with the advice that names its
-/// replacement. A document that still sets one fails to load with that
-/// advice instead of a bare unknown-field error, so a configuration that
-/// relied on the key is never silently reinterpreted.
 pub const REMOVED_KEYS: [(&str, &str); 7] = [
     (
         "allow_tools",
@@ -705,10 +676,6 @@ pub const REMOVED_KEYS: [(&str, &str); 7] = [
     ),
 ];
 
-/// Appends the [`REMOVED_KEYS`] advice to a parse error when the document
-/// sets a removed key at the top level, in `policy`, or in a profile. The
-/// document is rescanned untyped because a profile's unknown field surfaces
-/// only as an untagged-enum mismatch.
 fn explain_removed_key(options: &Options, content: &str, message: String) -> String {
     let Ok(ron::Value::Map(document)) = options.from_str::<ron::Value>(content) else {
         return message;
@@ -742,22 +709,14 @@ pub(super) struct PolicyPatch {
     require_https: Option<bool>,
     allow_custom_providers: Option<bool>,
     allow_literal_secrets: Option<bool>,
-    /// How hard the runtime steers the model from shell habits to built-ins:
-    /// `off`, `hint` (default), or `strict` (refuse before execution).
     builtin_preference: Option<BuiltinPreference>,
-    /// Managed-only: exact tool names refused under every approval mode.
     deny_tools: Option<Vec<String>>,
     deny_shell_prefixes: Option<Vec<String>>,
-    /// Managed-only: hosts `fetch` is refused under every approval mode.
-    /// Exact lowercase host names or `*.suffix` wildcards.
     deny_hosts: Option<Vec<String>>,
     goals: Option<GoalCeilings>,
 }
 
 impl PolicyPatch {
-    /// Fields only administrator-controlled (Managed/MDM) sources may set.
-    /// [`MANAGED_ONLY_POLICY_FIELD_NAMES`] publishes the same set; a test
-    /// holds the two equal.
     fn has_managed_only_fields(&self) -> bool {
         self.allowed_providers.is_some()
             || self.denied_providers.is_some()
@@ -781,19 +740,12 @@ pub(super) struct Document {
     model: StringField,
     #[serde(default, skip_serializing_if = "StringField::is_missing")]
     worker_model: StringField,
-    /// Delegation roster and bounds. Replaces the whole section when set;
-    /// `Clear` drops what an earlier layer declared.
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     delegation: Field<DelegationPatch>,
-    /// Final-answer audit settings. Replaces the whole section when set.
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     audit: Field<AuditPatch>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     goals: Field<GoalsPatch>,
-    /// Seconds a held call may wait for a client before the server denies it.
-    /// Missing is no server deadline: interactive holds wait for the client,
-    /// the run deadline, or cancellation. Not trust-gated: it can only make
-    /// a hold end sooner, never widen what runs.
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     approval_timeout_seconds: Field<u64>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
@@ -806,17 +758,12 @@ pub(super) struct Document {
     mcp: Field<UniqueMap<String, McpServerPatch>>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     profiles: Field<UniqueMap<String, ProfilePatch>>,
-    /// Explicitly declared agent packs by id: a directory containing
-    /// `pack.ron`, or `Remove` to drop a pack an earlier layer declared or
-    /// discovered.
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     packs: Field<UniqueMap<String, PackPatch>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     policy: Option<PolicyPatch>,
 }
 
-/// The `delegation` section as declared. Validated against providers, policy,
-/// and the runtime bounds when layers are merged.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct DelegationPatch {
@@ -841,7 +788,6 @@ struct DelegationEntryPatch {
     role: DelegationRole,
     #[serde(default)]
     note: Option<String>,
-    /// Effort children on this entry run at; absent derives from the role.
     #[serde(default)]
     effort: Option<qq_provider::ReasoningEffort>,
 }
@@ -849,17 +795,10 @@ struct DelegationEntryPatch {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) enum PackPatch {
-    Pack {
-        /// Pack directory, absolute or relative to the declaring file.
-        path: String,
-    },
+    Pack { path: String },
     Remove,
 }
 
-/// One named agent profile: a bundle of per-session defaults selected by
-/// name at session creation. Entries replace whole declarations by name and
-/// `Remove` deletes a profile declared by an earlier layer. `default` is
-/// implicit (the top-level values) and may not be declared.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 enum ProfilePatch {
@@ -921,8 +860,6 @@ impl Document {
                 origin: origin.clone(),
             });
         }
-        // MCP declarations name commands to execute and endpoints to call;
-        // remote configuration may never plant them.
         if origin.kind() == SourceKind::Remote && self.mcp.is_present() {
             return Err(ConfigError::RemoteMcpForbidden {
                 origin: origin.clone(),
@@ -954,8 +891,6 @@ impl Document {
             || self.packs.is_present()
     }
 
-    /// The sensitive sections this document declares, by configuration key,
-    /// in document order. What `qq trust` shows the user before they accept.
     pub(super) fn sensitive_sections(&self) -> Vec<&'static str> {
         let mut sections = Vec::new();
         if self.organization.is_present() {
@@ -994,8 +929,6 @@ impl Document {
         sections
     }
 
-    /// Explicit pack declarations, for the loader to resolve against the
-    /// declaring file's directory.
     pub(super) const fn packs(&self) -> &Field<UniqueMap<String, PackPatch>> {
         &self.packs
     }
@@ -1159,8 +1092,6 @@ impl Document {
 
 const MAX_MCP_SERVER_NAME_BYTES: usize = 64;
 
-/// Server names must keep the `mcp__<server>__<tool>` grammar unambiguous:
-/// ASCII letters, digits, hyphens, or underscores, and never `__`.
 fn valid_mcp_server_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_MCP_SERVER_NAME_BYTES
@@ -1170,12 +1101,8 @@ fn valid_mcp_server_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-/// Hex length of a SHA-256 tool-set digest as `qq-mcp` prints it.
 pub(crate) const MCP_TOOL_SET_PIN_HEX_LEN: usize = 64;
 
-/// A pin is exactly the digest `qq-mcp` reports for a listing: 64 lowercase
-/// hex digits. Checked at load so a typo fails the document rather than
-/// quarantining the server at first use.
 fn valid_mcp_tool_set_pin(pin: &str) -> bool {
     pin.len() == MCP_TOOL_SET_PIN_HEX_LEN
         && pin
@@ -1293,8 +1220,6 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
             if let Err(message) = validate_tool_name(name) {
                 return Err(invalid(format!("policy field exposed_tools: {message}")));
             }
-            // Configuration cannot depend on the runtime. A root contract
-            // test binds this fixed vocabulary to the actual static catalog.
             if !matches!(
                 name.as_str(),
                 "read_file"
@@ -1391,10 +1316,6 @@ fn validate_rule_value(value: &str, shape: RuleShape) -> Result<(), String> {
     }
 }
 
-/// Host rules are lowercase DNS names (`docs.rs`) or one leading wildcard
-/// label (`*.github.com`) matching any subdomain but not the apex. No
-/// scheme, port, path, or IP literal: a rule names a site, and the SSRF
-/// rules judge addresses at fetch time.
 fn validate_host(host: &str) -> Result<(), String> {
     if host.is_empty() || host.len() > MAX_HOST_BYTES {
         return Err(format!("host {host:?} must be 1-{MAX_HOST_BYTES} bytes"));
@@ -1429,10 +1350,6 @@ fn validate_host(host: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Tool names follow tool declaration names: 1-128 bytes of ASCII letters,
-/// digits, hyphens, or underscores. Names starting with `mcp__` must complete
-/// the `mcp__<server>__<tool>` grammar, with the server segment obeying the
-/// MCP server-name rules.
 fn validate_tool_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > MAX_TOOL_NAME_BYTES {
         return Err(format!(
@@ -1460,9 +1377,6 @@ fn validate_tool_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Shell prefixes are matched at word granularity, so they must be
-/// non-empty, contain no control characters, and carry no surrounding
-/// whitespace.
 fn validate_shell_prefix(prefix: &str) -> Result<(), String> {
     if prefix.trim().is_empty() {
         return Err("shell prefix must not be empty".to_owned());
@@ -1498,7 +1412,6 @@ pub(super) struct MergeState {
     providers: BTreeMap<String, ProviderConfig>,
     mcp: BTreeMap<String, McpServerConfig>,
     profiles: BTreeMap<String, AgentProfileConfig>,
-    /// Packs admitted so far, by id. Later layers replace or remove by id.
     packs: BTreeMap<String, crate::pack::AgentPack>,
     policy: EffectivePolicy,
     provenance: ConfigProvenance,
@@ -1577,8 +1490,6 @@ impl MergeState {
             &mut self.max_output_tokens,
             DEFAULT_MAX_OUTPUT_TOKENS,
         );
-        // `Clear` restores the compiled default; that is not a chosen cap, so
-        // its provenance is the compiled one again, not the clearing layer.
         match document.max_output_tokens {
             Field::Missing => {}
             Field::Set(_) => self.provenance.max_output_tokens = Some(source.clone()),
@@ -1589,8 +1500,6 @@ impl MergeState {
                 ));
             }
         }
-        // A shorter approval wait adds no authority; it applies from any
-        // layer, trusted or not, like `max_output_tokens`.
         match document.approval_timeout_seconds {
             Field::Missing => {}
             Field::Set(seconds) => self.approval_timeout_seconds = Some(seconds),
@@ -1599,8 +1508,6 @@ impl MergeState {
         if document.approval_timeout_seconds.is_present() {
             self.provenance.approval_timeout = Some(source.clone());
         }
-        // Narrowing exposure adds no authority, even when another field in
-        // this document still requires workspace trust.
         if let Some(incoming) = document
             .policy
             .as_ref()
@@ -1687,7 +1594,6 @@ impl MergeState {
         }
     }
 
-    /// Adds or replaces a discovered or explicitly declared pack.
     pub(super) fn admit_pack(&mut self, pack: crate::pack::AgentPack) {
         self.provenance
             .packs
@@ -1820,8 +1726,6 @@ impl MergeState {
                 else {
                     unreachable!("built-in HTTP presets use a built-in credential")
                 };
-                // Fields the row does not accept were rejected at parse time,
-                // so they are `Missing` here and change nothing.
                 apply_optional(&patch.api_key, api_key);
                 apply_optional_string(&patch.profile, profile);
                 apply_models(&patch.models, provider.models_mut());
@@ -2010,12 +1914,9 @@ impl MergeState {
         if let Some(incoming) = patch.allow_literal_secrets {
             self.policy.allow_literal_secrets &= incoming;
         }
-        // Later layers may only tighten the preference: `hint` over `off`,
-        // `strict` over either. A managed source that says strict wins.
         if let Some(incoming) = patch.builtin_preference {
             self.policy.builtin_preference = self.policy.builtin_preference.max(incoming);
         }
-        // Denies are monotonic across layers, like denied_providers.
         if let Some(incoming) = &patch.deny_tools {
             let mut combined: BTreeSet<_> = self.policy.deny_tools.iter().cloned().collect();
             combined.extend(incoming.iter().cloned());
@@ -2028,22 +1929,11 @@ impl MergeState {
         }
     }
 
-    /// Everything the loader validates except the model requirement. The
-    /// model, when present, is parsed and policy-checked; only its absence
-    /// is tolerated. Interactive clients start from this so they can open
-    /// and ask for a model instead of exiting; headless paths call
-    /// [`ClientSnapshot::require_model`] on the result.
     pub(super) fn finish_for_client(
         mut self,
         reports: Vec<SourceReport>,
         sources: ConfigSources,
     ) -> Result<ClientSnapshot, ConfigError> {
-        // Packs contribute beneath the configuration: their MCP servers join
-        // where the configuration declared none of that name, and their
-        // profiles join where no configured profile claims the name. Two
-        // packs claiming one profile name is an error rather than a silent
-        // winner; a configured profile shadowing a pack profile is allowed
-        // because the configuration is the operator's override lane.
         let mut pack_profiles: BTreeMap<String, (String, AgentProfileConfig)> = BTreeMap::new();
         for (pack_id, pack) in &self.packs {
             for (name, patch) in pack.mcp() {
@@ -2051,8 +1941,6 @@ impl MergeState {
                     let mut patched = BTreeMap::new();
                     patched.insert(name.clone(), patch.clone());
                     let field = Field::Set(UniqueMap(patched));
-                    // Reuse the ordinary MCP application so validation and
-                    // defaults are identical to config-declared servers.
                     let mut scratch = std::mem::take(&mut self.mcp);
                     apply_mcp_into(&mut scratch, &field);
                     self.mcp = scratch;
@@ -2089,9 +1977,6 @@ impl MergeState {
             self.profiles.insert(name.clone(), profile);
             self.provenance.profiles.insert(name, source);
         }
-        // The model requirement is enforced last (below) so that a document
-        // without one still has every other rule checked; `ConfigLoader::check`
-        // relies on `ModelRequired` meaning "valid apart from the selection".
         let model = self.model.map(ModelRoute::parse).transpose()?;
         let worker_model = self.worker_model.map(ModelRoute::parse).transpose()?;
         for route in model.iter().chain(worker_model.as_ref()) {
@@ -2106,13 +1991,8 @@ impl MergeState {
             )?;
         }
         if model.is_none() {
-            // Provider-level policy (custom endpoints, literal secrets, HTTPS,
-            // the output cap) applies whether or not a route selects them.
             enforce_policy(&self.policy, None, self.max_output_tokens, &self.providers)?;
         }
-        // The roster is validated route by route exactly like `model`. Without
-        // a declared section, a legacy `worker_model` is the one-entry
-        // balanced roster so existing configurations keep delegating.
         let delegation = match self.delegation.take() {
             Some(patch) => {
                 if patch.roster.len() > MAX_DELEGATION_ROSTER {
@@ -2162,10 +2042,6 @@ impl MergeState {
                         effort: entry.effort,
                     });
                 }
-                // `max_depth: 0` disables delegation entirely: no run receives
-                // `spawn_agent`. It is the control arm of every delegation
-                // experiment, so it is a real setting rather than a roster-less
-                // workaround.
                 let max_depth = patch.max_depth.unwrap_or(1);
                 if max_depth > MAX_DELEGATION_DEPTH {
                     return Err(ConfigError::InvalidDelegation(format!(
@@ -2200,10 +2076,6 @@ impl MergeState {
                 ..DelegationConfig::default()
             },
         };
-        // Profiles are validated like the top-level selection: a well-formed
-        // name, a parseable route on a configured provider, and a policy-
-        // permitted cap. `default` names the implicit profile and cannot be
-        // declared, so the two never disagree.
         for (name, profile) in &self.profiles {
             if name == "default"
                 || name.is_empty()
@@ -2232,7 +2104,6 @@ impl MergeState {
             } else if let Some(cap) = profile.max_output_tokens {
                 enforce_policy(&self.policy, model.as_ref(), cap, &self.providers)?;
             }
-            // A pack profile that names MCP servers must name declared ones.
             if let Some(reference) = &profile.pack
                 && let Some(servers) = reference.profile.mcp()
             {
@@ -2264,9 +2135,6 @@ impl MergeState {
             }
             None => AuditConfig::default(),
         };
-        // Every other rule has passed by this point, so `ModelRequired` is the
-        // only error a model-less but otherwise valid document can produce
-        // from `require_model`.
         let approval_timeout = match self.approval_timeout_seconds {
             None => None,
             Some(0) => {
@@ -2306,8 +2174,6 @@ impl MergeState {
 }
 
 impl ClientSnapshot {
-    /// Promotes to the full snapshot every headless path requires, failing
-    /// with [`ConfigError::ModelRequired`] when no model was configured.
     pub(super) fn require_model(self, global_config: &Path) -> Result<ConfigSnapshot, ConfigError> {
         let Some(model) = self.model else {
             return Err(ConfigError::ModelRequired {

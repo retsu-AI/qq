@@ -1,5 +1,3 @@
-//! OpenAI-compatible Chat Completions API adapter.
-
 use std::{borrow::Cow, sync::Arc};
 
 use async_stream::try_stream;
@@ -38,22 +36,17 @@ const SSE_SPEC: SseExchangeSpec = SseExchangeSpec {
     content_type_gate: ContentTypeGate::Strict,
 };
 
-/// A client for OpenAI-compatible Chat Completions endpoints.
 pub(crate) struct OpenAiChatCompletions {
     pub(crate) exchange: HttpExchange,
     endpoint: reqwest::Url,
     headers: Arc<HeaderMap>,
-    /// Sends the request's cache key as xAI's `x-grok-conv-id`.
     grok_conversation: bool,
 }
 
-/// The header xAI routes a conversation's requests to one cache by.
 const GROK_CONVERSATION_ID: HeaderName = HeaderName::from_static("x-grok-conv-id");
 
 #[cfg(test)]
 impl OpenAiChatCompletions {
-    /// One attempt per request, so a scripted single-response server is
-    /// observed exactly once.
     fn single_shot(mut self) -> Self {
         self.exchange
             .set_attempt_policy(crate::http::AttemptPolicy::disabled());
@@ -62,7 +55,6 @@ impl OpenAiChatCompletions {
 }
 
 impl OpenAiChatCompletions {
-    /// Creates a client for OpenAI's standard Chat Completions endpoint.
     #[cfg(test)]
     pub(crate) fn new(api_key: &str) -> Result<Self, ProviderError> {
         Self::with_endpoint(
@@ -73,10 +65,6 @@ impl OpenAiChatCompletions {
         )
     }
 
-    /// Creates a client for an exact OpenAI-compatible endpoint URL.
-    ///
-    /// Plain HTTP is accepted only when `allow_http` is true and the URL host is
-    /// loopback. Header names and values are validated while constructing the client.
     #[cfg(test)]
     pub(crate) fn with_endpoint(
         endpoint: &str,
@@ -114,7 +102,6 @@ impl OpenAiChatCompletions {
         })
     }
 
-    /// Sends each request's cache key as `x-grok-conv-id`, when it has one.
     #[must_use]
     pub(crate) fn with_grok_conversation(mut self, enabled: bool) -> Self {
         self.grok_conversation = enabled;
@@ -164,22 +151,12 @@ impl Provider for OpenAiChatCompletions {
                 let mut usage = UsageOnce::new(
                     "OpenAI-compatible stream reported usage more than once",
                 );
-                // Maps streamed tool-call array indexes to call ids so argument
-                // fragments and the finish reason can be attributed after the
-                // first fragment.
                 let mut tool_calls = ToolCallLedger::new(
                     "OpenAI-compatible stream reused a tool-call index",
                     "OpenAI-compatible stream sent arguments for an unknown tool call",
                 );
 
-                // A `length` finish reason arrives before the usage chunk and
-                // `[DONE]`; remember it so the terminal event still carries usage.
                 let mut incomplete = None;
-                // Gateways stream exposed thinking as `delta.reasoning_content`
-                // (LiteLLM, DeepSeek, vLLM) or `delta.reasoning` (OpenRouter)
-                // with no block framing;
-                // the first fragment opens one block, the first visible delta,
-                // finish reason, or `[DONE]` closes it.
                 let mut reasoning_open = false;
 
                 while let Some(event) = sse.next_event().await? {
@@ -289,8 +266,6 @@ pub(crate) struct ChatCompletionsRequest<'a> {
 impl<'a> From<&'a ModelRequest> for ChatCompletionsRequest<'a> {
     fn from(request: &'a ModelRequest) -> Self {
         let mut messages = Vec::with_capacity(request.messages().len() + 1);
-        // Chat Completions has no dedicated instructions slot; the system
-        // prompt travels as the leading system-role message.
         if let Some(system) = request.system() {
             messages.push(ChatMessage {
                 role: ChatRole::System,
@@ -330,13 +305,6 @@ fn effort_string(effort: crate::ReasoningEffort) -> &'static str {
     }
 }
 
-/// Appends the wire messages for one provider-neutral message.
-///
-/// Chat Completions has no multi-result message, so each `ToolResult` block
-/// becomes its own `tool`-role message; `is_error` has no wire field because
-/// the runtime frames errors inside the result content. Any remaining text and
-/// tool calls follow as one message so a lone text block keeps its legacy
-/// plain-string shape.
 fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage<'a>>) {
     let role = match message.role() {
         Role::User => ChatRole::User,
@@ -428,7 +396,6 @@ enum ChatToolCall<'a> {
 #[derive(Serialize)]
 struct ChatFunctionCall<'a> {
     name: &'a str,
-    /// Chat Completions carries tool arguments as a JSON-encoded string.
     arguments: &'a str,
 }
 
@@ -505,11 +472,6 @@ struct ChatChoice {
 struct ChatDelta {
     content: Option<String>,
     refusal: Option<String>,
-    /// Exposed thinking on OpenAI-compatible gateways. Not an OpenAI field;
-    /// absent from OpenAI's own responses. LiteLLM, DeepSeek and vLLM spell
-    /// it `reasoning_content`; OpenRouter's normalized stream spells it
-    /// `reasoning`. A gateway sends one or the other, never both with
-    /// different text; `reasoning_content` wins if both are present.
     reasoning_content: Option<String>,
     reasoning: Option<String>,
     #[serde(default)]
@@ -559,8 +521,6 @@ enum DecodedDelta {
         json: String,
     },
     ToolCallsFinished,
-    /// The choice stopped short for a recoverable reason; the stream still
-    /// runs to `[DONE]` so trailing usage is captured.
     Incomplete(IncompleteReason),
     TerminalError(ProviderError),
 }
@@ -601,8 +561,6 @@ fn decode_event(data: &str, redactions: &[String]) -> Result<DecodedChunk, Provi
             deltas.push(DecodedDelta::Refusal(text));
         }
         for tool_call in choice.delta.tool_calls {
-            // The first fragment of a call carries `id` and `function.name`;
-            // later fragments carry only `function.arguments`.
             if let Some(id) = tool_call.id {
                 let Some(name) = tool_call.function.name else {
                     return Err(ProviderError::Protocol(
@@ -926,9 +884,6 @@ mod tests {
 
     #[test]
     fn decodes_gateway_reasoning_content_ahead_of_visible_content() {
-        // LiteLLM/DeepSeek/vLLM stream exposed thinking as
-        // `reasoning_content`; dropping it made an all-thinking turn look
-        // empty (RR8.2).
         let deltas = decode_event(
             r#"{"choices":[{"delta":{"reasoning_content":"Let me check","content":"Done."}}]}"#,
             &[],
@@ -940,7 +895,6 @@ mod tests {
             [DecodedDelta::Reasoning(reasoning), DecodedDelta::OutputText(text)]
                 if reasoning == "Let me check" && text == "Done."
         ));
-        // OpenRouter's normalized stream spells the same field `reasoning`.
         let openrouter = decode_event(
             r#"{"choices":[{"delta":{"reasoning":"Hmm","content":null}}]}"#,
             &[],
@@ -1153,7 +1107,6 @@ mod tests {
         assert_eq!(body["tool_choice"], "none");
         assert_eq!(body["tools"][0]["function"]["name"], "read_file");
 
-        // Auto, and None without declared tools, keep today's wire shape.
         let auto =
             ModelRequest::new("chat-test", vec![Message::user("ping")], 64).with_tools(tools);
         let body = serde_json::to_value(ChatCompletionsRequest::from(&auto)).unwrap();
@@ -1177,8 +1130,6 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
     }
 
-    /// xAI routes a conversation's requests to one cache by `x-grok-conv-id`;
-    /// other Chat Completions endpoints never see the header.
     #[tokio::test]
     async fn the_cache_key_is_sent_as_the_grok_conversation_only_when_enabled() {
         let body = concat!(
@@ -1390,9 +1341,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_all_reasoning_turn_cut_at_length_closes_its_block_before_incomplete() {
-        // The audited failure shape: 16 384 tokens of thinking, `length`, no
-        // visible output. The runtime must see the reasoning, then the
-        // truncation, never an unclosed block.
         let body = concat!(
             "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"deep thoughts\"}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",

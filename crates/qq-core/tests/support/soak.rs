@@ -1,5 +1,3 @@
-//! Test-only public-API fixture shared by the AC0 soak and its benchmark.
-
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -49,26 +47,20 @@ pub struct Script {
     pub truncate_at: Vec<usize>,
     pub fault_at: Option<usize>,
     pub fault_attempts: usize,
-    /// Summarizer requests answered with a 529 before one succeeds.
     pub summary_faults: usize,
-    /// HTTP status of each scripted summarizer fault.
     pub summary_fault_status: u16,
     pub summary_fault_after_output: bool,
-    /// One measured call-bearing summarizer turn before a later fault.
     pub summary_prefix: Option<SummaryPrefix>,
     pub summary_hang_after_prefix: bool,
     pub pricing: Option<qq_protocol::ModelPricing>,
-    /// Backoff between turn and summarizer retries.
     pub retry_delay: Duration,
     pub empty_checkpoint: bool,
     pub repeat_arguments: bool,
     pub stall_after: Option<usize>,
     pub journal: Option<PathBuf>,
     pub hold_result: bool,
-    /// Visible text streamed with each work turn's calls, in bytes.
     pub text_bytes: usize,
     pub work_usage: Option<qq_provider::ProviderUsage>,
-    /// Deterministic request-sized usage so measured context still grows.
     pub measure_work_usage: bool,
     pub summary_usage: Option<qq_provider::ProviderUsage>,
 }
@@ -134,8 +126,6 @@ impl Provider for ScriptedProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
         let mut observed = self.observed.lock().expect("fixture observations");
         observed.provider_requests += 1;
-        // The instruction remains in summarizer continuations and rejected
-        // call replies. Ordinary prompt history never includes it.
         let summarizing = request.messages().iter().any(|message| {
             message.content().iter().any(|block| {
                 matches!(block, qq_provider::ContentBlock::Text { text }
@@ -207,9 +197,6 @@ impl Provider for ScriptedProvider {
                 self.script.summary_usage,
             );
         }
-        // The checkpoint's report notice is the request's last message
-        // (ADR-0054 § 2); earlier notices stay in history, so only the last
-        // message identifies the checkpoint turn.
         if request.messages().last().is_some_and(|message| {
             message.content().iter().any(|block| {
                 matches!(block, qq_provider::ContentBlock::Text { text }
@@ -269,9 +256,6 @@ impl Provider for ScriptedProvider {
             );
         }
         observed.work_turns += 1;
-        // This fixture has no interleaved prompts or specification edits:
-        // the initial or post-summary goal atom is in the first two messages.
-        // Inspect both prefixes in both modes, never the growing history.
         let mut has_goal = false;
         for message in request.messages().iter().take(2) {
             has_goal |= matches!(message.content().first(),
@@ -760,12 +744,9 @@ pub struct Report {
     pub duplicate_sequences: usize,
     pub durable_calls: usize,
     pub compactions: usize,
-    /// `run_turn_retrying` events for the prompt run.
     pub turn_retries: usize,
-    /// Internal (compaction) runs started and finished in the session.
     pub step_runs_started: usize,
     pub step_runs_finished: usize,
-    /// Scripted summarizer faults the provider actually served.
     pub summarizer_faults: usize,
     pub persisted_event_bytes: u64,
     pub baseline_rss_bytes: Option<u64>,

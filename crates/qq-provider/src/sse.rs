@@ -23,37 +23,19 @@ enum SseMode {
     Named(Utf8ErrorMessage),
 }
 
-/// One dispatched SSE event. `data` is the joined `data:` lines; the adapter
-/// parses it once and drops it, so it is the event's only allocation.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct SseEvent {
     pub(crate) name: Option<String>,
     pub(crate) data: String,
 }
 
-/// Frames a `text/event-stream` body into events.
-///
-/// `push` scans each chunk for line ends once, so the cost is one pass over
-/// the bytes plus one `String` per dispatched event: a line that ends inside
-/// the chunk is parsed in place from the chunk, and only the tail of a line
-/// that a chunk boundary splits is buffered (`partial`). The event's `data`
-/// accumulates in one reusable buffer across its lines; `event` and `id`
-/// fields are recognized, other fields and comments are skipped per the SSE
-/// specification. CRLF, CR, and LF line ends and a leading UTF-8 BOM are
-/// accepted. The per-event size bound counts every non-terminator byte of
-/// the event so an oversized event is refused before its terminator.
 pub(crate) struct SseDecoder {
-    /// Bytes of a line split by a chunk boundary, waiting for its end.
     partial: Vec<u8>,
-    /// Joined `data:` lines of the event being assembled, `\n`-separated.
     data: Vec<u8>,
     event_name: Option<String>,
-    /// Non-terminator bytes seen in the current event, for the size bound.
     event_bytes: usize,
     max_event_bytes: usize,
-    /// The previous byte was `\r`: a following `\n` belongs to it.
     skip_line_feed: bool,
-    /// The stream's first bytes have not yet been checked for a BOM.
     at_start: bool,
     mode: SseMode,
     size_overflow: &'static str,
@@ -115,18 +97,12 @@ impl SseDecoder {
         }
     }
 
-    /// Frames every complete event in `bytes` (including one completed by
-    /// bytes buffered from earlier chunks). The events are appended to
-    /// `events` in stream order.
     pub(crate) fn push_into(
         &mut self,
         mut bytes: &[u8],
         events: &mut Vec<SseEvent>,
     ) -> Result<(), ProviderError> {
         if self.at_start {
-            // The BOM may itself straddle chunks: hold back bytes while they
-            // are a BOM prefix. Held bytes that turn out not to be a BOM are
-            // ordinary line bytes and are re-fed below.
             let held = self.partial.len();
             let take = (3 - held).min(bytes.len());
             self.partial.extend_from_slice(&bytes[..take]);
@@ -172,8 +148,6 @@ impl SseDecoder {
             if self.partial.is_empty() {
                 self.line(line_tail, events)?;
             } else {
-                // A line the previous chunk began: complete it in the
-                // buffer, parse, and release the buffer for the next split.
                 let mut line = std::mem::take(&mut self.partial);
                 line.extend_from_slice(line_tail);
                 let result = self.line(&line, events);
@@ -185,7 +159,6 @@ impl SseDecoder {
         Ok(())
     }
 
-    /// `push_into` collecting into a fresh vector.
     #[cfg(test)]
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Vec<SseEvent>, ProviderError> {
         let mut events = Vec::new();
@@ -212,8 +185,6 @@ impl SseDecoder {
                 return Ok(());
             }
             self.data.pop();
-            // Moving the buffer out hands its allocation to the event; the
-            // event's `data` is the one allocation it costs.
             let data = String::from_utf8(std::mem::take(&mut self.data))
                 .map_err(|error| self.data_utf8.into_provider_error(error))?;
             events.push(SseEvent { name, data });
@@ -300,8 +271,6 @@ mod tests {
         assert_eq!(events, expected(false));
     }
 
-    /// Every split point of the source into two chunks, and every chunk size
-    /// from 1 to the whole body, frames identically to one push.
     #[test]
     fn framing_is_independent_of_chunk_boundaries() {
         let whole = SseDecoder::named(1_024, OVERFLOW, LIMIT, DATA_UTF8, NAME_UTF8)
@@ -340,9 +309,6 @@ mod tests {
         let events = decoder.push(b"ta: y\n\n").unwrap();
         assert_eq!(events[0].data, "y");
 
-        // A BOM prefix that turns out not to be one: the held bytes are
-        // line bytes. "\xef\xbbdata" is an unknown field, so that line is
-        // skipped and nothing dispatches; the next event does.
         let mut decoder = SseDecoder::data_only(1_024, OVERFLOW, LIMIT, DATA_UTF8);
         assert!(decoder.push(b"\xef\xbb").unwrap().is_empty());
         assert!(decoder.push(b"data: z\n\n").unwrap().is_empty());
@@ -390,7 +356,6 @@ mod tests {
             "provider stream was invalid: event exceeded size limit"
         );
 
-        // The bound spans lines of one event and resets per event.
         let mut decoder = SseDecoder::data_only(12, OVERFLOW, LIMIT, DATA_UTF8);
         assert!(decoder.push(b"data: abc\ndat").unwrap().is_empty());
         assert!(

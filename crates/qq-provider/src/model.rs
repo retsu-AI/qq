@@ -1,17 +1,9 @@
-//! Provider-neutral request, event, usage, and error vocabulary.
-
 use std::sync::{Arc, OnceLock};
 
 use qq_reasoning::{ReasoningEffort, ReasoningKind};
 use serde_json::value::RawValue;
 use thiserror::Error;
 
-/// A provider-neutral model generation request.
-///
-/// The transcript is shared with its owner: a run holds the same messages
-/// across turns and appends to them, so the request borrows the list by
-/// reference count and the per-attempt clone every adapter performs inside
-/// its restart loop copies nothing. Cloning a request is cheap.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelRequest {
     model: Arc<str>,
@@ -24,21 +16,10 @@ pub struct ModelRequest {
     cache_key: Option<Arc<str>>,
 }
 
-/// Whether the model may call the declared tools on this request.
-///
-/// A turn that must answer in text keeps its tools *declared* and sets
-/// `None`, instead of dropping the declarations: an unchanged tool list
-/// keeps the provider's cached prefix and the history's native tool blocks
-/// (Bedrock Converse accepts those only alongside a tool configuration). The choice is a
-/// request to the model, not a guarantee: Bedrock Converse has no "none"
-/// choice and sends the tools unchanged, so a caller that must not run tools
-/// on such a turn still rejects any call it makes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ToolChoice {
-    /// The model decides whether to call a tool.
     #[default]
     Auto,
-    /// The model should answer without calling a tool.
     None,
 }
 
@@ -61,10 +42,6 @@ impl ModelRequest {
         }
     }
 
-    /// Names the conversation this request continues, so a provider that
-    /// routes requests by key (OpenAI's `prompt_cache_key`) sends every turn
-    /// of it to the machine that holds its cached prefix. Adapters without
-    /// such routing ignore it. It is a stable identifier, never a secret.
     #[must_use]
     pub fn with_cache_key(mut self, key: impl Into<Arc<str>>) -> Self {
         self.cache_key = Some(key.into());
@@ -76,9 +53,6 @@ impl ModelRequest {
         self.cache_key.as_deref()
     }
 
-    /// Asks the model not to call the declared tools on this request; see
-    /// [`ToolChoice`]. Without declared tools the choice is moot and no
-    /// codec sends it.
     #[must_use]
     pub const fn with_tool_choice(mut self, choice: ToolChoice) -> Self {
         self.tool_choice = choice;
@@ -90,24 +64,16 @@ impl ModelRequest {
         self.tool_choice
     }
 
-    /// Whether a codec should send its "no tool calls" choice: tools are
-    /// declared and the request asks for none.
     pub(crate) fn tools_disabled(&self) -> bool {
         self.tool_choice == ToolChoice::None && !self.tools.is_empty()
     }
 
-    /// Declares the tools the model may call during this request. The list
-    /// is shared, not copied: a run declares the same catalog on every turn
-    /// and only the request carrying it is per-turn.
     #[must_use]
     pub fn with_tools(mut self, tools: impl Into<Arc<[ToolSpec]>>) -> Self {
         self.tools = tools.into();
         self
     }
 
-    /// Sets the system prompt; each codec maps it to its native
-    /// system/instructions slot. Requests without one keep their previous
-    /// wire shape.
     #[must_use]
     pub fn with_system(mut self, system: impl Into<Arc<str>>) -> Self {
         self.system = Some(system.into());
@@ -124,8 +90,6 @@ impl ModelRequest {
         &self.messages
     }
 
-    /// The shared transcript handle, for a caller that appends to the same
-    /// list after this request completes without copying it.
     #[must_use]
     pub fn shared_messages(&self) -> &Arc<Vec<Message>> {
         &self.messages
@@ -146,8 +110,6 @@ impl ModelRequest {
         self.max_output_tokens
     }
 
-    /// Requests a provider-native reasoning effort. The selected adapter
-    /// validates whether it can encode the value before transport.
     #[must_use]
     pub const fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
         self.reasoning_effort = match effort {
@@ -162,8 +124,6 @@ impl ModelRequest {
         self.reasoning_effort
     }
 
-    /// Returns a configuration error for an adapter that cannot encode effort.
-    /// This guard runs before transport or request-time credential authorization.
     pub(crate) fn unsupported_reasoning_effort(&self, adapter: &str) -> Option<ProviderError> {
         self.reasoning_effort.map(|effort| {
             ProviderError::Configuration(format!(
@@ -172,9 +132,6 @@ impl ModelRequest {
         })
     }
 
-    /// A lower bound on the encoded request body, from the payload bytes the
-    /// wire codecs embed verbatim plus fixed per-item framing. Used to size
-    /// the body buffer once instead of doubling through a megabyte.
     #[must_use]
     pub fn wire_size_hint(&self) -> usize {
         const MESSAGE_FRAMING: usize = 32;
@@ -211,13 +168,6 @@ impl ModelRequest {
     }
 }
 
-/// A tool the model may call, described provider-neutrally.
-///
-/// Specs are immutable once built and travel with every request, catalog,
-/// and plan, so the payload is shared: cloning is a reference count bump,
-/// never a deep copy of the schema. The schema is kept in its compact JSON
-/// encoding: every request writes it verbatim, so nothing is re-serialized
-/// per turn, and its byte length is the wire cost.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolSpec {
     inner: Arc<ToolSpecInner>,
@@ -228,15 +178,9 @@ struct ToolSpecInner {
     name: String,
     description: String,
     input_schema: Box<RawValue>,
-    // Gemini's `Schema` is a restricted OpenAPI subset that rejects unknown
-    // JSON Schema keywords with HTTP 400. The reduced form is derived from
-    // `input_schema` on the first Google request and cached so the encode
-    // hot path stays parse-free; it is never part of equality.
     gemini_schema: OnceLock<Box<RawValue>>,
 }
 
-// `RawValue` has no `PartialEq`; two schemas are equal when their compact
-// encodings are, which is exact for text `serde_json` produced (sorted keys).
 impl PartialEq for ToolSpecInner {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
@@ -245,8 +189,6 @@ impl PartialEq for ToolSpecInner {
     }
 }
 
-/// JSON Schema keywords absent from Gemini's `Schema`; any of these anywhere
-/// in a tool's parameters fails the whole request.
 const GEMINI_UNSUPPORTED_SCHEMA_KEYWORDS: &[&str] = &[
     "additionalProperties",
     "$schema",
@@ -275,10 +217,6 @@ const GEMINI_UNSUPPORTED_SCHEMA_KEYWORDS: &[&str] = &[
     "deprecated",
 ];
 
-/// Removes every unsupported keyword from a schema and from the schemas it
-/// nests under `properties`, `items`, and `anyOf`. Keys of the `properties`
-/// map are property names, not keywords, so they are never removed; values
-/// such as `default`, `enum`, and `example` are data and left untouched.
 fn strip_gemini_unsupported_keywords(schema: &mut serde_json::Value) {
     let serde_json::Value::Object(object) = schema else {
         return;
@@ -317,15 +255,11 @@ impl ToolSpec {
         description: impl Into<String>,
         input_schema: serde_json::Value,
     ) -> Self {
-        // A `Value` always has a JSON encoding; `to_raw_value` fails only on
-        // a non-string map key, which `Value` cannot hold.
         let input_schema = serde_json::value::to_raw_value(&input_schema)
             .expect("a serde_json::Value always encodes as JSON");
         Self::from_raw(name, description, input_schema)
     }
 
-    /// A spec whose schema is already compact JSON text (an MCP server's
-    /// declaration, a persisted catalog entry). No parse, no re-encode.
     #[must_use]
     pub fn from_raw(
         name: impl Into<String>,
@@ -352,35 +286,26 @@ impl ToolSpec {
         &self.inner.description
     }
 
-    /// The schema as compact JSON. Serializes verbatim; `.get()` is the text.
     #[must_use]
     pub fn input_schema(&self) -> &RawValue {
         &self.inner.input_schema
     }
 
-    /// The schema reduced to Gemini's `Schema` subset, computed once per spec
-    /// and shared by every clone. Only the Google codec consumes this; every
-    /// other provider keeps `input_schema` verbatim.
     pub(crate) fn gemini_parameters(&self) -> &RawValue {
         self.inner.gemini_schema.get_or_init(|| {
             let original = self.inner.input_schema.get();
             match serde_json::from_str::<serde_json::Value>(original) {
                 Ok(mut schema) => {
                     strip_gemini_unsupported_keywords(&mut schema);
-                    // A `Value` always has a JSON encoding (see `ToolSpec::new`).
                     serde_json::value::to_raw_value(&schema)
                         .expect("a serde_json::Value always encodes as JSON")
                 }
-                // `from_raw` accepted a `RawValue`, which `serde_json` already
-                // validated as JSON; an unparsable schema cannot be improved
-                // here, so send it as declared and let the provider report it.
                 Err(_) => self.inner.input_schema.clone(),
             }
         })
     }
 }
 
-/// A message in model context, holding ordered content blocks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     role: Role,
@@ -398,7 +323,6 @@ impl Message {
         }
     }
 
-    /// A user message with one text block.
     #[must_use]
     pub fn user(content: impl Into<String>) -> Self {
         Self {
@@ -410,7 +334,6 @@ impl Message {
         }
     }
 
-    /// An assistant message with one text block.
     #[must_use]
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
@@ -422,7 +345,6 @@ impl Message {
         }
     }
 
-    /// A user-role message carrying tool results back to the model.
     #[must_use]
     pub fn tool_results(results: Vec<ContentBlock>) -> Self {
         Self {
@@ -442,7 +364,6 @@ impl Message {
         &self.content
     }
 
-    /// Opaque provider continuation data, separate from user-visible content.
     #[must_use]
     pub fn with_replay(mut self, replay: Arc<str>) -> Self {
         self.replay = Some(replay);
@@ -454,7 +375,6 @@ impl Message {
         self.replay.as_deref()
     }
 
-    /// Whether any block carries usable content.
     #[must_use]
     pub fn has_content(&self) -> bool {
         self.content.iter().any(|block| match block {
@@ -464,22 +384,16 @@ impl Message {
     }
 }
 
-/// One ordered unit of message content.
 #[derive(Debug, Clone)]
 pub enum ContentBlock {
     Text {
         text: String,
     },
-    /// A model-requested tool invocation, valid in assistant messages. The
-    /// arguments are kept as the compact JSON text the run validated: wire
-    /// codecs that want an object embed it verbatim and codecs that want a
-    /// string send `.get()`, so history is never re-serialized per request.
     ToolCall {
         id: String,
         name: String,
         arguments: Box<RawValue>,
     },
-    /// The result of one tool invocation, valid in user messages.
     ToolResult {
         call_id: String,
         content: String,
@@ -521,8 +435,6 @@ impl PartialEq for ContentBlock {
 }
 
 impl ContentBlock {
-    /// A tool-call block from a parsed argument value; for fixtures and for
-    /// callers that build arguments structurally.
     #[must_use]
     pub fn tool_call(
         id: impl Into<String>,
@@ -544,10 +456,8 @@ pub enum Role {
     Assistant,
 }
 
-/// Events common to provider streaming implementations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderEvent {
-    /// Complete opaque continuation data, emitted only for a validated turn.
     Replay {
         data: Arc<str>,
     },
@@ -581,25 +491,15 @@ pub enum ProviderEvent {
     Completed {
         usage: Option<ProviderUsage>,
     },
-    /// The provider stopped generating before the model finished its turn
-    /// for a reason the caller can recover from by asking it to continue.
-    /// Text streamed so far is valid; tool calls still open when this arrives
-    /// carry incomplete arguments and must not be executed. Terminal like
-    /// `Completed`. Stops the caller cannot recover from (content filters,
-    /// refusals) remain `ProviderError::ResponseIncomplete`.
     Incomplete {
         usage: Option<ProviderUsage>,
         reason: IncompleteReason,
     },
 }
 
-/// Why a provider stopped a response short of the model finishing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IncompleteReason {
-    /// The response reached the request's output token limit.
     OutputTokens,
-    /// The provider paused a long-running turn (Anthropic `pause_turn`) and
-    /// expects the caller to resend to resume.
     Paused,
 }
 
@@ -613,17 +513,12 @@ impl IncompleteReason {
     }
 }
 
-/// Provider-neutral token counts for one completed model response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderUsage {
-    /// Input tokens that were neither read from nor written to a cache.
     pub input_tokens: u64,
     pub cache_read_input_tokens: u64,
     pub cache_write_input_tokens: u64,
-    /// All generated tokens, including hidden reasoning tokens when reported.
     pub output_tokens: u64,
-    /// The reasoning-token portion of `output_tokens` when the provider
-    /// reports it separately.
     pub reasoning_tokens: Option<u64>,
 }
 
@@ -655,7 +550,6 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
-    /// Server-directed cooldown retained when the HTTP attempt ledger stops.
     #[must_use]
     pub const fn retry_after(&self) -> Option<std::time::Duration> {
         match self {
@@ -690,9 +584,6 @@ pub enum ProviderErrorKind {
     Authentication,
     RateLimited,
     InvalidRequest,
-    /// The request exceeded the model's context window (or the provider's
-    /// request-size cap). Distinguished from other invalid requests because
-    /// the session layer can recover by compacting and retrying.
     ContextExceeded,
     Unavailable,
     Transport,
@@ -709,13 +600,11 @@ mod tests {
     fn a_request_shares_the_transcript_and_releases_it_when_dropped() {
         let transcript = Arc::new(vec![Message::user("hello")]);
         let request = ModelRequest::new("m", Arc::clone(&transcript), 16);
-        // The adapter's per-attempt clone is a reference-count bump.
         let attempt = request.clone();
         assert_eq!(Arc::strong_count(&transcript), 3);
         assert!(Arc::ptr_eq(attempt.shared_messages(), &transcript));
         drop(attempt);
         drop(request);
-        // Once every stream is gone the owner appends in place.
         assert_eq!(Arc::strong_count(&transcript), 1);
     }
 
@@ -783,7 +672,6 @@ mod tests {
             first.get(),
             r#"{"properties":{"edits":{"items":{"properties":{"old":{"type":"string"}},"type":"object"},"type":"array"},"mode":{}},"required":["edits"],"type":"object"}"#
         );
-        // The provider-neutral schema is untouched, as is equality.
         assert!(spec.input_schema().get().contains("additionalProperties"));
         assert_eq!(spec, spec.clone());
     }

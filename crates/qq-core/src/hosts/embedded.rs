@@ -1,15 +1,3 @@
-//! An in-process tool host for embedding applications.
-//!
-//! An embedder registers typed handlers once, before compiling plans, and the
-//! host serves them under the same contract as MCP: an immutable catalog
-//! snapshot with a generation, a per-host concurrency bound, a per-call
-//! deadline, argument and result byte bounds, typed failures, and no implicit
-//! retry. Tool names are `ext__<host>__<tool>`.
-//!
-//! The registry is frozen at construction. A host whose tool set must change
-//! is a new host with a new generation; plans compiled from the old one keep
-//! it until they are replaced.
-
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -30,28 +18,18 @@ use super::{
 };
 use crate::RunCancellation;
 
-/// Default per-call deadline.
 pub const DEFAULT_EMBEDDED_CALL_TIMEOUT: Duration = Duration::from_secs(30);
-/// Default per-host bound on concurrently executing calls.
 pub const DEFAULT_EMBEDDED_MAX_CONCURRENT_CALLS: usize = 4;
-/// Largest argument document a handler receives.
 pub const MAX_EMBEDDED_ARGUMENT_BYTES: usize = 64 * 1024;
-/// Largest result a handler may return before it is refused as invalid; the
-/// run loop truncates to its own bound after this check.
 pub const MAX_EMBEDDED_RESULT_BYTES: usize = 1024 * 1024;
 const MAX_HOST_NAME_BYTES: usize = 64;
 const MAX_TOOL_NAME_BYTES: usize = 64;
 
-/// What a handler produces. `Err` is the tool reporting failure to the
-/// model (an ordinary `is_error` result); the host itself decides
-/// [`HostCallError`]s.
 pub type EmbeddedToolFuture =
     Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'static>>;
 
-/// One registered handler: receives the raw JSON argument document.
 pub type EmbeddedToolHandler = Arc<dyn Fn(String) -> EmbeddedToolFuture + Send + Sync>;
 
-/// Why registration was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EmbeddedHostError {
     #[error(
@@ -78,8 +56,6 @@ struct Registered {
     handler: EmbeddedToolHandler,
 }
 
-/// Builds an [`EmbeddedToolHost`]. Registration is validated eagerly so a
-/// misdeclared tool fails the embedder at startup, not the model at run time.
 pub struct EmbeddedToolHostBuilder {
     name: String,
     tools: BTreeMap<String, Registered>,
@@ -105,7 +81,6 @@ impl EmbeddedToolHostBuilder {
         }
     }
 
-    /// Registers `tool` (un-namespaced) with its schema, hints, and handler.
     #[must_use]
     pub fn tool(
         mut self,
@@ -142,8 +117,6 @@ impl EmbeddedToolHostBuilder {
         self
     }
 
-    /// Pre-approves `tool` (un-namespaced) for every run, like an MCP
-    /// allowlist entry. Mode still wins: read-only sessions deny it.
     #[must_use]
     pub fn grant(mut self, tool: &str) -> Self {
         self.grants
@@ -188,7 +161,6 @@ impl EmbeddedToolHostBuilder {
     }
 }
 
-/// A frozen set of in-process tools served under the external-host contract.
 pub struct EmbeddedToolHost {
     name: String,
     tools: BTreeMap<String, Registered>,
@@ -204,7 +176,6 @@ impl EmbeddedToolHost {
         EmbeddedToolHostBuilder::new(name)
     }
 
-    /// The registry never changes, so its generation is constant.
     const GENERATION: u64 = 1;
 }
 
@@ -248,10 +219,6 @@ impl ExternalToolHost for EmbeddedToolHost {
                 "arguments exceed the {MAX_EMBEDDED_ARGUMENT_BYTES}-byte limit"
             )))));
         }
-        // The permit is taken without waiting: a saturated host is reported
-        // as overloaded so the model can back off, rather than queueing calls
-        // behind one another inside a turn's deadline. The owned permit
-        // travels with the future and releases when it settles or is dropped.
         let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
             return Box::pin(std::future::ready(Err(HostCallError::Overloaded)));
         };
@@ -467,7 +434,6 @@ mod tests {
                 .err(),
             Some(EmbeddedHostError::ZeroConcurrencyBound)
         );
-        // Grants for unregistered tools are dropped, not invented.
         let host = EmbeddedToolHost::builder("app")
             .grant("ghost")
             .build()

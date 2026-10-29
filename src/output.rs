@@ -1,5 +1,3 @@
-//! Plain-text command output.
-
 use std::{
     borrow::Cow,
     io::{self, Write},

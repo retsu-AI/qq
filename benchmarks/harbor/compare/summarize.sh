@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# Summarize one or more Harbor jobs side by side from their trial result.json
-# files: pass rate, dollars per attempt and per pass, and median wall time.
-# Works for any Harbor agent (qq, claude-code, codex, opencode) because it reads
-# only Harbor's own result schema, not the QQ trace. `cargo xtask eval report`
-# remains the authoritative QQ scorecard; this is the cross-harness view.
-#
-#   benchmarks/harbor/compare/summarize.sh target/qq-eval/jobs/pilot-qq target/qq-eval/jobs/pilot-cc
 set -euo pipefail
 shopt -s nullglob
 

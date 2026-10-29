@@ -1,11 +1,3 @@
-//! Cost of `search` and `tree` over a synthetic 10k-file workspace: an
-//! ignore-aware walk plus content scan in the page cache.
-//!
-//! Measurement target: a hot content search over
-//! 10k files ≤ 150 ms. The fixture mirrors a mid-size repository: 200
-//! directories × 50 source files of ~40 lines, a `.gitignore`, and a
-//! `target/` tree of the same size that the walk must skip without reading.
-
 use std::{hint::black_box, time::Instant};
 
 use qq_core::tool_bench as bench;
@@ -60,7 +52,6 @@ fn main() {
         }
     }
 
-    // No match anywhere: the walk reads all 10k files (the gate case).
     let header = measure("content_absent_10k_full_scan", iterations, || {
         bench::run_tool(root, "search", r#"{"query":"no_such_symbol_anywhere"}"#)
     });

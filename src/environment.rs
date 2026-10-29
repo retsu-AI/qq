@@ -1,26 +1,16 @@
-//! Where QQ runs and what its commands can reach, in the words `qq doctor`,
-//! the TUI's first screen, and the headless goal note share.
-//!
-//! Commands run as the user, with the user's network and credentials. The
-//! only isolation is whatever QQ itself runs inside, so these lines say
-//! which: the host, or a container.
-
 use std::path::Path;
 
-/// The guide page on isolating unattended runs.
 pub const UNATTENDED_GUIDE: &str = "https://retsu-ai.github.io/qq/docs/running-unattended/";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {
     Host,
-    /// Inside a container; the marker that says so.
     Container(&'static str),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Environment {
     pub placement: Placement,
-    /// The account commands run as.
     pub user: String,
 }
 
@@ -36,7 +26,6 @@ impl Environment {
         }
     }
 
-    /// [`Self::detect`] on a blocking thread: it stats container markers.
     pub async fn detect_off_workers() -> Self {
         tokio::task::spawn_blocking(Self::detect)
             .await
@@ -46,7 +35,6 @@ impl Environment {
             })
     }
 
-    /// `on the host: commands run as …`, for the doctor and the TUI.
     pub fn summary(&self) -> String {
         match self.placement {
             Placement::Host => format!(
@@ -61,8 +49,6 @@ impl Environment {
         }
     }
 
-    /// The one-line stderr note before a headless goal on the host; `None`
-    /// inside a container.
     pub fn goal_note(&self) -> Option<String> {
         (self.placement == Placement::Host).then(|| {
             format!(
@@ -74,8 +60,6 @@ impl Environment {
     }
 }
 
-/// Docker writes `/.dockerenv`, Podman `/run/.containerenv`; systemd-nspawn,
-/// Podman and Flatpak set `container`; Kubernetes sets its service host.
 fn placement(
     exists: impl Fn(&str) -> bool,
     env: impl Fn(&str) -> Option<std::ffi::OsString>,
@@ -94,7 +78,6 @@ fn placement(
     Placement::Host
 }
 
-/// `on: …` / `off: …`, after "snapshots" in the doctor and the TUI.
 pub fn snapshot_summary(covered: bool) -> &'static str {
     if covered {
         "on: `qq undo` restores the workspace as it was before each run"
@@ -103,7 +86,6 @@ pub fn snapshot_summary(covered: bool) -> &'static str {
     }
 }
 
-/// The lines the TUI's first screen shows under its hints.
 pub fn first_run_lines(environment: &Environment, snapshots: bool) -> Vec<String> {
     vec![
         format!("QQ is {}.", environment.summary()),

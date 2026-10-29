@@ -1,7 +1,3 @@
-//! Markdown layout: prose, lists, quotes, tables, and fenced code panels with
-//! optional tree-sitter highlighting. Produces styled lines already wrapped to
-//! the requested width.
-
 use std::sync::OnceLock;
 
 use crate::{
@@ -19,16 +15,6 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 use tree_sitter::Language;
 use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 
-/// Byte offset where a streaming markdown source can be split so the prefix
-/// renders the same whether laid out alone or as part of the whole.
-///
-/// The split lands after a blank line that is neither inside an open fenced
-/// code block nor directly below an indented (four-space) code line, because
-/// pulldown-cmark treats such a blank line as a hard block boundary: nothing
-/// after it changes how earlier blocks lay out. The blank line stays with the
-/// prefix so it ends at a block end. Returns 0 when no boundary exists yet.
-/// Link reference definitions are the one construct this ignores; a reference
-/// defined after the split renders literally until the message completes.
 pub(crate) fn settled_prefix_end(source: &str) -> usize {
     let mut settled = 0;
     let mut in_fence: Option<(u8, usize)> = None;
@@ -72,37 +58,22 @@ pub(crate) fn settled_prefix_end(source: &str) -> usize {
     settled
 }
 
-/// Lays markdown out as styled lines. `highlight` enables tree-sitter syntax
-/// coloring inside fenced code panels; it is only worth paying for content
-/// that renders once (terminal-state messages on the cached path), so
-/// streaming render paths pass `false` and get plain panels.
 pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec<Line> {
     if source.is_empty() {
         return Vec::new();
     }
     let width = width.max(1);
     let mut lines = vec![Line::default()];
-    // Lines marked literal (code blocks, laid-out tables) keep character
-    // wrapping so column alignment survives; prose lines wrap at words.
     let mut literal = vec![false];
-    // Per-line hanging prefix: list markers and quote rails. The body wraps
-    // at `width - hang` and the prefix repeats (as blanks for list items, as
-    // the rail for quotes) on every continuation row.
     let mut hangs: Vec<Option<Hang>> = vec![None];
     let mut styles = vec![normal()];
-    // One entry per open list: `Some(next)` for ordered lists with the
-    // marker column width, `None` for bullets. Depth is the length.
     let mut lists: Vec<Option<(u64, usize)>> = Vec::new();
     let mut quote_depth = 0_usize;
     let mut table: Option<TableBuffer> = None;
     let mut code_block: Option<CodeBlockBuffer> = None;
     let mut heading_level: Option<HeadingLevel> = None;
     let mut heading_start = 0;
-    // True from an item's marker until its first inline content, so a loose
-    // item's opening paragraph joins the marker line.
     let mut item_marker_open = false;
-    // Direct item counts per list in document order, so ordered markers can
-    // be sized before their items arrive. One cheap pass over the events.
     let mut list_lengths: Vec<u64> = Vec::new();
     {
         let mut open: Vec<(usize, u64)> = Vec::new();
@@ -131,17 +102,10 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
     for event in parser {
         match event {
             Event::Start(tag) => match tag {
-                // Block starts: one blank row separates this block from the
-                // previous one. Items inside a list stay tight; the list
-                // itself is one block. Blank rows at the very top are
-                // trimmed with the leading empty line below.
                 Tag::Paragraph => {
                     if lists.is_empty() {
                         block_gap(&mut lines, &mut literal, &mut hangs);
                     } else if !item_marker_open {
-                        // A later paragraph inside a loose item starts its
-                        // own line under the item text; the first one
-                        // continues on the marker line.
                         ensure_line(&mut lines, &mut literal, &mut hangs);
                         hangs.truncate(lines.len() - 1);
                         hangs.push(current_hang(&lists, quote_depth));
@@ -176,10 +140,6 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                         block_gap(&mut lines, &mut literal, &mut hangs);
                     }
                     lists.push(start.map(|first| {
-                        // Numbers right-align to the widest the list reaches;
-                        // pulldown does not expose the count, so the list's
-                        // direct items are counted from the event stream at
-                        // this position. Bounded by the list's own length.
                         let count = list_lengths.get(list_ordinal).copied().unwrap_or(1).max(1);
                         let last = first.saturating_add(count - 1);
                         (first, last.to_string().len())
@@ -261,8 +221,6 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                 TagEnd::Heading(_) => {
                     styles.pop();
                     if heading_level.take() == Some(HeadingLevel::H1) {
-                        // An underline the width of the title, capped at the
-                        // measure, marks the one top-level heading style.
                         let title_width = lines[heading_start..]
                             .iter()
                             .map(Line::width)
@@ -375,8 +333,6 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                 }
                 push_inline(table.as_mut(), &mut lines, &code, inline_code());
             }
-            // A soft break is a source-formatting line break: render it as a
-            // space so paragraphs reflow to the terminal width.
             Event::SoftBreak => {
                 push_inline(
                     table.as_mut(),
@@ -402,7 +358,6 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                 hangs.push(None);
             }
             Event::TaskListMarker(checked) => {
-                // Replace the bullet the item pushed: the box is the marker.
                 let line = lines.last_mut().expect("line exists");
                 if let Some(last) = line.spans.last_mut()
                     && (last.text.ends_with("• ") || last.text.ends_with("◦ "))
@@ -433,15 +388,10 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
         literal.pop();
         hangs.pop();
     }
-    // Leading blank rows come from the seed line or a gap before the first
-    // block; the transcript owns spacing above the message.
     let leading = lines.iter().take_while(|line| line.is_empty()).count();
     lines.drain(..leading);
     literal.drain(..leading);
     hangs.drain(..leading);
-    // A source that ends at a block boundary keeps the gap that follows its
-    // last block, so a settled prefix laid out alone concatenates with the
-    // rest into exactly the whole message's rows (`settled_prefix_end`).
     if !lines.is_empty() && source.trim_end_matches([' ', '\t']).ends_with("\n\n") {
         lines.push(Line::default());
         literal.push(false);
@@ -451,9 +401,6 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
     for ((line, literal), hang) in lines.into_iter().zip(literal).zip(hangs) {
         match hang {
             Some(hang) if hang.width > 0 && hang.width < width => {
-                // The first row already carries its rail and marker; wrap the
-                // body alone, then re-attach the prefix as blanks (or the rail
-                // for quotes) so continuation rows hang under the text.
                 let mut prefix = Line::default();
                 let mut body = Line::default();
                 let mut taken = 0;
@@ -516,8 +463,6 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
     output
 }
 
-/// Drop whitespace a word-wrap left at the end of a prose row. Rows compare
-/// by text in goldens and diffs; a dangling space is invisible and costly.
 fn trim_trailing_whitespace(row: &mut Line) {
     while let Some(last) = row.spans.last_mut() {
         let trimmed = last.text.trim_end().len();
@@ -533,15 +478,12 @@ fn trim_trailing_whitespace(row: &mut Line) {
     }
 }
 
-/// Hanging prefix of one laid-out line: how many cells the marker and rail
-/// occupy, and how many quote rails to repeat on continuation rows.
 #[derive(Clone, Copy)]
 struct Hang {
     width: usize,
     rail: usize,
 }
 
-/// Cells taken by `depth` nested quote rails.
 const fn quote_rail_width(depth: usize) -> usize {
     depth * 2
 }
@@ -552,16 +494,10 @@ fn push_quote_rail(line: &mut Line, depth: usize) {
     }
 }
 
-/// The hang a fresh prose line inside the current lists/quotes should get:
-/// continuation text of a list item indents under the item; quoted prose
-/// repeats the rail.
 fn current_hang(lists: &[Option<(u64, usize)>], quote_depth: usize) -> Option<Hang> {
     if lists.is_empty() && quote_depth == 0 {
         return None;
     }
-    // A paragraph inside an item aligns with the item text: the marker's
-    // width for bullets is 2 cells per depth; ordered markers vary, so use
-    // the depth-based indent plus the widest marker seen so far.
     let list_indent = lists.iter().enumerate().fold(0, |acc, (index, list)| {
         let indent = if index + 1 == lists.len() {
             match list {
@@ -579,9 +515,6 @@ fn current_hang(lists: &[Option<(u64, usize)>], quote_depth: usize) -> Option<Ha
     })
 }
 
-/// Start a fresh prose line, when the current one is empty, with the rail
-/// and indent the enclosing quote and list context call for. Inline events
-/// arriving on an item's marker line leave it alone.
 fn begin_inline(
     lines: &mut [Line],
     hangs: &mut Vec<Option<Hang>>,
@@ -604,12 +537,8 @@ fn begin_inline(
     *hangs.last_mut().expect("hang exists") = Some(hang);
 }
 
-/// Ensure the last line is empty and mark one blank separator row before it,
-/// so the next block starts exactly one row below the previous one.
 fn block_gap(lines: &mut Vec<Line>, literal: &mut Vec<bool>, hangs: &mut Vec<Option<Hang>>) {
     ensure_line(lines, literal, hangs);
-    // `ensure_line` leaves one empty trailing line; a gap needs an empty
-    // separator plus the empty line the block will fill.
     if lines.len() >= 2 && !lines[lines.len() - 2].is_empty() {
         lines.push(Line::default());
         literal.push(false);
@@ -617,8 +546,6 @@ fn block_gap(lines: &mut Vec<Line>, literal: &mut Vec<bool>, hangs: &mut Vec<Opt
     }
 }
 
-/// Routes inline content to the open table cell when one exists, otherwise to
-/// the current transcript line.
 fn push_inline(table: Option<&mut TableBuffer>, lines: &mut [Line], text: &str, style: Style) {
     match table {
         Some(buffer) => buffer.append(text, style),
@@ -629,13 +556,9 @@ fn push_inline(table: Option<&mut TableBuffer>, lines: &mut [Line], text: &str, 
     }
 }
 
-/// Narrowest useful column; below this per column the table stacks instead.
 const TABLE_MIN_COLUMN_WIDTH: usize = 3;
-/// Display width of the " │ " column separator.
 const TABLE_SEPARATOR_WIDTH: usize = 3;
 
-/// Buffers one table's rows of styled cells while the parser walks it, so the
-/// layout can size columns from complete content.
 #[derive(Default)]
 struct TableBuffer {
     rows: Vec<Vec<Line>>,
@@ -661,8 +584,6 @@ impl TableBuffer {
         self.row.get_or_insert_default().push(Line::default());
     }
 
-    /// Appends inline content to the current cell, creating row and cell on
-    /// demand so malformed or partial input never panics.
     fn append(&mut self, text: &str, style: Style) {
         let row = self.row.get_or_insert_default();
         if row.is_empty() {
@@ -676,10 +597,6 @@ impl TableBuffer {
     }
 }
 
-/// Lays a buffered table out as aligned columns sized from content. When the
-/// natural table overflows the width, columns shrink proportionally and cells
-/// wrap within their column; when even minimum columns cannot fit, rows stack
-/// as `header: value` lines.
 fn layout_table(rows: &[Vec<Line>], has_header: bool, width: usize) -> Vec<Line> {
     let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
     if columns == 0 {
@@ -701,8 +618,6 @@ fn layout_table(rows: &[Vec<Line>], has_header: bool, width: usize) -> Vec<Line>
         .collect::<Vec<_>>();
     let mut widths = natural.clone();
     if natural.iter().sum::<usize>() > available {
-        // Columns already within their fair share keep their natural width;
-        // repeat because each fixed column raises the fair share of the rest.
         let mut remaining = available;
         let mut flexible = (0..columns).collect::<Vec<_>>();
         loop {
@@ -719,7 +634,6 @@ fn layout_table(rows: &[Vec<Line>], has_header: bool, width: usize) -> Vec<Line>
             }
             flexible = wide;
         }
-        // The overflowing columns split the remaining space proportionally.
         let flexible_total = flexible
             .iter()
             .map(|column| natural[*column])
@@ -730,8 +644,6 @@ fn layout_table(rows: &[Vec<Line>], has_header: bool, width: usize) -> Vec<Line>
                 .max(TABLE_MIN_COLUMN_WIDTH)
                 .min(natural[column].max(TABLE_MIN_COLUMN_WIDTH));
         }
-        // Rounding and minimums can leave a small excess; take it back from
-        // the widest columns so the sum fits `available` again.
         while widths.iter().sum::<usize>() > available {
             let Some((index, _)) = widths
                 .iter()
@@ -784,8 +696,6 @@ fn layout_table(rows: &[Vec<Line>], has_header: bool, width: usize) -> Vec<Line>
     output
 }
 
-/// Very-narrow fallback: each data row becomes `header: value` lines with a
-/// muted divider between rows.
 fn layout_table_stacked(rows: &[Vec<Line>], has_header: bool, width: usize) -> Vec<Line> {
     let (header, data) = if has_header && rows.len() > 1 {
         (rows.first(), &rows[1..])
@@ -814,26 +724,14 @@ fn layout_table_stacked(rows: &[Vec<Line>], has_header: bool, width: usize) -> V
     output
 }
 
-/// The panel's left rail: a heavy bar plus one cell, on the first row of
-/// every source line and on both padding rows.
 const CODE_PANEL_GUTTER: &str = "┃  ";
-/// The rail on a continuation row: a source line that wrapped keeps flowing
-/// under the arrow, so a wrapped line never reads as a new one.
 const CODE_PANEL_WRAP_GUTTER: &str = "↪  ";
-/// Display width of the gutter plus the one cell of padding before content.
 pub(super) const CODE_PANEL_INSET: usize = 3;
 
-/// Bytes past which a code block skips tree-sitter and renders plain;
-/// highlighting must never stall a frame.
 pub(crate) const MAX_HIGHLIGHT_BYTES: usize = 64 * 1024;
 
-/// A recognized highlight capture name paired with its theme style.
 type HighlightCapture = (&'static str, fn() -> Style);
 
-/// Highlight capture names recognized in grammar queries, each mapped to a
-/// theme style. `HighlightConfiguration::configure` resolves query captures
-/// against these by longest dotted prefix, so `keyword.control.repeat` lands
-/// on `keyword`; captures matching nothing keep the plain panel style.
 const HIGHLIGHT_CAPTURES: &[HighlightCapture] = &[
     ("attribute", code_constant),
     ("comment", code_comment),
@@ -856,10 +754,6 @@ const HIGHLIGHT_CAPTURES: &[HighlightCapture] = &[
     ("variable.parameter", code_property),
 ];
 
-/// Builds one grammar's highlight configuration on first use. Compiling the
-/// highlight query is the expensive step, so each grammar pays it once; a
-/// grammar whose query fails to compile stays `None` and its blocks render
-/// plain forever rather than retrying every frame.
 fn highlight_configuration(
     cell: &'static OnceLock<Option<HighlightConfiguration>>,
     name: &str,
@@ -879,11 +773,6 @@ fn highlight_configuration(
     .as_ref()
 }
 
-/// Maps a fence tag (with common aliases) to a bundled grammar's highlight
-/// configuration. Unknown or absent tags return `None` and render plain.
-/// TypeScript, TSX, JSX, and C++ queries only extend their base language's
-/// query, so those arms concatenate the extension ahead of the base (earlier
-/// patterns win in tree-sitter queries).
 pub(crate) fn fence_highlight_configuration(tag: &str) -> Option<&'static HighlightConfiguration> {
     macro_rules! grammar {
         ($name:literal, $language:expr, $highlights:expr) => {{
@@ -974,14 +863,6 @@ pub(crate) fn fence_highlight_configuration(tag: &str) -> Option<&'static Highli
     }
 }
 
-/// Runs tree-sitter highlighting over one code block, returning one styled
-/// line per source line. Tree-sitter is error-tolerant, so partial or invalid
-/// code still highlights; any highlighter failure returns `None` and the
-/// caller falls back to plain panel text.
-///
-/// Kept out of line: this is the cold, expensive path, and letting it inline
-/// into the panel layout measured +7 % on the fence-free 32 KiB streaming
-/// ceiling when the capture table grew (U4), through code layout alone.
 #[inline(never)]
 fn highlighted_code_lines(configuration: &HighlightConfiguration, text: &str) -> Option<Vec<Line>> {
     let mut highlighter = Highlighter::new();
@@ -1017,17 +898,12 @@ fn highlighted_code_lines(configuration: &HighlightConfiguration, text: &str) ->
             }
         }
     }
-    // The block's trailing newline would otherwise read as an extra empty
-    // content row that the plain `str::lines` path never produces.
     if text.ends_with('\n') && lines.last().is_some_and(Line::is_empty) {
         lines.pop();
     }
     Some(lines)
 }
 
-/// Buffers one code block's text while the parser walks it, so the panel can
-/// be laid out from complete content. Streamed partial input closes the block
-/// at end of input, so an unterminated fence still renders as a panel.
 struct CodeBlockBuffer {
     language: Option<String>,
     text: String,
@@ -1050,16 +926,6 @@ impl CodeBlockBuffer {
     }
 }
 
-/// Lays a buffered code block out as a panel (see [`panel_rows`]) labelled
-/// with the fence's language tag.
-///
-/// An unterminated fence reaches here too (pulldown closes it at end of
-/// input), so a streaming panel has the same rows as the finished one and
-/// does not jump when the closing fence arrives.
-///
-/// With `highlight` set, a recognized fence tag colors the content through
-/// its tree-sitter grammar; diff fences keep their dedicated coloring, and
-/// oversized blocks or highlighter failures fall back to plain text.
 fn layout_code_panel(block: &CodeBlockBuffer, width: usize, highlight: bool) -> Vec<Line> {
     let diff = block.language.as_deref() == Some("diff");
     let label = block.language.as_deref();
@@ -1091,20 +957,10 @@ fn layout_code_panel(block: &CodeBlockBuffer, width: usize, highlight: bool) -> 
     }
 }
 
-/// Columns a panel at `width` leaves for content: the rail, its padding
-/// cell, and never less than one cell.
 pub(crate) fn panel_content_width(width: usize) -> usize {
     width.saturating_sub(CODE_PANEL_INSET).max(1)
 }
 
-/// The one panel implementation, shared by fenced code and tool detail: a
-/// top padding row carrying `label` right-aligned in `muted` (blank without
-/// one), the body lines character-wrapped to the content width, and a blank
-/// bottom padding row. Every row is padded to `width` so the tint reads as
-/// one solid slab. The rail is `┃` on the first row of each body line and
-/// `↪` on the rows a long line wrapped onto, so a wrapped line never reads
-/// as a new one. A line that already fits is not wrapped: `wrap_line_chars`
-/// copies its text, and most panel rows (every pre-truncated tool row) fit.
 pub(crate) fn panel_rows(
     body: impl IntoIterator<Item = Line>,
     label: Option<&str>,
@@ -1113,9 +969,6 @@ pub(crate) fn panel_rows(
     panel_rows_at(body, label, width, 0)
 }
 
-/// [`panel_rows`] with `indent` blank cells before the rail on the terminal
-/// background, for panels that sit at the content column rather than the
-/// pane edge. The margin rides in `Line::indent`, so it costs no span.
 pub(crate) fn panel_rows_at(
     body: impl IntoIterator<Item = Line>,
     label: Option<&str>,
@@ -1126,8 +979,6 @@ pub(crate) fn panel_rows_at(
     let content_width = panel_content_width(width);
     let mut top = Line::default();
     if let Some(label) = label {
-        // ` label ` sits flush with the right edge; its trailing cell mirrors
-        // the padding cell after the gutter.
         let label = label
             .chars()
             .filter_map(terminal_safe_character)
@@ -1153,15 +1004,9 @@ pub(crate) fn panel_rows_at(
     output
 }
 
-/// The panel's styles, read from the active theme once per panel rather than
-/// once per row: `theme::active()` copies the whole palette out of a
-/// thread-local, and a frame of 32 expanded tool panels builds hundreds of
-/// rows.
 #[derive(Clone, Copy)]
 struct PanelStyles {
-    /// The rail glyph plus its padding cell.
     rail: Style,
-    /// Trailing padding.
     fill: Style,
     surface: Color,
 }
@@ -1176,12 +1021,6 @@ impl PanelStyles {
         }
     }
 
-    /// One physical panel row: the rail (`┃`, or `↪` when `continuation`
-    /// marks a wrapped source line) in `border`, one cell of padding, the
-    /// content, and enough trailing padding to carry the surface tint to the
-    /// full width. A span that brings its own background (diff add/remove
-    /// tints) keeps it; the surface only fills spans that have none. A width
-    /// too narrow for the rail itself truncates rather than overflowing.
     fn row(self, content: Line, width: usize, continuation: bool, indent: usize) -> Line {
         let rail = if continuation {
             CODE_PANEL_WRAP_GUTTER
@@ -1192,17 +1031,11 @@ impl PanelStyles {
             indent,
             spans: Vec::with_capacity(content.spans.len() + 2),
         };
-        // Rail glyph, its trailing space, and the padding cell in one span:
-        // the glyph color is invisible on the spaces, and a frame of 32
-        // expanded panels allocates one string per span per row.
         row.spans.push(Span {
             text: rail.to_owned(),
             style: self.rail,
         });
         let mut used = CODE_PANEL_INSET;
-        // Content spans are appended without the merge check `Line::push`
-        // does: the rail stays its own span even when the first content span
-        // happens to share its style, so callers can address it.
         for mut span in content.spans {
             used += text_width(&span.text);
             if span.style.background.is_none() {
@@ -1223,8 +1056,6 @@ impl PanelStyles {
     }
 }
 
-/// Test entry for a single panel row; production code goes through
-/// [`panel_rows`] so the palette is read once per panel.
 #[cfg(test)]
 pub(crate) fn code_panel_row(content: Line, width: usize, continuation: bool) -> Line {
     PanelStyles::current().row(content, width, continuation, 0)
@@ -1253,8 +1084,6 @@ fn ensure_line(lines: &mut Vec<Line>, literal: &mut Vec<bool>, hangs: &mut Vec<O
     hangs.resize(lines.len(), None);
 }
 
-/// Whether `source` contains a fenced code block that highlighting could
-/// color. Cheap line scan; false positives only cost one skipped job.
 pub(crate) fn has_fenced_code(source: &str) -> bool {
     source.lines().any(|line| {
         let trimmed = line.trim_start();

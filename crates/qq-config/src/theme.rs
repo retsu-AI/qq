@@ -1,11 +1,3 @@
-//! TUI theme documents: `<name>.ron` files that map the renderer's color
-//! roles to concrete colors. See `docs/design/theme.md`.
-//!
-//! Themes are load-time configuration and fail fast: an unknown name, a
-//! missing role, a bad literal, or an alias cycle is a configuration error
-//! before the TUI starts. The compiled `terminal` theme and the shipped
-//! `ink` document are always present, so the default always resolves.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -22,29 +14,18 @@ use super::{
     },
 };
 
-/// The theme name TUI settings carry when no layer set one. It is an alias,
-/// not a palette: `load` resolves it through `default_theme_name`, so a
-/// `theme: "qq"` written before the designed default existed keeps working
-/// (ADR 0036).
 pub const DEFAULT_THEME: &str = "qq";
 
-/// The designed truecolor default (`themes/ink.ron`).
 pub const TRUECOLOR_DEFAULT_THEME: &str = "ink";
 
-/// The compiled palette built from the terminal's own ANSI colors; the
-/// default when truecolor is not advertised and selectable by name anywhere.
 pub const TERMINAL_THEME: &str = "terminal";
 
-/// Whether the terminal advertised 24-bit color. The composition root reads
-/// `COLORTERM` once at startup and passes the answer in; this crate never
-/// consults the environment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TruecolorSupport {
     Advertised,
     NotAdvertised,
 }
 
-/// The theme the `qq` alias (and an unset `theme`) selects.
 #[must_use]
 pub const fn default_theme_name(truecolor: TruecolorSupport) -> &'static str {
     match truecolor {
@@ -53,10 +34,6 @@ pub const fn default_theme_name(truecolor: TruecolorSupport) -> &'static str {
     }
 }
 
-/// Themes shipped inside the binary as ordinary theme documents, so they go
-/// through the same parser and errors as user files and double as
-/// copy-and-tweak examples. Sorted by name; `terminal` is built in code
-/// because files cannot name ANSI colors.
 pub const COMPILED_THEMES: &[(&str, &str)] = &[
     ("catppuccin", include_str!("../themes/catppuccin.ron")),
     ("dracula", include_str!("../themes/dracula.ron")),
@@ -73,10 +50,8 @@ pub const COMPILED_THEMES: &[(&str, &str)] = &[
     ("tokyonight", include_str!("../themes/tokyonight.ron")),
 ];
 
-/// Upper bound on theme files enumerated for the picker.
 const MAX_DISCOVERED_THEMES: usize = 64;
 
-/// A 24-bit color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Rgb {
     pub r: u8,
@@ -99,9 +74,6 @@ impl Rgb {
     }
 }
 
-/// The standard terminal colors, which follow the user's terminal palette.
-/// Only the compiled `terminal` theme uses them; files are `#RRGGBB` so a
-/// theme looks the same everywhere.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AnsiColor {
     White,
@@ -118,7 +90,6 @@ pub enum ThemeColor {
     Rgb(Rgb),
 }
 
-/// Every color role the renderer paints with, fully resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThemeColors {
     pub text: ThemeColor,
@@ -131,8 +102,6 @@ pub struct ThemeColors {
     pub surface: ThemeColor,
 }
 
-/// A syntax role a theme's optional `syntax` block may set. The renderer
-/// derives a default for any role the document leaves out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SyntaxRole {
     Keyword,
@@ -146,7 +115,6 @@ pub enum SyntaxRole {
 }
 
 impl SyntaxRole {
-    /// The field name inside the `syntax` block.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -168,8 +136,6 @@ impl fmt::Display for SyntaxRole {
     }
 }
 
-/// Syntax overrides a theme document declared: every field optional, resolved
-/// through the same aliases and literal rules as the required roles.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ThemeSyntax {
     pub keyword: Option<ThemeColor>,
@@ -183,7 +149,6 @@ pub struct ThemeSyntax {
 }
 
 impl ThemeSyntax {
-    /// Whether the document set any syntax role.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.keyword.is_none()
@@ -197,7 +162,6 @@ impl ThemeSyntax {
     }
 }
 
-/// A resolved theme with where it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThemeDocument {
     name: String,
@@ -217,8 +181,6 @@ impl ThemeDocument {
         &self.colors
     }
 
-    /// The document's `syntax` overrides; all `None` when the block is
-    /// absent.
     #[must_use]
     pub const fn syntax(&self) -> &ThemeSyntax {
         &self.syntax
@@ -230,9 +192,6 @@ impl ThemeDocument {
     }
 }
 
-/// The compiled `terminal` theme: the terminal's own ANSI colors for every
-/// role but `brand` and `surface`, so it follows whatever palette the user's
-/// terminal has. The fallback when truecolor is not advertised.
 #[must_use]
 pub fn compiled_theme() -> ThemeDocument {
     const fn rgb(r: u8, g: u8, b: u8) -> ThemeColor {
@@ -255,8 +214,6 @@ pub fn compiled_theme() -> ThemeDocument {
     }
 }
 
-/// Parse one of `COMPILED_THEMES`. A shipped document that fails to parse
-/// is a build defect, surfaced as the same `ConfigError` a user file gets.
 fn compiled_document(name: &str, content: &str) -> Result<ThemeDocument, ConfigError> {
     let source =
         SourceIdentity::virtual_source(SourceKind::Compiled, format!("compiled theme {name}"));
@@ -282,8 +239,6 @@ struct RolesDocument {
     surface: String,
 }
 
-/// The optional `syntax` block. Every field is optional; unknown fields are
-/// rejected like the rest of the document.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SyntaxDocument {
@@ -308,7 +263,6 @@ struct Document {
     syntax: SyntaxDocument,
 }
 
-/// Why a role value failed to resolve to a color.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ThemeColorFault {
     #[error("refers to `{0}`, which is neither a `defs` alias nor a `#RRGGBB` literal")]
@@ -333,8 +287,6 @@ impl Document {
             });
         }
         let resolve = |value: &str| -> Result<ThemeColor, ThemeColorFault> {
-            // Follow aliases until a literal, refusing to revisit a name so
-            // a cycle is an error rather than a hang.
             let mut seen = BTreeSet::new();
             let mut current = value;
             loop {
@@ -397,13 +349,11 @@ impl Document {
     }
 }
 
-/// A validated document body before it is paired with a name and source.
 struct ParsedTheme {
     colors: ThemeColors,
     syntax: ThemeSyntax,
 }
 
-/// Where a theme file may live, in resolution order after the compiled set.
 fn theme_paths(
     loader: &ConfigLoader,
     cwd: &Path,
@@ -416,13 +366,6 @@ fn theme_paths(
     directories
 }
 
-/// Resolve theme `name`: the global `themes/` directory, then project
-/// `.qq/themes/` directories nearest-last so the nearest wins, falling back
-/// to the compiled set so a user file may shadow a shipped theme.
-///
-/// `qq` is the default alias and resolves to `default_theme_name(truecolor)`
-/// before lookup; every other name is taken literally, so an explicit
-/// `terminal` or `ink` wins regardless of what the terminal advertised.
 pub(super) fn load(
     loader: &ConfigLoader,
     cwd: &Path,
@@ -472,10 +415,6 @@ pub(super) fn load(
     })
 }
 
-/// Every theme resolvable from `cwd`: the compiled set plus each valid
-/// `*.ron` under the theme directories, nearest layer winning on a name.
-/// Invalid files are skipped here (they fail loudly only when selected) so
-/// one broken experiment does not hide the picker.
 pub(super) fn discover(
     loader: &ConfigLoader,
     cwd: &Path,
@@ -505,8 +444,6 @@ pub(super) fn discover(
             .collect();
         names.sort();
         for name in names.into_iter().take(MAX_DISCOVERED_THEMES) {
-            // `load` never reads a file for these names: `qq` is rewritten to
-            // the default and `terminal` is built in code.
             if name == DEFAULT_THEME || name == TERMINAL_THEME {
                 continue;
             }

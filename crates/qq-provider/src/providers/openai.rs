@@ -1,5 +1,3 @@
-//! OpenAI Responses API adapter.
-
 use std::sync::Arc;
 
 use async_stream::try_stream;
@@ -32,24 +30,18 @@ pub(crate) enum ResponsesRequestKind {
     Codex,
 }
 
-/// A client for OpenAI-compatible Responses endpoints.
 pub(crate) struct OpenAi {
     pub(crate) exchange: HttpExchange,
     endpoint: reqwest::Url,
     headers: Arc<HeaderMap>,
     request_kind: ResponsesRequestKind,
-    /// Sends `prompt_cache_key` (and, on the Codex body, `session-id`)
-    /// from the request's cache key.
     prompt_cache_key: bool,
 }
 
-/// The header the ChatGPT Codex backend derives cache affinity from.
 const SESSION_ID: HeaderName = HeaderName::from_static("session-id");
 
 #[cfg(test)]
 impl OpenAi {
-    /// One attempt per request, so a scripted single-response server is
-    /// observed exactly once.
     fn single_shot(mut self) -> Self {
         self.exchange
             .set_attempt_policy(crate::http::AttemptPolicy::disabled());
@@ -58,7 +50,6 @@ impl OpenAi {
 }
 
 impl OpenAi {
-    /// Creates a client for OpenAI's standard Responses endpoint.
     #[cfg(test)]
     pub(crate) fn new(api_key: &str) -> Result<Self, ProviderError> {
         Self::with_endpoint(
@@ -69,10 +60,6 @@ impl OpenAi {
         )
     }
 
-    /// Creates a client for an exact OpenAI-compatible Responses endpoint URL.
-    ///
-    /// Plain HTTP is accepted only when `allow_http` is true and the URL host is
-    /// loopback. Header names and values are validated while constructing the client.
     #[cfg(test)]
     pub(crate) fn with_endpoint(
         exact_endpoint: &str,
@@ -93,8 +80,6 @@ impl OpenAi {
         .map(Self::single_shot)
     }
 
-    /// `body_shape` is the recipe's explicit Responses body; the auth intent
-    /// does not select it.
     pub(crate) fn with_client(
         client: reqwest::Client,
         endpoint: reqwest::Url,
@@ -119,8 +104,6 @@ impl OpenAi {
         })
     }
 
-    /// Sends each request's cache key, when it has one. The key is a session
-    /// identifier: stable across a conversation's turns and not a secret.
     #[must_use]
     pub(crate) const fn with_prompt_cache_key(mut self, enabled: bool) -> Self {
         self.prompt_cache_key = enabled;
@@ -172,18 +155,10 @@ impl Provider for OpenAi {
                     "OpenAI output size overflowed",
                     "OpenAI output exceeded the configured size limit",
                 );
-                // Maps streamed function-call item ids to call ids so argument
-                // deltas and item completions can be attributed after the added
-                // event; the call id is what round-trips into function_call_output.
                 let mut tool_calls = ToolCallLedger::new(
                     "OpenAI-compatible stream reused a function-call item id",
                     "OpenAI-compatible stream sent arguments for an unknown function call",
                 );
-                // Open calls whose arguments have been emitted. Codex routes
-                // stream deltas for the first call of a parallel batch and
-                // send the rest only as complete `arguments` on the done
-                // events; those are emitted once, as a single delta, for a
-                // call that has none yet. Bounded by the open calls.
                 let mut emitted: Vec<String> = Vec::new();
                 while let Some(event) = sse.next_event().await? {
                     let data = event.data;
@@ -260,9 +235,6 @@ impl Provider for OpenAi {
     }
 }
 
-/// Builds the exchange spec for one request. ChatGPT Codex streams valid SSE
-/// frames but often omits Content-Type entirely; standard OpenAI Responses
-/// still requires text/event-stream so a JSON success body cannot be misread.
 fn sse_spec(request_kind: ResponsesRequestKind) -> SseExchangeSpec {
     SseExchangeSpec {
         messages: ExchangeMessages {
@@ -308,9 +280,6 @@ pub(crate) struct ResponsesRequest<'a> {
 
 impl<'a> ResponsesRequest<'a> {
     pub(crate) fn new(request: &'a ModelRequest, kind: ResponsesRequestKind) -> Self {
-        // Each content block becomes its own Responses input item; a text
-        // block keeps the plain message shape so tool-less requests stay
-        // wire-identical.
         let mut input = Vec::new();
         for message in request.messages() {
             let role = match message.role() {
@@ -361,8 +330,6 @@ impl<'a> ResponsesRequest<'a> {
         }
     }
 
-    /// OpenAI routes requests sharing a key to the same cache, so every turn
-    /// of a session reads the prefix the previous turn wrote.
     pub(crate) const fn with_prompt_cache_key(mut self, key: Option<&'a str>) -> Self {
         self.prompt_cache_key = key;
         self
@@ -400,7 +367,6 @@ enum FunctionItem<'a> {
     FunctionCall {
         call_id: &'a str,
         name: &'a str,
-        /// Responses carries tool arguments as a JSON-encoded string.
         arguments: &'a str,
     },
     FunctionCallOutput {
@@ -477,7 +443,6 @@ enum OutputItem {
         id: String,
         call_id: String,
         name: String,
-        /// Complete on `output_item.done`; empty or absent on `added`.
         #[serde(default)]
         arguments: Option<String>,
     },
@@ -553,7 +518,6 @@ pub(crate) enum DecodedEvent {
         item_id: String,
         json: String,
     },
-    /// The complete arguments of one call; emitted only when no delta was.
     ToolCallArgumentsDone {
         item_id: String,
         arguments: String,
@@ -575,8 +539,6 @@ pub(crate) fn decode_event(
     redactions: &[String],
 ) -> Result<DecodedEvent, ProviderError> {
     let event: StreamingEvent = serde_json::from_str(data).map_err(|error| {
-        // Include a short sanitized payload snippet so live Codex/OpenAI
-        // decode failures remain diagnosable without logging the full stream.
         let snippet = truncate_chars(data.trim(), 240);
         ProviderError::Protocol(sanitize_message(
             &format!("could not decode OpenAI event: {error}; payload={snippet}"),
@@ -1062,8 +1024,6 @@ mod tests {
             &[],
         )
         .unwrap_err();
-        // Official OpenAI/Codex Responses error events nest the diagnostic
-        // under `error` and may include sequence/param metadata.
         let nested = decode_event(
             r#"{"type":"error","sequence_number":3,"error":{"type":"invalid_request_error","code":"invalid_prompt","message":"boom","param":null}}"#,
             &[],
@@ -1079,7 +1039,6 @@ mod tests {
         let undecodable = decode_event(r#"{"type":"response.completed","response":[]}"#, &[])
             .unwrap_err()
             .to_string();
-        // Observed from Codex after HTTP 200; must be retried, not fail the run.
         let overloaded = [
             r#"{"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}"#,
             r#"{"type":"response.failed","response":{"error":{"message":"Our servers are currently overloaded. Please try again later."}}}"#,
@@ -1263,8 +1222,6 @@ mod tests {
         }
     }
 
-    /// A single-shot Codex adapter authorized per attempt, as the runtime
-    /// builds it for `openai-codex`.
     fn codex_provider(endpoint: &str, is_fedramp: bool) -> OpenAi {
         let endpoint = validate_endpoint(endpoint, true).unwrap();
         let client = support::client_for_endpoint(&endpoint).unwrap();
@@ -1324,10 +1281,6 @@ mod tests {
         );
     }
 
-    /// A session's turns share one key so OpenAI routes them to the cache
-    /// holding their prefix; the ChatGPT Codex backend routes by the
-    /// `session-id` header as well. Without routing, or without a key,
-    /// neither is sent.
     #[tokio::test]
     async fn the_cache_key_routes_requests_only_when_enabled() {
         let body = "data: {\"type\":\"response.completed\"}\n\n";
@@ -1393,7 +1346,6 @@ mod tests {
 
     #[tokio::test]
     async fn codex_accepts_sse_without_content_type() {
-        // Live ChatGPT Codex responses stream SSE frames with no Content-Type.
         let body = concat!(
             "event: response.created\n",
             "data: {\"type\":\"response.created\"}\n\n",
@@ -1516,11 +1468,6 @@ mod tests {
         server.capture();
     }
 
-    /// T16 regression, shaped like a captured Codex stream (gpt-6-astra and
-    /// gpt-6-sol, 2026-10-06): the first call of a parallel batch streams
-    /// deltas, the rest send their arguments only on the done events. Before
-    /// the fix those calls ran with `{}`. Done payloads after deltas are not
-    /// emitted again, and `output_item.done` alone is enough.
     #[tokio::test]
     async fn parallel_calls_without_deltas_take_their_arguments_from_the_done_events() {
         let body = concat!(
@@ -1596,7 +1543,6 @@ mod tests {
                 started("call_3", "read_file"),
                 arguments("call_3", "{\"path\":\"b.txt\"}"),
                 completed("call_3"),
-                // A call that really has no arguments still completes empty.
                 started("call_4", "tree"),
                 completed("call_4"),
                 ProviderEvent::Completed { usage: None },

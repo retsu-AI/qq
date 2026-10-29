@@ -17,8 +17,6 @@ pub(crate) struct PreparedRequestWeight {
     pub(crate) tool_schema_bytes: u64,
     pub(crate) reducible_message_bytes: u64,
     pub(crate) irreducible_message_bytes: u64,
-    /// Provider-measured occupancy of the compatible preceding request plus
-    /// the conservative byte weight appended since that request.
     pub(crate) compatible_input_tokens: Option<u64>,
 }
 
@@ -31,24 +29,12 @@ impl PreparedRequestWeight {
     }
 }
 
-/// A runtime notice the run placed in the conversation immediately before a
-/// turn's request (ADR-0054 § 2). It is persisted with the first turn whose
-/// request carried it, so assembly replays the same message in the same
-/// place. The texts are part of replay: changing one changes how every
-/// stored run that carried it is assembled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TurnNotice {
-    /// The slice checkpoint: report progress without calling tools.
     Report,
-    /// A stall report after calls without progress (ADR-0054 § 2): the same
-    /// kind of turn as the slice checkpoint, under its own wording.
     StallReport,
-    /// A root report asks for the next permitted action without changing historical notices.
     RootStallReport,
-    /// The turn after a report: tools are available again.
     Continuation,
-    /// A sub-agent's last turn: answer the brief from what it has. The
-    /// reply ends the run (ADR-0054 § 3).
     FinalAnswer,
 }
 
@@ -85,8 +71,6 @@ impl TurnNotice {
     }
 }
 
-/// A framed boundary notice and the number of child deliveries preceding it
-/// since the previous committed turn. Empty reactive retries retain this order.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OrderedTurnNotice {
@@ -107,10 +91,6 @@ fn deserialize_notice_text<'de, D: serde::Deserializer<'de>>(
     Ok(text)
 }
 
-/// Identity of the exact immutable prefix placed before the conversation for
-/// one provider turn. Compaction turns intentionally differ from ordinary
-/// turns; budget-final and checkpoint turns do not, because their notice is
-/// a message (ADR-0054 § 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub(crate) struct PreparedStaticPrefix(ContentHash);
@@ -176,46 +156,29 @@ pub(crate) enum RuntimeEvent {
         turn_ordinal: u32,
         message: Message,
         usage: Option<TokenUsage>,
-        /// Tool calls requested by this turn, in request order. Carried on the
-        /// same event as the completed turn so the store can persist the turn
-        /// and its calls in one transaction; a crash must never leave a
-        /// persisted ToolCall block without its tool_calls rows.
         calls: Vec<RuntimeToolCall>,
-        /// The provider stopped this turn at its output token limit. The
-        /// message is a valid prefix; `calls` is always empty.
         truncated: bool,
-        /// The runtime notice this turn's request was the first to carry.
         notice: Option<TurnNotice>,
         goal_notices: Vec<OrderedTurnNotice>,
         reserved_goal_notices: usize,
     },
     ToolCallStarted {
         id: ToolCallId,
-        /// The call may change files: an edit, a write, a shell command that
-        /// is not provably read-only, an external tool, or a write child.
-        /// The session layer snapshots the workspace before the first one.
         may_change_files: bool,
     },
     ToolCallDenied {
         id: ToolCallId,
         message: String,
     },
-    /// Not-started result whose refusal or interruption needs persistence.
     ToolCallUnexecuted {
         id: ToolCallId,
         message: String,
         interrupted: bool,
     },
-    /// An `ask_user` call the user answered. Like a denial, the session
-    /// layer persisted and published the settled call before this fires;
-    /// `result` is what the model reads.
     ToolCallAnswered {
         id: ToolCallId,
         result: String,
     },
-    /// A chunk of live output from a running tool (shell commands stream their
-    /// combined stdout+stderr). Display-only: the bounded result on
-    /// `ToolCallFinished` remains authoritative.
     ToolCallOutputDelta {
         id: ToolCallId,
         chunk: String,
@@ -228,78 +191,42 @@ pub(crate) enum RuntimeEvent {
         id: ToolCallId,
         result: String,
         is_error: bool,
-        /// File-state map entries recorded by this execution, persisted with
-        /// the result so the map can be rebuilt for later runs.
         file_states: Vec<FileStateUpdate>,
-        /// A UI-facing payload persisted with the result (the applied diff of
-        /// a successful edit). Never enters model context.
         display: Option<ToolCallDisplay>,
-        /// The complete output when `result` was cut and a session store
-        /// will keep it under the handle the marker already names.
         spill: Option<crate::tools::SpillRecord>,
         execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
     },
-    /// The final-answer auditor settled. Emitted before `Completed` (when the
-    /// answer stands) or before the revision turn (when it does not); the
-    /// store persists the record and charges the audit's spend to the run.
     Audited {
         outcome: qq_protocol::AuditOutcome,
         findings: Vec<String>,
-        /// Revisions already spent before this audit (0 for the first).
         revisions: u16,
         usage: Option<TokenUsage>,
         cost_usd_nanos: Option<u64>,
         audit_session: Option<qq_protocol::SessionId>,
     },
-    /// The run stubbed stale read-only results in its live messages before
-    /// preparing `turn_ordinal`: a prune seam. The session layer moves the
-    /// durable watermark to the turn before it, so assembly replays the
-    /// same stubs and the next run extends this one (ADR-0056 § 6).
     ContextPruned {
         turn_ordinal: u32,
     },
-    /// The run summarized its own turns through `turn_cutoff` before
-    /// preparing `turn_ordinal`; the compactor already committed the marker.
-    /// Informational for the session layer (occupancy is unknown again).
     InRunCompacted {
         turn_ordinal: u32,
         turn_cutoff: u32,
     },
-    /// The provider rejected turn `turn_ordinal` for its context window even
-    /// though the estimate said it fit. Nothing streamed; the loop re-plans
-    /// the turn with in-run compaction forced. Informational.
     ProviderOverflow {
         turn_ordinal: u32,
         message: String,
     },
-    /// Queued steering entered model context: the message will be part of
-    /// the request for `turn_ordinal`. Emitted at the boundary, before that
-    /// turn is prepared.
     SteeringApplied {
         message_id: MessageId,
         turn_ordinal: u32,
-        /// Files the applied message read, for the store to keep as this
-        /// message's attachments. Empty for text-only steering.
         attachments: Vec<crate::input::ResolvedAttachment>,
     },
-    /// An interrupting steer aborted turn `turn_ordinal` in flight. Emitted
-    /// after the partial turn (if any text streamed) is committed via
-    /// `AssistantTurnCompleted` and before its unfinished calls are settled;
-    /// the store marks every call of the turn still open as interrupted.
     Interrupted {
         turn_ordinal: u32,
     },
-    /// The provider cut turn `turn_ordinal` at its output token limit. Emitted
-    /// after the partial turn is committed via `AssistantTurnCompleted`; the
-    /// loop then continues with the next turn. `continuation` is 1-based.
     OutputTruncated {
         turn_ordinal: u32,
         continuation: u16,
     },
-    /// A transient provider fault ended turn `turn_ordinal` after its first
-    /// event. Emitted after the partial turn is committed via
-    /// `AssistantTurnCompleted`; the loop then sleeps `delay` and re-issues
-    /// the turn. `attempt` is 1-based within this turn's recovery.
     TurnRetrying {
         turn_ordinal: u32,
         attempt: u16,
@@ -307,22 +234,14 @@ pub(crate) enum RuntimeEvent {
         kind: RunFailureKind,
         message: String,
     },
-    /// Turn recovery exhausted its allowance on a transient provider fault.
-    /// Every completed turn is durable; the run is resumable by the next
-    /// prompt rather than failed.
     Paused {
         pause: Box<qq_protocol::RunPause>,
     },
-    /// The final answer failed its output contract and the loop is about to
-    /// spend repair turn `repair` (1-based) on it. Emitted after the failing
-    /// turn is committed via `AssistantTurnCompleted`; `errors` is bounded.
     OutputRepairRequested {
         turn_ordinal: u32,
         repair: u8,
         errors: Vec<String>,
     },
-    /// The run reached a final answer. `final_output` is the contract
-    /// verdict for a run claimed with one, `None` otherwise.
     Completed {
         final_output: Option<Box<qq_protocol::FinalOutput>>,
     },
@@ -330,9 +249,6 @@ pub(crate) enum RuntimeEvent {
         kind: RunFailureKind,
         message: String,
     },
-    /// A caller-imposed limit settled the run. Emitted after the reserved
-    /// final response turn (if any) has been persisted via
-    /// `AssistantTurnCompleted`.
     BudgetExhausted {
         exhaustion: BudgetExhaustion,
     },
@@ -366,28 +282,16 @@ pub(crate) struct RuntimeToolCall {
     pub(crate) provider_call_id: String,
     pub(crate) name: String,
     pub(crate) arguments: String,
-    /// The catalog's effect for `name`, resolved once when the call is
-    /// admitted. Policy classifies from this, never from the name. A name
-    /// absent from the catalog is a tool error and never reaches the gate.
     pub(crate) effect: EffectClass,
-    /// Set when the call cannot execute: the provider streamed arguments that
-    /// were not valid JSON, or the name is not in the catalog. The call never
-    /// reaches the gate; this message is returned to the model as a
-    /// retryable tool error instead of failing the run.
     pub(crate) rejection: Option<CallRejection>,
 }
 
 pub(crate) struct PendingToolCall {
     pub(crate) provider_call_id: String,
     pub(crate) name: String,
-    /// While streaming, the raw argument text as the provider sent it; once
-    /// completed, its compact canonical re-encoding (or `{}` when the text
-    /// was not JSON, with `rejection` set). The transcript embeds this text
-    /// verbatim, so it is never re-serialized.
     pub(crate) arguments: String,
     pub(crate) rejection: Option<String>,
     pub(crate) completed: bool,
-    /// The streamed arguments passed the 64 KiB limit and were discarded.
     pub(crate) oversized: bool,
 }
 

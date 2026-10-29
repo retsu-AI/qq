@@ -1,8 +1,5 @@
 name: Release
 
-# Publishes prebuilt `qq` binaries when a `vX.Y.Z` tag is pushed. Merge the
-# `cargo xtask release X.Y.Z` bump PR, then tag the merged main with
-# `cargo xtask release --tag`; see docs/runbooks/release.md.
 
 on:
   push:
@@ -67,8 +64,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The build script embeds the revision into `qq --version`. Export it so
-      # the value does not depend on the checkout's git state.
       - name: Record source revision
         shell: bash
         run: |
@@ -80,8 +75,6 @@ jobs:
         shell: bash
         run: rustup target add ${{ matrix.target }}
 
-      # aws-lc-sys compiles C; point cc-rs at musl-gcc so its objects are
-      # built against musl headers rather than the host glibc.
       - name: Install musl toolchain
         if: contains(matrix.target, 'musl')
         shell: bash
@@ -172,9 +165,6 @@ jobs:
           cat ./*.sha256 > SHA256SUMS
           rm ./*.sha256
           ls -la
-      # The release body is this version's CHANGELOG.md section (upgrade
-      # notes, contract changes, entries) above GitHub's generated notes, so
-      # a breaking PATCH release (ADR-0051) ships its upgrade steps to users.
       - name: Extract release notes
         shell: bash
         run: |
@@ -203,10 +193,6 @@ jobs:
             --verify-tag \
             dist/*
 
-  # Regenerates Formula/qq.rb in retsu-AI/homebrew-qq from the published
-  # SHA256SUMS. Skipped, not failed, until the tap exists and the
-  # HOMEBREW_TAP_TOKEN secret (a fine-grained PAT with contents: write on the
-  # tap repository) is set; see docs/runbooks/release.md § Homebrew tap.
   homebrew:
     name: update Homebrew tap
     needs: [verify, publish]

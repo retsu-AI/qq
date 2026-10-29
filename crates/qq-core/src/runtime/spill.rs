@@ -1,9 +1,3 @@
-//! `read_tool_result`: paging or searching within a complete tool output the
-//! session store kept after bounding cut its inline preview. The handle the
-//! marker carries (`t:<tool>:<call8>:<digest8>`) is the only key; the read
-//! is session-scoped and returns exact, unmasked bytes — the model asked for
-//! a specific range of something it already produced.
-
 use std::{future::Future, pin::Pin};
 
 use serde::Deserialize;
@@ -16,7 +10,6 @@ use crate::tools::output::{
 };
 
 pub(crate) const READ_TOOL_RESULT_TOOL: &str = "read_tool_result";
-/// Model-facing page; `Bounds::new` clamps to the ceiling.
 pub(crate) const READ_TOOL_RESULT_BOUNDS: Bounds = Bounds::new(32 * 1024, 4_000);
 const MAX_PAGE_LINES: usize = 2_000;
 const MAX_QUERY_BYTES: usize = 1_024;
@@ -43,8 +36,6 @@ const fn default_limit() -> usize {
     200
 }
 
-/// A parsed handle: the tool that produced the output, the first eight hex
-/// digits of its call id, and the first eight of the stored digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SpillHandle {
     pub(crate) tool: String,
@@ -53,7 +44,6 @@ pub(crate) struct SpillHandle {
 }
 
 impl SpillHandle {
-    /// `t:<tool>:<call8>:<digest8>`; anything else is `handle_invalid`.
     pub(crate) fn parse(handle: &str) -> Option<Self> {
         let rest = handle.strip_prefix("t:")?;
         let (tool, rest) = rest.split_once(':')?;
@@ -72,7 +62,6 @@ impl SpillHandle {
     }
 }
 
-/// What the store found for a handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SpillRead {
     Found {
@@ -80,20 +69,14 @@ pub(crate) enum SpillRead {
         text: String,
         omitted_from_line: usize,
     },
-    /// No row under the call prefix, or the digest disagrees.
     Missing,
-    /// The row exists but the per-session cap reclaimed its content.
     Evicted,
-    /// The row belongs to another session; handles do not cross sessions.
     ForeignSession,
 }
 
 pub(crate) type SpillReadFuture =
     Pin<Box<dyn Future<Output = Result<SpillRead, String>> + Send + 'static>>;
 
-/// Reads a stored complete output by handle within the calling session.
-/// Installed by the session runtime; direct runs keep no spills, so the tool
-/// is neither declared nor dispatchable there.
 pub(crate) trait SpillReader: Send + Sync {
     fn read(&self, handle: SpillHandle) -> SpillReadFuture;
 }
@@ -117,9 +100,6 @@ pub(crate) fn read_tool_result_spec() -> ToolSpec {
     )
 }
 
-/// Renders one page (or the matching lines) of a stored output. Line
-/// addressed like `read_file`; a page stops on a whole line at the budget
-/// and the header names the next offset. Errors are typed strings.
 pub(crate) fn render_tool_result(
     handle: &str,
     arguments: &ReadToolResultArgs,
@@ -143,7 +123,6 @@ pub(crate) fn render_tool_result(
     let mut body = String::with_capacity(body_budget.min(text.len() + total_lines * 8));
     let mut body_escaped = 0_usize;
 
-    // `""` beside offset/limit is a filled-in default: page, don't search.
     if let Some(query) = arguments.query.as_deref().filter(|query| !query.is_empty()) {
         if query.len() > MAX_QUERY_BYTES {
             return Err(format!(
@@ -232,7 +211,6 @@ pub(crate) fn render_tool_result(
         let (cost, _) =
             push_line(&mut body, content, MAX_LINE_BYTES, usize::MAX).unwrap_or((0, false));
         body.push('\n');
-        // The gutter's tab and the newline each escape to two bytes.
         let row_cost = escaped_len(&body[before..before + prefix]) + cost + 2;
         if body_escaped + row_cost > body_budget {
             body.truncate(before);
@@ -327,8 +305,6 @@ mod tests {
                 .unwrap_err()
                 .starts_with("invalid_limit")
         );
-        // D9: an empty query beside offset/limit pages instead of failing,
-        // and the header says the query was ignored.
         assert_eq!(
             render_tool_result("h", &args(49, 200, Some(""), false), &text).unwrap(),
             tail.replacen('\n', " note=empty_query_ignored\n", 1)

@@ -36,13 +36,8 @@ async fn rejects_a_symlinked_database_and_uses_private_permissions() {
     assert_eq!(std::fs::read(victim).unwrap(), b"untouched");
 }
 
-// ----- spawn_agent (sub-agent sessions) -----
-
 #[tokio::test]
 async fn the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runtime() {
-    // The contract rides the run row: a store reopened by a fresh runtime
-    // claims the still-queued run and enforces the same schema and
-    // allowance the caller was admitted with.
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let answers: Arc<StdMutex<std::collections::VecDeque<&'static str>>> = Arc::new(StdMutex::new(
         ["<hang>", "nope", r#"{"ok": true, "n": 9}"#]
@@ -71,8 +66,6 @@ async fn the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runti
             after: created.committed_through,
         })
         .unwrap();
-    // A hanging run occupies the session so the contract run stays queued
-    // through the simulated process death.
     let hanging = submit_prompt_to(&runtime, session_id, "hang").await;
     let queued = runtime
         .command(
@@ -95,9 +88,6 @@ async fn the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runti
         |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id == hanging),
     )
     .await;
-    // `RunStarted` precedes the provider call; wait until the hanging
-    // stream has actually consumed its scripted answer so the contract
-    // run inherits the rest of the script after the restart.
     tokio::time::timeout(Duration::from_secs(10), async {
         while requests.lock().unwrap().is_empty() {
             tokio::task::yield_now().await;
@@ -147,8 +137,6 @@ async fn the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runti
             repair_turns: 1,
         })
     );
-    // The interrupted run was settled by recovery, not re-executed: after
-    // the hang, exactly the contract run's answer and one repair ran.
     let texts: Vec<String> = requests
         .lock()
         .unwrap()
@@ -166,9 +154,6 @@ async fn the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runti
 
 #[tokio::test]
 async fn repair_turns_spend_the_turn_budget_and_exhaustion_publishes_no_verdict() {
-    // Two turns permitted: the first answer fails validation, so the one
-    // repair becomes the reserved budget-final turn, which settles as
-    // exhaustion (never a contract verdict) even though it validates.
     let mut harness = output_contract_harness(&["nope", r#"{"ok": true, "n": 1}"#]).await;
     let queued = harness
         .runtime
@@ -218,13 +203,11 @@ async fn a_valid_first_answer_completes_with_the_parsed_final_output() {
             repair_turns: 0,
         })
     );
-    // The verdict is durable on the row before it was published.
     let snapshot = run_snapshot(&harness, run_id).await;
     assert_eq!(
         snapshot.final_output,
         finished_final_output(&observed, run_id)
     );
-    // The model saw the schema before its first turn.
     let requests = harness.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     let system = requests[0].system().unwrap();
@@ -271,7 +254,6 @@ async fn an_invalid_answer_is_repaired_within_the_allowance_and_the_notice_names
         second_repair.contains("/ok: expected boolean, found string"),
         "{second_repair}"
     );
-    // Every failing answer stays in the durable transcript as its own turn.
     let turns = observed
         .iter()
         .filter(|event| {
@@ -308,8 +290,6 @@ async fn an_answer_that_never_validates_completes_with_the_typed_failure_after_t
         errors[0].starts_with("/: the answer is not a JSON document"),
         "{errors:?}"
     );
-    // Exactly one repair was spent: the third scripted answer was never
-    // requested.
     assert_eq!(harness.requests.lock().unwrap().len(), 2);
     let snapshot = run_snapshot(&harness, run_id).await;
     assert!(matches!(

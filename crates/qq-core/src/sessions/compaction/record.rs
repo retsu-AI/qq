@@ -1,42 +1,23 @@
-//! Bounded evidence metadata appended to the model's narrative. Exact task
-//! inputs are projected separately from durable rows by `inputs`.
-
 use std::collections::{BTreeSet, HashSet};
 use std::fmt::Write as _;
 
 use super::context::COMPACTION_RECORD_BYTES;
 use super::*;
 
-/// Shares of a full-size metadata record.
 const LAST_REPLY_SHARE: usize = 8 * 1024;
 const FILES_SHARE: usize = 12 * 1024;
 const FAILURES_SHARE: usize = 4 * 1024;
-/// Below this budget no record is rendered: the parts' fixed framing would
-/// leave no room for content.
 const MIN_RECORD_BYTES: usize = 2 * 1024;
-/// Tool calls scanned for files and failures, newest first. Matches the
-/// session file-state bound.
 const RECORD_SCAN_CALLS: u32 = 4_096;
-/// Longest single path or failure line in the record.
 const RECORD_LINE_BYTES: usize = 512;
-/// Kept for an omission line at the end of a list, so a list never ends
-/// silently.
 const OMISSION_LINE_BYTES: usize = 32;
 
-/// What a record covers.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::sessions) enum RecordScope {
-    /// A between-run compaction: every prompt at or before the cutoff, with
-    /// its run's steering, calls, and replies, across all earlier compactions.
     Session { cutoff_ordinal: u64 },
-    /// An in-run compaction: what the replaced turns of one prompt run held
-    /// that the kept transcript does not — its steering, files, and failures.
     Run { run_id: RunId, turn_cutoff: u32 },
 }
 
-/// The record's byte budget: `COMPACTION_RECORD_BYTES`, lowered by a declared
-/// window to an eighth of its estimated bytes (the context planner's
-/// bytes-per-token ratio) so a small model keeps room to work.
 pub(in crate::sessions) fn record_budget(context_window: Option<u32>) -> usize {
     context_window.map_or(COMPACTION_RECORD_BYTES, |window| {
         let window_bytes = u64::from(window).saturating_mul(context::ESTIMATED_BYTES_PER_TOKEN);
@@ -46,9 +27,6 @@ pub(in crate::sessions) fn record_budget(context_window: Option<u32>) -> usize {
     })
 }
 
-/// Renders the record, or an empty string when the scope has nothing to
-/// record or the budget is too small to hold any of it. The result never
-/// exceeds `budget` bytes and ends on a line boundary.
 pub(in crate::sessions) fn render_compaction_record(
     connection: &Connection,
     session_id: SessionId,
@@ -59,8 +37,6 @@ pub(in crate::sessions) fn render_compaction_record(
     if budget < MIN_RECORD_BYTES {
         return Ok(String::new());
     }
-    // Part budgets scale with the record, so a small window keeps the same
-    // proportions as a full one.
     let share = |full: usize| full.saturating_mul(budget) / COMPACTION_RECORD_BYTES;
     let session = session_id.to_string();
 
@@ -71,8 +47,6 @@ pub(in crate::sessions) fn render_compaction_record(
             cutoff_ordinal,
             share(LAST_REPLY_SHARE),
         )?,
-        // The kept turns of a running prompt are verbatim; its last reply is
-        // in them.
         RecordScope::Run { .. } => String::new(),
     };
     let (files, failures) = render_files_and_failures(
@@ -97,14 +71,10 @@ pub(in crate::sessions) fn render_compaction_record(
             record.push_str(&part);
         }
     }
-    // Each part is built within its own budget; the cut is only a backstop
-    // that keeps the stored row bounded if that accounting is ever wrong.
     debug_assert!(record.len() <= budget, "{} > {budget}", record.len());
     Ok(truncate_utf8(record, budget))
 }
 
-/// The newest non-empty final assistant reply among the covered prompt runs,
-/// read only up to the part's budget.
 fn render_last_reply(
     connection: &Connection,
     session: &str,
@@ -132,8 +102,6 @@ fn render_last_reply(
          FROM candidates WHERE trim(text) != ''
          ORDER BY ordinal DESC LIMIT 1",
     )?;
-    // `substr` counts characters; `budget + 1` characters are always more
-    // than `budget` bytes, so a fetched prefix is enough to cut from.
     let found = statement
         .query_row(
             params![session, cutoff_ordinal, budget.saturating_add(1)],
@@ -163,10 +131,6 @@ fn render_last_reply(
     Ok(format!("{header}{body}\n"))
 }
 
-// Paths come out of the arguments in SQL, so a large `write_file` content or
-// a malformed row is never copied out of SQLite. Only built-in file tools are
-// read: MCP tools are always `mcp__`-prefixed, so these names are the
-// built-ins. Shell-made changes are not listed.
 macro_rules! record_call_columns {
     () => {
         "c.name,
@@ -186,8 +150,6 @@ macro_rules! record_call_columns {
     };
 }
 
-/// Files modified and read through built-in tools, and failed tool calls,
-/// from the newest `RECORD_SCAN_CALLS` calls of the scope.
 fn render_files_and_failures(
     connection: &Connection,
     session: &str,
@@ -234,7 +196,6 @@ fn render_files_and_failures(
             run_id,
             turn_cutoff,
         } => {
-            // The replaced turns' calls, as replay drops them.
             let mut statement = connection.prepare_cached(concat!(
                 "SELECT ",
                 record_call_columns!(),
@@ -258,9 +219,6 @@ fn render_files_and_failures(
     let mut failures: Vec<String> = Vec::new();
     let mut seen_failures = HashSet::new();
     for call in calls {
-        // Only `failed` calls are failures of the work: denied calls are a
-        // user decision, interrupted ones a lifecycle event, and runtime
-        // rejections ("not executed: ...") harness notices.
         if let Some(result) = call.failure
             && let Some(line) = result.lines().map(str::trim).find(|line| !line.is_empty())
             && !line.starts_with("not executed:")
@@ -284,8 +242,6 @@ fn render_files_and_failures(
         let Some(paths) = call.paths else {
             continue;
         };
-        // SQLite built this array from text values, so it always decodes;
-        // a failure is a store invariant violation.
         let paths: Vec<String> = serde_json::from_str(&paths)?;
         let paths = paths
             .into_iter()
@@ -314,7 +270,6 @@ fn render_files_and_failures(
         files.push_str(heading);
         let total = paths.len();
         for (index, path) in paths.into_iter().enumerate() {
-            // `- {path}\n`
             if files.len() + path.len() + 3 + OMISSION_LINE_BYTES > files_budget {
                 let _ = writeln!(files, "- ... {} more", total - index);
                 break;

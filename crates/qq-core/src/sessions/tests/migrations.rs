@@ -60,7 +60,6 @@ async fn prune_deletes_only_idle_sessions_without_messages() {
         CommandOutcome::SessionsPruned { deleted: 2, .. }
     ));
 
-    // One SessionDeleted per victim; the prompted session survives.
     let mut deleted = Vec::new();
     while deleted.len() < 2 {
         let event = tokio::time::timeout(Duration::from_secs(2), events.next())
@@ -92,7 +91,6 @@ async fn prune_deletes_only_idle_sessions_without_messages() {
         vec![kept]
     );
 
-    // A second prune finds nothing left to delete.
     let receipt = runtime
         .command(
             CommandId::generate().unwrap(),
@@ -194,8 +192,6 @@ fn version_five_migration_defaults_existing_messages_to_turn_zero() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     {
-        // A version-5 store whose messages table predates turn_ordinal,
-        // holding one completed legacy run.
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
@@ -307,8 +303,6 @@ fn version_six_migration_adds_the_display_column_and_keeps_existing_calls_bare()
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     {
-        // A version-6 store whose tool_calls table predates display_json,
-        // holding one completed edit call.
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
@@ -375,8 +369,6 @@ fn version_seven_migration_adds_compaction_storage_and_run_kinds() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     {
-        // A version-7 store whose runs table predates internal run kinds
-        // and that has no compaction storage.
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
@@ -1283,8 +1275,6 @@ fn version_twenty_migration_adds_spawn_call_ownership_without_guessing() {
             .unwrap(),
         STORE_SCHEMA_VERSION.to_string()
     );
-    // A historical child keeps its parent run but has no recorded call:
-    // the summary says so explicitly instead of inventing one.
     let child = load_session_summary(&connection, child_id).unwrap();
     assert_eq!(
         child.spawned_by,
@@ -1299,9 +1289,6 @@ fn version_twenty_migration_adds_spawn_call_ownership_without_guessing() {
     assert_eq!(parent.activity, None);
 }
 
-/// Schema 25: `runs.activity` is added null and the command counter is
-/// backfilled from the journal, so a schema-24 store reopens with its
-/// summaries intact and its command bound still enforced.
 #[test]
 fn version_twenty_five_migration_adds_activity_and_backfills_the_command_counter() {
     let directory = tempfile::tempdir().unwrap();
@@ -1384,20 +1371,14 @@ fn version_twenty_five_migration_adds_activity_and_backfills_the_command_counter
         )
         .unwrap();
     assert_eq!(activity, None);
-    // A historical running run reports no activity, which is what the
-    // event-log scan reported for a run with no activity events.
     let summary = load_session_summary(&connection, session_id).unwrap();
     assert_eq!(summary.active_run_id, Some(run_id));
     assert_eq!(summary.activity, None);
 }
 
-/// Every `PersistenceFault` variant is reachable from a real store fault:
-/// a `RAISE(ABORT)` trigger is a constraint, a row that no longer decodes
-/// is a codec fault, and a read-only database keeps its SQLite code.
 #[tokio::test]
 async fn every_persistence_fault_variant_is_reachable() {
     let (directory, store, claimed) = claimed_store_fixture().await;
-    // Constraint: a trigger rejects the write.
     store
         .call(Priority::Control, |connection| {
             connection.execute_batch(
@@ -1417,7 +1398,6 @@ async fn every_persistence_fault_variant_is_reachable() {
         SessionRuntimeError::Persistence(PersistenceFault::Constraint)
     );
     assert!(constraint.to_string().contains("invariant"), "{constraint}");
-    // Codec: the run's limits no longer decode.
     store
         .call(Priority::Control, |connection| {
             connection.execute_batch(
@@ -1432,7 +1412,6 @@ async fn every_persistence_fault_variant_is_reachable() {
         parse_run_limits(Some("not json")).unwrap_err(),
         SessionRuntimeError::Persistence(PersistenceFault::Codec)
     );
-    // Sqlite: the connection is read-only, so a write keeps the code.
     let read_only = store
         .call(Priority::Control, |connection| {
             connection.execute_batch("PRAGMA query_only = 1")?;
@@ -1491,8 +1470,6 @@ fn version_twenty_six_migration_adds_the_tool_call_effect_and_keeps_history_unkn
             .unwrap(),
         STORE_SCHEMA_VERSION.to_string()
     );
-    // A historical call has no recorded effect: assembly falls back to
-    // the name rather than guessing a class for it.
     let effect: Option<String> = connection
         .query_row("SELECT effect FROM tool_calls WHERE id = 'c'", [], |row| {
             row.get(0)
@@ -1607,7 +1584,6 @@ fn version_twenty_nine_migration_adds_the_attachment_tables_empty() {
             .unwrap();
         assert_eq!(rows, 0, "{table}");
     }
-    // A store that stops at 28 reopens: nothing in 29 rewrites older rows.
     let (connection, _) = open_database(&path).unwrap();
     drop(connection);
 }
@@ -1661,8 +1637,6 @@ async fn spills_commit_with_their_result_and_read_back_exactly_within_the_sessio
         store_with_one_spill(directory.path(), text).await;
     let call = tool_call_id.to_string();
 
-    // Same transaction: the result row and the spill row exist together
-    // and the persisted result cites the handle.
     let connection = Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
     let (result, spilled, bytes): (String, u32, u64) = connection
         .query_row(
@@ -1679,7 +1653,6 @@ async fn spills_commit_with_their_result_and_read_back_exactly_within_the_sessio
     assert!(result.contains(&format!("t:read_file:{}:{}", &call[..8], &digest[..8])));
     drop(connection);
 
-    // Exact, unmasked bytes come back for the owning session.
     let found = store
         .read_tool_spill(session_id, call[..8].to_owned(), digest[..8].to_owned())
         .await
@@ -1692,7 +1665,6 @@ async fn spills_commit_with_their_result_and_read_back_exactly_within_the_sessio
             omitted_from_line: 2,
         }
     );
-    // A digest that disagrees is not this output.
     assert_eq!(
         store
             .read_tool_spill(session_id, call[..8].to_owned(), "00000000".to_owned())
@@ -1707,7 +1679,6 @@ async fn spills_commit_with_their_result_and_read_back_exactly_within_the_sessio
             .unwrap(),
         crate::runtime::SpillRead::Missing
     );
-    // Another session holding the handle reads nothing.
     let other = SessionId::generate().unwrap();
     assert_eq!(
         store
@@ -1721,8 +1692,6 @@ async fn spills_commit_with_their_result_and_read_back_exactly_within_the_sessio
 #[tokio::test]
 async fn spills_past_the_session_cap_evict_the_oldest_finished_content() {
     let directory = tempfile::tempdir().unwrap();
-    // Three spills of 30 MiB against a 64 MiB cap: the third evicts the
-    // first; its row and handle stay, its content does not.
     let big = "y".repeat(30 * 1024 * 1024);
     let (store, session_id, first_call, first_digest) =
         store_with_one_spill(directory.path(), &big).await;
@@ -1769,9 +1738,6 @@ async fn spills_past_the_session_cap_evict_the_oldest_finished_content() {
     assert_eq!(rows, 3, "evicted rows keep their handle");
 }
 
-/// D6: activity is a column written with its event, and the summary reads
-/// D6: activity is a column written with its event and the summary reads
-/// the column; the command counter tracks the journal exactly.
 #[tokio::test]
 async fn run_activity_is_read_from_the_column_and_the_command_counter_tracks_the_journal() {
     let mut harness = approval_harness(
@@ -1783,9 +1749,6 @@ async fn run_activity_is_read_from_the_column_and_the_command_counter_tracks_the
     )
     .await;
     let (observed, _) = collect_until_approval_requested(&mut harness.events).await;
-    // The run is parked at an approval. The last RunActivityChanged the
-    // subscriber saw, the column, and the summary published by the next
-    // command must all agree.
     let last_activity = observed
         .iter()
         .rev()
@@ -1909,7 +1872,6 @@ fn version_twenty_two_migration_adds_truncation_state_as_never_truncated() {
         .unwrap();
     assert!(!truncated);
     assert_eq!(continuations, 0);
-    // Historical context replays without a continuation notice.
     let (ordinal, content_json, truncated): (u32, String, bool) = connection
         .query_row(
             "SELECT turn_ordinal, assistant_content_json, truncated FROM model_turns
@@ -2010,8 +1972,6 @@ fn version_nineteen_migration_keeps_historical_runs_unlimited() {
     assert_eq!(historical.limits, None);
     assert_eq!(historical.outcome, Some(RunOutcome::Completed));
 
-    // A malformed shape and a malformed stored row are both persistence
-    // faults, never silently reinterpreted under current defaults.
     connection
         .execute(
             "UPDATE runs SET limits_json = '{not-json' WHERE id = ?1",
@@ -2084,9 +2044,6 @@ fn partially_applied_version_seventeen_migration_completes_atomically() {
     );
 }
 
-/// Regression: a fully migrated store must reopen. Every earlier migration
-/// step lists the versions it is already applied to; forgetting the current one
-/// re-runs `ALTER TABLE ... ADD COLUMN` on reopen and SQLite rejects it.
 #[test]
 fn a_current_store_reopens_without_rerunning_migrations() {
     let directory = tempfile::tempdir().unwrap();
@@ -2110,8 +2067,6 @@ fn a_current_store_reopens_without_rerunning_migrations() {
     assert_eq!(version(&connection), STORE_SCHEMA_VERSION.to_string());
 }
 
-/// Schema 34 adds the nullable effort pin to a pre-34 store and refuses a
-/// column that already exists with the wrong shape.
 #[test]
 fn version_thirty_three_gains_the_reasoning_effort_pin_and_rejects_a_bad_shape() {
     let directory = tempfile::tempdir().unwrap();
@@ -2666,10 +2621,6 @@ fn malformed_version_thirty_one_routing_column_is_rejected() {
 
 #[tokio::test]
 async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
-    // Release gate (ENG-975): v0.1.4 shipped schema 35. A store holding a
-    // real session and a completed prompt must open under the current
-    // runtime, migrate forward exactly once, keep its transcript, and accept
-    // the post-35 commands (the session approval delegate, schema 36).
     let version = |connection: &rusqlite::Connection| {
         connection
             .query_row(
@@ -2718,7 +2669,6 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
         (workspace_id, session_id)
     };
 
-    // Rewind the file to the v0.1.4 shape: schema_version 35.
     {
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
@@ -2760,8 +2710,6 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);
-    // The message rows themselves, not the summary title (which copies the
-    // first prompt and would survive lost history).
     let migrated = focused_transcript(&snapshot);
     assert_eq!(migrated.len(), 2, "{migrated:?}");
     assert_eq!(migrated[0].0, qq_protocol::MessageRole::User);
@@ -2769,12 +2717,8 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
     assert_eq!(migrated[1].0, qq_protocol::MessageRole::Assistant);
     assert_eq!(migrated[1].1, qq_protocol::MessageState::Complete);
     assert!(!migrated[1].2.is_empty(), "the assistant reply survives");
-    // `close` releases the store's single-writer lock; `shutdown` alone
-    // stops the scheduler but keeps the store open.
     runtime.close().await.unwrap();
 
-    // Reopening the upgraded store is a no-op: the version and the
-    // transcript come back unchanged.
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions::new(path.clone()),
         Arc::new(ScriptedLoader),
@@ -2860,10 +2804,6 @@ fn malformed_model_fallback_column_is_rejected() {
     ));
 }
 
-/// Schema 40 adds the nullable turn notice to a pre-40 store: every existing
-/// turn reads as having carried no notice and replays exactly as it did. A
-/// column that already exists with the wrong shape is refused, and a stored
-/// value the build does not know fails assembly instead of being dropped.
 #[test]
 fn version_thirty_nine_gains_the_turn_notice_as_null_and_rejects_a_bad_shape() {
     let directory = tempfile::tempdir().unwrap();
@@ -2894,7 +2834,6 @@ fn version_thirty_nine_gains_the_turn_notice_as_null_and_rejects_a_bad_shape() {
             params![run_id.to_string(), session_id.to_string()],
         )
         .unwrap();
-    // The run's prompt, so assembly selects its turns.
     connection
         .execute(
             "INSERT INTO messages(id, session_id, run_id, ordinal, turn_ordinal, role, state,
@@ -2966,8 +2905,6 @@ fn version_thirty_nine_gains_the_turn_notice_as_null_and_rejects_a_bad_shape() {
         .unwrap();
         context
     };
-    // A historical turn replays as it always did; a report turn replays its
-    // notice first, where the live request carried it.
     assert_eq!(replay(None), [Message::assistant("legacy")]);
     assert_eq!(
         replay(Some(crate::runtime::TurnNotice::Report)),
@@ -3002,9 +2939,6 @@ fn version_thirty_nine_gains_the_turn_notice_as_null_and_rejects_a_bad_shape() {
     ));
 }
 
-/// Schema 41 adds the delivery table for non-blocking children (ADR-0054
-/// § 4). A pre-41 store gains it empty, its sessions assemble exactly as
-/// before, and a table with the wrong shape is refused.
 #[test]
 fn version_forty_gains_the_child_delivery_table_and_rejects_a_bad_shape() {
     let directory = tempfile::tempdir().unwrap();
@@ -3035,7 +2969,6 @@ fn version_forty_gains_the_child_delivery_table_and_rejects_a_bad_shape() {
         })
         .unwrap();
     assert_eq!(rows, 0);
-    // Reopening a current store does not rerun the step.
     drop(connection);
     let (connection, _) = open_database(&path).unwrap();
     for statement in [
@@ -3051,9 +2984,6 @@ fn version_forty_gains_the_child_delivery_table_and_rejects_a_bad_shape() {
     ));
 }
 
-/// Schema 42 adds the interim-report table (ADR-0054 § 4). A schema-41 store
-/// gains it empty, reopening does not rerun the step, and a table with the
-/// wrong shape is refused.
 #[test]
 fn version_forty_one_gains_the_child_report_table_and_rejects_a_bad_shape() {
     let directory = tempfile::tempdir().unwrap();
@@ -3097,11 +3027,6 @@ fn version_forty_one_gains_the_child_report_table_and_rejects_a_bad_shape() {
     ));
 }
 
-/// Schema 43 adds the prune watermark (ADR-0056 § 6). A schema-42 session
-/// with history upgrades with the watermark at its newest committed turn, so
-/// it assembles exactly as it did at 42 (everything stale stubbed); a
-/// session without turns stays unset. A column with the wrong shape is
-/// refused.
 #[test]
 fn version_forty_two_gains_the_prune_watermark_at_the_newest_turn() {
     let directory = tempfile::tempdir().unwrap();
@@ -3353,14 +3278,6 @@ fn ab5_schema_fifty_cannot_hide_a_missing_execution_receipt_column() {
 
 #[tokio::test]
 async fn a_store_with_retired_supervised_mode_opens_and_replays_as_auto() {
-    // v0.1.3 through v0.1.8 stored `supervised` for write sub-agents: in the
-    // session row and in every session summary journaled with an event,
-    // which runs also kept as their completion receipts from schema 62 on.
-    // That mode no longer exists; children now run under `auto` with internal
-    // supervision. Upgraded stores must snapshot, replay and report
-    // completions instead of failing on the retired value. A store from
-    // before 62 has no receipts yet: migration 62 decodes them from the
-    // journal, so it must find the summaries already rewritten.
     for schema in [61, 63] {
         retired_supervised_mode_upgrades_from(schema).await;
     }
@@ -3418,7 +3335,6 @@ async fn retired_supervised_mode_upgrades_from(schema: u32) {
             )
             .unwrap();
         if schema < 62 {
-            // Before 62, receipts lived only in the journal.
             connection
                 .execute(
                     "UPDATE runs SET completion_sequence=0,completion_json=NULL",
@@ -3529,11 +3445,6 @@ async fn retired_supervised_mode_upgrades_from(schema: u32) {
 
 #[tokio::test]
 async fn a_schema_64_store_with_reviewer_delegate_and_grant_state_opens_and_replays() {
-    // Protocol 41 removed the approval reviewer, `approval_delegate` and
-    // session/workspace grants. A store written before then holds their
-    // tables and columns, summaries naming a delegate, delegated holds,
-    // grant and reviewer resolutions, and their events. It must open, drop
-    // that storage, and still snapshot and replay its history.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let (workspace_id, session_id, store_id) = {
@@ -3646,8 +3557,6 @@ async fn a_schema_64_store_with_reviewer_delegate_and_grant_state_opens_and_repl
                 )
                 .unwrap();
         }
-        // Every journaled summary names a delegate; one also holds a
-        // delegated call, and so does the run's completion receipt.
         connection
             .execute_batch(&format!(
                 "UPDATE events SET envelope_json=json_set(envelope_json,'$.event.session.approval_delegate','off')

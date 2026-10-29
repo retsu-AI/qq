@@ -13,17 +13,12 @@ pub type WorkerRuntimeLoadFuture =
 pub type SpawnModelValidationFuture =
     Pin<Box<dyn Future<Output = Result<(), RuntimeLoadError>> + Send + 'static>>;
 
-/// The compiled plan a session run executes from, as returned by the
-/// embedding application's [`RuntimeLoader`].
 #[derive(Clone)]
 pub struct LoadedRuntime {
     pub plan: Arc<CompiledAgentPlan>,
 }
 
 impl LoadedRuntime {
-    /// Builds an embedded plan from the runtime's own model metadata.
-    /// Catalog capture and filesystem compilation run off the async executor,
-    /// sharing the compiler's four-task concurrency bound.
     pub async fn from_runtime(
         runtime: Runtime,
         profile: qq_protocol::AgentProfileId,
@@ -50,12 +45,6 @@ impl LoadedRuntime {
         Self { plan }
     }
 
-    /// Compiles a plan from an already constructed runtime and its resolved
-    /// model, for loaders that build runtimes directly (embedders, tests,
-    /// benchmarks). The runtime's provider, MCP registry, spawn routes, and
-    /// retry policy are kept; its model identity must agree with
-    /// `resolved_model`, which the compiled plan then reports. Performs
-    /// blocking filesystem work.
     pub fn compile_blocking(
         runtime: &Runtime,
         resolved_model: ResolvedModel,
@@ -69,9 +58,6 @@ impl LoadedRuntime {
         )
     }
 
-    /// [`Self::compile_blocking`] for a named agent profile. Embedders that
-    /// realize profiles themselves record which one the plan implements so
-    /// the run's persisted identity names it.
     pub fn compile_blocking_for_profile(
         runtime: &Runtime,
         resolved_model: ResolvedModel,
@@ -127,10 +113,6 @@ impl LoadedRuntime {
 pub trait RuntimeLoader: Send + Sync + 'static {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture;
 
-    /// Loads a runtime while reporting secret-free preparation progress and
-    /// observing cooperative cancellation at phase boundaries. The default
-    /// preserves the embedding contract for loaders without stages; owners
-    /// await these noncooperating loaders before terminal settlement too.
     fn load_with_progress(
         &self,
         request: RuntimeLoadRequest,
@@ -140,9 +122,6 @@ pub trait RuntimeLoader: Send + Sync + 'static {
         self.load(request)
     }
 
-    /// Resolves the application-configured worker route against the same
-    /// workspace configuration and policy used by ordinary runtime loading.
-    /// `parent` is returned unchanged when no worker route is configured.
     fn resolve_worker_model(
         &self,
         workspace: String,
@@ -152,19 +131,6 @@ pub trait RuntimeLoader: Send + Sync + 'static {
         Box::pin(std::future::ready(Ok(parent)))
     }
 
-    /// Confirms a resolved child route is spawnable right now: the route
-    /// parses, its provider is configured, policy-allowed, and authenticated
-    /// at this moment. `advertised` is the immutable model catalog from the
-    /// parent's compiled plan, not model-supplied input. Membership in that
-    /// snapshot survives later discovery refreshes; fresh availability and
-    /// authentication failures remain recoverable tool errors. Every spawn
-    /// resolution source — the explicit tool argument, configured worker,
-    /// and parent-selection
-    /// fallback — passes through this check before any durable child state
-    /// is created. Core stays ignorant of provider-auth details; the loader
-    /// answers "is this route spawnable" the same way it answers "load this
-    /// route". The default accepts everything, for embeddings without an
-    /// authenticated catalog.
     fn validate_spawn_model(
         &self,
         workspace: String,
@@ -176,9 +142,6 @@ pub trait RuntimeLoader: Send + Sync + 'static {
     }
 }
 
-/// Secret-free progress for runtime preparation. A loader should advance this
-/// before work that may block so a deadline can identify the unfinished stage
-/// without exposing configuration or credential values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum RuntimeLoadStage {
@@ -224,7 +187,6 @@ impl Default for RuntimeLoadProgress {
 }
 
 impl RuntimeLoadProgress {
-    /// Requests cooperative cancellation; the owner must still await the loader.
     pub fn cancel(&self) {
         self.cancellation.cancel();
     }
@@ -234,7 +196,6 @@ impl RuntimeLoadProgress {
         self.cancellation.is_cancelled()
     }
 
-    /// Waits for cancellation without polling or abandoning owned work.
     pub async fn cancelled(&self) {
         self.cancellation.cancelled().await;
     }
@@ -275,8 +236,6 @@ pub struct RuntimeLoadRequest {
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
     pub workspace: String,
     pub model: ModelSelection,
-    /// Configured agent profile the session selected. Loaders that know no
-    /// profiles accept `default` and reject anything else.
     pub profile: qq_protocol::AgentProfileId,
 }
 
@@ -302,18 +261,11 @@ pub enum GoalCheckPolicyError {
 pub type GoalCheckPolicyFuture =
     Pin<Box<dyn Future<Output = Result<(), GoalCheckPolicyError>> + Send + 'static>>;
 
-/// The configuration-facing seam for workspace goal policy, provided at
-/// runtime construction. qq-core stays configuration-agnostic: the embedding
-/// application implements it against its config layer.
 pub trait WorkspacePolicyAuthority: Send + Sync + 'static {
-    /// Resolve current goal settings. Failure must reject new activation.
     fn goal_policy(&self, _workspace: &Path) -> GoalPolicyFuture {
         Box::pin(std::future::ready(Err(GoalPolicyError::Unavailable)))
     }
 
-    /// Validate the current managed hard denies before issuing exact check
-    /// authority. An authority must implement this rather than silently
-    /// granting checks when its configured policy cannot be consulted.
     fn validate_goal_check(&self, _workspace: &Path, _command: &str) -> GoalCheckPolicyFuture {
         Box::pin(std::future::ready(Err(GoalCheckPolicyError::Unavailable)))
     }
@@ -322,8 +274,6 @@ pub trait WorkspacePolicyAuthority: Send + Sync + 'static {
 pub type SessionEventStream =
     Pin<Box<dyn Stream<Item = Result<SessionEventEnvelope, SessionRuntimeError>> + Send + 'static>>;
 
-/// Committed events with their persisted encoding, for transports that
-/// forward bytes.
 pub type PublishedEventStream =
     Pin<Box<dyn Stream<Item = Result<Arc<PublishedEvent>, SessionRuntimeError>> + Send + 'static>>;
 
@@ -331,18 +281,9 @@ pub type PublishedEventStream =
 pub struct SessionRuntimeOptions {
     pub database_path: PathBuf,
     pub max_active_runs: usize,
-    /// May lower, but not raise, the independent derived side-query ceiling.
     pub max_active_side_queries: Option<usize>,
-    /// Per-question ceilings; each may lower, but not raise, the shipped one.
     pub side_query_limits: SideQueryLimits,
-    /// How long a held call may wait for a client before the server denies
-    /// it `denied_timeout`. `None` (the default) is no server deadline: an
-    /// interactive hold waits for the client, the run's own deadline, or
-    /// cancellation, and is never denied by a timer the operator did not set.
-    /// A supervisor that wants a bound sets one.
     pub approval_timeout: Option<Duration>,
-    /// Where workspace goal policy comes from. Absent, goals use the default
-    /// policy and checks that need managed-policy validation are refused.
     pub grant_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
 }
 
@@ -373,8 +314,6 @@ impl SessionRuntimeOptions {
         }
     }
 
-    /// Bounds every held call's wait for a client. Absent means no server
-    /// deadline; see [`Self::approval_timeout`].
     #[must_use]
     pub const fn with_approval_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.approval_timeout = timeout;
@@ -401,27 +340,13 @@ pub(super) struct SessionRuntimeInner {
     pub(super) side_permits: Arc<Semaphore>,
     pub(super) side_tasks: AtomicUsize,
     pub(super) side_limits: side_questions::SideCeilings,
-    /// Source sessions with an executing side question; the owner's drop
-    /// removes its entry and wakes a replacement awaiting the handoff.
     pub(super) side_sessions: Mutex<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     pub(super) side_cancellations: Mutex<HashMap<RunId, RunCancellation>>,
-    /// Run permits for child (sub-agent) sessions, one pool per depth
-    /// (`child_permits[d - 1]` serves depth `d`), each separate from
-    /// `permits`: a parent run holds its permit for its whole lifetime,
-    /// including while it awaits a spawned child. If a depth drew from its
-    /// parents' pool, `max_active_runs` parents all awaiting children would
-    /// leave no permit with which any child could ever start — a deadlock —
-    /// and the same holds between depth one and depth two. Each pool is
-    /// sized like the root pool, so global run concurrency stays bounded at
-    /// `(MAX_CHILD_DEPTH + 1) * max_active_runs`.
     pub(super) child_permits: Vec<Arc<Semaphore>>,
     pub(super) max_active_runs: usize,
     pub(super) schedule: mpsc::Sender<()>,
     pub(super) cancellations: Mutex<HashMap<RunId, watch::Sender<bool>>>,
-    // Only executing paid prompt runs; their scoped registration removes entries after drain.
     pub(super) goal_deadlines: Mutex<HashMap<RunId, crate::runtime::RunDeadline>>,
-    /// Live steering channels for executing prompt runs, registered when the
-    /// run loop starts and removed when it settles.
     pub(super) steering: Mutex<HashMap<RunId, crate::runtime::SteeringSender>>,
     approvals: Mutex<HashMap<ToolCallId, PendingApproval>>,
     pub(super) approval_timeout: Option<Duration>,
@@ -470,7 +395,6 @@ impl SessionRuntime {
                     .query_map([], |row| row.get::<_, String>(0))?
                     .collect::<Result<Vec<_>, _>>()?;
                 drop(statement);
-                // A crashed request's spend is unknown, never the last committed total.
                 transaction.execute(
                     "UPDATE side_questions SET state = 'interrupted', finished_at_ms = ?1,
                     usage_json = NULL, estimated_cost_usd_nanos = NULL WHERE state = 'running'",
@@ -530,15 +454,11 @@ impl SessionRuntime {
         Ok(runtime)
     }
 
-    /// The durable identity of the store this runtime owns. Every cursor it
-    /// issues carries this value; a server advertises it as its identity.
     #[must_use]
     pub fn store_id(&self) -> StoreId {
         self.inner.store.store_id()
     }
 
-    /// Replay boundary captured before startup recovery and goal scheduling.
-    /// Absent when the opened store had no live goals.
     pub async fn startup_goal_cursor(
         &self,
         workspace_id: WorkspaceId,
@@ -555,8 +475,6 @@ impl SessionRuntime {
             .await
     }
 
-    /// Stops an accepted active goal without overwriting a stopped reason.
-    /// The status and identity predicate is checked in the command transaction.
     pub async fn pause_goal_if_active(
         &self,
         session_id: SessionId,
@@ -638,7 +556,6 @@ impl SessionRuntime {
         } else {
             None
         };
-        // Carry failures through journal lookup so committed commands replay.
         let goal_policy = goal_session.map(|_| &goal_path);
         let goal_policy = match goal_policy {
             Some(Some(Ok(path))) => Some(self.inner.resolve_goal_policy(Path::new(path)).await),
@@ -726,9 +643,6 @@ impl SessionRuntime {
         if let Some(tool_call_id) = signal_approval {
             self.inner.resolve_approval(tool_call_id);
         }
-        // The row is durable (the receipt names its id). A replayed command
-        // returns the same receipt without re-queuing: the first delivery
-        // already reached the loop, or the run finished and superseded it.
         if let (Some((run_id, input, interrupt)), CommandOutcome::SteeringQueued { message_id, .. }) =
             (steer, &applied.receipt.outcome)
             && !applied.replayed
@@ -753,8 +667,6 @@ impl SessionRuntime {
         Ok(applied.receipt)
     }
 
-    /// The canonical path a resolved workspace id names, for callers that
-    /// consult workspace-scoped configuration (capabilities) outside a run.
     pub async fn workspace_path(
         &self,
         workspace_id: WorkspaceId,
@@ -765,8 +677,6 @@ impl SessionRuntime {
         self.inner.store.workspace_path(workspace_id).await
     }
 
-    /// Bounded admission-time context for an isolated side question. Only
-    /// committed prompt/run units are included; streamed partial output is not.
     pub async fn capture_side_context(
         &self,
         session_id: SessionId,
@@ -777,7 +687,6 @@ impl SessionRuntime {
         self.inner.store.capture_side_context(session_id).await
     }
 
-    /// Discover registered roots without interpreting a client-side directory.
     pub async fn workspace_catalog(
         &self,
         request: qq_protocol::WorkspaceCatalogRequest,
@@ -815,8 +724,6 @@ impl SessionRuntime {
         self.inner.store.snapshot(request).await
     }
 
-    /// Unsettled runs sponsored by this exact live goal, including cancellations
-    /// that still need to drain. Historical roots retain paid-child ownership.
     pub async fn goal_pending_runs(
         &self,
         session_id: SessionId,
@@ -831,9 +738,6 @@ impl SessionRuntime {
             .await
     }
 
-    /// Already-cancelled runs sponsored by this session's goal, including
-    /// historical goals that were cleared or replaced while work drained.
-    /// This read never includes replacement work or requests cancellation.
     pub async fn cancelled_goal_runs(
         &self,
         session_id: SessionId,
@@ -848,7 +752,6 @@ impl SessionRuntime {
             .await
     }
 
-    /// Whether an unsettled run is sponsored by this exact live goal.
     pub async fn goal_owns_run(
         &self,
         session_id: SessionId,
@@ -864,8 +767,6 @@ impl SessionRuntime {
             .await
     }
 
-    /// Reads a bounded page of terminal run receipts in (after, through].
-    /// Continue with the last receipt's cursor until an empty page is returned.
     pub async fn completed_runs(
         &self,
         session_id: SessionId,
@@ -889,7 +790,6 @@ impl SessionRuntime {
             .await
     }
 
-    /// Sessions in this root's bounded family that have unresolved holds.
     pub async fn approval_sessions(
         &self,
         workspace_id: WorkspaceId,
@@ -901,9 +801,6 @@ impl SessionRuntime {
         self.inner.store.approval_sessions(workspace_id, root).await
     }
 
-    /// Reads a finished run's exact reply and original terminal receipt.
-    /// Returns None while that run is still active or queued. Historical mixed
-    /// channels without persisted delivery order cannot be reconstructed.
     pub async fn run_result(
         &self,
         workspace_id: WorkspaceId,
@@ -919,8 +816,6 @@ impl SessionRuntime {
             .await
     }
 
-    /// Reads an exact durable run, independently of transcript pagination.
-    /// Workspace and session fences prevent accidentally reading another lane.
     pub async fn run_snapshot(
         &self,
         workspace_id: WorkspaceId,
@@ -936,7 +831,6 @@ impl SessionRuntime {
             .await
     }
 
-    /// Committed events after `request.after`, as parsed envelopes.
     pub fn subscribe(
         &self,
         request: SubscribeRequest,
@@ -947,18 +841,6 @@ impl SessionRuntime {
         ))
     }
 
-    /// Committed events after `request.after`, each carrying the exact JSON
-    /// the store persisted so a transport can forward it without
-    /// re-serializing.
-    ///
-    /// Delivery has two phases. Catch-up reads pages until the subscriber is
-    /// current: from the workspace ring when it still covers the cursor
-    /// (warm reconnect), otherwise from SQLite. Then events are read from the
-    /// ring by cursor with no store access. A subscriber that falls more than
-    /// the ring capacity behind is redirected to catch-up from its last
-    /// cursor. If the retained journal no longer covers it, CursorExpired
-    /// requires a fresh snapshot instead of silently skipping history.
-    /// Nothing is published to the ring that was not already committed.
     pub fn subscribe_published(
         &self,
         request: SubscribeRequest,
@@ -1002,8 +884,6 @@ impl SessionRuntime {
                             }
                         },
                     };
-                    // A short page is the end of the backlog: one read
-                    // suffices for a subscriber that is nearly caught up.
                     let caught_up = page.len() < usize::from(MAX_REPLAY_EVENTS);
                     for event in page {
                         after = event.envelope.cursor.sequence;
@@ -1027,12 +907,9 @@ impl SessionRuntime {
                     };
                     match received {
                         Ok(event) => {
-                            // Reads are by cursor, so this is exactly
-                            // `after + 1`: no duplicate or gap handling.
                             after = event.envelope.cursor.sequence;
                             yield Ok(event);
                         }
-                        // Recover the missing range from the authoritative log.
                         Err(feed::RecvError::Behind) => break,
                         Err(feed::RecvError::Closed) => return,
                     }
@@ -1041,10 +918,6 @@ impl SessionRuntime {
         }))
     }
 
-    /// Stops accepting commands and new run claims, durably cancels every
-    /// accepted queued or running prompt, and waits until no unfinished run
-    /// remains. Snapshot and subscription reads stay available so callers can
-    /// inspect the settled state after shutdown.
     pub async fn shutdown(&self) -> Result<(), SessionRuntimeError> {
         let lifecycle = self.inner.lifecycle.write().await;
         self.inner.shutdown.send_replace(true);
@@ -1110,15 +983,11 @@ impl SessionRuntime {
         }
     }
 
-    /// Settles all accepted work and then closes the durable store worker.
-    /// Unlike [`Self::shutdown`], snapshots and subscriptions are unavailable
-    /// after this final owner-lifecycle operation completes.
     pub async fn close(&self) -> Result<(), SessionRuntimeError> {
         self.shutdown().await?;
         self.inner.store.close().await
     }
 
-    /// Whether unfinished work in this session is outside the selected goal.
     pub async fn has_preempting_goal_work(
         &self,
         session_id: SessionId,
@@ -1130,9 +999,6 @@ impl SessionRuntime {
             .await
     }
 
-    /// Retains accepted runs until they settle naturally. An explicit interrupt
-    /// requests ordinary shutdown, cancelling and draining the remaining work.
-    /// External shutdown or runtime failure interrupts the wait as unavailable.
     pub async fn close_when_idle(
         &self,
         interrupt: impl std::future::Future<Output = ()>,
@@ -1180,11 +1046,6 @@ impl SessionRuntime {
         }
     }
 
-    /// Abandons the store without settling anything: the worker thread is
-    /// stopped and joined, every later store call fails as unavailable, and
-    /// runs still executing are left exactly as a crashed process would leave
-    /// them (`running` rows, no terminal event). For tests of recovery and
-    /// ownership handoff across a simulated process death.
     #[doc(hidden)]
     pub async fn abandon_for_test(&self) -> Result<(), SessionRuntimeError> {
         let Some(worker) = self.inner.store.stop_worker_for_test() else {
@@ -1227,11 +1088,6 @@ impl SessionRuntimeInner {
         policy.and_then(GoalPolicy::validate)
     }
 
-    /// Wakes in-process waiters on a workspace after a run settled. Client
-    /// delivery is the feed's job (published by the store worker after
-    /// commit); this watch exists only so a parent awaiting a child in
-    /// `subagents.rs` learns that an outcome may now be readable. Every
-    /// settlement path calls it; streaming and lifecycle writes do not.
     pub(super) fn notify(&self, cursor: EventCursor) {
         let Ok(mut wakeups) = self.wakeups.lock() else {
             return;
@@ -1272,9 +1128,6 @@ impl SessionRuntimeInner {
         }
     }
 
-    /// Hands a durably recorded steering message to the executing run. A run
-    /// that is no longer registered finished (or is finishing); its
-    /// settlement marks the message superseded, so nothing is lost here.
     pub(super) fn steer(
         &self,
         run_id: RunId,
@@ -1287,10 +1140,6 @@ impl SessionRuntimeInner {
         let Some(sender) = steering.get(&run_id) else {
             return;
         };
-        // The channel is sized to `MAX_PENDING_STEERING`, the same bound the
-        // durable admission enforces, so a full channel means the store and
-        // the loop disagree only transiently; the message stays `queued` and
-        // settles superseded with the run if it never applies.
         match sender.messages.try_send(message) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_)) => {}
@@ -1334,9 +1183,6 @@ impl SessionRuntimeInner {
     }
 }
 
-/// Why a leading-slash prompt was refused at admission. Syntactic only: the
-/// name is checked against the grammar and the client-reserved vocabulary,
-/// never against the workspace index, so admission performs no I/O.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SlashCommandError {
     #[error(
@@ -1349,9 +1195,6 @@ pub enum SlashCommandError {
     Reserved { name: String },
 }
 
-/// Rejects a prompt whose rendered text names a slash command the runtime can
-/// never resolve. Everything else, including `//` escapes and names the
-/// workspace may or may not index, is admitted.
 pub(super) fn validate_slash_prompt(prompt: &str) -> Result<(), SlashCommandError> {
     if prompt.starts_with("//") {
         return Ok(());
@@ -1513,11 +1356,6 @@ pub enum SessionRuntimeError {
     Persistence(PersistenceFault),
 }
 
-/// Why a store operation failed. SQLite errors keep their result code so an
-/// operator can tell a busy or read-only database from a corrupt row; codec
-/// faults are rows that no longer decode; constraint faults are store
-/// invariants the code itself checks (a settled run losing its outcome, a
-/// missing parent) or `CHECK`/`UNIQUE`/foreign-key violations.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum PersistenceFault {
     #[error("sqlite reported {0:?}")]
@@ -1529,9 +1367,7 @@ pub enum PersistenceFault {
 }
 
 impl SessionRuntimeError {
-    /// A store invariant the code checks itself did not hold.
     pub(crate) const CONSTRAINT: Self = Self::Persistence(PersistenceFault::Constraint);
-    /// A stored row that no longer decodes into its type.
     pub(crate) const CODEC: Self = Self::Persistence(PersistenceFault::Codec);
 }
 

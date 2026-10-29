@@ -158,7 +158,6 @@ fn model_api_patch_layers_over_builtin_mantle_protocols() {
     let snapshot = tree.loader().load(&request).unwrap();
     let models = snapshot.providers().get("bedrock-mantle").unwrap().models();
 
-    // Builtin catalog ships per-vendor protocols.
     assert_eq!(
         models["openai.gpt-5.6-luna"].api(),
         Some(ProviderApi::OpenAiResponses)
@@ -171,7 +170,6 @@ fn model_api_patch_layers_over_builtin_mantle_protocols() {
         models["anthropic.claude-fable-5"].api(),
         Some(ProviderApi::AnthropicMessages)
     );
-    // A patch sets the API on new models and overrides builtins.
     assert_eq!(
         models["custom-model"].api(),
         Some(ProviderApi::OpenAiChatCompletions)
@@ -253,7 +251,6 @@ fn worker_model_layers_clears_and_tracks_provenance_independently() {
 fn delegation_roster_layers_validates_and_falls_back_to_worker_model_sugar() {
     let tree = TempTree::new();
 
-    // No section and no worker: the empty roster with defaults.
     let bare = tree.loader().load(&tree.request()).unwrap();
     assert!(bare.delegation().roster().is_empty());
     assert_eq!(bare.delegation().default_role(), DelegationRole::Balanced);
@@ -261,7 +258,6 @@ fn delegation_roster_layers_validates_and_falls_back_to_worker_model_sugar() {
     assert!(!bare.delegation().write_children());
     assert!(bare.provenance().delegation().is_none());
 
-    // A legacy worker_model is the one-entry balanced roster.
     let sugar = tree
         .loader()
         .load(
@@ -282,7 +278,6 @@ fn delegation_roster_layers_validates_and_falls_back_to_worker_model_sugar() {
         Some("openai/worker")
     );
 
-    // A declared section wins over the sugar and tracks provenance.
     tree.write(
         "global/config.ron",
         r#"(version: 1, worker_model: "openai/ignored", delegation: (
@@ -325,7 +320,6 @@ fn delegation_roster_layers_validates_and_falls_back_to_worker_model_sugar() {
         "worker_model stays a separately reported value"
     );
 
-    // Clearing the section from a later layer restores the sugar.
     let cleared = tree
         .loader()
         .load(
@@ -344,8 +338,6 @@ fn delegation_roster_layers_validates_and_falls_back_to_worker_model_sugar() {
         SourceKind::Inline
     );
 
-    // Every route is validated exactly like `model`, and the section's own
-    // bounds are enforced.
     let load = |content: &str| {
         tree.loader()
             .load(&tree.request().with_explicit_content(content))
@@ -382,7 +374,6 @@ fn delegation_roster_layers_validates_and_falls_back_to_worker_model_sugar() {
         load(r#"(version: 1, delegation: (roster: [(route: "openai/a", role: fast)], max_depth: 4))"#),
         ConfigError::InvalidDelegation(message) if message.contains("max_depth")
     ));
-    // Zero is the "never delegate" control arm, not an error.
     let disabled = tree
         .loader()
         .load(&tree.request().with_explicit_content(
@@ -395,7 +386,6 @@ fn delegation_roster_layers_validates_and_falls_back_to_worker_model_sugar() {
         ConfigError::Parse { .. }
     ));
 
-    // Policy applies to roster routes.
     tree.write(
         "managed/managed.ron",
         r#"(version: 1, policy: (allowed_providers: ["openai"]))"#,
@@ -447,9 +437,6 @@ fn reasoning_effort_is_explicit_layered_and_distinct_from_omission() {
 
 #[test]
 fn clearing_max_output_tokens_restores_compiled_provenance() {
-    // A layer that clears the cap restores the default; that is not a chosen
-    // cap, so the provenance is the compiled source again rather than the
-    // clearing layer (which would read as an explicit operator pin).
     let tree = TempTree::new();
     tree.write("global/config.ron", "(version: 1, max_output_tokens: 4096)");
     let set = tree.loader().load(&tree.request()).unwrap();
@@ -520,15 +507,10 @@ fn reasoning_effort_clear_and_workspace_changes_obey_trust() {
 
 #[test]
 fn removed_jev_keys_are_rejected_by_name() {
-    // Jev review, routing, and approval were removed. A configuration that
-    // still sets one fails to parse and names the key, rather than silently
-    // running without the reviewer it asked for.
     for (document, named) in [
         ("(version: 1, jev_review: final)", true),
         ("(version: 1, jev_routing: true)", true),
         ("(version: 1, jev_approval: true)", true),
-        // Profile entries parse through an untagged enum, whose error cannot
-        // name the field; the load still fails.
         (
             r#"(version: 1, profiles: { "p": Profile(jev_approval: true) })"#,
             false,
@@ -549,9 +531,6 @@ fn removed_jev_keys_are_rejected_by_name() {
 
 #[test]
 fn approval_timeout_is_absent_by_default_and_bounded_when_set() {
-    // DA2 / RR9: absent is no server deadline. A set value reaches the
-    // snapshot as a duration, is bounded, and needs no trust because it only
-    // shortens a wait.
     let tree = TempTree::new();
     let bare = tree.loader().load(&tree.request()).unwrap();
     assert_eq!(bare.approval_timeout(), None);
@@ -574,7 +553,6 @@ fn approval_timeout_is_absent_by_default_and_bounded_when_set() {
         SourceKind::Inline
     );
 
-    // An untrusted project file may set it: it adds no authority.
     tree.write(
         "work/qq.ron",
         r#"(version: 1, approval_timeout_seconds: 30)"#,
@@ -666,7 +644,6 @@ fn every_experiment_arm_overlay_parses_and_validates() {
             continue;
         }
         seen += 1;
-        // Placeholders become routes on the configured test providers.
         let content = std::fs::read_to_string(&path)
             .unwrap()
             .replace("PROVIDER/PRIMARY", "openai/test-model")
@@ -1040,21 +1017,17 @@ fn probed_paths_cover_every_present_and_absent_source_location() {
     let canonical = |relative: &str| fs::canonicalize(tree.path(relative)).unwrap();
     let contains = |path: PathBuf| probed.contains(&path);
 
-    // Present sources.
     assert!(contains(canonical("global").join("config.ron")));
     assert!(contains(canonical("global").join("config.d/10-first.ron")));
     assert!(contains(canonical("work/child").join("qq.ron")));
     assert!(contains(canonical("explicit.ron")));
-    // Absent locations whose appearance would change the result.
     assert!(contains(canonical("work").join("qq.ron")));
     assert!(contains(canonical("work").join(".qq")));
     assert!(contains(canonical("work/child").join(".qq")));
     assert!(contains(tree.path("managed")));
     assert!(contains(tree.path("data").join("trust.ron")));
     assert!(contains(tree.path("data").join("organizations.ron")));
-    // The VCS marker that bounded the ancestor walk.
     assert!(contains(canonical("work").join(".git")));
-    // Nothing above the VCS root was inspected, and no duplicates were kept.
     assert!(!contains(tree.path("qq.ron")));
     let mut unique = probed.to_vec();
     unique.sort();
@@ -1282,8 +1255,6 @@ fn trust_required_names_every_pending_file_and_the_command_that_accepts_it() {
         );
     }
 
-    // The pending entries carry the sensitive sections each file declares,
-    // root first, so `qq trust` can show them before granting.
     let ConfigError::TrustRequired { pending, .. } = error else {
         panic!("expected TrustRequired, got {error}");
     };
@@ -1346,8 +1317,6 @@ fn project_trust_gates_sensitive_changes_and_ignores_safe_edits() {
 
 #[test]
 fn pending_trust_scans_without_writing_and_names_the_sensitive_sections() {
-    // `qq config sources` and `qq doctor` read the pending set without
-    // recording it; `qq trust` records exactly that set.
     let tree = TempTree::new();
     let config = tree.write(
         "work/.qq/config.ron",
@@ -1376,8 +1345,6 @@ fn pending_trust_scans_without_writing_and_names_the_sensitive_sections() {
         ["model", "providers", "mcp", "packs",]
     );
 
-    // Read-only: the same files are pending on the next scan and the load
-    // still fails, and the pending entry equals what the load reports.
     assert_eq!(loader.pending_trust(&request).unwrap(), pending);
     let ConfigError::TrustRequired {
         pending: from_load, ..
@@ -1388,7 +1355,6 @@ fn pending_trust_scans_without_writing_and_names_the_sensitive_sections() {
     assert_eq!(from_load, pending);
     assert!(!tree.path("data/trust.ron").exists());
 
-    // Granting records exactly the scanned set and clears it.
     assert_eq!(loader.grant_pending_trust(&request).unwrap(), pending);
     assert!(loader.pending_trust(&request).unwrap().is_empty());
 }
@@ -1510,8 +1476,6 @@ fn require_https_and_custom_provider_policy_are_enforced() {
 
 #[test]
 fn missing_model_error_names_every_way_to_set_one() {
-    // A fresh machine with no configuration at all: the failure must tell the
-    // user exactly where to put a model, including this machine's global path.
     let tree = TempTree::new();
     fs::create_dir_all(tree.path("work")).unwrap();
     let error = tree
@@ -1550,7 +1514,6 @@ fn check_validates_a_document_without_a_model_and_load_still_requires_one() {
     ));
     assert!(matches!(tree.loader().check(&request), Ok(None)));
 
-    // With a model, `check` returns the same snapshot `load` does.
     let with_model = tree.request();
     let loaded = tree.loader().load(&with_model).unwrap();
     let checked = tree.loader().check(&with_model).unwrap().unwrap();
@@ -1560,9 +1523,6 @@ fn check_validates_a_document_without_a_model_and_load_still_requires_one() {
 
 #[test]
 fn load_for_client_tolerates_a_missing_model_and_keeps_every_other_field() {
-    // OB1: bare `qq` with `(version: 1)` opens the TUI, so the client load
-    // must succeed with the built-in providers and policy intact and only
-    // the model absent. `load` keeps the headless contract.
     let tree = TempTree::new();
     tree.write(
         "managed/managed.ron",
@@ -1588,8 +1548,6 @@ fn load_for_client_tolerates_a_missing_model_and_keeps_every_other_field() {
         Err(ConfigError::ModelRequired { .. })
     ));
 
-    // With a model, the client load carries the same route and validates it
-    // the same way `load` does: an unknown provider is still an error.
     let with_model = tree.request();
     let loaded = tree.loader().load(&with_model).unwrap();
     let client = tree.loader().load_for_client(&with_model).unwrap();
@@ -1606,7 +1564,6 @@ fn load_for_client_tolerates_a_missing_model_and_keeps_every_other_field() {
 #[test]
 fn check_without_a_model_still_reports_every_other_error() {
     let tree = TempTree::new();
-    // Provider-level policy is independent of the selected route.
     tree.write(
         "global/config.ron",
         r#"(
@@ -1635,8 +1592,6 @@ fn check_without_a_model_still_reports_every_other_error() {
         })
     ));
 
-    // A route that is present but names an unknown provider fails the same
-    // way with or without a top-level model.
     let unknown_worker = LoadRequest::new(tree.path("work"))
         .with_explicit_content(r#"(version: 1, worker_model: "nope/model")"#);
     assert!(matches!(
@@ -1644,7 +1599,6 @@ fn check_without_a_model_still_reports_every_other_error() {
         Err(ConfigError::UnknownProvider(provider)) if provider == "nope"
     ));
 
-    // Profile validation does not depend on the top-level selection either.
     let clean = TempTree::new();
     let bad_profile = LoadRequest::new(clean.path("work")).with_explicit_content(
         r#"(version: 1, profiles: {"Bad_Name": Profile(approval_mode: ask)})"#,
@@ -2021,7 +1975,6 @@ fn mcp_servers_parse_layer_by_name_and_apply_defaults() {
             },
         )"#,
     );
-    // The workspace layer removes one server by name after trust is granted.
     tree.write("work/qq.ron", r#"(version: 1, mcp: {"linear": Remove})"#);
     let request = tree.request();
     assert!(
@@ -2092,7 +2045,6 @@ fn rejects_invalid_mcp_declarations() {
         other => panic!("expected a parse error for {mcp_entry:?}, got {other:?}"),
     };
 
-    // `__` inside a server name would make `mcp__<server>__<tool>` ambiguous.
     expect_message(
         r#""bad__name": Stdio(command: "./tool.sh")"#,
         "mcp server name",
@@ -2119,8 +2071,6 @@ fn rejects_invalid_mcp_declarations() {
         r#""blank": Stdio(command: "./tool.sh", allow: [""])"#,
         "empty tool name",
     );
-    // A pin is checked at load: a typo must fail the document rather than
-    // quarantine the server at first use.
     expect_message(
         r#""short": Stdio(command: "./tool.sh", pin: "abc123")"#,
         "pin must be the 64 lowercase hex digits",
@@ -2328,7 +2278,6 @@ fn absent_empty_and_external_tool_exposure_remain_distinct() {
 #[test]
 fn managed_only_policy_fields_are_scoped_by_source_kind() {
     let project = SourceIdentity::virtual_source(SourceKind::Project, "project test");
-    // The managed-only constraint fields stay managed-only.
     let deny = r#"(version: 1, policy: (deny_tools: ["edit_file"]))"#;
     assert!(matches!(
         document::Document::parse(deny, &project),
@@ -2356,8 +2305,6 @@ fn builtin_preference_only_tightens() {
         )"#,
     );
     let snapshot = tree.loader().load(&tree.request()).unwrap();
-    // off (global) then hint (workspace): hint wins; a later `off` could not
-    // loosen it back.
     assert_eq!(
         snapshot.policy().builtin_preference(),
         BuiltinPreference::Hint
@@ -2499,7 +2446,6 @@ fn mcp_declarations_are_scoped_by_source_kind() {
         mcp: {"srv": Http(url: "https://example.test/mcp", bearer: Value("token"))},
     )"#;
 
-    // Remote configuration may never plant MCP servers.
     let remote = SourceIdentity::virtual_source(SourceKind::Remote, "remote test");
     assert!(matches!(
         document::Document::parse(
@@ -2509,7 +2455,6 @@ fn mcp_declarations_are_scoped_by_source_kind() {
         Err(ConfigError::RemoteMcpForbidden { .. })
     ));
 
-    // A literal bearer token follows the same scope rule as provider secrets.
     let project = SourceIdentity::virtual_source(SourceKind::Project, "project test");
     assert!(matches!(
         document::Document::parse(content, &project),
@@ -2574,7 +2519,6 @@ fn the_qq_alias_resolves_to_ink_or_terminal_by_truecolor_and_explicit_names_win(
     let loader = tree.loader();
     let work = tree.path("work");
 
-    // Unset (`qq`) follows what the terminal advertised.
     let ink = loader
         .load_theme(&work, DEFAULT_THEME, TruecolorSupport::Advertised)
         .unwrap();
@@ -2600,7 +2544,6 @@ fn the_qq_alias_resolves_to_ink_or_terminal_by_truecolor_and_explicit_names_win(
         "terminal"
     );
 
-    // An explicit name is never second-guessed.
     assert_eq!(
         loader
             .load_theme(&work, "terminal", TruecolorSupport::Advertised)
@@ -2614,8 +2557,6 @@ fn the_qq_alias_resolves_to_ink_or_terminal_by_truecolor_and_explicit_names_win(
         ink
     );
 
-    // A user file may shadow `ink` but not the compiled `terminal`, and the
-    // alias follows the shadowed `ink`.
     tree.write("global/themes/ink.ron", ROSE_PINE);
     tree.write("global/themes/terminal.ron", ROSE_PINE);
     tree.write("global/themes/qq.ron", ROSE_PINE);
@@ -2648,8 +2589,6 @@ fn themes_resolve_compiled_then_global_then_nearest_project() {
     let loader = tree.loader();
     let truecolor = TruecolorSupport::Advertised;
 
-    // `rose-pine` ships in the binary; a global file of the same name
-    // shadows it.
     let shipped = loader
         .load_theme(&tree.path("work"), "rose-pine", truecolor)
         .unwrap();
@@ -2674,7 +2613,6 @@ fn themes_resolve_compiled_then_global_then_nearest_project() {
         "aliases share a literal"
     );
 
-    // A project copy of the same name wins, nearest directory last.
     tree.write(
         "work/.qq/themes/rose-pine.ron",
         &ROSE_PINE.replace("#9ccfd8", "#000001"),
@@ -2726,8 +2664,6 @@ fn every_shipped_theme_parses_and_is_discoverable_without_any_files() {
         assert_eq!(theme.name(), *name);
         assert_eq!(theme.source().kind(), SourceKind::Compiled);
         let colors = theme.colors();
-        // Every role is a distinct literal: a theme that maps two roles to
-        // one color loses a distinction the renderer relies on.
         let roles = [
             colors.text,
             colors.muted,
@@ -2745,9 +2681,6 @@ fn every_shipped_theme_parses_and_is_discoverable_without_any_files() {
             roles.len(),
             "{name} maps two roles to one color"
         );
-        // A shipped `syntax` block, when present, resolved every field it set
-        // to a literal; a role it left out stays `None` for the renderer to
-        // derive. Themes without canonical token colors ship no block.
         let syntax = theme.syntax();
         let has_block = !matches!(*name, "ember" | "ink");
         assert_eq!(
@@ -2773,8 +2706,6 @@ fn every_shipped_theme_parses_and_is_discoverable_without_any_files() {
                 "{name}: syntax colors are literals"
             );
         }
-        // Upstream palettes may paint keywords red (Gruvbox, Monokai), but
-        // the constant tone must never read as an error.
         assert_ne!(
             syntax.constant,
             Some(colors.error),
@@ -2840,7 +2771,6 @@ fn theme_documents_fail_fast_on_every_documented_error() {
         Err(ConfigError::Parse { .. })
     ));
 
-    // A broken file is skipped by discovery but still selectable-and-failing.
     let discovered = loader.discover_themes(&tree.path("work")).unwrap();
     assert_eq!(discovered.len(), COMPILED_THEMES.len() + 1);
     assert!(discovered.iter().all(|theme| theme.name() != "bad"));
@@ -2863,12 +2793,10 @@ fn theme_syntax_blocks_are_optional_partial_and_validated_per_field() {
     };
     let rgb = |r, g, b| ThemeColor::Rgb(Rgb { r, g, b });
 
-    // Absent: every override is None and the document is otherwise intact.
     let absent = load(ROSE_PINE).unwrap();
     assert_eq!(*absent.syntax(), ThemeSyntax::default());
     assert!(absent.syntax().is_empty());
 
-    // Every field, mixing aliases and literals.
     let full = load(&with_block(
         r##"        keyword: "pine",
         function: "rose",
@@ -2891,7 +2819,6 @@ fn theme_syntax_blocks_are_optional_partial_and_validated_per_field() {
     assert_eq!(syntax.punctuation, Some(rgb(0x90, 0x8c, 0xaa)));
     assert!(!syntax.is_empty());
 
-    // A subset: the rest stay None for the renderer to derive.
     let partial = load(&with_block(
         r##"        keyword: "pine", punctuation: "#908caa","##,
     ))
@@ -2904,13 +2831,11 @@ fn theme_syntax_blocks_are_optional_partial_and_validated_per_field() {
             ..ThemeSyntax::default()
         }
     );
-    // An empty block is the same as no block.
     assert_eq!(
         *load(&with_block("")).unwrap().syntax(),
         ThemeSyntax::default()
     );
 
-    // Malformed literal: the error names the field and the reason.
     match load(&with_block(r##"        constant: "#f6c17","##)) {
         Err(ConfigError::InvalidThemeSyntax { role, reason, .. }) => {
             assert_eq!(role, SyntaxRole::Constant);
@@ -2918,7 +2843,6 @@ fn theme_syntax_blocks_are_optional_partial_and_validated_per_field() {
         }
         other => panic!("expected a syntax error naming `constant`, got {other:?}"),
     }
-    // Unknown alias.
     match load(&with_block(r##"        type: "sea","##)) {
         Err(ConfigError::InvalidThemeSyntax { role, reason, .. }) => {
             assert_eq!(role, SyntaxRole::Type);
@@ -2926,7 +2850,6 @@ fn theme_syntax_blocks_are_optional_partial_and_validated_per_field() {
         }
         other => panic!("expected a syntax error naming `type`, got {other:?}"),
     }
-    // Alias cycle reached from a syntax role.
     let cycle = with_block(r##"        comment: "loop","##).replace(
         "\"foam\": \"#9ccfd8\"",
         "\"foam\": \"#9ccfd8\", \"loop\": \"loop\"",
@@ -2938,19 +2861,16 @@ fn theme_syntax_blocks_are_optional_partial_and_validated_per_field() {
         }
         other => panic!("expected a cycle error naming `comment`, got {other:?}"),
     }
-    // The rendered message carries the field name for the user.
     let message = load(&with_block(r##"        string: "#zzzzzz","##))
         .unwrap_err()
         .to_string();
     assert!(message.contains("`syntax.string`"), "{message}");
     assert!(message.contains("#zzzzzz"), "{message}");
 
-    // Unknown fields inside the block are rejected like the top level.
     assert!(matches!(
         load(&with_block(r##"        operator: "pine","##)),
         Err(ConfigError::Parse { .. })
     ));
-    // A non-block value for `syntax` is a parse error.
     assert!(matches!(
         load(&ROSE_PINE.replacen("    colors: (", "    syntax: \"pine\",\n    colors: (", 1)),
         Err(ConfigError::Parse { .. })
@@ -2972,7 +2892,6 @@ fn agent_profiles_layer_by_name_validate_routes_and_never_declare_default() {
             },
         )"#,
     );
-    // The workspace layer removes one and repoints another after trust.
     tree.write(
         "work/qq.ron",
         r#"(version: 1, profiles: {"scratch": Remove, "fast": Profile(model: "openai/gpt-5.6", organization: "acme")})"#,
@@ -3044,7 +2963,6 @@ fn agent_packs_are_discovered_validated_layered_and_trust_gated() {
         "global/config.ron",
         r#"(version: 1, model: "openai/gpt-5.6")"#,
     );
-    // A global pack: two profiles, a prompt, a skill root, and an MCP server.
     tree.write(
         "global/packs/review-kit/pack.ron",
         r#"(
@@ -3073,10 +2991,7 @@ fn agent_packs_are_discovered_validated_layered_and_trust_gated() {
         "global/packs/review-kit/prompts/reviewer.md",
         "Review carefully.\n",
     );
-    // A directory without a manifest is not a pack and is ignored.
     tree.write("global/packs/junk/README.md", "not a pack\n");
-    // A project pack that would shadow the global one by id, plus a project
-    // profile that shadows a pack profile by name.
     tree.write(
         "work/.qq/packs/review-kit/pack.ron",
         r#"(
@@ -3092,8 +3007,6 @@ fn agent_packs_are_discovered_validated_layered_and_trust_gated() {
     );
     let request = tree.request();
 
-    // Untrusted project: only the global pack contributes; the project's
-    // config is partially applied and its packs are held back.
     let untrusted = tree.loader().load(&request);
     let Err(ConfigError::TrustRequired { .. }) = untrusted else {
         panic!("project mcp requires trust: {untrusted:?}");
@@ -3110,9 +3023,6 @@ fn agent_packs_are_discovered_validated_layered_and_trust_gated() {
     assert_eq!(pack.source().kind(), SourceKind::Project);
     assert_eq!(pack.manifest_digest().len(), 64);
     assert_eq!(snapshot.packs().len(), 1);
-    // Pack profiles sit beneath configured ones: `fixer` is the configured
-    // profile (the global pack's `fixer` is gone with the global pack anyway),
-    // `reviewer` comes from the project pack.
     let reviewer = snapshot.profile("reviewer").unwrap();
     assert_eq!(reviewer.model(), Some("openai/gpt-mini"));
     let reference = reviewer.pack().unwrap();
@@ -3127,7 +3037,6 @@ fn agent_packs_are_discovered_validated_layered_and_trust_gated() {
         SourceKind::Project
     );
     assert!(snapshot.provenance().pack("review-kit").is_some());
-    // The configured MCP server wins over any pack declaration of the name.
     assert_eq!(
         snapshot.mcp_servers()["notes"].transport(),
         &McpTransport::Stdio {
@@ -3144,7 +3053,6 @@ fn agent_packs_are_discovered_validated_layered_and_trust_gated() {
         "manifests are probed so a cache can revalidate"
     );
 
-    // Remove the project pack: the global one is back with its full shape.
     std::fs::remove_dir_all(tree.path("work/.qq/packs")).unwrap();
     let snapshot = tree.loader().load(&request).unwrap();
     let pack = &snapshot.packs()["review-kit"];
@@ -3168,8 +3076,6 @@ fn agent_packs_are_discovered_validated_layered_and_trust_gated() {
         "allow lists are exclusive"
     );
     assert_eq!(profile.mcp(), Some(&["notes".to_owned()][..]));
-    // The pack's MCP server is admitted because the configuration no longer
-    // declares one of that name... except the project config still does.
     assert_eq!(
         snapshot.mcp_servers()["notes"].transport(),
         &McpTransport::Stdio {
@@ -3179,7 +3085,6 @@ fn agent_packs_are_discovered_validated_layered_and_trust_gated() {
         }
     );
 
-    // Explicit declarations win over discovery and `Remove` drops a pack.
     tree.write(
         "work/.qq/config.ron",
         r#"(version: 1, packs: { "review-kit": Remove })"#,
@@ -3217,7 +3122,6 @@ fn project_packs_are_their_own_trust_subject() {
         "global/config.ron",
         r#"(version: 1, model: "openai/gpt-5.6")"#,
     );
-    // A repository that ships only a pack, with no project configuration.
     let manifest = tree.write(
         "work/.qq/packs/evil/pack.ron",
         r#"(schema: 1, id: "evil", version: "1.0.0", mcp: {
@@ -3243,7 +3147,6 @@ fn project_packs_are_their_own_trust_subject() {
     assert_eq!(snapshot.packs()["evil"].version(), "1.0.0");
     assert!(snapshot.mcp_servers().contains_key("x"));
 
-    // Changing the trusted manifest asks again.
     tree.write(
         "work/.qq/packs/evil/pack.ron",
         r#"(schema: 1, id: "evil", version: "1.0.1", mcp: {
@@ -3255,7 +3158,6 @@ fn project_packs_are_their_own_trust_subject() {
         Err(ConfigError::TrustRequired { .. })
     ));
 
-    // A pack added after the project's configuration was trusted asks too.
     fs::remove_dir_all(tree.path("work/.qq/packs")).unwrap();
     tree.write(
         "work/.qq/config.ron",
@@ -3291,7 +3193,6 @@ fn explicit_project_pack_manifests_are_trust_gated_by_content() {
     );
     let request = tree.request();
 
-    // One review covers the declaring file and the manifest it names.
     let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
         panic!("an untrusted project file requires trust");
     };
@@ -3305,7 +3206,6 @@ fn explicit_project_pack_manifests_are_trust_gated_by_content() {
         "1.0.0"
     );
 
-    // The declaring file is unchanged, but the pack it names changed.
     tree.write(
         "work/vendor/kit/pack.ron",
         r#"(schema: 1, id: "kit", version: "2.0.0", mcp: { "x": Stdio(command: "sh") })"#,
@@ -3323,10 +3223,6 @@ fn explicit_project_pack_manifests_are_trust_gated_by_content() {
 
 #[test]
 fn explicit_pack_reads_before_trust_are_bounded() {
-    // An untrusted project file's explicit entries are read for review
-    // before anyone consents, so they share the per-load pack bound with
-    // discovery instead of letting a repository make every load read and
-    // parse an unbounded number of manifests.
     let tree = TempTree::new();
     tree.write(
         "global/config.ron",
@@ -3358,7 +3254,6 @@ fn explicit_pack_reads_before_trust_are_bounded() {
         "{scanned:?}"
     );
 
-    // At the bound, one review covers the file and every manifest it names.
     let at_bound = entries.replace(
         &format!(r#""kit-{MAX_PACKS}": Pack(path: "../vendor/kit-{MAX_PACKS}"), "#),
         "",
@@ -3372,8 +3267,6 @@ fn explicit_pack_reads_before_trust_are_bounded() {
     };
     assert_eq!(pending.len(), MAX_PACKS + 1, "the file and its packs");
 
-    // Entries that point at nothing spend the budget too, so a document
-    // cannot buy unbounded probes with missing directories.
     let mut missing = String::new();
     for index in 0..=MAX_PACKS {
         missing.push_str(&format!(
@@ -3396,8 +3289,6 @@ fn explicit_pack_reads_before_trust_are_bounded() {
 
 #[test]
 fn placeholder_pack_directories_spend_the_load_budget() {
-    // Directories without a manifest are ignored, but each is listed and
-    // probed on every load, so they count toward the bound too.
     let tree = TempTree::new();
     tree.write(
         "global/config.ron",
@@ -3418,7 +3309,6 @@ fn placeholder_pack_directories_spend_the_load_budget() {
         Err(ConfigError::TooManyPacks { limit: MAX_PACKS })
     ));
 
-    // Stray files are listed too and spend the same budget.
     fs::remove_dir_all(tree.path("work/.qq/packs")).unwrap();
     for index in 0..=MAX_PACKS {
         tree.write(format!("work/.qq/packs/file-{index}"), "");
@@ -3476,10 +3366,6 @@ fn discovered_project_pack_links_are_rejected_before_they_are_followed() {
 
 #[test]
 fn project_pack_paths_that_leave_the_repository_are_rejected_unread() {
-    // A repository's `packs` entries are read before the user consents, so
-    // one that leaves it (absolute, `..`, a UNC share, an automount) is an
-    // error and is never opened. The outside manifest is invalid RON, so
-    // reading it would surface `Parse` instead of `InvalidPack`.
     let tree = TempTree::new();
     tree.write(
         "global/config.ron",
@@ -3509,7 +3395,6 @@ fn project_pack_paths_that_leave_the_repository_are_rejected_unread() {
         assert!(!tree.path("data/trust.ron").exists());
     }
 
-    // A path that only passes through `..` and stays inside is fine.
     tree.write(
         "work/vendor/kit/pack.ron",
         r#"(schema: 1, id: "kit", version: "1.0.0")"#,
@@ -3538,7 +3423,6 @@ fn project_pack_paths_through_a_link_are_rejected_unread() {
     tree.write("outside/kit/pack.ron", "not ron");
     let request = tree.request();
 
-    // A linked pack directory.
     fs::create_dir_all(tree.path("work/vendor")).unwrap();
     symlink(tree.path("outside/kit"), tree.path("work/vendor/kit")).unwrap();
     tree.write(
@@ -3555,7 +3439,6 @@ fn project_pack_paths_through_a_link_are_rejected_unread() {
         );
     }
 
-    // A real directory whose `pack.ron` leaf is a link.
     fs::remove_file(tree.path("work/vendor/kit")).unwrap();
     fs::create_dir_all(tree.path("work/vendor/kit")).unwrap();
     symlink(
@@ -3633,7 +3516,6 @@ fn agent_pack_manifests_fail_fast_on_every_documented_error() {
         load_with(r#"(schema: 1, id: "kit", version: "1", extra: 1)"#),
         Err(ConfigError::Parse { .. })
     ));
-    // Two packs claiming one profile is a conflict, not a silent winner.
     let _ = std::fs::remove_dir_all(tree.path("global/packs"));
     tree.write(
         "global/packs/a/pack.ron",
@@ -3647,7 +3529,6 @@ fn agent_pack_manifests_fail_fast_on_every_documented_error() {
         tree.loader().load(&request),
         Err(ConfigError::PackProfileConflict { profile, packs }) if profile == "p" && packs == "a, b"
     ));
-    // Tool policy semantics.
     let policy = PackToolPolicy {
         allow: vec!["mcp__*".to_owned()],
         deny: vec!["mcp__srv__danger".to_owned()],
@@ -3658,10 +3539,6 @@ fn agent_pack_manifests_fail_fast_on_every_documented_error() {
     assert!(PackToolPolicy::default().permits("anything"));
 }
 
-/// The field list serde's derive compiled for a `deny_unknown_fields` struct,
-/// recovered from RON's unknown-field error: the derive reports `expected`
-/// straight from its generated `FIELDS` constant, so this is the struct's
-/// real field list with no hand-maintained mirror to drift.
 fn derived_field_names<T: serde::de::DeserializeOwned + std::fmt::Debug>(
     probe: &str,
 ) -> Vec<&'static str> {
@@ -3678,8 +3555,6 @@ fn derived_field_names<T: serde::de::DeserializeOwned + std::fmt::Debug>(
 
 #[test]
 fn published_document_field_names_match_the_struct_and_all_parse() {
-    // Equality with the derive's own list: an added field fails here until
-    // it is published (and therefore documented).
     assert_eq!(
         derived_field_names::<document::Document>("(version: 1, __not_a_field__: 1)"),
         DOCUMENT_FIELD_NAMES.to_vec()
@@ -3689,8 +3564,6 @@ fn published_document_field_names_match_the_struct_and_all_parse() {
         POLICY_FIELD_NAMES.to_vec()
     );
 
-    // Every published key, set with a trivially valid value, parses as one
-    // document. `deny_unknown_fields` rejects a misspelled name.
     let mut policy = String::from("(");
     for name in POLICY_FIELD_NAMES {
         let value = match name {
@@ -3755,9 +3628,6 @@ fn published_document_field_names_match_the_struct_and_all_parse() {
 
 #[test]
 fn published_policy_key_lists_are_exactly_what_each_layer_rejects() {
-    // Every policy key alone, from each kind of layer. The published lists
-    // are what the guide's "who may set it" column says; they must be
-    // exactly the sets the loader refuses.
     let global = SourceIdentity::virtual_source(SourceKind::Global, "docs-truth user layer");
     let managed = SourceIdentity::virtual_source(SourceKind::Managed, "docs-truth managed layer");
     let mdm = SourceIdentity::virtual_source(SourceKind::Mdm, "docs-truth MDM layer");
@@ -3796,10 +3666,6 @@ fn published_policy_key_lists_are_exactly_what_each_layer_rejects() {
 
 #[test]
 fn environment_variables_are_the_ones_from_process_env_reads() {
-    // A misspelled or extra name in the const would leave the field untouched
-    // or fail the destructure; each override must round-trip from its
-    // variable. The environment is process-wide, so the read happens in a
-    // child test process with exactly these variables set.
     let values = [
         "/tmp/docs-truth.ron",
         "(version: 1)",
@@ -3827,9 +3693,6 @@ fn environment_variables_are_the_ones_from_process_env_reads() {
 
 #[test]
 fn removed_environment_variables_fail_by_name() {
-    // A deployment still launched with `QQ_JEV_CHECKPOINTS=enforce` (what
-    // `qq jev setup` used to print) or `QQ_APPROVAL_DELEGATE=on` must not
-    // silently lose the feature it asked for.
     for (name, _) in REMOVED_ENVIRONMENT_VARIABLES {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -3990,7 +3853,6 @@ fn goal_managed_ceilings_only_tighten_and_clamp_defaults() {
     assert_eq!(goals.per_run.max_model_turns, Some(8));
     assert_eq!(goals.per_run.max_total_tokens, Some(3000));
     assert_eq!(snapshot.policy().goal_ceilings().max_runs, Some(20));
-    // Ordinary configuration cannot restore compiled ceilings after lowering.
     let clear = tree
         .loader()
         .load(
@@ -4069,10 +3931,6 @@ fn goal_configuration_rejects_invalid_bounds_and_requires_workspace_trust() {
     ));
 }
 
-/// Every provider patch shape a user can write today. AP7 (ADR-0064)
-/// replaces the per-provider variants with a provider table; these documents
-/// must keep parsing to the same providers and hashing to the same trust
-/// digest so already-trusted project files stay trusted.
 const BUILTIN_PATCH_DOCUMENTS: [&str; 13] = [
     r#"(version: 1, providers: {"openai": OpenAi(api_key: Env("MY_OPENAI_KEY"))})"#,
     r#"(version: 1, providers: {"openai": OpenAi(api_key: Stored("openai/work"), models: {"m": (name: "M")})})"#,
@@ -4089,8 +3947,6 @@ const BUILTIN_PATCH_DOCUMENTS: [&str; 13] = [
     r#"(version: 1, providers: {"c": Custom(connection: (base_url: "https://c.example/v1", api: AnthropicMessages, auth: ApiKey(Stored("c/key"))), models: {"m": Remove})})"#,
 ];
 
-/// The trust digests of [`BUILTIN_PATCH_DOCUMENTS`], recorded from the
-/// per-variant representation before AP7.
 const BUILTIN_PATCH_DIGESTS: [&str; 13] = [
     "206e1448f30dde87534e6a4b278d535e442d06229759614248dd9d2e3a09631d",
     "5e8e0d7bb05617439d91718c29e3125a248d4849cafcfefc733be35344042d4b",
@@ -4123,8 +3979,6 @@ fn builtin_provider_patches_keep_their_trust_digests() {
     assert_eq!(digests, BUILTIN_PATCH_DIGESTS);
 }
 
-/// Each built-in accepts only its own credential fields; anything else is
-/// a parse error, not silently ignored.
 #[test]
 fn builtin_provider_patches_reject_fields_they_do_not_have() {
     for (provider, patch) in [
@@ -4148,8 +4002,6 @@ fn builtin_provider_patches_reject_fields_they_do_not_have() {
     }
 }
 
-/// The built-in presets each patch layers over, as observable on the loaded
-/// snapshot: endpoint, mode, protocol, credential and usage.
 #[test]
 fn builtin_provider_patches_layer_over_their_presets() {
     let tree = TempTree::new();
@@ -4289,7 +4141,6 @@ fn unattended_load_ignores_untrusted_authority_without_recording_trust() {
     );
     assert_eq!(loader.pending_trust(&request).unwrap().len(), 1);
     assert!(!tree.path("data/trust.ron").exists());
-    // The explicit inspection API still reports withheld authority.
     assert!(matches!(
         loader.load(&strict),
         Err(ConfigError::TrustRequired { .. })

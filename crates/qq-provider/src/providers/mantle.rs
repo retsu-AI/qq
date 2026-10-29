@@ -1,5 +1,3 @@
-//! Amazon Bedrock Mantle adapter for OpenAI- and Anthropic-compatible APIs.
-
 use std::{fmt, sync::Arc};
 
 use async_stream::try_stream;
@@ -24,7 +22,6 @@ use crate::{
     sanitize::sanitize_message,
 };
 
-/// A lazily initialized Amazon Bedrock Mantle deployment.
 pub(crate) struct Mantle {
     inner: Arc<MantleInner>,
 }

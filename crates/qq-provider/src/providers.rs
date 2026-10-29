@@ -1,5 +1,3 @@
-//! Concrete provider adapters and their protocol-side support kit.
-
 pub(crate) mod anthropic;
 #[cfg(feature = "provider-bedrock")]
 pub(crate) mod bedrock;

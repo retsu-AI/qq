@@ -1,33 +1,12 @@
 const STORAGE_CONTEXT_BYTES: u64 = 4 * 1024 * 1024;
 const CONSERVATIVE_OUTPUT_BYTES_PER_TOKEN: u64 = 32;
-/// Most storage bytes reserved for one turn's persisted output, whatever the
-/// wire cap: the reserve the 16 384-token default yields (512 KiB). A larger
-/// wire cap exists to hold hidden reasoning, which is never persisted as
-/// transcript; reserving 32 bytes for each of a 128 000-token ceiling would
-/// leave a 4 MiB store 32 KiB for the whole prompt.
 const MAX_OUTPUT_STORAGE_RESERVE_BYTES: u64 = 16_384 * CONSERVATIVE_OUTPUT_BYTES_PER_TOKEN;
-/// Bytes of provider-neutral request text per estimated input token when no
-/// provider measurement covers the request. English prose and source code
-/// tokenize at roughly 3.5–4.5 bytes per token on every current tokenizer;
-/// four is the figure Codex, pi, fx, and OpenCode all use. Rounding up and
-/// the output reserve keep the estimate conservative; a provider-reported
-/// overflow remains the authoritative backstop.
 pub(crate) const ESTIMATED_BYTES_PER_TOKEN: u64 = 4;
 
-/// Estimated input tokens for `bytes` of request text, rounded up.
 pub(crate) const fn estimate_tokens(bytes: u64) -> u64 {
     bytes.div_ceil(ESTIMATED_BYTES_PER_TOKEN)
 }
 
-/// Request bytes the summarizer may spend on transcript messages so its
-/// estimate fits the window: the window less the output reserve, at the
-/// byte ratio, less the fixed system and tool-schema bytes. `None` when the
-/// model has no declared window; nothing bounds the transcript then but the
-/// storage backstop.
-/// Output tokens a summarizer request reserves: the run's resolved cap, held
-/// to an eighth of a declared window (but never below 8 192) so the reserve
-/// cannot crowd out the transcript it summarizes. A narrative of about 1 200
-/// words fits well inside either bound (ADR-0056).
 pub(crate) fn summarizer_output_tokens(max_output_tokens: u32, context_window: Option<u32>) -> u32 {
     match context_window {
         Some(window) => max_output_tokens.min((window / 8).max(8_192)),
@@ -51,14 +30,6 @@ pub(crate) fn summarizer_message_byte_budget(
     )
 }
 
-/// Carries a provider-measured token count across a request whose bytes
-/// changed: appended bytes are charged and removed bytes credited at the
-/// ratio the measurement itself established (`measured_bytes / measured`,
-/// clamped to a sane band), not the fixed default. On code-heavy transcripts
-/// the real ratio is nearer three bytes per token than four, so charging
-/// deltas at four under-estimates growth by a quarter; the observed ratio
-/// tracks the transcript's own tokenizer behaviour. Falls back to the default
-/// when the measurement is empty or degenerate.
 pub(crate) fn adjust_measured_tokens(
     measured: u64,
     previous_bytes: u64,
@@ -72,9 +43,6 @@ pub(crate) fn adjust_measured_tokens(
     )
 }
 
-/// [`adjust_measured_tokens`] with the ratio supplied: for callers that apply
-/// the delta per request component and must calibrate against the whole
-/// measured request, not the component.
 pub(crate) const fn adjust_measured_tokens_at(
     measured: u64,
     previous_bytes: u64,
@@ -93,18 +61,10 @@ pub(crate) const fn adjust_measured_tokens_at(
     }
 }
 
-/// Bytes per token the provider's measurement implies for the request it
-/// measured, bounded to `[MIN_CALIBRATED_BYTES_PER_TOKEN,
-/// MAX_CALIBRATED_BYTES_PER_TOKEN]` so a mis-reported count (cache-only
-/// usage, a provider that counts images) cannot swing the estimate to zero
-/// or to nothing. Small measurements are noise: below
-/// `MIN_CALIBRATION_TOKENS` the default ratio stands.
 pub(crate) const fn calibrated_bytes_per_token(measured_tokens: u64, measured_bytes: u64) -> u64 {
     if measured_tokens < MIN_CALIBRATION_TOKENS || measured_bytes == 0 {
         return ESTIMATED_BYTES_PER_TOKEN;
     }
-    // Round to nearest so the two rounding directions of charging and
-    // crediting stay symmetric around the observed ratio.
     let ratio = (measured_bytes + measured_tokens / 2) / measured_tokens;
     if ratio < MIN_CALIBRATED_BYTES_PER_TOKEN {
         MIN_CALIBRATED_BYTES_PER_TOKEN
@@ -115,21 +75,11 @@ pub(crate) const fn calibrated_bytes_per_token(measured_tokens: u64, measured_by
     }
 }
 
-/// Below this many measured tokens the observed ratio is dominated by the
-/// system prompt and framing rather than the transcript; keep the default.
 const MIN_CALIBRATION_TOKENS: u64 = 2_000;
-/// Dense code and non-Latin text tokenize near two bytes per token; prose
-/// with long words near five. Anything outside is a measurement artefact.
 const MIN_CALIBRATED_BYTES_PER_TOKEN: u64 = 2;
 const MAX_CALIBRATED_BYTES_PER_TOKEN: u64 = 6;
 
-/// Fraction of the model window held back as headroom before a prompt run
-/// starts: an eligible run whose estimate exceeds `window - reserve` compacts
-/// proactively, while it still fits, instead of waiting for the estimate to
-/// cross the window itself. Codex compacts at 90 %; fx at 80 %.
 const PROACTIVE_COMPACTION_HEADROOM_DIVISOR: u64 = 10;
-/// Upper bound on the compaction record QQ appends to a summary (ADR-0056).
-/// The storage envelope an eligible prompt reserves covers it.
 pub(crate) const COMPACTION_RECORD_BYTES: usize = 64 * 1024;
 const COMPACTION_STORAGE_ENVELOPE_BYTES: u64 = COMPACTION_RECORD_BYTES as u64 + 32;
 
@@ -151,27 +101,18 @@ pub(crate) enum ContextRejectReason {
     Irreducible(ContextConstraint),
     NoReducibleHistory(ContextConstraint),
     Exhausted(ContextConstraint, CompactionExhaustion),
-    /// The summarizer's own request is over the storage backstop.
     SummarizerOverflow(ContextConstraint),
     BetweenRunsOnly(ContextConstraint),
     Unsupported(ContextConstraint),
     ProviderReportedOverflow(CompactionExhaustion),
 }
 
-/// Why no further automatic compaction step will run for this prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompactionExhaustion {
-    /// `steps` summarizer requests ran and the transcript is either fully
-    /// summarized or a step failed; a further step would repeat its input.
     Attempted { steps: u32 },
-    /// One prompt and its run alone exceed what the summarizer can read in
-    /// the model window; no cut at a unit boundary can make it fit.
     OversizedUnit { bytes: u64 },
 }
 
-/// Most summarizer requests one prompt may spend before the fold stops.
-/// Each step reads at most one model window of transcript and must shrink
-/// the assembly, so this bounds the provider cost of admitting one prompt.
 pub(crate) const MAX_COMPACTION_STEPS: u32 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,10 +121,6 @@ pub(crate) enum CompactionDisposition {
     Exhausted(CompactionExhaustion),
     BetweenRunsOnly,
     Unsupported,
-    /// The request *is* the summarizer's: its transcript is the one being
-    /// shrunk, so an estimated model-window overflow is expected rather than
-    /// disqualifying. Only the storage backstop applies; a provider-reported
-    /// overflow of the summarizer request is the authoritative failure.
     Summarizing,
 }
 
@@ -220,8 +157,6 @@ pub(crate) struct ContextInput {
     pub(crate) tool_schema_bytes: u64,
     pub(crate) reducible_message_bytes: u64,
     pub(crate) irreducible_message_bytes: u64,
-    /// Provider-measured occupancy of a caller-verified compatible prefix,
-    /// including a conservative byte upper bound for newly appended input.
     pub(crate) compatible_input_tokens: Option<u64>,
     pub(crate) compaction: CompactionDisposition,
 }
@@ -232,10 +167,6 @@ pub(crate) fn plan(input: ContextInput) -> ContextPlan {
         .saturating_add(input.tool_schema_bytes)
         .saturating_add(input.irreducible_message_bytes);
     let input_bytes = fixed_input.saturating_add(input.reducible_message_bytes);
-    // Compatibility is established by the caller from effective model,
-    // prompt/tool identity, and an append-only transcript watermark. When it
-    // holds, the provider's measured occupancy is more useful than applying
-    // the byte-ratio estimate to the unchanged prefix.
     let estimated_input_tokens = input
         .compatible_input_tokens
         .unwrap_or_else(|| estimate_tokens(input_bytes));
@@ -259,27 +190,16 @@ pub(crate) fn plan(input: ContextInput) -> ContextPlan {
     };
 
     let exceeds_storage = input_bytes.saturating_add(storage_reserve_bytes) > STORAGE_CONTEXT_BYTES;
-    // The summarizer reads the very transcript that overflowed; judging it
-    // against the model window would refuse every compaction a window
-    // overflow asked for. The provider adjudicates that request; only the
-    // storage backstop is planned here.
     let exceeds_window = input.compaction != CompactionDisposition::Summarizing
         && input
             .context_window
             .is_some_and(|window| required_tokens > u64::from(window));
-    // An eligible prompt run compacts before it crosses the window, while the
-    // summarizer still has room; nothing else (mid-run turns, already
-    // attempted, the summarizer) is held to the headroom.
     let near_window = input.compaction == CompactionDisposition::Eligible
         && input.reducible_message_bytes > 0
         && input.context_window.is_some_and(|window| {
             let window = u64::from(window);
             required_tokens > window.saturating_sub(window / PROACTIVE_COMPACTION_HEADROOM_DIVISOR)
         });
-    // A compatible provider measurement covers the complete prior request.
-    // Let a measured fit win before classifying raw byte weights as an
-    // irreducible model-window overflow; the byte storage backstop remains
-    // independently authoritative.
     if !exceeds_storage && !exceeds_window && !near_window {
         return ContextPlan::Send { estimate };
     }
@@ -460,8 +380,6 @@ pub(crate) fn rejection_message(plan: ContextPlan) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Byte fixtures are multiples of the ratio so token arithmetic reads
-    /// directly: `bytes(n)` bytes estimate to exactly `n` tokens.
     const fn bytes(tokens: u64) -> u64 {
         tokens * ESTIMATED_BYTES_PER_TOKEN
     }
@@ -499,8 +417,6 @@ mod tests {
         assert_eq!(estimate_tokens(5), 2);
         assert_eq!(estimate_tokens(729_498 * 4), 729_498);
         assert_eq!(estimate_tokens(u64::MAX), u64::MAX / 4 + 1);
-        // The user-visible failure this ratio fixes: ~730 KB of transcript
-        // on a 200k-token model is ~182k tokens and must send.
         let ContextPlan::Send { estimate } = plan(ContextInput {
             context_window: Some(200_000),
             max_output_tokens: 16_384,
@@ -520,14 +436,10 @@ mod tests {
 
     #[test]
     fn summarizer_budget_is_the_window_less_reserve_and_fixed_prefix_in_bytes() {
-        // 100-token window, 40 reserved for output: 60 tokens of input at
-        // four bytes each, less the system and tool bytes the request carries.
         assert_eq!(
             summarizer_message_byte_budget(Some(100), 40, bytes(10), bytes(10)),
             Some(bytes(40))
         );
-        // A fixed prefix past the window leaves nothing for the transcript;
-        // the loader still takes one unit and the provider adjudicates.
         assert_eq!(
             summarizer_message_byte_budget(Some(100), 40, bytes(70), 0),
             Some(0)
@@ -552,7 +464,6 @@ mod tests {
 
     #[test]
     fn measured_tokens_follow_byte_deltas_in_both_directions() {
-        // Below the calibration floor the default ratio stands.
         assert_eq!(adjust_measured_tokens(100, 1_000, 1_000), 100);
         assert_eq!(adjust_measured_tokens(100, 1_000, 1_024), 106);
         assert_eq!(adjust_measured_tokens(100, 1_024, 1_000), 94);
@@ -562,16 +473,11 @@ mod tests {
 
     #[test]
     fn deltas_are_charged_at_the_ratio_the_measurement_established() {
-        // A code-heavy request: 300 000 bytes measured at 100 000 tokens is
-        // three bytes per token. Appending 30 000 bytes costs 10 000 tokens,
-        // not the 7 500 the fixed ratio would charge; crediting is symmetric.
         assert_eq!(calibrated_bytes_per_token(100_000, 300_000), 3);
         assert_eq!(adjust_measured_tokens(100_000, 300_000, 330_000), 110_000);
         assert_eq!(adjust_measured_tokens(100_000, 300_000, 270_000), 90_000);
-        // Prose at five bytes per token charges less than the default.
         assert_eq!(calibrated_bytes_per_token(20_000, 100_000), 5);
         assert_eq!(adjust_measured_tokens(20_000, 100_000, 110_000), 22_000);
-        // Degenerate measurements clamp rather than swing the estimate.
         assert_eq!(calibrated_bytes_per_token(100_000, 50_000), 2);
         assert_eq!(calibrated_bytes_per_token(2_000, 1_000_000), 6);
         assert_eq!(calibrated_bytes_per_token(1_999, 3_000), 4);
@@ -580,12 +486,6 @@ mod tests {
 
     #[test]
     fn calibration_holds_the_estimate_within_ten_percent_on_a_code_heavy_transcript() {
-        // A transcript that tokenizes at 3.1 bytes/token (dense Rust with
-        // punctuation), measured once at 60 000 tokens for 186 000 bytes.
-        // Each later turn appends 12 000 bytes of the same material; the
-        // provider would report ~3 871 more tokens per turn. Track the
-        // measurement across eight turns and compare against what the
-        // provider would have reported at the true ratio.
         let true_bytes_per_token = 3.1_f64;
         let mut measured = 60_000_u64;
         let mut bytes = 186_000_u64;
@@ -596,13 +496,10 @@ mod tests {
             let truth = (next_bytes as f64 / true_bytes_per_token).round();
             let error = ((estimate as f64 - truth) / truth).abs();
             worst_error = worst_error.max(error);
-            // The provider re-measures each turn; the seed is always fresh.
             measured = truth as u64;
             bytes = next_bytes;
         }
         assert!(worst_error < 0.10, "worst error {worst_error:.3}");
-        // The uncalibrated default would have charged 12 000 / 4 = 3 000 per
-        // turn against a true 3 871: 22 % under on every delta.
         let default_delta = 12_000 / ESTIMATED_BYTES_PER_TOKEN;
         let true_delta = (12_000.0 / true_bytes_per_token).round() as u64;
         assert!((true_delta - default_delta) * 100 / true_delta > 20);
@@ -610,8 +507,6 @@ mod tests {
 
     #[test]
     fn known_window_exact_fit_sends_and_one_token_over_compacts() {
-        // Exact fit is judged without the proactive headroom: a run that
-        // already compacted once sends at the window.
         let mut attempted = input(Some(100));
         attempted.compaction =
             CompactionDisposition::Exhausted(CompactionExhaustion::Attempted { steps: 1 });
@@ -668,13 +563,10 @@ mod tests {
             context_window: Some(150),
             ..request
         }));
-        // 200 tokens required of a 200 window: inside the window but not the
-        // proactive headroom, so an eligible run compacts first...
         assert_compact(plan(ContextInput {
             context_window: Some(200),
             ..request
         }));
-        // ...and sends once the window leaves ten percent free.
         assert_send(plan(ContextInput {
             context_window: Some(223),
             ..request
@@ -683,8 +575,6 @@ mod tests {
 
     #[test]
     fn eligible_runs_compact_proactively_inside_the_last_tenth_of_the_window() {
-        // 60 input + 40 output = 100 required. Headroom on a 110 window is
-        // 11, so 100 > 99 compacts while 100 <= 108 on a 120 window sends.
         let eligible = input(Some(110));
         let ContextPlan::Compact { reason, target, .. } = plan(eligible) else {
             panic!("an eligible run inside the headroom must compact")
@@ -692,7 +582,6 @@ mod tests {
         assert_eq!(reason, ContextConstraint::ModelWindow);
         assert_eq!(target.max_reducible_input_tokens, Some(30));
         assert_send(plan(input(Some(120))));
-        // Only a first-chance prompt run is held to the headroom.
         for disposition in [
             CompactionDisposition::Exhausted(CompactionExhaustion::Attempted { steps: 1 }),
             CompactionDisposition::BetweenRunsOnly,
@@ -704,7 +593,6 @@ mod tests {
                 ..eligible
             }));
         }
-        // Nothing reducible: sending is the only option short of rejecting.
         assert_send(plan(ContextInput {
             reducible_message_bytes: 0,
             irreducible_message_bytes: bytes(40),
@@ -714,9 +602,6 @@ mod tests {
 
     #[test]
     fn the_summarizer_request_is_planned_against_storage_only() {
-        // The transcript that overflowed a 150-token window is exactly what
-        // the summarizer must read: planning it against the window would
-        // refuse every window-triggered compaction.
         let overflowing = ContextInput {
             context_window: Some(150),
             max_output_tokens: 40,
@@ -734,13 +619,11 @@ mod tests {
             compaction: CompactionDisposition::Summarizing,
             ..overflowing
         }));
-        // Even a fixed prefix past the window is the provider's call.
         assert_send(plan(ContextInput {
             system_bytes: bytes(400),
             compaction: CompactionDisposition::Summarizing,
             ..overflowing
         }));
-        // The storage backstop still binds the summarizer.
         assert_reject(plan(ContextInput {
             reducible_message_bytes: STORAGE_CONTEXT_BYTES,
             compaction: CompactionDisposition::Summarizing,
@@ -864,10 +747,6 @@ mod tests {
 
     #[test]
     fn a_lifted_wire_cap_does_not_consume_the_storage_backstop() {
-        // RR8.3: the effort-aware lift raises the wire cap to the model
-        // ceiling (128 000 on Claude). Reserving 32 bytes per token of that
-        // would leave a 4 MiB store 32 KiB for the prompt and reject every
-        // effort-enabled session before its first request.
         let plan_for = |max_output_tokens| {
             plan(ContextInput {
                 context_window: Some(1_000_000),
@@ -887,7 +766,6 @@ mod tests {
             panic!("the default cap sends");
         };
         assert_eq!(lifted.storage_reserve_bytes, default.storage_reserve_bytes);
-        // The window arithmetic still sees the real wire cap.
         assert_eq!(lifted.output_reserve_tokens, 128_000);
     }
 

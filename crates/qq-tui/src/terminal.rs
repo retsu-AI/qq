@@ -29,14 +29,9 @@ use crate::{
     view::FrameRenderer,
 };
 
-/// Interval between frame ticks. Frames are only drawn when state changed.
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 const ANIMATION_INTERVAL: Duration = Duration::from_millis(crate::app::ANIMATION_INTERVAL_MS);
 
-/// Runs the interactive loop to exit and returns the session that was focused
-/// when it ended (`None` when the user never had one, or exited on a signal
-/// before the loop started). The terminal is restored before this returns,
-/// so the caller may print to the ordinary screen.
 pub async fn run<P>(client: P, app: App) -> Result<Option<SessionId>, TuiError>
 where
     P: ClientPort,
@@ -52,7 +47,6 @@ where
     let terminal = TerminalGuard::enter()?;
     let events = EventStream::new();
     let output = tokio::io::stdout();
-    // Inside a herdr pane, report this client's state to it (ENG-1034).
     let herdr = crate::herdr::HerdrPane::from_env().map(crate::herdr::Reporter::spawn);
     let app = run_loop(
         client,
@@ -67,8 +61,6 @@ where
         },
     )
     .await;
-    // Release whether the loop ended cleanly or not: the pane no longer
-    // runs an agent either way.
     if let Some(herdr) = herdr {
         herdr.release().await;
     }
@@ -77,11 +69,6 @@ where
     Ok(app.focused())
 }
 
-/// Edit `draft` in `$VISUAL` or `$EDITOR`. The terminal leaves raw mode and
-/// its input modes for the editor's lifetime; the caller redraws afterwards.
-/// Runs on the blocking pool because the editor owns the TTY until it exits.
-/// `None` means the editor was unavailable, failed, or left the text
-/// unchanged.
 fn external_editor(draft: String) -> EditorFuture {
     Box::pin(async move {
         let Some(command) = std::env::var_os("VISUAL")
@@ -91,7 +78,6 @@ fn external_editor(draft: String) -> EditorFuture {
             return Err(EditorError::NotConfigured);
         };
         let mut output = stdout();
-        // Leave the alternate-screen chrome intact but hand the TTY over.
         let _ = disable_input_modes(&mut output);
         let _ = execute!(output, Show);
         let _ = terminal::disable_raw_mode();
@@ -102,8 +88,6 @@ fn external_editor(draft: String) -> EditorFuture {
                 .tempfile()
                 .map_err(EditorError::Io)?;
             std::fs::write(file.path(), &draft).map_err(EditorError::Io)?;
-            // `$EDITOR` may carry arguments (`code --wait`); split on
-            // whitespace, which matches how shells treat the variable.
             let command = command.to_string_lossy();
             let mut parts = command.split_whitespace();
             let program = parts.next().ok_or(EditorError::NotConfigured)?;
@@ -127,7 +111,6 @@ fn external_editor(draft: String) -> EditorFuture {
     })
 }
 
-/// Why an external edit produced no text.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EditorError {
     #[error("set $VISUAL or $EDITOR to edit the draft externally")]
@@ -141,20 +124,11 @@ pub(crate) enum EditorError {
 pub(crate) type EditorFuture =
     std::pin::Pin<Box<dyn Future<Output = Result<Option<String>, EditorError>> + Send>>;
 
-/// The blocking work the loop delegates outside the app: an external editor
-/// for the draft, which suspends the loop while it runs. `herdr` receives the
-/// client's state after every update when running inside a herdr pane.
 pub(crate) struct Hooks<X> {
     pub(crate) editor: X,
     pub(crate) herdr: Option<crate::herdr::ReportSink>,
 }
 
-/// The event loop with every terminal dependency injected so it runs without a
-/// TTY in tests and benchmarks. Returns the final application state so callers
-/// can inspect it after the loop exits.
-///
-/// `size` is queried once at start and again after each `Resize` event rather
-/// than every frame.
 pub(crate) async fn run_loop<P, E, W, S, F, X>(
     mut client: P,
     mut app: App,
@@ -180,12 +154,8 @@ where
     frame_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     animation_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut terminal_size = size()?;
-    // The most urgent redraw requested since the last frame, if any.
     let mut redraw = Some(Redraw::Immediate);
-    // The most recent client-reported failure, surfaced if the client then
-    // stops without recovering.
     let mut last_client_failure: Option<String> = None;
-    // Set when input or a client update arrived since the last herdr report.
     let mut state_may_change = false;
 
     loop {
@@ -195,8 +165,6 @@ where
             output.write_all(&bytes).await?;
             output.flush().await?;
             redraw = None;
-            // The tick would otherwise fire right after this frame for a
-            // change already drawn.
             frame_tick.reset();
         }
         let effects = tokio::select! {
@@ -225,8 +193,6 @@ where
                 if let ClientUpdate::SnapshotFailed(failure) = &update {
                     last_client_failure = Some(failure.message().to_owned());
                 }
-                // Streamed deltas are most updates while runs stream and
-                // never change idle/working/blocked; skip the fold for them.
                 state_may_change |= !matches!(
                     &update,
                     ClientUpdate::Event(SessionEventEnvelope {
@@ -254,8 +220,6 @@ where
                 Effects::none()
             }
         };
-        // Effects may produce more effects (a failed send is reported back
-        // through the app); apply until the queue drains.
         let mut queue: VecDeque<Effect> = effects.into_iter().collect();
         let mut quit = false;
         while let Some(effect) = queue.pop_front() {
@@ -269,9 +233,6 @@ where
                     }
                 }
                 Effect::Editor(draft) => {
-                    // An external edit owns the terminal until it returns;
-                    // nothing else can usefully happen meanwhile. Client
-                    // updates queue in the channel and drain afterwards.
                     match editor(draft).await {
                         Ok(text) => {
                             app.apply_editor_result(text);
@@ -284,7 +245,6 @@ where
                     redraw = Some(Redraw::Immediate);
                 }
                 Effect::ResolveMentions(submit) => {
-                    // File reads and a possible git call: off the executor.
                     let root = app.workspace_root.clone();
                     let text = submit.text.clone();
                     let resolved = match root {
@@ -328,11 +288,6 @@ where
         if quit {
             break;
         }
-        // After input or a state-bearing client update, so a focus change or
-        // a new session also moves herdr's resume target; frame and animation
-        // ticks change nothing herdr shows. Deduplicated in the sink. Nothing
-        // is reported before the first snapshot: an empty store would read as
-        // idle while the workspace may be running or waiting.
         if state_may_change
             && app.workspace_id.is_some()
             && let Some(herdr) = &herdr
@@ -340,8 +295,6 @@ where
             state_may_change = false;
             herdr.update(crate::herdr::Report {
                 activity: app.sessions.activity(),
-                // `--session` opens roots only; a focused child resumes as
-                // its tree.
                 session: app
                     .focused()
                     .and_then(|focused| app.sessions.root_of(focused)),
@@ -351,11 +304,6 @@ where
     Ok(app)
 }
 
-/// Terminal bytes that ask for the user's attention: BEL for the terminal's
-/// own bell or visual flash, then an OSC 9 desktop notification, which
-/// iTerm2, WezTerm, kitty, ghostty, and Windows Terminal show and every
-/// other terminal ignores. Text is scrubbed so a session title cannot
-/// terminate or extend the escape sequence.
 fn attention_bytes(attention: &crate::app::Attention) -> Vec<u8> {
     let text: String = attention
         .summary()
@@ -377,8 +325,6 @@ fn apply_send_failure(
             result: Err(error),
         },
         ClientRequest::Snapshot(_) => ClientUpdate::SnapshotFailed(error),
-        // A refresh that never left keeps the document (or catalog) the app
-        // already has.
         ClientRequest::Capabilities | ClientRequest::Models(_) => return Effects::none(),
     };
     app.apply_client_update(update)
@@ -419,7 +365,6 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Escape bytes that enable or disable mouse reporting.
 fn mouse_capture_bytes(enabled: bool) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     if enabled {
@@ -431,10 +376,6 @@ fn mouse_capture_bytes(enabled: bool) -> io::Result<Vec<u8>> {
 }
 
 fn enable_input_modes(output: &mut impl io::Write) -> io::Result<()> {
-    // Kitty keyboard progressive enhancement lets compatible terminals report
-    // modified keys such as Shift-Enter. Unsupported terminals ignore the CSI.
-    // Always push/pop rather than probing: the support query blocks on stdin
-    // and races the async event loop.
     execute!(
         output,
         PushKeyboardEnhancementFlags(

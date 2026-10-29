@@ -1,14 +1,3 @@
-//! The request-time credential provider shared by every OAuth provider.
-//!
-//! A compiled provider asks for a credential on every HTTP attempt. Warm
-//! requests copy the cached value out under a short lock and confirm it with
-//! one credential-epoch read, so concurrent requests never wait for each
-//! other. A miss (no cache, a newer epoch, or a passed refresh deadline) takes
-//! the fill lock, so one request per provider loads or refreshes while the
-//! rest wait and then reuse its result. Resolutions the epoch cannot
-//! invalidate (environment variables, explicit references, stored API keys
-//! outside the OAuth path) are never cached and never take the fill lock.
-
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -21,14 +10,9 @@ use qq_provider::{
 
 use super::{AuthError, CredentialStore, oauth};
 
-/// One provider's credential loading: how to resolve it, how to turn the
-/// result into request headers, and how its errors read to a request.
 pub(crate) trait RequestCredentialSource: Send + Sync + 'static {
     type Credential: Clone + Send + Sync + 'static;
 
-    /// Resolves the credential on a blocking thread. `reload` is set when a
-    /// cached value existed and was found stale, so the durable value must be
-    /// read again rather than through the store's short read memo.
     fn resolve(
         &self,
         store: &CredentialStore,
@@ -41,12 +25,8 @@ pub(crate) trait RequestCredentialSource: Send + Sync + 'static {
 
     fn map_error(&self, error: AuthError) -> RequestCredentialError;
 
-    /// The provider's error for an unreadable clock.
     fn clock_unavailable() -> AuthError;
 
-    /// Whether this source is known, before any resolution, never to yield a
-    /// cacheable credential (an explicit reference). Such sources skip the
-    /// fill lock from their first request, including when they fail.
     fn never_cacheable(&self) -> bool {
         false
     }
@@ -54,9 +34,6 @@ pub(crate) trait RequestCredentialSource: Send + Sync + 'static {
 
 pub(crate) struct Resolution<C> {
     pub(crate) credential: C,
-    /// `Some` when the value may be reused until the credential epoch moves
-    /// or `refresh_after` (Unix seconds) passes; `None` when nothing the
-    /// store tracks would invalidate it.
     pub(crate) reuse: Option<Reuse>,
 }
 
@@ -84,18 +61,11 @@ impl<C> Cached<C> {
 pub(crate) struct CachedRequestCredentials<S: RequestCredentialSource> {
     pub(crate) store: CredentialStore,
     source: Arc<S>,
-    /// Held only to take or replace a shared handle, never across an await;
-    /// a warm request clones the `Arc`, not the credential bytes.
     pub(crate) cache: tokio::sync::Mutex<Option<Arc<Cached<S::Credential>>>>,
-    /// Serialises misses so one request per provider loads or refreshes.
     pub(crate) fill: tokio::sync::Mutex<()>,
-    /// The last resolution could not be cached, so misses skip `fill`.
     uncacheable: AtomicBool,
-    /// Requests that reached the fill lock, for tests that prove a path
-    /// never takes it.
     #[cfg(test)]
     pub(crate) fill_attempts: std::sync::atomic::AtomicUsize,
-    /// Resolutions performed while holding the fill lock.
     #[cfg(test)]
     resolved_under_fill: std::sync::atomic::AtomicUsize,
 }
@@ -121,7 +91,6 @@ impl<S: RequestCredentialSource> CachedRequestCredentials<S> {
         self.resolved_under_fill.load(Ordering::SeqCst)
     }
 
-    /// Whether `reuse` still describes the durable credential.
     async fn still_valid(&self, reuse: Reuse) -> Result<bool, RequestCredentialError> {
         self.store
             .load_request_credential(move |store| {
@@ -180,14 +149,10 @@ impl<S: RequestCredentialSource> RequestCredentialProvider for CachedRequestCred
             #[cfg(test)]
             self.fill_attempts.fetch_add(1, Ordering::SeqCst);
             let fill = self.fill.lock().await;
-            // A concurrent first request may have found the source
-            // uncacheable while this one waited; such resolutions never need
-            // the fill lock, so release it rather than resolve serially.
             if self.uncacheable.load(Ordering::Relaxed) {
                 drop(fill);
                 return self.resolve_uncached().await;
             }
-            // Another request may have filled the cache while this one waited.
             let current = self.cache.lock().await.clone();
             let current_reuse = current.as_deref().map(Cached::reuse);
             #[cfg(test)]
@@ -205,13 +170,6 @@ impl<S: RequestCredentialSource> RequestCredentialProvider for CachedRequestCred
                     source.resolve(&store, current_reuse.is_some()).map(Some)
                 })
                 .await;
-            // A failed load caches nothing, so the next miss would take
-            // `fill` again and every waiter would fail through it one by one;
-            // with a hung keyring each would wait out the load timeout in
-            // turn. Whether the worker failed (timeout, no capacity, a dead
-            // worker) or the resolution itself did, mark the source
-            // uncacheable so waiters and later requests resolve on the bounded
-            // worker pool, until a resolution that can be cached clears it.
             let failed = |error| {
                 self.uncacheable.store(true, Ordering::Relaxed);
                 error

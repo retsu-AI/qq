@@ -1,11 +1,3 @@
-//! Structured run input and opaque correlation metadata.
-//!
-//! A prompt is a bounded list of typed parts rather than one string. Text
-//! parts are carried verbatim; workspace file parts name a capability-scoped
-//! path whose bytes the runtime reads when the run starts, so admission never
-//! performs I/O and a stale or oversized attachment fails the run before its
-//! first provider request rather than the command that queued it.
-
 use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -13,32 +5,19 @@ use thiserror::Error;
 
 use crate::ContentHash;
 
-/// Most parts one prompt or steering message may carry.
 pub const MAX_INPUT_PARTS: usize = 32;
-/// Total bytes of `Text` parts per prompt or steering message.
 pub const MAX_INPUT_TEXT_BYTES: usize = 128 * 1024;
-/// Most `WorkspaceFile` parts per prompt or steering message.
 pub const MAX_INPUT_FILE_PARTS: usize = 8;
-/// Longest workspace-relative path a file part may name.
 pub const MAX_INPUT_PATH_BYTES: usize = 4096;
-/// Largest single file the runtime will attach when resolving a part.
 pub const MAX_INPUT_FILE_BYTES: usize = 256 * 1024;
-/// Largest resolved input (text plus every attached file) per message.
 pub const MAX_RESOLVED_INPUT_BYTES: usize = 1024 * 1024;
 
-/// One typed unit of user input.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InputPart {
     Text {
         text: String,
     },
-    /// A file inside the session's workspace, attached by reference. The
-    /// runtime reads it through the workspace capability when the run starts;
-    /// when `expected_hash` is present the bytes must still hash to it.
-    /// `range` (1-based, inclusive, `start <= end`) attaches only those
-    /// lines; the whole file is still hashed and recorded so an edit needs
-    /// no redundant read.
     WorkspaceFile {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,7 +27,6 @@ pub enum InputPart {
     },
 }
 
-/// An inclusive 1-based line window of an attached file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LineRange {
     pub start: u32,
@@ -56,13 +34,11 @@ pub struct LineRange {
 }
 
 impl InputPart {
-    /// A single text part.
     #[must_use]
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
     }
 
-    /// A whole-file attachment without a hash.
     #[must_use]
     pub fn workspace_file(path: impl Into<String>) -> Self {
         Self::WorkspaceFile {
@@ -81,7 +57,6 @@ impl InputPart {
     }
 }
 
-/// The variant vocabulary of [`InputPart`], advertised by server capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputPartKind {
@@ -90,13 +65,9 @@ pub enum InputPartKind {
 }
 
 impl InputPartKind {
-    /// Every kind this protocol revision defines, in declaration order.
     pub const ALL: [Self; 2] = [Self::Text, Self::WorkspaceFile];
 }
 
-/// Why a list of input parts was rejected before admission. Every variant is
-/// decidable from the parts alone; none requires filesystem or provider
-/// access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum InputError {
     #[error("input must carry at least one part")]
@@ -123,7 +94,6 @@ pub enum InputError {
     InvalidRange { index: usize },
 }
 
-/// Checks the syntactic bounds shared by prompts and steering input.
 pub fn validate_input(parts: &[InputPart]) -> Result<(), InputError> {
     if parts.is_empty() {
         return Err(InputError::Empty);
@@ -174,26 +144,16 @@ pub fn validate_input(parts: &[InputPart]) -> Result<(), InputError> {
     Ok(())
 }
 
-/// Most entries one correlation map may carry.
 pub const MAX_CORRELATION_ENTRIES: usize = 8;
-/// Longest correlation key in bytes.
 pub const MAX_CORRELATION_KEY_BYTES: usize = 64;
-/// Longest correlation value in bytes.
 pub const MAX_CORRELATION_VALUE_BYTES: usize = 256;
-/// Total key plus value bytes across one correlation map.
 pub const MAX_CORRELATION_BYTES: usize = 2048;
 
-/// Opaque caller-owned attribution for a session or run: a gateway's user,
-/// channel, thread, request, or job identifiers. QQ stores and echoes it; it
-/// never interprets the keys, derives identity from them, or treats them as
-/// authorization. Bounded so it can ride every summary without growing the
-/// event stream.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Correlation(BTreeMap<String, String>);
 
 impl Correlation {
-    /// Validates the bounds and wraps the map.
     pub fn new(entries: BTreeMap<String, String>) -> Result<Self, CorrelationError> {
         if entries.len() > MAX_CORRELATION_ENTRIES {
             return Err(CorrelationError::TooManyEntries {

@@ -1,4 +1,3 @@
-//! A credential-free durable session editing its workspace in place.
 use futures_util::StreamExt;
 use qq_core::*;
 use qq_protocol::*;

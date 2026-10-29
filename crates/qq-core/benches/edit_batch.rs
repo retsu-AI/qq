@@ -1,12 +1,3 @@
-//! Cost of one `edit_file` batch: 32 edits over a 1 MiB source file, the
-//! way a model rewrites a module in one call. Covers the cascade on every
-//! edit (exact hits first; one drifted edit per strategy so the fuzzy tiers
-//! run), the in-memory apply chain, the unified diff for the UI payload,
-//! and the atomic temp+rename.
-//!
-//! Compare these measurements alongside `tool_dispatch` when changing the
-//! edit path; report regressions with the benchmark results.
-
 use std::{hint::black_box, time::Instant};
 
 use qq_core::tool_bench::Session;
@@ -50,7 +41,6 @@ fn main() {
     std::fs::write(root.join("big.rs"), &original).expect("fixture must be written");
     assert!(original.len() >= 1024 * 1024, "{} bytes", original.len());
 
-    // 32 exact edits spread through the file, each unique.
     let exact: Vec<serde_json::Value> = (0..EDITS)
         .map(|i| {
             let n = i * (LINES / EDITS);
@@ -63,8 +53,6 @@ fn main() {
         .collect();
     let exact_args = serde_json::json!({ "edits": exact, "dry_run": true }).to_string();
 
-    // The same, with whitespace drift on every edit so each falls through to
-    // a fuzzy tier (trailing blanks, collapsed inner spaces, de-indented).
     let drifted: Vec<serde_json::Value> = (0..EDITS)
         .map(|i| {
             let n = i * (LINES / EDITS);
@@ -96,7 +84,6 @@ fn main() {
         assert!(!error, "{text}");
         text
     });
-    // The real apply: restore the file each round so every edit is found.
     let apply_args = exact_args.replace(r#","dry_run":true"#, "");
     measure("edit_batch_32_exact_apply_1mib", iterations, || {
         std::fs::write(root.join("big.rs"), &original).expect("fixture must be restored");

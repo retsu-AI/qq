@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-# Exercises install.sh against a local fixture release served over HTTP, so
-# the test needs no network and no real GitHub release. Run from anywhere:
-#
-#   bash tests/install_sh.sh
-#
-# Asserts: install + checksum verification, --dir, QQ_INSTALL_DIR, the PATH
-# hint, refusal of a tampered checksum, refusal of an unknown version, and
-# --help. Requires python3 (for http.server), curl, tar, and sha256sum or
-# shasum, all of which the dev shell and the CI runner provide.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,8 +20,6 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "install_sh.sh: unsupported host $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
-# Fixture release: the same layout release.yml produces (binary inside a
-# `qq-vX.Y.Z-<target>/` directory) plus a combined SHA256SUMS.
 release="$work/releases/v$version"
 name="qq-v$version-$target"
 mkdir -p "$release/$name"
@@ -51,7 +40,6 @@ mode() {
 }
 (cd "$release" && sum "$name.tar.gz" > SHA256SUMS && printf '%064d *qq-v%s-x86_64-pc-windows-msvc.zip\n' 0 "$version" >> SHA256SUMS)
 
-# Serve on an ephemeral port; read the port back from python's stdout.
 python3 -c '
 import http.server, socketserver, sys, os
 os.chdir(sys.argv[1])
@@ -76,13 +64,11 @@ check() {
   if "$@"; then echo "ok   $label"; else echo "FAIL $label"; failures=$((failures + 1)); fi
 }
 run() {
-  # Runs install.sh with a clean HOME and a PATH that omits the install dir.
   local home=$1; shift
   HOME="$home" SHELL="${TEST_SHELL:-/bin/bash}" PATH="$(dirname "$(command -v sh)"):$(dirname "$(command -v curl)"):$(dirname "$(command -v tar)"):$(dirname "$(command -v python3)"):/usr/bin:/bin" \
     sh "$script" "$@"
 }
 
-# 1. Default install into ~/.local/bin with an explicit version.
 home1="$work/home1"; mkdir -p "$home1"
 out="$(run "$home1" --version "$version" 2>&1)" || { echo "$out"; false; }
 check "installs to ~/.local/bin" test -x "$home1/.local/bin/qq"

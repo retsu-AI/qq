@@ -1,17 +1,3 @@
-//! The compiled index of a workspace's commands and skills.
-//!
-//! Built once per plan generation from the guidance roots, the index holds
-//! names, kinds, sources, and a bounded one-line description per document —
-//! never the bodies. A `/name` invocation resolves against it in memory
-//! instead of probing five candidate paths; the body is still read and hashed
-//! at invocation, so a stale description can only mislabel, never misload.
-//!
-//! Disclosure is per root. Native `.qq/` roots, pack roots, the global
-//! `<config>/skills` root, and `.agents/skills` are disclosed to the model
-//! through the `load_skill` tool; `.claude/` roots stay user-invoke-only.
-//! A name keeps only the documents from its highest-precedence tier, so an
-//! `.agents/skills` copy of a `.qq/skills` skill is dropped.
-
 use std::{
     collections::BTreeMap,
     io::{ErrorKind, Read},
@@ -26,21 +12,14 @@ use sha2::{Digest, Sha256};
 use super::guidance::GuidanceKind;
 use crate::{plan::SourceFingerprint, workspace::Workspace};
 
-/// Most documents one index holds; later roots are truncated first.
 pub const MAX_INDEXED_SKILLS: usize = 64;
-/// Bytes of front matter or leading text kept as a document's description.
 pub const MAX_SKILL_DESCRIPTION_BYTES: usize = 512;
-/// Bytes read from the head of a document to extract its description.
 const DESCRIPTION_SCAN_BYTES: usize = 4 * 1024;
-/// Most names one directory listing contributes before it is truncated.
 const MAX_ROOT_ENTRIES: usize = 256;
 
 pub(crate) const LOAD_SKILL_TOOL: &str = "load_skill";
 
-/// Bytes the rendered index may occupy in the system prompt. Entries past
-/// the cap are counted, not listed; they stay loadable by name.
 pub const MAX_DISCLOSURE_BYTES: usize = 8 * 1024;
-/// Room kept under the cap for the omitted-entries line.
 const DISCLOSURE_OMITTED_RESERVE: usize = 96;
 
 const DISCLOSURE_HEADER: &str = "Skills and commands. When the task matches one's description, \
@@ -59,26 +38,17 @@ fn disclosure_line(entry: &SkillEntry) -> String {
     }
 }
 
-/// One indexed document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillEntry {
     pub kind: SkillKind,
     pub name: String,
-    /// Path of the document: workspace-relative for workspace roots, or
-    /// `pack:<id>/<relative>` for documents a pack contributes.
     pub source: String,
-    /// Which opened root holds the document: `None` for the workspace,
-    /// `Some(index)` for the plan's extra roots (packs, the global root).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<usize>,
-    /// The skill's own directory, which its relative paths resolve
-    /// against: workspace-relative for workspace roots, absolute otherwise.
-    /// Empty for single-file commands.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub directory: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
-    /// Whether the model may load this document itself.
     pub disclosed: bool,
 }
 
@@ -107,25 +77,14 @@ impl From<SkillKind> for qq_protocol::GuidanceKind {
     }
 }
 
-/// A root the index scans.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SkillRoot {
-    /// Directory relative to the root's opened capability.
     pub(crate) directory: String,
     pub(crate) kind: SkillKind,
-    /// `true` for `dir/<name>/SKILL.md`, `false` for `dir/<name>.md`.
     pub(crate) nested: bool,
-    /// Whether documents under this root are disclosed to the model.
     pub(crate) disclosed: bool,
-    /// Precedence: a name found in a lower tier drops every document of the
-    /// same name from higher tiers. Names that collide within one tier stay
-    /// and are ambiguous.
     pub(crate) tier: u8,
-    /// Which opened capability the directory is relative to: `None` for the
-    /// workspace, `Some(index)` for a root handed to the compiler.
     pub(crate) root: Option<usize>,
-    /// Prefix for `source` (`pack:<id>/`, `global:`) so a document's
-    /// provenance names where it came from; empty for the workspace.
     pub(crate) source_prefix: String,
 }
 
@@ -133,12 +92,10 @@ const TIER_NATIVE: u8 = 0;
 const TIER_GLOBAL: u8 = 1;
 const TIER_COMPAT: u8 = 2;
 
-/// The global root's directory inside the configuration directory.
 pub(crate) const GLOBAL_SKILLS_DIRECTORY: &str = "skills";
 const GLOBAL_SOURCE_PREFIX: &str = "global:skills/";
 
 impl SkillRoot {
-    /// The roots every workspace is scanned for.
     pub(crate) fn workspace_defaults() -> Vec<Self> {
         vec![
             Self::workspace(".qq/commands", SkillKind::Command, true, TIER_NATIVE),
@@ -161,8 +118,6 @@ impl SkillRoot {
         }
     }
 
-    /// A root inside pack `pack_id`, opened as capability `root`. Pack
-    /// documents share the native tier and are disclosed.
     pub(crate) fn pack(pack_id: &str, root: usize, directory: &str, kind: SkillKind) -> Self {
         Self {
             directory: directory.to_owned(),
@@ -175,9 +130,6 @@ impl SkillRoot {
         }
     }
 
-    /// The user's global skills directory, opened (canonical) as capability
-    /// `root` and listed in place. Workspace and pack documents shadow it;
-    /// it shadows `.agents/skills`.
     pub(crate) fn global(root: usize) -> Self {
         Self {
             directory: String::new(),
@@ -219,7 +171,6 @@ impl SkillRoot {
     }
 }
 
-/// Why `/name` did not resolve to exactly one document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SkillResolution<'a> {
     One(&'a SkillEntry),
@@ -227,15 +178,12 @@ pub(crate) enum SkillResolution<'a> {
     Ambiguous(Vec<&'a SkillEntry>),
 }
 
-/// The compiled index. Immutable; shared by every run of a plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillIndex {
-    /// Sorted by (name, source) for deterministic digests and lookups.
     entries: Vec<SkillEntry>,
     digest: ContentHash,
     truncated: bool,
     disclosed_count: usize,
-    /// Rendered once for the system prompt.
     disclosure_text: Option<String>,
 }
 
@@ -245,17 +193,12 @@ impl SkillIndex {
         Self::from_entries(Vec::new(), false)
     }
 
-    /// Scans `roots` inside `workspace`. Blocking: one directory listing per
-    /// root plus one bounded head read per document. Returns the index and
-    /// the fingerprint of every root directory (present or absent) so a plan
-    /// cache can revalidate with `stat`s alone.
     pub(crate) fn compile_blocking(
         workspace: &Workspace,
         packs: &[Workspace],
         roots: &[SkillRoot],
     ) -> (Self, Vec<SourceFingerprint>) {
         let mut fingerprints = Vec::with_capacity(roots.len());
-        // Every readable document in root order, with its root's tier.
         let mut found: Vec<(u8, SkillEntry)> = Vec::new();
         let mut truncated = false;
         for root in roots {
@@ -270,14 +213,10 @@ impl SkillIndex {
             let present = fingerprint.is_present();
             fingerprints.push(fingerprint);
             if !present {
-                // The fingerprint already observed the root's absence; do not
-                // pay a second syscall to fail the listing.
                 continue;
             }
             let listing = match opened.root().read_dir(root.listing_path()) {
                 Ok(listing) => listing,
-                // An absent or unreadable root contributes nothing; the
-                // fingerprint records what was observed.
                 Err(_) => continue,
             };
             let mut names: Vec<String> = Vec::new();
@@ -316,11 +255,8 @@ impl SkillIndex {
             names.sort();
             for name in names {
                 let relative = root.document_path(&name);
-                // Front matter decides the name and description, so an
-                // in-place edit must recompile the plan too.
                 fingerprints.push(SourceFingerprint::capture(opened.path().join(&relative)));
                 let Some(head) = read_front_matter(opened, &relative) else {
-                    // Not a regular readable file at the expected path.
                     continue;
                 };
                 let directory = if root.nested {
@@ -329,8 +265,6 @@ impl SkillIndex {
                         .unwrap_or(&relative)
                         .to_owned();
                     let absolute = opened.path().join(&parent);
-                    // The model's file tools take workspace-relative paths;
-                    // only a root outside the workspace shows an absolute one.
                     match absolute.strip_prefix(workspace.path()) {
                         Ok(inside) => inside.to_string_lossy().replace('\\', "/"),
                         Err(_) => absolute.display().to_string(),
@@ -352,8 +286,6 @@ impl SkillIndex {
                 ));
             }
         }
-        // A name keeps only its highest-precedence tier: `.qq/skills/x`
-        // drops `.agents/skills/x`, while two native `x` stay ambiguous.
         let mut best: BTreeMap<&str, u8> = BTreeMap::new();
         for (tier, entry) in &found {
             best.entry(entry.name.as_str())
@@ -369,7 +301,6 @@ impl SkillIndex {
             .zip(keep)
             .filter_map(|(found, keep)| keep.then_some(found))
             .collect();
-        // Lower-precedence tiers are truncated first, later roots within one.
         if entries.len() > MAX_INDEXED_SKILLS {
             entries.sort_by_key(|(tier, _)| *tier);
             entries.truncate(MAX_INDEXED_SKILLS);
@@ -460,8 +391,6 @@ impl SkillIndex {
         self.disclosure_text.as_deref()
     }
 
-    /// Resolves `/name`. Lower-precedence tiers of a name are dropped at
-    /// scan time, so two survivors with one name are genuinely ambiguous.
     pub(crate) fn resolve(&self, name: &str) -> SkillResolution<'_> {
         let start = self
             .entries
@@ -477,7 +406,6 @@ impl SkillIndex {
         }
     }
 
-    /// The document's path relative to its root capability.
     pub(crate) fn relative_source(entry: &SkillEntry) -> &str {
         if let Some(rest) = entry.source.strip_prefix(GLOBAL_SOURCE_PREFIX) {
             return rest;
@@ -488,7 +416,6 @@ impl SkillIndex {
         }
     }
 
-    /// Resolves a model-initiated load: only disclosed documents.
     pub(crate) fn resolve_disclosed(&self, name: &str) -> Option<&SkillEntry> {
         match self.resolve(name) {
             SkillResolution::One(entry) if entry.disclosed => Some(entry),
@@ -513,19 +440,12 @@ impl SkillIndex {
     }
 }
 
-/// What the index keeps from a document's leading YAML front matter.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct FrontMatter {
-    /// `name:`, when it is a valid invocation name; otherwise the path's
-    /// name stands.
     name: Option<String>,
-    /// `description:`, bounded; empty when the document declares none.
     description: String,
 }
 
-/// Reads the head of one document and returns its front matter. Body text
-/// is never used, so indexing cannot leak an unselected document into the
-/// prompt. `None` when the path is not a regular readable file.
 fn read_front_matter(workspace: &Workspace, source: &str) -> Option<FrontMatter> {
     let resolved = workspace.contained_path(source).ok()?;
     let metadata = workspace.root().metadata(&resolved).ok()?;
@@ -558,7 +478,6 @@ fn parse_front_matter(text: &str) -> FrontMatter {
             if trimmed == "---" {
                 break;
             }
-            // Only top-level keys: `metadata:\n  name: x` names nothing.
             if line.starts_with(char::is_whitespace) {
                 continue;
             }
@@ -602,7 +521,6 @@ fn parse_front_matter(text: &str) -> FrontMatter {
 #[serde(deny_unknown_fields)]
 pub(crate) struct LoadSkillArgs {
     pub(crate) name: String,
-    /// Substituted for `$ARGUMENTS` in the loaded body.
     #[serde(default)]
     pub(crate) arguments: String,
 }
@@ -719,11 +637,9 @@ mod tests {
                 ("review", ".qq/skills/review/SKILL.md"),
             ]
         );
-        // The duplicate is gone, not ambiguous.
         assert!(
             matches!(index.resolve("review"), SkillResolution::One(e) if e.source == ".qq/skills/review/SKILL.md")
         );
-        // `.claude/` stays invoke-only.
         assert!(matches!(index.resolve("hidden"), SkillResolution::One(e) if !e.disclosed));
         assert!(index.resolve_disclosed("hidden").is_none());
         assert!(
@@ -742,7 +658,6 @@ mod tests {
                 "---\nname: review\ndescription: Review it\n---\n",
             ),
             (".qq/skills/kept/SKILL.md", "---\nname: Not Valid\n---\n"),
-            // A renamed `.agents` copy still deduplicates against `.qq`.
             (".agents/skills/other/SKILL.md", "---\nname: review\n---\n"),
         ]);
         let index = index(&workspace);
@@ -786,7 +701,6 @@ mod tests {
         roots.push(SkillRoot::global(0));
         let (index, fingerprints) =
             SkillIndex::compile_blocking(&workspace, std::slice::from_ref(&global), &roots);
-        // Six roots plus one per document read.
         assert_eq!(fingerprints.len(), 10);
         assert_eq!(
             disclosed(&index),
@@ -830,7 +744,6 @@ mod tests {
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect();
         let (_dir, workspace) = workspace_with(&refs);
-        // Pack roots are scanned after every workspace root.
         let (_p, pack) = workspace_with(&[("skills/zz-native/SKILL.md", "n\n")]);
         let mut roots = SkillRoot::workspace_defaults();
         roots.push(SkillRoot::pack("kit", 0, "skills", SkillKind::Skill));
@@ -864,9 +777,7 @@ mod tests {
         let listed = text.lines().filter(|line| line.starts_with("- ")).count();
         assert_eq!(listed, 15);
         assert!(text.ends_with("(25 more not listed: the skill index is capped at 8 KiB.)\n"));
-        // Every entry is still indexed; only the prompt text is capped.
         assert!(!index.truncated());
-        // Unlisted skills stay loadable by name.
         assert_eq!(index.disclosed_count(), 40);
         assert!(index.resolve_disclosed("s39").is_some());
     }

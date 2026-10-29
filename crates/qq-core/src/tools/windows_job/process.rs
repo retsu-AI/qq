@@ -1,4 +1,3 @@
-//! Keep async stdio while retaining the process handle for job assignment.
 use std::{io, process::ExitStatus};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 
@@ -23,7 +22,6 @@ impl Process {
         let pid = self
             .id()
             .ok_or_else(|| io::Error::other("new child has no process identity"))?;
-        // The held process handle pins this PID during thread discovery.
         subc_jobobject::resume_main_thread(pid)
     }
 

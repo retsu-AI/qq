@@ -1,18 +1,7 @@
-//! Per-plan shell policy: managed command-prefix denials and how hard the
-//! runtime steers the model from shell habits toward the bounded built-ins.
-//! Set by the application from configuration; core never sees the document.
-
 use std::sync::Arc;
 
-/// Variables a verified read starts with, its environment otherwise cleared:
-/// enough for a program to find its tools, home, locale, terminal, and
-/// scratch. Every other command inherits the whole environment.
 #[cfg(not(windows))]
 pub const BASE_ENV: [&str; 5] = ["PATH", "HOME", "LANG", "TERM", "TMPDIR"];
-/// Windows loaders require SYSTEMROOT and AppContainer startup requires
-/// LOCALAPPDATA in the child environment.
-/// Capture it with the other base values rather than adding worker ambient
-/// environment after the invocation has been frozen.
 #[cfg(windows)]
 pub const BASE_ENV: [&str; 7] = [
     "PATH",
@@ -24,17 +13,11 @@ pub const BASE_ENV: [&str; 7] = [
     "LOCALAPPDATA",
 ];
 
-/// How the runtime treats a shell command whose first program has a bounded
-/// built-in equivalent (`grep` → `search`, `cat` → `read_file`, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum BuiltinPreference {
-    /// Say nothing.
     Off,
-    /// Run it and append one `hint:` line naming the built-in.
     #[default]
     Hint,
-    /// Refuse before execution with `PolicyDecision::Deny { UseBuiltin }`;
-    /// the benchmark arm for measuring what shell habit costs.
     Strict,
 }
 
@@ -42,8 +25,6 @@ pub enum BuiltinPreference {
 #[serde(deny_unknown_fields)]
 pub struct ShellPolicy {
     pub builtin_preference: BuiltinPreference,
-    /// Explicit literal command-prefix controls, independent of approval mode.
-    /// These are not filesystem or network containment boundaries.
     #[serde(default)]
     pub deny_prefixes: Arc<[String]>,
 }
@@ -57,9 +38,6 @@ impl Default for ShellPolicy {
     }
 }
 
-/// A host-approved native implementation whose admitted read arguments do
-/// not load helpers, plugins or configuration-driven executable code. The
-/// approval is a behavioral trust decision; a hash alone proves no behavior.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovedReadImage {
@@ -71,8 +49,6 @@ pub struct ApprovedReadImage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadImageContract {
-    /// Self-contained read behavior for all admitted argv/stdin in a C locale,
-    /// independent of HOME/TERM and with no executable dependencies or helpers.
     SelfContainedReadV1,
 }
 
@@ -110,8 +86,6 @@ impl ReadImageFamily {
     }
 }
 
-/// Bounded explicit approvals supplied by the trusted host. Empty by default;
-/// workspace instructions and tool requests cannot add entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovedReadImages {
     entries: Arc<[ApprovedReadImage]>,
@@ -171,8 +145,6 @@ impl std::str::FromStr for ApprovedReadImage {
     }
 }
 
-/// The `FAMILY:SHA256` form [`ApprovedReadImage::from_str`] parses, so a
-/// host can hand its approvals to a process it starts.
 impl std::fmt::Display for ApprovedReadImage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}:{}", self.family.program(), self.sha256)
@@ -204,7 +176,6 @@ impl ApprovedReadImages {
         self.entries.is_empty()
     }
 
-    /// The approvals, sorted by family.
     pub fn iter(&self) -> impl Iterator<Item = &ApprovedReadImage> {
         self.entries.iter()
     }
@@ -222,15 +193,12 @@ impl ApprovedReadImages {
     }
 }
 
-/// A hint may name an equivalent without claiming the shell is replaceable.
-/// Prefixed or compound commands and uncertain paths still need the shell.
 pub(crate) struct BuiltinAlternative {
     pub(crate) program: &'static str,
     pub(crate) builtin: &'static str,
     pub(crate) refuse: bool,
 }
 
-/// Judge the first program, optionally past one lexical `cd DIR &&`.
 pub(crate) fn builtin_alternative(command: &str) -> Option<BuiltinAlternative> {
     let mut command = command.trim_start();
     let mut prefixed = false;
@@ -260,7 +228,6 @@ pub(crate) fn builtin_alternative(command: &str) -> Option<BuiltinAlternative> {
         .trim();
     let mut words = first.split_whitespace();
     let mut program = words.next()?;
-    // Skip harmless wrappers and env prefixes: `time grep`, `FOO=1 cat`.
     while program.contains('=') || matches!(program, "time" | "nice" | "nohup" | "env" | "command")
     {
         program = words.next()?;
@@ -288,16 +255,12 @@ pub(crate) fn builtin_alternative(command: &str) -> Option<BuiltinAlternative> {
         "curl" | "wget" => (if program == "curl" { "curl" } else { "wget" }, "fetch"),
         _ => return None,
     };
-    // The lexical nudge cannot prove shell expansion or a changed directory's
-    // containment. Only plain relative operands qualify for strict refusal.
     let refuse = !prefixed
         && !command.contains([
             '|', ';', '&', '\n', '\r', '\'', '"', '\\', '$', '`', '*', '?', '[', ']', '<', '>',
             '(', ')', '{', '}',
         ])
         && command.split_whitespace().all(|word| {
-            // A short option can attach its path (`grep -f/tmp/patterns`).
-            // Without an option grammar, do not assert containment for it.
             !(word.starts_with('-') && word.contains('/'))
                 && word.split('=').all(|operand| {
                     !operand.starts_with(['/', '~']) && !operand.split('/').any(|part| part == "..")

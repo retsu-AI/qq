@@ -1,31 +1,12 @@
-//! The shell parse behind the fixed stops and the explicit command controls.
-//! `tree-sitter-bash` turns the command into a CST and the collector records
-//! every simple command anywhere in it: in lists, pipelines, subshells, `if`,
-//! `$(…)` and function bodies, with launchers and wrappers peeled and
-//! `sh -c STRING` reparsed. A dynamic word is `None`.
-
 use std::sync::OnceLock;
 
 use tree_sitter::{Node, Parser};
 
-/// Commands longer than this skip parsing: nothing that long is a command a
-/// human would approve from a preview, and the parser's worst case is theirs.
 pub(crate) const MAX_CLASSIFIED_BYTES: usize = 16 * 1024;
-/// Wrappers peeled before the inner command is classified (`env nice sudo …`).
 const MAX_WRAPPER_DEPTH: usize = 8;
-/// `sh -c STRING` inside `sh -c STRING`… recursion bound.
 const MAX_NESTED_SHELLS: usize = 4;
-/// Where the start of a launched command is unknowable, at most this many
-/// suffix starts are judged, each whole (no word dropped, so a `--force`
-/// deep in the argv still counts). The bound keeps the work linear in the
-/// command; past it the command is already unknown, never allowed, and the
-/// user sees the whole string before approving it.
 const MAX_SUFFIX_STARTS: usize = 16;
 
-/// Suffixes of `words` from `first` that start at a word which could be a
-/// program, at most `MAX_SUFFIX_STARTS` of them. A literal option (`-a`) or
-/// assignment (`A=1`) is never a launched program, so a run of them cannot
-/// spend the bound and push the real command past it.
 fn bounded_suffixes(
     words: &[Option<String>],
     first: usize,
@@ -40,21 +21,12 @@ fn bounded_suffixes(
         .map(|start| words[start..].to_vec())
 }
 
-/// One simple command as the classifier sees it: literal argv (`None` for a
-/// word with an expansion, quote with substitution, or glob), the redirect
-/// targets, and how it was reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SimpleCommand {
     pub(crate) argv: Vec<Option<String>>,
-    /// Redirect targets (`> file`, `>> file`; `tee`d paths are argv). `None`
-    /// when the target is dynamic — its raw source text is then in
-    /// `raw_redirects` so a `$HOME/.ssh/…` shape is still recognizable.
     pub(crate) redirects: Vec<Option<String>>,
     pub(crate) raw_redirects: Vec<String>,
-    /// Environment assignments preceding the command (`FOO=bar cmd`).
     pub(crate) assignments: Vec<String>,
-    /// The command was reached through a wrapper (`sudo`, `xargs`, `sh -c`)
-    /// or a construct (`if`, subshell, `$()`) rather than at the top level.
     pub(crate) nested: bool,
 }
 
@@ -63,16 +35,11 @@ impl SimpleCommand {
         self.argv.first()?.as_deref().map(basename)
     }
 
-    /// Literal arguments after the program; a dynamic word is `None`.
     pub(crate) fn args(&self) -> &[Option<String>] {
         self.argv.get(1..).unwrap_or(&[])
     }
 }
 
-/// A redirect target that writes nothing: the null device, a standard
-/// stream, or a duplication of a standard descriptor (`2>&1`, recorded as
-/// `\0&1`). `>&3` copies an inherited descriptor, which may be a file or a
-/// socket, so it is a write.
 pub(crate) fn stream_target(target: &str) -> bool {
     matches!(
         target,
@@ -92,9 +59,6 @@ pub(crate) fn basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
-/// Every simple command in `command`, wrappers peeled. `$HOME` and
-/// `${HOME}` read as `~`, so a home operand is visible; any other expansion
-/// is `None`. A parse error still yields the commands the parser recovered.
 pub(super) fn shell_commands(command: &str) -> Vec<SimpleCommand> {
     let mut commands = Vec::new();
     if command.len() > MAX_CLASSIFIED_BYTES {
@@ -115,19 +79,10 @@ pub(super) fn shell_commands(command: &str) -> Vec<SimpleCommand> {
     commands
 }
 
-/// For a transparent launcher, the number of words after the program that
-/// belong to it: its own options and, for `timeout`, the duration. It is
-/// `None` in three cases: the program is not one of the closed set, a word is
-/// not a literal option of that launcher, or no inner command follows. In
-/// each case the launcher is judged as a program of its own (`unlisted`).
 fn launcher_words(program: &str, args: &[Option<String>]) -> Option<usize> {
-    // Options that take the next word, options that stand alone, and the
-    // `--long=` and attached short forms (`-oL`) that carry their value.
     let (with_value, alone, attached): (&[&str], &[&str], &[&str]) = match program {
         "timeout" => (
             &["-s", "--signal", "-k", "--kill-after"],
-            // `--foreground` leaves the command's children untimed, so it
-            // changes what cancellation reaches and is not transparent.
             &["--preserve-status"],
             &["--signal=", "--kill-after="],
         ),
@@ -161,10 +116,6 @@ fn launcher_words(program: &str, args: &[Option<String>]) -> Option<usize> {
         }
     }
     if program == "timeout" {
-        // GNU duration: a floating-point number (`30`, `.5`, `1e3`, `inf`)
-        // with an optional `s`/`m`/`h`/`d` suffix. `timeout` itself rejects
-        // anything else before launching, so this only has to tell the
-        // duration apart from the inner command.
         let duration = args.get(own)?.as_deref()?;
         let number = duration
             .strip_suffix(['s', 'm', 'h', 'd'])
@@ -174,13 +125,10 @@ fn launcher_words(program: &str, args: &[Option<String>]) -> Option<usize> {
         }
         own += 1;
     }
-    // The inner command must exist and have a literal program.
     args.get(own)?.as_deref()?;
     Some(own)
 }
 
-/// A program `peel` looks through: a launcher or a wrapper whose inner
-/// command is recorded.
 fn is_wrapper(program: &str) -> bool {
     matches!(
         program,
@@ -224,9 +172,6 @@ fn parser() -> Parser {
     parser
 }
 
-/// Applies explicit command controls to literal argv in the shell parse.
-/// Unknown/dynamic commands are not denied merely because rules exist. These
-/// controls do not establish filesystem/network containment or inspect programs.
 pub(crate) fn shell_prefix_denied(command: &str, denied_prefixes: &[String]) -> bool {
     if denied_prefixes.is_empty() {
         return false;
@@ -259,8 +204,6 @@ pub(crate) fn shell_prefix_denied(command: &str, denied_prefixes: &[String]) -> 
 }
 
 fn literal_policy_argv(source: &str) -> Vec<Vec<Option<String>>> {
-    // Tool dispatch bounds argument bytes. Its explicit literal controls must
-    // inspect that entire input, not the conservative classifier's smaller cap.
     let Some(tree) = parser().parse(source, None) else {
         return Vec::new();
     };
@@ -290,9 +233,6 @@ fn literal_policy_argv(source: &str) -> Vec<Vec<Option<String>>> {
     commands
 }
 
-/// Matches managed denies against every visible shell command, including
-/// wrappers and nested shell payloads. Unresolved syntax refuses authority.
-/// It is used only for goal completion checks.
 #[must_use]
 pub fn goal_check_shell_denied(command: &str, denied_prefixes: &[String]) -> bool {
     if denied_prefixes.is_empty() {
@@ -407,8 +347,6 @@ pub fn goal_check_shell_denied(command: &str, denied_prefixes: &[String]) -> boo
                 "printf" | "echo" | "true" | "false" | "pwd" | "test" | "[" | "find" | "fd"
                 | "fdfind" | "sort" | "timeout" | "nice" | "time" | "nohup" | "stdbuf",
             ) => {}
-            // Grant only execution forms inspected above. A new program may
-            // interpret configuration or arguments as commands of its own.
             _ => return true,
         }
     }
@@ -485,8 +423,6 @@ fn goal_policy_commands(source: &str) -> Option<Vec<SimpleCommand>> {
 }
 
 fn goal_policy_syntax_resolved(root: Node<'_>, source: &[u8]) -> bool {
-    // Unfamiliar escape spellings are prompt shapes in ordinary approval,
-    // but must not be mistaken for literal argv when enforcing hard denies.
     let mut nodes = vec![root];
     while let Some(node) = nodes.pop() {
         if node.kind() == "ansi_c_string"
@@ -501,13 +437,10 @@ fn goal_policy_syntax_resolved(root: Node<'_>, source: &[u8]) -> bool {
     true
 }
 
-/// The literal text of a word node, or `None` when it (or any part of a
-/// concatenation/string) expands at runtime.
 fn literal_word(node: Node<'_>, source: &[u8]) -> Option<String> {
     word(node, source, false)
 }
 
-/// [`literal_word`], reading `$HOME` and `${HOME}` as `~` when `home` is set.
 fn word(node: Node<'_>, source: &[u8], home: bool) -> Option<String> {
     match node.kind() {
         "simple_expansion" | "expansion"
@@ -517,8 +450,6 @@ fn word(node: Node<'_>, source: &[u8], home: bool) -> Option<String> {
         }
         "word" | "number" | "test_operator" => {
             let text = std::str::from_utf8(&source[node.byte_range()]).ok()?;
-            // A bare word with a glob character expands to unknown paths.
-            // The stop check reads it as text: `rm -rf ~/*` names home.
             if !home && text.contains(['*', '?', '[']) {
                 return None;
             }
@@ -564,22 +495,15 @@ fn word(node: Node<'_>, source: &[u8], home: bool) -> Option<String> {
     }
 }
 
-/// A redirect's target: its literal text when static, and its raw source
-/// text either way (for shape matching on dynamic targets).
 fn redirect_target(node: Node<'_>, source: &[u8], home: bool) -> (Option<String>, Option<String>) {
     let target = node
         .named_children(&mut node.walk())
         .find(|c| c.kind() != "file_descriptor");
-    // `2>&1` duplicates a descriptor; `> 1` writes a file named `1`, and
-    // `> '&1'` a file named `&1`. The duplication is recorded as `\0&1` so
-    // none of them can be confused.
     let duplicates = node
         .children(&mut node.walk())
         .any(|token| matches!(token.kind(), ">&" | "<&"));
     let literal = target.and_then(|c| {
         let word = word(c, source, home)?;
-        // The marker starts with NUL, which no shell word can contain, so
-        // a file literally named `&1` cannot pass as a duplication.
         Some(if duplicates && c.kind() == "number" {
             format!("\u{0}&{word}")
         } else {
@@ -597,7 +521,6 @@ struct Collector<'a, const KEEP_LAUNCHERS: bool> {
     commands: &'a mut Vec<SimpleCommand>,
     expansion_overflow: &'a mut bool,
     nested_shells: usize,
-    /// Read `$HOME` as `~` in command words (see [`shell_commands`]).
     home: bool,
 }
 
@@ -610,12 +533,9 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
         match node.kind() {
             "command" => self.simple(node, nested),
             "redirected_statement" => {
-                // The body is a command (or construct) plus redirects; the
-                // redirect targets attach to every simple command inside.
                 let mut redirects: Vec<Option<String>> = Vec::new();
                 let mut raw_redirects: Vec<String> = Vec::new();
                 let mut body = None;
-                // Every redirect writes nothing (`2>&1`, `>/dev/null`).
                 let mut stream_only = true;
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
@@ -633,9 +553,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                 }
                 let before = self.commands.len();
                 if let Some(body) = body {
-                    // A list or pipeline under stream-only redirects
-                    // (`cd x && cargo test 2>&1`) runs at the level it sits
-                    // at; any other body is a construct.
                     let flat = body.kind() == "command"
                         || (stream_only && matches!(body.kind(), "list" | "pipeline"));
                     self.collect(body, nested || !flat);
@@ -657,12 +574,9 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
             | "unset_command"
             | "comment"
             | "test_command" => {
-                // No program runs; substitutions inside still do.
                 self.substitutions(node);
             }
             _ => {
-                // Subshells, control flow, function bodies, negations: every
-                // descendant command runs, but not at the top level.
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
                     self.collect(child, true);
@@ -671,10 +585,7 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
         }
     }
 
-    /// Commands inside `$(…)`, `` `…` ``, and `<(…)` at or under a node.
     fn substitutions(&mut self, node: Node<'_>) {
-        // Nothing to find when the source has no substitution syntax at all;
-        // this skips a full subtree walk per word on the common command.
         let text = &self.source[node.byte_range()];
         if !text.contains(&b'$') && !text.contains(&b'`') && !text.contains(&b'(') {
             return;
@@ -697,8 +608,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
         let mut assignments = Vec::new();
         let mut redirects = Vec::new();
         let mut raw_redirects = Vec::new();
-        // Words whose substitutions run too; visited after the command
-        // itself so the list reads outer-then-inner.
         let mut deferred: Vec<Node<'_>> = Vec::new();
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -748,33 +657,13 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
         }
     }
 
-    /// Records the command and, when it is a wrapper, the command it wraps.
-    /// A launcher (`timeout D`, `time`, `nice`, `nohup`, `stdbuf`) that has
-    /// only its own options and an inner command is replaced by that inner
-    /// command at the launcher's level, with the launcher's assignments and
-    /// redirects. Every other wrapper is recorded, and the command it wraps is
-    /// recorded as nested. That covers `env`, `xargs`, `sudo`/`doas`/`su`
-    /// (judged Forbidden by the rules), and a launcher with a foreign option.
-    /// `sh -c STRING` parses the string as a program of its own.
     fn peel(&mut self, command: SimpleCommand, depth: usize) {
         if KEEP_LAUNCHERS && (*self.expansion_overflow || self.commands.len() >= 256) {
             *self.expansion_overflow = true;
             return;
         }
         let program = command.program().map(str::to_owned);
-        // `depth` wrappers are already peeled. Past the limit, a command that
-        // would itself be peeled is too deep to see through: it is nested, so
-        // it can never be allowed. The command reached after exactly
-        // `MAX_WRAPPER_DEPTH` peels is judged normally.
         if depth >= MAX_WRAPPER_DEPTH && program.as_deref().is_some_and(is_wrapper) {
-            // Fail closed. Whatever the wrappers launch is unseen, so the
-            // command is an unknown program (`argv: [None]`), never allowed.
-            // Every literal word of the tail is also judged as a program of
-            // its own, so a buried `sudo` or `rm -rf /` is still Forbidden.
-            // Skip the remaining well-formed launchers (bounded by the
-            // argv) to reach the launched program, then judge it nested. A
-            // tail that is not a clean launcher chain is judged at every
-            // suffix instead, so nothing buried is missed.
             let mut words: &[Option<String>] = &command.argv;
             while let Some(name) = words.first().and_then(Option::as_deref) {
                 match launcher_words(basename(name), &words[1..]) {
@@ -789,8 +678,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
             let tails: Vec<Vec<Option<String>>> = if clean {
                 vec![words.to_vec()]
             } else {
-                // From index 0: the command at the boundary may itself be
-                // the danger (`nice` ×8 `sudo ls` reaches `sudo` here).
                 bounded_suffixes(&command.argv, 0).collect()
             };
             self.commands.push(SimpleCommand {
@@ -809,8 +696,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
             }
             return;
         }
-        // Only the bare name reaches the system launcher through `PATH`;
-        // `./timeout` or `/tmp/nohup` is whatever program sits there.
         let bare = command
             .argv
             .first()
@@ -824,9 +709,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                 if KEEP_LAUNCHERS {
                     self.commands.push(command.clone());
                 }
-                // The launcher changes how long, how nicely, or how buffered
-                // the inner command runs, never what it does, so it adds no
-                // tier.
                 self.peel(
                     SimpleCommand {
                         argv: command.argv[own + 1..].to_vec(),
@@ -835,10 +717,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                     depth + 1,
                 );
             } else {
-                // A path-qualified launcher may be anything, so it stays a
-                // command of its own (never allowed). Its apparent tail is
-                // still judged, nested, so `/usr/bin/timeout 5 sudo ls` is
-                // Forbidden.
                 let inner = SimpleCommand {
                     argv: command.argv[own + 1..].to_vec(),
                     redirects: command.redirects.clone(),
@@ -871,11 +749,8 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
         };
         match program.as_str() {
             "env" => {
-                // env [-i] [-u NAME]… [-S STRING] [K=V]… cmd
                 let mut skip = 0;
                 while let Some(Some(word)) = args.get(skip) {
-                    // `-S`/`--split-string` makes a string the command: it is
-                    // judged like `sh -c STRING`, nested.
                     let split = if word == "-S" || word == "--split-string" {
                         skip += 1;
                         Some(args.get(skip).cloned().flatten())
@@ -885,12 +760,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                             .map(|rest| Some(rest.to_owned()))
                     };
                     if let Some(string) = split {
-                        // `env -S` splits by its own rules (`\_` is a
-                        // separator, `\c` ends the string, `${VAR}`
-                        // expands), not shell syntax. The command it builds
-                        // is unknowable here: record an unknown program, and
-                        // judge every suffix of the roughly split words as a
-                        // nested program so a `sudo` inside is still found.
                         self.commands.push(SimpleCommand {
                             argv: vec![None],
                             redirects: Vec::new(),
@@ -898,15 +767,9 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                             assignments: Vec::new(),
                             nested: true,
                         });
-                        // Quotes join adjacent fragments (`su""do` is
-                        // `sudo`), so they are removed before splitting on
-                        // whitespace and the `\_` separator. Escapes other
-                        // than `\_` are dropped to their character.
                         let source = string.unwrap_or_default().replace("\\_", " ");
                         let mut text = String::with_capacity(source.len());
                         let mut rest = source.as_str();
-                        // Expand each source placeholder once. Inserted values
-                        // are not env syntax, and the last assignment wins.
                         while !rest.is_empty() {
                             let (piece, next) = match rest.find("${") {
                                 Some(start) if start > 0 => (&rest[..start], &rest[start..]),
@@ -942,16 +805,11 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                         while let Some(c) = chars.next() {
                             match c {
                                 '\'' | '"' => {}
-                                // `\c` ends the string: the rest is ignored.
                                 '\\' if chars.clone().next() == Some('c') => break,
                                 '\\' => unquoted.extend(chars.next()),
                                 c => unquoted.push(c),
                             }
                         }
-                        // The split words are prepended to the arguments that
-                        // follow the option (`env -S 'echo ok' sudo ls` runs
-                        // `echo ok sudo ls`), so trailing words are judged as
-                        // arguments, not as a separate command.
                         let mut words: Vec<Option<String>> = unquoted
                             .split_whitespace()
                             .map(|w| Some(w.to_owned()))
@@ -969,7 +827,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                                 depth + 1,
                             );
                         }
-                        // The rest of argv belongs to the split command.
                         return;
                     } else if word == "-i" || word == "--ignore-environment" {
                         skip += 1;
@@ -981,9 +838,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                         break;
                     }
                 }
-                // `env NAME=VALUE cmd` is the same as `NAME=VALUE cmd`: the
-                // assignments travel with the inner command, so the
-                // assignment rules (`GIT_EXTERNAL_DIFF=…`) judge it.
                 let assigned: Vec<String> = args[..skip.min(args.len())]
                     .iter()
                     .filter_map(|a| a.as_deref())
@@ -996,9 +850,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                 }
             }
             "taskset" | "chrt" => {
-                // taskset [opts] MASK cmd, chrt [opts] PRIORITY cmd. A `-p`
-                // among the leading dash words retargets a running process:
-                // nothing is launched.
                 let retargets = args
                     .iter()
                     .map_while(|a| a.as_deref().filter(|w| w.starts_with('-')))
@@ -1006,11 +857,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                 if retargets {
                     return;
                 }
-                // Otherwise every suffix of the arguments is judged as the
-                // command. Options and the positional may be dynamic (`chrt
-                // "$(printf -o)" 0 sudo ls`), so where the command starts is
-                // not knowable. Each candidate is nested, so this only ever
-                // adds strictness.
                 for argv in bounded_suffixes(args, 0) {
                     self.peel(
                         SimpleCommand {
@@ -1026,7 +872,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
             }
             "nice" | "nohup" | "time" | "stdbuf" | "ionice" | "setsid" | "unbuffer" | "command"
             | "builtin" | "exec" => {
-                // Skip the wrapper's own dash options (and `nice -n 5`).
                 let mut skip = 0;
                 while let Some(Some(word)) = args.get(skip) {
                     if word.starts_with('-') {
@@ -1056,7 +901,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                         break;
                     }
                 }
-                // The duration.
                 skip += 1;
                 if let Some(inner) = inner_from(skip) {
                     self.peel(inner, depth + 1);
@@ -1092,7 +936,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                 }
             }
             "sh" | "bash" | "zsh" | "dash" | "ksh" => {
-                // sh [-flags] -c STRING: the string is a program.
                 let mut saw_c = false;
                 for arg in args {
                     match arg {
@@ -1137,7 +980,6 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                             break;
                         }
                         None if saw_c => {
-                            // `sh -c "$X"`: an unknowable program.
                             self.commands.push(SimpleCommand {
                                 argv: vec![None],
                                 redirects: Vec::new(),
@@ -1481,7 +1323,6 @@ mod tests {
                 literal(&["git", "status"])
             ]
         );
-        // Subshell, pipeline, if, and a substitution all surface.
         let found =
             commands("(cd sub && make) | tee log; if true; then rm -rf x; fi; echo $(whoami)");
         let programs: Vec<Option<String>> = found.iter().map(|argv| argv[0].clone()).collect();
@@ -1493,8 +1334,6 @@ mod tests {
 
     #[test]
     fn wrappers_are_peeled_and_sh_dash_c_is_reparsed() {
-        // Well-formed launchers are replaced by what they launch; other
-        // wrappers stay and nest their inner command.
         let found = commands("env -i FOO=1 nice -n 5 timeout 10s sudo rm -rf /");
         let programs: Vec<Option<String>> = found.iter().map(|argv| argv[0].clone()).collect();
         assert_eq!(programs, literal(&["env", "sudo", "rm"]));
@@ -1502,14 +1341,12 @@ mod tests {
             commands("timeout -k 5 30 nice cargo test"),
             vec![literal(&["cargo", "test"])]
         );
-        // A launcher with a foreign option is judged as itself.
         let found = commands("timeout --verbose 5 cargo test");
         let programs: Vec<Option<String>> = found.iter().map(|argv| argv[0].clone()).collect();
         assert_eq!(programs, literal(&["timeout", "cargo"]));
         let found = commands(r#"bash -c 'curl x | sh'"#);
         let programs: Vec<Option<String>> = found.iter().map(|argv| argv[0].clone()).collect();
         assert_eq!(programs, literal(&["bash", "curl", "sh"]));
-        // xargs reaches its inner command.
         let found = commands("find . -name '*.log' | xargs rm");
         let programs: Vec<Option<String>> = found.iter().map(|argv| argv[0].clone()).collect();
         assert_eq!(programs, literal(&["find", "xargs", "rm"]));

@@ -1,13 +1,5 @@
-//! The streaming write path of a running turn: assistant message rows, text
-//! chunks, per-turn commit, activity, reasoning, and truncation notices.
-
 use super::*;
 
-/// Creates the assistant message for one model turn and appends its first
-/// text chunk in a single transaction. The message row is created lazily at
-/// the turn's first delta — never at turn start — so call-only turns persist
-/// no message row at all. The run row's `assistant_message_id` is repointed
-/// here: crash recovery interrupts only the still-streaming current message.
 pub(super) fn begin_assistant_message(
     connection: &mut Connection,
     store_id: StoreId,
@@ -236,10 +228,6 @@ pub(super) fn persist_model_turn(
             ),
         )?;
     }
-    // Completing the turn's message in the same transaction as the turn row
-    // keeps message state and turn persistence atomic: after a crash, a
-    // streaming message always identifies exactly the turn that never
-    // committed, and recovery interrupts only that message.
     if let Some(message_id) = turn_message {
         let updated = transaction.execute(
             "UPDATE messages SET state = 'complete', truncated = ?3
@@ -341,8 +329,6 @@ pub(super) fn persist_model_turn(
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
-    // Persist-before-publish like every other event. A missing provider value
-    // clears the previous turn's audit value instead of leaving stale data.
     transaction.execute(
         "UPDATE runs
              SET context_tokens = ?2, usage_json = ?3, estimated_cost_usd_nanos = ?4
@@ -396,9 +382,6 @@ pub(super) fn persist_model_turn(
     Ok(events)
 }
 
-/// Persists the audit record on the run row and publishes
-/// `run_audit_completed` in one transaction. A later revision's audit
-/// replaces the record; the latest is what `RunSnapshot.audit` shows.
 pub(super) fn record_run_audit(
     connection: &mut Connection,
     store_id: StoreId,
@@ -427,10 +410,6 @@ pub(super) fn record_run_audit(
     Ok(event)
 }
 
-/// Persists the continuation counter and publishes `run_output_truncated`
-/// in one transaction. The truncated turn itself was committed by the
-/// preceding `persist_model_turn`; the counter is the run's authoritative
-/// record of how many continuations it spent.
 pub(super) fn record_run_output_truncated(
     connection: &mut Connection,
     store_id: StoreId,
@@ -460,9 +439,6 @@ pub(super) fn record_run_output_truncated(
     Ok(event)
 }
 
-/// Publishes `run_turn_retrying` for a running run. The partial turn was
-/// committed by the preceding `persist_model_turn`; the retry itself changes
-/// no row, so this is display and replay evidence of why the run went quiet.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn record_run_turn_retrying(
     connection: &mut Connection,
@@ -501,8 +477,6 @@ pub(super) fn record_run_turn_retrying(
     Ok(event)
 }
 
-/// retained in the event log for reconnect/replay, but does not alter model
-/// context or transcript rows.
 pub(super) fn append_run_activity(
     connection: &mut Connection,
     store_id: StoreId,
@@ -512,8 +486,6 @@ pub(super) fn append_run_activity(
     rejected: bool,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    // The column and the event commit together, so the summary query reads
-    // the same value a replaying client would reconstruct.
     if goal && (activity == RunActivity::WaitingForProvider || rejected) {
         let pending = activity == RunActivity::WaitingForProvider;
         transaction.execute(

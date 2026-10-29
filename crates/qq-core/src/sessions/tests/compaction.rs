@@ -2,9 +2,6 @@ use super::*;
 
 #[tokio::test]
 async fn a_compaction_run_reports_compacting_and_nothing_else() {
-    // CX4: a compaction run is one activity from start to finish. A
-    // snapshot taken while the summarizer is at the model already names it,
-    // and the summarizer's own provider activity is never published.
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::Text("hello".to_owned()),
         AutoCompactScript::Text(valid_summary("work so far")),
@@ -29,8 +26,6 @@ async fn a_compaction_run_reports_compacting_and_nothing_else() {
         })
         .collect();
     assert_eq!(activities, [(compaction, RunActivity::Compacting)]);
-    // It is reported by the transaction that starts the run, so a run
-    // cancelled before its first poll still says what it was.
     let started = observed
         .iter()
         .position(|event| matches!(&event.event, SessionEvent::RunStarted { run_id, .. } if *run_id == compaction))
@@ -47,7 +42,6 @@ async fn a_compaction_run_reports_compacting_and_nothing_else() {
         observed[started].cursor.sequence + 1
     );
 
-    // A second compaction parks at the model; the snapshot says why.
     let second = queue_prompt(&harness.runtime, harness.session_id, "more".to_owned()).await;
     collect_until(&mut harness.events, finished_for(second)).await;
     let parked = compact_session(&harness.runtime, harness.session_id).await;
@@ -100,8 +94,6 @@ async fn compact_session_is_refused_while_active_and_never_runs_a_summarizer_too
     };
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
 
-    // Idle-only: refused with the same error DeleteSession uses while a
-    // run is active.
     assert_eq!(
         harness
             .runtime
@@ -126,11 +118,6 @@ async fn compact_session_is_refused_while_active_and_never_runs_a_summarizer_too
     .unwrap();
     collect_through_finished(&mut harness.events).await;
 
-    // Idle now: the compaction queues and executes through the ordinary
-    // machinery. Its request declares the session's tools so it shares the
-    // provider cache (ADR-0056 § 5), but nothing runs: the call is rejected
-    // and the model asked again. This provider then answers "done", which is
-    // no summary, so the step fails closed on validation.
     let request_count_before = harness.requests.lock().unwrap().len();
     let compaction_run = compact_session(&harness.runtime, harness.session_id).await;
     let observed = collect_through_finished(&mut harness.events).await;
@@ -157,7 +144,6 @@ async fn compact_session_is_refused_while_active_and_never_runs_a_summarizer_too
     let summary = &requests[request_count_before];
     assert_eq!(summary.system(), prompt.system());
     assert_eq!(summary.tools(), prompt.tools());
-    // The retry answers the rejected call with its rejection.
     let retry = requests.last().unwrap();
     assert!(
         retry
@@ -170,7 +156,6 @@ async fn compact_session_is_refused_while_active_and_never_runs_a_summarizer_too
                     if content.starts_with("not executed: this is a compaction request")
             ))
     );
-    // It still carries the session's tool history.
     assert!(
         summary
             .messages()
@@ -183,16 +168,11 @@ async fn compact_session_is_refused_while_active_and_never_runs_a_summarizer_too
                 )
             })
     );
-    // The summarizer loaded through the ordinary loader path.
     assert_eq!(harness.models.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
 async fn a_between_run_summarizer_request_extends_the_prompt_request_it_follows() {
-    // ADR-0056 § 5: the summarizer sends the prompt run's system prompt and
-    // tools, and its messages are the session context the prompt run last
-    // sent plus that run's reply, then the instruction. A provider prefix
-    // cache therefore covers everything but the instruction.
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::ReadNoteThenText("read it".to_owned()),
         AutoCompactScript::Text(valid_summary("folded")),
@@ -311,10 +291,6 @@ async fn a_summarizer_that_calls_a_tool_is_answered_once_and_its_reply_text_is_d
 
 #[tokio::test]
 async fn a_rejected_call_turn_after_a_cut_reply_drops_the_abandoned_fragment() {
-    // Turn one is cut mid-reply; turn two continues it but calls a tool and
-    // is rejected; turn three writes the summary. The stored summary is
-    // turn three alone: the fragment of the abandoned reply is not joined to
-    // it.
     let summary = valid_summary("clean");
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::Text("first answer".to_owned()),
@@ -387,7 +363,6 @@ async fn a_summarizer_that_calls_tools_on_two_turns_fails_closed() {
             .iter()
             .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
     );
-    // Exactly the prompt, the first summarizer turn, and its one retry.
     assert_eq!(harness.requests.lock().unwrap().len(), 3);
 }
 
@@ -437,7 +412,6 @@ async fn compaction_runs_account_usage_and_cost_but_join_no_transcript() {
     let compaction_run = compact_session(&runtime, session_id).await;
     let observed = collect_through_compacted(&mut events).await;
 
-    // Usage and cost account like any run.
     let usage = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -494,8 +468,6 @@ async fn compaction_runs_account_usage_and_cost_but_join_no_transcript() {
         })
         .unwrap();
     assert!(before_bytes > 0);
-    // The stored summary is the narrative, then the record; the published
-    // size is the assembly it produces.
     let summary_excerpt = summary_excerpt.unwrap();
     assert!(
         summary_excerpt.starts_with(&format!(
@@ -510,8 +482,6 @@ async fn compaction_runs_account_usage_and_cost_but_join_no_transcript() {
     assert!(request_texts_of(&context[0])[0].contains("--- user message #1 ---"));
     assert_eq!(context_tokens, None);
 
-    // The transcript is untouched: no new message rows, one more run,
-    // cost increased, session idle again.
     let snapshot = runtime
         .snapshot(SnapshotRequest {
             workspace_id,
@@ -549,9 +519,6 @@ async fn assembly_after_compaction_is_summary_plus_verbatim_span_and_recompactio
     compact_session(&harness.runtime, harness.session_id).await;
     collect_through_compacted(&mut harness.events).await;
     {
-        // The summarization request is the assembled context plus the
-        // fixed instruction. QQ renders the record itself, so the
-        // instruction carries no seeded data.
         let requests = harness.requests.lock().unwrap();
         let texts = request_texts(&requests[1]);
         assert!(texts.iter().any(|text| text == "first prompt"));
@@ -562,8 +529,6 @@ async fn assembly_after_compaction_is_summary_plus_verbatim_span_and_recompactio
     submit_prompt(&harness, "second prompt").await;
     collect_through_finished(&mut harness.events).await;
     {
-        // Assembly is now summary + verbatim span after the marker; the
-        // original prompt survives only inside the summary's record.
         let requests = harness.requests.lock().unwrap();
         let texts = request_texts(&requests[2]);
         assert!(texts[0].starts_with(COMPACTION_SUMMARY_PREAMBLE));
@@ -572,7 +537,6 @@ async fn assembly_after_compaction_is_summary_plus_verbatim_span_and_recompactio
         assert!(!texts.iter().any(|text| text == "first prompt"));
     }
 
-    // Recompaction summarizes the prior summary plus the span since.
     compact_session(&harness.runtime, harness.session_id).await;
     collect_through_compacted(&mut harness.events).await;
     {
@@ -591,8 +555,6 @@ async fn assembly_after_compaction_is_summary_plus_verbatim_span_and_recompactio
     submit_prompt(&harness, "third prompt").await;
     collect_through_finished(&mut harness.events).await;
     {
-        // Only the newest summary replays; prior summaries are folded in,
-        // not stacked.
         let requests = harness.requests.lock().unwrap();
         let texts = request_texts(requests.last().unwrap());
         assert_eq!(texts.len(), 2);
@@ -600,7 +562,6 @@ async fn assembly_after_compaction_is_summary_plus_verbatim_span_and_recompactio
         assert_eq!(texts[1], "third prompt");
     }
 
-    // Bounded history: both compactions are retained for future rollback.
     let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
     let compactions: u32 = connection
         .query_row("SELECT COUNT(*) FROM session_compactions", [], |row| {
@@ -616,8 +577,6 @@ async fn assembly_after_compaction_is_summary_plus_verbatim_span_and_recompactio
     );
 }
 
-/// A store with one session and `prompts` completed prompt runs, each with a
-/// final reply. Returns the connection, session, and run ids in order.
 fn record_fixture(prompts: &[String]) -> (tempfile::TempDir, Connection, SessionId, Vec<RunId>) {
     let directory = tempfile::tempdir().unwrap();
     let (connection, _) = open_database(&directory.path().join("sessions.sqlite3")).unwrap();
@@ -795,7 +754,6 @@ fn metadata_is_bounded_while_exact_inputs_are_not_cut_by_the_record_budget() {
         record.len()
     );
     assert!(record.starts_with(COMPACTION_RECORD_HEADER));
-    // Inputs are projected separately, without a lossy record budget.
     assert!(!record.contains("USER "));
     let exact = with_exact_inputs(
         &connection,
@@ -814,23 +772,18 @@ fn metadata_is_bounded_while_exact_inputs_are_not_cut_by_the_record_budget() {
     }
     assert!(!exact.contains("omitted for space"));
     assert!(record.contains("Last assistant reply, to user message #79:\nreply 39\n"));
-    // Written files are modified, read-only files are listed once, a dry run
-    // modifies nothing.
     assert!(
         record.contains("Files modified:\n- src/edited.rs\n- src/read.rs\n"),
         "{record}"
     );
     assert!(!record.contains("Files read, not modified"));
     assert!(!record.contains("src/preview.rs"));
-    // Failures keep the first line verbatim; runtime rejections are not
-    // failures.
     assert!(record.contains(
         "- shell: exit status 101: error[E0433]: failed to resolve (user message #79 turn 1)"
     ));
     assert!(!record.contains("more detail"));
     assert!(!record.contains("slice checkpoint"));
 
-    // A small window shrinks the record proportionally, on a char boundary.
     let small = render_compaction_record(
         &connection,
         session_id,
@@ -857,7 +810,6 @@ fn metadata_is_bounded_while_exact_inputs_are_not_cut_by_the_record_budget() {
         assert!(exact_small.contains(prompt));
     }
 
-    // Nothing to record renders nothing.
     let (_directory, connection, session_id, _) = record_fixture(&[]);
     assert_eq!(
         render_compaction_record(
@@ -901,9 +853,6 @@ fn insert_record_steering(
 fn an_in_run_record_holds_the_replaced_turns_steering_files_and_failures() {
     let (_directory, connection, session_id, runs) = record_fixture(&["do the task".to_owned()]);
     let run = runs[0];
-    // Turns 1, 2, then a gap to 5 and 6. A cutoff of 2 keeps turns 5 and 6;
-    // replay drops the steering applied up to the first kept turn (5), so
-    // the record must hold exactly that steering.
     for turn in [1, 2, 5, 6] {
         connection
             .execute(
@@ -986,19 +935,15 @@ fn an_in_run_record_holds_the_replaced_turns_steering_files_and_failures() {
     }
     assert!(record.contains("--- steering during user message #1 turn 5 ---\nsteer before kept\n"));
     assert!(!record.contains("steer later"));
-    // The prompt and the last reply stay verbatim in the kept transcript.
     assert!(!record.contains("do the task"));
     assert!(!record.contains("Last assistant reply"));
     assert!(record.contains("Files modified:\n- a.rs\n"));
     assert!(!record.contains("kept.rs"));
-    // The first non-empty line of a failure is kept.
     assert!(
         record.contains("- shell: make: *** [all] Error 2 (turn 2)"),
         "{record}"
     );
 
-    // With no kept turn, replay drops steering through the cutoff only, and
-    // the record matches it: nothing is duplicated into a later turn.
     let record = render(6);
     assert!(record.contains("steer later"));
     assert!(record.contains("kept.rs"));
@@ -1079,10 +1024,8 @@ fn small_records_stay_within_budget_and_end_on_a_line() {
         record_budget(Some(16_384)),
     )
     .unwrap();
-    // Lists that do not fit say how much they left out.
     assert!(record.contains(" more\n"), "{record}");
     assert!(record.contains(" older\n"), "{record}");
-    // Session-scope steering is preserved outside the record budget.
     let full = with_exact_inputs(
         &connection,
         &session_id.to_string(),
@@ -1097,9 +1040,7 @@ fn small_records_stay_within_budget_and_end_on_a_line() {
 
 #[test]
 fn the_summarizer_output_cap_is_the_run_cap_bounded_by_the_window() {
-    // No window: the run's own cap, which used to be clamped at 8 192.
     assert_eq!(context::summarizer_output_tokens(32_768, None), 32_768);
-    // A large window allows the run cap up to an eighth of the window.
     assert_eq!(
         context::summarizer_output_tokens(16_384, Some(272_000)),
         16_384
@@ -1108,7 +1049,6 @@ fn the_summarizer_output_cap_is_the_run_cap_bounded_by_the_window() {
         context::summarizer_output_tokens(128_000, Some(272_000)),
         34_000
     );
-    // A small window keeps at least 8 192, as before, when the run allows it.
     assert_eq!(
         context::summarizer_output_tokens(16_384, Some(16_384)),
         8_192
@@ -1136,10 +1076,8 @@ fn a_summary_that_echoes_a_record_keeps_only_its_narrative() {
         narrative
     );
     assert_eq!(narrative_of(narrative.clone()), narrative);
-    // Prose that mentions the header mid-line is not a record.
     let mentions = format!("{narrative}\nSee {COMPACTION_RECORD_HEADER} below.");
     assert_eq!(narrative_of(mentions.clone()), mentions);
-    // A narrative fits only if the largest record still fits beside it.
     assert!(
         validate_compaction_summary(&format!(
             "{}\n{}",
@@ -1161,8 +1099,6 @@ async fn prompts_below_the_context_threshold_never_auto_compact() {
     for prompt in ["one", "two"] {
         let run_id = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
         let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
-        // Only the prompt itself runs: nothing claims ahead of it and no
-        // compaction commits.
         assert!(observed.iter().all(|event| match &event.event {
             SessionEvent::RunStarted {
                 run_id: started, ..
@@ -1174,9 +1110,6 @@ async fn prompts_below_the_context_threshold_never_auto_compact() {
     assert_eq!(harness.requests.lock().unwrap().len(), 2);
 }
 
-/// F05: the prompt that triggered automatic compaction is retried from the
-/// stored placeholder, but its attachment must be the bytes the first
-/// attempt read, not a re-read of a file that changed while the summary ran.
 #[tokio::test]
 async fn an_over_budget_prompt_keeps_its_first_attachment_bytes_across_auto_compaction() {
     let mut harness = auto_compact_harness(vec![
@@ -1190,8 +1123,6 @@ async fn an_over_budget_prompt_keeps_its_first_attachment_bytes_across_auto_comp
     let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
 
-    // Over budget with an attachment: the claim resolves the file, plans
-    // Compact, summarizes, then reloads the placeholder and retries.
     let queued = harness
         .runtime
         .command(
@@ -1216,7 +1147,6 @@ async fn an_over_budget_prompt_keeps_its_first_attachment_bytes_across_auto_comp
     let CommandOutcome::PromptQueued { run_id: prompt, .. } = queued.outcome else {
         panic!("unexpected receipt")
     };
-    // Change the file as soon as compaction starts, before the retry.
     let observed = collect_until(
         &mut harness.events,
         |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id != prompt),
@@ -1238,7 +1168,6 @@ async fn an_over_budget_prompt_keeps_its_first_attachment_bytes_across_auto_comp
         assert!(!sent.contains("ALPHA_MODIFIED"), "{sent}");
     }
 
-    // And the follow-up reconstructs the same bytes from the store.
     let third = queue_prompt(&harness.runtime, harness.session_id, "after".to_owned()).await;
     collect_until(&mut harness.events, finished_for(third)).await;
     let requests = harness.requests.lock().unwrap();
@@ -1270,8 +1199,6 @@ async fn storage_overflow_compacts_before_the_queued_prompt() {
     .await;
     let observed = collect_until(&mut harness.events, finished_for(prompt)).await;
 
-    // The compaction claims first; the prompt stays queued and runs
-    // right after it.
     let compaction = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -1305,8 +1232,6 @@ async fn storage_overflow_compacts_before_the_queued_prompt() {
     assert!(prompt_started < prompt_finished);
 
     {
-        // The summarization request ends with the fixed instruction, and
-        // the prompt then runs on the compacted assembly.
         let requests = harness.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         let summarize = request_texts(&requests[1]);
@@ -1322,7 +1247,6 @@ async fn storage_overflow_compacts_before_the_queued_prompt() {
         assert_eq!(after[after.len() - 1], "y".repeat(MAX_PROMPT_BYTES));
     }
 
-    // The run row records automatic provenance.
     let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
     let (auto, context_base_bytes, context_increment_bytes): (bool, Option<i64>, i64) = connection
         .query_row(
@@ -1344,8 +1268,6 @@ async fn storage_overflow_compacts_before_the_queued_prompt() {
         .unwrap()
     );
 
-    // No re-trigger: the assembly shrank below the threshold, so the
-    // next prompt runs directly.
     let third = queue_prompt(&harness.runtime, harness.session_id, "after".to_owned()).await;
     let observed = collect_until(&mut harness.events, finished_for(third)).await;
     assert!(observed.iter().all(|event| match &event.event {
@@ -1357,14 +1279,7 @@ async fn storage_overflow_compacts_before_the_queued_prompt() {
 
 #[tokio::test]
 async fn compaction_sends_and_persists_the_effective_output_cap() {
-    // The summarizer asks for the run's own resolved cap. It used to clamp
-    // at 8 192, which cut every long summary into a continuation turn
-    // (ADR-0056).
     for (configured, expected) in [(1_024, 1_024), (16_384, 16_384)] {
-        // The prior answer leaves the prompt run over the storage backstop
-        // (its reserve is the configured cap at 32 B/token plus the
-        // compaction envelope) while the summarizer request, which reserves
-        // the effective cap, still fits.
         let prior = MAX_CONTEXT_BYTES - 100 * 1024 - usize::try_from(configured).unwrap() * 32;
         let mut harness = auto_compact_harness_with_limits(
             vec![
@@ -1497,8 +1412,6 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
     .await;
     let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
-    // The watermark already covers the history, so the threshold seam has
-    // nothing to move and the injected failure hits the compaction reload.
     mark_prune_seam(
         &harness.workspace_path.join("sessions.sqlite3"),
         harness.session_id,
@@ -1861,11 +1774,6 @@ async fn provider_overflow_can_compact_active_turns_then_the_inherited_prefix() 
 
 #[tokio::test]
 async fn a_context_overflow_failure_compacts_before_the_next_prompt() {
-    // The provider rejects the first prompt as exceeding the model
-    // context window while the session is still under the byte
-    // threshold. The failure must be loud (a failed run outcome naming
-    // the overflow) and the next prompt must compact first instead of
-    // hitting the same wall.
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::ContextOverflow,
         AutoCompactScript::Text(valid_summary("the summary")),
@@ -1889,7 +1797,6 @@ async fn a_context_overflow_failure_compacts_before_the_next_prompt() {
 
     let second = queue_prompt(&harness.runtime, harness.session_id, "retry".to_owned()).await;
     let observed = collect_until(&mut harness.events, finished_for(second)).await;
-    // A compaction run claims ahead of the retried prompt.
     let compaction = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -1919,10 +1826,6 @@ async fn a_context_overflow_failure_compacts_before_the_next_prompt() {
 
 #[tokio::test]
 async fn unknown_provider_identity_still_compacts_a_known_overflow_before_the_retry() {
-    // Custom/LiteLLM deployments and dynamic AWS region chains resolve
-    // without a request-shape identity. That disables occupancy reuse,
-    // but a provider-reported overflow must still compact exactly once
-    // instead of re-sending the same request every retry.
     let mut harness = auto_compact_harness_with_loader(AutoCompactLoader {
         requests: Arc::new(StdMutex::new(Vec::new())),
         scripts: vec![
@@ -1968,8 +1871,6 @@ async fn unknown_provider_identity_still_compacts_a_known_overflow_before_the_re
         "overflow, compaction, retry: the known overflow is never re-sent"
     );
 
-    // Reuse stays disabled: no occupancy basis is persisted for an
-    // unknown identity even after a measured turn.
     let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
     let (occupancy, pending): (Option<String>, Option<String>) = connection
         .query_row(
@@ -1985,11 +1886,6 @@ async fn unknown_provider_identity_still_compacts_a_known_overflow_before_the_re
 
 #[tokio::test]
 async fn pruned_history_still_compacts_a_known_overflow_before_the_retry() {
-    // Once the transcript holds more than CONTEXT_PRUNE_KEEP_TURNS
-    // assistant turns, assembly stubs old read-only results. That
-    // rewrite makes byte-monotonic occupancy reuse impossible, but the
-    // pruned request is still an uncertain repeat of a provider-reported
-    // overflow and must compact rather than poll.
     let mut scripts = vec![AutoCompactScript::ReadNoteThenText("read it".to_owned())];
     scripts.extend((0..CONTEXT_PRUNE_KEEP_TURNS).map(|_| AutoCompactScript::Text("ok".to_owned())));
     scripts.extend([
@@ -2073,9 +1969,6 @@ async fn failed_manual_compaction_does_not_mask_provider_overflow_evidence() {
 
     let failed_compaction = compact_session(&harness.runtime, harness.session_id).await;
     let failed = collect_until(&mut harness.events, finished_for(failed_compaction)).await;
-    // A transport fault before any summary text streamed: the run's own
-    // recovery re-issues the turn until its allowance is spent, then the
-    // compaction settles paused (no marker committed).
     assert!(failed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::RunFinished {
@@ -2236,8 +2129,6 @@ async fn provider_overflow_evidence_survives_restart_until_compaction_commits() 
 async fn failed_overflow_recovery_never_resends_the_known_overflowing_prompt() {
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::ContextOverflow,
-        // One loaded provider serves the failed summarizer step (six sends:
-        // the fault and its turn retries) and then the downgraded prompt.
         AutoCompactScript::Sequence(
             std::iter::repeat_n(
                 AutoCompactScript::Fail,
@@ -2263,13 +2154,7 @@ async fn failed_overflow_recovery_never_resends_the_known_overflowing_prompt() {
             _ => None,
         })
         .unwrap();
-    // The fold is exhausted and the provider already rejected this shape:
-    // the prompt is admitted from the (absent) summary alone rather than
-    // refused (RR6), and its downgraded request reaches the provider once.
     assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
-    // One overflow, the failed summarizer's attempt plus its turn retries,
-    // then the downgraded prompt. The known-overflowing shape itself was
-    // never resent.
     let requests = harness.requests.lock().unwrap();
     assert_eq!(
         requests.len(),
@@ -2364,9 +2249,6 @@ async fn exceeding_the_hard_budget_compacts_once_and_the_prompt_proceeds() {
     let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
 
-    // Context plus prompt exceeds the hard budget. Submission is
-    // admitted (previously this was rejected outright); the claim
-    // compacts once, re-checks, and the prompt proceeds.
     let second = queue_prompt(
         &harness.runtime,
         harness.session_id,
@@ -2392,9 +2274,6 @@ async fn a_prompt_still_over_budget_after_compacting_runs_from_the_summary_alone
     let mut harness = auto_compact_harness_with_window(
         vec![
             AutoCompactScript::Text("x".repeat(20 * 1024 * 4)),
-            // Pathological summarizer: the summary is as large as the
-            // transcript it replaces. Validation rejects it, so no marker
-            // commits and the retry is still past the model window.
             AutoCompactScript::Text(valid_summary(&"s".repeat(20 * 1024 * 4))),
             AutoCompactScript::Text("recovered".to_owned()),
         ],
@@ -2411,7 +2290,6 @@ async fn a_prompt_still_over_budget_after_compacting_runs_from_the_summary_alone
     )
     .await;
     let observed = collect_until(&mut harness.events, finished_for(second)).await;
-    // The one attempt happened and was rejected for not shrinking...
     assert!(
         !observed
             .iter()
@@ -2425,9 +2303,6 @@ async fn a_prompt_still_over_budget_after_compacting_runs_from_the_summary_alone
             ..
         } if *run_id != second && message.contains("did not shrink")
     )));
-    // ...and the prompt then runs from the summary alone (RR6): no marker
-    // ever committed, so the opening carries the notice without a summary,
-    // and the 80 KiB run is not in the request.
     let outcome = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -2496,8 +2371,6 @@ async fn oversized_compaction_summary_fails_without_committing_a_marker() {
 async fn a_failed_auto_compaction_does_not_strand_the_queued_prompt() {
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::Text(over_threshold_output()),
-        // One loaded provider serves the failed summarizer step (six sends:
-        // the fault and its turn retries) and then the downgraded prompt.
         AutoCompactScript::Sequence(
             std::iter::repeat_n(
                 AutoCompactScript::Fail,
@@ -2519,8 +2392,6 @@ async fn a_failed_auto_compaction_does_not_strand_the_queued_prompt() {
     )
     .await;
     let observed = collect_until(&mut harness.events, finished_for(second)).await;
-    // The summarizer's transport fault was retried and then paused: nothing
-    // committed...
     let compaction = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -2538,9 +2409,6 @@ async fn a_failed_auto_compaction_does_not_strand_the_queued_prompt() {
             .iter()
             .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
     );
-    // ...and the unchanged overflowing prompt is not refused after that one
-    // attempt: it runs from the summary alone (RR6). No marker exists, so
-    // the opening is the bare notice and the over-threshold run is absent.
     assert!(observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
@@ -2560,8 +2428,6 @@ async fn a_compaction_that_does_not_shrink_the_assembly_never_loops() {
     let mut harness = auto_compact_harness_with_window(
         vec![
             AutoCompactScript::Text("x".repeat(20 * 1024 * 4)),
-            // The summary itself stays past the threshold: the guard must
-            // reject the prompt after the single attempt.
             AutoCompactScript::Text(valid_summary(&"s".repeat(20 * 1024 * 4))),
             AutoCompactScript::Text("done".to_owned()),
         ],
@@ -2588,8 +2454,6 @@ async fn a_compaction_that_does_not_shrink_the_assembly_never_loops() {
         })
         .count();
     assert_eq!(compactions, 1, "exactly one automatic attempt per prompt");
-    // The attempt did not shrink the assembly; the prompt runs from the
-    // summary alone instead of looping or failing (RR6).
     assert!(observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
@@ -2626,8 +2490,6 @@ async fn cancelling_the_queued_prompt_cancels_the_pending_auto_compaction() {
         panic!("expected the auto-compaction to start")
     };
 
-    // Cancelling the only queued prompt cascades to the compaction that
-    // was running on its behalf.
     harness
         .runtime
         .command(
@@ -2671,7 +2533,6 @@ async fn cancelling_the_queued_prompt_cancels_the_pending_auto_compaction() {
             .iter()
             .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
     );
-    // The owner settles after its helper drains, leaving the session idle.
     let session = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -2699,7 +2560,6 @@ async fn cancelling_a_queued_prompt_never_cancels_a_manual_compaction() {
     let first = queue_prompt(&harness.runtime, harness.session_id, "hi".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
 
-    // A user-requested compaction claims and parks at the model.
     let compaction = compact_session(&harness.runtime, harness.session_id).await;
     collect_until(
         &mut harness.events,
@@ -2707,8 +2567,6 @@ async fn cancelling_a_queued_prompt_never_cancels_a_manual_compaction() {
     )
     .await;
 
-    // Queue a prompt behind it, then cancel that prompt: the manual
-    // compaction must keep running.
     let prompt = queue_prompt(&harness.runtime, harness.session_id, "later".to_owned()).await;
     harness
         .runtime
@@ -2724,7 +2582,6 @@ async fn cancelling_a_queued_prompt_never_cancels_a_manual_compaction() {
         SessionEvent::CancellationRequested { run_id, .. } if *run_id == compaction
     )));
 
-    // Clean up: cancel the parked compaction directly.
     harness
         .runtime
         .command(
@@ -2766,7 +2623,6 @@ async fn assembly_prunes_stale_read_only_results_but_never_mutating_ones() {
 
     for prompt in ["one", "two", "three", "four", "five"] {
         if prompt == "five" {
-            // A seam before the last prompt: assembly stubs up to it.
             mark_prune_seam(
                 &harness.workspace_path.join("sessions.sqlite3"),
                 harness.session_id,
@@ -2789,8 +2645,6 @@ async fn assembly_prunes_stale_read_only_results_but_never_mutating_ones() {
             .collect()
     };
     assert_eq!(results.len(), 3);
-    // The old read is a stub: its header without the hash, then the tool,
-    // arguments, size and how to get the text back.
     let (header, stub) = results[0].split_once('\n').unwrap_or_else(|| {
         panic!(
             "stale read-only result must be stubbed, got {:?}",
@@ -2808,13 +2662,11 @@ async fn assembly_prunes_stale_read_only_results_but_never_mutating_ones() {
         results[0]
     );
     assert!(stub.ends_with("without if_changed_since]"));
-    // The equally old mutation is never pruned: not re-derivable.
     assert!(
         !results[1].starts_with("[pruned"),
         "mutating results must never be pruned, got {:?}",
         results[1]
     );
-    // The recent read stays verbatim.
     assert!(
         results[2].contains("nnnn"),
         "recent results must stay verbatim, got {:?}",
@@ -2847,7 +2699,6 @@ fn compaction_summary_validation_requires_every_section_heading() {
     assert!(missing.contains("Open problems"));
     assert!(missing.contains("Next step"));
     assert!(!missing.contains("Intent"));
-    // Body text mentioning a heading word does not satisfy the section.
     let prose = validate_compaction_summary(
         "1. Intent: fix the open problems: they matter\n2. Decisions and constraints: none\n\
          3. Work state: done\n5. Next step: ship",
@@ -2857,16 +2708,11 @@ fn compaction_summary_validation_requires_every_section_heading() {
         prose,
         "compaction summary is missing required sections: Open problems"
     );
-    // The previous six-section format is not a valid new narrative: a fold
-    // must rewrite it into the new sections.
     let old = validate_compaction_summary(&old_format_summary("x")).unwrap_err();
     assert_eq!(
         old,
         "compaction summary is missing required sections: Open problems, Next step"
     );
-    // Regression: a markdown heading on its own line with the body beneath
-    // it is how models answer the numbered instruction; every section was
-    // present in the live store yet all six were reported missing.
     assert!(
         validate_compaction_summary(
             "## 1. Intent\n\nThe user wants QQ to be reliable.\n\n\
@@ -2886,7 +2732,6 @@ fn compaction_summary_validation_requires_every_section_heading() {
         .is_ok(),
         "bold, closed atx, and plain headings are accepted"
     );
-    // A heading word followed by other prose is still body text.
     let prose_heading = validate_compaction_summary(
         "Intent was unclear\n2. Decisions and constraints: none\n3. Work state: done\n\
          4. Open problems: none\n5. Next step: ship",
@@ -2909,10 +2754,6 @@ fn compaction_summary_validation_requires_every_section_heading() {
 
 #[tokio::test]
 async fn a_summary_split_across_truncated_turns_is_joined_without_a_seam() {
-    // Regression: the summarizer's turns were joined with a newline even
-    // when the provider cut the previous turn mid-token, so a heading split
-    // across the cut (`Decis` + `ions and constraints:`) never matched and
-    // the compaction failed as a policy error.
     let summary = valid_summary("joined");
     let cut = summary.find("Decis").unwrap() + "Decis".len();
     let second_cut = summary.find("Open").unwrap() + "Op".len();
@@ -2936,7 +2777,6 @@ async fn a_summary_split_across_truncated_turns_is_joined_without_a_seam() {
         matches!(outcome, Some(RunOutcome::Completed)),
         "{outcome:?}"
     );
-    // The prompt plus three summarizer requests: two continuations.
     assert_eq!(harness.requests.lock().unwrap().len(), 4);
 
     let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
@@ -2952,7 +2792,6 @@ async fn a_summary_split_across_truncated_turns_is_joined_without_a_seam() {
         "truncated turns are concatenated verbatim, then the record: {stored}"
     );
 
-    // The joined summary is what the next prompt sees.
     let next = queue_prompt(&harness.runtime, harness.session_id, "two".to_owned()).await;
     collect_until(&mut harness.events, finished_for(next)).await;
     let requests = harness.requests.lock().unwrap();
@@ -2968,7 +2807,6 @@ async fn malformed_summary_fails_compaction_and_retains_the_prior_compaction() {
         AutoCompactScript::Text("first answer".to_owned()),
         AutoCompactScript::Text(valid_summary("good summary")),
         AutoCompactScript::Text("second answer".to_owned()),
-        // No section headings: rejected before any marker is written.
         AutoCompactScript::Text("just some prose about the work".to_owned()),
         AutoCompactScript::Text("third answer".to_owned()),
     ])
@@ -2995,8 +2833,6 @@ async fn malformed_summary_fails_compaction_and_retains_the_prior_compaction() {
             .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
     );
 
-    // The prior compaction still governs assembly: the next prompt sees
-    // the good summary and the verbatim span after its marker.
     let third = queue_prompt(&harness.runtime, harness.session_id, "three".to_owned()).await;
     collect_until(&mut harness.events, finished_for(third)).await;
     let requests = harness.requests.lock().unwrap();
@@ -3101,15 +2937,9 @@ async fn rollback_restores_the_prior_compaction_then_the_verbatim_transcript() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_cut_result_names_a_handle_the_model_can_page_and_search_exactly() {
-    // 1 500 lines of ~60 bytes (~90 KiB) of shell output: over the 16
-    // KiB shell bound, under the 128 KiB capture cap, so the inline
-    // result is head+tail with a marker and the complete capture spills.
-    // Line 1 000 carries a secret the inline preview masks.
     let command = "for n in $(seq 1 1500); do if [ $n -eq 1000 ]; then echo \
          'TOKEN=AKIAIOSFODNN7EXAMPLE and the rest of line one thousand'; \
          else printf 'line %5d zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\\n' $n; fi; done";
-    // A shell loop is a Prompt-tier command; the session runs under
-    // `full` so no approval is waited on.
     let mut harness = auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
             requests: Arc::new(StdMutex::new(Vec::new())),
@@ -3148,7 +2978,6 @@ async fn a_cut_result_names_a_handle_the_model_can_page_and_search_exactly() {
     assert!(marker.contains("; read_tool_result offset="), "{marker}");
     assert!(!marker.contains("not stored"), "{marker}");
     assert!(!shell.contains("AKIA"), "the inline preview is masked");
-    // The handle's call prefix is this call's id.
     let call8 = &finished[0].id.to_string()[..8];
     assert!(marker.contains(&format!("t:shell:{call8}:")), "{marker}");
 
@@ -3158,8 +2987,6 @@ async fn a_cut_result_names_a_handle_the_model_can_page_and_search_exactly() {
     let page = recall.result.as_deref().unwrap();
     let header = page.lines().next().unwrap();
     assert!(header.starts_with("read_tool_result t:shell:"), "{header}");
-    // The stored output is the complete shell result: its own header
-    // line first, so stored line N+1 is output line N.
     assert!(header.ends_with(" L1000-1002/1501 next=1003"), "{header}");
     assert!(
         page.contains("\n1001\tTOKEN=AKIAIOSFODNN7EXAMPLE and the rest"),
@@ -3222,10 +3049,6 @@ async fn rollback_is_refused_while_the_session_is_not_idle() {
 
 #[tokio::test]
 async fn repeated_compactions_keep_every_user_message_verbatim_without_the_model_retyping_them() {
-    // ADR-0056: the record, not the model, carries user messages. This
-    // summarizer writes only a fixed narrative and never repeats a user
-    // message; every message must still be verbatim in the latest summary
-    // after several folds, and history stays bounded.
     struct ForgetfulLoader {
         requests: Arc<StdMutex<Vec<ModelRequest>>>,
     }
@@ -3256,8 +3079,6 @@ async fn repeated_compactions_keep_every_user_message_verbatim_without_the_model
                 .last()
                 .is_some_and(|text| text.starts_with("Summarize this conversation"));
             let text = if summarizing {
-                // Echo the prior record too, as a careless model might; QQ
-                // must drop it and render its own.
                 let echoed = texts
                     .first()
                     .and_then(|text| text.find(COMPACTION_RECORD_HEADER).map(|at| &text[at..]))
@@ -3329,10 +3150,8 @@ async fn repeated_compactions_keep_every_user_message_verbatim_without_the_model
             texts[0]
         );
     }
-    // One record, rendered by QQ: the echoed copy was dropped.
     assert_eq!(texts[0].matches(COMPACTION_RECORD_HEADER).count(), 1);
     assert_eq!(texts[0].matches("1. Intent: narrative only").count(), 1);
-    // Only the latest summary and the verbatim span are assembled.
     assert_eq!(
         texts
             .iter()
@@ -3355,8 +3174,6 @@ async fn repeated_compactions_keep_every_user_message_verbatim_without_the_model
 
 #[tokio::test]
 async fn an_old_format_summary_recovers_inputs_before_a_later_fold() {
-    // Legacy markers recover their exact inputs at assembly time. A later
-    // fold can only shrink actual work evidence, never those inputs.
     let hidden = format!("hidden{} end", " alpha".repeat(5_000));
     let span = [
         format!("second{} end", " beta".repeat(1_800)),
@@ -3373,8 +3190,6 @@ async fn an_old_format_summary_recovers_inputs_before_a_later_fold() {
     .await;
     let first = queue_prompt(&harness.runtime, harness.session_id, hidden.clone()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
-    // Write the summary the old code would have committed: six sections and
-    // no record, as rows on disk from before the upgrade look.
     let old = compact_session(&harness.runtime, harness.session_id).await;
     let observed = collect_until(&mut harness.events, finished_for(old)).await;
     assert!(matches!(
@@ -3439,8 +3254,6 @@ async fn an_old_format_summary_recovers_inputs_before_a_later_fold() {
     let texts = request_texts(requests.last().unwrap());
     assert!(texts[0].contains("5. Next step: folded"));
     assert!(!texts[0].contains("Files touched: old"));
-    // The message the old summary covered is recovered from rows, and the
-    // two after it are verbatim too.
     for (ordinal, text) in [(1, &hidden), (3, &span[0]), (5, &span[1])] {
         assert!(
             texts[0].contains(&format!("--- user message #{ordinal} ---\n{text}\n")),
@@ -3451,9 +3264,6 @@ async fn an_old_format_summary_recovers_inputs_before_a_later_fold() {
 
 #[tokio::test]
 async fn compaction_shrinks_a_tool_heavy_assembly_at_least_eightfold() {
-    // Phase 5 acceptance: a compaction of a transcript dominated by tool
-    // traffic must shrink the measured assembly by at least 8x, and the
-    // published before/after bytes must agree with the next assembly.
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::ReadNoteThenText("read it".to_owned()),
         AutoCompactScript::ReadNoteThenText("read it again".to_owned()),
@@ -3541,8 +3351,6 @@ async fn search_history_recalls_compacted_transcript_with_bounded_citations() {
         })
         .expect("search_history must dispatch in a session run");
     assert!(!is_error, "{result}");
-    // The prompt and newest assistant reply fill the first page. The
-    // remaining earlier tool result must be reachable using its cursor.
     assert!(result.starts_with("2 history match(es)"), "{result}");
     assert!(
         result.contains("[user message #1]\nnever touch"),
@@ -3585,9 +3393,6 @@ async fn search_history_recalls_compacted_transcript_with_bounded_citations() {
                 .any(|tool| tool.name() == crate::runtime::SEARCH_HISTORY_TOOL),
             "session runs declare search_history"
         );
-        // The compacted assembly keeps the user's message and the last reply
-        // verbatim in the record, and lists the file read, but not the tool
-        // result; the tool is the only route back to the note's text.
         let texts = request_texts(request);
         assert!(texts[0].contains("folded"), "{texts:?}");
         assert!(
@@ -3617,16 +3422,9 @@ async fn search_history_recalls_compacted_transcript_with_bounded_citations() {
 
 #[tokio::test]
 async fn a_window_overflow_compacts_even_though_the_summarizer_reads_the_same_transcript() {
-    // Regression: the summarizer request carries the very transcript that
-    // overflowed the model window. Planning it against the window refused
-    // every window-triggered compaction and reported "already attempted"
-    // for a compaction that never started. With the summarizer planned
-    // against storage only, the compaction runs and the prompt proceeds.
     let window: u32 = 32 * 1024;
     let mut harness = auto_compact_harness_with_window(
         vec![
-            // ~30k estimated tokens of history: inside the window alone,
-            // past it once the system prompt and the prompt below join.
             AutoCompactScript::Text("x".repeat(30 * 1024 * 4)),
             AutoCompactScript::Text(valid_summary("the summary")),
             AutoCompactScript::Text("done".to_owned()),
@@ -3661,7 +3459,6 @@ async fn a_window_overflow_compacts_even_though_the_summarizer_reads_the_same_tr
         SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
             if *run_id == second
     )));
-    // Three provider requests: the seed, the summarizer, the prompt.
     let requests = harness.requests.lock().unwrap();
     assert_eq!(requests.len(), 3);
     assert!(
@@ -3674,8 +3471,6 @@ async fn a_window_overflow_compacts_even_though_the_summarizer_reads_the_same_tr
 
 #[tokio::test]
 async fn manual_compaction_runs_when_the_estimate_already_exceeds_the_window() {
-    // A session whose byte estimate is past the model window is exactly the
-    // one a user reaches for /compact on. The summarizer must send.
     let mut harness = auto_compact_harness_with_window(
         vec![
             AutoCompactScript::Text("x".repeat(40 * 1024 * 4)),
@@ -3688,7 +3483,6 @@ async fn manual_compaction_runs_when_the_estimate_already_exceeds_the_window() {
     collect_until(&mut harness.events, finished_for(first)).await;
 
     let compaction = compact_session(&harness.runtime, harness.session_id).await;
-    // `SessionCompacted` follows the compaction's `RunFinished`.
     let observed = collect_until(&mut harness.events, |event| {
         matches!(event, SessionEvent::SessionCompacted { .. })
             || matches!(
@@ -3718,10 +3512,6 @@ async fn manual_compaction_runs_when_the_estimate_already_exceeds_the_window() {
 
 #[tokio::test]
 async fn a_run_that_outgrows_the_window_stubs_its_stale_reads_instead_of_failing() {
-    // Regression: mid-run overflow was a hard failure (`BetweenRunsOnly`).
-    // Eight verbatim 8 KiB reads (~16k tokens) plus the prompt do not fit a
-    // 16k window with a 2k output reserve, but once the reads older than the
-    // recency window are stubbed in memory the run completes.
     let turns = 8;
     let mut harness = auto_compact_harness_with_limits(
         vec![AutoCompactScript::ReadNoteRepeatedly {
@@ -3751,8 +3541,6 @@ async fn a_run_that_outgrows_the_window_stubs_its_stale_reads_instead_of_failing
     assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
     let requests = harness.requests.lock().unwrap();
     assert_eq!(requests.len(), turns + 1);
-    // The last request carries stubs for the oldest reads and the most
-    // recent CONTEXT_PRUNE_KEEP_TURNS results verbatim.
     let results: Vec<&str> = requests
         .last()
         .unwrap()
@@ -3771,15 +3559,12 @@ async fn a_run_that_outgrows_the_window_stubs_its_stale_reads_instead_of_failing
         "{stubbed}"
     );
     assert!(results.last().unwrap().contains(&"n".repeat(127)));
-    // Live pruning produces the stub assembly would: the read header without
-    // its hash, and the re-read hint (AP2).
     for stub in results.iter().filter(|r| r.contains("[pruned")) {
         let (header, tail) = stub.split_once('\n').expect("a read stub keeps its header");
         assert!(header.starts_with("read note.txt L"), "{header}");
         assert!(!header.contains(" h:"), "{header}");
         assert!(tail.ends_with("without if_changed_since]"), "{tail}");
     }
-    // The stored rows are untouched: the persisted result text is verbatim.
     let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
     let pruned_rows: u64 = connection
         .query_row(
@@ -3791,8 +3576,6 @@ async fn a_run_that_outgrows_the_window_stubs_its_stale_reads_instead_of_failing
     assert_eq!(pruned_rows, 0);
 }
 
-/// The previous request's messages are a prefix of the next run's first
-/// request: what the provider cache needs (ADR-0056 § 6).
 fn assert_extends(previous: &ModelRequest, next: &ModelRequest) {
     assert_eq!(previous.system(), next.system());
     assert_eq!(previous.tools(), next.tools());
@@ -3810,10 +3593,6 @@ fn assert_extends(previous: &ModelRequest, next: &ModelRequest) {
 
 #[tokio::test]
 async fn each_run_extends_the_previous_runs_last_request_until_a_seam() {
-    // CX3: between seams assembly stubs nothing new, so every run's first
-    // request is the previous run's last request plus the new turn, even
-    // once old reads fall outside the recency window. Before CX3 the sixth
-    // prompt's request rewrote the first read to a stub.
     let mut harness = auto_compact_harness(
         std::iter::repeat_with(|| AutoCompactScript::ReadNoteThenText("ok".to_owned()))
             .take(7)
@@ -3831,7 +3610,6 @@ async fn each_run_extends_the_previous_runs_last_request_until_a_seam() {
         collect_until(&mut harness.events, finished_for(run)).await;
     }
     let requests = harness.requests.lock().unwrap();
-    // Two requests per run: the read, then the answer after its result.
     assert_eq!(requests.len(), 14);
     for run in 1..7 {
         assert_extends(&requests[2 * run - 1], &requests[2 * run]);
@@ -3846,12 +3624,6 @@ async fn each_run_extends_the_previous_runs_last_request_until_a_seam() {
 
 #[tokio::test]
 async fn a_live_prune_moves_the_watermark_and_the_next_run_extends_it() {
-    // CX3: the live overflow prune is a seam. The run that stubbed its old
-    // reads records the watermark before it sends the stubbed request, so
-    // the next run assembles the same stubs and extends that request.
-    // Ten 8 KiB reads overflow a 24k window mid-run, so the run stubs and
-    // records the seam; the next prompt then sits below the proactive
-    // threshold, so it is not a seam itself and must extend.
     let turns = 10;
     let mut harness = auto_compact_harness_with_limits(
         vec![
@@ -3896,7 +3668,6 @@ async fn a_live_prune_moves_the_watermark_and_the_next_run_extends_it() {
         finished_outcome(&observed, next),
         Some(RunOutcome::Completed)
     );
-    // No seam in between: the watermark the first run left still stands.
     let after: (Option<u64>, Option<u32>) =
         Connection::open(harness.workspace_path.join("sessions.sqlite3"))
             .unwrap()
@@ -3924,11 +3695,6 @@ async fn a_live_prune_moves_the_watermark_and_the_next_run_extends_it() {
 
 #[tokio::test]
 async fn a_live_prune_classifies_earlier_runs_results_by_their_stored_effect() {
-    // CX3 review: an earlier run's read-only result whose tool is not one of
-    // the built-in prunable names (`__test_delay`, like `load_skill`) is
-    // stubbed by assembly from its stored effect. The live overflow prune
-    // must classify it the same way, or the next run's first request no
-    // longer extends the stubbed one.
     let mut harness = auto_compact_harness_with_limits(
         vec![
             AutoCompactScript::CallThenText {
@@ -3966,7 +3732,6 @@ async fn a_live_prune_classifies_earlier_runs_results_by_their_stored_effect() {
     }
     let requests = harness.requests.lock().unwrap();
     let (previous, first) = (&requests[requests.len() - 2], &requests[requests.len() - 1]);
-    // The live prune stubbed the earlier run's result, as replay does.
     assert!(
         previous
             .messages()
@@ -3982,10 +3747,6 @@ async fn a_live_prune_classifies_earlier_runs_results_by_their_stored_effect() {
 
 #[tokio::test]
 async fn the_prune_watermark_never_reports_success_for_a_run_without_a_prompt_row() {
-    // CX3 review: a compaction run has no prompt row, so the watermark
-    // update would match nothing. Reporting success there would let the
-    // next assembly contradict a request already sent; it must fail, and
-    // the session layer does not treat a summarizer's prune as a seam.
     let (_directory, store, prompt) = claimed_store_fixture().await;
     store.advance_prune_watermark(&prompt, 0).await.unwrap();
     let mut compaction = prompt.panic_settlement_claim();
@@ -4014,16 +3775,11 @@ async fn the_prune_watermark_never_reports_success_for_a_run_without_a_prompt_ro
 
 #[tokio::test]
 async fn the_proactive_threshold_stubs_stale_reads_before_it_compacts() {
-    // CX3: inside the last tenth of the window the first seam is stubbing,
-    // not a summarizer. Old 12 KiB reads are re-derivable; once they are
-    // stubs the prompt fits and sends without compacting.
     let turns = CONTEXT_PRUNE_KEEP_TURNS + 3;
     let mut scripts: Vec<AutoCompactScript> = (0..turns)
         .map(|_| AutoCompactScript::ReadNoteThenText("ok".to_owned()))
         .collect();
     scripts.push(AutoCompactScript::Text("fits now".to_owned()));
-    // Seven ~12.6 KiB reads are ~22k estimated tokens: inside the last
-    // tenth of a 24k window only for the final prompt.
     let mut harness = auto_compact_harness_with_window(scripts, Some(24 * 1024)).await;
     std::fs::write(
         harness.workspace_path.join("note.txt"),
@@ -4064,11 +3820,7 @@ async fn the_proactive_threshold_stubs_stale_reads_before_it_compacts() {
         .flat_map(Message::content)
         .filter(|block| matches!(block, ContentBlock::ToolResult { content, .. } if content.contains("[pruned")))
         .count();
-    // Each run is two assistant turns (the read, then the answer); the
-    // last four turns are kept, and the oldest of them is an answer, so the
-    // newest three reads stay verbatim and every older read is a stub.
     assert_eq!(stubbed, turns - 3);
-    // The stubs are durable: the run after it assembles the same request.
     let watermark: Option<u64> = Connection::open(harness.workspace_path.join("sessions.sqlite3"))
         .unwrap()
         .query_row(
@@ -4082,13 +3834,6 @@ async fn the_proactive_threshold_stubs_stale_reads_before_it_compacts() {
 
 #[tokio::test]
 async fn a_session_without_a_window_still_sheds_stale_reads_before_the_storage_backstop() {
-    // CX3 review: with no declared window neither the live overflow prune
-    // nor the window threshold ever runs, so the watermark stays unset. The
-    // storage backstop is then the only seam. Stale reads must still be
-    // stubbed before it refuses the session.
-    // `read_file` returns about 26 KiB of a large file per call. A 16k
-    // output cap reserves 512 KiB of storage, so ~140 runs of history cross
-    // the backstop unstubbed.
     let note = format!("{}\n", "n".repeat(127)).repeat(720);
     let runs = (4 * 1024 * 1024 - 512 * 1024) / (26 * 1024) + 4;
     let mut scripts: Vec<AutoCompactScript> = (0..runs)
@@ -4124,7 +3869,6 @@ async fn a_session_without_a_window_still_sheds_stale_reads_before_the_storage_b
             .any(|block| matches!(block, ContentBlock::ToolResult { content, .. } if content.contains("[pruned"))),
         "stale reads were stubbed at a seam"
     );
-    // Stubbing alone brought it back under; no summarizer ran.
     assert!(!requests.iter().any(|request| {
         request_texts(request)
             .iter()
@@ -4134,9 +3878,6 @@ async fn a_session_without_a_window_still_sheds_stale_reads_before_the_storage_b
 
 #[tokio::test]
 async fn a_prompt_inside_the_last_tenth_of_the_window_compacts_before_it_sends() {
-    // ~30k estimated tokens of history against a 32k window: the next prompt
-    // still fits, but inside the ten percent headroom. It compacts first
-    // rather than waiting for the estimate to cross the window.
     let mut harness = auto_compact_harness_with_window(
         vec![
             AutoCompactScript::Text("x".repeat(29 * 1024 * 4)),
@@ -4169,12 +3910,6 @@ async fn a_prompt_inside_the_last_tenth_of_the_window_compacts_before_it_sends()
 
 #[tokio::test]
 async fn measured_occupancy_survives_assembly_pruning_and_admits_the_next_prompt() {
-    // Regression: once assembly stubbed any read-only result (always, after
-    // CONTEXT_PRUNE_KEEP_TURNS turns) the persisted measurement was
-    // discarded and the next prompt was judged by the raw byte estimate over
-    // the whole history. Here the provider reports a small measured
-    // occupancy for a transcript whose bytes alone would overflow the
-    // window; the prompt after pruning must still send without compacting.
     let turns = CONTEXT_PRUNE_KEEP_TURNS + 2;
     let mut scripts = Vec::new();
     for _ in 0..=turns {
@@ -4184,10 +3919,6 @@ async fn measured_occupancy_survives_assembly_pruning_and_admits_the_next_prompt
         });
     }
     let mut harness = auto_compact_harness_with_window(scripts, Some(6 * 1024)).await;
-    // Each read is ~12 KiB once bounded (~3k estimated tokens). After
-    // pruning to the last four turns the transcript alone is ~6k estimated
-    // tokens, past a 6k window with its 256 output reserve, unless the
-    // 500-token measurement is trusted.
     std::fs::write(
         harness.workspace_path.join("note.txt"),
         format!("{}\n", "n".repeat(127)).repeat(96),
@@ -4195,7 +3926,6 @@ async fn measured_occupancy_survives_assembly_pruning_and_admits_the_next_prompt
     .unwrap();
     for index in 0..turns {
         if index + 1 == turns {
-            // A seam before the last prompt rewrites its history to stubs.
             mark_prune_seam(
                 &harness.workspace_path.join("sessions.sqlite3"),
                 harness.session_id,
@@ -4244,11 +3974,6 @@ async fn measured_occupancy_survives_assembly_pruning_and_admits_the_next_prompt
     );
 }
 
-/// F06: assembling a fixed retained context must not read the archive behind
-/// the compaction cutoff. Wall time is a bench receipt, not a test; here the
-/// guarantee is structural: the same retained context assembles identically
-/// (and agrees with the per-message reference) whatever the archive size,
-/// and every assembly query is index-driven with no table scan.
 #[test]
 fn assembly_work_follows_the_retained_context_not_the_archive() {
     let mut assembled = Vec::new();
@@ -4264,8 +3989,6 @@ fn assembly_work_follows_the_retained_context_not_the_archive() {
     }
     assert_eq!(assembled[0], assembled[1], "same retained context");
 
-    // Every assembly query reaches its rows through an index keyed by the
-    // retained window or the run id; none scans a whole table.
     let directory = tempfile::tempdir().unwrap();
     let (connection, _) = bench_support::seed_compacted_session(
         &directory.path().join("sessions.sqlite3"),
@@ -4306,14 +4029,9 @@ fn assembly_work_follows_the_retained_context_not_the_archive() {
     }
 }
 
-/// F06: `search_history` bounds the transcript bytes it visits, walks newest
-/// history first so what it did cover is the most useful, and says when it
-/// stopped short. A present term near the top is still found in full.
 #[test]
 fn history_search_is_scan_bounded_and_newest_first() {
     let directory = tempfile::tempdir().unwrap();
-    // 2_000 runs x 3 turns x 8 KiB results = ~48 MiB of transcript, well
-    // past the 8 MiB budget.
     let (connection, session_id) = bench_support::seed_compacted_session(
         &directory.path().join("sessions.sqlite3"),
         2_000,
@@ -4329,8 +4047,6 @@ fn history_search_is_scan_bounded_and_newest_first() {
         "an absent term must hit the scan budget"
     );
 
-    // The newest prompt's needle is found; the oldest prompt's needle lies
-    // behind the budget and is reported as unexamined rather than absent.
     let newest = search_session_history(&connection, session_id, "needle-1999", 8, None).unwrap();
     assert_eq!(newest.matches.len(), 1, "{newest:?}");
     assert!(newest.matches[0].citation.starts_with("user message #"));
@@ -4353,7 +4069,6 @@ fn history_search_is_scan_bounded_and_newest_first() {
     }
     assert!(pages > 1);
 
-    // A common term returns the newest `limit` hits first.
     let common = search_session_history(&connection, session_id, "prompt", 5, None).unwrap();
     assert_eq!(common.matches.len(), 5);
     let ordinals: Vec<u64> = common
@@ -4372,7 +4087,6 @@ fn history_search_is_scan_bounded_and_newest_first() {
     );
     assert!(ordinals[0] > 3_990, "newest first: {ordinals:?}");
 
-    // A small session searches to the end and is not marked truncated.
     let directory = tempfile::tempdir().unwrap();
     let (connection, session_id) = bench_support::seed_compacted_session(
         &directory.path().join("sessions.sqlite3"),
@@ -4387,8 +4101,6 @@ fn history_search_is_scan_bounded_and_newest_first() {
     assert!(complete.next_cursor.is_none());
 }
 
-/// Every provider request the summarizer sent, in order, with the message
-/// bytes each carried (excluding the instruction).
 fn summarizer_requests(requests: &[ModelRequest]) -> Vec<(usize, u64)> {
     requests
         .iter()
@@ -4410,15 +4122,7 @@ fn summarizer_requests(requests: &[ModelRequest]) -> Vec<(usize, u64)> {
 
 #[tokio::test]
 async fn a_transcript_several_windows_long_folds_through_bounded_summarizer_steps() {
-    // F04: the summarizer used to read the whole transcript. Past the
-    // window the provider rejected it, the one attempt was spent, and the
-    // prompt failed with "already attempted" — no route to a summary at all.
-    // Now each step reads at most a window of whole prompt/run units and
-    // commits a summary covering exactly that span; the next step folds the
-    // summary with the next chunk until the prompt fits.
     let window: u32 = 32 * 1024;
-    // Each run leaves ~20k estimated tokens in the transcript; four of them
-    // are ~80k, two and a half windows.
     let run_bytes = 20 * 1024 * 4;
     let mut harness = auto_compact_harness_with_window(
         vec![
@@ -4426,8 +4130,6 @@ async fn a_transcript_several_windows_long_folds_through_bounded_summarizer_step
             AutoCompactScript::Text("b".repeat(run_bytes)),
             AutoCompactScript::Text("c".repeat(run_bytes)),
             AutoCompactScript::Text("d".repeat(run_bytes)),
-            // The final prompt's load serves every fold step and then the
-            // prompt itself.
             AutoCompactScript::Sequence(vec![
                 AutoCompactScript::Text(valid_summary("step one")),
                 AutoCompactScript::Text(valid_summary("step two")),
@@ -4438,10 +4140,6 @@ async fn a_transcript_several_windows_long_folds_through_bounded_summarizer_step
         Some(window),
     )
     .await;
-    // Each seed prompt is planned before its run grows the transcript, so
-    // the first three fit; the fourth is planned at ~60k and would fold on
-    // its own. Seed it through the store instead so the fold under test is
-    // the final prompt's, over the whole 80k.
     for prompt in ["one", "two", "three"] {
         let run = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
         collect_until(&mut harness.events, finished_for(run)).await;
@@ -4482,8 +4180,6 @@ async fn a_transcript_several_windows_long_folds_through_bounded_summarizer_step
             "summarizer request {index} carried {bytes} message bytes, over the {budget}-byte window budget"
         );
     }
-    // Every request the model saw fit the window: nothing was sent that
-    // the estimate said would overflow.
     for (index, request) in requests.iter().enumerate() {
         let bytes = crate::measure_messages(request.messages());
         assert!(
@@ -4491,8 +4187,6 @@ async fn a_transcript_several_windows_long_folds_through_bounded_summarizer_step
             "request {index} ({bytes} bytes) was sent over the window"
         );
     }
-    // The final prompt's context is the last summary plus what it did not
-    // cover; the raw "a" run is gone.
     let final_request = requests.last().unwrap();
     let texts = request_texts(final_request);
     assert!(texts.iter().any(|text| text.contains("step")), "{texts:?}");
@@ -4505,11 +4199,6 @@ async fn a_transcript_several_windows_long_folds_through_bounded_summarizer_step
 
 #[tokio::test]
 async fn one_run_larger_than_the_window_fails_as_irreducible_not_already_attempted() {
-    // A single prompt/run unit that alone exceeds the summarizer's budget
-    // cannot be cut anywhere. The step is still sent — the estimate is
-    // conservative — but when the provider rejects it the prompt fails
-    // naming the unit and its size, not a spent retry, and the same
-    // request is never sent twice.
     let window: u32 = 32 * 1024;
     let mut harness = auto_compact_harness_with_window(
         vec![
@@ -4547,7 +4236,6 @@ async fn one_run_larger_than_the_window_fails_as_irreducible_not_already_attempt
         !message.contains("summarizer step"),
         "an oversized unit is not a spent retry: {message}"
     );
-    // Seed plus the initial summarizer request and three strictly smaller attempts.
     let requests = harness.requests.lock().unwrap();
     assert_eq!(requests.len(), 9);
     for pair in requests[1..].windows(2) {
@@ -4560,31 +4248,17 @@ async fn one_run_larger_than_the_window_fails_as_irreducible_not_already_attempt
 
 #[tokio::test]
 async fn a_bounded_step_that_fails_stops_the_fold_without_repeating_its_input() {
-    // The first bounded step commits; the next prompt's step is rejected by
-    // the provider. No further step may run for that prompt: it would read
-    // exactly the input the failed one did. The prompt then runs from the
-    // summary alone (RR6) and, when the provider rejects even that, fails
-    // with the provider's own reason; the fold's cutoff never moved backwards.
     let window: u32 = 32 * 1024;
     let run_bytes = 20 * 1024 * 4;
     let mut harness = auto_compact_harness_with_window(
         vec![
             AutoCompactScript::Text("a".repeat(run_bytes)),
             AutoCompactScript::Text("b".repeat(run_bytes)),
-            // Prompt three is planned at ~40k: over the window. Step one
-            // covers "a" and commits. The remaining ~20k plus the summary
-            // fit, so the prompt sends — and its own request is rejected by
-            // the provider, which is a known overflow for the retry.
             AutoCompactScript::Sequence(vec![
                 AutoCompactScript::Text(valid_summary("step one")),
                 AutoCompactScript::ContextOverflow,
                 AutoCompactScript::Text("invalid summary".to_owned()),
             ]),
-            // The retry compacts first: step two ("b" folded with the
-            // summary) is rejected; the retry then runs from the summary
-            // alone and the provider rejects that too.
-            // The next admission sees the failed fold, rejects an invalid
-            // summary, then sends the summary-only downgrade.
             AutoCompactScript::Sequence(vec![
                 AutoCompactScript::Text("invalid summary".to_owned()),
                 AutoCompactScript::ContextOverflow,
@@ -4635,8 +4309,6 @@ async fn a_bounded_step_that_fails_stops_the_fold_without_repeating_its_input() 
         ),
         "{outcome:?}"
     );
-    // Recovery reloads the complete inherited span. Its provider rejects
-    // every portion too; each retry must shrink and the split budget bounds it.
     let requests = harness.requests.lock().unwrap();
     let steps = summarizer_requests(&requests);
     assert_eq!(requests.len(), steps.len() + 4, "only four prompt sends");
@@ -4659,7 +4331,6 @@ async fn a_bounded_step_that_fails_stops_the_fold_without_repeating_its_input() 
             .iter()
             .any(|text| text.contains(&"b".repeat(run_bytes)))
     );
-    // The failed step read new input, not the first step's.
     let first_step = request_texts(&requests[steps[0].0]);
     let second_step = request_texts(&requests[steps[1].0]);
     assert!(
@@ -4685,9 +4356,6 @@ async fn a_bounded_step_that_fails_stops_the_fold_without_repeating_its_input() 
 
 #[tokio::test]
 async fn manual_compaction_of_an_oversized_transcript_reads_one_window_at_a_time() {
-    // `/compact` on a transcript past the window used to send the whole
-    // thing and fail. It now summarizes the first window of whole units; a
-    // second `/compact` folds the rest.
     let window: u32 = 32 * 1024;
     let run_bytes = 20 * 1024 * 4;
     let mut harness = auto_compact_harness_with_window(
@@ -4700,8 +4368,6 @@ async fn manual_compaction_of_an_oversized_transcript_reads_one_window_at_a_time
         Some(window),
     )
     .await;
-    // Two prompts of ~20k tokens: the second is planned at ~20k + system,
-    // under the 90 % proactive line, so no automatic compaction runs here.
     for prompt in ["one", "two"] {
         let run = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
         collect_until(&mut harness.events, finished_for(run)).await;
@@ -4724,7 +4390,6 @@ async fn manual_compaction_of_an_oversized_transcript_reads_one_window_at_a_time
     let budget =
         crate::sessions::context::summarizer_message_byte_budget(Some(window), 256, 0, 0).unwrap();
     assert!(steps[0].1 <= budget, "{steps:?}");
-    // The second /compact folds the first summary with the "b" run.
     let texts = request_texts(&requests[steps[1].0]);
     assert!(
         texts.iter().any(|text| text.contains("first half")),
@@ -4744,20 +4409,12 @@ async fn manual_compaction_of_an_oversized_transcript_reads_one_window_at_a_time
 
 #[tokio::test]
 async fn a_committed_step_survives_shutdown_and_the_next_prompt_folds_from_its_marker() {
-    // Step one commits and the prompt, now fitting, is sent and stalls; the
-    // runtime shuts down and settles it cancelled. Step one's marker is
-    // durable and its step count stays on the cancelled prompt. After
-    // reopen a new prompt is planned over the summary plus the "b" run;
-    // when that grows past the window, its fold starts from the marker —
-    // reading the summary and "b", never "a" again.
     let window: u32 = 32 * 1024;
     let run_bytes = 20 * 1024 * 4;
     let mut harness = auto_compact_harness_with_window(
         vec![
             AutoCompactScript::Text("a".repeat(run_bytes)),
             AutoCompactScript::Text("b".repeat(run_bytes)),
-            // Prompt three is planned at ~40k: step one covers "a" and
-            // commits; the remainder fits, so the prompt sends — and stalls.
             AutoCompactScript::Sequence(vec![
                 AutoCompactScript::Text(valid_summary("step one")),
                 AutoCompactScript::Stall,
@@ -4826,7 +4483,6 @@ async fn a_committed_step_survives_shutdown_and_the_next_prompt_folds_from_its_m
         Arc::new(AutoCompactLoader {
             requests: Arc::clone(&requests),
             scripts: vec![
-                // Grows the transcript past the window again.
                 AutoCompactScript::Text("c".repeat(run_bytes)),
                 AutoCompactScript::Sequence(vec![
                     AutoCompactScript::Text(valid_summary("step two")),
@@ -4890,9 +4546,6 @@ async fn a_committed_step_survives_shutdown_and_the_next_prompt_folds_from_its_m
     runtime.close().await.unwrap();
 }
 
-/// A harness whose one loaded provider answers the run's turns with shell
-/// calls (mutating, so never stubbed) and every summarizer request with a
-/// valid summary, under `full` approval so no gate waits.
 async fn in_run_compaction_harness(turns: usize, window: u32, summary: &str) -> AutoCompactHarness {
     auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
@@ -4944,8 +4597,6 @@ async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
                     timeout_ms: 3_600_000,
                 });
                 goal.check_authorization = Some(qq_protocol::GoalCheckAuthorization::ForGoal);
-                // Explicit prompt work still runs first; preserve a model-style
-                // wait so automatic follow-up cannot consume the single script.
                 let until_ms = now_ms() + 86_000_000;
                 goal.next_run_at_ms = until_ms;
                 goal.wait = Some(qq_protocol::GoalWait {
@@ -5092,16 +4743,7 @@ async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
 
 #[tokio::test]
 async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes() {
-    // F03: a run whose transcript outgrows the window at a later turn used to
-    // fail with "compaction runs only between prompts". Its mutating results
-    // cannot be stubbed, so stubbing does not save it. Now the loop
-    // summarizes its own earlier turns at the boundary and continues in the
-    // same run; each in-run compaction is a durable internal run with a
-    // marker scoped to the prompt run.
     let turns = 48;
-    // Each shell turn adds ~2.2 KiB of bounded result (~550 tokens); 48 of
-    // them are ~26k tokens of transcript, past a 16k window twice over once
-    // the system prompt and tool schemas are counted.
     let mut harness = in_run_compaction_harness(turns, 16 * 1024, "work so far").await;
     let run = queue_prompt(
         &harness.runtime,
@@ -5120,8 +4762,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
         })
         .unwrap();
     assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
-    // Exactly one user-visible run: every other RunStarted is an internal
-    // compaction, and each of those settled Completed with a SessionCompacted.
     let started: Vec<RunId> = observed
         .iter()
         .filter_map(|event| match &event.event {
@@ -5147,9 +4787,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
                 if run_id == compaction
         )));
     }
-    // CX4: the prompt run reports `Compacting` before each of its
-    // compaction runs starts and `WaitingForProvider` after it finishes; the
-    // compaction run itself reports only `Compacting`.
     let activities: Vec<(RunId, RunActivity)> = observed
         .iter()
         .filter_map(|event| match &event.event {
@@ -5181,9 +4818,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
                     _ => None,
                 });
         assert_eq!(prompt_activity_before, Some(RunActivity::Compacting));
-        // The session's summary names the prompt run's activity, so the
-        // compaction run's start and finish both say `compacting` (the
-        // headless `completed_after_in_run_compaction` golden pins this).
         for at in [started, finished] {
             let (SessionEvent::RunStarted { session, .. }
             | SessionEvent::RunFinished { session, .. }) = &observed[at].event
@@ -5192,8 +4826,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
             };
             assert_eq!(session.activity, Some(RunActivity::Compacting));
         }
-        // Its own `compacting` commits with its start, so no cancel between
-        // the two can leave a started compaction run unreported.
         assert!(
             matches!(
                 &observed[started + 1],
@@ -5203,8 +4835,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
             "{:?}",
             observed[started + 1].event
         );
-        // The compaction is recorded right after its run finishes, under
-        // that run's id, before the prompt run moves on (the golden's order).
         assert!(
             matches!(
                 &observed[finished + 1],
@@ -5231,10 +4861,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
             .collect();
         assert_eq!(own, [RunActivity::Compacting]);
     }
-    // An in-run summary sends the run's own system prompt and tools, and
-    // its messages are a prefix of the request the run sent just before it
-    // (the turn that overflowed is cut at the boundary), so a provider
-    // prefix cache covers all but the instruction (ADR-0056 § 5).
     {
         let requests = harness.requests.lock().unwrap();
         let index = requests
@@ -5260,8 +4886,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
             "it keeps the prompt"
         );
     }
-    // An in-run summary declares the run's tools and carries its tool
-    // calls and results.
     {
         let requests = harness.requests.lock().unwrap();
         let summary = requests
@@ -5286,8 +4910,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
                 })
         );
     }
-    // Every request the model saw fit the window by the estimate (system
-    // prompt and tool schemas included, as the loop counts them).
     let results = {
         let requests = harness.requests.lock().unwrap();
         for (index, request) in requests.iter().enumerate() {
@@ -5302,16 +4924,12 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
                             + tool.input_schema().get().len()) as u64
                     })
                     .sum::<u64>();
-            // Each request is judged with the output reserve it actually
-            // carried: the run's own, or the summarizer's larger one.
             let reserve = u64::from(request.max_output_tokens());
             assert!(
                 crate::sessions::context::estimate_tokens(bytes) + reserve <= 16 * 1024,
                 "request {index} ({bytes} bytes + {reserve} reserve) was sent over the window"
             );
         }
-        // The final request carries the prompt, a summary, and only the turns
-        // since the last compaction verbatim — not all 48 shell results.
         let last = requests.last().unwrap();
         let texts = request_texts(last);
         assert_eq!(texts.first().map(String::as_str), Some("do the task"));
@@ -5334,7 +4952,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
         results
     };
 
-    // All 24 shell calls ran exactly once and are durable.
     let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
     let calls: u64 = connection
         .query_row(
@@ -5344,7 +4961,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
         )
         .unwrap();
     assert_eq!(calls, turns as u64);
-    // The markers are scoped to the prompt run; no between-run marker exists.
     let (scoped, unscoped): (u64, u64) = connection
         .query_row(
             "SELECT SUM(scope_run_id = ?1), SUM(scope_run_id IS NULL) FROM session_compactions",
@@ -5359,10 +4975,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
         .unwrap();
     assert!((1..=3).contains(&scoped), "{scoped}");
     assert_eq!(unscoped, 0);
-    // AC2: in-run steps do not draw on the between-run step budget, and
-    // each re-based the run's reservation to its new window: the final
-    // reservation covers one window (base plus this window's increments),
-    // not the run's lifetime output.
     let (attempted, base, increment): (u32, u64, u64) = connection
         .query_row(
             "SELECT context_compaction_attempted, context_base_bytes, context_increment_bytes
@@ -5385,8 +4997,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
     );
     drop(connection);
 
-    // Replay renders the same shape the live run saw: prompt, summary, then
-    // the retained turns; the reference oracle agrees.
     let store = harness.runtime.inner.store.clone();
     let session_id = harness.session_id;
     let context = store
@@ -5418,8 +5028,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
                 _ => None,
             })
     };
-    // The live splice used the stored summary, so it is byte-identical to
-    // replay.
     let replayed = summary_text(&context).expect("replay renders the in-run summary");
     let live = {
         let requests = harness.requests.lock().unwrap();
@@ -5436,10 +5044,6 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
 
 #[tokio::test]
 async fn an_in_run_summarizer_keeps_the_session_context_before_its_prompt() {
-    // The second prompt of a session compacts itself mid-run. Its
-    // summarizer request starts with the first prompt and its reply, as
-    // every turn of the run did, so the cached prefix is shared; the earlier
-    // context is not summarized away.
     let mut harness = auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
             requests: Arc::new(StdMutex::new(Vec::new())),
@@ -5490,7 +5094,6 @@ async fn an_in_run_summarizer_keeps_the_session_context_before_its_prompt() {
     assert_eq!(texts[0], "earlier work");
     assert_eq!(texts[1], "first answer");
     assert_eq!(texts[2], "do the task");
-    // It is routed to the cache of the turns it shares a prefix with.
     let session = harness.session_id.to_string();
     assert_eq!(summary.cache_key(), Some(session.as_str()));
     assert!(
@@ -5502,16 +5105,6 @@ async fn an_in_run_summarizer_keeps_the_session_context_before_its_prompt() {
 
 #[tokio::test]
 async fn a_dense_tokenizer_compacts_in_run_instead_of_failing_at_the_guard() {
-    // ENG-940: eight production runs failed with "context is estimated at N
-    // input tokens ... over the window" and `context_compaction_attempted =
-    // 0`. The loop decided whether to recover from the raw bytes/4 estimate
-    // (fits) while the admission guard judged the measured chain (over), so
-    // recovery never ran and the guard failed the run closed. Here the
-    // provider reports two bytes per token: the raw estimate of a 16k window
-    // fits until ~64 KiB of transcript, the measured chain overflows at half
-    // that. The run must compact its own turns on the measured figure and
-    // complete; no request may reach the provider over the window by the
-    // measured chain.
     let turns = 24;
     let mut harness = auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
@@ -5557,9 +5150,6 @@ async fn a_dense_tokenizer_compacts_in_run_instead_of_failing_at_the_guard() {
         compactions >= 1,
         "the measured overflow must trigger in-run compaction"
     );
-    // Every prompt-run request fit the window by the provider's own ratio.
-    // The summarizer's requests are exempt: they read the overflowing
-    // transcript by design and the provider adjudicates them.
     let oversized: Vec<(usize, u64)> = {
         let requests = harness.requests.lock().unwrap();
         requests
@@ -5600,10 +5190,6 @@ async fn a_dense_tokenizer_compacts_in_run_instead_of_failing_at_the_guard() {
 
 #[tokio::test]
 async fn a_rejected_in_run_summary_fails_the_run_closed_without_resending_the_overflow() {
-    // The summarizer returns garbage (no required sections). The compaction
-    // run settles failed, no marker is written, and the prompt run fails with
-    // the context diagnosis naming the summarizer — it does not poll the
-    // provider with the overflowing request.
     let turns = 48;
     let mut harness = auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
@@ -5645,7 +5231,6 @@ async fn a_rejected_in_run_summary_fails_the_run_closed_without_resending_the_ov
         ),
         "{outcome:?}"
     );
-    // One compaction run started and settled failed; nothing compacted.
     let compaction = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -5663,8 +5248,6 @@ async fn a_rejected_in_run_summary_fails_the_run_closed_without_resending_the_ov
             .iter()
             .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
     );
-    // The last provider request was the summarizer's, not a retry of the
-    // overflowing turn.
     let requests = harness.requests.lock().unwrap();
     let last = request_texts(requests.last().unwrap());
     assert!(
@@ -5679,7 +5262,6 @@ async fn a_rejected_in_run_summary_fails_the_run_closed_without_resending_the_ov
         })
         .unwrap();
     assert_eq!(markers, 0);
-    // The session is idle and usable afterwards.
     let session = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -5695,10 +5277,6 @@ async fn a_rejected_in_run_summary_fails_the_run_closed_without_resending_the_ov
 
 #[tokio::test]
 async fn an_in_run_compaction_that_cannot_start_fails_the_prompt_run_as_a_server_failure() {
-    // CX4 review: the compaction run's start (its row, `RunStarted`, and its
-    // `compacting` activity, one transaction) can fail in the store. The
-    // provider was never asked, so the prompt run must not blame the context
-    // or advise `/compact`.
     let mut harness = in_run_compaction_harness(48, 16 * 1024, "work so far").await;
     Connection::open(harness.workspace_path.join("sessions.sqlite3"))
         .unwrap()
@@ -5724,7 +5302,6 @@ async fn an_in_run_compaction_that_cannot_start_fails_the_prompt_run_as_a_server
         ),
         "{prompt:?}"
     );
-    // No compaction run exists, and the summarizer was never asked.
     assert!(!observed.iter().any(
         |event| matches!(&event.event, SessionEvent::RunStarted { run_id, .. } if *run_id != run)
     ));
@@ -5739,9 +5316,6 @@ async fn an_in_run_compaction_that_cannot_start_fails_the_prompt_run_as_a_server
 
 #[tokio::test]
 async fn cancelling_during_in_run_compaction_settles_both_runs_once() {
-    // The summarizer stalls; the user cancels the prompt run. The cascade
-    // cancels the compaction (it is owned by the prompt run), both settle
-    // Cancelled exactly once, no marker is written, and the session is idle.
     let turns = 48;
     let mut harness = auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
@@ -5784,7 +5358,6 @@ async fn cancelling_during_in_run_compaction_settles_both_runs_once() {
         )
         .await
         .unwrap();
-    // Both terminals arrive; their order depends on which task settles first.
     let mut observed = collect_until(&mut harness.events, finished_for(run)).await;
     if !observed.iter().any(|event| {
         matches!(
@@ -5838,7 +5411,6 @@ async fn cancelling_during_in_run_compaction_settles_both_runs_once() {
     harness.runtime.shutdown().await.unwrap();
 }
 
-/// Marker text the scripted summarizer treats as "never reply".
 const STALL_SUMMARY: &str = "__STALL__";
 
 #[test]
@@ -5896,8 +5468,6 @@ fn compaction_retention_preserves_recent_rollback_views_and_reclaims_covered_run
                 scope.map(|i| runs[i].to_string()), scope.map(|_| cutoff)],
         ).unwrap();
 
-        // Compare actual assembled messages before and after collection,
-        // including each of the three rollback states, in one transaction.
         let transaction = connection.transaction().unwrap();
         transaction
             .execute_batch("SAVEPOINT before_collection")
@@ -6052,11 +5622,6 @@ async fn repeated_in_run_compaction_retains_the_session_prefix_after_restart() {
 
 #[tokio::test]
 async fn an_in_run_marker_survives_restart_and_folds_into_a_later_between_run_compaction() {
-    // Run one compacts itself mid-run and completes. After a restart, a new
-    // prompt's context renders run one as prompt + in-run summary + retained
-    // turns (not all 48 results). When that session later compacts between
-    // runs, the between-run summarizer reads the already-summarized shape,
-    // and its marker supersedes the in-run one in assembly.
     let turns = 48;
     let mut harness = in_run_compaction_harness(turns, 16 * 1024, "work so far").await;
     let run = queue_prompt(
@@ -6124,7 +5689,6 @@ async fn an_in_run_marker_survives_restart_and_folds_into_a_later_between_run_co
         assert_eq!(texts.last().map(String::as_str), Some("and then?"));
     }
 
-    // Manual between-run compaction folds everything, in-run summary included.
     let compaction = compact_session(&runtime, session_id).await;
     let observed = collect_until(&mut events, finished_for(compaction)).await;
     assert!(observed.iter().any(|event| matches!(
@@ -6165,7 +5729,6 @@ async fn an_in_run_marker_survives_restart_and_folds_into_a_later_between_run_co
                 .any(|text| text.contains("between-run summary"))
         );
     }
-    // Rollback pops the between-run marker; the in-run marker applies again.
     runtime
         .command(
             CommandId::generate().unwrap(),
@@ -6194,11 +5757,6 @@ async fn an_in_run_marker_survives_restart_and_folds_into_a_later_between_run_co
 
 #[tokio::test]
 async fn a_provider_window_rejection_compacts_the_run_and_continues() {
-    // RR6 (b): the estimate said the request fit, the provider said it did
-    // not. The first such rejection used to fail the run with
-    // `provider_context_exceeded` (and wedge the next prompt on a known
-    // overflow). Now the loop treats the provider's verdict as authoritative,
-    // compacts its own turns at the boundary, and re-issues the turn.
     let overflows = Arc::new(AtomicUsize::new(0));
     let mut harness = auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
@@ -6211,8 +5769,6 @@ async fn a_provider_window_rejection_compacts_the_run_and_continues() {
                 overflows: Arc::clone(&overflows),
             }],
             loads: StdMutex::new(0),
-            // Wide enough that the estimate never trips on 12 tiny results;
-            // only the provider's scripted verdict can trigger compaction.
             context_window: Some(200_000),
             max_output_tokens: 1_024,
             provider_identity: true,
@@ -6237,8 +5793,6 @@ async fn a_provider_window_rejection_compacts_the_run_and_continues() {
         })
         .unwrap();
     assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
-    // Exactly one provider rejection, answered by exactly one in-run
-    // compaction, and every one of the 12 shell calls ran once.
     assert_eq!(overflows.load(Ordering::SeqCst), 1);
     let compactions = observed
         .iter()
@@ -6254,8 +5808,6 @@ async fn a_provider_window_rejection_compacts_the_run_and_continues() {
         )
         .unwrap();
     assert_eq!(calls, 12);
-    // The next prompt is admitted normally: the overflow was recovered, not
-    // recorded as a failed run whose basis the next prompt must avoid.
     let next = queue_prompt(&harness.runtime, harness.session_id, "more".to_owned()).await;
     let observed = collect_until(&mut harness.events, finished_for(next)).await;
     assert!(observed.iter().any(|event| matches!(
@@ -6266,11 +5818,6 @@ async fn a_provider_window_rejection_compacts_the_run_and_continues() {
 
 #[tokio::test]
 async fn an_empty_faulted_attempt_inside_the_replaced_span_keeps_replay_equal_to_live() {
-    // ENG-991: an empty faulted attempt is stored as a turn row but never
-    // joins the live transcript, so a cutoff counted from live assistant
-    // messages fell one short of the stored ordinal of the last replaced
-    // turn, and replay kept a turn the live run had summarized. The cutoff
-    // is now the stored ordinal the loop tracks per live turn.
     let faults = Arc::new(AtomicUsize::new(0));
     let mut harness = auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
@@ -6311,8 +5858,6 @@ async fn an_empty_faulted_attempt_inside_the_replaced_span_keeps_replay_equal_to
             .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. })),
         "the run must compact in-run"
     );
-    // The live run's last request is what the model saw; replaying the
-    // settled run renders it plus the final answer.
     let live = {
         let requests = harness.requests.lock().unwrap();
         requests.last().unwrap().messages().to_vec()
@@ -6341,11 +5886,6 @@ async fn an_empty_faulted_attempt_inside_the_replaced_span_keeps_replay_equal_to
 
 #[tokio::test]
 async fn an_exhausted_fold_admits_the_prompt_with_summary_only_history() {
-    // RR6 (c): after the fold ran and the retained transcript still does not
-    // fit, the prompt used to be refused with "automatic compaction ran N
-    // summarizer steps ... start a new session" — and every later prompt hit
-    // the same wall (3 sessions wedged in the audit). Now the run starts
-    // from the latest summary alone with a notice; nothing is deleted.
     for reject_prefix in [false, true] {
         let window: u32 = 32 * 1024;
         let mut retry_steps = vec![AutoCompactScript::Text("invalid summary".to_owned())];
@@ -6361,15 +5901,11 @@ async fn an_exhausted_fold_admits_the_prompt_with_summary_only_history() {
             vec![
                 AutoCompactScript::Text("a".repeat(run_bytes)),
                 AutoCompactScript::Text("b".repeat(run_bytes)),
-                // Prompt three: step one summarizes "a" and commits; the
-                // prompt's own send is rejected by the provider.
                 AutoCompactScript::Sequence(vec![
                     AutoCompactScript::Text(valid_summary("step one")),
                     AutoCompactScript::ContextOverflow,
                     AutoCompactScript::Text("invalid summary".to_owned()),
                 ]),
-                // The retry's step two is rejected too: the fold is exhausted.
-                // The retry then runs from the summary alone and completes.
                 AutoCompactScript::Sequence(retry_steps),
             ],
             Some(window),
@@ -6395,8 +5931,6 @@ async fn an_exhausted_fold_admits_the_prompt_with_summary_only_history() {
         assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
         let requests = harness.requests.lock().unwrap();
         let texts = request_texts(requests.last().unwrap());
-        // Notice, then the summary, then the prompt; none of the verbatim
-        // 80 KiB runs.
         assert_eq!(texts.len(), 2, "{texts:?}");
         if reject_prefix {
             assert!(texts[0].contains("recovered prefix"));
@@ -6429,7 +5963,6 @@ async fn an_exhausted_fold_admits_the_prompt_with_summary_only_history() {
                 .any(|text| text.contains(&"b".repeat(run_bytes)))
         );
         drop(requests);
-        // Nothing was deleted: the session still holds every prompt.
         let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
         let prompts: u64 = connection
         .query_row(
@@ -6442,18 +5975,10 @@ async fn an_exhausted_fold_admits_the_prompt_with_summary_only_history() {
     }
 }
 
-/// The live splice removes every message before the first kept assistant
-/// turn, including the steering and the runtime notice that preceded that
-/// turn's request. Replay must drop them too, or a run that compacted right
-/// after a slice checkpoint (or a steer) assembles a message the live request
-/// never carried. Live context is built and spliced with the real boundary;
-/// replay goes through `append_run_turns` with the matching cutoff.
 #[test]
 fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
     use crate::runtime::TurnNotice;
     let assistant = |n: u32| Message::assistant(format!("turn {n}"));
-    // Seven turns, four kept: turn 4 is the first kept turn. It was the
-    // first turn of a new slice, and a steer joined before it.
     let mut live = vec![Message::user("prompt")];
     for n in 1..=7 {
         if n == 4 {
@@ -6467,7 +5992,6 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
     assert_eq!(replaced_turns, 3);
     let summary = Message::user(format!("{IN_RUN_COMPACTION_PREAMBLE}\n\nsummary"));
     live.splice(1..1 + replace_through, [summary]);
-    // The live splice took the steer and the notice with the summarized span.
     assert!(!live.contains(&Message::user(TurnNotice::Continuation.text())));
     assert!(!live.contains(&Message::user("steer before four")));
 
@@ -6502,7 +6026,6 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
     .unwrap();
     assert_eq!(replayed, live);
 
-    // A notice on a kept turn after the first one survives on both sides.
     let mut live = vec![Message::user("prompt")];
     for n in 1..=7 {
         if n == 5 {
@@ -6547,11 +6070,6 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
     assert!(replayed.contains(&Message::user(TurnNotice::Report.text())));
 }
 
-/// Delivered sub-agent answers (ADR-0054 § 4) splice like steering: the one
-/// before the first kept turn went with the summarized span, after that
-/// boundary's steering; one before a later kept turn survives. Replay places
-/// both exactly where the live run did, and an answer delivered after the
-/// run settled follows the run.
 #[test]
 fn replay_drops_and_keeps_delivered_answers_as_the_in_run_splice_did() {
     let assistant = |n: u32| Message::assistant(format!("turn {n}"));
@@ -6616,21 +6134,14 @@ fn in_run_compaction_boundary_keeps_the_recent_turns_with_their_results() {
     use crate::sessions::in_run_compaction_boundary as boundary;
     let assistant = || Message::assistant("t");
     let results = || Message::tool_results(vec![]);
-    // Six turns, each assistant + results. Keeping four replaces the first
-    // two turns (four messages) and reports cutoff 2.
     let run: Vec<Message> = (0..6).flat_map(|_| [assistant(), results()]).collect();
     assert_eq!(boundary(&run, 4), Some((4, 2)));
-    // Steering applied before the first kept turn is replaced with the
-    // summarized span — assembly drops steering with `applied_before` up to
-    // and including the first kept turn.
     let mut with_steer = run.clone();
     with_steer.insert(4, Message::user("steer"));
     assert_eq!(boundary(&with_steer, 4), Some((5, 2)));
-    // Exactly the keep count: nothing to replace.
     let short: Vec<Message> = (0..4).flat_map(|_| [assistant(), results()]).collect();
     assert_eq!(boundary(&short, 4), None);
     assert_eq!(boundary(&[], 4), None);
-    // A prior in-run summary at the head is replaced along with the turns.
     let mut folded = vec![Message::user("summary so far")];
     folded.extend((0..5).flat_map(|_| [assistant(), results()]));
     assert_eq!(boundary(&folded, 4), Some((3, 1)));
@@ -6638,15 +6149,9 @@ fn in_run_compaction_boundary_keeps_the_recent_turns_with_their_results() {
 
 #[tokio::test]
 async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verbatim() {
-    // #97 fixed the between-run summarizer joining truncated turns with a
-    // newline through a mid-token cut. The in-run summarizer takes its own
-    // path (`Runtime::summarize`), so it must continue a cut reply the same
-    // way and concatenate the pieces byte-for-byte; a heading split at the
-    // cut still validates and the committed summary is the whole text.
     for with_goal in [false, true] {
         let turns = 48;
         let summary = valid_summary("continued");
-        // Cut inside the word "Decisions" so the seam splits a required heading.
         let cut = summary.find("Decis").unwrap() + "Decis".len();
         let script = AutoCompactScript::ShellRepeatedlyWithTruncatedSummaries {
             turns,
@@ -6720,7 +6225,6 @@ async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verba
             .filter(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
             .count();
         assert!(compactions >= 1);
-        // Every stored in-run summary is the full text: heading intact, no seam.
         let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
         let mut statement = connection
             .prepare("SELECT summary FROM session_compactions WHERE scope_run_id = ?1")
@@ -6743,8 +6247,6 @@ async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verba
                 "a newline was inserted at the cut: {text}"
             );
         }
-        // Each summarizer exchange was two provider requests: the cut reply and
-        // its continuation carrying the truncation notice.
         let requests = harness.requests.lock().unwrap();
         let continuations = requests
             .iter()
@@ -6782,14 +6284,8 @@ async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verba
     }
 }
 
-/// End to end: a run reaches its slice report, keeps working, and then
-/// compacts in-run (more than once). Whatever the splices removed — including
-/// the report and continuation notices when their turns are summarized or are
-/// the first kept turn — a follow-up assembles exactly the live context, and
-/// the reference oracle agrees. (AP3a review gap G2.)
 #[tokio::test]
 async fn compacting_after_a_slice_report_replays_the_live_context() {
-    // Enough turns to compact twice after the report at turn 17.
     let calls = 22 * crate::MAX_TOOL_CALLS_PER_TURN;
     let mut harness = auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
@@ -6802,8 +6298,6 @@ async fn compacting_after_a_slice_report_replays_the_live_context() {
                 AutoCompactScript::Text("follow-up done".to_owned()),
             ],
             loads: StdMutex::new(0),
-            // Sixteen 400-byte shell results per turn fill a 24k window a
-            // few turns after the report, and again later.
             context_window: Some(24 * 1024),
             max_output_tokens: 1_024,
             provider_identity: true,
@@ -6812,8 +6306,6 @@ async fn compacting_after_a_slice_report_replays_the_live_context() {
     )
     .await;
     let run = queue_prompt(&harness.runtime, harness.session_id, "do it".to_owned()).await;
-    // ~350 durable tool calls take a few seconds alone; under a loaded
-    // parallel suite allow more than the shared helper's 30 s.
     let mut observed = Vec::new();
     tokio::time::timeout(Duration::from_secs(120), async {
         loop {
@@ -7540,8 +7032,6 @@ fn exact_inputs_reject_capacity_overflow_without_cutting_or_deleting_sources() {
 
 #[tokio::test]
 async fn oversized_legacy_inputs_fail_only_the_affected_run() {
-    // Older capped records could cover more exact input than the storage
-    // window. Upgrading must preserve those rows and keep the fleet usable.
     let inputs = vec!["original constraint ".repeat(8_000); 40];
     let (directory, connection, session, _) = record_fixture(&inputs);
     let workspace: String = connection

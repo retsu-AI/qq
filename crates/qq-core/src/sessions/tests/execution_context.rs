@@ -85,7 +85,6 @@ async fn command_receipt_is_durable_before_live_output_and_survives_reopen() {
             finished, live,
             "completion and reopen must retain the same process identity"
         );
-        // A cancelled command ran: its captured output is the durable result.
         let result: String = connection
             .query_row(
                 "SELECT result FROM tool_calls WHERE run_id=?1",
@@ -132,7 +131,6 @@ async fn cancellation_at_spawn_preserves_the_process_receipt() {
         .await
         .unwrap()
         .unwrap();
-    // Teardown has discarded the observer, but must still drain the owned write.
     release.send(()).unwrap();
     collect_until(&mut harness.events, finished_for(run)).await;
     let context: Option<String> = harness

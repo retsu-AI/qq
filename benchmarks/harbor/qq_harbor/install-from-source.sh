@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Cargo-build fallback for the QQ Harbor adapter.
-#
-# Builds the qq binary inside the task container from a source tarball the
-# adapter uploaded. This is the documented fallback path, not the default:
-# it downloads a Rust toolchain and compiles the workspace, which can take
-# many minutes per container. Prefer QQ_BINARY_PATH with a prebuilt binary.
-#
-# Usage: install-from-source.sh SOURCE_TARBALL DEST_BINARY
 set -euo pipefail
 
 src_tar="${1:?usage: install-from-source.sh SOURCE_TARBALL DEST_BINARY}"
@@ -21,7 +13,6 @@ fi
 if ! command -v cargo >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --profile minimal
-  # shellcheck disable=SC1091
   . "$HOME/.cargo/env"
 fi
 

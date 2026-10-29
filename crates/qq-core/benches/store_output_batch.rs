@@ -1,9 +1,3 @@
-//! `store_output_batch`: eight concurrent runs each streaming small text
-//! deltas through the durable session runtime, so the store's output lane
-//! sees interleaved `append_text` jobs from eight streams. Reports the batch
-//! wall time and the derived per-delta cost. Exercises the group-commit path
-//! end to end through the public runtime API; the store itself is private.
-
 use std::{
     hint::black_box,
     path::PathBuf,
@@ -28,9 +22,6 @@ const DELTAS_PER_STREAM: usize = 256;
 const DELTA_BYTES: usize = 64;
 const DEFAULT_ITERATIONS: u64 = 5;
 
-/// Emits `DELTAS_PER_STREAM` deltas of `DELTA_BYTES`, yielding between each
-/// so the eight streams interleave at the store instead of arriving as eight
-/// contiguous bursts.
 struct DeltaProvider;
 
 impl Provider for DeltaProvider {

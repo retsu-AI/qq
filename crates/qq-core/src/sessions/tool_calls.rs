@@ -1,6 +1,3 @@
-//! Tool-call rows and their approval state: start/output/finish, spills,
-//! policy load, denial, and approval conclusion.
-
 use super::*;
 
 pub(super) fn start_tool_call(
@@ -29,9 +26,6 @@ pub(super) fn start_tool_call(
     Ok(event)
 }
 
-/// Appends a `ToolCallOutputDelta` event for a running call. The chunk lives
-/// only in the event log (batched like text deltas so long builds render
-/// live); the call's bounded result remains the single durable output.
 pub(super) fn append_tool_call_output(
     connection: &mut Connection,
     store_id: StoreId,
@@ -62,8 +56,6 @@ pub(super) fn append_tool_call_output(
     Ok(event)
 }
 
-/// Records native process evidence, including an unresolved invocation whose
-/// model run was interrupted. This grants no new execution authority.
 pub(super) fn record_tool_process(
     connection: &mut Connection,
     identity: RunIdentity,
@@ -132,8 +124,6 @@ pub(super) fn finish_tool_call(
     Ok(commit)
 }
 
-/// A settled tool result. `context_exhausted` means the result is durable
-/// but cannot enter model context, so the run must stop before another turn.
 #[derive(Debug)]
 pub(super) struct ToolCallCommit {
     pub(super) context_exhausted: bool,
@@ -178,14 +168,6 @@ pub(super) fn finish_tool_call_in_transaction(
         )
         .optional()?
         .ok_or(SessionRuntimeError::ToolCallNotFound)?;
-    // The display payload is deliberately absent from the capacity check: it
-    // never enters model context, so it cannot crowd the context budget. The
-    // provider call id does enter the next ToolResult block and is counted.
-    // Completion checks have no provider turn. Their bounded result is audit
-    // evidence; only the goal notice may enter a later model context.
-    // A result that ran is durable even when it cannot enter model context:
-    // the call settles with its real outcome, and the caller then stops the
-    // run for context exhaustion instead of another model turn.
     let context_exhausted = identity.kind != RunKind::GoalCheck
         && match reserve_tool_result_capacity(
             transaction,
@@ -247,8 +229,6 @@ pub(super) fn finish_tool_call_in_transaction(
     for update in &file_states {
         record_session_file(transaction, identity.session_id, update, now)?;
     }
-    // The complete output and the result whose marker cites it commit
-    // together: a marker never names a handle the store does not hold.
     if let Some(spill) = spill {
         store_tool_spill(transaction, identity, tool_call_id, &tool_name, spill, now)?;
     }
@@ -261,9 +241,6 @@ pub(super) fn finish_tool_call_in_transaction(
     Ok(ToolCallCommit { context_exhausted })
 }
 
-/// Writes one complete output under its call. Past the per-session cap, the
-/// oldest rows of runs that are no longer running lose their content; their
-/// rows remain so a later read of the handle says `spill_evicted`.
 pub(super) fn store_tool_spill(
     transaction: &Connection,
     identity: RunIdentity,
@@ -323,15 +300,6 @@ pub(super) fn store_tool_spill(
     Ok(())
 }
 
-/// One stored output for `read_tool_result`. The call-id prefix locates the
-/// row; the digest prefix must agree so a handle from another store cannot
-/// alias a row here; the session must be the caller's.
-///
-/// Two kinds of row answer a handle. A `tool_spills` row holds the complete
-/// output of a call whose own bound cut it. When no spill matches, the
-/// call's persisted `tool_calls.result` answers instead: that is the text a
-/// turn-budget cut names when the call itself did not spill, digested as
-/// stored, so the handle in the marker pins exactly the row it was made from.
 pub(super) fn read_tool_spill(
     connection: &Connection,
     session_id: SessionId,
@@ -409,9 +377,6 @@ pub(super) fn read_tool_spill(
     }
 }
 
-/// Upserts one file-state entry, evicting the least-recently recorded paths
-/// when the per-session bound is exceeded; an evicted file simply needs a
-/// re-read before its next edit.
 pub(super) fn record_session_file(
     transaction: &Connection,
     session_id: SessionId,
@@ -427,9 +392,6 @@ pub(super) fn record_session_file(
                  updated_at_ms = excluded.updated_at_ms",
         params![session, update.path, update.hash, now],
     )?;
-    // Eviction is gated on the count: an update to a known path cannot grow
-    // the set, and a session under the bound has nothing to evict, so the
-    // ordered sub-select runs only when a new path pushed the session over.
     let count: u64 = transaction.query_row(
         "SELECT COUNT(*) FROM session_files WHERE session_id = ?1",
         params![session],
@@ -448,18 +410,12 @@ pub(super) fn record_session_file(
     Ok(())
 }
 
-/// Effective local mode plus the ancestor ceilings applied before it.
 #[derive(Clone, Debug)]
 pub(super) struct ToolApprovalPolicy {
     pub mode: ApprovalMode,
     pub ancestors: Vec<ApprovalMode>,
 }
 
-/// Recover the immutable policy inputs recorded when the gate requested this
-/// approval. Never infer a catalog effect from an arbitrary external tool name.
-/// Shell and fetch previews retain the exact command/host used by admission;
-/// mutations and external tools have the same ceiling policy. Refused hosts
-/// never reach an approval request: admission denies them under every mode.
 pub(super) fn load_pending_approval_class(
     connection: &Connection,
     workspace_id: WorkspaceId,
@@ -484,9 +440,6 @@ pub(super) fn load_pending_approval_class(
     Ok((name, inputs.into_class()))
 }
 
-/// Backfill only unresolved holds before a reader may prune delivery events.
-/// An incomplete legacy hold keeps no authority inputs and cannot be approved;
-/// it must not prevent other sessions from opening. Never guess its class.
 pub(super) fn migrate_pending_approval_inputs(
     connection: &Connection,
 ) -> Result<(), SessionRuntimeError> {
@@ -683,8 +636,6 @@ pub(super) fn settle_unstarted_tool_call(
     Ok(event)
 }
 
-/// What a hold tells the client about the call, by kind. At most one is set
-/// for a given call; the event carries each as its own optional field.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ApprovalPreviews {
@@ -796,8 +747,6 @@ pub(super) fn conclude_tool_approval(
         .optional()?
         .ok_or(SessionRuntimeError::ToolCallNotFound)?;
     if let Some(resolution) = resolution {
-        // A client resolution won the race; its transaction already
-        // persisted the state change and published the event.
         return match parse_approval_resolution(&resolution)? {
             ApprovalResolution::ApprovedOnce => Ok(ConcludedApproval::Approved),
             ApprovalResolution::Denied | ApprovalResolution::DeniedTimeout => {

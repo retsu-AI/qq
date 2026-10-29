@@ -1,21 +1,11 @@
-//! Model-context assembly from persisted rows: message loading, the pruned
-//! assembly, legacy run replay, the runtime notice, and history search.
-
 use super::*;
 
-/// One stored `<attached-file>` block of a prompt, in prompt order. `content`
-/// is `None` when the per-session cap reclaimed the bytes.
 struct StoredAttachment {
     path: String,
     window: Option<(usize, usize, usize)>,
     content: Option<String>,
 }
 
-/// Persists the attachments a prompt embedded so later assembly reproduces
-/// the request the model saw. Bytes are stored once per `(session, digest,
-/// window)`; past the per-session cap, the oldest blobs of runs that are no
-/// longer running lose their content, and their rows remain so reconstruction
-/// renders an explicit evicted block.
 pub(super) fn store_message_attachments(
     transaction: &Connection,
     session_id: SessionId,
@@ -29,10 +19,6 @@ pub(super) fn store_message_attachments(
             None => attachment.digest.clone(),
             Some((start, end, _)) => format!("{}:{start}-{end}", attachment.digest),
         };
-        // `INSERT OR IGNORE` keeps the first copy (and its eviction state):
-        // an evicted blob is not resurrected by a later prompt attaching the
-        // same bytes, which would make the earlier prompt's rendering depend
-        // on the later one.
         transaction.execute(
             "INSERT OR IGNORE INTO attachment_blobs(session_id, blob_key, content, content_bytes,
                                                    created_at_ms)
@@ -74,7 +60,6 @@ pub(super) fn store_message_attachments(
     )?;
     if held > MAX_SESSION_ATTACHMENT_BYTES {
         let mut excess = held - MAX_SESSION_ATTACHMENT_BYTES;
-        // A blob is reclaimable once no running run's prompt references it.
         let mut statement = transaction.prepare(
             "SELECT b.blob_key, b.content_bytes FROM attachment_blobs b
              WHERE b.session_id = ?1 AND b.content IS NOT NULL
@@ -107,11 +92,6 @@ pub(super) fn store_message_attachments(
     Ok(())
 }
 
-/// Every stored attachment of the retained prompts (those in the ordinal
-/// window) and of the steering applied to their runs, keyed by message id
-/// and in prompt order, with the blob bytes joined in. Sessions without
-/// attachments pay one indexed lookup that returns nothing; archived prompts
-/// behind the cutoff are never read.
 fn load_retained_attachments(
     transaction: &Connection,
     session: &str,
@@ -245,11 +225,6 @@ pub(super) fn load_message_text(
     Ok((output, refusal))
 }
 
-/// Assembles the provider messages for one session: the latest compaction
-/// summary (when one exists), then the verbatim transcript after its cutoff,
-/// with read-only tool results outside the recency window replaced by stubs.
-/// The stored rows are never modified — pruning and summarization are
-/// properties of assembly alone.
 pub(super) fn load_model_context(
     transaction: &Connection,
     session_id: SessionId,
@@ -259,13 +234,6 @@ pub(super) fn load_model_context(
         .map(|(context, _)| context)
 }
 
-/// Assembles model context with a fixed number of session-scoped queries:
-/// the prompts (with their run's status and outcome and their assembled
-/// text), every committed model turn for those runs, every recorded tool
-/// result, every applied steering message, and — only for stores that
-/// predate `model_turns` — the legacy assistant rows. Assembly then runs in
-/// memory in prompt order, so the cost is proportional to the context and not
-/// to the number of messages times the number of tables.
 pub(super) fn load_model_context_with_rewrite_status(
     transaction: &Connection,
     session_id: SessionId,
@@ -275,19 +243,12 @@ pub(super) fn load_model_context_with_rewrite_status(
         .map(|(context, rewritten, _)| (context, rewritten))
 }
 
-/// One prompt and the run it produced, as assembly laid them out: the
-/// prompt's message ordinal and the index in the assembled context of the
-/// first message *after* the unit. A summarizer that cannot read the whole
-/// transcript cuts at a unit boundary so no run is split from its prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ContextUnit {
     pub(super) prompt_ordinal: u64,
     pub(super) end: usize,
 }
 
-/// [`load_model_context_with_rewrite_status`] that also reports where each
-/// prompt/run unit ends in the returned context. The leading summary
-/// message, when present, belongs to no unit.
 pub(super) fn load_model_context_with_units(
     transaction: &Connection,
     session_id: SessionId,
@@ -297,14 +258,8 @@ pub(super) fn load_model_context_with_units(
         .map(|assembled| (assembled.context, assembled.rewritten, assembled.units))
 }
 
-/// The stored effect class of every tool result in `context`, in block
-/// order (`None` for rows that predate the effect column). A run's live
-/// overflow prune classifies the results it inherited by these, as assembly
-/// did; results are never added, removed or reordered in that prefix, so
-/// the order is stable where provider call ids are not unique.
 pub(super) type ResultEffects = Vec<Option<EffectClass>>;
 
-/// [`load_model_context`] plus the [`ResultEffects`] of its tool results.
 pub(super) fn load_model_context_with_effects(
     transaction: &Connection,
     session_id: SessionId,
@@ -326,15 +281,11 @@ pub(super) fn load_model_context_with_effects(
 
 struct Assembled {
     context: Vec<Message>,
-    /// Whether pruning rewrote any result.
     rewritten: bool,
     units: Vec<ContextUnit>,
-    /// Stored effects by (message, block) position in `context`.
     effects: HashMap<(usize, usize), EffectClass>,
 }
 
-/// `window_start` assembles only the units after that ordinal, ignoring the
-/// compaction summary (side-question capture reads one unit at a time).
 fn assemble_model_context(
     transaction: &Connection,
     session_id: SessionId,
@@ -351,10 +302,6 @@ fn assemble_model_context(
             .as_ref()
             .map_or(0, |compaction| compaction.cutoff_ordinal)
     });
-    // The prune watermark (schema 43, ADR-0056 § 6): stale read-only results
-    // are stubbed as if the context ended at this turn, so a run's first
-    // request extends the previous run's last one until the next seam moves
-    // it. `None` until the session's first seam: nothing is stubbed.
     let watermark: Option<(u64, u32)> = transaction
         .query_row(
             "SELECT prune_through_ordinal, prune_through_turn FROM sessions WHERE id = ?1",
@@ -367,12 +314,9 @@ fn assemble_model_context(
         )
         .optional()?
         .flatten();
-    // SQLite integers are i64; `u64::MAX` means "everything".
     let through_ordinal = through_ordinal.min(u64::try_from(i64::MAX).unwrap_or(u64::MAX));
     let session = session_id.to_string();
 
-    // Prompts in ordinal order, each with its run's status and outcome and its
-    // full text: the base `output` plus every streamed chunk in chunk order.
     struct Prompt {
         message_id: String,
         run_id: String,
@@ -433,12 +377,6 @@ fn assemble_model_context(
     let mut delivered =
         deliveries::retained_deliveries(transaction, &session, through_ordinal, cutoff_ordinal)?;
 
-    // Every committed turn of a retained run, grouped by run. The retained
-    // runs are exactly those whose prompt the query above selected: the
-    // same session, ordinal window, role, and state filter, expressed as a
-    // join so the archive behind the compaction cutoff is never read. Old
-    // history therefore costs nothing at assembly; recall goes through
-    // `search_history`.
     let mut turns: HashMap<String, Vec<StoredTurn>> = HashMap::new();
     let mut statement = transaction.prepare_cached(
         "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated, t.notice,
@@ -472,7 +410,6 @@ fn assemble_model_context(
              ORDER BY t.run_id, t.turn_ordinal",
     )?;
     let mut rows = statement.query(params![session, through_ordinal, cutoff_ordinal])?;
-    // Include opaque replay envelopes in the allocation budget before decoding.
     while let Some(row) = rows.next()? {
         let raw = row
             .get_ref(2)?
@@ -516,11 +453,6 @@ fn assemble_model_context(
     drop(rows);
     drop(statement);
 
-    // Every recorded tool result, keyed by run, turn, and provider call id, with the
-    // effect class the call was admitted under (absent for rows written
-    // before schema 26), the call's own id, and the digest of its spill when
-    // one was stored: the turn-budget projection below names one or the
-    // other as the recall path, exactly as the live run did.
     let mut results: HashMap<String, RecordedTurnResults> = HashMap::new();
     let mut statement = transaction.prepare_cached(
         "SELECT c.run_id, c.provider_call_id, c.result, c.is_error, c.effect, c.turn_ordinal,
@@ -567,8 +499,6 @@ fn assemble_model_context(
     }
     drop(statement);
 
-    // Applied steering, per run, in the order it was applied. Each carries
-    // the ordinal of the turn whose request first included it.
     let mut steering: HashMap<String, std::collections::VecDeque<(u32, String)>> = HashMap::new();
     let mut statement = transaction.prepare_cached(
         "SELECT s.run_id, s.turn_ordinal, s.output, s.id, s.input_json
@@ -591,9 +521,6 @@ fn assemble_model_context(
     })?;
     for row in rows {
         let (run_id, ordinal, text, message_id, input_json) = row?;
-        // Steering that attached files is re-rendered from the stored bytes
-        // like a prompt; text-only steering (and rows without attachments)
-        // keep their rendered text.
         let text = match attachments.remove(&message_id) {
             Some(stored) => {
                 let parts = parse_input_parts(input_json.as_deref())?;
@@ -620,8 +547,6 @@ fn assemble_model_context(
     let mut context = Vec::new();
     let mut effects = HashMap::new();
     let mut units = Vec::with_capacity(prompts.len());
-    // The assembled length through the watermark turn: pruning reads only
-    // `context[..prune_limit]`.
     let mut prune_limit = 0_usize;
     if let Some(compaction) = compaction {
         context.push(Message::user(format!(
@@ -638,9 +563,6 @@ fn assemble_model_context(
     }
     for prompt in prompts {
         let prompt_ordinal = prompt.ordinal;
-        // A prompt whose files were persisted at run start is reassembled
-        // from those bytes, exactly as its run first sent it. Prompts that
-        // never started (or predate schema 29) keep their placeholder text.
         let text = match attachments.remove(&prompt.message_id) {
             Some(stored) => {
                 let parts = parse_input_parts(prompt.input_json.as_deref())?;
@@ -661,10 +583,6 @@ fn assemble_model_context(
             context.push(Message::user(notice));
         }
         context.push(Message::user(text));
-        // Reconstruct each run immediately after its prompt rather than
-        // following message-row ordinals. Follow-up prompts can be queued
-        // while the prior run is active, so its later committed output still
-        // belongs before the follow-up in model context.
         if matches!(
             prompt.status.as_str(),
             "completed"
@@ -702,8 +620,6 @@ fn assemble_model_context(
                         parse_id(&prompt.run_id)?,
                         &mut context,
                     )?;
-                    // A run that settled before committing a turn can still
-                    // own delivered answers (its child finished first).
                     for (_, text) in delivered.remove(&prompt.run_id).unwrap_or_default() {
                         context.push(Message::user(text));
                     }
@@ -728,8 +644,6 @@ fn assemble_model_context(
             end: context.len(),
         });
     }
-    // Pruning rewrites results in place and never adds or removes messages,
-    // so the unit ends computed above still index this context.
     let rewritten = prune_stale_tool_results(&mut context[..prune_limit], &effects);
     Ok(Assembled {
         context,
@@ -739,8 +653,6 @@ fn assemble_model_context(
     })
 }
 
-/// Capture complete recent units with bounded payload allocation. SQL preflight
-/// measures raw storage before the existing assembler copies or decodes a unit.
 pub(super) fn capture_side_context(
     connection: &Connection,
     session_id: SessionId,
@@ -832,9 +744,6 @@ pub(super) fn capture_side_context(
         newest.push(unit);
     }
     let mut active_context = Vec::new();
-    // Include the current prompt even when its run is unfinished, but never
-    // manufacture results for in-flight tools. Completed units above remain
-    // provider-valid; current partial output is explicitly omitted.
     let active_prompt: Option<(Option<String>, Option<String>)> = connection.query_row(
         "SELECT CASE WHEN length(CAST(m.output AS BLOB))
                 + COALESCE(length(CAST(r.goal_initial_notice AS BLOB)),0) <= ?2 THEN m.output ELSE NULL END,
@@ -853,9 +762,6 @@ pub(super) fn capture_side_context(
             format!("[Current main task; unfinished output and tool exchanges omitted]\n{prompt}");
         remaining = remaining.saturating_sub(prompt.len());
         active_context.push(Message::user(prompt));
-        // Text-only committed assistant output is quoted as captured evidence,
-        // not replayed as an assistant/tool protocol turn. Streamed text lives
-        // in message_chunks; the preflight sums both before anything is read.
         let mut statement = connection.prepare_cached(
             "SELECT m.id, length(CAST(m.output AS BLOB)) + COALESCE((
                     SELECT SUM(length(CAST(c.text AS BLOB))) FROM message_chunks c
@@ -917,10 +823,6 @@ pub(super) fn capture_side_context(
 
 type RecordedTurnResults = HashMap<u32, HashMap<String, RecordedResult>>;
 
-/// The live overflow-prune seam: the run's prompt and `through_turn`, its
-/// newest committed turn. A watermark already at or past it stays. A run
-/// without a prompt row (a compaction run) has no seam to record: that is a
-/// caller error, never a silent success the next assembly would contradict.
 pub(super) fn advance_prune_watermark(
     connection: &mut Connection,
     identity: RunIdentity,
@@ -956,8 +858,6 @@ pub(super) fn advance_prune_watermark(
     Ok(())
 }
 
-/// The proactive-threshold seam: the newest committed turn of any prompt
-/// before this run's. Returns whether the watermark moved.
 pub(super) fn advance_prune_watermark_before_prompt(
     connection: &mut Connection,
     identity: RunIdentity,
@@ -985,20 +885,14 @@ pub(super) fn advance_prune_watermark_before_prompt(
     Ok(moved == 1)
 }
 
-/// One stored tool result as context assembly reads it.
 pub(super) struct RecordedResult {
     pub(super) content: String,
     pub(super) is_error: bool,
     pub(super) effect: Option<EffectClass>,
-    /// The call's own id: with `spill_digest`, what a turn-budget cut's
-    /// marker names as the recall path.
     pub(super) id: ToolCallId,
-    /// The digest of the complete output when the call spilled it.
     pub(super) spill_digest: Option<String>,
 }
 
-/// Assistant rows from stores that predate `model_turns`: one query per such
-/// run, which only legacy sessions ever pay.
 pub(super) fn append_legacy_run_messages(
     connection: &Connection,
     run_id: RunId,
@@ -1070,14 +964,6 @@ pub(super) fn runtime_notice(outcome: &RunOutcome) -> Option<String> {
     ))
 }
 
-/// Replaces read-only tool results older than the recency window with
-/// short stubs (the result's header line, when it has one, then one line). A result is prunable when the call was admitted with the
-/// `read_only` effect class (`effects` maps assembled message/block positions
-/// to their stored effects) — its output is re-derivable on demand; mutating, shell, and
-/// external outputs are not. Rows recorded before the effect was stored fall
-/// back to the built-in read-only names. The window keeps the last
-/// [`CONTEXT_PRUNE_KEEP_TURNS`] model turns (assistant messages) verbatim.
-/// `is_error` is preserved so an error result stays an error stub.
 pub(crate) fn prune_stale_tool_results(
     context: &mut [Message],
     effects: &HashMap<(usize, usize), EffectClass>,
@@ -1095,8 +981,6 @@ pub(crate) fn prune_stale_tool_results(
     else {
         return false;
     };
-    // A provider ID is local to one assistant turn, not the session. Retain
-    // only that turn's call metadata while visiting its results.
     let mut calls = HashMap::new();
     let mut rewritten = false;
     for (message_index, message) in context[..window_start].iter_mut().enumerate() {
@@ -1165,9 +1049,6 @@ pub(crate) fn prune_stale_tool_results(
     rewritten
 }
 
-/// The stub replacing a prunable read-only result, or `None` when the result
-/// must stay verbatim (unknown call, non-read-only tool, or already smaller
-/// than the stub would be).
 pub(super) fn prunable_stub(
     calls: &HashMap<String, (String, String)>,
     effect: Option<EffectClass>,
@@ -1191,15 +1072,6 @@ pub(super) fn prunable_stub(
     } else {
         "call it again if needed"
     };
-    // A live run prunes again on every overflowing turn. A stub is never
-    // stubbed again: the second stub would name the first stub's size, and
-    // replay, which stubs the stored row once, would disagree with the
-    // request the model saw. Only the exact form this call would produce
-    // counts: an optional header line that passes the same bounded
-    // `header_line` check the stub was built with, then the stub line with
-    // this call's name, arguments and hint and a `u64` size. Every part is
-    // bounded, so a real result that matched would be stub-sized and
-    // keeping it costs nothing.
     let header_tool = if name == "read_file" { "read" } else { name };
     let last = match content.split_once('\n') {
         Some((_, rest)) if rest.contains('\n') => None,
@@ -1221,16 +1093,8 @@ pub(super) fn prunable_stub(
     {
         return None;
     }
-    // A result that follows the header convention keeps its header: the
-    // counts, window, and cursor it carries let the model continue without
-    // re-running the whole call. `read_file` names its header `read` and is
-    // the one tool whose hash would mislead here: `if_changed_since` with
-    // that hash returns no body, and the body is what pruning removed.
     let size = content.len();
     let header = if name == "read_file" {
-        // The hash is the only ` h:` token after the path, and no later field
-        // can contain one; searching from the end leaves a path that happens
-        // to contain ` h:` intact.
         crate::tools::header_line("read", content).map(|header| {
             match header.rfind(" h:").map(|at| {
                 let end = header[at + 1..]
@@ -1256,21 +1120,15 @@ pub(super) fn prunable_stub(
     (content.len() > stub.len()).then_some(stub)
 }
 
-/// What a pruned `read_file` stub tells the model. A re-read with
-/// `if_changed_since` would return only an `unchanged` header.
 const PRUNED_READ_REREAD: &str = "the text is no longer in context: read_file the lines you \
 need again, without if_changed_since";
 
-/// `h:` followed by the twelve-digit short hash, or `h:-` when the file was
-/// too large to hash (`tools/read.rs`).
 fn is_read_hash_token(token: &str) -> bool {
     token.strip_prefix("h:").is_some_and(|hash| {
         hash == "-" || (hash.len() == 12 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
     })
 }
 
-/// The byte weight the assembled context contributes to the session budget:
-/// message text, tool-call names and arguments, and (pruned) tool results.
 pub(super) fn context_bytes(messages: &[Message]) -> usize {
     messages
         .iter()
@@ -1295,10 +1153,6 @@ pub(super) fn context_bytes(messages: &[Message]) -> usize {
         )
 }
 
-/// Measures the session's context as the next run would assemble it —
-/// summary plus post-cutoff transcript with pruning applied — plus any text
-/// still streaming into the current turn's message, which has not joined a
-/// committed turn yet but will.
 pub(super) fn assembled_context_bytes(
     transaction: &Connection,
     session_id: SessionId,
@@ -1321,8 +1175,6 @@ pub(super) fn assembled_context_bytes(
         .saturating_add(usize::try_from(streaming_bytes).unwrap_or(usize::MAX)))
 }
 
-/// Empty truncated/faulted attempts never joined the live transcript.
-/// Use the same predicate when choosing the first kept turn and replaying it.
 pub(super) fn turn_is_replayed(
     content_json: &str,
     truncated: bool,
@@ -1342,7 +1194,6 @@ pub(super) fn turn_is_replayed(
     .has_content())
 }
 
-/// One committed model turn as context assembly reads it.
 pub(super) struct StoredTurn {
     pub(super) strict_projection: bool,
     pub(super) checkpoint_projection_required: bool,
@@ -1351,27 +1202,11 @@ pub(super) struct StoredTurn {
     pub(super) legacy_projection: bool,
     pub(super) ordinal: u32,
     pub(super) content_json: String,
-    /// The provider cut the turn at its output limit; the truncation notice
-    /// followed it.
     pub(super) truncated: bool,
-    /// The runtime notice placed before the turn's request.
     pub(super) notice: Option<crate::runtime::TurnNotice>,
     pub(super) goal_notices: Vec<crate::runtime::OrderedTurnNotice>,
 }
 
-/// Replays one run's committed turns into `context`: each assistant turn,
-/// then exactly one result per `ToolCall` block in block order. Applied
-/// steering, then the turn's runtime notice (slice checkpoint or
-/// continuation), go immediately before the turn whose request first carried
-/// them, and the output-limit notice goes after a truncated turn. An in-run
-/// marker drops what the live splice replaced: the turns through its cutoff,
-/// and the steering and notice before the first kept turn.
-///
-/// Results pass through the same per-turn output budget the live run applied
-/// (`TurnOutputBudget`, in block order, which is call order), so a turn whose
-/// results together exceeded the budget replays exactly the reduced text the
-/// model saw rather than the larger per-call rows. The projection is a pure
-/// function of the stored rows; nothing extra is persisted.
 pub(super) fn append_run_turns(
     turns: Vec<StoredTurn>,
     mut recorded: RecordedTurnResults,
@@ -1381,14 +1216,7 @@ pub(super) fn append_run_turns(
     context: &mut Vec<Message>,
     effects: &mut HashMap<(usize, usize), EffectClass>,
 ) -> Result<Vec<(u32, usize)>, SessionRuntimeError> {
-    // The context length after each replayed turn (and after an in-run
-    // summary, as turn `turn_cutoff`), for the prune watermark.
     let mut ends = Vec::with_capacity(turns.len() + 1);
-    // An in-run marker replaces the run's turns through `turn_cutoff` — and
-    // the steering those turns carried — with one summary message where the
-    // first replaced turn stood. The model sees prompt, summary, then the
-    // retained recent turns verbatim, exactly what the live run saw after
-    // it compacted.
     let mut turns = turns;
     if let Some(marker) = compaction {
         let replaced = turns
@@ -1400,10 +1228,6 @@ pub(super) fn append_run_turns(
             for ordinal in 1..=marker.turn_cutoff {
                 recorded.remove(&ordinal);
             }
-            // The live splice replaced everything before the first kept
-            // assistant message, which includes the steering and the runtime
-            // notice that preceded that kept turn's request
-            // (`in_run_compaction_boundary`). Drop them here too.
             let mut first_kept_index = None;
             for (index, turn) in turns.iter().enumerate() {
                 if turn_is_replayed(&turn.content_json, turn.truncated)? {
@@ -1462,9 +1286,6 @@ pub(super) fn append_run_turns(
             let (_, text) = steering.pop_front().expect("front was just checked");
             context.push(Message::user(text));
         }
-        // A child wait can deliver before preparation; an empty reactive
-        // retry can deliver between two goal revisions without committing a
-        // turn. Merge the stored positions instead of grouping all goals first.
         let positioned_notice =
             notice.is_some_and(|notice| goal_notices.iter().any(|atom| atom.text == notice.text()));
         let mut preceding_deliveries = 0;
@@ -1492,9 +1313,6 @@ pub(super) fn append_run_turns(
             let (_, text) = delivered.pop_front().expect("front was just checked");
             context.push(Message::user(text));
         }
-        // The live run placed this notice after the boundary's steering and
-        // before the request that produced this turn, and kept it even when
-        // that attempt was later dropped (an empty truncation below).
         if let Some(notice) = notice.filter(|_| !positioned_notice) {
             context.push(Message::user(notice.text()));
         }
@@ -1504,10 +1322,6 @@ pub(super) fn append_run_turns(
                 super::codec::PersistedTurn::Replay { content, replay } => (content, Some(replay)),
             };
         let content: Vec<ContentBlock> = content.into_iter().map(ContentBlock::from).collect();
-        // A block without a recorded result (a crash between the turn commit
-        // and its tool_calls rows in an older store) gets an explicit
-        // interrupted result so replayed context stays provider-valid
-        // instead of poisoning the session.
         let mut saved_projection = projection_json
             .as_deref()
             .map(super::projection::SavedProjection::decode)
@@ -1629,11 +1443,6 @@ pub(super) fn append_run_turns(
         if let Some(replay) = replay {
             message = message.with_replay(replay.into());
         }
-        // A truncated turn with nothing visible (the cap went to hidden
-        // reasoning, or a provider pause before any text) was neither
-        // appended nor followed by a notice in the live run: the request was
-        // resent as it stood. Replay mirrors that so the assembled context is
-        // the request the model actually saw.
         if truncated && !message.has_content() && results.is_empty() {
             continue;
         }
@@ -1644,22 +1453,14 @@ pub(super) fn append_run_turns(
         if let Some(notice) = saved_projection.and_then(|saved| saved.correction_notice) {
             context.push(Message::user(notice));
         }
-        // A truncated turn was followed in the live run by the continuation
-        // notice; replaying it keeps the assembled context identical to the
-        // request the model actually saw (and preserves role alternation).
         if truncated {
             context.push(Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE));
         }
         ends.push((turn_ordinal, context.len()));
     }
-    // Steering applied for a turn that never committed (the run settled
-    // first) still reached the model's request; keep it so the transcript
-    // the user saw is the transcript the next run continues from.
     for (_, text) in steering {
         context.push(Message::user(text));
     }
-    // Answers delivered at a boundary whose turn never committed, then those
-    // committed when the run settled first: both follow the run.
     for (_, text) in delivered {
         context.push(Message::user(text));
     }

@@ -16,8 +16,6 @@ use crate::{
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Bounds each body read and, because reqwest arms it when the request is
-/// sent and resets it only on a read, also the wait for response headers.
 const READ_TIMEOUT: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const ERROR_BODY_BYTES_LIMIT: usize = 16 * 1_024;
@@ -25,14 +23,9 @@ const DEFAULT_ATTEMPTS: u32 = 4;
 const DEFAULT_BASE_DELAY: Duration = Duration::from_millis(500);
 const DEFAULT_MAX_DELAY: Duration = Duration::from_secs(8);
 const DEFAULT_TOTAL_BUDGET: Duration = Duration::from_secs(30);
-/// The longest server-directed wait honoured. A `Retry-After` beyond this is
-/// a provider asking the caller to come back later, not to hold a turn open.
 const RETRY_AFTER_CAP: Duration = Duration::from_secs(60);
-/// Anthropic's overloaded status; not in `http::StatusCode`'s named set.
 const OVERLOADED: u16 = 529;
 
-/// Fleet-safe backoff between runtime turn continuations. HTTP attempts have
-/// a separate ledger; this policy never changes their count or task authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnRecoveryPolicy {
     base_delay: Duration,
@@ -54,14 +47,11 @@ impl TurnRecoveryPolicy {
         }
     }
 
-    /// Equal jitter between half the exponential delay and its cap.
     #[must_use]
     pub fn delay(self, attempt: u16) -> Duration {
         self.delay_after(attempt, None)
     }
 
-    /// Cooldown is a floor, capped consistently with HTTP advice. Jitter is
-    /// added above it so a shared Retry-After does not synchronize a fleet.
     #[must_use]
     pub fn delay_after(self, attempt: u16, retry_after: Option<Duration>) -> Duration {
         self.delay_with(attempt, retry_after, random_u32())
@@ -78,15 +68,6 @@ impl TurnRecoveryPolicy {
     }
 }
 
-/// The single retry owner for one compiled provider.
-///
-/// Every send a logical request may cost — a rejected or failed HTTP exchange
-/// before any body arrives, or an SSE stream that ends or fails before it has
-/// yielded one semantic event — draws from the same attempt count and time
-/// budget. Once a stream has yielded an event the request is never resent:
-/// a retry could duplicate output the caller has already seen. The runtime
-/// can continue a committed partial turn separately; cooldown advice survives
-/// the handoff when this request's ledger stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttemptPolicy {
     max_attempts: u32,
@@ -96,10 +77,6 @@ pub struct AttemptPolicy {
 }
 
 impl Default for AttemptPolicy {
-    /// Four attempts with 500 ms → 8 s full-jitter exponential backoff whose
-    /// sleeps sum to at most 30 s: enough to ride out an overload blip without
-    /// idling a turn for minutes. Each attempt is bounded by its own connect,
-    /// header, and read deadlines, not by this budget.
     fn default() -> Self {
         Self {
             max_attempts: DEFAULT_ATTEMPTS,
@@ -111,7 +88,6 @@ impl Default for AttemptPolicy {
 }
 
 impl AttemptPolicy {
-    /// Single attempt, no sleeps. For live canaries and single-shot tests.
     #[must_use]
     pub const fn disabled() -> Self {
         Self {
@@ -122,8 +98,6 @@ impl AttemptPolicy {
         }
     }
 
-    /// Bounded attempts with the given backoff. `max_attempts` is clamped to
-    /// at least one; the cap is clamped to at least the base.
     #[must_use]
     pub fn new(
         max_attempts: u32,
@@ -159,14 +133,10 @@ impl AttemptPolicy {
         self.total_budget
     }
 
-    /// Whether another send may run after `completed_attempts` finished tries.
     pub(crate) const fn has_remaining_attempt(self, completed_attempts: u32) -> bool {
         completed_attempts < self.max_attempts
     }
 
-    /// Exponential delay for the retry about to start.
-    ///
-    /// `retry_index` is zero for the first retry after the initial try.
     pub(crate) fn exponential_delay(self, retry_index: u32) -> Duration {
         let multiplier = 1u32.checked_shl(retry_index.min(31)).unwrap_or(u32::MAX);
         self.base_delay
@@ -174,12 +144,6 @@ impl AttemptPolicy {
             .min(self.max_delay)
     }
 
-    /// Delay before the next attempt, honoring `Retry-After` when present.
-    ///
-    /// A server-directed wait is authoritative: sleeping less only earns the
-    /// same rejection again, so it is honoured above `max_delay`, up to
-    /// [`RETRY_AFTER_CAP`]. Only the exponential part is jittered; the
-    /// server's figure is a floor, not a range.
     pub(crate) fn delay_before_retry(
         self,
         retry_index: u32,
@@ -193,8 +157,6 @@ impl AttemptPolicy {
         }
     }
 
-    /// Returns whether sleeping `delay` on top of the backoff already `slept`
-    /// still fits inside the total budget.
     pub(crate) fn can_afford(self, slept: Duration, delay: Duration) -> bool {
         slept
             .checked_add(delay)
@@ -202,14 +164,6 @@ impl AttemptPolicy {
     }
 }
 
-/// The attempts one logical request has spent, shared between the HTTP
-/// exchange (pre-body retries) and the stream driver (pre-first-event
-/// restarts) so their sum never exceeds the policy.
-///
-/// The time budget counts only the backoff this ledger has granted, never the
-/// time an attempt itself took: a send that stalls for the whole header
-/// deadline is exactly the send worth repeating, and charging its wait to the
-/// budget would leave nothing to retry with.
 #[derive(Debug)]
 pub(crate) struct AttemptLedger {
     policy: AttemptPolicy,
@@ -226,7 +180,6 @@ impl AttemptLedger {
         }
     }
 
-    /// Records one send about to happen and returns its ordinal (1-based).
     pub(crate) fn begin_attempt(&mut self) -> u32 {
         self.attempts = self.attempts.saturating_add(1);
         self.attempts
@@ -236,10 +189,6 @@ impl AttemptLedger {
         self.attempts
     }
 
-    /// The delay to sleep before another attempt, or `None` when the policy
-    /// has no attempt or backoff budget left. A granted delay is charged to
-    /// the budget here, so the caller must sleep it before the next
-    /// `begin_attempt`. `retry_after` comes from the provider.
     pub(crate) fn next_delay(&mut self, retry_after: Option<Duration>) -> Option<Duration> {
         self.next_delay_with(retry_after, random_u32())
     }
@@ -252,10 +201,6 @@ impl AttemptLedger {
         let delay = self
             .policy
             .delay_before_retry(retry_index, retry_after, random);
-        // The budget bounds the caller's own guessing, so a server-directed
-        // wait is charged at the exponential rate: the part above it is time
-        // the provider asked for, and refusing it would only earn the same
-        // rejection sooner. The cap on `Retry-After` bounds the excess.
         let charged = delay.min(self.policy.exponential_delay(retry_index));
         if !self.policy.can_afford(self.slept, charged) {
             return None;
@@ -265,9 +210,6 @@ impl AttemptLedger {
     }
 }
 
-/// The attempt ledger shared between the exchange and the stream restart
-/// loop. Both touch it only between polls of one stream, so the lock is
-/// never contended and never held across an await.
 #[derive(Debug, Clone)]
 pub(crate) struct SharedLedger(Arc<std::sync::Mutex<AttemptLedger>>);
 
@@ -277,16 +219,12 @@ impl SharedLedger {
     }
 
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, AttemptLedger> {
-        // A poisoned lock means a panic already unwound through this task's
-        // stream; the count it holds is still the right one to report.
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
-/// Appends the attempt count to a failure the policy gave up on, so the
-/// outcome a caller records shows how many sends the turn cost.
 pub(crate) fn note_attempts(error: ProviderError, attempts: u32) -> ProviderError {
     if attempts <= 1 {
         return error;
@@ -322,7 +260,6 @@ pub(crate) fn note_attempts(error: ProviderError, attempts: u32) -> ProviderErro
     }
 }
 
-/// Pre-stream statuses that may be retried by [`HttpExchange`].
 pub(crate) fn is_retryable_status(status: StatusCode) -> bool {
     matches!(
         status,
@@ -335,8 +272,6 @@ pub(crate) fn is_retryable_status(status: StatusCode) -> bool {
     ) || status.as_u16() == OVERLOADED
 }
 
-/// Parses `Retry-After` as delta-seconds or an HTTP-date. A date already in
-/// the past means "now" and yields zero, so the exponential floor applies.
 pub(crate) fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
     retry_after_delay_at(headers, std::time::SystemTime::now())
 }
@@ -350,7 +285,6 @@ fn retry_after_delay_at(headers: &HeaderMap, now: std::time::SystemTime) -> Opti
     Some(at.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
-/// Full jitter over `0..=delay` from a uniform 32-bit random value.
 pub(crate) fn full_jitter(delay: Duration, random: u32) -> Duration {
     if delay.is_zero() {
         return Duration::ZERO;
@@ -363,9 +297,6 @@ pub(crate) fn full_jitter(delay: Duration, random: u32) -> Duration {
 
 fn random_u32() -> u32 {
     getrandom::u32().unwrap_or_else(|_| {
-        // Fall back to a process-wide xorshift seeded from the wall clock if
-        // the OS RNG is unavailable. Retry jitter only needs to break
-        // synchronized stampedes, and successive draws must differ.
         use std::sync::atomic::{AtomicU64, Ordering};
         static STATE: AtomicU64 = AtomicU64::new(0);
         let mut state = STATE.load(Ordering::Relaxed);
@@ -383,14 +314,6 @@ fn random_u32() -> u32 {
     })
 }
 
-/// Builds the headers an adapter sends on every request and the secrets to
-/// redact from its diagnostics.
-///
-/// `owned` names are set only by the adapter, as are the names the
-/// request-time `authorizer` sets; with request-controlled names, none of
-/// them can be configured. `constants` are protocol headers sent on every
-/// request (`anthropic-version`), which a custom authentication header may
-/// not replace either.
 pub(crate) fn build_static_headers(
     auth: StaticAuth,
     configured: impl IntoIterator<Item = (String, String)>,
@@ -475,8 +398,6 @@ impl SafeHeaders {
                 ProviderError::Configuration("static header value is invalid".to_owned())
             })?;
             header_value.set_sensitive(true);
-            // A blank value is not a secret; registering it would rewrite
-            // every run of spaces in a diagnostic.
             if !value.trim().is_empty() {
                 self.redactions.push(value);
             }
@@ -542,13 +463,10 @@ pub(crate) struct HttpRejection {
     retry_after: Option<Duration>,
     body: Vec<u8>,
     redactions: Arc<[String]>,
-    /// Sends spent before this rejection was final, for the failure message.
     attempts: u32,
 }
 
 impl HttpExchange {
-    /// The static redactions are normalized here, once, so an attempt whose
-    /// authorizer adds nothing can share the list as-is.
     pub(crate) fn new(
         client: reqwest::Client,
         authorizer: RequestAuthorizer,
@@ -575,7 +493,6 @@ impl HttpExchange {
         self
     }
 
-    /// `execute` under a fresh ledger for this exchange's policy.
     #[cfg(test)]
     pub(crate) async fn execute_fresh(
         &self,
@@ -587,7 +504,6 @@ impl HttpExchange {
             .await
     }
 
-    /// A fresh ledger for one logical request under this exchange's policy.
     pub(crate) fn ledger(&self) -> SharedLedger {
         SharedLedger::new(self.attempts)
     }
@@ -600,9 +516,6 @@ impl HttpExchange {
         &self.redactions
     }
 
-    /// Sends `request`, retrying pre-body failures (transport errors and
-    /// retryable statuses) against `ledger`. The ledger outlives this call
-    /// so a stream restart after a success here draws from the same count.
     pub(crate) async fn execute(
         &self,
         request: reqwest::Request,
@@ -614,22 +527,16 @@ impl HttpExchange {
 
         loop {
             let attempts = ledger.lock().begin_attempt();
-            // Clone before consuming the request so a later attempt can resend.
-            // Streaming bodies that cannot be cloned stay single-shot.
             let next_request = if self.attempts.has_remaining_attempt(attempts) {
                 request.try_clone()
             } else {
                 None
             };
 
-            // Static redactions are already normalized; only a request-time
-            // credential adds to them, and most authorizers add nothing.
             let dynamic = self.authorizer.authorize(&mut request).await?;
             let redactions: Arc<[String]> = if dynamic.is_empty() {
                 Arc::clone(&self.redactions)
             } else {
-                // A request-time credential usually has no static secrets
-                // beside it, so the merge rarely copies the static list.
                 let mut merged = dynamic;
                 merged.extend(self.redactions.iter().cloned());
                 normalize_redactions(&mut merged);
@@ -773,17 +680,9 @@ pub(crate) fn transport_error(error: reqwest::Error, redactions: &[String]) -> P
     ProviderError::Transport(sanitize_message(&describe_transport(&error), redactions))
 }
 
-/// reqwest's `Display` prints only the error kind and drops the cause chain,
-/// and `bytes_stream` files every body read failure — peer reset, truncated
-/// framing, idle timeout — under one kind that renders as "error decoding
-/// response body". Name the phase ourselves and append the causes so the
-/// message says what happened. The URL is left out: it can carry credentials
-/// and the provider is already named by the caller.
 fn describe_transport(error: &reqwest::Error) -> String {
     let body_phase = error.is_body() || error.is_decode();
     if error.is_timeout() {
-        // The only cause below a timeout is reqwest's own "operation timed
-        // out"; the phase says more than the chain would.
         return if body_phase {
             format!(
                 "timed out waiting for response body (no bytes for {}s, or request past {}s)",
@@ -813,8 +712,6 @@ fn describe_transport(error: &reqwest::Error) -> String {
     });
     let mut source = std::error::Error::source(error);
     while let Some(cause) = source {
-        // Nested reqwest errors (the body wrapper under a `Decode`) would only
-        // add another kind label.
         if !cause.is::<reqwest::Error>() {
             let text = cause.to_string();
             if !text.is_empty() && !message.ends_with(&text) {
@@ -984,8 +881,6 @@ mod tests {
         );
         assert!(!headers["x-protocol-version"].is_sensitive());
         assert_eq!(headers["x-protocol-version"], "2099-01-01");
-        // Longest first, deduplicated, without the blank value or the
-        // protocol constant.
         assert_eq!(redactions, ["long-test-secret", "test-secret"]);
 
         let (headers, redactions) =
@@ -1130,8 +1025,6 @@ mod tests {
         headers.insert(RETRY_AFTER, HeaderValue::from_static(" 7 "));
         assert_eq!(retry_after_delay(&headers), Some(Duration::from_secs(7)));
 
-        // HTTP-date forms are relative to the clock: 90 s ahead is 90 s, in
-        // the past is zero (retry now, exponential floor applies).
         let now = httpdate::parse_http_date("Wed, 21 Oct 2015 07:28:00 GMT").unwrap();
         headers.insert(
             RETRY_AFTER,
@@ -1155,8 +1048,6 @@ mod tests {
 
     #[test]
     fn overloaded_529_is_retryable() {
-        // Anthropic answers `overloaded_error` with 529, which is not one of
-        // http's named statuses. Five audited runs gave up on it at once.
         assert!(is_retryable_status(StatusCode::from_u16(529).unwrap()));
     }
 
@@ -1175,27 +1066,22 @@ mod tests {
     #[test]
     fn delay_before_retry_honors_retry_after_above_max_delay_up_to_the_cap() {
         let policy = AttemptPolicy::default();
-        // No header: jittered exponential (u32::MAX jitter = full delay).
         assert_eq!(
             policy.delay_before_retry(0, None, u32::MAX),
             Duration::from_millis(500)
         );
-        // Header above the exponential wins and is not jittered down.
         assert_eq!(
             policy.delay_before_retry(0, Some(Duration::from_secs(2)), 0),
             Duration::from_secs(2)
         );
-        // Header below the exponential: the exponential floor stands.
         assert_eq!(
             policy.delay_before_retry(0, Some(Duration::from_millis(100)), u32::MAX),
             Duration::from_millis(500)
         );
-        // Above `max_delay` (8 s) the server's figure is honoured...
         assert_eq!(
             policy.delay_before_retry(0, Some(Duration::from_secs(20)), u32::MAX),
             Duration::from_secs(20)
         );
-        // ...up to the 60 s cap.
         assert_eq!(
             policy.delay_before_retry(0, Some(Duration::from_secs(600)), u32::MAX),
             RETRY_AFTER_CAP
@@ -1204,9 +1090,6 @@ mod tests {
 
     #[test]
     fn ledger_charges_a_server_directed_wait_at_the_exponential_rate() {
-        // Retry-After: 20 on the default policy sleeps 20 s but charges only
-        // the 500 ms exponential to the 30 s budget, so honouring the server
-        // never exhausts the budget by itself.
         let mut ledger = AttemptLedger::new(AttemptPolicy::default());
         assert_eq!(ledger.begin_attempt(), 1);
         assert_eq!(
@@ -1240,8 +1123,6 @@ mod tests {
 
     #[test]
     fn ledger_charges_only_granted_backoff_to_the_budget() {
-        // Two 1 s sleeps fit a 2 s budget; the third does not, whatever the
-        // attempts themselves cost in wall time.
         let policy = AttemptPolicy::new(
             4,
             Duration::from_secs(1),
@@ -1264,8 +1145,6 @@ mod tests {
         assert_eq!(ledger.next_delay_with(None, u32::MAX), None);
         assert_eq!(ledger.attempts(), 3);
 
-        // Jitter that lands on zero costs nothing, so the attempt cap is what
-        // ends the ledger.
         let mut free = AttemptLedger::new(policy);
         for attempt in 1..=3 {
             assert_eq!(free.begin_attempt(), attempt);
@@ -1335,8 +1214,6 @@ mod tests {
     }
 
     fn exchange(authorizer: RequestAuthorizer, redactions: Vec<String>) -> HttpExchange {
-        // Keep multi-attempt coverage fast without pausing the runtime clock;
-        // paused time breaks reqwest's connect/request timers.
         exchange_with_retry(authorizer, redactions, fast_retry_policy())
     }
 
@@ -1420,7 +1297,6 @@ mod tests {
         );
         let request = build_direct_client().unwrap().get(url).build().unwrap();
 
-        // Disable retries so a single 429 fixture still bounds the body once.
         let outcome = exchange_with_retry(
             RequestAuthorizer::default(),
             Vec::new(),
@@ -1649,10 +1525,6 @@ mod tests {
 
     #[tokio::test]
     async fn stalled_body_transport_error_names_the_timeout() {
-        // Regression: reqwest files a body read timeout under its `Decode`
-        // kind, whose `Display` is the bare "error decoding response body".
-        // A stream that returns headers and then never sends a byte must say
-        // that it timed out waiting for the body.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/stalled", listener.local_addr().unwrap());
         let (release, released) = std::sync::mpsc::channel::<()>();
@@ -1664,7 +1536,6 @@ mod tests {
                     b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
                 )
                 .unwrap();
-            // Hold the connection open without sending until the client gave up.
             released.recv().unwrap();
         });
         let client = reqwest::Client::builder()
@@ -1697,8 +1568,6 @@ mod tests {
 
     #[tokio::test]
     async fn truncated_body_transport_error_carries_the_cause() {
-        // Regression: a peer that closes mid-body must render the phase and
-        // the underlying cause, not only reqwest's kind label.
         let (url, server) = serve_response(
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_owned(),
             b"5\r\nhel".to_vec(),
@@ -1859,9 +1728,6 @@ mod tests {
         ]);
         let request = build_direct_client().unwrap().get(&url).build().unwrap();
 
-        // A zero Retry-After keeps the test fast while still exercising the
-        // header parse + delay selection path; the server's figure is a floor
-        // and is never jittered down, so a real value would be slept in full.
         let policy = AttemptPolicy::new(
             3,
             Duration::from_millis(1),
@@ -1914,10 +1780,6 @@ mod tests {
 
     #[tokio::test]
     async fn exchange_retries_a_header_timeout_longer_than_the_budget() {
-        // Regression: the budget used to be measured from the first send, so
-        // an attempt that stalled past it could never be retried, and the
-        // header deadline (READ_TIMEOUT, 300 s) is ten times the 30 s budget.
-        // A request the gateway lost must be resent.
         let body = b"after-stall".to_vec();
         let (url, hits, server) = serve_scripted(vec![
             ScriptedResponse::Stall(Duration::from_millis(400)),
@@ -1933,7 +1795,6 @@ mod tests {
             .build()
             .unwrap();
         let request = client.get(&url).build().unwrap();
-        // The stalled attempt outlives the whole backoff budget.
         let policy = AttemptPolicy::new(
             3,
             Duration::from_millis(1),
@@ -2058,7 +1919,6 @@ mod tests {
     enum ScriptedResponse {
         Http(Vec<u8>),
         Drop,
-        /// Hold the connection open without answering, then drop it.
         Stall(Duration),
     }
 
@@ -2112,9 +1972,6 @@ mod tests {
                         drop(stream);
                     }
                     ScriptedResponse::Stall(duration) => {
-                        // Park the connection off the accept loop so the next
-                        // scripted response is served as soon as the client
-                        // gives up and resends.
                         thread::spawn(move || {
                             // lint: allow(sleep) the scripted stall is the server behavior under test
                             thread::sleep(duration);
@@ -2192,9 +2049,6 @@ mod tests {
         }
     }
 
-    /// Every secret a multi-header credential sets reaches the rejection's
-    /// redaction set, not only the first, and its non-secret metadata does
-    /// not.
     #[tokio::test]
     async fn rejections_redact_every_secret_of_a_multi_header_credential() {
         let authorizer = RequestAuthorizer::request_time_codex(

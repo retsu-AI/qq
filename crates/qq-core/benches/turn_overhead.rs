@@ -1,7 +1,3 @@
-//! AC0: fake-provider entry-to-entry wall time near turns 10/100/1000.
-//! Includes tool dispatch, durable settlement, planning, and checkpoint /
-//! compaction work; excludes startup and live-provider network latency.
-
 #![forbid(unsafe_code)]
 
 #[path = "../tests/support/soak.rs"]
@@ -17,7 +13,6 @@ fn main() {
         Err(std::env::VarError::NotPresent) => false,
         other => panic!("QQ_BENCH_GOAL must be 0 or 1: {other:?}"),
     };
-    // Hash every directly compiled fixture source before the timed workload.
     let mut fixture = Sha256::new();
     fixture.update(b"qq-turn-fixture-v1\0");
     for (path, source) in [
@@ -75,7 +70,6 @@ fn main() {
         );
         compaction_counts.push(report.compactions);
         for (index, milestone) in milestones.into_iter().enumerate() {
-            // Five adjacent completed work-turn gaps ending at this milestone.
             let gaps = &report.turn_gaps_ns[milestone - 6..milestone - 1];
             let total = gaps.iter().map(|gap| u128::from(*gap)).sum::<u128>();
             samples[index].push(u64::try_from(total / 5).expect("sample fits u64"));

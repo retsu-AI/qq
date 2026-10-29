@@ -63,9 +63,7 @@ const WORKER_PROCESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const COMMAND_OUTPUT_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const LONG_STREAM_CHUNK_BYTES: usize = 1_024;
 const R4_BATCH_MAX_BYTES: usize = 8 * 1_024;
-/// Bytes streamed as `ToolCallOutputDelta` per command (the capture cap).
 const R4_SHELL_OUTPUT_MAX_BYTES: usize = 128 * 1_024;
-/// Model-facing shell text after head+tail bounding.
 const R4_SHELL_MODEL_TEXT_MAX_BYTES: usize = 16 * 1_024;
 const LOAD_PROVIDER_DELAY: Duration = Duration::from_millis(50);
 const PROVIDER_MARK_CAPACITY: usize = 256;
@@ -183,8 +181,6 @@ struct PerfReport {
     build: BuildMetadata,
     machine: MachineMetadata,
     artifact: ArtifactMetadata,
-    /// The `--no-default-features` embedding profile built beside the full
-    /// binary. Absent in reports recorded before fixture version 3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     minimal_artifact: Option<ArtifactMetadata>,
     workload: WorkloadMetadata,
@@ -466,9 +462,6 @@ async fn launch_release_worker(args: BaselineArgs) -> Result<(), PerfError> {
     ]);
     sanitize_rust_build_environment(&mut build);
     run_status_bounded("release build", BUILD_PROCESS_TIMEOUT, &mut build).await?;
-    // The minimal embedding profile builds into its own target directory so
-    // feature unification with the full binary cannot silently re-enable the
-    // heavy provider families it exists to exclude.
     let mut minimal_build = TokioCommand::new(cargo_program());
     minimal_build.current_dir(&root).args([
         "build",
@@ -877,8 +870,6 @@ fn cargo_target_directory(root: &Path) -> PathBuf {
     }
 }
 
-/// Where the minimal embedding profile builds. A sibling of the default target
-/// directory so `CARGO_TARGET_DIR` overrides still apply.
 fn minimal_target_directory(root: &Path) -> PathBuf {
     cargo_target_directory(root).join("qq-perf-minimal")
 }
@@ -1902,18 +1893,11 @@ enum ProviderMode {
         name: &'static str,
         arguments: &'static str,
     },
-    /// The first stream emits `total_bytes` and completes; every later stream
-    /// emits one delta and then hangs, so a workspace can carry both a long
-    /// committed history and an active run.
     TextThenHang {
         total_bytes: usize,
         chunk_bytes: usize,
         streams: Arc<std::sync::atomic::AtomicUsize>,
     },
-    /// Every stream fails before its first event. The provider's own ledger
-    /// is out of scope (this provider has none), so the entries per turn the
-    /// runtime produces are exactly the run-owned turn retries of ADR-0040:
-    /// one send plus `MAX_TURN_RETRIES`, then `paused`.
     Faulting,
 }
 
@@ -1974,11 +1958,6 @@ struct BenchmarkLoader {
 }
 
 impl RuntimeLoader for BenchmarkLoader {
-    /// Compiles the plan for the requested workspace on every load, the same
-    /// blocking filesystem work (canonicalize, open, read instructions) the
-    /// run loop performed per run before plans existed. The production loader
-    /// caches compiled plans; this fixture measures the uncached floor so the
-    /// admission-to-provider metric stays comparable with earlier reports.
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let provider = BenchmarkProvider {
             mode: self.mode.clone(),
@@ -1986,8 +1965,6 @@ impl RuntimeLoader for BenchmarkLoader {
             activity: Arc::clone(&self.activity),
         };
         Box::pin(async move {
-            // Turn recovery sleeps minute-scale in production; the benchmark
-            // measures sends, not wall time.
             let runtime = Runtime::new(provider, "benchmark/model", 16_384)
                 .map_err(|error| RuntimeLoadError {
                     kind: RunFailureKind::Configuration,
@@ -2147,8 +2124,6 @@ impl Provider for BenchmarkProvider {
                         let bytes = remaining.min(chunk_bytes);
                         remaining -= bytes;
                         yield Ok(ProviderEvent::OutputTextDelta { text: "x".repeat(bytes) });
-                        // Outrun the store's 8 ms batch window so each delta
-                        // commits as its own event.
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                     yield Ok(ProviderEvent::Completed { usage: None });
@@ -2719,9 +2694,6 @@ async fn process_workloads(
     ))
 }
 
-/// The AWS SDK crates the minimal embedding profile must not link. Matched
-/// against `cargo tree` crate names, so the unrelated `aws-lc-rs` TLS backend
-/// that rustls pulls in either profile does not count.
 const HEAVY_PROVIDER_DEPENDENCY_PREFIXES: [&str; 7] = [
     "aws-config ",
     "aws-credential-types ",
@@ -2732,8 +2704,6 @@ const HEAVY_PROVIDER_DEPENDENCY_PREFIXES: [&str; 7] = [
     "aws-smithy-types ",
 ];
 
-/// Counts distinct crates in a `cargo tree` listing: one entry per unique
-/// `name vX.Y.Z` token, ignoring feature edges and `(*)` back-references.
 fn dependency_closure_crates(dependency_tree: &str) -> usize {
     dependency_tree
         .lines()
@@ -2751,10 +2721,6 @@ fn dependency_closure_crates(dependency_tree: &str) -> usize {
         .len()
 }
 
-/// Measures the `--no-default-features` embedding profile beside the full
-/// binary: artifact size, dependency closure, fresh-process startup, server
-/// readiness, and idle RSS, with a correctness receipt that the heavy provider
-/// closure is absent. Startup and RSS reuse the full-profile fixtures exactly.
 async fn minimal_profile_workloads(
     binary: &Path,
     artifact: &ArtifactMetadata,
@@ -2778,7 +2744,6 @@ async fn minimal_profile_workloads(
         )?,
     ];
     for mut metric in process_metrics {
-        // `qq_fresh_process_version_ns` becomes `qq_minimal_fresh_process_version_ns`.
         metric.name = format!("qq_minimal_{}", metric.name.trim_start_matches("qq_"));
         metric.boundary = format!(
             "{} (minimal --no-default-features profile)",
@@ -3743,12 +3708,6 @@ async fn cancellation_workloads(
     finish_runtime_fixture(&fixture, "shut down cancellation runtime", operation).await
 }
 
-/// Retry amplification above the provider: with a provider that fails every
-/// stream before its first event, the number of provider entries per paused
-/// run is the number of sends the runtime issued for one logical turn. Under
-/// ADR-0040 the run owns turn recovery, so the expected value is exactly
-/// `MAX_TURN_RETRIES + 1`. The metric retains its cross-run average, while
-/// correctness requires every sampled run to exhaust recovery exactly.
 async fn retry_amplification_workloads(
     samples: u16,
 ) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>), PerfError> {
@@ -3779,8 +3738,6 @@ async fn retry_amplification_workloads(
                     "faulting run did not settle as paused: {outcome:?}"
                 )));
             }
-            // The run has settled, so every provider entry it caused is
-            // already in the channel.
             let mut entries = 0_u64;
             while let Ok(mark) = fixture.marks.try_recv() {
                 if mark.kind == ProviderMarkKind::Entered {
@@ -3972,11 +3929,6 @@ async fn run_feed_worker(args: FeedWorkerArgs) -> Result<(), PerfError> {
     Ok(())
 }
 
-/// Subscriber fan-out: with 1, 8, and 32 subscribers attached to one
-/// workspace, the time from the provider's first delta to that event's
-/// committed observation by the slowest subscriber, and the command
-/// acknowledgement under the same load. Subscribers cost the store nothing
-/// per event once attached, so these should move little with the count.
 async fn subscriber_fan_out_workloads(
     samples: u16,
 ) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>), PerfError> {
@@ -4003,9 +3955,6 @@ async fn subscriber_fan_out_workloads(
                     poll_idle_subscriber(&mut stream)?;
                     streams.push(stream);
                 }
-                // The first poll enqueues each attachment before yielding.
-                // A later job on the same FIFO lane proves those reads
-                // finished; the second poll consumes their ready replies.
                 with_timeout(
                     "confirm fan-out attachment",
                     fixture.runtime.snapshot(SnapshotRequest {
@@ -4082,12 +4031,6 @@ async fn subscriber_fan_out_workloads(
     Ok((metrics, checks))
 }
 
-/// Command acknowledgement against a workspace whose active session has a
-/// long event history: with a hanging run parked after more than 512
-/// committed events, `SetSessionModel` on a second idle session publishes a
-/// summary. The summary once scanned the newest 512 envelopes for the
-/// active run's activity; it now reads a column, so this must not scale with
-/// history.
 async fn busy_workspace_ack_workloads(
     samples: u16,
 ) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>), PerfError> {
@@ -4100,7 +4043,6 @@ async fn busy_workspace_ack_workloads(
     })
     .await?;
     let operation = async {
-        // Seed one completed run so the workspace's event log is long.
         let (busy_session, cursor) = fixture.create_session(ApprovalMode::ReadOnly).await?;
         let mut events = fixture.subscribe(cursor)?;
         let seeded = session_command(
@@ -4122,8 +4064,6 @@ async fn busy_workspace_ack_workloads(
             return Err(PerfError::Fixture("history run did not complete".to_owned()));
         }
         let history_events = cursor.sequence;
-        // Park a second run on the same session so it has an active run whose
-        // summary every later command on the workspace publishes.
         session_command(
             "park active run",
             &fixture.runtime,
@@ -5465,9 +5405,6 @@ mod tests {
         assert!(retry_amplification_result(&[]).is_err());
     }
 
-    /// The fixture's amplification counter must observe exactly one send plus
-    /// `MAX_TURN_RETRIES` provider entries per paused run: the run owns turn
-    /// recovery (ADR-0040) and nothing above it resends.
     #[tokio::test]
     async fn retry_amplification_fixture_observes_the_turn_retry_bound() {
         let (metrics, checks) = retry_amplification_workloads(5).await.unwrap();
@@ -5482,10 +5419,6 @@ mod tests {
         assert!(checks[0].passed, "{}", checks[0].detail);
     }
 
-    /// Every subscriber in the fan-out fixture must converge on the same
-    /// terminal cursor for each run.
-    /// The busy-workspace fixture must seed at least 512 committed events before
-    /// its acknowledgements are measured.
     #[tokio::test]
     async fn busy_workspace_fixture_seeds_a_long_history() {
         let (metrics, checks) = busy_workspace_ack_workloads(10).await.unwrap();

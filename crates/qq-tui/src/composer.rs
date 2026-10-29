@@ -1,28 +1,11 @@
-//! Cursor-aware prompt editing primitives.
-//!
-//! A bounded `String` is preferable to a rope for the composer's small (64 KiB)
-//! documents. It has excellent cache locality and keeps the common append/edit
-//! path allocation-free while capacity remains. Storage is hidden here so it
-//! can still be replaced later without changing key handling.
-//!
-//! Large pastes are kept out of the visible text: the composer shows a short
-//! `[Pasted N lines]` placeholder and substitutes the real content on submit.
-//! Every edit that changes text records an undo entry; kills feed a one-slot
-//! kill ring for yank.
-
 use std::collections::VecDeque;
 
-/// Pastes at or above this many lines, or this many bytes, collapse to a
-/// placeholder so the composer stays readable.
 pub(crate) const PASTE_PLACEHOLDER_LINES: usize = 3;
 pub(crate) const PASTE_PLACEHOLDER_BYTES: usize = 512;
-/// Undo depth. Each entry is a full text snapshot bounded by the composer
-/// limit, so depth times limit bounds memory.
 const UNDO_DEPTH: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Paste {
-    /// The exact placeholder as it appears in `text`.
     placeholder: String,
     content: String,
 }
@@ -36,14 +19,10 @@ struct Snapshot {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Composer {
     pub(crate) text: String,
-    /// UTF-8 byte offset. `None` means the end, which also lets tests and state
-    /// restoration replace `text` directly without leaving a stale cursor.
     cursor: Option<usize>,
-    /// Character column retained while moving through lines of unequal length.
     preferred_column: Option<usize>,
     pastes: Vec<Paste>,
     undo: VecDeque<Snapshot>,
-    /// Most recent kill, yanked by Ctrl-Y.
     kill: String,
 }
 
@@ -68,9 +47,6 @@ impl Composer {
         self.undo.clear();
     }
 
-    /// The text to submit: the visible text with every surviving placeholder
-    /// replaced by its pasted content. Placeholders the user deleted expand
-    /// to nothing, which is what deleting them means.
     pub(crate) fn expanded(&self) -> String {
         if self.pastes.is_empty() {
             return self.text.clone();
@@ -98,7 +74,6 @@ impl Composer {
         }
     }
 
-    /// Restore the previous text. Returns false when there is nothing to undo.
     pub(crate) fn undo(&mut self) -> bool {
         let Some(snapshot) = self.undo.pop_back() else {
             return false;
@@ -110,9 +85,6 @@ impl Composer {
     }
 
     pub(crate) fn insert(&mut self, character: char) {
-        // Consecutive single-character inserts coalesce into one undo step by
-        // snapshotting only when the previous edit was not an insert at the
-        // same position; simpler: snapshot on word boundaries.
         if character.is_whitespace() || self.undo.is_empty() {
             self.snapshot();
         }
@@ -122,7 +94,6 @@ impl Composer {
         self.preferred_column = None;
     }
 
-    /// Insert text at the cursor as one undo step. Returns bytes inserted.
     pub(crate) fn insert_str(&mut self, text: &str) -> usize {
         if text.is_empty() {
             return 0;
@@ -135,9 +106,6 @@ impl Composer {
         text.len()
     }
 
-    /// The `@` token the cursor sits in or just after: its byte span (the `@`
-    /// included) and the text after the `@`. `None` when the cursor is not
-    /// on such a token, or the `@` is mid-word (an email) or escaped (`@@`).
     pub(crate) fn mention_token(&self) -> Option<(std::ops::Range<usize>, &str)> {
         let cursor = self.cursor();
         let before = &self.text[..cursor];
@@ -154,7 +122,6 @@ impl Composer {
         if !preceded_ok || before[..start].ends_with('@') {
             return None;
         }
-        // The token ends at the cursor or the next boundary after it.
         let after = &self.text[cursor..];
         let end = cursor
             + after
@@ -163,8 +130,6 @@ impl Composer {
         Some((start..end, token))
     }
 
-    /// Replace the byte span with `text` and leave the cursor after it, as
-    /// one undo step.
     pub(crate) fn replace_span(&mut self, span: std::ops::Range<usize>, text: &str) {
         if span.start > span.end || span.end > self.text.len() {
             return;
@@ -175,8 +140,6 @@ impl Composer {
         self.preferred_column = None;
     }
 
-    /// Insert pasted content. Small pastes go in literally; larger ones are
-    /// stored and represented by a placeholder. Returns whether text changed.
     pub(crate) fn paste(&mut self, content: &str) -> bool {
         if content.is_empty() {
             return false;
@@ -197,8 +160,6 @@ impl Composer {
 
     pub(crate) fn backspace(&mut self) -> bool {
         let cursor = self.cursor();
-        // Deleting into a placeholder removes the whole placeholder so a
-        // half-edited token never expands to a half-paste.
         if let Some(range) = self.placeholder_ending_at(cursor) {
             self.snapshot();
             self.text.drain(range.clone());
@@ -281,8 +242,6 @@ impl Composer {
         true
     }
 
-    /// Byte offset of the start of the word before the cursor: skip
-    /// whitespace backwards, then the word itself.
     fn word_start_before(&self, cursor: usize) -> usize {
         let text = &self.text[..cursor];
         let trimmed = text.trim_end_matches(|c: char| c.is_whitespace() && c != '\n');
@@ -297,7 +256,6 @@ impl Composer {
             .map_or(0, |(index, c)| index + c.len_utf8())
     }
 
-    /// Byte offset just past the word after the cursor.
     fn word_end_after(&self, cursor: usize) -> usize {
         let rest = &self.text[cursor..];
         let skipped = rest.len() - rest.trim_start_matches(char::is_whitespace).len();
@@ -362,16 +320,12 @@ impl Composer {
         true
     }
 
-    /// Ctrl-W / Alt-Backspace: delete the word before the cursor into the
-    /// kill slot.
     pub(crate) fn kill_word_back(&mut self) -> bool {
         let cursor = self.cursor();
         let start = self.word_start_before(cursor);
         self.kill_range(start..cursor)
     }
 
-    /// Ctrl-K: delete to the end of the logical line (or the newline itself
-    /// when already at the end).
     pub(crate) fn kill_to_line_end(&mut self) -> bool {
         let cursor = self.cursor();
         let end = self.text[cursor..]
@@ -383,14 +337,12 @@ impl Composer {
         self.kill_range(cursor..end)
     }
 
-    /// Ctrl-U: delete to the start of the logical line.
     pub(crate) fn kill_to_line_start(&mut self) -> bool {
         let cursor = self.cursor();
         let start = self.text[..cursor].rfind('\n').map_or(0, |i| i + 1);
         self.kill_range(start..cursor)
     }
 
-    /// Ctrl-Y: reinsert the last kill.
     pub(crate) fn yank(&mut self) -> bool {
         if self.kill.is_empty() {
             return false;
@@ -399,8 +351,6 @@ impl Composer {
         self.insert_str(&kill) > 0
     }
 
-    /// Moves between logical newline-delimited lines. Returning false at a
-    /// boundary lets the caller use that arrow for prompt history.
     pub(crate) fn move_up(&mut self) -> bool {
         self.move_vertical(false)
     }
@@ -535,12 +485,9 @@ mod tests {
         composer.insert_str(" please");
         assert_eq!(composer.expanded(), "see x = 1\ny = 2\nz = 3\n please");
 
-        // Small pastes go in literally.
         assert!(composer.paste(" ok"));
         assert!(composer.expanded().ends_with(" please ok"));
 
-        // Cursor motion treats the placeholder as one token, and backspace
-        // removes it whole so nothing partial can expand.
         composer.replace(String::new());
         composer.paste("a\nb\nc");
         assert_eq!(composer.cursor(), composer.text.len());

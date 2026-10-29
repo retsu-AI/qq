@@ -1,9 +1,3 @@
-//! `tree`: a depth-bounded, ignore-aware directory tree with sizes and counts.
-//!
-//! The tree fills breadth-first so the top level is complete before any
-//! deeper level appears: a model asking about a repository sees every
-//! top-level entry even when the entry budget is small.
-
 use std::{
     collections::VecDeque,
     fmt::Write as _,
@@ -28,14 +22,10 @@ pub(super) const MAX_DEPTH: usize = 6;
 const DEFAULT_DEPTH: usize = 2;
 pub(super) const MAX_ENTRIES: usize = 500;
 const DEFAULT_ENTRIES: usize = 120;
-/// Directory entries visited across the listing and the count sub-walks.
 pub(super) const MAX_SCAN_ENTRIES: usize = 20_000;
 const TREE_DEADLINE: Duration = Duration::from_secs(2);
-/// Entries one directory's `(<files>f <dirs>d)` sub-walk may visit.
 const MAX_COUNT_ENTRIES: usize = 2_000;
-/// Longest single-child chain collapsed into one row (`a/b/c/d`).
 const MAX_CHAIN: usize = 4;
-/// Leaf files pack onto one row up to this width.
 const PACK_WIDTH: usize = 100;
 pub(super) const MAX_GLOB_BYTES: usize = 256;
 
@@ -68,11 +58,8 @@ const fn default_entries() -> usize {
 
 struct Node {
     child: super::walk::Child,
-    /// Directory statistics from a bounded sub-walk.
     counts: Option<Counts>,
-    /// Directory listed (children appended) rather than only shown.
     expanded: bool,
-    /// Children beyond the entry budget or depth: `+N more`.
     unlisted: usize,
     children: Vec<usize>,
 }
@@ -100,7 +87,6 @@ pub(super) fn tree(
             "invalid_limit: limit must be between 1 and {MAX_ENTRIES}"
         ));
     }
-    // `""` is a filled-in default for "no filter", not a pattern.
     let empty_glob = arguments.glob.as_deref() == Some("");
     let filter = match arguments.glob.as_ref().filter(|glob| !glob.is_empty()) {
         None => PathFilter::new(&[], &[]),
@@ -131,7 +117,6 @@ pub(super) fn tree(
     let mut root_unlisted = 0_usize;
     let mut shown = 0_usize;
     let mut stop: Option<StopReason> = None;
-    // Breadth-first: (directory path, depth of its children, parent node).
     let mut queue: VecDeque<(String, usize, Option<usize>)> = VecDeque::new();
     queue.push_back((root.clone(), 1, None));
     while let Some((dir, depth, parent)) = queue.pop_front() {
@@ -139,19 +124,14 @@ pub(super) fn tree(
             return ReadSideOutput::interrupted(CANCELLED_MESSAGE);
         }
         if stop.is_some() {
-            // Never listed: shown as a directory with counts only.
             if let Some(parent) = parent {
                 nodes[parent].expanded = false;
             }
             continue;
         }
-        // Ignore matching needs each directory's ancestor chain, so the BFS
-        // opens a stack per directory rather than sharing one.
         let mut stack = IgnoreStack::open(workspace, &dir, arguments.include_ignored);
         let children = match list_children(workspace, &dir, &mut stack, &mut budget.unreadable) {
             Ok(children) => children,
-            // An unreadable subdirectory shows unexpanded; the root itself
-            // failing is the call's error.
             Err(error) => match parent {
                 Some(parent) => {
                     nodes[parent].expanded = false;
@@ -166,8 +146,6 @@ pub(super) fn tree(
                 stop = Some(reason);
             }
             let is_dir = child.is_dir();
-            // Ignored files are dropped; ignored directories appear once, at
-            // the top level, as `…ignored` so the model knows they exist.
             if (!is_dir && (child.ignored || !filter.admits_file(&child.path)))
                 || (is_dir && child.ignored && depth > 1)
             {
@@ -239,8 +217,6 @@ pub(super) fn tree(
     ReadSideOutput::with_bounds(text, &TREE_BOUNDS, false)
 }
 
-/// `(<files>f <dirs>d)` for one directory from a bounded sub-walk that skips
-/// ignored directories; `capped` when the sub-walk hit its own bound.
 fn count_dir(
     workspace: &Workspace,
     dir: &str,
@@ -285,7 +261,6 @@ fn render(nodes: &[Node], index: usize, indent: usize, out: &mut String) {
     push_indent(out, indent);
     match node.child.kind {
         EntryKind::Dir => {
-            // Collapse single-child directory chains: `a/b/c/` on one row.
             let mut current = index;
             let mut chain = 1_usize;
             out.push_str(&nodes[current].child.name);
@@ -341,8 +316,6 @@ fn render(nodes: &[Node], index: usize, indent: usize, out: &mut String) {
     }
 }
 
-/// Renders one level: subdirectories one per row, leaf files packed onto
-/// rows of at most [`PACK_WIDTH`] bytes.
 fn render_children(nodes: &[Node], children: &[usize], indent: usize, out: &mut String) {
     let mut packed = String::new();
     let flush = |packed: &mut String, out: &mut String| {
@@ -394,8 +367,6 @@ fn push_indent(out: &mut String, indent: usize) {
     }
 }
 
-/// ` 1.2k` style size suffix: bytes below 1 KiB are exact, otherwise one
-/// decimal with `k`/`M`/`G`.
 fn push_size(out: &mut String, size: u64) {
     out.push(' ');
     if size < 1024 {

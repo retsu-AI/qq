@@ -7,11 +7,8 @@ repository.workspace = true
 publish = false
 
 [features]
-# The full provider profile. `--no-default-features` builds HTTP families
-# only; configured Bedrock providers then fail with a configuration error.
 default = ["provider-bedrock"]
 provider-bedrock = ["qq-provider/provider-bedrock"]
-# Test-only constructors and catalog probes for the binary's own tests.
 test-support = []
 
 [dependencies]

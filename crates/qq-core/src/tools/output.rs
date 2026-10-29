@@ -1,52 +1,24 @@
-//! Cross-cutting tool output primitives: bounds, head+tail bounding, the
-//! header-line convention, secret masking, and the per-turn output budget.
-//!
-//! Every tool result passes through [`ToolOutput`]'s constructors, which mask
-//! and then bound the model-facing text exactly once. Bounding cuts at line
-//! boundaries, keeps a head and a tail, and inserts one marker describing what
-//! was cut, so the model never has to guess whether output is complete.
-
 use std::fmt::Write as _;
 
 use qq_protocol::ToolCallId;
 
-/// Ceiling for model-facing text from one tool call.
 pub(crate) const MAX_MODEL_TEXT_BYTES: usize = 128 * 1024;
-/// Ceiling for model-facing lines from one tool call.
 pub(crate) const MAX_MODEL_TEXT_LINES: usize = 4_000;
-/// Lines longer than this are clipped with `…+N`.
 pub(crate) const MAX_LINE_BYTES: usize = 2_000;
-/// Smallest `max_bytes` a bound may be reduced to; below this no output is useful.
 pub(crate) const MIN_MODEL_TEXT_BYTES: usize = 4 * 1024;
-/// Sum of model-facing text across one turn's tool calls.
 pub(crate) const MAX_TURN_TOOL_OUTPUT_BYTES: usize = 96 * 1024;
 const DEFAULT_HEAD_RATIO: u8 = 50;
-/// Escaped bytes reserved for the omission marker when computing the cut,
-/// sized for a finalized marker carrying a spill handle and resume offset.
 pub(crate) const MARKER_RESERVE_BYTES: usize = 224;
-/// Largest complete output the spill store keeps for one call.
 pub(crate) const MAX_SPILL_ITEM_BYTES: usize = 8 * 1024 * 1024;
-/// The marker's provisional tail; [`finalize_spill_marker`] replaces it once
-/// the runtime knows whether (and under which handle) the text was stored.
 const NOT_STORED: &str = "; not stored]…\n";
-/// Longest ordinary header line a pruning stub preserves; search keeps its bounded page header.
 pub(crate) const MAX_STUB_HEADER_BYTES: usize = 512;
-/// Every marker line qq inserts into model text starts with this, so clients
-/// can tell a marker from content with one prefix check.
 pub(crate) const MARKER_PREFIX: &str = "…[qq: ";
 
-/// How much of a tool's complete output reaches the model.
-///
-/// `max_bytes` is measured on the JSON-escaped text: results embed in
-/// persisted event envelopes with a hard cap, and control-dense content (ANSI
-/// logs) escapes up to 6:1, so a raw-byte budget could make persistence fail
-/// on legitimate output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Bounds {
     pub(crate) max_bytes: usize,
     pub(crate) max_lines: usize,
     pub(crate) max_line_bytes: usize,
-    /// Percent of the budget spent on the head; the remainder keeps the tail.
     pub(crate) head_ratio: u8,
 }
 
@@ -58,8 +30,6 @@ impl Bounds {
         head_ratio: DEFAULT_HEAD_RATIO,
     };
 
-    /// A per-tool default clamped to the ceilings. `const` so tools declare
-    /// their bounds as constants next to their other limits.
     pub(crate) const fn new(max_bytes: usize, max_lines: usize) -> Self {
         let max_bytes = if max_bytes > MAX_MODEL_TEXT_BYTES {
             MAX_MODEL_TEXT_BYTES
@@ -88,17 +58,12 @@ impl Bounds {
     }
 }
 
-/// Text that fits its [`Bounds`], plus what was cut to make it fit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoundedText {
     pub(crate) text: String,
-    /// Bytes between the kept head and tail, named in the marker.
     pub(crate) omitted_bytes: usize,
     pub(crate) omitted_lines: usize,
-    /// Lines clipped to `max_line_bytes` with `…+N`.
     pub(crate) clipped_lines: usize,
-    /// 1-based line number of the first omitted line (the `offset` that
-    /// continues reading the stored output where the head stopped).
     pub(crate) omitted_from_line: usize,
 }
 
@@ -108,9 +73,6 @@ impl BoundedText {
     }
 }
 
-/// The size of each byte once serde_json escapes it inside a JSON string.
-/// A table so `escaped_len` compiles to a gather-and-sum the optimizer can
-/// unroll, not a per-byte branch.
 const ESCAPED_BYTE_LEN: [u8; 256] = {
     let mut table = [1_u8; 256];
     let mut byte = 0_usize;
@@ -140,13 +102,10 @@ pub(crate) fn escaped_len(content: &str) -> usize {
         .sum()
 }
 
-/// Whether `text` needs cutting. Cheap size checks first; otherwise one pass
-/// per line, with the newline search vectorized by `split_inclusive`.
 fn exceeds(text: &str, bounds: &Bounds) -> bool {
     if text.len() > bounds.max_bytes {
         return true;
     }
-    // Escaping only grows text; short text with few possible lines fits.
     if text.len().saturating_mul(6) <= bounds.max_bytes
         && text.len() <= bounds.max_line_bytes
         && text.len() <= bounds.max_lines
@@ -170,13 +129,8 @@ fn exceeds(text: &str, bounds: &Bounds) -> bool {
     false
 }
 
-/// Escaped bytes reserved for a `…+N` clip suffix.
 const CLIP_SUFFIX_RESERVE_BYTES: usize = 16;
 
-/// Appends `line` (which may end in `\n`) to `out` within `escaped_budget`,
-/// clipping its content to `max_line_bytes` (or to what the budget allows)
-/// with `…+N`. Returns the escaped size appended and whether the line was
-/// clipped, or `None` when not even a prefix fits.
 pub(crate) fn push_line(
     out: &mut String,
     line: &str,
@@ -217,13 +171,10 @@ pub(crate) fn push_line(
     Some((escaped_len(&out[before..]), true))
 }
 
-/// Lines in `text`: newline count, plus one for an unterminated last line.
-/// `matches` uses the standard library's vectorized byte search.
 fn count_lines(text: &str) -> usize {
     text.matches('\n').count() + usize::from(!text.is_empty() && !text.ends_with('\n'))
 }
 
-/// The start of the last line of `text` (a line ends at `\n` or the end).
 fn last_line_start(text: &str) -> usize {
     let body = text.strip_suffix('\n').unwrap_or(text);
     body.rfind('\n').map_or(0, |index| index + 1)
@@ -245,12 +196,6 @@ fn push_marker(out: &mut String, omitted_bytes: usize, omitted_lines: usize, not
     out.push_str(NOT_STORED);
 }
 
-/// Keeps `head_ratio` of the budget from the start and the rest from the end,
-/// cutting at line boundaries, and inserts exactly one marker for the cut.
-/// `note` names why the budget was smaller than the tool's default (the turn
-/// budget); the marker always states whether the full text is stored.
-///
-/// Deterministic: the same text and bounds produce the same bytes.
 pub(crate) fn bound_text(text: String, bounds: &Bounds, note: Option<&str>) -> BoundedText {
     if !exceeds(&text, bounds) {
         return BoundedText {
@@ -269,7 +214,6 @@ pub(crate) fn bound_text(text: String, bounds: &Bounds, note: Option<&str>) -> B
     let tail_lines_budget = bounds.max_lines - head_lines_budget;
     let mut clipped_lines = 0_usize;
 
-    // Head: whole (or clipped) lines from the start while both budgets hold.
     let mut head = String::with_capacity(head_bytes_budget.min(text.len()));
     let mut head_end = 0_usize;
     let mut head_bytes = 0_usize;
@@ -289,9 +233,6 @@ pub(crate) fn bound_text(text: String, bounds: &Bounds, note: Option<&str>) -> B
         clipped_lines += usize::from(clipped);
     }
 
-    // Tail: lines from the end, never reaching back into the head. Each line
-    // is measured against the budget it had; the same budget re-renders it
-    // identically below.
     let mut tail_lines: Vec<(&str, usize)> = Vec::new();
     let mut tail_bytes = 0_usize;
     let mut tail_start = text.len();
@@ -337,11 +278,6 @@ pub(crate) fn bound_text(text: String, bounds: &Bounds, note: Option<&str>) -> B
     }
 }
 
-/// Rewrites the provisional `not stored` tail of the marker `bound_text`
-/// inserted. With a handle the marker names the stored output and, when
-/// `offset` is known, the line to continue from; without one it stays as
-/// written. Only the first provisional marker changes, so a later cut (the
-/// turn budget) can be finalized in turn. Returns whether a marker changed.
 pub(crate) fn finalize_spill_marker(
     text: &mut String,
     handle: Option<&str>,
@@ -376,7 +312,6 @@ pub(crate) fn finalize_spill_marker(
     false
 }
 
-/// `1234567` → `1,234,567`.
 fn push_grouped(out: &mut String, value: usize) {
     let digits = value.to_string();
     for (index, digit) in digits.chars().enumerate() {
@@ -387,9 +322,6 @@ fn push_grouped(out: &mut String, value: usize) {
     }
 }
 
-/// Builds one header line: `<tool> <subject> (<key>=<value>)*`. Keys are
-/// lowercase ASCII; values must not contain whitespace (callers pass numbers,
-/// hashes, or short tokens).
 pub(crate) struct Header(String);
 
 impl Header {
@@ -409,23 +341,18 @@ impl Header {
         self
     }
 
-    /// A bare token such as `unchanged`, `L1-40/120`, or `h:3f9a…`: no `=`,
-    /// no whitespace.
     pub(crate) fn token(mut self, token: impl std::fmt::Display) -> Self {
         let _ = write!(self.0, " {token}");
         debug_assert!(!self.0.ends_with(char::is_whitespace));
         self
     }
 
-    /// The header line followed by a newline, ready to prefix a body.
     pub(crate) fn into_line(mut self) -> String {
         self.0.push('\n');
         self.0
     }
 }
 
-/// The header line of a result that follows the convention (`<tool> …`), or
-/// `None`. Used by context pruning so a stub keeps the counts and cursor.
 pub(crate) fn header_line<'a>(tool: &str, text: &'a str) -> Option<&'a str> {
     let first = text.lines().next()?;
     let rest = first.strip_prefix(tool)?;
@@ -436,10 +363,6 @@ pub(crate) fn header_line<'a>(tool: &str, text: &'a str) -> Option<&'a str> {
     };
     (rest.starts_with(' ') && first.len() <= limit).then_some(first)
 }
-
-// ---------------------------------------------------------------------------
-// Secret masking
-// ---------------------------------------------------------------------------
 
 const fn is_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
@@ -456,7 +379,6 @@ fn token_run(bytes: &[u8], from: usize) -> usize {
         .map_or(bytes.len(), |offset| from + offset)
 }
 
-/// Kinds a masked span is labelled with: `[masked:<kind>]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SecretKind {
     AwsKey,
@@ -482,7 +404,6 @@ impl SecretKind {
     }
 }
 
-/// Words that mark `KEY=value` as a credential when they appear in `KEY`.
 const CREDENTIAL_KEY_WORDS: [&[u8]; 8] = [
     b"password",
     b"passwd",
@@ -503,20 +424,16 @@ fn key_names_credential(key: &[u8]) -> bool {
     })
 }
 
-/// A secret found at `bytes[start..end]`, to be replaced with its label.
 struct Hit {
     start: usize,
     end: usize,
     kind: SecretKind,
 }
 
-/// Detects a secret starting exactly at `at`, if any. Callers guarantee `at`
-/// sits on a trigger byte; this checks the full shape.
 fn detect(bytes: &[u8], at: usize) -> Option<Hit> {
     let rest = &bytes[at..];
     let boundary_before = at == 0 || !is_word_byte(bytes[at - 1]);
     match rest[0] {
-        // (AKIA|ASIA|AIDA|AGPA|AROA|ANPA)[A-Z0-9]{16}
         b'A' if boundary_before && rest.len() >= 20 => {
             const PREFIXES: [&[u8]; 6] = [b"AKIA", b"ASIA", b"AIDA", b"AGPA", b"AROA", b"ANPA"];
             if PREFIXES.contains(&&rest[..4])
@@ -533,7 +450,6 @@ fn detect(bytes: &[u8], at: usize) -> Option<Hit> {
             }
             None
         }
-        // gh[pousr]_[A-Za-z0-9]{36,} | github_pat_[A-Za-z0-9_]{22,}
         b'g' if boundary_before => {
             if rest.len() >= 40
                 && rest[1] == b'h'
@@ -567,7 +483,6 @@ fn detect(bytes: &[u8], at: usize) -> Option<Hit> {
             }
             None
         }
-        // sk-… | sk_live_… | pk_live_… ≥ 16 chars
         b's' | b'p' if boundary_before => {
             let prefix_len = if rest.starts_with(b"sk-") {
                 3
@@ -583,7 +498,6 @@ fn detect(bytes: &[u8], at: usize) -> Option<Hit> {
                 kind: SecretKind::ApiKey,
             })
         }
-        // xox[bp]-… ≥ 16 chars
         b'x' if boundary_before && rest.len() >= 5 => {
             if rest.starts_with(b"xox") && matches!(rest[3], b'b' | b'p') && rest[4] == b'-' {
                 let end = token_run(bytes, at + 5);
@@ -595,7 +509,6 @@ fn detect(bytes: &[u8], at: usize) -> Option<Hit> {
             }
             None
         }
-        // Bearer <token>: the token is masked, the scheme word stays.
         b'B' if boundary_before && rest.starts_with(b"Bearer ") => {
             let start = at + 7;
             let end = bytes[start..]
@@ -608,8 +521,6 @@ fn detect(bytes: &[u8], at: usize) -> Option<Hit> {
                 kind: SecretKind::Bearer,
             })
         }
-        // KEY=value: KEY names a credential, value ≥ 8 chars, not `$VAR`, not
-        // a bare number (`max_tokens=100000000` is configuration, not a secret).
         b'=' => {
             let key_start = bytes[..at]
                 .iter()
@@ -644,7 +555,6 @@ fn detect(bytes: &[u8], at: usize) -> Option<Hit> {
                 kind: SecretKind::Credential,
             })
         }
-        // scheme://user:pass@host
         b':' if rest.starts_with(b"://") => {
             let start = at + 3;
             let end = bytes[start..]
@@ -663,9 +573,6 @@ fn detect(bytes: &[u8], at: usize) -> Option<Hit> {
     }
 }
 
-/// Byte pairs a secret shape can start with, as a 64 Kbit set: one load and
-/// one bit test per input byte, no branch on content. `=` pairs with any
-/// second byte (the value follows), everything else is a fixed digraph.
 const START_PAIRS: [u64; 1024] = {
     let mut bits = [0_u64; 1024];
     let mut second = 0_usize;
@@ -695,8 +602,6 @@ fn could_start(bytes: &[u8], at: usize) -> bool {
     START_PAIRS[pair / 64] & (1 << (pair % 64)) != 0
 }
 
-/// First bytes of every secret shape; the scan skips everything else with one
-/// table load per byte.
 const FIRST: [bool; 256] = {
     let mut table = [false; 256];
     table[b'=' as usize] = true;
@@ -715,7 +620,6 @@ const fn is_first(byte: u8) -> bool {
     FIRST[byte as usize]
 }
 
-/// The first secret at or after `from` whose span starts at or after `copied`.
 fn next_hit(bytes: &[u8], from: usize, copied: usize) -> Option<Hit> {
     let mut index = from;
     while index + 1 < bytes.len() {
@@ -731,8 +635,6 @@ fn next_hit(bytes: &[u8], from: usize, copied: usize) -> Option<Hit> {
     None
 }
 
-/// JSON-escaped size after the same masking used at the output boundary.
-/// Secret spans never cross a line, so a complete rendered row is measurable.
 pub(crate) fn masked_escaped_len(text: &str) -> usize {
     let bytes = text.as_bytes();
     let mut copied = 0;
@@ -744,8 +646,6 @@ pub(crate) fn masked_escaped_len(text: &str) -> usize {
     cost + escaped_len(&text[copied..])
 }
 
-/// Replaces secret-shaped spans with `[masked:<kind>]`. Returns the input
-/// untouched (no allocation) when nothing matches, which is the common case.
 pub fn mask_secrets(text: String) -> String {
     let bytes = text.as_bytes();
     let Some(mut hit) = next_hit(bytes, 0, 0) else {
@@ -768,48 +668,28 @@ pub fn mask_secrets(text: String) -> String {
     out
 }
 
-// ---------------------------------------------------------------------------
-// Per-turn budget
-// ---------------------------------------------------------------------------
-
-/// Where the complete text of a result the turn budget cuts can be read
-/// back, so the cut's marker names a recall path.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResultRecall<'a> {
-    /// No session store (a direct run): the marker says `not stored`.
     None,
-    /// The store holds the complete output under this spill handle.
     Spill(&'a str),
-    /// The store holds the per-call result row itself: a result the call's
-    /// own bound left whole, which only the turn budget cut. The marker
-    /// names the row by the digest of that stored text.
     StoredResult { tool: &'a str, call: ToolCallId },
 }
 
-/// The marker token for a stored output under `call`:
-/// `t:<tool>:<call8>:<digest8>`. Shared by spills and stored result rows so
-/// `read_tool_result` resolves either with one handle grammar.
 pub(crate) fn result_handle(tool: &str, call: ToolCallId, digest: &str) -> String {
     let call = call.to_string();
     format!("t:{tool}:{}:{}", &call[..8], &digest[..8])
 }
 
-/// Reply space reserved for every call, including administrative rejections.
-/// Variable tool names still leave room for their recall marker.
 pub(crate) fn result_reserve_bytes(tool: &str) -> usize {
     384 + tool.len()
 }
 
-/// Turn output reserved for one complete search page.
 pub(crate) const SEARCH_RESERVATION_BYTES: usize = super::search::SEARCH_BOUNDS.max_bytes;
 
 fn complete_search_page(tool: &str, text: &str) -> bool {
     tool == "search" && text.starts_with("search ") && text.len() <= SEARCH_RESERVATION_BYTES
 }
 
-/// One strict projection from persisted per-call results to model context.
-/// Reserve complete admitted search pages and short replies before ordinary
-/// text is cut; replay uses the same call order and complete result bytes.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TurnOutputBudget {
     remaining: usize,
@@ -848,12 +728,6 @@ impl TurnOutputBudget {
         }
     }
 
-    /// Admits one result, shrinking it when the turn is nearly spent, and
-    /// charges what remains of it. A cut's marker points at `recall`.
-    ///
-    /// Deterministic: the same text and recall produce the same bytes, which
-    /// is what lets assembly reconstruct the projection instead of storing
-    /// it.
     pub(crate) fn admit(
         &mut self,
         tool: &str,
@@ -877,8 +751,6 @@ impl TurnOutputBudget {
         }
         let mut cut = false;
         if text.len() > allowed {
-            // The stored-result handle digests the row's text, which is the
-            // text before this cut; hashing happens only on this cold path.
             let stored_result = match recall {
                 ResultRecall::StoredResult { tool, call } => Some(result_handle(
                     tool,
@@ -922,8 +794,6 @@ impl TurnOutputBudget {
                 }
             }
         }
-        // Legacy/unreserved callers can leave less room than a marker itself.
-        // The production reservation path always leaves a complete short reply.
         if text.len() > allowed {
             text.clear();
             let notice = "turn output budget reached";
@@ -940,7 +810,6 @@ impl TurnOutputBudget {
     }
 }
 
-/// Original generic-floor projection for recorded pre-AB2 plan identities.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LegacyTurnOutputBudget {
     remaining: usize,
@@ -953,18 +822,10 @@ impl LegacyTurnOutputBudget {
         }
     }
 
-    /// Admits one result, shrinking it when the turn is nearly spent, and
-    /// charges what remains of it. A cut's marker points at `recall`.
-    ///
-    /// Deterministic: the same text and recall produce the same bytes, which
-    /// is what lets assembly reconstruct the projection instead of storing
-    /// it.
     pub(crate) fn admit(&mut self, text: &mut String, recall: ResultRecall<'_>) -> bool {
         let allowed = self.remaining.max(MIN_MODEL_TEXT_BYTES);
         let mut cut = false;
         if text.len() > allowed {
-            // The stored-result handle digests the row's text, which is the
-            // text before this cut; hashing happens only on this cold path.
             let stored_result = match recall {
                 ResultRecall::StoredResult { tool, call } => Some(result_handle(
                     tool,
@@ -998,7 +859,6 @@ impl LegacyTurnOutputBudget {
     }
 }
 
-/// Entry points for the `tool_output` bench. Not a public API.
 #[doc(hidden)]
 pub mod bench_support {
     #[must_use]
@@ -1059,14 +919,12 @@ mod tests {
         assert!(bounded.text.ends_with("line-39998\nline-39999\n"));
         assert_eq!(bounded.text.matches("…[qq: ").count(), 1);
         assert!(escaped_len(&bounded.text) <= bounds.max_bytes);
-        // Every kept line is whole: no line was split mid-way.
         for line in bounded.text.lines() {
             assert!(
                 line.starts_with("line-") || line.starts_with("…[qq: "),
                 "partial line kept: {line:?}"
             );
         }
-        // The marker accounts for exactly the bytes between head and tail.
         let kept: usize = bounded
             .text
             .lines()
@@ -1150,17 +1008,14 @@ mod tests {
             escaped_len(&text) <= 16 * 1024,
             "the reserve covers the handle"
         );
-        // Only one provisional marker; a second finalize finds nothing.
         assert!(!finalize_spill_marker(
             &mut text,
             Some("t:x:00000000:00000000"),
             None
         ));
-        // No handle: the marker keeps saying `not stored`.
         let mut untouched = bounded.text.clone();
         assert!(!finalize_spill_marker(&mut untouched, None, None));
         assert_eq!(untouched, bounded.text);
-        // A marker-looking line that is content (not at line start) is skipped.
         let mut content = format!("x {MARKER_PREFIX}fake; not stored]…\n");
         assert!(!finalize_spill_marker(
             &mut content,
@@ -1251,13 +1106,11 @@ mod tests {
 
     #[test]
     fn a_single_line_without_newline_is_bounded() {
-        // 3 KiB on one line, generous bytes: only the line clip applies.
         let text = "y".repeat(3 * 1024);
         let bounded = bound_text(text.clone(), &Bounds::new(64 * 1024, 1), None);
         assert_eq!(bounded.text.len(), MAX_LINE_BYTES + "…+1072".len());
         assert!(bounded.text.ends_with("…+1072"));
         assert_eq!(bounded.omitted_bytes, 0);
-        // Tight bytes: the head's half of the budget bounds the one line.
         let bounded = bound_text(text, &Bounds::new(MIN_MODEL_TEXT_BYTES, 1), None);
         assert!(bounded.text.len() < MAX_LINE_BYTES);
         assert!(bounded.text.contains("…+"));
@@ -1271,7 +1124,6 @@ mod tests {
 
     #[test]
     fn escape_dense_single_lines_never_exceed_the_byte_budget() {
-        // Every byte escapes 6:1, so even the clipped line must shrink to fit.
         let bounds = Bounds::new(MIN_MODEL_TEXT_BYTES, 1);
         let text = "\u{1}".repeat(3 * 1024);
         let bounded = bound_text(text, &bounds, None);
@@ -1281,7 +1133,6 @@ mod tests {
             bounded.text.len()
         );
         assert!(bounded.text.contains("…+"));
-        // Two lines: the head keeps a prefix of the first, the tail the second.
         let two = format!("{}\n{}", "\u{1}".repeat(3 * 1024), "\u{1}".repeat(3 * 1024));
         let bounded = bound_text(two, &Bounds::new(MIN_MODEL_TEXT_BYTES, 2), None);
         assert!(escaped_len(&bounded.text) <= MIN_MODEL_TEXT_BYTES);
@@ -1480,8 +1331,6 @@ mod tests {
 
     #[test]
     fn a_budget_cut_of_an_unspilled_result_names_the_stored_row() {
-        // The call's own bound kept the result whole (no spill), so the turn
-        // budget's marker points at the persisted result row by digest.
         let call = ToolCallId::from_bytes([0xab; 16]);
         let text = lines(1_000);
         let digest = crate::workspace::content_hash(text.as_bytes());
@@ -1510,8 +1359,6 @@ mod tests {
             "{marker}"
         );
         assert!(!marker.contains("not stored"), "{marker}");
-        // Same text, same budget state: the same bytes, so assembly can
-        // reconstruct the projection from the stored row.
         let mut again = TurnOutputBudget::new();
         let mut first_again = "x".repeat(92 * 1024);
         again.admit("other", &mut first_again, ResultRecall::None);
@@ -1529,8 +1376,6 @@ mod tests {
 
     #[test]
     fn a_huge_single_line_shell_capture_is_bounded() {
-        // Mirrors the R4 shell fixture: 1 MiB of `s` on one line, captured
-        // head+tail at 128 KiB, then bounded for the model.
         let mut text = String::from("shell exit=0 elapsed=0.0 bytes=1048576\n");
         text.push_str(&"s".repeat(64 * 1024));
         text.push_str("\n…[qq: 917504 bytes not captured]…\n");
@@ -1538,7 +1383,6 @@ mod tests {
         let bounded = bound_text(text, &Bounds::new(16 * 1024, 4_000), None);
         assert!(bounded.text.starts_with("shell exit=0 "));
         assert!(bounded.text.len() <= 16 * 1024);
-        // Both 64 KiB lines survive, clipped; nothing is omitted whole.
         assert_eq!(bounded.clipped_lines, 2);
         assert_eq!(bounded.omitted_bytes, 0);
         assert!(bounded.text.contains("bytes not captured"));

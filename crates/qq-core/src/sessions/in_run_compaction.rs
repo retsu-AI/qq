@@ -1,18 +1,3 @@
-//! In-run compaction: the session layer's side of summarizing a running
-//! prompt's own earlier turns so the run continues in one window.
-//!
-//! The run loop asks (`InRunCompactor::compact`) at a safe boundary with the
-//! exact messages to replace. This module runs the summarizer as an internal
-//! `RunKind::Compaction` run — a durable row with its own usage, cost, and
-//! `RunStarted`/`RunFinished`/`SessionCompacted` events, exactly like a
-//! between-run step — but without taking the session's active-run slot,
-//! which the prompt run holds. The marker it commits is scoped to the prompt
-//! run (`session_compactions.scope_run_id`, `turn_cutoff`), so replay renders
-//! the summary where the replaced turns stood and the between-run cutoff is
-//! untouched. The summarizer request is provider-direct: no steering, no
-//! audit. It declares the run's tools and system prompt only so it shares the
-//! run's provider cache; a call is rejected, never run (ADR-0056 § 5).
-
 use super::{
     execution::{ModelTurnCommit, RunAccountingAccumulator, cancellation_requested},
     runtime::SessionRuntimeInner,
@@ -119,8 +104,6 @@ async fn compact_in_run(
         request.transcript
     };
     inner.notify(started_event.cursor);
-    // Register for cancellation like any run, so a cancel of the prompt run
-    // (which cascades here) or of this run directly stops the summarizer.
     let (cancel, mut cancelled) = watch::channel(false);
     match inner.cancellations.lock() {
         Ok(mut cancellations) => {
@@ -133,13 +116,7 @@ async fn compact_in_run(
             ));
         }
     }
-    // If the prompt run's task is torn down while this future is pending
-    // (cancel, deadline, runtime failure drop the stream that awaits us),
-    // the compaction row must still settle: the guard spawns that on drop.
-    // It is disarmed on every path that settles explicitly below.
     let mut guard = SettleOnDrop::new(Arc::clone(inner), compaction.clone());
-    // A cancel recorded between the start transaction and the registration
-    // above would otherwise be missed.
     match cancellation_requested(inner, compaction.identity.run_id).await {
         Ok(true) => {
             guard.disarm();
@@ -161,9 +138,6 @@ async fn compact_in_run(
             return Err(Error::Persistence(error.to_string()));
         }
     }
-    // One provider turn: the run's transcript through the cutoff, then the
-    // instruction. The summarizer sees the prompt so it knows the task, and
-    // is told the summary replaces the model's own work, not the user's.
     messages.push(Message::user(if request.inherited_prefix {
         COMPACTION_INSTRUCTION.to_owned()
     } else {
@@ -302,9 +276,6 @@ async fn compact_in_run(
                         }
                     }
                     if paid.is_some() {
-                        // Admission may commit before its acknowledgement loses
-                        // the deadline race. Return settled durable uncertainty,
-                        // not the earlier in-memory measured prefix.
                         let run = compaction.identity.run_id;
                         let settled=inner.store.call(Priority::Control,move |connection| {
                             let (usage,cost):(Option<String>,Option<u64>)=connection.query_row(
@@ -399,9 +370,6 @@ async fn compact_in_run(
     guard.disarm();
     let summary = match reply {
         Ok(reply) => reply,
-        // The compaction run is settled before the loop's backoff, so a retry
-        // never stacks a second running row; if that write fails the runtime
-        // is marked failed and the next attempt returns `Unavailable`.
         Err(crate::runtime::SummarizeError::RejectedBeforeWork {
             kind,
             message,
@@ -489,8 +457,6 @@ async fn compact_in_run(
         )
         .await;
     match committed {
-        // The splice uses the stored text, so the live request and replay
-        // render the same bytes.
         Ok((events, Some(summary))) => {
             for event in events {
                 inner.notify(event.cursor);
@@ -526,10 +492,6 @@ async fn compact_in_run(
     }
 }
 
-/// Settles the compaction run `Cancelled` if the awaiting task is dropped
-/// before an explicit settlement, and unregisters its cancellation sender
-/// either way. The settlement is spawned: `Drop` cannot await, and the store
-/// call must complete even though the dropping task is gone.
 struct SettleOnDrop {
     inner: Arc<SessionRuntimeInner>,
     run_id: RunId,
@@ -664,8 +626,6 @@ async fn settle_failed_with(
     }
 }
 
-/// Prepended to the standard instruction so the summarizer knows the summary
-/// replaces the assistant's own earlier turns of a task still in progress.
 const IN_RUN_COMPACTION_INSTRUCTION_PREFIX: &str = "The task above is still in progress. The \
 messages after its prompt (the last user message before your work began) are your own earlier \
 work on it; summarize that work so it can replace those messages while you continue. Earlier \

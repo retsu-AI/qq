@@ -5,10 +5,7 @@ use markdown::{CODE_PANEL_INSET, panel_content_width, panel_rows, panel_rows_at}
 use qq_client::state::ToolCallTiming;
 use qq_protocol::ToolErrorKind;
 
-/// Runs with more than this many quiet tool calls fold into one summary row.
 pub(super) const TOOL_FOLD_THRESHOLD: usize = 3;
-/// Every marker line qq-core inserts into a result (omitted head/tail, scan
-/// caps, unlisted entries) starts with this; markers are excluded from counts.
 pub(super) const TOOL_MARKER_PREFIX: &str = "…[qq: ";
 pub(super) const TOOL_SUBJECT_WIDTH: usize = 48;
 pub(super) const MAX_TOOL_ERROR_BYTES: usize = 2 * 1024;
@@ -16,63 +13,33 @@ pub(super) const MAX_TOOL_ERROR_ROWS: usize = 6;
 pub(super) const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
 pub(super) const MAX_TOOL_ARGUMENT_ROWS: usize = 8;
 pub(super) const MAX_TOOL_RESULT_ROWS: usize = 12;
-/// Rows of live streamed output shown under a running call's one-liner.
 pub(super) const MAX_LIVE_TAIL_ROWS: usize = 6;
 pub(super) const TOOL_SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
-/// Files named in a folded read-only group before `+N`.
 const FOLD_NAMED_FILES: usize = 3;
-/// Appended to a summary row's metric when the runtime cut the result short.
 const TRUNCATED_SUFFIX: &str = " · truncated";
-/// Detail panels sit at the content column, under the verb, so their rail
-/// lines up with fenced code in prose (which follows the same three-cell
-/// message prefix).
 const TOOL_PANEL_INDENT: &str = "   ";
-/// Rows the panel adds around a call's detail: the top and bottom padding
-/// rows. Content budgets are counted without them.
 pub(super) const TOOL_PANEL_PADDING_ROWS: usize = 2;
 
-/// What the transcript needs to know about a tool call to draw its row,
-/// derived once from the JSON arguments and result and cached by the
-/// renderer under [`ToolRowKey`]. Nothing here depends on width or time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolRow {
-    /// `Read`, `Edit`, `Run`, `Search`, `Spawn`, or the raw tool name.
     pub verb: &'static str,
     pub raw_name: bool,
-    /// Path, command, query, or task: what the call acted on.
     pub subject: Option<String>,
-    /// The subject is a path and may be middle-elided and hyperlinked.
     pub subject_is_path: bool,
-    /// `212 lines`, `+12 −3`, `exit 0`, `14 hits · 3 files`.
     pub metric: Option<String>,
-    /// The result was cut short by the runtime.
     pub truncated: bool,
-    /// Arguments as `key: value` rows, for tools without a curated view.
     pub arguments: Vec<(String, String)>,
-    /// Which end of the result the expanded view shows.
     pub body: ResultBody,
-    /// Diff text for the expanded view and approvals, when the call has one.
     pub diff: Option<String>,
-    /// The expanded detail panel laid out at one width, filled the first
-    /// frame the call is expanded and reused until the width changes. Every
-    /// other input (arguments, result, diff) is fixed by [`ToolRowKey`], so
-    /// the cached rows go away with the row. Interior mutability because the
-    /// transcript cache hands out `&ToolRow` while laying out; a frame with
-    /// 32 expanded calls rebuilt every panel before this.
     panel: RefCell<Option<(usize, Vec<Line>)>>,
 }
 
-/// Which end of a result reads best: the head for content the model asked
-/// to see (files, listings, matches), the tail for command output whose
-/// verdict comes last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResultBody {
     Head,
     Tail,
 }
 
-/// Identity of a cached [`ToolRow`]: the call plus everything that changes
-/// its derivation. Width and time are applied at draw time, not cached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ToolRowKey {
     pub id: ToolCallId,
@@ -95,8 +62,6 @@ impl ToolRowKey {
 }
 
 impl ToolRow {
-    /// Derive the row from a call. The one place `serde_json` touches tool
-    /// arguments on the render side.
     pub(crate) fn derive(call: &ToolCallSnapshot) -> Self {
         let arguments = if call.arguments.len() <= MAX_TOOL_DETAIL_BYTES {
             serde_json::from_str::<serde_json::Value>(&call.arguments).ok()
@@ -144,8 +109,6 @@ impl ToolRow {
             (!text.is_empty()).then_some(text)
         };
         let (verb, raw_name, subject, subject_is_path, metric) = match call.name.as_str() {
-            // `read <path> L<a>-<b>[,…]/<total> h:<hash>` heads the result;
-            // `unchanged`, `outline`, and `info` name the other shapes.
             "read_file" => (
                 "Read",
                 false,
@@ -153,8 +116,6 @@ impl ToolRow {
                 arguments.is_some(),
                 has_result.then(|| read_metric(result, content_lines())),
             ),
-            // `tree <path> depth= entries=<shown>/<total> files= dirs=` heads
-            // the result; `list_dir` is its alias.
             "tree" | "list_dir" => (
                 "List",
                 false,
@@ -173,9 +134,6 @@ impl ToolRow {
                 false,
                 has_result.then(|| search_metric(result)),
             ),
-            // `edit ok files=<n> edits=<m>` heads the result; the arguments
-            // carry `edits: [{path, …}]`, whose first path (plus a count when
-            // several files) is the subject.
             "edit_file" => (
                 "Edit",
                 false,
@@ -195,8 +153,6 @@ impl ToolRow {
                         .map(|content| count_noun(content.lines().count(), "line", "lines"))
                 }),
             ),
-            // `shell exit=<code> elapsed=<s> bytes=<n>` (or `exec …`) heads
-            // the result; an exec call renders as `program args…`.
             "shell" | "exec" => {
                 let cwd = string_argument("cwd");
                 let command = string_argument("command")
@@ -235,8 +191,6 @@ impl ToolRow {
                 false,
                 None,
             ),
-            // `read_tool_result <handle> L<a>-<b>/<total> [next=]` or
-            // `… query="…" matches=<shown>/<total>` heads the result.
             "read_tool_result" => (
                 "Recall",
                 false,
@@ -252,8 +206,6 @@ impl ToolRow {
                 has_result.then(|| format_result_size(result.len())),
             ),
             name => {
-                // MCP tools arrive as `mcp__server__tool`; show `server · tool`
-                // and the first string argument as the subject.
                 let (verb, raw) = match name.strip_prefix("mcp__") {
                     Some(rest) => {
                         let _ = rest;
@@ -300,8 +252,6 @@ impl ToolRow {
         }
     }
 
-    /// The name shown in the row: the verb, or `server · tool` for MCP, or
-    /// the raw tool name.
     fn label(&self, call: &ToolCallSnapshot) -> String {
         if !self.raw_name {
             return self.verb.to_owned();
@@ -316,13 +266,10 @@ impl ToolRow {
     }
 }
 
-/// A line qq-core inserted rather than the tool's content.
 pub(super) fn is_marker_line(line: &str) -> bool {
     line.starts_with(TOOL_MARKER_PREFIX)
 }
 
-/// `value` of `key=value` from a result's header line, when the result
-/// starts with `<tool> …`.
 fn header_field<'a>(result: &'a str, tool: &str, key: &str) -> Option<&'a str> {
     let header = result.lines().next()?;
     let rest = header.strip_prefix(tool)?;
@@ -334,8 +281,6 @@ fn header_field<'a>(result: &'a str, tool: &str, key: &str) -> Option<&'a str> {
         .map(|(_, value)| value)
 }
 
-/// The result without its `<tool> k=v …` header line; the row's metric
-/// already shows what the header says.
 fn strip_header<'a>(result: &'a str, tool: &str) -> &'a str {
     let Some(header) = result.lines().next() else {
         return result;
@@ -346,8 +291,6 @@ fn strip_header<'a>(result: &'a str, tool: &str) -> &'a str {
     else {
         return result;
     };
-    // `edit <n>: <code>: …` is a batch-edit error, not a header: keep it so
-    // the reason survives.
     if rest[1..].split_once(": ").is_some_and(|(index, _)| {
         !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
     }) {
@@ -356,8 +299,6 @@ fn strip_header<'a>(result: &'a str, tool: &str) -> &'a str {
     result.get(header.len() + 1..).unwrap_or_default()
 }
 
-/// `<shown> hits · <files> files` from the `search "…" mode= matches=<shown>/
-/// <total> files=<n>` header; `no matches` when the total is zero.
 fn search_metric(result: &str) -> String {
     let (shown, total) = header_field(result, "search", "matches")
         .and_then(|value| value.split_once('/'))
@@ -379,9 +320,6 @@ fn search_metric(result: &str) -> String {
     metric
 }
 
-/// The header word a tool's result starts with: `read_file` writes `read`,
-/// `edit_file` writes `edit`, `write_file` writes `write`, `list_dir` writes
-/// `tree`, everything else its own name.
 fn header_word(name: &str) -> &str {
     match name {
         "read_file" => "read",
@@ -392,8 +330,6 @@ fn header_word(name: &str) -> &str {
     }
 }
 
-/// The subject of an `edit_file` row: the first edited path, with `+N files`
-/// when the batch spans several. Legacy single-path arguments still work.
 fn edit_subject(arguments: Option<&serde_json::Value>) -> Option<String> {
     let arguments = arguments?;
     if let Some(path) = arguments.get("path").and_then(|value| value.as_str()) {
@@ -415,9 +351,6 @@ fn edit_subject(arguments: Option<&serde_json::Value>) -> Option<String> {
     })
 }
 
-/// `<a>-<b> of <total> lines` from the `read` header; `unchanged`, `<n>
-/// items` (outline), or `info` for the other shapes. Falls back to counting
-/// body lines when the result has no header.
 fn read_metric(result: &str, body_lines: usize) -> String {
     let Some(header) = result.lines().next() else {
         return count_noun(body_lines, "line", "lines");
@@ -455,8 +388,6 @@ fn read_metric(result: &str, body_lines: usize) -> String {
     }
 }
 
-/// `L<a>-<b> of <n> lines` or `<shown>/<total> hits` from the
-/// `read_tool_result` header.
 fn stored_output_metric(result: &str) -> String {
     if let Some((shown, total)) =
         header_field(result, "read_tool_result", "matches").and_then(|value| value.split_once('/'))
@@ -484,8 +415,6 @@ fn stored_output_metric(result: &str) -> String {
     }
 }
 
-/// `<n> entries` from the `tree … entries=<shown>/<total>` header, with the
-/// total when entries were left unlisted.
 fn tree_metric(result: &str) -> String {
     match header_field(result, "tree", "entries").and_then(|value| value.split_once('/')) {
         Some((shown, total)) if shown != total => format!("{shown}/{total} entries"),
@@ -498,7 +427,6 @@ fn tree_metric(result: &str) -> String {
     }
 }
 
-/// `+12 −3` from a unified diff.
 fn diff_metric(diff: &str) -> String {
     let mut added = 0_usize;
     let mut removed = 0_usize;
@@ -523,9 +451,6 @@ fn first_sentence(text: &str) -> String {
     trimmed[..end].trim_end().to_owned()
 }
 
-/// Shorten a path from the middle so the file name always survives:
-/// `crates/qq-tui/src/view/tools.rs` at 24 columns becomes
-/// `crates/…/view/tools.rs`.
 pub(crate) fn elide_path(path: &str, width: usize) -> String {
     let count = path.chars().count();
     if count <= width {
@@ -537,10 +462,6 @@ pub(crate) fn elide_path(path: &str, width: usize) -> String {
     let Some((head, tail)) = path.rsplit_once('/') else {
         return preview(path, width);
     };
-    // Keep the file name whole when it fits with an ellipsis and one head
-    // segment; otherwise fall back to a plain truncation of the name.
-    // `…/{tail}` needs exactly `tail_count + 2` columns; only truncate the
-    // name itself when even that does not fit.
     let tail_count = tail.chars().count();
     if tail_count + 2 > width {
         return format!(
@@ -567,8 +488,6 @@ pub(crate) fn elide_path(path: &str, width: usize) -> String {
     }
 }
 
-/// Live timing for the row: how long a running call has run and when it
-/// last produced output, or its wall-clock start and end when finished.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RowClock {
     pub timing: ToolCallTiming,
@@ -576,7 +495,6 @@ pub(crate) struct RowClock {
 }
 
 impl RowClock {
-    /// Elapsed since start, live for running calls, fixed for finished ones.
     fn duration(&self, running: bool) -> Option<u64> {
         let started = self.timing.started_at_ms?;
         let end = if running {
@@ -588,38 +506,22 @@ impl RowClock {
     }
 }
 
-/// Per-call display state the caller resolves before rendering.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ToolRowContext<'a> {
     pub row: &'a ToolRow,
     pub clock: RowClock,
-    /// This call's body is shown (here or in the inspector). An expanded
-    /// call never folds, so its summary row stays wherever the body went.
     pub expanded: bool,
-    /// Expanded bodies render under the summary row. `false` while the
-    /// inspector pane shows them, so the transcript keeps the row alone.
     pub inline_detail: bool,
-    /// The transcript folds quiet finished blocks to one row.
     pub fold: bool,
-    /// The transcript cursor rests on this call.
     pub selected: bool,
 }
 
-/// Rows rendered beneath a tool call that spawned a child session.
 pub(super) type ChildRows<'a> = &'a dyn Fn(ToolCallId, usize) -> Vec<Line>;
 
-/// Rows of the approval block for the call awaiting an answer; empty for
-/// every other call.
 pub(super) type ApprovalRows<'a> = &'a dyn Fn(ToolCallId, usize) -> Vec<Line>;
 
-/// Resolves a call to its cached row and display state.
 pub(super) type RowLookup<'a> = &'a dyn Fn(&ToolCallSnapshot) -> ToolRowContext<'a>;
 
-/// Renders one run's tool calls: one gutter line per call, with errors,
-/// expansion, and live output adding bounded body rows. In folded detail a
-/// block of quiet finished calls is one summary row instead. A running
-/// call's live output shows at every detail level: it is the thing the user
-/// is waiting for.
 pub(super) fn render_tool_calls(
     calls: &[&ToolCallSnapshot],
     live_output: &HashMap<ToolCallId, String>,
@@ -629,10 +531,6 @@ pub(super) fn render_tool_calls(
     children: ChildRows<'_>,
     approval: ApprovalRows<'_>,
 ) -> Vec<Line> {
-    // A corrected argument the model then retried successfully is routine:
-    // the retry's row is the record. Expanding or selecting the corrected
-    // call (the cursor still visits it) shows it again. Most blocks hold no
-    // error at all, so they skip the copy.
     let shown: Vec<&ToolCallSnapshot>;
     let calls = if calls.iter().any(|call| call.is_error) {
         shown = calls
@@ -667,11 +565,6 @@ pub(super) fn render_tool_calls(
         lines.push(tool_summary_line(call, context, tick, width));
         lines.extend(approval(call.id, width));
         if let Some(result) = call.result.as_deref() {
-            // Only a failure opens its panel by default; a correction keeps
-            // its text for the expanded body, and an outcome shows the one
-            // line that says why (the expanded body shows all of it). A
-            // denied or interrupted call has no grade but is still an error:
-            // its reason is the panel, as before grading existed.
             let panel = match (call.error_kind(), call.is_error) {
                 (Some(ToolErrorKind::Failure), _) | (None, true) => {
                     Some((MAX_TOOL_ERROR_ROWS, failure()))
@@ -700,15 +593,11 @@ pub(super) fn render_tool_calls(
         {
             lines.extend(tool_live_output_lines(output, width));
         }
-        // A spawned child renders under the call that created it so the
-        // parent transcript shows delegated work in execution order.
         lines.extend(children(call.id, width));
     }
     lines
 }
 
-/// `▸ Read ×4  cache.rs, refresh.rs, lib.rs, +1` for a group of quiet calls;
-/// mixed verbs list each with its count.
 pub(super) fn tool_fold_line(
     calls: &[&ToolCallSnapshot],
     lookup: RowLookup<'_>,
@@ -732,7 +621,6 @@ pub(super) fn tool_fold_line(
             }
         }
     }
-    // The fold glyph sits in the rail so the text starts at the prose column.
     let mut line = Line::styled(" ▸ ", accent());
     for (index, (name, count)) in counts.iter().enumerate() {
         if index > 0 {
@@ -756,12 +644,6 @@ pub(super) fn tool_fold_line(
     truncate_line(line, width)
 }
 
-/// One summary row: state glyph in the rail, verb at the prose column,
-/// subject, then metric and duration right-aligned to the content width so
-/// they line up down a run at every width. The subject takes what is left
-/// between verb and metric; paths elide from the middle so the file name
-/// always shows. When even a short subject would not fit, the duration goes
-/// first, then the metric, so the row degrades to verb and subject.
 pub(super) fn tool_summary_line(
     call: &ToolCallSnapshot,
     context: ToolRowContext<'_>,
@@ -770,8 +652,6 @@ pub(super) fn tool_summary_line(
 ) -> Line {
     let row = context.row;
     let (glyph, glyph_style) = tool_state_glyph(call, tick);
-    // The cursor marker takes the margin cell so the state glyph keeps its
-    // rail cell and the row does not shift when selected.
     let mut line = Line::styled(if context.selected { "▶" } else { " " }, accent());
     line.push(glyph, glyph_style);
     line.push(" ", muted());
@@ -781,8 +661,6 @@ pub(super) fn tool_summary_line(
         format!("{label:<label_width$} "),
         if row.raw_name { muted() } else { normal() },
     );
-    // Rail (3) + padded label + separator; the label is ASCII or `·` (one
-    // cell), so the count is the width.
     let mut used = 3 + label_width + 1;
     let running = call.state == ToolCallState::Running;
     let metric = row.metric.as_deref().filter(|metric| !metric.is_empty());
@@ -794,9 +672,6 @@ pub(super) fn tool_summary_line(
                 0
             }
     });
-    // A command outcome's metric already reads `exit 101`: while the metric
-    // shows, the label would only repeat it; once layout drops the metric,
-    // the label is the only place the exit code remains.
     let exit_in_metric = call.error_kind() == Some(ToolErrorKind::Outcome)
         && metric.is_some()
         && call
@@ -827,8 +702,6 @@ pub(super) fn tool_summary_line(
     let state_width = state.map_or(0, |(label, _)| label.len());
     let duration = context.clock.duration(running).map(format_duration_ms);
     let duration_width = duration.as_deref().map_or(0, |text| text.len() + 2);
-    // Right side: `metric · state  duration`, dropped from the right until
-    // the subject keeps its minimum column.
     let mut show_duration = duration.is_some();
     let mut show_metric = metric.is_some();
     let right_width = |show_metric: bool, show_duration: bool| {
@@ -866,8 +739,6 @@ pub(super) fn tool_summary_line(
         line.push(text, normal());
     }
     if right_width > 0 {
-        // Anchor the right side to the content width; a row that is still
-        // too narrow overflows and is truncated below.
         line.push(
             " ".repeat(width.saturating_sub(used + right_width).max(gap)),
             muted(),
@@ -909,9 +780,6 @@ pub(super) fn tool_state_glyph(call: &ToolCallSnapshot, tick: usize) -> (&'stati
     }
 }
 
-/// The right-side state label and style of a settled correction or outcome:
-/// a corrected argument is routine, and an outcome names its code
-/// (`path_not_found`) as a warning. Failures keep the state label.
 fn tool_error_label(call: &ToolCallSnapshot, kind: ToolErrorKind) -> (&str, Style) {
     match kind {
         ToolErrorKind::Correction => ("corrected", muted()),
@@ -924,12 +792,10 @@ fn tool_error_label(call: &ToolCallSnapshot, kind: ToolErrorKind) -> (&str, Styl
                     !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
                 })
                 .map_or(result, |(_, rest)| rest);
-            // `exec exit=101 …`: shown only when layout dropped the metric.
             let result = result
                 .strip_prefix("shell ")
                 .or_else(|| result.strip_prefix("exec "))
                 .unwrap_or(result);
-            // `fetch <url> status=404`: the status is the answer, not the URL.
             let fetch_status = result
                 .strip_prefix("fetch ")
                 .and_then(|rest| rest.lines().next())
@@ -951,14 +817,10 @@ fn tool_error_label(call: &ToolCallSnapshot, kind: ToolErrorKind) -> (&str, Styl
     }
 }
 
-/// A self-corrected call that the model followed with a successful call to
-/// the same tool later in `calls`: its row folds into that call's.
 fn absorbed_correction(calls: &[&ToolCallSnapshot], index: usize) -> bool {
     let call = calls[index];
     call.error_kind() == Some(ToolErrorKind::Correction)
         && calls[index + 1..].iter().any(|later| {
-            // Only a later turn can be a retry: the model cannot see a
-            // result within the turn that issued the call.
             later.name == call.name
                 && later.turn_ordinal > call.turn_ordinal
                 && later.state == ToolCallState::Completed
@@ -966,10 +828,6 @@ fn absorbed_correction(calls: &[&ToolCallSnapshot], index: usize) -> bool {
         })
 }
 
-/// Errors are the one case where content matters by default: show a bounded
-/// tail of the error text in a detail panel under the summary row, in
-/// `style` on the panel surface, at most `max_rows` rows. Empty when the
-/// error has no text.
 pub(super) fn tool_error_lines(
     result: &str,
     max_rows: usize,
@@ -993,11 +851,6 @@ pub(super) fn tool_error_lines(
     tool_panel_rows(body, None, width)
 }
 
-/// A tool detail panel: the shared code panel (`markdown::panel_rows`) at the
-/// content column, so its rail lines up with fenced code in prose. The
-/// margin before the rail stays on the terminal background; only the panel
-/// itself is tinted. Widths too narrow for margin plus rail truncate every
-/// row rather than overflowing.
 fn tool_panel_rows(
     body: impl IntoIterator<Item = Line>,
     label: Option<&str>,
@@ -1014,8 +867,6 @@ fn tool_panel_content_width(width: usize) -> usize {
     panel_content_width(width.saturating_sub(TOOL_PANEL_INDENT.len()))
 }
 
-/// `HH:MM:SS` in UTC from server milliseconds. Local-time rendering waits on
-/// a timezone source that does not read the environment inside the frame.
 pub(crate) fn format_clock(ms: u64) -> String {
     let seconds = ms / 1000;
     format!(
@@ -1026,13 +877,6 @@ pub(crate) fn format_clock(ms: u64) -> String {
     )
 }
 
-/// Expanded detail: the timing line, then what the call produced inside a
-/// detail panel. Known tools never show their JSON: reads and searches show
-/// the head of the result, edits show the diff head-first with line numbers,
-/// and commands show the tail of their output. Unknown and MCP tools list
-/// arguments as `key: value` rows before the result tail, one blank panel
-/// row between the two. The panel adds [`TOOL_PANEL_PADDING_ROWS`] around a
-/// body and is absent when there is nothing to show.
 pub(super) fn tool_expanded_lines(
     call: &ToolCallSnapshot,
     context: ToolRowContext<'_>,
@@ -1040,9 +884,6 @@ pub(super) fn tool_expanded_lines(
 ) -> Vec<Line> {
     let mut lines = Vec::new();
     let row = context.row;
-    // Corrections and outcomes keep their text for here, under the timing
-    // line and with the same budget as any expanded result; a failure already
-    // showed its panel. An outcome drops its tool header (the row says it).
     let graded = match call.error_kind() {
         Some(ToolErrorKind::Correction) => tool_error_lines(
             call.result.as_deref().unwrap_or_default(),
@@ -1065,9 +906,6 @@ pub(super) fn tool_expanded_lines(
     };
     let timing = context.clock.timing;
     let running = call.state == ToolCallState::Running;
-    // The timing line answers "is this new, or am I still waiting on the
-    // same thing?": wall-clock start, then finish or a live elapsed clock,
-    // then when output last arrived. It stays outside the panel.
     let mut when = Line::styled("     ", muted());
     let mut fields = Vec::new();
     if let Some(started) = timing.started_at_ms {
@@ -1085,7 +923,6 @@ pub(super) fn tool_expanded_lines(
         (false, Some(finished)) => fields.push(format!("→ {}", format_clock(finished))),
         (false, None) => {}
     }
-    // How a held call was settled: `denied by you`, `denied by timeout`.
     if let Some(label) = timing.settled.and_then(|settled| settled.label()) {
         fields.push(label);
     }
@@ -1107,9 +944,6 @@ pub(super) fn tool_expanded_lines(
     lines
 }
 
-/// The detail panel body for `call`: arguments, diff or result, wrapped in
-/// the shared code panel. Empty when there is nothing to show. Depends on
-/// nothing that changes between frames, so [`ToolRow::panel`] caches it.
 fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line> {
     let content_width = tool_panel_content_width(width);
     let mut body: Vec<Line> = Vec::new();
@@ -1179,14 +1013,9 @@ fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line>
     if body.is_empty() {
         return Vec::new();
     }
-    // No label: the summary row above already names the tool and subject,
-    // and a language tag would need a grammar lookup per frame.
     tool_panel_rows(body, None, width)
 }
 
-/// A unified diff, head-first, with new-file line numbers in the gutter and
-/// the role tints behind added and removed lines. Shows at most `max_rows`
-/// and says how many more there are.
 pub(crate) fn diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<Line> {
     let mut lines = Vec::new();
     let mut new_line: Option<usize> = None;
@@ -1200,7 +1029,6 @@ pub(crate) fn diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<Line>
             break;
         }
         if text.starts_with("@@") {
-            // `@@ -a,b +c,d @@`: the new-file start is `c`.
             new_line = text
                 .split_whitespace()
                 .nth(2)
@@ -1236,12 +1064,6 @@ pub(crate) fn diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<Line>
     lines
 }
 
-/// The last few complete lines of a running call's streamed output, muted
-/// and literal (character wrap, never reflowed) in a detail panel under the
-/// call's one-liner. Only whole lines render: a chunk may end mid-line, and
-/// a partial line reads as garbage until its newline arrives. The panel's
-/// padding rows are present from the first chunk, so a frame only grows by
-/// the rows the tail itself adds.
 pub(super) fn tool_live_output_lines(output: &str, width: usize) -> Vec<Line> {
     let complete = &output[..output.rfind('\n').map_or(0, |index| index + 1)];
     if complete.is_empty() {
@@ -1262,8 +1084,6 @@ pub(super) fn tool_live_output_lines(output: &str, width: usize) -> Vec<Line> {
         None,
         width,
     );
-    // Long lines wrap into extra rows; keep the tail bounded regardless. The
-    // oldest content rows go, right after the top padding row.
     let excess = (rows.len() - TOOL_PANEL_PADDING_ROWS).saturating_sub(MAX_LIVE_TAIL_ROWS);
     if excess > 0 {
         rows.drain(1..1 + excess);
@@ -1271,9 +1091,6 @@ pub(super) fn tool_live_output_lines(output: &str, width: usize) -> Vec<Line> {
     rows
 }
 
-/// Whether text is unified-diff-shaped: a hunk header, or both added and
-/// removed lines. Prose summaries ("Edited x: replaced 1 occurrence(s).")
-/// never match, so diff coloring only applies to an actual diff.
 pub(super) fn looks_like_diff(text: &str) -> bool {
     let mut added = false;
     let mut removed = false;
@@ -1314,7 +1131,6 @@ pub(super) const fn tool_state_label(state: ToolCallState) -> &'static str {
     }
 }
 
-/// How the test entry shows calls: rows, folded, or every body expanded.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SimpleDetail {
@@ -1323,8 +1139,6 @@ pub(super) enum SimpleDetail {
     Expanded,
 }
 
-/// Test entry: derive rows on the fly and render with one detail level for
-/// every call, no selection, no timing, and no approval block.
 #[cfg(test)]
 pub(super) fn render_tool_calls_simple(
     calls: &[&ToolCallSnapshot],

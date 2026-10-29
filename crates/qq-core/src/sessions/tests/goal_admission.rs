@@ -623,8 +623,6 @@ async fn legacy_model_work_repair_rolls_back_on_invalid_turn() {
 
 #[tokio::test]
 async fn direct_goal_rejections_with_finite_caps_keep_retry_pause_and_known_zero() {
-    // Admit the full byte-bounded request so this exercises HTTP retry,
-    // rather than refusing the request before the provider can reject it.
     for goal_origin in [false, true] {
         for (tokens, cost) in [
             (Some(100_000_u64), None),
@@ -1419,8 +1417,6 @@ async fn replayed_goal_cancel_signals_paid_child_of_an_earlier_root() {
         )
         .await
         .unwrap();
-    // Preserve cancellation/replay coverage for a queued goal from before the
-    // sponsored-work fence. New schedulers no longer create this overlap.
     store
         .call(Priority::Control, move |connection| {
             connection.execute(

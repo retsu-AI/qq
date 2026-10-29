@@ -1,6 +1,3 @@
-//! On-disk credential index and plaintext fallback formats, and the hardened
-//! file operations every credential-state write goes through.
-
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
@@ -56,9 +53,6 @@ pub(crate) struct CredentialRecord {
 #[serde(deny_unknown_fields)]
 pub(crate) struct IndexState {
     pub(crate) version: u32,
-    /// Advanced by every durable index write. Indexes written before the
-    /// field existed load as revision zero, so the first mutation after an
-    /// upgrade still produces a strictly newer epoch.
     #[serde(default)]
     pub(crate) revision: u64,
     pub(crate) records: Vec<CredentialRecord>,
@@ -268,8 +262,6 @@ pub(crate) fn ensure_data_directory(path: &Path) -> Result<(), AuthError> {
             source,
         })?;
         let open_metadata = verify_open_directory(path, &directory)?;
-        // This runs on every lock cycle, so the chmod is issued only when the
-        // mode actually differs; the verified metadata already carries it.
         if open_metadata.permissions().mode() & 0o777 != 0o700 {
             directory
                 .set_permissions(fs::Permissions::from_mode(0o700))
@@ -439,8 +431,6 @@ pub(crate) fn validate_regular_metadata(
     Ok(())
 }
 
-/// Returns the open handle's metadata so the caller can act on the verified
-/// mode without a further stat.
 #[cfg(unix)]
 pub(crate) fn verify_open_directory(path: &Path, file: &File) -> Result<fs::Metadata, AuthError> {
     let open_metadata = file.metadata().map_err(|source| AuthError::Io {

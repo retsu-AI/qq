@@ -15,8 +15,6 @@ use std::io::Read as _;
 
 use crate::tools::dispatch::ToolCancellation;
 
-/// Shared by one producer's plans and children. Capture occurs on the bounded
-/// process-preparation worker, once, without adding work to CLI startup.
 #[derive(Debug)]
 pub struct ProcessProducer {
     source: SourceRevision,
@@ -84,7 +82,6 @@ impl ProcessProducer {
     ) -> Arc<ProducerEvidence> {
         let incomplete = || {
             Arc::new(ProducerEvidence {
-                // Allocation failure leaves qualification unavailable.
                 instance: *self.instance.get_or_init(|| ToolCallId::generate().ok()),
                 source: self.source.clone(),
                 executable_sha256: None,
@@ -105,7 +102,6 @@ impl ProcessProducer {
             {
                 break;
             }
-            // Only the initial hash can contend, on bounded preparation workers.
             std::thread::park_timeout(std::time::Duration::from_millis(1));
         }
         let _lease = CaptureLease(&self.capturing);
@@ -116,7 +112,6 @@ impl ProcessProducer {
         let executable_sha256 = if matches!(self.source, SourceRevision::Clean(_)) {
             hash_executable(cancelled, deadline)
         } else {
-            // Unknown/dirty source cannot satisfy a clean producer pin.
             None
         };
         Arc::get_mut(&mut evidence)

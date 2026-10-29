@@ -1,5 +1,3 @@
-//! Amazon Bedrock `ConverseStream` adapter.
-
 use std::{
     collections::{HashMap, hash_map::Entry},
     error::Error,
@@ -45,7 +43,6 @@ use crate::{
 
 const EVENT_FRAME_OVERHEAD_BYTES: usize = 64;
 
-/// A client for Amazon Bedrock's `ConverseStream` API.
 #[derive(Clone)]
 pub(crate) struct Bedrock {
     client: Arc<OnceCell<Client>>,
@@ -61,16 +58,6 @@ impl fmt::Debug for Bedrock {
 }
 
 impl Bedrock {
-    /// Creates a lazily initialized Bedrock client.
-    ///
-    /// AWS configuration is not loaded and no network access occurs until the
-    /// first returned provider stream is polled. If `region` is `None`, the AWS
-    /// region provider chain is used.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the authentication or region configuration is empty or contains
-    /// control characters.
     pub(crate) fn new(auth: BedrockAuth, region: Option<String>) -> Result<Self, ProviderError> {
         validate_configuration(&auth, region.as_deref())?;
         let redactions: Arc<[String]> = match &auth {
@@ -131,8 +118,6 @@ impl Provider for Bedrock {
             );
             let mut message_stopped = false;
             let mut incomplete = None;
-            // Maps streamed content-block indexes to tool-call ids so argument
-            // deltas and block stops can be attributed after the start event.
             let mut tool_calls = ToolCallTracker::default();
 
             while let Some(event) = receiver
@@ -286,12 +271,6 @@ struct ConverseRequest {
     inference_config: InferenceConfiguration,
 }
 
-/// Whether the Converse model id names a family that accepts `cachePoint`
-/// blocks. Converse rejects the block as a validation error for families
-/// without prompt caching (Llama, Mistral, most Nova variants), so the
-/// breakpoints are placed only where they are known to be honoured: the
-/// Anthropic family, in every regional and inference-profile spelling
-/// (`anthropic.`, `us.anthropic.`, `global.anthropic.`, ARNs ending in one).
 fn supports_cache_points(model_id: &str) -> bool {
     model_id
         .rsplit('/')
@@ -315,15 +294,8 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
                 "Amazon Bedrock max_output_tokens must not exceed 2147483647".to_owned(),
             )
         })?;
-        // Same three breakpoints as the Anthropic Messages codec: after the
-        // system prompt, after the last tool, after the last message block.
         let cache_points = supports_cache_points(request.model());
         let last_message = request.messages().len().checked_sub(1);
-        // Converse rejects tool-use and tool-result blocks unless the request
-        // declares tools. A request that declares none (a compaction
-        // summary) carries its tool history as text instead: the model reads
-        // the same calls and results and cannot call anything. Requests with
-        // tools keep their blocks, so their cached prefix is unchanged.
         let tool_names = request.tools().is_empty().then(|| {
             request
                 .messages()
@@ -333,8 +305,6 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
                     ContentBlock::ToolCall { id, name, .. } => Some((id.as_str(), name.as_str())),
                     ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
                 })
-                // The first call with an id names its results; ids are unique
-                // within one provider's history.
                 .fold(HashMap::new(), |mut names, (id, name)| {
                     names.entry(id).or_insert(name);
                     names
@@ -387,10 +357,6 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
             if cache_points {
                 builder = builder.tools(Tool::CachePoint(cache_point()));
             }
-            // Converse's tool choice has no "none" (only auto, any, and a
-            // named tool). `ToolChoice::None` therefore sends the tools
-            // unchanged, keeping the native tool blocks and the cached
-            // prefix; the caller rejects any call the model makes anyway.
             Some(builder.build().map_err(|_| {
                 ProviderError::Configuration(
                     "could not construct an Amazon Bedrock tool configuration".to_owned(),
@@ -416,7 +382,6 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
     }
 }
 
-/// One content block as plain text, for a request that declares no tools.
 fn tool_block_as_text(block: &ContentBlock, names: &HashMap<&str, &str>) -> String {
     match block {
         ContentBlock::Text { text } => text.clone(),
@@ -479,10 +444,6 @@ fn bedrock_content_block(block: &ContentBlock) -> Result<BedrockContentBlock, Pr
     }
 }
 
-/// The Converse SDK wants a `Document` tree, so this adapter alone parses
-/// the compact JSON the request carries. The text was produced by
-/// `serde_json`, so a parse failure is a programming error, reported rather
-/// than trusted.
 fn document_from_raw(raw: &serde_json::value::RawValue) -> Result<Document, ProviderError> {
     serde_json::from_str::<Value>(raw.get())
         .map(|value| document_from_value(&value))
@@ -500,8 +461,6 @@ fn document_from_value(value: &Value) -> Document {
         Value::Number(number) => Document::Number(match (number.as_u64(), number.as_i64()) {
             (Some(value), _) => Number::PosInt(value),
             (None, Some(value)) => Number::NegInt(value),
-            // Without serde_json's arbitrary_precision feature, a number that
-            // fits neither integer range is always representable as f64.
             (None, None) => Number::Float(number.as_f64().unwrap_or(0.0)),
         }),
         Value::String(value) => Document::String(value.clone()),
@@ -520,8 +479,6 @@ enum DecodedEvent {
     OutputText(String),
     Refusal(String),
     MessageStopped,
-    /// `messageStop` with a recoverable stop reason; the terminal usage
-    /// still follows in `metadata`.
     MessageIncomplete(IncompleteReason),
     Usage(ProviderUsage),
     ToolCallStarted {
@@ -539,7 +496,6 @@ enum DecodedEvent {
     Ignored,
 }
 
-/// Attributes streamed tool-call events to ids by content-block index.
 #[derive(Debug, Default)]
 struct ToolCallTracker {
     calls: HashMap<i32, String>,
@@ -896,10 +852,6 @@ fn check_stream_event_size(
     Ok(())
 }
 
-/// The variable-length bytes one stream event carries: the text or tool-input
-/// delta, or a tool block's id and name. Every other field is fixed-size and
-/// covered by `EVENT_FRAME_OVERHEAD_BYTES`. Counting the payload directly
-/// replaces `Debug`-formatting the whole SDK event to measure it.
 fn stream_event_payload_bytes(event: &ConverseStreamOutput) -> usize {
     match event {
         ConverseStreamOutput::ContentBlockDelta(event) => match &event.delta {
@@ -1005,9 +957,6 @@ mod tests {
 
     #[test]
     fn a_tool_choice_of_none_still_declares_the_tools() {
-        // Converse rejects a request whose history holds tool calls when no
-        // tool configuration is sent, and has no "none" choice: the tools go
-        // out unchanged, with no tool choice.
         let tools = vec![crate::ToolSpec::new(
             "read_file",
             "Reads one file",
@@ -1062,7 +1011,6 @@ mod tests {
             "unexpected system block: {system:?}"
         );
         assert!(matches!(&system[1], SystemContentBlock::CachePoint(_)));
-        // The last message's final block is a cache point too.
         assert!(
             mapped.messages[0]
                 .content()
@@ -1105,9 +1053,6 @@ mod tests {
         assert!(matches!(tools[1], Tool::CachePoint(_)));
     }
 
-    /// Converse rejects tool-use and tool-result blocks when no tools are
-    /// declared, which is every compaction summary of a session that used a
-    /// tool (ENG-1002). Such a request carries its tool history as text.
     #[test]
     fn a_request_without_tools_sends_its_tool_history_as_text() {
         let history = vec![
@@ -1172,7 +1117,6 @@ mod tests {
                 "[tool error from an earlier call]\ndenied"
             ]
         );
-        // With tools declared, the same history keeps its tool blocks.
         let request = ModelRequest::new("anthropic.claude-test", history, 128).with_tools(vec![
             ToolSpec::new("read_file", "Reads one file", json!({"type": "object"})),
         ]);

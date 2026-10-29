@@ -1,6 +1,5 @@
 use super::*;
 
-// These fixtures exercise human check consent and the explicit host path.
 async fn explicit_check_session(
     runtime: &SessionRuntime,
     workspace_id: WorkspaceId,
@@ -118,8 +117,6 @@ async fn goal_check_consumed_once_failure_requires_new_authority_without_requeue
 }
 
 async fn once_check(success: bool) {
-    // `cmd /C` on Windows, `sh -c` elsewhere; the output names are split so
-    // the command text itself never contains the expected tail.
     let command = match (success, cfg!(windows)) {
         (true, false) => "printf checked >> goal-check-marker",
         (false, false) => {
@@ -461,7 +458,6 @@ async fn goal_check_process_cancellation_drains_its_process_group() {
     }
     #[cfg(target_os = "linux")]
     {
-        // An orphan may await init's reap; it must no longer execute.
         if let Ok(stat) = tokio::fs::read_to_string(format!("/proc/{descendant}/stat")).await {
             assert_eq!(stat.rsplit_once(") ").unwrap().1.as_bytes()[0], b'Z');
         }
@@ -1102,7 +1098,6 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
         }
         if let Some(goal) = &mut changed {
             assert!(goal.pending_run_id.is_none() || goal.pending_run_id == Some(check));
-            // Settlement may release only its own draining reservation.
             goal.pending_run_id = None;
         }
         release.send(()).unwrap();

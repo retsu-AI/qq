@@ -1,34 +1,16 @@
-//! Shared conformance checks every [`ExternalToolHost`] adapter must pass.
-//!
-//! Not a public API. The suite is parameterized by what the adapter under
-//! test can be made to do, so the embedded host (which controls its handlers)
-//! runs every check and an adapter fronting an unreachable backend runs the
-//! availability subset. Each check returns a description of what failed so a
-//! single test can report the first violation.
-
 use std::{sync::Arc, time::Duration};
 
 use super::{ExternalToolHost, HostCallError, HostReadiness};
 use crate::RunCancellation;
 
-/// Names of the tools (namespaced) the fixture host serves, or `None` when
-/// the adapter cannot be made to exhibit that behavior.
 #[derive(Debug, Default, Clone)]
 pub struct ConformanceFixture {
-    /// Returns a successful result whose content contains `expect_content`.
     pub succeeds: Option<(String, String)>,
-    /// The tool reports its own failure (`is_error`), not a host error.
     pub tool_error: Option<String>,
-    /// Never completes within the host's deadline.
     pub hangs: Option<String>,
-    /// Returns a result larger than the host's result bound.
     pub oversized: Option<String>,
-    /// A name the host has never heard of (must still be namespaced).
     pub unknown: String,
-    /// Concurrency bound the host was built with, for the overload check.
     pub concurrency: Option<usize>,
-    /// `true` when the backend is unreachable and calls must be
-    /// `Unavailable` rather than succeed.
     pub backend_unavailable: bool,
 }
 
@@ -36,18 +18,12 @@ fn not_cancelled() -> RunCancellation {
     RunCancellation::new()
 }
 
-/// Cancellation must be observed by wake, not by a poll: the old hosts
-/// checked a flag every 50 ms, so anything comfortably under that period
-/// proves the host awaits the token.
 const CANCEL_LATENCY_BOUND: Duration = Duration::from_millis(40);
 
-/// Runs the suite. `Ok(())` when every applicable check passed.
 pub async fn check(
     host: Arc<dyn ExternalToolHost>,
     fixture: ConformanceFixture,
 ) -> Result<(), String> {
-    // Catalog: a snapshot has a generation the host recognizes as current,
-    // and readiness reflects the backend.
     let catalog = tokio::task::spawn_blocking({
         let host = Arc::clone(&host);
         move || host.catalog_blocking()
@@ -75,7 +51,6 @@ pub async fn check(
         }
     }
 
-    // Unknown tool: typed, never a panic or a success.
     match host
         .call(fixture.unknown.clone(), "{}".to_owned(), not_cancelled())
         .await
@@ -112,8 +87,6 @@ pub async fn check(
             Err(HostCallError::Timeout) => {}
             other => return Err(format!("{name} must time out, got {other:?}")),
         }
-        // Cancellation while in flight settles the call as Cancelled, and it
-        // does so on the wake, not on a later poll tick.
         let cancelled = RunCancellation::new();
         let call = host.call(name.clone(), "{}".to_owned(), cancelled.clone());
         let trip = {
@@ -136,9 +109,6 @@ pub async fn check(
                 "cancellation of {name} took {latency:?}; the host must await the token, not poll it"
             ));
         }
-        // A token cancelled before the call starts settles the call at once,
-        // and the same token cancels a second call too (it is a flag, not a
-        // one-shot permit).
         let already = RunCancellation::already_cancelled();
         for attempt in 0..2 {
             let started = tokio::time::Instant::now();
@@ -160,7 +130,6 @@ pub async fn check(
                 ));
             }
         }
-        // Dropping an in-flight call must be safe and must not wedge the host.
         {
             let dropped = host.call(name.clone(), "{}".to_owned(), not_cancelled());
             drop(dropped);
@@ -174,15 +143,12 @@ pub async fn check(
                 other => return Err(format!("host wedged after a dropped call: {other:?}")),
             }
         }
-        // Overload: saturating the bound yields Overloaded, and the host
-        // recovers once the saturating calls settle.
         if let Some(bound) = fixture.concurrency {
             let mut in_flight = Vec::with_capacity(bound);
             for _ in 0..bound {
                 in_flight.push(host.call(name.clone(), "{}".to_owned(), not_cancelled()));
             }
             let mut pinned: Vec<_> = in_flight.into_iter().map(Box::pin).collect();
-            // Poll each once so its permit is taken before the extra call.
             for call in &mut pinned {
                 let _ = futures_util::poll!(call.as_mut());
             }
@@ -215,8 +181,6 @@ pub async fn check(
         }
     }
 
-    // Shutdown: bounded, then every call is ShutDown and the snapshot is no
-    // longer current so a plan holding it recompiles.
     tokio::time::timeout(std::time::Duration::from_secs(5), host.shutdown())
         .await
         .map_err(|_| "shutdown must be bounded".to_owned())?;

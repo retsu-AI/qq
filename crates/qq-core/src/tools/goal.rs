@@ -1,4 +1,3 @@
-//! Scoped model edits; objective, check, budget and authorization are not arguments.
 use qq_protocol::GoalChecklistState;
 use serde::{Deserialize, Serialize};
 
@@ -45,7 +44,6 @@ pub(crate) fn render_notice(goal: &qq_protocol::GoalSnapshot, now_ms: u64) -> St
     render_with_tail(goal, now_ms, goal.check_output.as_deref())
 }
 
-/// Reserve the full check tail on every write, even before a check exists.
 pub(crate) fn fits_notice(goal: &qq_protocol::GoalSnapshot) -> bool {
     let reserved_tail = "x".repeat(MAX_CHECK_TAIL_BYTES);
     goal.check_output
@@ -112,8 +110,6 @@ pub(crate) struct UpdateGoalArgs {
     pub wait: Option<ModelWait>,
 }
 
-/// Models sometimes send the checklist array JSON-encoded as a string; the
-/// decoded array is what they meant.
 fn checklist_edits<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<ChecklistEdit>, D::Error> {
@@ -210,8 +206,6 @@ impl UpdateGoalResult {
 mod tests {
     use super::{ChecklistEdit, UpdateGoalArgs};
 
-    /// v0.1.8 refused 5 update_goal calls in 4 runs that sent the checklist
-    /// as a JSON-encoded string.
     #[test]
     fn a_checklist_sent_as_a_json_string_decodes() {
         let arguments: UpdateGoalArgs = serde_json::from_str(
