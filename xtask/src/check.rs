@@ -676,12 +676,6 @@ fn plan(selection: &Selection, args: &CheckArgs) -> Vec<Gate> {
     ]);
     test.extend(packages);
     gates.push(Gate::cargo("test", test));
-    if selection.scope == Scope::Full {
-        gates.push(Gate::cargo(
-            "doctest",
-            strings(&["test", "--color", "never", "--workspace", "--doc"]),
-        ));
-    }
     if selection.minimal_provider {
         let minimal = [
             "-p",

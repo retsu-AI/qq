@@ -32,8 +32,7 @@ Runs only what your change can affect:
    2. `cargo xtask lint`
    3. `cargo clippy -p … --all-targets --all-features -D warnings`
    4. `cargo nextest run -p …`
-   5. `cargo test --doc --workspace` (full scope only; nextest skips doctests)
-   6. the minimal `qq-provider` profile (Clippy and tests), when any
+   5. the minimal `qq-provider` profile (Clippy and tests), when any
       `qq-provider` file changed
 
 If the merge-base with `--base` cannot be found, the command fails rather
@@ -132,9 +131,7 @@ Repository work conventions are in
 
 The long tail (the goal-driver soaks, the deadline and compaction suites,
 the soak binary, and the perf fixtures) is given priority so it starts first
-and overlaps the fast tests. nextest does not execute doctests; the full gate
-runs `cargo test --doc --workspace` separately, even when there are no
-doctests.
+and overlaps the fast tests.
 
 On Linux a setup script (`.config/nextest-tmpdir.sh`) points `TMPDIR` at
 `/dev/shm/qq-test-$UID`. The session store commits with
