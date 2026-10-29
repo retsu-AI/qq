@@ -1525,6 +1525,7 @@ impl RuntimeFactory {
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone())
+                .with_global_config_dir(self.inner.config.paths().global_dir().to_owned())
                 .with_protected_pack_roots(
                     snapshot
                         .packs()
@@ -8688,6 +8689,30 @@ mod tests {
             digest(&codex, ResponsesBodyShape::Standard),
             digest(&bearer, ResponsesBodyShape::Codex)
         );
+    }
+
+    #[test]
+    fn global_skills_come_from_the_configuration_directory() {
+        let fixture = RuntimeFixture::new();
+        let skill = fixture.path("global/skills/tidy/SKILL.md");
+        fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        fs::write(skill, "---\ndescription: Tidy up\n---\nTidy.\n").unwrap();
+        let document = r#"(version: 1, model: "custom/test-model", providers: {
+            "custom": Custom(connection: (base_url: "http://localhost/v1", api: OpenAiChatCompletions, auth: NoAuth),
+            models: {"test-model": (name: "Test model")})
+        })"#;
+        let plan = fixture
+            .factory()
+            .plan_for(&fixture.request(document.to_owned()))
+            .unwrap();
+        let tidy = plan
+            .skills()
+            .entries()
+            .iter()
+            .find(|e| e.name == "tidy")
+            .unwrap();
+        assert_eq!(tidy.source, "global:skills/tidy/SKILL.md");
+        assert!(tidy.disclosed);
     }
     mod continuation;
 }

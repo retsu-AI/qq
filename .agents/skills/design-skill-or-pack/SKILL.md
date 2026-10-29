@@ -25,17 +25,21 @@ skill; put the skill in `.qq/skills/` where every profile sees it.
 ~/.config/qq/packs/<id>/pack.ron    user pack, every project
 ```
 
-Skills under `.agents/` and `.claude/` are read for `/name` invocation only
-and are never disclosed to the model. Put anything you want the model to find
-on its own under `.qq/` or a pack. In this repository every file under
-`.qq/skills/` has a byte-identical copy under `.agents/skills/` for other
-harnesses; `cargo xtask lint` enforces it.
+Skills under `.agents/skills/` and `~/.config/qq/skills/` are disclosed
+too; a name in `.qq/` or a pack wins over the global root, which wins over
+`.agents/`, so a skill copied into both `.qq/skills/` and `.agents/skills/` is
+listed once. Skills under `.claude/` are read for `/name` invocation only. In
+this repository every file under `.qq/skills/` has a byte-identical copy
+under `.agents/skills/` for other harnesses; `cargo xtask lint` enforces it.
 
 What QQ does not do, so write around it:
 
-- `load_skill` returns only `SKILL.md`. Point at bundled files (playbooks,
-  scripts) by their workspace path, such as
-  `.qq/skills/<name>/playbooks/x.md`, and have the model `read_file` them.
+- `load_skill` returns `SKILL.md`, the skill's directory, and a list of up
+  to 32 files beside it; it does not read them. Refer to bundled files by
+  paths relative to the skill (`playbooks/x.md`) and have the model
+  `read_file` them; QQ tells it they resolve against the skill directory.
+- `$ARGUMENTS` in the body is replaced by the text after `/name`, or by the
+  `arguments` the model passes to `load_skill`.
 - Model-spawned sub-agents get no skills catalog and no `load_skill`. A
   skill that delegates must put the rules in the brief or tell the child
   to `read_file` the skill.
@@ -46,7 +50,8 @@ What QQ does not do, so write around it:
 
 ## Writing a skill
 
-The file is `<name>/SKILL.md`. The directory name is the skill name: 1–64
+The file is `<name>/SKILL.md`. The directory name is the skill name unless
+front matter sets `name:`: 1–64
 bytes, a lowercase letter, then lowercase letters, digits, `-`, `_`. A
 directory with any other name is skipped without a warning. Reserved names are
 every entry of `qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS` (`goal`, `btw`,
@@ -64,9 +69,10 @@ description: One sentence, under 200 characters, that tells the model WHEN to lo
 ---
 ```
 
-QQ reads only `description:`, as a single line capped at 512 bytes; a
-folded `>` value reads as the literal `>`. `name:` is ignored by QQ but
-other harnesses need it, so keep it equal to the directory name. The
+QQ reads `description:`, as a single line capped at 512 bytes (a folded
+`>` value reads as the literal `>`), and a top-level `name:`, which names
+the skill when it is a valid, unreserved name. Keep `name:` equal to the
+directory name; other harnesses need it. The
 catalog holds at most 64 skills and commands in total.
 
 The description is the only part the model sees before it decides to call

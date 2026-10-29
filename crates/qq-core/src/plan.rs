@@ -126,6 +126,7 @@ pub struct AgentProfile {
     credential_epoch: CredentialEpoch,
     profile_id: AgentProfileId,
     pack: Option<PackSelection>,
+    global_config_dir: Option<PathBuf>,
     protected_pack_roots: Vec<PathBuf>,
     exposed_tools: Option<Vec<String>>,
     side_question_denies: Vec<String>,
@@ -171,6 +172,7 @@ impl AgentProfile {
             credential_epoch: CredentialEpoch::NONE,
             profile_id: AgentProfileId::default(),
             pack: None,
+            global_config_dir: None,
             protected_pack_roots: Vec::new(),
             exposed_tools: None,
             side_question_denies: Vec::new(),
@@ -231,6 +233,7 @@ impl AgentProfile {
             credential_epoch: CredentialEpoch::NONE,
             profile_id: AgentProfileId::default(),
             pack: None,
+            global_config_dir: None,
             protected_pack_roots: runtime.protected_pack_roots.to_vec(),
             exposed_tools: None,
             side_question_denies: Vec::new(),
@@ -264,6 +267,15 @@ impl AgentProfile {
     #[must_use]
     pub fn with_pack(mut self, pack: PackSelection) -> Self {
         self.pack = Some(pack);
+        self
+    }
+
+    /// Indexes the user's global skills at `<dir>/skills/<name>/SKILL.md`,
+    /// where `dir` is the configuration directory (`~/.config/qq` on Linux).
+    /// Workspace and pack documents of the same name shadow them.
+    #[must_use]
+    pub fn with_global_config_dir(mut self, dir: PathBuf) -> Self {
+        self.global_config_dir = Some(dir);
         self
     }
 
@@ -672,6 +684,7 @@ impl CompiledAgentPlan {
             credential_epoch,
             profile_id,
             pack,
+            global_config_dir,
             mut protected_pack_roots,
             exposed_tools,
             side_question_denies,
@@ -814,6 +827,19 @@ impl CompiledAgentPlan {
                 tool_deny: selection.tool_deny.clone(),
             });
             pack_roots.push(pack_workspace);
+        }
+        if let Some(dir) = &global_config_dir {
+            let global_skills = dir.join(crate::workspace::skills::GLOBAL_SKILLS_DIRECTORY);
+            // The configured path is watched as well as its canonical target,
+            // so creating it or re-pointing a symlinked one recompiles.
+            sources.push(SourceFingerprint::capture(global_skills.clone()));
+            if let Some(opened) = std::fs::canonicalize(&global_skills)
+                .ok()
+                .and_then(|canonical| Workspace::open(&canonical).ok())
+            {
+                skill_roots.push(SkillRoot::global(pack_roots.len()));
+                pack_roots.push(opened);
+            }
         }
         let (skills, skill_sources) =
             SkillIndex::compile_blocking(&opened, &pack_roots, &skill_roots);
@@ -2427,6 +2453,72 @@ mod pack_tests {
     use super::{tests_support::*, *};
 
     #[test]
+    fn the_global_skill_root_is_indexed_and_fingerprinted_even_before_it_exists() {
+        let workspace = canonical_temp();
+        let config = canonical_temp();
+        let missing = config.path().join("not-yet");
+        let plan = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path()).with_global_config_dir(missing.clone()),
+        )
+        .unwrap();
+        assert!(plan.skills().is_empty());
+        let watched = |plan: &CompiledAgentPlan, path: &Path| {
+            plan.instruction_sources()
+                .iter()
+                .find(|s| s.path() == path)
+                .map(SourceFingerprint::is_current)
+        };
+        assert_eq!(watched(&plan, &missing.join("skills")), Some(true));
+        std::fs::create_dir_all(missing.join("skills/tidy")).unwrap();
+        assert_eq!(watched(&plan, &missing.join("skills")), Some(false));
+
+        std::fs::write(
+            missing.join("skills/tidy/SKILL.md"),
+            "---\ndescription: Tidy up\n---\nTidy.\n",
+        )
+        .unwrap();
+        let plan = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path()).with_global_config_dir(missing.clone()),
+        )
+        .unwrap();
+        let tidy = plan.skills().resolve_disclosed("tidy").unwrap();
+        assert_eq!(tidy.source, "global:skills/tidy/SKILL.md");
+        let loaded = crate::workspace::load_entry(
+            &plan.workspace,
+            &plan.pack_roots,
+            tidy,
+            "",
+            &crate::RunCancellation::new(),
+        )
+        .unwrap()
+        .render_for_tool();
+        let directory = std::fs::canonicalize(missing.join("skills/tidy")).unwrap();
+        assert!(
+            loaded.contains(&format!("Skill directory: {}\n", directory.display())),
+            "{loaded}"
+        );
+        assert!(loaded.contains("Tidy.\n"));
+
+        // A symlinked skills directory (a dotfiles checkout) is followed.
+        #[cfg(unix)]
+        {
+            let elsewhere = canonical_temp();
+            std::fs::create_dir_all(elsewhere.path().join("linted")).unwrap();
+            std::fs::write(elsewhere.path().join("linted/SKILL.md"), "Lint.\n").unwrap();
+            let linked = canonical_temp();
+            std::os::unix::fs::symlink(elsewhere.path(), linked.path().join("skills")).unwrap();
+            let plan = CompiledAgentPlan::compile_blocking(
+                profile(workspace.path()).with_global_config_dir(linked.path().to_owned()),
+            )
+            .unwrap();
+            assert_eq!(
+                plan.skills().resolve_disclosed("linted").unwrap().source,
+                "global:skills/linted/SKILL.md"
+            );
+        }
+    }
+
+    #[test]
     fn a_selected_pack_contributes_persona_skills_and_tool_policy_to_the_plan() {
         let workspace = canonical_temp();
         std::fs::write(workspace.path().join("AGENTS.md"), "Workspace rules.\n").unwrap();
@@ -2498,6 +2590,7 @@ mod pack_tests {
             &plan.workspace,
             &plan.pack_roots,
             audit,
+            "",
             &crate::RunCancellation::new(),
         )
         .unwrap();

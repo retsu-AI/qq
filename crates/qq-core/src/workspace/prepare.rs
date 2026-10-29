@@ -236,6 +236,7 @@ pub(crate) async fn load_disclosed_skill(
     index: Arc<super::skills::SkillIndex>,
     cancelled: RunCancellation,
     name: String,
+    arguments: String,
     tasks: &crate::tools::ToolTasks,
 ) -> Result<SelectedGuidance, WorkspacePreparationError> {
     let permit = blocking_permits()
@@ -255,7 +256,11 @@ pub(crate) async fn load_disclosed_skill(
             return Err(GuidanceError::Unknown { name }.into());
         };
         Ok(super::guidance::load_entry(
-            &workspace, &packs, entry, &cancelled,
+            &workspace,
+            &packs,
+            entry,
+            &super::guidance::bounded_arguments(arguments.trim()),
+            &cancelled,
         )?)
     })
     .await

@@ -548,6 +548,11 @@ const SCENARIOS: &[Scenario] = &[
         run: |home| Box::pin(run_tool_call(home)),
     },
     Scenario {
+        name: "run-skill",
+        proves: "the model sees the skill index, load_skill returns the skill's directory, its files, and the substituted $ARGUMENTS, and the script beside it runs",
+        run: |home| Box::pin(run_skill(home)),
+    },
+    Scenario {
         name: "run-goal-check-consent",
         proves: "goal checks require separate consent across process restart; ordinary tool approval does not authorize them",
         run: |home| Box::pin(run_goal_check_consent(home)),
@@ -1142,6 +1147,85 @@ async fn run_tool_call(home: &Home) -> Result<(), String> {
     ensure!(
         requests[1].contains("function_call_output") && requests[1].contains("pub struct Widget;"),
         "the second request did not send the tool result back"
+    );
+    Ok(())
+}
+
+async fn run_skill(home: &Home) -> Result<(), String> {
+    let skill = home.workspace.join(".qq/skills/greet");
+    tokio::fs::create_dir_all(skill.join("scripts"))
+        .await
+        .map_err(|error| error.to_string())?;
+    tokio::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: greet\ndescription: Greet someone by name\n---\nRun scripts/greet.sh $ARGUMENTS.\n",
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    tokio::fs::write(skill.join("scripts/greet.sh"), "echo \"hello $1\"\n")
+        .await
+        .map_err(|error| error.to_string())?;
+    let provider = home
+        .provider(vec![
+            Reply::Tool(
+                "load_skill",
+                serde_json::json!({"name": "greet", "arguments": "Ada"}),
+            ),
+            if cfg!(windows) {
+                Reply::ReadFile(".qq/skills/greet/scripts/greet.sh")
+            } else {
+                Reply::Tool(
+                    "exec",
+                    serde_json::json!({"program": "sh", "args": [".qq/skills/greet/scripts/greet.sh", "Ada"]}),
+                )
+            },
+            Reply::Text("greeted"),
+        ])
+        .await
+        .map_err(|error| format!("start fake provider: {error}"))?;
+    let output = home
+        .run(
+            &provider.base_url,
+            &["run", "--format", "jsonl", "greet Ada"],
+        )
+        .await?;
+    ensure!(output.status == Some(0), "run: {}", output.stderr);
+    let mut results = Vec::new();
+    for record in jsonl(&output.stdout)? {
+        let event = &record["envelope"]["event"];
+        if event["type"] == "tool_call_finished" {
+            let call = &event["tool_call"];
+            ensure!(call["is_error"] == false, "tool call failed: {call}");
+            results.push(call["result"].as_str().unwrap_or_default().to_owned());
+        }
+    }
+    ensure!(results.len() == 2, "expected two results: {results:?}");
+    for expected in [
+        "Skill directory: .qq/skills/greet\n",
+        "- .qq/skills/greet/scripts/greet.sh\n",
+        "Run scripts/greet.sh Ada.\n",
+    ] {
+        ensure!(
+            results[0].contains(expected),
+            "load_skill result lacks {expected:?}: {}",
+            results[0]
+        );
+    }
+    let ran = if cfg!(windows) {
+        "echo \"hello $1\""
+    } else {
+        "hello Ada"
+    };
+    ensure!(
+        results[1].contains(ran),
+        "the script beside the skill was not reached: {}",
+        results[1]
+    );
+    let requests = provider.requests()?;
+    ensure!(
+        requests[0].contains("call load_skill with its name before acting")
+            && requests[0].contains("- greet (skill): Greet someone by name"),
+        "the first request did not carry the skill index"
     );
     Ok(())
 }

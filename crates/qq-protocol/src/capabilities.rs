@@ -134,7 +134,8 @@ pub struct SkillSummary {
     /// model through `load_skill` or forwarded by a client as `/name`.
     pub name: String,
     pub kind: GuidanceKind,
-    /// Workspace-relative path, or `pack:<id>/<relative>` for a pack document.
+    /// Workspace-relative path, `pack:<id>/<relative>` for a pack document,
+    /// or `global:skills/<relative>` for the user's global skills root.
     pub source: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
