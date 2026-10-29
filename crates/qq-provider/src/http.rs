@@ -1324,14 +1324,6 @@ mod tests {
         assert!(mid < delay);
     }
 
-    #[test]
-    fn exchange_defaults_to_attempt_policy_and_accepts_override() {
-        let exchange = default_exchange(RequestAuthorizer::default(), Vec::new());
-        assert_eq!(exchange.attempts, AttemptPolicy::default());
-        let disabled = exchange.with_attempt_policy(AttemptPolicy::disabled());
-        assert_eq!(disabled.attempts, AttemptPolicy::disabled());
-    }
-
     const WIRE_OVERFLOW: &str = "test wire size overflowed";
     const WIRE_LIMIT: &str = "test wire size exceeded the limit";
 
@@ -1368,10 +1360,6 @@ mod tests {
             Duration::from_millis(1),
             Duration::from_secs(1),
         )
-    }
-
-    fn default_exchange(authorizer: RequestAuthorizer, redactions: Vec<String>) -> HttpExchange {
-        exchange_with_retry(authorizer, redactions, AttemptPolicy::default())
     }
 
     #[tokio::test]

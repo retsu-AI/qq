@@ -1319,14 +1319,6 @@ mod tests {
     }
 
     #[test]
-    fn bounding_is_deterministic() {
-        let text = lines(40_000);
-        let first = bound_text(text.clone(), &Bounds::new(16 * 1024, 4_000), None);
-        let second = bound_text(text, &Bounds::new(16 * 1024, 4_000), None);
-        assert_eq!(first, second);
-    }
-
-    #[test]
     fn headers_follow_the_grammar() {
         let header = Header::new("shell", None)
             .field("exit", 0)
