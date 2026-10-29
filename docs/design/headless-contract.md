@@ -249,7 +249,7 @@ Approval classification uses the catalog effect class (`crates/qq-core/src/appro
   denied.
 - `full`: everything executes.
 
-Managed `deny_shell_prefixes` are denied under every mode.
+`deny_shell_prefixes` from any layer are denied under every mode.
 `fetch` follows the ladder; private, link-local, metadata, and
 managed-denied hosts are refused under every mode, including `full`.
 

@@ -446,7 +446,7 @@ impl CodexLogin {
             .local_addr()
             .map_err(|_| CodexAuthError::CallbackUnavailable)?
             .port();
-        let redirect_uri = format!("http://localhost:{actual_port}/auth/callback");
+        let redirect_uri = format!("http://127.0.0.1:{actual_port}/auth/callback");
         let authorization_url = authorization_url(&redirect_uri, &state, &code_verifier)?;
         Ok(Self {
             listener,

@@ -1393,7 +1393,7 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
                     entered.notify_one();
                     release.notified().await;
                     if deny {
-                        return Err(GoalCheckPolicyError::ManagedDenied);
+                        return Err(GoalCheckPolicyError::ShellDenied);
                     }
                 }
                 Ok(())

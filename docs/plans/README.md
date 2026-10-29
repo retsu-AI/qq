@@ -170,17 +170,8 @@ task against the loopback fake provider in CI.
 
 ## H. Smaller reliability items
 
-- Retry "overloaded" and xAI "Internal error during token generation" as
-  transient in `qq-provider`.
-- A turn cut at the output limit with no visible text continues instead of
-  failing the run.
-- Auth: the Codex OAuth redirect host matches the listener (`localhost` vs
-  `127.0.0.1` in `qq-auth/src/codex.rs`). Model discovery drops the single
-  global fetch lock and `DiscoveryAuth` (`qq-host/src/catalog.rs`). These are
-  carried over from the retired auth plan.
 - Bound store growth with an explicit retention setting before more runs
   die on `DiskFull`. Snapshot refs follow the same setting.
-- A user-level `deny_shell_prefixes`. Today only managed config may set it.
 - `/undo` in the TUI, as a server command: the runtime refuses it while
   any run is active, queued or due from a goal, and admits no run until the
   restore finishes. A client-side guard cannot see other clients or goal

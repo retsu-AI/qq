@@ -698,6 +698,13 @@ fn wire_error_kind(error: &WireApiError) -> ProviderErrorKind {
             return kind;
         }
     }
+    if error
+        .message
+        .as_deref()
+        .is_some_and(support::names_transient_failure)
+    {
+        return ProviderErrorKind::Unavailable;
+    }
 
     ProviderErrorKind::Response
 }
@@ -909,6 +916,12 @@ mod tests {
             authentication_error.kind(),
             ProviderErrorKind::Authentication
         );
+        let token_generation = decode_event(
+            r#"{"error":{"message":"Internal error during token generation"}}"#,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(token_generation.kind(), ProviderErrorKind::Unavailable);
     }
 
     #[test]

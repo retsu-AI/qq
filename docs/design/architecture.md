@@ -842,7 +842,10 @@ per run (`MAX_EMPTY_OUTPUT_RETRIES`) toward the plan's output ceiling: the
 catalog's model limit bounded by `policy.max_output_tokens`, which sits above
 the configured cap whenever the catalog knows the model (a plan without one
 cannot raise). When the raise is spent or unavailable, an all-reasoning turn
-settles at once with the cause, the ceiling, and the remedies that can work:
+is retried with a fixed notice asking the model to reason less, sharing the
+`MAX_OUTPUT_CONTINUATIONS` count with visible continuations; the notice is
+persisted with the turn so replay matches the request. Past the cap it
+settles with the cause, the ceiling, and the remedies that can work:
 `max_output_tokens` or `reasoning_effort` when the model limit binds, or
 `reasoning_effort` and the managed policy when `policy.max_output_tokens`
 binds. The count of consecutive empty turns it reports is reset by any turn
@@ -850,8 +853,8 @@ that produced text or a complete call, so a raise taken for a call-then-cut
 turn is not attributed to reasoning; a turn that streamed a
 complete call is continued like any visible truncation. The summarizer applies the
 same rule and fails its step rather than continuing an empty reply. Such an
-empty truncated turn is persisted as truncated but replays as nothing, matching
-the live request. A provider pause with no text is resent, not treated as
+empty truncated turn is persisted as truncated and replays as only the notice
+that followed it, matching the live request. A provider pause with no text is resent, not treated as
 empty. A
 reserved budget final response that truncates settles as the budget exhaustion
 it already was and is never continued. Restart never resumes an in-flight

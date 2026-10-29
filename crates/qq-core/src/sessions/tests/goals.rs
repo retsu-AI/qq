@@ -1357,7 +1357,7 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
                 } else if self.allow.load(Ordering::SeqCst) {
                     Ok(())
                 } else {
-                    Err(GoalCheckPolicyError::ManagedDenied)
+                    Err(GoalCheckPolicyError::ShellDenied)
                 },
             ))
         }
@@ -1407,7 +1407,7 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
             .command(CommandId::generate().unwrap(), approve.clone())
             .await,
         Err(SessionRuntimeError::GoalCheckPolicy(
-            GoalCheckPolicyError::ManagedDenied
+            GoalCheckPolicyError::ShellDenied
         ))
     ));
     let snapshot = runtime
@@ -1450,7 +1450,7 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
         assert!(
             matches!(error, SessionRuntimeError::GoalCheckPolicy(ref error)
             if *error == if unavailable { GoalCheckPolicyError::Unavailable }
-                else { GoalCheckPolicyError::ManagedDenied })
+                else { GoalCheckPolicyError::ShellDenied })
         );
         let snapshot = runtime
             .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
@@ -8803,7 +8803,7 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
         }
         fn validate_goal_check(&self, _: &Path, _: &str) -> GoalCheckPolicyFuture {
             Box::pin(std::future::ready(if self.0 {
-                Err(GoalCheckPolicyError::ManagedDenied)
+                Err(GoalCheckPolicyError::ShellDenied)
             } else {
                 Ok(())
             }))
@@ -8854,7 +8854,7 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
                 "denied" => assert!(matches!(
                     result,
                     Err(SessionRuntimeError::GoalCheckPolicy(
-                        GoalCheckPolicyError::ManagedDenied
+                        GoalCheckPolicyError::ShellDenied
                     ))
                 )),
                 "forbidden" => assert!(matches!(

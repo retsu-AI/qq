@@ -227,7 +227,7 @@ fn parser() -> Parser {
 /// Applies explicit command controls to literal argv in the shell parse.
 /// Unknown/dynamic commands are not denied merely because rules exist. These
 /// controls do not establish filesystem/network containment or inspect programs.
-pub(crate) fn managed_shell_denied(command: &str, denied_prefixes: &[String]) -> bool {
+pub(crate) fn shell_prefix_denied(command: &str, denied_prefixes: &[String]) -> bool {
     if denied_prefixes.is_empty() {
         return false;
     }
@@ -1158,10 +1158,10 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
 
 #[cfg(test)]
 mod managed_policy_tests {
-    use super::{MAX_CLASSIFIED_BYTES, managed_shell_denied};
+    use super::{MAX_CLASSIFIED_BYTES, shell_prefix_denied};
 
     #[test]
-    fn managed_shell_denies_match_literal_commands_without_classifying_unknown_programs() {
+    fn shell_prefix_denies_match_literal_commands_without_classifying_unknown_programs() {
         let denied = vec![
             "cargo publish".to_owned(),
             "managed-tool --dangerous".to_owned(),
@@ -1173,7 +1173,7 @@ mod managed_policy_tests {
             "/usr/bin/cargo publish",
             "echo $(managed-tool --dangerous)",
         ] {
-            assert!(managed_shell_denied(command, &denied), "{command}");
+            assert!(shell_prefix_denied(command, &denied), "{command}");
         }
         for command in [
             "cargo test",
@@ -1183,11 +1183,11 @@ mod managed_policy_tests {
             "printf 'cargo publish'",
             "echo cargo publish",
         ] {
-            assert!(!managed_shell_denied(command, &denied), "{command}");
+            assert!(!shell_prefix_denied(command, &denied), "{command}");
         }
-        assert!(!managed_shell_denied("cargo publish", &[]));
+        assert!(!shell_prefix_denied("cargo publish", &[]));
         let long_literal = format!("cargo publish # {}", "x".repeat(MAX_CLASSIFIED_BYTES + 1));
-        assert!(managed_shell_denied(&long_literal, &denied));
+        assert!(shell_prefix_denied(&long_literal, &denied));
     }
 }
 

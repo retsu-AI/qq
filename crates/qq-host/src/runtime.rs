@@ -2388,7 +2388,7 @@ impl WorkspacePolicyAuthority for RuntimeFactory {
     ) -> qq_core::GoalCheckPolicyFuture {
         if command.len() > 1024 {
             return Box::pin(std::future::ready(Err(
-                qq_core::GoalCheckPolicyError::ManagedDenied,
+                qq_core::GoalCheckPolicyError::ShellDenied,
             )));
         }
         let factory = self.clone();
@@ -2437,7 +2437,7 @@ impl WorkspacePolicyAuthority for RuntimeFactory {
                         snapshot.policy().deny_shell_prefixes(),
                     )
                 {
-                    Err(qq_core::GoalCheckPolicyError::ManagedDenied)
+                    Err(qq_core::GoalCheckPolicyError::ShellDenied)
                 } else {
                     Ok(())
                 }
@@ -2774,7 +2774,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
             qq_core::GoalPolicyError::Configuration(_) | qq_core::GoalPolicyError::Invalid,
         )
         | SessionRuntimeError::GoalCheckPolicy(
-            qq_core::GoalCheckPolicyError::ManagedDenied
+            qq_core::GoalCheckPolicyError::ShellDenied
             | qq_core::GoalCheckPolicyError::Configuration(_),
         )
         | SessionRuntimeError::InvalidPageLimit) => {
@@ -6016,7 +6016,7 @@ mod tests {
         assert_eq!(
             WorkspacePolicyAuthority::validate_goal_check(&factory, &workspace, &"x".repeat(1025))
                 .await,
-            Err(qq_core::GoalCheckPolicyError::ManagedDenied)
+            Err(qq_core::GoalCheckPolicyError::ShellDenied)
         );
         assert!(factory.inner.check_policy_slots.get().is_none());
         let slots = factory
@@ -6037,7 +6037,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn goal_check_authority_loads_current_managed_denies_and_refuses_bad_policy() {
+    async fn goal_check_authority_loads_current_shell_denies_and_refuses_bad_policy() {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
         let workspace = fixture.path("work");
@@ -6058,7 +6058,7 @@ mod tests {
             assert!(matches!(
                 WorkspacePolicyAuthority::validate_goal_check(&factory, &workspace, "cargo test")
                     .await,
-                Err(qq_core::GoalCheckPolicyError::ManagedDenied)
+                Err(qq_core::GoalCheckPolicyError::ShellDenied)
             ));
             for command in [
                 "bash --rcfile /dev/null -c 'cargo test'",
@@ -6069,7 +6069,7 @@ mod tests {
                 assert_eq!(
                     WorkspacePolicyAuthority::validate_goal_check(&factory, &workspace, command)
                         .await,
-                    Err(qq_core::GoalCheckPolicyError::ManagedDenied),
+                    Err(qq_core::GoalCheckPolicyError::ShellDenied),
                     "{command}"
                 );
             }

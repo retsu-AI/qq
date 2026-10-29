@@ -728,9 +728,7 @@ fn openai_error_kind(code: Option<&str>, message: Option<&str>) -> ProviderError
         Some(
             "server_error" | "service_unavailable" | "server_is_overloaded" | "overloaded_error",
         ) => ProviderErrorKind::Unavailable,
-        // Codex reports overload after HTTP 200 with codes that vary or are
-        // absent; the message is the only stable signal that a retry is safe.
-        _ if message.is_some_and(|message| message.contains("overloaded")) => {
+        _ if message.is_some_and(support::names_transient_failure) => {
             ProviderErrorKind::Unavailable
         }
         _ => ProviderErrorKind::Response,
@@ -1086,6 +1084,8 @@ mod tests {
             r#"{"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}"#,
             r#"{"type":"response.failed","response":{"error":{"message":"Our servers are currently overloaded. Please try again later."}}}"#,
             r#"{"type":"error","message":"Our servers are currently overloaded. Please try again later."}"#,
+            r#"{"type":"response.failed","response":{"error":{"message":"Internal error during token generation"}}}"#,
+            r#"{"type":"error","message":"Internal error during token generation"}"#,
         ];
         for payload in overloaded {
             let error = decode_event(payload, &[]).unwrap_err();

@@ -107,6 +107,24 @@ impl RequestCredential {
         Ok(credential)
     }
 
+    pub fn header(name: &str, secret: impl Into<String>) -> Result<Self, RequestCredentialError> {
+        let name =
+            HeaderName::from_bytes(name.as_bytes()).map_err(|_| RequestCredentialError::Invalid)?;
+        let secret = secret.into();
+        check_credential_size(secret.len())?;
+        let mut credential = Self::empty();
+        credential.push_secret(name, secret)?;
+        Ok(credential)
+    }
+
+    #[must_use]
+    pub fn headers(&self) -> reqwest::header::HeaderMap {
+        self.headers
+            .iter()
+            .map(|header| (header.name.clone(), header.value.clone()))
+            .collect()
+    }
+
     const fn empty() -> Self {
         Self {
             headers: Vec::new(),
@@ -754,5 +772,35 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, ProviderError::Configuration(_)));
+    }
+
+    #[test]
+    fn headers_carry_the_credential_with_secrets_marked_sensitive() {
+        let codex = RequestCredential::codex("token", "account", true)
+            .unwrap()
+            .headers();
+        assert_eq!(codex.len(), 4);
+        assert_eq!(codex[AUTHORIZATION], "Bearer token");
+        assert!(codex[AUTHORIZATION].is_sensitive());
+        assert_eq!(codex["chatgpt-account-id"], "account");
+        assert!(codex["chatgpt-account-id"].is_sensitive());
+        assert_eq!(codex["originator"], "qq");
+        assert!(!codex["originator"].is_sensitive());
+        assert_eq!(codex["x-openai-fedramp"], "true");
+
+        let header = RequestCredential::header("X-Api-Key", "key")
+            .unwrap()
+            .headers();
+        assert_eq!(header.len(), 1);
+        assert_eq!(header["x-api-key"], "key");
+        assert!(header["x-api-key"].is_sensitive());
+        assert!(matches!(
+            RequestCredential::header("bad name", "key"),
+            Err(RequestCredentialError::Invalid)
+        ));
+        assert!(matches!(
+            RequestCredential::header("x-api-key", "line\nbreak"),
+            Err(RequestCredentialError::Invalid)
+        ));
     }
 }

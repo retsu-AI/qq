@@ -2173,6 +2173,43 @@ fn tool_exposure_intersects_across_layers() {
 }
 
 #[test]
+fn shell_prefix_denies_union_across_user_and_project_layers() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, policy: (deny_shell_prefixes: ["git push --force", "rm -rf"]))"#,
+    );
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, policy: (deny_shell_prefixes: ["rm -rf", "terraform apply"]))"#,
+    );
+    let snapshot = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(
+        snapshot.policy().deny_shell_prefixes(),
+        ["git push --force", "rm -rf", "terraform apply"]
+    );
+
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, model: "openai/untrusted", policy: (deny_shell_prefixes: ["terraform apply"]))"#,
+    );
+    let pending = tree
+        .loader()
+        .load(&tree.request().with_untrusted_project_config_ignored())
+        .unwrap();
+    assert!(
+        pending
+            .source_reports()
+            .iter()
+            .any(|report| report.status() == SourceStatus::PartiallyAppliedPendingTrust)
+    );
+    assert_eq!(
+        pending.policy().deny_shell_prefixes(),
+        ["git push --force", "rm -rf", "terraform apply"]
+    );
+}
+
+#[test]
 fn tool_exposure_rejects_unknown_static_and_malformed_mcp_names() {
     let tree = TempTree::new();
     for name in [

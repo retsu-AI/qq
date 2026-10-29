@@ -89,5 +89,5 @@ decisions in the main thread; not raw output. Read
 handle expected failures explicitly instead of a reflexive `?`; typed
 `thiserror` errors with sources; exhaustive `match` with no silent `_`
 fallback; no blocking work or sync lock across `.await` on a Tokio worker;
-bounded channels and queues; no `mod.rs` (lint-enforced); comments only for
-non-obvious invariants.
+bounded channels and queues; no `mod.rs` (lint-enforced); no new code
+comments of any kind.

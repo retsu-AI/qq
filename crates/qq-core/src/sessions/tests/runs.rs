@@ -1926,12 +1926,7 @@ async fn a_raised_output_cap_is_what_the_retried_turn_records() {
 }
 
 #[tokio::test]
-async fn an_empty_truncated_turn_replays_without_the_continuation_notice() {
-    // RR8.1: a session run's cap is the model ceiling, so an empty
-    // truncation fails the run at once; the empty turn is still persisted
-    // as truncated. The next prompt's replayed context must not append an
-    // empty assistant message plus a continuation notice the live run
-    // never sent (and that would tell the model to continue nothing).
+async fn an_empty_truncated_turn_continues_and_replays_only_the_reasoning_notice() {
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let directory = tempfile::tempdir().unwrap();
     let runtime = SessionRuntime::open(
@@ -1976,31 +1971,30 @@ async fn an_empty_truncated_turn_replays_without_the_continuation_notice() {
             _ => None,
         }));
     }
-    assert!(matches!(
-        outcomes[0],
-        Some(RunOutcome::Failed {
-            failure: RunFailure {
-                kind: RunFailureKind::ProviderOutputTruncated,
-                ..
-            }
-        })
-    ));
+    assert!(matches!(outcomes[0], Some(RunOutcome::Completed)));
     assert!(matches!(outcomes[1], Some(RunOutcome::Completed)));
     let requests = requests.lock().unwrap().clone();
-    assert_eq!(requests.len(), 2);
-    // Prompt, the failed-run notice, prompt: no empty assistant message and
-    // no continuation notice in between.
-    let replayed = requests[1].messages();
-    assert_eq!(replayed.len(), 3, "{replayed:#?}");
-    assert!(replayed.iter().all(|message| message.role() == Role::User));
-    assert!(
-        replayed
-            .iter()
-            .all(|message| match message.content().first() {
-                Some(ContentBlock::Text { text }) =>
-                    text != crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE,
-                _ => false,
-            })
+    assert_eq!(requests.len(), 4);
+    let text = |message: &Message| match message.content() {
+        [ContentBlock::Text { text }] => (message.role(), text.clone()),
+        other => panic!("unexpected content {other:?}"),
+    };
+    let notice = crate::REASONING_TRUNCATED_NOTICE.to_owned();
+    assert_eq!(
+        requests[1].messages().iter().map(text).collect::<Vec<_>>(),
+        [
+            (Role::User, "think hard".to_owned()),
+            (Role::User, notice.clone()),
+        ]
+    );
+    assert_eq!(
+        requests[2].messages().iter().map(text).collect::<Vec<_>>(),
+        [
+            (Role::User, "think hard".to_owned()),
+            (Role::User, notice),
+            (Role::Assistant, " second half".to_owned()),
+            (Role::User, "and now summarize".to_owned()),
+        ]
     );
     runtime.shutdown().await.unwrap();
 }

@@ -64,6 +64,10 @@ timeout.
 - Bounded channels and queues; no lock held across `.await`; no blocking I/O
   on Tokio workers.
 - Persist session events before publishing them.
+- No code comments: no `//`, `///`, `//!` or `/* */` in code you write.
+  Names, types and tests carry the meaning. A comment explaining a
+  workaround means the cause needs fixing instead. Existing comments go
+  when the code they describe changes; never add new ones.
 - Library errors use `thiserror` enums with sources; no
   `Box<dyn Error>` in library APIs.
 - Tests check behavior, deterministically: no network, no real credentials,
