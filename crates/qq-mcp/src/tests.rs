@@ -470,7 +470,6 @@ async fn call_timeouts_are_errors_and_do_not_wedge_the_shared_client() {
 #[tokio::test]
 async fn cancellation_stops_a_call_without_wedging_the_shared_client() {
     let mut fixture = Fixture::new(&["echo", "slow"]);
-    // Only cancellation can end the call.
     fixture.server.slow_delay = Duration::from_secs(3600);
     let active = Arc::clone(&fixture.server.active_calls);
     let mut slow = settings("srv");

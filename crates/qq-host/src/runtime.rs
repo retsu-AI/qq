@@ -7806,8 +7806,6 @@ mod tests {
             PlanLookup::Hit
         );
 
-        // Each edit moves the mtime forward a second rather than waiting out
-        // filesystem timestamp granularity.
         let edit = |contents: &str| {
             let previous = fs::metadata(&config).unwrap().modified().unwrap();
             fs::write(&config, contents).unwrap();
@@ -7987,7 +7985,6 @@ mod tests {
         );
     }
 
-    /// A keyring that counts reads.
     struct CountingKeyring {
         inner: MemoryKeyring,
         reads: AtomicU64,

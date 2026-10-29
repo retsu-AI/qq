@@ -963,7 +963,6 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
         .await
         .expect("the process must reach actual spawn")
         .unwrap();
-    // Spawn precedes the shell's first write; expire only after it printed.
     let printed = directory.path().join("printed");
     let waited = std::time::Instant::now();
     while !printed.exists() {

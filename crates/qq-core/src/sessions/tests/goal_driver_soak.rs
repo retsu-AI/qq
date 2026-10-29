@@ -771,8 +771,6 @@ async fn multi_day(checked: bool) {
             driver.outage(&mut clock, 6 * HOUR, &mut ids).await;
         }
         if step == 30 {
-            // Long enough to reach the backoff ceiling again after the
-            // committed work reset the streak; longer only repeats wakes.
             driver.outage(&mut clock, 6 * HOUR, &mut ids).await;
         }
     }

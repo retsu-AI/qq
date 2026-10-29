@@ -7294,7 +7294,6 @@ mod tests {
         })
         .await;
         let options = options(&fixture.workspace);
-        // Interrupt once the run has loaded its provider, mid-run.
         let interrupt = entered.notified();
 
         let (status, stdout, _stderr) = run_to_end(&fixture, options, interrupt).await;
@@ -7306,9 +7305,6 @@ mod tests {
         assert_no_active_run(&fixture).await;
     }
 
-    /// Each budget stops its run as `budget_exhausted` (exit 3) and leaves no
-    /// active run: a looping run at its turn or cost limit, a run whose cost
-    /// became unknown, and a completed turn whose cost crossed the limit.
     #[tokio::test]
     async fn budgets_settle_runs_as_budget_exhaustion() {
         enum Expect {

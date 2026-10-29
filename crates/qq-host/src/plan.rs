@@ -766,8 +766,6 @@ mod tests {
         assert_eq!(cache.superseded_len(), 0);
     }
 
-    /// Writes `path` with an mtime a second past `than`'s, so a fingerprint
-    /// sees the change without waiting out filesystem timestamp granularity.
     fn write_newer(path: &std::path::Path, than: &std::path::Path, contents: &str) {
         let previous = std::fs::metadata(than).unwrap().modified().unwrap();
         std::fs::write(path, contents).unwrap();
@@ -1024,7 +1022,6 @@ mod tests {
                     cache
                         .load::<std::convert::Infallible, _>(&key(&workspace, "m"), || {
                             compiles.fetch_add(1, Ordering::SeqCst);
-                            // Hold the compile until every caller has asked.
                             while callers.load(Ordering::SeqCst) < 16 {
                                 thread::yield_now();
                             }

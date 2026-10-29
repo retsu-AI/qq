@@ -2439,8 +2439,6 @@ mod tests {
         let started = std::time::Instant::now();
         let second = Store::open(path.clone()).await;
         assert!(matches!(second, Err(SessionRuntimeError::StoreBusy)));
-        // The refusal waits out the handoff grace (a departing owner may still
-        // be closing); it is not a SQLite busy timeout.
         let elapsed = started.elapsed();
         assert!(elapsed >= schema::OWNERSHIP_WAIT, "{elapsed:?}");
         // Nothing about the database changed: the loser never opened it.
@@ -2529,7 +2527,6 @@ mod tests {
         (release_tx, blocked)
     }
 
-    /// Waits until the worker's queues hold at least this many messages.
     async fn queued(store: &Store, control: usize, output: usize) {
         while store.inner.control.len() < control || store.inner.output.len() < output {
             tokio::task::yield_now().await;
@@ -3055,7 +3052,6 @@ mod tests {
         let output_store = store.clone();
         let output =
             tokio::spawn(async move { output_store.call(Priority::Output, |_| Ok(7)).await });
-        // The test runtime is single-threaded: each yield polls the submitter.
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
