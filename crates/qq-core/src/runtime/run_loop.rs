@@ -2432,19 +2432,6 @@ impl RunState {
                                 if !assistant.has_content()
                                     && truncation_reason == qq_provider::IncompleteReason::OutputTokens
                                 {
-                                    // Nothing that would change the resend: no text,
-                                    // and any tool call was dropped with the cut. Either
-                                    // the whole cap went to hidden reasoning, or the
-                                    // model streamed a complete call and ran out after
-                                    // it. A continuation notice cannot help because
-                                    // there is nothing to continue and the request would
-                                    // be resent byte-for-byte. Raise the cap once toward
-                                    // the ceiling. When that is spent: an all-reasoning
-                                    // turn settles with the cause and both remedies
-                                    // named; a turn that streamed a call is continued
-                                    // like any visible truncation (a fresh sample may
-                                    // fit). A provider pause with no text is not this
-                                    // case: it must be resent.
                                     let can_raise = recovery.empty_output_retries < MAX_EMPTY_OUTPUT_RETRIES
                                         && run.max_output_tokens < output_ceiling;
                                     if streamed_visible_output {
@@ -2452,6 +2439,24 @@ impl RunState {
                                     } else {
                                         recovery.reasoning_only_truncations =
                                             recovery.reasoning_only_truncations.saturating_add(1);
+                                    }
+                                    if !can_raise && !streamed_visible_output && summarizer.is_none()
+                                        && recovery.output_continuations < MAX_OUTPUT_CONTINUATIONS
+                                    {
+                                        recovery.output_continuations += 1;
+                                        yield TurnStep::Emit( RuntimeEvent::OutputTruncated {
+                                            turn_ordinal,
+                                            continuation: recovery.output_continuations,
+                                        });
+                                        let text = REASONING_TRUNCATED_NOTICE.to_owned();
+                                        let notice = Message::user(text.clone());
+                                        window.irreducible_message_bytes = window.irreducible_message_bytes
+                                            .saturating_add(measure_message(&notice));
+                                        Arc::make_mut(messages).push(notice);
+                                        slice.pending_goal_notices.push(runtime::OrderedTurnNotice {
+                                            text, preceding_deliveries: slice.pending_deliveries,
+                                        });
+                                        yield TurnStep::NextTurn; return;
                                     }
                                     if !can_raise && !streamed_visible_output {
                                         yield TurnStep::Emit( RuntimeEvent::Failed {

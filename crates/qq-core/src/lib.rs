@@ -222,6 +222,9 @@ pub struct OutputCeiling {
 pub(crate) const OUTPUT_TRUNCATED_CONTINUE_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
 previous response was cut off at the output token limit. Continue exactly from where it \
 stopped; do not repeat what was already written.";
+pub(crate) const REASONING_TRUNCATED_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
+previous response spent the whole output token limit on reasoning and produced no text or tool \
+call. Reason less this time: take the next step now, or give the answer briefly.";
 /// Most retries one turn may spend on a transient provider fault after the
 /// stream has started (the provider owns retries before that, ADR-0005). The
 /// count resets when a turn completes, so a long run survives many isolated
@@ -6115,9 +6118,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_tool_call_cut_mid_arguments_with_no_text_is_an_empty_truncation() {
-        // A call cut before it completed is dropped from the resend, so a
-        // turn holding only that is as empty as one with nothing at all: at
-        // the ceiling it fails at once rather than resending three times.
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             TruncatingProvider {
@@ -6139,7 +6139,7 @@ mod tests {
             )
             .collect::<Vec<_>>()
             .await;
-        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(requests.lock().unwrap().len(), 4);
         assert!(matches!(
             events.last(),
             Some(RuntimeEvent::Failed {
@@ -6150,7 +6150,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_truncated_turn_at_the_ceiling_fails_at_once_naming_the_cause() {
+    async fn a_summarizer_turn_spent_on_reasoning_fails_without_a_notice() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TruncatingProvider {
+                truncations: usize::MAX,
+                cut_tool_call: false,
+                empty: true,
+                empty_from: usize::MAX,
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                &runtime, workspace,
+            ))
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let events = plan
+            .execute(
+                vec![Message::user(sessions::COMPACTION_INSTRUCTION)],
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::ReadOnly,
+                    tools: Default::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::restricted().summarizer(plan::PromptPrefixKey {
+                    tools: None,
+                    guidance: false,
+                    subagent: None,
+                    mode: ApprovalMode::Auto,
+                    snapshots: false,
+                }),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Failed {
+                kind: RunFailureKind::ProviderOutputTruncated,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_empty_truncated_turn_at_the_ceiling_retries_with_a_notice_then_names_the_cause() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             TruncatingProvider {
@@ -6173,9 +6228,15 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
 
-        // Already at the model ceiling: no retry can change the request, so
-        // exactly one provider call is spent, not MAX_OUTPUT_CONTINUATIONS + 1.
-        assert_eq!(requests.lock().unwrap().len(), 1);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        for request in &requests[1..] {
+            assert_eq!(
+                request.messages().last(),
+                Some(&Message::user(REASONING_TRUNCATED_NOTICE))
+            );
+        }
+        assert_eq!(requests[3].messages().len(), 4);
         assert!(matches!(
             events.last(),
             Some(RuntimeEvent::Failed {
@@ -6183,6 +6244,7 @@ mod tests {
                 message,
             }) if message.contains("without producing any visible output")
                 && message.contains("reasoning_effort")
+                && message.contains("on 4 consecutive turns")
                 && message.contains("model ceiling 256")
         ));
     }
@@ -6291,7 +6353,11 @@ mod tests {
             )
             .collect::<Vec<_>>()
             .await;
-        assert_eq!(requests.lock().unwrap().len(), 2, "one raise, then settle");
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            4,
+            "one raise, two nudged retries, then settle"
+        );
         assert!(matches!(
             events.last(),
             Some(RuntimeEvent::Failed {
@@ -6361,12 +6427,12 @@ mod tests {
             .run_messages_in_workspace(vec![Message::user("go")], directory.path().to_owned())
             .collect::<Vec<_>>()
             .await;
-        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert_eq!(requests.lock().unwrap().len(), 4);
         let Some(RuntimeEvent::Failed { kind, message }) = events.last() else {
             panic!("expected a failure, got {:?}", events.last());
         };
         assert_eq!(*kind, RunFailureKind::ProviderOutputTruncated);
-        assert!(message.contains("on 1 consecutive turn;"), "{message}");
+        assert!(message.contains("on 3 consecutive turns;"), "{message}");
         assert!(message.contains("(512 tokens)"), "{message}");
     }
 
@@ -6433,12 +6499,12 @@ mod tests {
             .run_messages_in_workspace(vec![Message::user("go")], directory.path().to_owned())
             .collect::<Vec<_>>()
             .await;
-        assert_eq!(requests.lock().unwrap().len(), 3);
+        assert_eq!(requests.lock().unwrap().len(), 6);
         let Some(RuntimeEvent::Failed { kind, message }) = events.last() else {
             panic!("expected a failure, got {:?}", events.last());
         };
         assert_eq!(*kind, RunFailureKind::ProviderOutputTruncated);
-        assert!(message.contains("on 1 consecutive turn;"), "{message}");
+        assert!(message.contains("on 4 consecutive turns;"), "{message}");
     }
 
     #[tokio::test]
