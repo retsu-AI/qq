@@ -52,8 +52,13 @@ pub(super) struct EditFileArgs {
 }
 
 /// Models sometimes send `edits` JSON-encoded as a string, or one edit
-/// object without its array; both mean the list they decode to.
-fn edit_list<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Edit>, D::Error> {
+/// object without its array; both mean the list they decode to. The
+/// approval preview decodes with this too, so it shows what will apply.
+pub(crate) fn edit_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
     let value = match serde_json::Value::deserialize(deserializer)? {
         serde_json::Value::String(encoded) => {
             serde_json::from_str(&encoded).map_err(serde::de::Error::custom)?

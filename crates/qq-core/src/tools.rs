@@ -158,6 +158,7 @@ pub(crate) use dispatch::{
     ResultDisposition, SpillRecord, ToolDrainError, ToolOutput, ToolTasks, bounded_result,
     execute_with_images,
 };
+pub(crate) use edit::edit_list;
 #[cfg(test)]
 pub(crate) use edit::hold_tool_apply;
 #[cfg(test)]
