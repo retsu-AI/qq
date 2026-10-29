@@ -28,11 +28,12 @@ platform = { host = "cfg(target_os = \"linux\")" }
 filter = 'all()'
 setup = 'tmpfs-tmpdir'
 
-# The qq-core session suites are the long tail (7–13 s each alone, several
-# times that under full parallel load). Start them first so they overlap the
-# thousands of millisecond tests instead of running alone at the end.
+# The long tail on tmpfs: the goal-driver and deadline suites, the soak
+# binary, and the perf fixtures (2-6 s each alone). Start them first so they
+# overlap the thousands of millisecond tests instead of running alone at the
+# end.
 [[profile.default.overrides]]
-filter = 'package(qq-core) & test(/^sessions::tests::(compaction|progress|runs|delegation|feeds|nonblocking|settlement|approvals|commands)::/)'
+filter = '(package(qq-core) & test(/^sessions::tests::(goal_driver_soak|deadlines|compaction|goals|delegation|runs|goal_check|feeds)::/)) | binary_id(qq-core::soak) | (package(xtask) & test(/^perf::tests::/))'
 priority = 100
 
 [profile.quick]
