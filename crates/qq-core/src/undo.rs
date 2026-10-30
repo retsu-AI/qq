@@ -1305,6 +1305,63 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn an_ignored_folder_below_a_folder_survives_a_restore() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::create_dir_all(root.join("web/node_modules/left-pad")).unwrap();
+        std::fs::write(root.join("web/index.js"), "user\n").unwrap();
+        std::fs::write(root.join("web/node_modules/left-pad/index.js"), "dep\n").unwrap();
+        let taken = snapshot(
+            root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::write(root.join("web/index.js"), "agent\n").unwrap();
+        std::fs::write(root.join("web/node_modules/left-pad/index.js"), "rebuilt\n").unwrap();
+
+        restore(&taken).await.unwrap();
+        assert_eq!(read(&root.join("web/index.js")).as_deref(), Some("user\n"));
+        assert_eq!(
+            read(&root.join("web/node_modules/left-pad/index.js")).as_deref(),
+            Some("rebuilt\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_named_with_a_newline_is_not_replaced_by_a_snapshotted_file() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        let odd = root.join("odd\ndir");
+        let similar = root.join("odd");
+        std::fs::write(&odd, "file\n").unwrap();
+        std::fs::write(&similar, "similar\n").unwrap();
+        let taken = snapshot(
+            root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::remove_file(&odd).unwrap();
+        std::fs::create_dir(&odd).unwrap();
+        std::fs::write(odd.join("secret"), "secret\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "secret\n").unwrap();
+        std::fs::write(&similar, "agent\n").unwrap();
+
+        restore(&taken).await.unwrap();
+        assert_eq!(read(&odd.join("secret")).as_deref(), Some("secret\n"));
+        assert_eq!(read(&similar).as_deref(), Some("similar\n"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_newly_ignored_file_with_a_non_utf8_name_survives_a_restore() {

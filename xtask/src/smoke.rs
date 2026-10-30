@@ -490,7 +490,7 @@ const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "run-then-undo",
-        proves: "`qq undo` restores files a run edited, deleted and created, byte for byte, leaves the index and stash alone, and can be reversed",
+        proves: "`qq undo` restores files a run edited, deleted and created, byte for byte, keeps an ignored folder below a folder, leaves the index and stash alone, and can be reversed",
         run: |home| Box::pin(run_then_undo(home)),
     },
     Scenario {
@@ -662,6 +662,15 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     home.git(&["add", "notes.txt"]).await?;
     tokio::fs::write(home.workspace.join("draft.txt"), "user draft\r\nkeep\n")
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::fs::write(home.workspace.join(".gitignore"), "node_modules/\n")
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(home.workspace.join("web/node_modules"))
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::fs::write(home.workspace.join("web/node_modules/dep.js"), "dep\n")
         .await
         .map_err(|e| e.to_string())?;
     let files = home.files().await?;
