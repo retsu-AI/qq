@@ -202,6 +202,10 @@ async fn shell_prefix_denial_precedes_auto_and_full_and_allows_continuation() {
                 "exec",
                 r#"{"program":"managed-tool","args":["--dangerous"]}"#,
             ),
+            (
+                "shell",
+                r#"{"command":"env A=b timeout 9 sh -c 'cd x && managed-tool --dangerous'"}"#,
+            ),
         ] {
             let directory = test_directory();
             let runtime = SessionRuntime::open(

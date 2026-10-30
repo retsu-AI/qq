@@ -120,7 +120,8 @@ except Full denies them before running anything, and the agent gets a tool
 error telling it to find another way:
 
 - force-pushing or deleting remote refs (`git push --force`, `-f`,
-  `--force-with-lease`, `--delete`, `+ref`, `:ref`);
+  `--force-with-lease`, `--mirror`, `--delete`, `--prune`, any abbreviation
+  of those Git accepts such as `--force-w` or `--del`, `+ref`, `:ref`);
 - `rm -r`, `mv`, or `chmod -R`/`chown -R` on `/`, your home directory, or a
   directory directly under either;
 - `sudo`, `doas`, `su`, `pkexec`;
@@ -129,13 +130,22 @@ error telling it to find another way:
   `~/.config/gh`, `~/.docker/config.json`, `~/.kube`, `~/.git-credentials`,
   or QQ's own credential store.
 
-The stops see through `cd x && …`, `env A=b …`, `timeout`, `nice`, pipes,
-subshells and `sh -c '…'`. Switch to Full if you mean it.
+The stops see through `cd x && …`, `;` and `||` lists, pipes, subshells,
+`$(…)`, the launchers `env A=b`, `timeout`, `nice`, `nohup`, `time`,
+`stdbuf`, `command`, `exec`, `xargs` and `sudo`, `sh -c '…'` and
+`bash -lc '…'`, and Git's global options before the subcommand (`-C dir`,
+`-c k=v`, `--git-dir=…`, `--work-tree=…`, `--no-pager`). Switch to Full if
+you mean it.
 
 This is an accident net, not a security boundary. It reads literal
-commands. A script, an interpreter, or a command built at run time can do any
-of these things without matching. `deny_shell_prefixes` add literal
-prefixes that are denied in every mode, Full included.
+commands. A script, an interpreter, an alias, or a command built at run time
+(`$CMD`, `eval`, `sh -c "$X"`) can do any of these things without matching.
+`deny_shell_prefixes` add literal prefixes that are denied in every mode,
+Full included. Each command is normalized the same way as for the stops
+before it is compared, so the prefix `"git push origin main"` also refuses
+`env A=b git -C . push origin main` and `sh -c 'git push origin main'`. A
+prefix matches whole words from the start of a command: `"cargo publish"`
+refuses `cargo publish --dry-run` but not `echo cargo publish`.
 
 ## Undoing a run
 

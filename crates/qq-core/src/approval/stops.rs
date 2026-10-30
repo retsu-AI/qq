@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use super::classify::{SimpleCommand, shell_commands};
+use super::classify::{SimpleCommand, git_options_end, shell_commands};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stop {
@@ -182,27 +182,7 @@ fn top(operand: &str, home: &Path) -> bool {
 }
 
 fn force_push(args: &[Option<String>]) -> bool {
-    let mut index = 0;
-    while let Some(Some(word)) = args.get(index) {
-        if !word.starts_with('-') {
-            break;
-        }
-        index += if matches!(
-            word.as_str(),
-            "-C" | "-c"
-                | "--git-dir"
-                | "--work-tree"
-                | "--namespace"
-                | "--exec-path"
-                | "--super-prefix"
-                | "--config-env"
-                | "--attr-source"
-        ) {
-            2
-        } else {
-            1
-        };
-    }
+    let index = git_options_end(args);
     if args.get(index).and_then(Option::as_deref) != Some("push") {
         return false;
     }
@@ -211,7 +191,9 @@ fn force_push(args: &[Option<String>]) -> bool {
     let mut value = false;
     for arg in &args[index + 1..] {
         let Some(arg) = arg.as_deref() else {
-            positional += 1;
+            if !std::mem::take(&mut value) {
+                positional += 1;
+            }
             continue;
         };
         if std::mem::take(&mut value) {
@@ -224,17 +206,11 @@ fn force_push(args: &[Option<String>]) -> bool {
                 Some((name, _)) => (name, true),
                 None => (arg, false),
             };
-            if matches!(
-                name,
-                "--force" | "--force-with-lease" | "--mirror" | "--delete" | "--prune"
-            ) {
-                return true;
+            match push_long_option(&name[2..]) {
+                PushOption::ForceLike => return true,
+                PushOption::Value => value = !inline,
+                PushOption::Flag => {}
             }
-            value = !inline
-                && matches!(
-                    name,
-                    "--repo" | "--receive-pack" | "--exec" | "--push-option"
-                );
         } else if options && arg.len() > 1 && arg.starts_with('-') {
             for (offset, flag) in arg[1..].char_indices() {
                 match flag {
@@ -254,6 +230,69 @@ fn force_push(args: &[Option<String>]) -> bool {
         }
     }
     false
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushOption {
+    ForceLike,
+    Value,
+    Flag,
+}
+
+const PUSH_LONG_OPTIONS: [(&str, PushOption, bool); 28] = [
+    ("verbose", PushOption::Flag, true),
+    ("quiet", PushOption::Flag, true),
+    ("repo", PushOption::Value, true),
+    ("all", PushOption::Flag, true),
+    ("branches", PushOption::Flag, true),
+    ("mirror", PushOption::ForceLike, true),
+    ("delete", PushOption::ForceLike, true),
+    ("tags", PushOption::Flag, true),
+    ("dry-run", PushOption::Flag, true),
+    ("porcelain", PushOption::Flag, true),
+    ("force", PushOption::ForceLike, true),
+    ("force-with-lease", PushOption::ForceLike, true),
+    ("force-if-includes", PushOption::Flag, true),
+    ("recurse-submodules", PushOption::Value, true),
+    ("thin", PushOption::Flag, true),
+    ("receive-pack", PushOption::Value, true),
+    ("exec", PushOption::Value, true),
+    ("set-upstream", PushOption::Flag, true),
+    ("progress", PushOption::Flag, true),
+    ("prune", PushOption::ForceLike, true),
+    ("no-verify", PushOption::Flag, false),
+    ("verify", PushOption::Flag, false),
+    ("follow-tags", PushOption::Flag, true),
+    ("signed", PushOption::Flag, true),
+    ("atomic", PushOption::Flag, true),
+    ("push-option", PushOption::Value, true),
+    ("ipv4", PushOption::Flag, false),
+    ("ipv6", PushOption::Flag, false),
+];
+
+fn push_long_option(name: &str) -> PushOption {
+    let options = || {
+        PUSH_LONG_OPTIONS
+            .iter()
+            .flat_map(|&(option, kind, negatable)| {
+                let negated = negatable.then(|| (format!("no-{option}"), PushOption::Flag));
+                std::iter::once((option.to_owned(), kind)).chain(negated)
+            })
+    };
+    if let Some((_, kind)) = options().find(|(option, _)| option == name) {
+        return kind;
+    }
+    let candidates: Vec<PushOption> = options()
+        .filter(|(option, _)| !name.is_empty() && option.starts_with(name))
+        .map(|(_, kind)| kind)
+        .collect();
+    if candidates.contains(&PushOption::ForceLike) {
+        PushOption::ForceLike
+    } else if candidates == [PushOption::Value] {
+        PushOption::Value
+    } else {
+        PushOption::Flag
+    }
 }
 
 fn disk_device(target: &str) -> bool {
@@ -388,6 +427,16 @@ mod tests {
             "git push origin :old",
             "git push --prune origin",
             "git -C sub -c k=v push --force",
+            "git push --force-w",
+            "git push --force-w=x:abc origin x",
+            "git push --forc origin x",
+            "git push --mirr",
+            "git push --m backup",
+            "git push --del x",
+            "git push --de origin x",
+            "git push --pru origin",
+            "git push --recurse-submodules \"$MODE\" --force origin x",
+            "git push --repo \"$R\" -f origin x",
         ] {
             assert_stopped(command, Stop::ForcePush);
         }
@@ -398,6 +447,13 @@ mod tests {
             "git push -o ci.skip origin x",
             "git push --push-option -f origin x",
             "git push origin HEAD:refs/heads/x",
+            "git push --follow-tags",
+            "git push --fol origin x",
+            "git push --force-if-includes origin x",
+            "git push --dry-run origin x",
+            "git push --prog origin x",
+            "git push --no-force origin x",
+            "git push --rep=+x origin x",
             "git commit -m '--force'",
             "git log --force",
         ] {

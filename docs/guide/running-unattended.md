@@ -158,9 +158,14 @@ USER agent
 ```
 
 These prefixes are refused in every approval mode, Full included, and the
-agent gets a tool error telling it to find another way. Like the fixed
-stops, they match literal commands at word boundaries; a script that runs
-`git push` is not caught. Use them to block mistakes you can name, and use
+agent gets a tool error telling it to find another way. They see through
+the same wrappers as the [fixed stops](permissions.md#fixed-stops): `cd x &&
+…`, pipes, subshells, `env A=b`, `timeout`, `nice`, `nohup`, `command`,
+`sh -c '…'`, `bash -lc '…'`, and Git's global options, so `"git push origin
+main"` also refuses `git -C . push origin main`. They match whole words from
+the start of each command, so `echo cargo publish` is allowed. A script that
+runs `git push`, an alias, or a command built at run time (`$CMD`, `eval`)
+is not caught. Use them to block mistakes you can name, and use
 the token's permissions and branch protection to make the rest impossible.
 The key is described in [Configuration › Policy](configuration.md).
 
