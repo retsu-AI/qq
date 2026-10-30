@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use qq_core::undo::{Coverage, MINIMUM_GIT_VERSION};
+
 pub const UNATTENDED_GUIDE: &str = "https://retsu-ai.github.io/qq/docs/running-unattended/";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,15 +80,21 @@ fn placement(
     Placement::Host
 }
 
-pub fn snapshot_summary(covered: bool) -> &'static str {
-    if covered {
-        "on: `qq undo` restores the workspace as it was before each run"
-    } else {
-        "off: not a Git work tree, so `qq undo` cannot restore changes here"
+pub fn snapshot_summary(coverage: Coverage) -> String {
+    match coverage {
+        Coverage::Covered => {
+            "on: `qq undo` restores the workspace as it was before each run".to_owned()
+        }
+        Coverage::NotGit => {
+            "off: not a Git work tree, so `qq undo` cannot restore changes here".to_owned()
+        }
+        Coverage::GitTooOld(found) => format!(
+            "off: Git {found} is older than {MINIMUM_GIT_VERSION}, so `qq undo` cannot restore changes"
+        ),
     }
 }
 
-pub fn first_run_lines(environment: &Environment, snapshots: bool) -> Vec<String> {
+pub fn first_run_lines(environment: &Environment, snapshots: Coverage) -> Vec<String> {
     vec![
         format!("QQ is {}.", environment.summary()),
         format!("Snapshots {}.", snapshot_summary(snapshots)),
@@ -96,6 +104,7 @@ pub fn first_run_lines(environment: &Environment, snapshots: bool) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qq_core::undo::GitVersion;
 
     fn host(user: &str) -> Environment {
         Environment {
@@ -185,11 +194,21 @@ mod tests {
     #[test]
     fn first_run_lines_name_placement_and_snapshots() {
         assert_eq!(
-            first_run_lines(&host("ada"), false),
+            first_run_lines(&host("ada"), Coverage::NotGit),
             [
                 "QQ is on the host: commands run as ada, with this machine's network and credentials.",
                 "Snapshots off: not a Git work tree, so `qq undo` cannot restore changes here.",
             ]
+        );
+        assert_eq!(
+            first_run_lines(
+                &host("ada"),
+                Coverage::GitTooOld(GitVersion {
+                    major: 2,
+                    minor: 31
+                })
+            )[1],
+            "Snapshots off: Git 2.31 is older than 2.32, so `qq undo` cannot restore changes."
         );
     }
 }

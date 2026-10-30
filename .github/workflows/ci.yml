@@ -208,6 +208,35 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo run --locked -p qq-core --example embed
 
+  old-git:
+    name: undo on Git 2.39 (debian:bookworm)
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container: debian:bookworm
+    steps:
+      - name: Install Git and a C toolchain
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config
+          git --version
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: old-git
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Core undo tests
+        run: cargo nextest run --locked -p qq-core -E 'test(/undo/)'
+      - name: Run then undo
+        if: ${{ !cancelled() }}
+        run: cargo xtask smoke --only run-then-undo
+
   release-size:
     name: release build size
     runs-on: ubuntu-latest

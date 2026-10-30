@@ -563,8 +563,7 @@ fn server_check(paths: &server::ServerPaths) -> Check {
 }
 
 fn snapshots_check(cwd: &Path) -> Check {
-    const NAME: &str = "snapshots";
-    let covered = tokio::runtime::Builder::new_current_thread()
+    let coverage = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())
@@ -573,12 +572,27 @@ fn snapshots_check(cwd: &Path) -> Check {
                 .block_on(qq_core::undo::covers(cwd))
                 .map_err(|error| error.to_string())
         });
-    match covered {
-        Ok(true) => Check::ok(NAME, crate::environment::snapshot_summary(true)),
-        Ok(false) => Check::warn(
+    snapshots_verdict(coverage)
+}
+
+fn snapshots_verdict(coverage: Result<qq_core::undo::Coverage, String>) -> Check {
+    use qq_core::undo::Coverage;
+    const NAME: &str = "snapshots";
+    let summary = crate::environment::snapshot_summary;
+    match coverage {
+        Ok(Coverage::Covered) => Check::ok(NAME, summary(Coverage::Covered)),
+        Ok(Coverage::NotGit) => Check::warn(
             NAME,
-            crate::environment::snapshot_summary(false),
+            summary(Coverage::NotGit),
             "run qq inside a Git repository (`git init` here) so each run can be undone",
+        ),
+        Ok(stale @ Coverage::GitTooOld(_)) => Check::warn(
+            NAME,
+            summary(stale),
+            format!(
+                "install Git {} or newer",
+                qq_core::undo::MINIMUM_GIT_VERSION
+            ),
         ),
         Err(error) => Check::warn(
             NAME,
@@ -1170,6 +1184,18 @@ mod tests {
         let text = String::from_utf8(buffer).unwrap();
         assert!(text.lines().last() == Some("all checks passed"), "{text}");
         assert!(text.contains("\x1b[32mok   \x1b[0m"), "{text}");
+    }
+
+    #[test]
+    fn snapshots_warn_and_name_the_minimum_when_git_is_too_old() {
+        let old = qq_core::undo::GitVersion::parse("git version 2.31.8").unwrap();
+        let stale = snapshots_verdict(Ok(qq_core::undo::Coverage::GitTooOld(old)));
+        assert_eq!(stale.status, Status::Warn, "{stale:#?}");
+        assert_eq!(
+            stale.summary,
+            "off: Git 2.31 is older than 2.32, so `qq undo` cannot restore changes"
+        );
+        assert_eq!(stale.remedy.as_deref(), Some("install Git 2.32 or newer"));
     }
 
     #[test]

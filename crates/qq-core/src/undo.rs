@@ -15,6 +15,8 @@ pub const MAX_UNTRACKED_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 const GIT_STEP_TIMEOUT: Duration = Duration::from_secs(30);
 
+const MAX_PATHSPEC_ARGUMENT_BYTES: usize = 16 * 1024;
+
 const WORKSPACE_TRAILER: &str = "QQ-Workspace: ";
 const RUN_TRAILER: &str = "QQ-Run: ";
 const HEAD_TRAILER: &str = "QQ-Head: ";
@@ -50,6 +52,13 @@ pub struct Restored {
 pub enum UndoError {
     #[error("{0} is not inside a Git work tree; snapshots need Git")]
     NotGit(PathBuf),
+    #[error(
+        "Git {found} is older than {minimum}; snapshots and qq undo need Git {minimum} or newer"
+    )]
+    GitTooOld {
+        found: GitVersion,
+        minimum: GitVersion,
+    },
     #[error("could not run git: {0}")]
     Spawn(#[source] std::io::Error),
     #[error("git {step} timed out after {seconds} s")]
@@ -132,6 +141,7 @@ pub async fn snapshot(
     let Some(repository) = discover(workspace).await? else {
         return Ok(None);
     };
+    require_supported_git(workspace).await?;
     let snapshot = record(&repository, kind).await?;
     let cutoff_ms = retention.map(|retention| {
         snapshot
@@ -142,8 +152,22 @@ pub async fn snapshot(
     Ok(Some(snapshot))
 }
 
-pub async fn covers(directory: &Path) -> Result<bool, UndoError> {
-    Ok(discover(directory).await?.is_some())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    Covered,
+    NotGit,
+    GitTooOld(GitVersion),
+}
+
+pub async fn covers(directory: &Path) -> Result<Coverage, UndoError> {
+    if discover(directory).await?.is_none() {
+        return Ok(Coverage::NotGit);
+    }
+    match require_supported_git(directory).await {
+        Ok(()) => Ok(Coverage::Covered),
+        Err(UndoError::GitTooOld { found, .. }) => Ok(Coverage::GitTooOld(found)),
+        Err(error) => Err(error),
+    }
 }
 
 pub async fn list(directory: &Path) -> Result<Vec<Snapshot>, UndoError> {
@@ -167,6 +191,7 @@ pub async fn restore(target: &Snapshot) -> Result<Restored, UndoError> {
     let Some(repository) = discover(&target.workspace).await? else {
         return Err(UndoError::NotGit(target.workspace.clone()));
     };
+    require_supported_git(&target.workspace).await?;
     let before = record(&repository, SnapshotKind::BeforeUndo).await?;
     let index = ScratchIndex::copy(&repository).await?;
     let mut excluded = stage_workspace(&repository, &index).await?;
@@ -222,14 +247,7 @@ pub async fn restore(target: &Snapshot) -> Result<Restored, UndoError> {
 
 async fn discover(directory: &Path) -> Result<Option<Repository>, UndoError> {
     let output = command(directory, None)
-        .args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--is-inside-work-tree",
-            "--git-path",
-            "index",
-            "--absolute-git-dir",
-        ])
+        .args(["rev-parse", "--is-inside-work-tree", "--absolute-git-dir"])
         .output();
     let output = match tokio::time::timeout(GIT_STEP_TIMEOUT, output).await {
         Ok(Ok(output)) => output,
@@ -240,17 +258,66 @@ async fn discover(directory: &Path) -> Result<Option<Repository>, UndoError> {
     if !output.status.success() {
         return Ok(None);
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut lines = text.lines();
-    let (Some("true"), Some(index), Some(git_dir)) = (lines.next(), lines.next(), lines.next())
+    let Some(git_dir) = output
+        .stdout
+        .strip_prefix(b"true\n")
+        .and_then(|rest| rest.strip_suffix(b"\n"))
     else {
         return Ok(None);
     };
+    let git_dir = path_from_bytes(git_dir);
     Ok(Some(Repository {
         workspace: directory.to_owned(),
-        index: PathBuf::from(index),
-        git_dir: PathBuf::from(git_dir),
+        index: git_dir.join("index"),
+        git_dir,
     }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GitVersion {
+    pub major: u32,
+    pub minor: u32,
+}
+
+pub const MINIMUM_GIT_VERSION: GitVersion = GitVersion {
+    major: 2,
+    minor: 32,
+};
+
+impl std::fmt::Display for GitVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}.{}", self.major, self.minor)
+    }
+}
+
+impl GitVersion {
+    #[must_use]
+    pub fn parse(output: &str) -> Option<Self> {
+        let number = output
+            .strip_prefix("git version ")?
+            .split_whitespace()
+            .next()?;
+        let mut parts = number.split('.');
+        Some(Self {
+            major: parts.next()?.parse().ok()?,
+            minor: parts.next()?.parse().ok()?,
+        })
+    }
+}
+
+async fn git_version(directory: &Path) -> Result<Option<GitVersion>, UndoError> {
+    let output = git(directory, None, "--version", &["--version"]).await?;
+    Ok(GitVersion::parse(output.trim()))
+}
+
+async fn require_supported_git(directory: &Path) -> Result<(), UndoError> {
+    match git_version(directory).await? {
+        Some(found) if found < MINIMUM_GIT_VERSION => Err(UndoError::GitTooOld {
+            found,
+            minimum: MINIMUM_GIT_VERSION,
+        }),
+        Some(_) | None => Ok(()),
+    }
 }
 
 async fn record(repository: &Repository, kind: SnapshotKind) -> Result<Snapshot, UndoError> {
@@ -575,27 +642,43 @@ async fn replaced_ancestors(
     if ancestors.is_empty() {
         return Ok(Vec::new());
     }
-    let mut objects = Vec::new();
-    for ancestor in &ancestors {
-        objects.extend_from_slice(commit.as_bytes());
-        objects.extend_from_slice(b":./");
-        objects.extend_from_slice(&path_bytes(ancestor));
-        objects.push(0);
+    let mut replaced = Vec::new();
+    let mut pathspecs: Vec<std::ffi::OsString> = Vec::new();
+    let mut length = 0;
+    for (at, ancestor) in ancestors.iter().enumerate() {
+        let mut pathspec = std::ffi::OsString::from(":(literal)");
+        pathspec.push(ancestor.as_os_str());
+        length += pathspec.len() + 1;
+        pathspecs.push(pathspec);
+        if length >= MAX_PATHSPEC_ARGUMENT_BYTES || at + 1 == ancestors.len() {
+            let listing = git_bytes(
+                &repository.workspace,
+                None,
+                "ls-tree",
+                &[
+                    OsStr::new("ls-tree"),
+                    OsStr::new("-z"),
+                    OsStr::new(commit),
+                    OsStr::new("--"),
+                ]
+                .into_iter()
+                .chain(pathspecs.iter().map(std::ffi::OsString::as_os_str))
+                .collect::<Vec<_>>(),
+                Vec::new(),
+            )
+            .await?;
+            replaced.extend(nul_separated(&listing).filter_map(|entry| {
+                let tab = entry.iter().position(|byte| *byte == b'\t')?;
+                let (header, path) = (&entry[..tab], &entry[tab + 1..]);
+                let kind = header.split(|byte| *byte == b' ').nth(1)?;
+                matches!(kind, b"blob" | b"commit").then(|| path_from_bytes(path))
+            }));
+            pathspecs.clear();
+            length = 0;
+        }
     }
-    let types = git_bytes(
-        &repository.workspace,
-        None,
-        "cat-file",
-        &["cat-file", "--batch-check=%(objecttype)", "-Z"],
-        objects,
-    )
-    .await?;
-    Ok(ancestors
-        .into_iter()
-        .zip(types.split(|byte| *byte == 0))
-        .filter(|(_, kind)| matches!(*kind, b"blob" | b"commit"))
-        .map(|(ancestor, _)| ancestor.to_owned())
-        .collect())
+    replaced.retain(|path| ancestors.binary_search(&path.as_path()).is_ok());
+    Ok(replaced)
 }
 
 fn nul_separated(listing: &[u8]) -> impl Iterator<Item = &[u8]> {
@@ -718,7 +801,7 @@ fn command(directory: &Path, index: Option<&Path>) -> tokio::process::Command {
             "core.hooksPath=/dev/null"
         },
         "-c",
-        "core.fsmonitor=false",
+        "core.fsmonitor=",
         "-c",
         "core.autocrlf=false",
     ]);
@@ -759,12 +842,12 @@ async fn git_bytes(
     directory: &Path,
     index: Option<&Path>,
     step: &'static str,
-    arguments: &[&str],
+    arguments: &[impl AsRef<OsStr>],
     input: Vec<u8>,
 ) -> Result<Vec<u8>, UndoError> {
     use tokio::io::AsyncWriteExt as _;
     let mut command = command(directory, index);
-    command.args(arguments.iter().map(OsStr::new));
+    command.args(arguments);
     if !input.is_empty() {
         command.stdin(Stdio::piped());
     }
@@ -1302,6 +1385,92 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&large).unwrap().len(),
             MAX_UNTRACKED_FILE_BYTES + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ignored_folder_below_a_folder_survives_a_restore() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::create_dir_all(root.join("web/node_modules/left-pad")).unwrap();
+        std::fs::write(root.join("web/index.js"), "user\n").unwrap();
+        std::fs::write(root.join("web/node_modules/left-pad/index.js"), "dep\n").unwrap();
+        let taken = snapshot(
+            root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::write(root.join("web/index.js"), "agent\n").unwrap();
+        std::fs::write(root.join("web/node_modules/left-pad/index.js"), "rebuilt\n").unwrap();
+
+        restore(&taken).await.unwrap();
+        assert_eq!(read(&root.join("web/index.js")).as_deref(), Some("user\n"));
+        assert_eq!(
+            read(&root.join("web/node_modules/left-pad/index.js")).as_deref(),
+            Some("rebuilt\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_named_with_a_newline_is_not_replaced_by_a_snapshotted_file() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        let odd = root.join("odd\ndir");
+        let similar = root.join("odd");
+        std::fs::write(&odd, "file\n").unwrap();
+        std::fs::write(&similar, "similar\n").unwrap();
+        let taken = snapshot(
+            root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::remove_file(&odd).unwrap();
+        std::fs::create_dir(&odd).unwrap();
+        std::fs::write(odd.join("secret"), "secret\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "secret\n").unwrap();
+        std::fs::write(&similar, "agent\n").unwrap();
+
+        restore(&taken).await.unwrap();
+        assert_eq!(read(&odd.join("secret")).as_deref(), Some("secret\n"));
+        assert_eq!(read(&similar).as_deref(), Some("similar\n"));
+    }
+
+    #[test]
+    fn git_versions_parse_from_release_and_vendor_builds() {
+        for (output, expected) in [
+            ("git version 2.39.5", Some((2, 39))),
+            ("git version 2.39.5 (Apple Git-154)", Some((2, 39))),
+            ("git version 2.45.1.windows.1", Some((2, 45))),
+            ("git version 3.0", Some((3, 0))),
+            ("not git", None),
+        ] {
+            assert_eq!(
+                GitVersion::parse(output),
+                expected.map(|(major, minor)| GitVersion { major, minor }),
+                "{output}"
+            );
+        }
+        assert!(
+            GitVersion {
+                major: 2,
+                minor: 24
+            } < MINIMUM_GIT_VERSION
+        );
+        assert!(
+            GitVersion {
+                major: 2,
+                minor: 34
+            } >= MINIMUM_GIT_VERSION
         );
     }
 

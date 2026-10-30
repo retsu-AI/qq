@@ -177,7 +177,7 @@ discovery file. No provider is contacted and nothing is written.
 | `server` | `running at ADDR (pid, version)` or `none running; qq starts one on demand` | `warn` when the discovery state is unreadable |
 | `workspace` | the current directory resolves; lists `.qq/config.ron` and `AGENTS.md` when present | `warn` without an `AGENTS.md`; `fail` when the directory does not exist |
 | `environment` | always `ok`; says whether QQ is on the host or in a container, and that commands run as your user with that machine's network and credentials | — |
-| `snapshots` | the workspace is in a Git work tree, so `qq undo` can restore each run | `warn` outside Git or when `git` cannot run |
+| `snapshots` | the workspace is in a Git work tree, so `qq undo` can restore each run | `warn` outside Git, when `git` cannot run, or when Git is older than 2.32 |
 | `data` | the data directory is private and writable; shows `sessions.sqlite3` and its size | `fail` when it is not a directory, world-readable, or read-only |
 
 `--json` prints one object:
@@ -251,6 +251,7 @@ restored; the index, stash, commits and branches are left alone, and
 ignored files, untracked files over 16 MiB, anything outside the workspace,
 and anything outside a Git work tree, which gets no snapshot. Exit 0 on
 success, 2 when there is no matching snapshot, 1 on a Git failure.
+Snapshots need Git 2.32 or newer; with an older Git, `qq undo` refuses.
 
 `qq undo` works on the files directly and does not check for running agents.
 The TUI's `/undo` goes through the server instead, which refuses while a run

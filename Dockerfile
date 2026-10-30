@@ -47,7 +47,9 @@ ARG UID=1000
 ARG GID=1000
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git tini \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --system --add safe.directory /workspace \
+    && git config --system --add safe.directory '/workspace/*'
 RUN groupadd --gid "$GID" agent \
     && useradd --create-home --uid "$UID" --gid "$GID" --shell /bin/bash agent \
     && install -d -m 0700 -o agent -g agent /home/agent/.local /home/agent/.local/share \
