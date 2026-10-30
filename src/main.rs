@@ -735,7 +735,10 @@ async fn interactive(
         .map(tui_provider_remedy)
         .collect();
     let workspace_root = workspace.clone();
-    let snapshots = matches!(snapshots.await, Ok(Ok(true)));
+    let snapshots = match snapshots.await {
+        Ok(Ok(coverage)) => coverage,
+        Ok(Err(_)) | Err(_) => qq_core::undo::Coverage::NotGit,
+    };
     let environment_lines = environment::first_run_lines(
         &environment::Environment::detect_off_workers().await,
         snapshots,

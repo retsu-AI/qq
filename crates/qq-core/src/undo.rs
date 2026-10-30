@@ -152,8 +152,22 @@ pub async fn snapshot(
     Ok(Some(snapshot))
 }
 
-pub async fn covers(directory: &Path) -> Result<bool, UndoError> {
-    Ok(discover(directory).await?.is_some())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    Covered,
+    NotGit,
+    GitTooOld(GitVersion),
+}
+
+pub async fn covers(directory: &Path) -> Result<Coverage, UndoError> {
+    if discover(directory).await?.is_none() {
+        return Ok(Coverage::NotGit);
+    }
+    match require_supported_git(directory).await {
+        Ok(()) => Ok(Coverage::Covered),
+        Err(UndoError::GitTooOld { found, .. }) => Ok(Coverage::GitTooOld(found)),
+        Err(error) => Err(error),
+    }
 }
 
 pub async fn list(directory: &Path) -> Result<Vec<Snapshot>, UndoError> {
@@ -291,7 +305,7 @@ impl GitVersion {
     }
 }
 
-pub async fn git_version(directory: &Path) -> Result<Option<GitVersion>, UndoError> {
+async fn git_version(directory: &Path) -> Result<Option<GitVersion>, UndoError> {
     let output = git(directory, None, "--version", &["--version"]).await?;
     Ok(GitVersion::parse(output.trim()))
 }
