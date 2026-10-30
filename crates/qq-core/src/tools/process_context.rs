@@ -209,6 +209,8 @@ pub(crate) struct PreparedLaunch {
     command: Option<tokio::process::Command>,
     receipt: ExecutionContextReceipt,
     _cwd: Option<cap_std::fs::Dir>,
+    #[cfg(not(windows))]
+    stdin_text: Option<String>,
     #[cfg(target_os = "linux")]
     _image: Option<(std::fs::File, String)>,
 }
@@ -237,10 +239,12 @@ impl PreparedLaunch {
                 "command startup timed out",
             ));
         }
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut command = self
             .command
             .take()
             .ok_or_else(|| std::io::Error::other("launch was already consumed"))?;
+        #[cfg(windows)]
         command
             .stdin(if piped_stdin {
                 std::process::Stdio::piped()
@@ -250,33 +254,105 @@ impl PreparedLaunch {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        #[cfg(not(windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let (child, guard) = {
-            let _ = process;
-            let mut watcher = super::shell::spawn_watcher(deadline).await?;
+            let _ = (process, piped_stdin);
+            let verified = matches!(
+                self.receipt.facts().verdict,
+                ExecutionVerdict::VerifiedRead { .. }
+            );
+            let inner = command.as_std();
+            let program = inner.get_program().to_owned();
+            let args: Vec<std::ffi::OsString> =
+                inner.get_args().map(|arg| arg.to_owned()).collect();
+            let cwd = inner.get_current_dir().map(std::path::Path::to_owned);
+            let overrides: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> = inner
+                .get_envs()
+                .map(|(key, value)| (key.to_owned(), value.map(std::ffi::OsStr::to_owned)))
+                .collect();
+
+            super::shell::watcher::check_executable(
+                program.clone(),
+                verified,
+                overrides.clone(),
+                cwd.clone(),
+            )
+            .await?;
+
+            let mut watcher = super::shell::watcher::command(&program, &args).await?;
+            if verified {
+                watcher.env_clear();
+            }
+            for (key, value) in overrides {
+                match value {
+                    Some(value) => {
+                        watcher.env(key, value);
+                    }
+                    None => {
+                        watcher.env_remove(key);
+                    }
+                }
+            }
+            if let Some(cwd) = cwd {
+                watcher.current_dir(cwd);
+            }
+            let stdin = match self.stdin_text.take() {
+                Some(text) => {
+                    let stdin = super::shell::watcher::stdin_file(text.into_bytes()).await?;
+                    watcher.env("QQ_WATCHER_STDIN_FILE", stdin.path());
+                    Some(stdin)
+                }
+                None => None,
+            };
+
+            let readiness = super::shell::watcher::readiness()?;
+            watcher
+                .stdin(readiness.child_stdin()?)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(false)
+                .process_group(0);
             if cancelled.is_cancelled() {
-                let _ = watcher.start_kill();
-                let _ = watcher.wait().await;
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "command startup was cancelled",
                 ));
             }
-            let group = watcher
-                .id()
-                .and_then(|pid| i32::try_from(pid).ok())
-                .ok_or_else(|| std::io::Error::other("command watcher has no process id"))?;
-            command.process_group(group);
-            let child = match command.spawn() {
-                Ok(child) => child,
-                Err(error) => {
-                    let _ = watcher.start_kill();
-                    let _ = watcher.wait().await;
-                    return Err(error);
-                }
-            };
-            let mut guard = super::shell::ProcessGroupGuard::new(u32::try_from(group).ok());
-            guard.watch(watcher);
+            let inner = watcher.spawn()?;
+            let mut guard = super::shell::ProcessGroupGuard::new(inner.id());
+            let (command_pid, liveness) =
+                super::shell::watcher::command_child_pid(readiness, cancelled, deadline).await;
+            if let Some(stream) = &liveness {
+                guard.watch(stream.try_clone()?);
+            }
+            drop(stdin);
+            let child = super::shell::NativeChild::new(inner, command_pid, liveness);
+            (child, guard)
+        };
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+        let (child, guard) = {
+            let _ = process;
+            let _ = self.stdin_text.take();
+            command
+                .stdin(if piped_stdin {
+                    std::process::Stdio::piped()
+                } else {
+                    std::process::Stdio::null()
+                })
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .process_group(0);
+            if cancelled.is_cancelled() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "command startup was cancelled",
+                ));
+            }
+            let inner = command.spawn()?;
+            let guard = super::shell::ProcessGroupGuard::new(inner.id());
+            let command_pid = inner.id();
+            let child = super::shell::NativeChild::new_direct(inner, command_pid);
             (child, guard)
         };
         #[cfg(windows)]
@@ -292,12 +368,21 @@ impl PreparedLaunch {
         .await?;
         #[cfg(windows)]
         let guard = super::shell::ProcessGroupGuard::new(child.id());
-        let receipt = child.id().map(|pid| {
+        #[cfg(not(windows))]
+        let command_pid = child.command_pid();
+        #[cfg(windows)]
+        let command_pid = child.id();
+        let receipt = command_pid.map(|pid| {
             let mut receipt = self.receipt.clone();
             receipt.facts_mut().pid = pid;
             Box::new(receipt)
         });
         Ok((child, guard, receipt))
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn set_stdin_text(&mut self, text: String) {
+        self.stdin_text = Some(text);
     }
 }
 
@@ -447,7 +532,13 @@ pub(super) fn prepare(
             }
         }
     }
-    command.current_dir(cwd_path);
+    command
+        .env(
+            "PWD",
+            std::fs::canonicalize(&cwd_path).map_err(PreparationError::Cwd)?,
+        )
+        .env_remove("OLDPWD")
+        .current_dir(cwd_path);
     let context_id = match call_id {
         Some(id) => id,
         None => ToolCallId::generate().map_err(PreparationError::Identity)?,
@@ -477,6 +568,8 @@ pub(super) fn prepare(
         command: Some(command),
         receipt,
         _cwd: Some(directory),
+        #[cfg(not(windows))]
+        stdin_text: None,
         #[cfg(target_os = "linux")]
         _image: image,
     })
@@ -796,9 +889,10 @@ mod tests {
             .filter(|name| std::env::var_os(name).is_some())
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
+        base.push("PWD".to_owned());
         base.sort();
         assert_eq!(explicit(&prepared), base);
-        let mut plain = vec!["TERM".to_owned()];
+        let mut plain = vec!["TERM".to_owned(), "PWD".to_owned(), "OLDPWD".to_owned()];
         plain.extend(
             PLAIN_OUTPUT_ENV
                 .iter()

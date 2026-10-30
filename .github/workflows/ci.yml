@@ -193,6 +193,14 @@ jobs:
         shell: bash
         run: |
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
+      - name: Escaped command trees are torn down
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          bash .github/scripts/test-exact.sh tools::tests::shell_timeout_kills_children_that_leave_the_process_group
+          bash .github/scripts/test-exact.sh tools::tests::shell_cancellation_kills_children_that_leave_the_process_group
+          bash .github/scripts/test-exact.sh tools::tests::yielded_escaped_command_tree_dies_at_run_end
+          bash .github/scripts/test-exact.sh tools::tests::shell_and_exec_set_pwd_and_remove_oldpwd
       - name: Windows command jobs
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: bash

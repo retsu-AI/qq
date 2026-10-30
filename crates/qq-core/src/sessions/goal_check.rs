@@ -355,7 +355,7 @@ async fn run_host_process(
     };
     if !matches!(outcome, Ok(ProcessOutcome::Exited { .. })) {
         let group_error = group.kill().err();
-        let leader_error = child.start_kill().err();
+        let leader_error = None;
         let observer_error = if !observed {
             match exited.await {
                 Ok(Ok(())) => None,

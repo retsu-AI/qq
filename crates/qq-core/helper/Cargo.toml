@@ -1,0 +1,29 @@
+[workspace]
+
+[package]
+name = "qq-command-watcher"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+signal-hook = "0.3"
+
+[[bin]]
+name = "qq-command-watcher"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.4", default-features = false, features = ["std", "process", "thread", "fs", "event"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rustix = { version = "1.1.4", default-features = false, features = ["std", "process", "fs", "event"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true

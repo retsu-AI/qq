@@ -98,10 +98,13 @@ checkout, as you, with QQ's full environment, your network and your real
 HOME. Edits land in the checkout immediately. QQ does not copy the project,
 isolate the network or apply an operating-system sandbox. Each command runs
 in its own process group (a job object on Windows). A timeout, a
-cancellation, or QQ itself exiting stops that group. On Unix a process that
-moves itself to a new group or session (`setsid`, some daemons and
-`git gc --auto`) leaves that group and keeps running; Windows jobs follow
-every descendant. A command that prompts on the terminal (an SSH passphrase,
+cancellation, or QQ itself exiting stops that group. A process that moves
+itself to a new group or session (`setsid`, some daemons, `git gc --auto`, or
+GNU `timeout`) leaves that group, but QQ still tears it down: on Linux a
+subreaper reaps the escaped tree, on macOS QQ kills the descendants a process
+snapshot finds (one that double-forks and exits first can still slip away),
+and Windows jobs follow every descendant. A command that prompts on the
+terminal (an SSH passphrase,
 a Git credential prompt) waits until its timeout or a cancel, so set
 `GIT_TERMINAL_PROMPT=0` or use non-interactive credentials. QQ reserves no
 disk space for commands; a command that fills the disk can stop the session

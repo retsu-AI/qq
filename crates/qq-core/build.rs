@@ -1,8 +1,9 @@
-use std::{env, fs, path::Path};
+use std::{env, fs, path::Path, process::Command};
 
 use sha2::{Digest as _, Sha256};
 
 fn main() {
+    build_watcher();
     let root = Path::new("../..");
     let mut paths = vec![
         root.join("Cargo.lock"),
@@ -12,7 +13,16 @@ fn main() {
     ];
     collect(Path::new("src"), &mut paths);
     collect(&root.join("crates/qq-protocol/src"), &mut paths);
-    paths.extend(["build.rs", "Cargo.toml"].map(std::path::PathBuf::from));
+    paths.extend(
+        [
+            "build.rs",
+            "Cargo.toml",
+            "helper/Cargo.toml",
+            "helper/Cargo.lock",
+            "helper/src/main.rs",
+        ]
+        .map(std::path::PathBuf::from),
+    );
     paths.sort();
     let mut digest = Sha256::new();
     digest.update(b"qq-process-context-policy-v2\0");
@@ -39,6 +49,49 @@ fn main() {
         "cargo:rustc-env=QQ_PROCESS_POLICY_SHA256={:x}",
         digest.finalize()
     );
+}
+
+fn build_watcher() {
+    let out_dir = env::var_os("OUT_DIR").expect("OUT_DIR is set during build");
+    let embed = Path::new(&out_dir).join("qq-command-watcher");
+    let helper = Path::new("helper");
+    println!(
+        "cargo:rerun-if-changed={}",
+        helper.join("Cargo.toml").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        helper.join("src/main.rs").display()
+    );
+
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "linux" && target_os != "macos" {
+        fs::write(&embed, []).expect("write placeholder watcher image");
+        return;
+    }
+
+    let target = env::var("TARGET").expect("TARGET is set during build");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let helper_target = Path::new(&out_dir).join("watcher-target");
+    let status = Command::new(&cargo)
+        .current_dir(helper)
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env("CARGO_TARGET_DIR", &helper_target)
+        .args(["build", "--locked", "--quiet", "--target", &target])
+        .status();
+    let built = helper_target
+        .join(&target)
+        .join("debug")
+        .join("qq-command-watcher");
+    match status {
+        Ok(status) if status.success() && built.is_file() => {
+            fs::copy(&built, &embed).expect("copy watcher image into OUT_DIR");
+        }
+        _ => panic!("the command watcher helper failed to build"),
+    }
 }
 
 fn collect(directory: &Path, paths: &mut Vec<std::path::PathBuf>) {

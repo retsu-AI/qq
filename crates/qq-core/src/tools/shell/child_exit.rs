@@ -75,14 +75,16 @@ mod tests {
             .open(&release)
             .unwrap();
         let mut exit = super::ChildExit::new().unwrap();
-        let mut child = tokio::process::Command::new("/bin/sh")
+        let spawned = tokio::process::Command::new("/bin/sh")
             .args(["-c", "exec >/dev/null 2>&1; read token < release; exit 7"])
             .current_dir(root.path())
             .process_group(0)
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let mut group = super::super::ProcessGroupGuard::new(child.id());
+        let group_id = spawned.id();
+        let mut child = super::super::NativeChild::new_direct(spawned, group_id);
+        let mut group = super::super::ProcessGroupGuard::new(group_id);
         let mut interrupted = Box::pin(exit.wait(&mut child, &mut group));
         assert!(futures_util::poll!(interrupted.as_mut()).is_pending());
         drop(interrupted);

@@ -4469,7 +4469,7 @@ mod tests {
     #[cfg(unix)]
     async fn run_shell_tool(
         workspace: Workspace,
-        arguments: &'static str,
+        arguments: impl Into<String>,
         cancelled: RunCancellation,
         output: Option<mpsc::Sender<String>>,
     ) -> ToolOutput {
@@ -4477,7 +4477,7 @@ mod tests {
             workspace,
             Arc::new(FileState::default()),
             "shell".to_owned(),
-            arguments.to_owned(),
+            arguments.into(),
             cancelled,
             output,
             ToolTasks::default(),
@@ -5135,6 +5135,116 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn exec_pins_the_working_directory_inside_the_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("sub")).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let run = |arguments: &'static str| {
+            let workspace = workspace.clone();
+            async move {
+                execute(
+                    workspace,
+                    Arc::new(FileState::default()),
+                    "exec".to_owned(),
+                    arguments.to_owned(),
+                    RunCancellation::new(),
+                    None,
+                    ToolTasks::default(),
+                    Arc::new(crate::runtime::ShellPolicy::default()),
+                    Arc::default(),
+                )
+                .await
+            }
+        };
+        let inside = run(r#"{"program":"pwd","cwd":"sub"}"#).await;
+        assert!(!inside.is_error, "{}", inside.model_text);
+        let expected = fs::canonicalize(directory.path().join("sub")).unwrap();
+        assert_eq!(
+            inside.model_text.lines().nth(1),
+            Some(expected.to_str().unwrap()),
+            "{}",
+            inside.model_text
+        );
+        for arguments in [
+            r#"{"program":"pwd","cwd":".."}"#,
+            r#"{"program":"pwd","cwd":"/"}"#,
+            r#"{"program":"pwd","cwd":"missing"}"#,
+        ] {
+            let escaped = run(arguments).await;
+            assert!(escaped.is_error, "cwd escape accepted: {arguments}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_yielded_command_runs_in_the_pinned_working_directory() {
+        use std::io::Write as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("sub")).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let release = directory.path().join("sub/release");
+        crate::tools::create_test_fifo(&release).await;
+        let gate = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(release)
+            .unwrap();
+        let tasks = ToolTasks::default();
+        let cancelled = RunCancellation::new();
+        let yielded = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            execute(
+                workspace,
+                Arc::new(FileState::default()),
+                "shell".to_owned(),
+                r#"{"command":"pwd; read token < release; pwd","cwd":"sub","yield_after_seconds":1}"#.to_owned(),
+                cancelled.clone(),
+                None,
+                tasks.clone(),
+                Arc::new(crate::runtime::ShellPolicy::default()),
+                Arc::default(),
+            ),
+        )
+        .await
+        .expect("the gated command must yield");
+        let expected = fs::canonicalize(directory.path().join("sub")).unwrap();
+        let expected = expected.to_str().unwrap();
+        assert!(
+            yielded.model_text.starts_with("shell exit=running id=c1 "),
+            "{}",
+            yielded.model_text
+        );
+        assert!(
+            yielded.model_text.contains(expected),
+            "yield output missing the pinned cwd {expected}: {}",
+            yielded.model_text
+        );
+        let mut writer = gate.try_clone().unwrap();
+        tokio::task::spawn_blocking(move || writer.write_all(b"go\n").unwrap())
+            .await
+            .unwrap();
+        let finished = command_status(
+            &tasks,
+            r#"{"id":"c1","wait_seconds":20}"#,
+            cancelled.clone(),
+        )
+        .await;
+        assert!(
+            finished.model_text.starts_with("shell exit=0 "),
+            "{}",
+            finished.model_text
+        );
+        assert!(
+            finished.model_text.contains(expected),
+            "run-end output missing the pinned cwd {expected}: {}",
+            finished.model_text
+        );
+        tasks.drain().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn shell_hints_at_the_built_in_for_the_first_program_unless_off() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("a.txt"), "alpha\n").unwrap();
@@ -5200,12 +5310,12 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn a_command_starts_in_a_group_its_ready_watcher_leads() {
+    async fn a_command_runs_in_the_group_its_watcher_parent_leads() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         let result = run_shell_tool(
             workspace,
-            r#"{"command":"set -- $(sed 's/.*) //' /proc/$$/stat); echo self:$$ group:$3; grep SigIgn /proc/$3/status"}"#,
+            r#"{"command":"set -- $(sed 's/.*) //' /proc/$$/stat); echo self:$$ ppid:$2 group:$3"}"#,
             RunCancellation::new(),
             None,
         )
@@ -5222,20 +5332,13 @@ mod tests {
         assert_ne!(
             field("self:"),
             field("group:"),
-            "the command leads its own group"
+            "the command must not lead its own group"
         );
-        let ignored = u64::from_str_radix(
-            result
-                .model_text
-                .lines()
-                .find_map(|line| line.trim().strip_prefix("SigIgn:"))
-                .unwrap()
-                .trim(),
-            16,
-        )
-        .unwrap();
-        let term = 1_u64 << (rustix::process::Signal::TERM.as_raw() - 1);
-        assert_ne!(ignored & term, 0, "the group leader does not ignore TERM");
+        assert_eq!(
+            field("group:"),
+            field("ppid:"),
+            "the watcher parent leads the command's group"
+        );
     }
 
     #[cfg(unix)]
@@ -5259,6 +5362,160 @@ mod tests {
             result.model_text
         );
         assert_process_exits(parse_marked_pid(&result.model_text)).await;
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn escape_commands() -> Vec<&'static str> {
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut commands =
+            vec!["echo pid:$$; exec python3 -c 'import os, time; os.setsid(); time.sleep(5555)'"];
+        #[cfg(target_os = "linux")]
+        commands.push("timeout 600 sh -c 'echo pid:$$; exec sleep 5554' 2>&1 | cat");
+        commands
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn assert_escaped_child_reaped(pid: u32, context: &str) {
+        let reaped = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            assert_process_exits(pid),
+        )
+        .await;
+        if reaped.is_err()
+            && let Some(process) = i32::try_from(pid)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process(process, rustix::process::Signal::KILL);
+        }
+        assert!(
+            reaped.is_ok(),
+            "an escaped child {pid} survived teardown: {context}"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn shell_timeout_kills_children_that_leave_the_process_group() {
+        for command in escape_commands() {
+            let directory = tempfile::tempdir().unwrap();
+            let workspace = Workspace::open(directory.path()).unwrap();
+            let arguments =
+                serde_json::json!({ "command": command, "timeout_seconds": 1 }).to_string();
+            let result = run_shell_tool(workspace, arguments, RunCancellation::new(), None).await;
+            assert!(result.is_error, "{command}: {}", result.model_text);
+            assert_escaped_child_reaped(parse_marked_pid(&result.model_text), &result.model_text)
+                .await;
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn shell_cancellation_kills_children_that_leave_the_process_group() {
+        for command in escape_commands() {
+            let directory = tempfile::tempdir().unwrap();
+            let workspace = Workspace::open(directory.path()).unwrap();
+            let cancelled = RunCancellation::new();
+            let (sender, mut receiver) = mpsc::channel::<String>(16);
+            let arguments = serde_json::json!({ "command": command }).to_string();
+            let execution = tokio::spawn(run_shell_tool(
+                workspace,
+                arguments,
+                cancelled.clone(),
+                Some(sender),
+            ));
+            let mut marker = String::new();
+            let chunk = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while !marker.contains("pid:") {
+                    marker.push_str(
+                        &receiver
+                            .recv()
+                            .await
+                            .expect("the escaping command must stream its pid"),
+                    );
+                }
+            })
+            .await;
+            assert!(chunk.is_ok(), "{command}: never saw the escapee pid");
+            cancelled.cancel();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), execution)
+                .await
+                .expect("cancellation must stop the command promptly")
+                .unwrap();
+            assert!(
+                result.model_text.contains("cancelled"),
+                "{}",
+                result.model_text
+            );
+            assert_escaped_child_reaped(parse_marked_pid(&marker), &marker).await;
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn yielded_escaped_command_tree_dies_at_run_end() {
+        for command in escape_commands() {
+            let directory = tempfile::tempdir().unwrap();
+            let tasks = ToolTasks::default();
+            let cancelled = RunCancellation::new();
+            let result = execute(
+                Workspace::open(directory.path()).unwrap(),
+                Arc::new(FileState::default()),
+                "shell".to_owned(),
+                serde_json::json!({"command":command,"yield_after_seconds":1}).to_string(),
+                cancelled.clone(),
+                None,
+                tasks.clone(),
+                Arc::new(crate::runtime::ShellPolicy::default()),
+                Arc::default(),
+            )
+            .await;
+            assert!(
+                result.model_text.contains("exit=running"),
+                "{}",
+                result.model_text
+            );
+            let pid = parse_marked_pid(&result.model_text);
+            cancelled.cancel();
+            tasks.drain().await.unwrap();
+            assert_escaped_child_reaped(pid, &result.model_text).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_and_exec_set_pwd_and_remove_oldpwd() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("sub")).unwrap();
+        let expected = fs::canonicalize(directory.path().join("sub")).unwrap();
+        for (tool, arguments) in [
+            (
+                "shell",
+                serde_json::json!({"command":"printf '%s\\n%s\\n' \"$PWD\" \"${OLDPWD-unset}\"", "cwd":"sub"}),
+            ),
+            (
+                "exec",
+                serde_json::json!({"program":"printenv", "args":["PWD"], "cwd":"sub"}),
+            ),
+        ] {
+            let result = execute(
+                Workspace::open(directory.path()).unwrap(),
+                Arc::new(FileState::default()),
+                tool.to_owned(),
+                arguments.to_string(),
+                RunCancellation::new(),
+                None,
+                ToolTasks::default(),
+                Arc::new(crate::runtime::ShellPolicy::default()),
+                Arc::default(),
+            )
+            .await;
+            assert!(!result.is_error, "{}", result.model_text);
+            assert_eq!(result.model_text.lines().nth(1), expected.to_str());
+            if tool == "shell" {
+                assert_eq!(result.model_text.lines().nth(2), Some("unset"));
+            }
+        }
     }
 
     #[cfg(unix)]

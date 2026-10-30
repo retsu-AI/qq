@@ -3,11 +3,68 @@ use sha2::{Digest, Sha256};
 use tokio::{io::AsyncReadExt, sync::mpsc};
 
 mod child_exit;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) mod watcher;
 
 #[cfg(windows)]
 pub(crate) type NativeChild = super::windows_job::Child;
 #[cfg(not(windows))]
-pub(crate) type NativeChild = tokio::process::Child;
+pub(crate) struct NativeChild {
+    inner: tokio::process::Child,
+    command_pid: Option<u32>,
+    liveness: Option<std::os::unix::net::UnixStream>,
+}
+
+#[cfg(not(windows))]
+impl NativeChild {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn new(
+        inner: tokio::process::Child,
+        command_pid: Option<u32>,
+        liveness: Option<std::os::unix::net::UnixStream>,
+    ) -> Self {
+        Self {
+            inner,
+            command_pid,
+            liveness,
+        }
+    }
+
+    #[cfg(any(not(any(target_os = "linux", target_os = "macos")), test))]
+    pub(crate) fn new_direct(inner: tokio::process::Child, command_pid: Option<u32>) -> Self {
+        Self {
+            inner,
+            command_pid,
+            liveness: None,
+        }
+    }
+
+    pub(crate) fn command_pid(&self) -> Option<u32> {
+        self.command_pid
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn request_teardown(&mut self) {
+        if let Some(stream) = self.liveness.take() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+impl std::ops::Deref for NativeChild {
+    type Target = tokio::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+#[cfg(not(windows))]
+impl std::ops::DerefMut for NativeChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
 
 use crate::{
     runtime::{BuiltinPreference, ShellPolicy, builtin_alternative},
@@ -369,6 +426,10 @@ pub(super) async fn run_shell(
         Launch::Exec(arguments) => arguments.stdin.clone(),
         Launch::Shell(_) => None,
     };
+    #[cfg(not(windows))]
+    if let Some(text) = stdin_text.clone() {
+        prepared.set_stdin_text(text);
+    }
     let mut child_exit = match child_exit::ChildExit::new() {
         Ok(exit) => exit,
         Err(error) => {
@@ -450,6 +511,7 @@ pub(super) async fn run_shell(
             assert!(!hook.panic, "injected shell task panic after process spawn");
         }
     }
+    #[cfg(windows)]
     if let (Some(text), Some(mut stdin)) = (stdin_text, child.stdin.take()) {
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt as _;
@@ -457,6 +519,8 @@ pub(super) async fn run_shell(
             let _ = stdin.shutdown().await;
         });
     }
+    #[cfg(not(windows))]
+    let _ = stdin_text;
     #[cfg(test)]
     let mut read_fault = {
         let mut faults = READ_FAULTS.lock().unwrap();
@@ -749,17 +813,52 @@ async fn stop_shell(
     guard: &mut ProcessGroupGuard,
     process: &mut super::ToolTaskLease,
 ) -> Result<(), String> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        child.request_teardown();
+        let graceful = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+        let status = match graceful {
+            Ok(status) => status,
+            Err(_) => {
+                return Err(
+                    "could not confirm the command tree exit; watcher is still cleaning up"
+                        .to_owned(),
+                );
+            }
+        };
+        return finish_stop(status, child, guard, process).await;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        if let Err(error) = guard.kill() {
+            return Err(format!(
+                "could not terminate the command process group: {error}"
+            ));
+        }
+        if let Err(error) = child.start_kill() {
+            return Err(format!("could not terminate the command: {error}"));
+        }
+        let status = child.wait().await;
+        finish_stop(status, child, guard, process).await
+    }
+}
+
+async fn finish_stop(
+    status: std::io::Result<std::process::ExitStatus>,
+    child: &mut NativeChild,
+    guard: &mut ProcessGroupGuard,
+    process: &mut super::ToolTaskLease,
+) -> Result<(), String> {
     #[cfg(test)]
-    let observed_pid = child.id();
-    if let Err(error) = guard.kill() {
-        return Err(format!(
-            "could not terminate the command process group: {error}"
-        ));
-    }
-    if let Err(error) = child.start_kill() {
-        return Err(format!("could not terminate the command: {error}"));
-    }
-    let status = child.wait().await;
+    let observed_pid = {
+        #[cfg(not(windows))]
+        let pid = child.command_pid().or_else(|| child.id());
+        #[cfg(windows)]
+        let pid = child.id();
+        pid
+    };
+    #[cfg(not(test))]
+    let _ = child;
     match confirm_child_exit(status, guard, process).await {
         Ok(_) => {
             #[cfg(test)]
@@ -968,53 +1067,7 @@ pub(crate) struct ProcessGroupGuard {
     #[cfg(unix)]
     killed_pgid: Option<rustix::process::Pid>,
     #[cfg(unix)]
-    watcher: Option<tokio::process::Child>,
-}
-
-#[cfg(unix)]
-pub(crate) async fn spawn_watcher(
-    deadline: std::time::Instant,
-) -> std::io::Result<tokio::process::Child> {
-    static PIPE: std::sync::OnceLock<
-        Result<(std::io::PipeReader, std::io::PipeWriter), std::io::ErrorKind>,
-    > = std::sync::OnceLock::new();
-    let (reader, _) = PIPE
-        .get_or_init(|| std::io::pipe().map_err(|error| error.kind()))
-        .as_ref()
-        .map_err(|kind| std::io::Error::from(*kind))?;
-    let mut watcher = tokio::process::Command::new("/bin/sh");
-    watcher
-        .args([
-            "-c",
-            "trap '' HUP INT QUIT TERM; echo; exec >/dev/null; while read -r _; do :; done; kill -s KILL 0",
-        ])
-        .env_clear()
-        .current_dir("/")
-        .stdin(std::process::Stdio::from(reader.try_clone()?))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .process_group(0);
-    let mut watcher = watcher.spawn()?;
-    let mut ready = watcher
-        .stdout
-        .take()
-        .ok_or_else(|| std::io::Error::other("command watcher has no stdout"))?;
-    let mut byte = [0_u8; 1];
-    let read = tokio::time::timeout_at(deadline.into(), ready.read(&mut byte)).await;
-    if !matches!(read, Ok(Ok(1))) {
-        let _ = watcher.start_kill();
-        let _ = watcher.wait().await;
-        return Err(match read {
-            Ok(Err(error)) => error,
-            Ok(Ok(_)) => std::io::Error::other("command watcher exited before it was ready"),
-            Err(_) => std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "command watcher did not start",
-            ),
-        });
-    }
-    Ok(watcher)
+    liveness: Option<std::os::unix::net::UnixStream>,
 }
 
 impl ProcessGroupGuard {
@@ -1026,7 +1079,7 @@ impl ProcessGroupGuard {
                     .and_then(|id| i32::try_from(id).ok())
                     .and_then(rustix::process::Pid::from_raw),
                 killed_pgid: None,
-                watcher: None,
+                liveness: None,
             }
         }
         #[cfg(not(unix))]
@@ -1037,8 +1090,8 @@ impl ProcessGroupGuard {
     }
 
     #[cfg(unix)]
-    pub(crate) fn watch(&mut self, watcher: tokio::process::Child) {
-        self.watcher = Some(watcher);
+    pub(crate) fn watch(&mut self, stream: std::os::unix::net::UnixStream) {
+        self.liveness = Some(stream);
     }
 
     #[cfg(unix)]
@@ -1048,12 +1101,6 @@ impl ProcessGroupGuard {
 
     #[cfg(unix)]
     pub(crate) async fn reap_watcher(&mut self) -> std::io::Result<()> {
-        if let Some(mut watcher) = self.watcher.take() {
-            let _ = watcher.start_kill();
-            tokio::time::timeout(std::time::Duration::from_secs(2), watcher.wait())
-                .await
-                .map_err(|_| std::io::Error::other("command watcher did not exit"))??;
-        }
         Ok(())
     }
 
@@ -1066,6 +1113,12 @@ impl ProcessGroupGuard {
     }
 
     pub(crate) fn kill(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        if let Some(stream) = self.liveness.take() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            self.pgid = None;
+            return Ok(());
+        }
         #[cfg(unix)]
         if let Some(pgid) = self.pgid {
             match rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL) {
@@ -1379,31 +1432,50 @@ mod identity_tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod watcher_tests {
-    #[tokio::test]
-    async fn the_watcher_ignores_group_signals_before_a_command_joins() {
-        let mut watcher =
-            super::spawn_watcher(std::time::Instant::now() + std::time::Duration::from_secs(10))
-                .await
-                .unwrap();
-        let status = tokio::fs::read_to_string(format!("/proc/{}/status", watcher.id().unwrap()))
-            .await
+    #[test]
+    fn the_watcher_kills_a_setsid_escapee_when_the_liveness_pipe_closes() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let report = tempfile::NamedTempFile::new().unwrap();
+        let script = format!(
+            "setsid sh -c 'echo $$ > {}; exec sleep 300'; exec sleep 300",
+            report.path().display()
+        );
+        let image = super::watcher::test_image_path().unwrap();
+        let mut child = std::process::Command::new(image)
+            .arg(std::process::id().to_string())
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(std::process::Stdio::from(reader))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
             .unwrap();
-        watcher.start_kill().unwrap();
-        watcher.wait().await.unwrap();
-        let ignored = status
-            .lines()
-            .find_map(|line| line.strip_prefix("SigIgn:"))
-            .map(|mask| u64::from_str_radix(mask.trim(), 16).unwrap())
-            .unwrap();
-        for signal in [
-            rustix::process::Signal::HUP,
-            rustix::process::Signal::INT,
-            rustix::process::Signal::QUIT,
-            rustix::process::Signal::TERM,
-        ] {
-            let bit = 1_u64 << (signal.as_raw() - 1);
-            assert_ne!(ignored & bit, 0, "watcher does not yet ignore {signal:?}");
+        let started = std::time::Instant::now();
+        let escapee = loop {
+            if let Ok(text) = std::fs::read_to_string(report.path())
+                && let Some(pid) = text.split_ascii_whitespace().next()
+                && let Ok(pid) = pid.parse::<i32>()
+            {
+                break rustix::process::Pid::from_raw(pid).unwrap();
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "the escapee never started"
+            );
+            std::thread::park_timeout(std::time::Duration::from_millis(10));
+        };
+        assert!(rustix::process::test_kill_process(escapee).is_ok());
+        drop(writer);
+        let stopped = std::time::Instant::now();
+        while rustix::process::test_kill_process(escapee).is_ok() {
+            assert!(
+                stopped.elapsed() < std::time::Duration::from_secs(10),
+                "the setsid escapee survived the watcher teardown"
+            );
+            std::thread::park_timeout(std::time::Duration::from_millis(10));
         }
+        child.wait().unwrap();
     }
 }
 
@@ -1415,7 +1487,7 @@ mod orphan_tests {
             let directory = tempfile::tempdir().unwrap();
             let workspace = crate::workspace::Workspace::open(directory.path()).unwrap();
             let command = format!(
-                "exec >/dev/null 2>&1; trap '' TERM; kill -s TERM 0; tail -f /dev/null & echo $$ $! > '{}'; exec tail -f /dev/null",
+                "exec >/dev/null 2>&1; trap '' TERM; kill -s TERM 0; python3 -c 'import os,time; os.setsid(); time.sleep(5556)' & echo $$ $! > '{}'; exec tail -f /dev/null",
                 std::path::Path::new(&report).display()
             );
             let arguments = super::ShellArgs {

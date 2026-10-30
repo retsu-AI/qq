@@ -27,13 +27,18 @@ same workspace. Stronger isolation means running QQ inside a container, VM
 or dedicated account.
 
 A command does not outlive the process that started it. On Unix each
-command's process group is led by a small watcher that reads a pipe only
-the QQ process holds open; the watcher ignores the group signals a script
-may send before the command joins, and when QQ exits for any reason,
-SIGKILL included, it kills the group. On Windows each command's job is killed when
-its handle closes. On Unix a command that leaves its process group (`setsid`, a
-double fork into a new group) escapes this, as it escapes timeouts; Windows
-jobs follow every descendant. Commands share the user's terminal, so a
+command runs under a small watcher that leads the command's process group and
+reads a pipe only the QQ process holds open; when that pipe closes — QQ
+exiting for any reason, SIGKILL included — or a timeout or cancel requests
+teardown, the watcher tears the command down. On Linux the watcher is a child
+subreaper: descendants that leave the group (`setsid`, a double fork into a
+new group or session) reparent to it, and it SIGKILLs and reaps the whole
+tree, so an escapee no longer outlives its command. On macOS there is no
+subreaper; the watcher takes a `ps` snapshot and SIGKILLs every descendant it
+finds, matching each by pid and start time, so a double fork that exits before
+the snapshot can still slip away. On Windows each command runs in a job object
+that cannot break away, so the job follows every descendant and is killed when
+its handle closes. Commands share the user's terminal, so a
 command that prompts there waits until its timeout or a cancel. There is no
 disk-space reserve for commands. On
 restart, runs and commands that were in flight are settled as interrupted;
