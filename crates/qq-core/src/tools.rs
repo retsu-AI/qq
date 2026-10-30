@@ -4882,7 +4882,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cancel_and_timeout_kill_descendants_that_left_the_group() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         for timeout in [false, true] {
             for (command, marker, count) in escaped_tree_commands() {
@@ -4928,7 +4928,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_yielded_escaped_tree_dies_when_the_run_ends() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         let tasks = ToolTasks::default();
         let mut started = Vec::new();
@@ -4964,7 +4964,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn commands_see_their_working_directory_in_pwd_and_no_oldpwd() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         fs::create_dir(directory.path().join("sub")).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         let expected = workspace.path().join("sub");
