@@ -1,10 +1,10 @@
-                                                                         ┃ clean up the renderer
+  ┃ clean up the renderer
 
-                                                                         ● 4 calls · read 2 · ran 2   2 files +2 −0   3s
-                                                                         ● Edited   crates/qq-tui/src/file_1.rs                                                         +1 −0
-                                                                         ● Edited   crates/qq-tui/src/file_4.rs                                                         +1 −0
+  ● 4 calls · read 2 · ran 2   2 files +2 −0   3s
+  ● Edited   crates/qq-tui/src/file_1.rs                                                           +1 −0
+  ● Edited   crates/qq-tui/src/file_4.rs                                                           +1 −0
 
-                                                                         Done. Every file compiles.
+    Done. Every file compiles.
 
 
 
@@ -85,6 +85,6 @@
 
 
 
- ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- ┃ Ask QQ…
-   renderer · gpt-5.5 high · 4%                                                                                                                                                                                                                                                                                      ~/qq  main
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────
+  ┃ Ask QQ…
+    renderer · gpt-5.5 high · 4%                                                              ~/qq  main

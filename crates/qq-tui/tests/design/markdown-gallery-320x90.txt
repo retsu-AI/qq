@@ -1,52 +1,50 @@
-                                                                         ┃ show me every markdown element
+  ┃ show me every markdown element
 
-                                                                         First paragraph of prose.
+    First paragraph of prose.
 
-                                                                         Second paragraph of prose, directly after the first.
+    Second paragraph of prose, directly after the first.
 
-                                                                         Level one heading
+    Level one heading
 
-                                                                         Level two heading
+    Level two heading
 
-                                                                         Level three heading
+    Level three heading
 
-                                                                         1. First numbered item
-                                                                         2. Second numbered item that is deliberately long enough to wrap onto a second row
-                                                                            at this width
-                                                                         3. Third numbered item
-                                                                            ◦ nested bullet under three
+    1. First numbered item
+    2. Second numbered item that is deliberately long enough to wrap onto a second row
+       at this width
+    3. Third numbered item
+       ◦ nested bullet under three
 
-                                                                         • A bullet item that is also deliberately long enough to wrap onto a second physical
-                                                                           row here
-                                                                         • Short bullet
-                                                                         ☐ open task
-                                                                         ☑ done task
+    • A bullet item that is also deliberately long enough to wrap onto a second physical
+      row here
+    • Short bullet
+    ☐ open task
+    ☑ done task
 
-                                                                         ▎ A quote long enough to wrap onto a second row so we can see whether the rail repeats.
+    ▎ A quote long enough to wrap onto a second row so we can see whether the rail repeats.
 
-                                                                         Some emphasis, some strong, some inline code, a link, a footnote[1], and math $x^2$.
+    Some emphasis, some strong, some inline code, a link, a footnote[1], and math $x^2$.
 
-                                                                         [1] The footnote body.
+    [1] The footnote body.
 
-                                                                                                                                                                       rust
-                                                                           fn main() {
-                                                                               let x = 1;
-                                                                               if x > 0 {
-                                                                                   println!("{x}");
-                                                                               }
-                                                                           }
-
-
-                                                                         Role    Default
-                                                                         ──────  ─────────
-                                                                         text    white
-                                                                         muted   dark grey
-
-                                                                         ────────────────────────────────────────
-
-                                                                         Tail paragraph.
+                                                                                                   rust
+     fn main() {
+         let x = 1;
+         if x > 0 {
+             println!("{x}");
+         }
+     }
 
 
+    Role    Default
+    ──────  ─────────
+    text    white
+    muted   dark grey
+
+    ────────────────────────────────────────
+
+    Tail paragraph.
 
 
 
@@ -85,6 +83,8 @@
 
 
 
- ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- ┃ Ask QQ…
-   markdown · gpt-5.5 high · 4%                                                                                                                                                                                                                                                                                      ~/qq  main
+
+
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────
+  ┃ Ask QQ…
+    markdown · gpt-5.5 high · 4%                                                              ~/qq  main

@@ -1,8 +1,6 @@
-  qq 0.1.11 · ~/qq  main · gpt-5.5 high
+    qq 0.1.11 · ~/qq  main · gpt-5.5 high
 
-  /models  choose a model    @path  mention a file    ^T  switch session    ?  h
-
-
+    /models  choose a model    @path  mention a file    ^T  switch session
 
 
 
@@ -19,6 +17,8 @@
 
 
 
- ───────────────────────────────────────────────────────────────────────────────
- ┃ Ask QQ…
-   new session · gpt-5.5 high
+
+
+  ────────────────────────────────────────────────────────────────────────────
+  ┃ Ask QQ…
+    new session · gpt-5.5 high

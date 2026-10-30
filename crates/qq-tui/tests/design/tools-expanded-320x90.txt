@@ -1,22 +1,22 @@
-                                                                         ┃ clean up the renderer
+  ┃ clean up the renderer
 
-                                                                         ● 6 calls · read 2 · ran 2 · edited 2   2 files   ttft 0.4s   3s
-                                                                         ● Read     crates/qq-tui/src/file_0.rs                                                      20 lines
-                                                                         │ fn main() {}
-                                                                         │ fn main() {}
-                                                                         │ fn main() {}
-                                                                         ● Edited   crates/qq-tui/src/file_1.rs                                                         +1 −0
-                                                                         ● Ran      cargo test -p crate_2                                                              exit 0
-                                                                         │ test result: ok. 12 passed
-                                                                         ● Read     crates/qq-tui/src/file_3.rs                                                      20 lines
-                                                                         │ fn main() {}
-                                                                         │ fn main() {}
-                                                                         │ fn main() {}
-                                                                         ● Edited   crates/qq-tui/src/file_4.rs                                                         +1 −0
-                                                                         ● Ran      cargo test -p crate_5                                                              exit 0
-                                                                         │ test result: ok. 12 passed
+  ● 6 calls · read 2 · ran 2 · edited 2   2 files   ttft 0.4s   3s
+  ● Read     crates/qq-tui/src/file_0.rs                                                        20 lines
+  │ fn main() {}
+  │ fn main() {}
+  │ fn main() {}
+  ● Edited   crates/qq-tui/src/file_1.rs                                                           +1 −0
+  ● Ran      cargo test -p crate_2                                                                exit 0
+  │ test result: ok. 12 passed
+  ● Read     crates/qq-tui/src/file_3.rs                                                        20 lines
+  │ fn main() {}
+  │ fn main() {}
+  │ fn main() {}
+  ● Edited   crates/qq-tui/src/file_4.rs                                                           +1 −0
+  ● Ran      cargo test -p crate_5                                                                exit 0
+  │ test result: ok. 12 passed
 
-                                                                         Done. Every file compiles.
+    Done. Every file compiles.
 
 
 
@@ -85,6 +85,6 @@
 
 
 
- ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- ┃ Ask QQ…
-   renderer · gpt-5.5 high · 4%                                                                                                                                                                                                                                                                                      ~/qq  main
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────
+  ┃ Ask QQ…
+    renderer · gpt-5.5 high · 4%                                                              ~/qq  main

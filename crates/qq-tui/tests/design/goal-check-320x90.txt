@@ -1,4 +1,4 @@
-                                                                         ┃ /goal check
+  ┃ /goal check
 
 
 
@@ -82,9 +82,9 @@
 
 
 
- ─◇ run cargo test -p billing in /workspace? ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-   ▎ deny                                withhold consent; pause an active goal
-     allow once                          one start; a failure does not refund it
-     allow repeated checks               this goal and this exact command only
- ┃ enter apply   ↑↓ choose   esc back
-   billing · gpt-5.5 high · 4%                                                                                                                                                                                                                                                                                       ~/qq  main
+  ◇ run cargo test -p billing in /workspace? ───────────────────────────────────────────────────────────
+  ▎ deny                                withhold consent; pause an active goal
+    allow once                          one start; a failure does not refund it
+    allow repeated checks               this goal and this exact command only
+  ┃ enter apply   ↑↓ choose   esc back
+    billing · gpt-5.5 high · 4%                                                               ~/qq  main

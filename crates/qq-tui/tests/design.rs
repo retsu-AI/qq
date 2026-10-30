@@ -87,19 +87,36 @@ fn the_golden_path_gives_the_transcript_more_rows_than_today() {
     let size = (120, 40);
     let today = BenchHarness::scene(Scene::GoldenPath, size).plain_frame();
     let today_body = today.len() - 1 - 3;
-    let design = design::render(&DesignScene::GoldenPath.scene(), size);
-    let dock_rows = design
-        .plain()
-        .iter()
-        .rev()
-        .position(|row| row.starts_with(" ─"))
-        .expect("rule row")
-        + 1;
-    let design_body = design.plain().len() - dock_rows;
+    let design_body = design::render(&DesignScene::GoldenPath.scene(), size).body;
     assert!(
         design_body > today_body,
         "design body {design_body} rows, today {today_body}"
     );
+}
+
+#[test]
+fn the_page_stays_left_anchored_as_the_terminal_widens() {
+    for scene in DesignScene::ALL {
+        let frames: Vec<Vec<String>> = [(200, 60), (320, 90), (480, 120)]
+            .into_iter()
+            .map(|size| render(scene, size))
+            .collect();
+        for frame in &frames[1..] {
+            assert_eq!(frame[..12], frames[0][..12], "{scene:?} body moved");
+            assert_eq!(
+                frame[frame.len() - 3..],
+                frames[0][frames[0].len() - 3..],
+                "{scene:?} dock moved"
+            );
+        }
+        for row in render(scene, (480, 120)) {
+            let indent = row.len() - row.trim_start().len();
+            assert!(
+                row.is_empty() || indent <= 120,
+                "{scene:?} pads {indent} columns: {row:?}"
+            );
+        }
+    }
 }
 
 fn unicode_columns(row: &str) -> usize {

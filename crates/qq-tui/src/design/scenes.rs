@@ -103,7 +103,7 @@ fn dock(title: &str) -> Dock {
         context: "4%".to_owned(),
         cost: String::new(),
         place: "~/qq  main".to_owned(),
-        hints: None,
+        hints: Vec::new(),
     }
 }
 
@@ -157,7 +157,11 @@ fn keys(pairs: &[(&str, &str)]) -> Composer {
 }
 
 fn heading(text: &str) -> Row {
-    vec![bold(text, Role::Text)]
+    vec![span("  ", Role::Text), bold(text, Role::Text)]
+}
+
+fn note(text: &str, role: Role) -> Row {
+    vec![span("  ", Role::Text), span(text, role)]
 }
 
 fn field(label: &str, value: &str, selected: bool) -> Vec<Row> {
@@ -176,7 +180,7 @@ fn goal_form(replace: bool) -> Scene {
     let mut panel = vec![heading(if replace { "Replace goal" } else { "New goal" })];
     if replace {
         panel.push(vec![
-            span("replaces  ", Role::Faint),
+            span("  replaces  ", Role::Faint),
             span("Finish the billing migration", Role::Muted),
         ]);
     }
@@ -195,10 +199,10 @@ fn goal_form(replace: bool) -> Scene {
         "configured defaults · 200 runs · 24h · 256 turns per run",
         false,
     ));
-    panel.push(vec![span(
+    panel.push(note(
         "A check command runs only after /goal check consent.",
         Role::Faint,
-    )]);
+    ));
     let mut dock = dock("billing");
     dock.panel = panel;
     if replace {
@@ -222,7 +226,7 @@ fn goal_form(replace: bool) -> Scene {
 fn goal() -> Scene {
     let row = |label: &str, value: &str| {
         vec![
-            span(format!("{label:<10}"), Role::Faint),
+            span(format!("  {label:<10}"), Role::Faint),
             span(value, Role::Text),
         ]
     };
@@ -239,16 +243,16 @@ fn goal() -> Scene {
         row("audits", "1 · 1 failed check"),
         row("check", "cargo test -p billing · 5.0s · consent used"),
         vec![
-            span("● ", Role::Faint),
+            span("  ● ", Role::Faint),
             span("verify invoices", Role::Muted),
         ],
-        vec![span("◐ ", Role::Info), span("ship migration", Role::Text)],
+        vec![span("  ◐ ", Role::Info), span("ship migration", Role::Text)],
         vec![
-            span("✕ ", Role::Error),
+            span("  ✕ ", Role::Error),
             span("last check exit 7  missing invoice", Role::Muted),
         ],
         vec![
-            span("◇ ", Role::Warning),
+            span("  ◇ ", Role::Warning),
             span("completion claim awaiting verification", Role::Text),
         ],
     ];
@@ -626,12 +630,9 @@ fn steering() -> Scene {
             Block::Prompt("tidy the reconnect module".to_owned()),
             answer("the model turn"),
             Block::Prompt("prefer edit_file".to_owned()),
-            Block::Raw(vec![vec![span("steered", Role::Faint)]]),
+            Block::Note("steered".to_owned()),
             Block::Prompt("never mind".to_owned()),
-            Block::Raw(vec![vec![span(
-                "not sent · the run finished first",
-                Role::Faint,
-            )]]),
+            Block::Note("not sent · the run finished first".to_owned()),
         ],
         sessions: idle_sessions("steering"),
         dock,
@@ -755,7 +756,7 @@ fn fanout() -> Scene {
                 0,
                 false,
                 "wants to run cargo publish",
-                "v0.1.11 ›",
+                "",
             ),
             session(
                 State::NeedsYou,
@@ -763,7 +764,7 @@ fn fanout() -> Scene {
                 0,
                 false,
                 "exit 101 in reconnect",
-                "v0.1.11 ›",
+                "",
             ),
             session(
                 State::Running,
@@ -845,18 +846,16 @@ fn switcher() -> Scene {
         })
         .collect();
     scene.dock.composer = Composer::Draft("sse".to_owned());
-    scene.dock.hints = Some(vec![
-        span("enter", Role::Text),
-        span(" open · ", Role::Faint),
-        span("tab", Role::Text),
-        span(" agents · ", Role::Faint),
-        span("^A", Role::Text),
-        span(" all agents · ", Role::Faint),
-        span("^D", Role::Text),
-        span(" delete · ", Role::Faint),
-        span("esc", Role::Text),
-        span(" back", Role::Faint),
-    ]);
+    scene.dock.hints = [
+        ("enter", "open"),
+        ("tab", "agents"),
+        ("^A", "all agents"),
+        ("^D", "delete"),
+        ("esc", "back"),
+    ]
+    .iter()
+    .map(|(key, label)| ((*key).to_owned(), (*label).to_owned()))
+    .collect();
     scene
 }
 

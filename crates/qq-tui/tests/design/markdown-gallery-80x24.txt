@@ -1,24 +1,24 @@
-  Some emphasis, some strong, some inline code, a link, a footnote[1], and math
+    Some emphasis, some strong, some inline code, a link, a footnote[1], and…
 
-  [1] The footnote body.
+    [1] The footnote body.
 
-                                                                          rust
-    fn main() {
-        let x = 1;
-        if x > 0 {
-            println!("{x}");
-        }
-    }
+                                                                         rust
+     fn main() {
+         let x = 1;
+         if x > 0 {
+             println!("{x}");
+         }
+     }
 
 
-  Role    Default
-  ──────  ─────────
-  text    white
-  muted   dark grey
+    Role    Default
+    ──────  ─────────
+    text    white
+    muted   dark grey
 
-  ────────────────────────────────────────
+    ────────────────────────────────────────
 
-  Tail paragraph.
- ───────────────────────────────────────────────────────────────────────────────
- ┃ Ask QQ…
-   markdown · gpt-5.5 high
+    Tail paragraph.
+  ────────────────────────────────────────────────────────────────────────────
+  ┃ Ask QQ…
+    markdown · gpt-5.5 high

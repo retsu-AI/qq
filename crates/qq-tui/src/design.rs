@@ -7,9 +7,13 @@ mod scenes;
 
 pub use scenes::DesignScene;
 
-const MEASURE: usize = 100;
-const COLUMN_WIDTH: usize = 30;
-const COLUMN_GUTTER: usize = 3;
+pub const MEASURE: usize = 100;
+pub const MARGIN: usize = 2;
+const LANE: usize = 2;
+const PAGE: usize = LANE + MEASURE;
+const COLUMN_REGULAR: usize = 26;
+const COLUMN_WIDE: usize = 34;
+const COLUMN_GUTTER: usize = 4;
 const REGULAR: usize = 90;
 const WIDE: usize = 160;
 
@@ -63,6 +67,35 @@ fn inverse(text: impl Into<String>, role: Role) -> Span {
 
 fn width_of(row: &[Span]) -> usize {
     row.iter().map(|span| span.text.width()).sum()
+}
+
+fn lane(glyph: &str, role: Role) -> Span {
+    span(format!("{glyph} "), role)
+}
+
+fn blank_lane() -> Span {
+    span(" ".repeat(LANE), Role::Text)
+}
+
+#[must_use]
+pub fn fit(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut kept = String::new();
+    for character in text.chars() {
+        if kept.width() + UnicodeWidthStr::width(character.encode_utf8(&mut [0; 4]) as &str) + 1
+            > width
+        {
+            break;
+        }
+        kept.push(character);
+    }
+    let trimmed = kept.trim_end().to_owned();
+    format!("{trimmed}…")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +182,7 @@ pub enum Block {
         streaming: bool,
     },
     Error(String),
+    Note(String),
     Reasoning(String),
     Code {
         language: String,
@@ -212,7 +246,7 @@ pub struct Dock {
     pub context: String,
     pub cost: String,
     pub place: String,
-    pub hints: Option<Row>,
+    pub hints: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +267,7 @@ pub struct Scene {
 pub struct Frame {
     pub rows: Vec<Row>,
     pub width: usize,
+    pub body: usize,
 }
 
 impl Frame {
@@ -350,44 +385,46 @@ pub fn color(palette: &Palette, role: Role) -> Color {
 pub fn render(scene: &Scene, size: (u16, u16)) -> Frame {
     let width = usize::from(size.0);
     let height = usize::from(size.1);
-    let column = width >= REGULAR && scene.sessions.len() >= 2;
     let wide = width >= WIDE;
-    let column_width = if column { COLUMN_WIDTH } else { 0 };
-    let transcript_area = width - column_width - if column { COLUMN_GUTTER } else { 0 };
-    let content = transcript_area.saturating_sub(2).min(MEASURE);
-    let inset = if transcript_area >= 200 {
-        (transcript_area - content) / 3
-    } else {
-        2
+    let column_width = match (width >= REGULAR && scene.sessions.len() >= 2, wide) {
+        (false, _) => 0,
+        (true, false) => COLUMN_REGULAR,
+        (true, true) => COLUMN_WIDE,
     };
-    let dock = dock_rows(&scene.dock, width, height, column);
-    let body_height = height - dock.len();
-    let mut transcript = transcript_rows(&scene.blocks, content);
-    if transcript.len() > body_height {
-        transcript.drain(..transcript.len() - body_height);
+    let beside = if column_width > 0 {
+        COLUMN_GUTTER + column_width
+    } else {
+        0
+    };
+    let page = width
+        .saturating_sub(2 * MARGIN)
+        .saturating_sub(beside)
+        .min(PAGE);
+    let dock = dock_rows(&scene.dock, page + beside, column_width > 0);
+    let body = height - dock.len();
+    let mut transcript = transcript_rows(&scene.blocks, page - LANE);
+    if transcript.len() > body {
+        transcript.drain(..transcript.len() - body);
     }
-    let column_rows = if column {
-        column_rows(&scene.sessions, column_width, wide)
-    } else {
-        Vec::new()
-    };
+    let column = column_rows(&scene.sessions, column_width, wide);
     let mut rows = Vec::with_capacity(height);
-    for index in 0..body_height {
-        let mut row = vec![span(" ".repeat(inset), Role::Text)];
+    for index in 0..body {
+        let mut row = vec![span(" ".repeat(MARGIN), Role::Text)];
         let line = transcript.get(index).cloned().unwrap_or_default();
-        let used = inset + width_of(&line);
+        let used = width_of(&line);
         row.extend(line);
-        if column {
-            let start = transcript_area + COLUMN_GUTTER;
-            row.push(span(" ".repeat(start.saturating_sub(used)), Role::Text));
-            if let Some(entry) = column_rows.get(index) {
-                row.extend(entry.iter().cloned());
-            }
+        if let Some(entry) = column.get(index) {
+            row.push(span(" ".repeat(page + COLUMN_GUTTER - used), Role::Text));
+            row.extend(entry.iter().cloned());
         }
         rows.push(clip(row, width));
     }
-    rows.extend(dock.into_iter().map(|row| clip(row, width)));
-    Frame { rows, width }
+    for line in dock {
+        let mut row = vec![span(" ".repeat(MARGIN), Role::Text)];
+        row.extend(line);
+        rows.push(clip(row, width));
+    }
+    Frame { rows, width, body }
 }
 
 fn clip(row: Row, width: usize) -> Row {
@@ -400,17 +437,7 @@ fn clip(row: Row, width: usize) -> Row {
             out.push(span);
             continue;
         }
-        let mut kept = String::new();
-        for character in span.text.chars() {
-            let character_width =
-                UnicodeWidthStr::width(character.encode_utf8(&mut [0; 4]) as &str);
-            if used + character_width > width {
-                break;
-            }
-            used += character_width;
-            kept.push(character);
-        }
-        span.text = kept;
+        span.text = fit(&span.text, width - used);
         out.push(span);
         break;
     }
@@ -450,67 +477,109 @@ fn right_aligned(left: Row, right: Row, width: usize) -> Row {
     row
 }
 
-fn transcript_rows(blocks: &[Block], width: usize) -> Vec<Row> {
+fn keys_row(keys: &[(String, String)]) -> Row {
+    let mut row = Vec::new();
+    for (index, (key, label)) in keys.iter().enumerate() {
+        if index > 0 {
+            row.push(span("   ", Role::Text));
+        }
+        row.push(span(key.clone(), Role::Text));
+        row.push(span(format!(" {label}"), Role::Faint));
+    }
+    row
+}
+
+fn attached(block: &Block) -> bool {
+    matches!(block, Block::Note(_))
+}
+
+fn grouped(block: &Block) -> bool {
+    matches!(
+        block,
+        Block::Tool(_) | Block::Agents { .. } | Block::Receipt(_)
+    )
+}
+
+fn transcript_rows(blocks: &[Block], text: usize) -> Vec<Row> {
+    let page = LANE + text;
     let mut rows: Vec<Row> = Vec::new();
-    let mut previous_was_tool = false;
+    let mut previous: Option<&Block> = None;
     for block in blocks {
-        let is_tool = matches!(
-            block,
-            Block::Tool(_) | Block::Agents { .. } | Block::Receipt(_)
-        );
-        if !rows.is_empty() && !(is_tool && previous_was_tool) {
+        let joins =
+            attached(block) || previous.is_some_and(|before| grouped(before) && grouped(block));
+        if previous.is_some() && !joins {
             rows.push(Vec::new());
         }
-        previous_was_tool = is_tool;
+        previous = Some(block);
         match block {
-            Block::Banner(lines) | Block::Raw(lines) => rows.extend(lines.iter().cloned()),
-            Block::Prompt(text) => {
-                for line in wrap(text, width.saturating_sub(2)) {
-                    rows.push(vec![span("┃ ", Role::Accent), bold(line, Role::Text)]);
+            Block::Banner(lines) | Block::Raw(lines) => {
+                for line in lines {
+                    let mut row = vec![blank_lane()];
+                    row.extend(line.iter().cloned());
+                    rows.push(clip(row, page));
                 }
             }
-            Block::Answer { text, streaming } => {
-                let mut lines = wrap(text, width.saturating_sub(2));
+            Block::Prompt(prompt) => {
+                for line in wrap(prompt, text) {
+                    rows.push(vec![lane("┃", Role::Accent), bold(line, Role::Text)]);
+                }
+            }
+            Block::Answer {
+                text: answer,
+                streaming,
+            } => {
+                let lines = wrap(answer, text);
                 let last = lines.len() - 1;
-                for (index, line) in lines.drain(..).enumerate() {
-                    let mut row = vec![span(line, Role::Text)];
+                for (index, line) in lines.into_iter().enumerate() {
+                    let mut row = vec![blank_lane(), span(line, Role::Text)];
                     if *streaming && index == last {
                         row.push(span("▍", Role::Accent));
                     }
                     rows.push(row);
                 }
             }
-            Block::Error(text) => {
+            Block::Error(message) => {
                 rows.push(vec![
-                    span("✕ ", Role::Error),
-                    span(text.clone(), Role::Text),
+                    lane("✕", Role::Error),
+                    span(message.clone(), Role::Text),
                 ]);
             }
+            Block::Note(note) => {
+                rows.push(vec![blank_lane(), span(note.clone(), Role::Faint)]);
+            }
             Block::Reasoning(elapsed) => {
-                rows.push(vec![span(format!("∴ {elapsed}"), Role::Faint)]);
+                rows.push(vec![
+                    lane("∴", Role::Faint),
+                    span(format!("thought for {elapsed}"), Role::Faint),
+                ]);
             }
             Block::Code { language, lines } => {
-                let fill_width = width.saturating_sub(2);
-                let panel = |text: String, role: Role| {
-                    let pad = fill_width.saturating_sub(text.width());
-                    vec![Span {
-                        fill: true,
-                        ..span(format!("  {text}{}", " ".repeat(pad)), role)
-                    }]
+                let panel = |line: String, role: Role| {
+                    let body = format!(" {line}");
+                    let pad = text.saturating_sub(body.width());
+                    vec![
+                        blank_lane(),
+                        Span {
+                            fill: true,
+                            ..span(format!("{body}{}", " ".repeat(pad)), role)
+                        },
+                    ]
                 };
-                let label = format!("{:>width$}", language, width = fill_width.saturating_sub(2));
-                rows.push(panel(label, Role::Faint));
+                rows.push(panel(
+                    format!("{language:>width$}", width = text.saturating_sub(2)),
+                    Role::Faint,
+                ));
                 for line in lines {
                     rows.push(panel(line.clone(), Role::Text));
                 }
                 rows.push(panel(String::new(), Role::Text));
             }
-            Block::Tool(tool) => tool_rows(tool, width, &mut rows),
-            Block::Agents { lanes } => agent_rows(lanes, width, &mut rows),
-            Block::Receipt(text) => {
+            Block::Tool(tool) => tool_rows(tool, text, &mut rows),
+            Block::Agents { lanes } => agent_rows(lanes, text, &mut rows),
+            Block::Receipt(summary) => {
                 rows.push(vec![
-                    span("● ", State::Done.role()),
-                    span(text.clone(), Role::Muted),
+                    lane("●", State::Done.role()),
+                    span(fit(summary, text), Role::Muted),
                 ]);
             }
         }
@@ -518,26 +587,29 @@ fn transcript_rows(blocks: &[Block], width: usize) -> Vec<Row> {
     rows
 }
 
-fn tool_rows(tool: &Tool, width: usize, rows: &mut Vec<Row>) {
-    let left = vec![
-        span(format!("{} ", tool.state.glyph()), tool.state.row_role()),
-        span(format!("{:<8} ", tool.verb), Role::Text),
-        span(tool.subject.clone(), Role::Muted),
-    ];
+const VERB: usize = 9;
+
+fn tool_rows(tool: &Tool, text: usize, rows: &mut Vec<Row>) {
     let metric_role = if tool.state == State::Failed {
         Role::Error
     } else {
         Role::Faint
     };
+    let room = text.saturating_sub(VERB + tool.metric.width() + 2);
+    let left = vec![
+        lane(tool.state.glyph(), tool.state.row_role()),
+        span(format!("{:<VERB$}", tool.verb), Role::Text),
+        span(fit(&tool.subject, room), Role::Muted),
+    ];
     rows.push(right_aligned(
         left,
         vec![span(tool.metric.clone(), metric_role)],
-        width,
+        LANE + text,
     ));
     for line in &tool.tail {
         rows.push(vec![
-            span("│ ", Role::Faint),
-            span(line.clone(), Role::Muted),
+            lane("│", Role::Faint),
+            span(fit(line, text), Role::Muted),
         ]);
     }
     for line in &tool.diff {
@@ -547,7 +619,7 @@ fn tool_rows(tool: &Tool, width: usize, rows: &mut Vec<Row>) {
             _ => (Role::Text, " "),
         };
         let mut row = vec![
-            span("│ ", Role::Faint),
+            lane("│", Role::Faint),
             span(format!("{:>4} ", line.number), Role::Faint),
             span(format!("{sign}  "), role),
         ];
@@ -563,11 +635,13 @@ fn tool_rows(tool: &Tool, width: usize, rows: &mut Vec<Row>) {
             }
             None => row.push(span(line.text.clone(), role)),
         }
-        rows.push(row);
+        rows.push(clip(row, LANE + text));
     }
 }
 
-fn agent_rows(lanes: &[Lane], width: usize, rows: &mut Vec<Row>) {
+const FOLDED_LANES: usize = 6;
+
+fn agent_rows(lanes: &[Lane], text: usize, rows: &mut Vec<Row>) {
     let count = |state: State| lanes.iter().filter(|lane| lane.state == state).count();
     let mut tally = Vec::new();
     for state in [State::Running, State::NeedsYou, State::Done, State::Failed] {
@@ -581,11 +655,11 @@ fn agent_rows(lanes: &[Lane], width: usize, rows: &mut Vec<Row>) {
     }
     let noun = if lanes.len() == 1 { "agent" } else { "agents" };
     let header = vec![
-        span("● ", State::Done.role()),
-        span(format!("{:<8} ", "Spawned"), Role::Text),
+        lane("●", State::Done.role()),
+        span(format!("{:<VERB$}", "Spawned"), Role::Text),
         span(format!("{} {noun}", lanes.len()), Role::Muted),
     ];
-    rows.push(right_aligned(header, tally, width));
+    rows.push(right_aligned(header, tally, LANE + text));
     let urgency = |state: State| match state {
         State::NeedsYou => 0,
         State::Failed => 1,
@@ -594,39 +668,43 @@ fn agent_rows(lanes: &[Lane], width: usize, rows: &mut Vec<Row>) {
         State::Idle => 4,
     };
     let mut shown: Vec<&Lane> = lanes.iter().collect();
-    let folded = shown.len() > 6;
+    let folded = shown.len() > FOLDED_LANES;
     if folded {
         shown.sort_by_key(|lane| urgency(lane.state));
-        shown.truncate(6);
+        shown.truncate(FOLDED_LANES);
     }
     let title_width = shown
         .iter()
         .map(|lane| lane.title.width())
         .max()
         .unwrap_or(0);
-    for (index, lane) in shown.iter().enumerate() {
+    let room = text.saturating_sub(2 + title_width + 3);
+    for (index, entry) in shown.iter().enumerate() {
         let connector = if index + 1 == shown.len() && !folded {
-            "└ "
+            "└"
         } else {
-            "├ "
+            "├"
         };
         rows.push(vec![
-            span(connector, Role::Faint),
-            span(format!("{} ", lane.state.glyph()), lane.state.row_role()),
-            span(format!("{:<title_width$}   ", lane.title), Role::Text),
-            span(lane.activity.clone(), Role::Muted),
+            lane(connector, Role::Faint),
+            span(format!("{} ", entry.state.glyph()), entry.state.row_role()),
+            span(format!("{:<title_width$}   ", entry.title), Role::Text),
+            span(fit(&entry.activity, room), Role::Muted),
         ]);
     }
     if folded {
         rows.push(vec![
-            span("└ ", Role::Faint),
-            span(format!("+{} more  ", lanes.len() - 6), Role::Muted),
-            span("^T", Role::Faint),
+            lane("└", Role::Faint),
+            span(format!("+{} more", lanes.len() - FOLDED_LANES), Role::Muted),
+            span("   ^T all agents", Role::Faint),
         ]);
     }
 }
 
 fn column_rows(sessions: &[SessionRow], width: usize, wide: bool) -> Vec<Row> {
+    if width == 0 {
+        return Vec::new();
+    }
     let groups = [
         ("NEEDS YOU", [State::NeedsYou, State::Failed]),
         ("WORKING", [State::Running, State::Running]),
@@ -642,13 +720,16 @@ fn column_rows(sessions: &[SessionRow], width: usize, wide: bool) -> Vec<Row> {
         if members.is_empty() {
             continue;
         }
-        rows.push(vec![span(format!("  {label}"), Role::Faint)]);
+        if !rows.is_empty() {
+            rows.push(Vec::new());
+        }
+        rows.push(vec![blank_lane(), span(label, Role::Faint)]);
         for session in members {
             number += 1;
             let marker = if session.focused {
-                span("▎ ", Role::Accent)
+                lane("▎", Role::Accent)
             } else {
-                span("  ", Role::Text)
+                blank_lane()
             };
             let digit = if number <= 9 {
                 format!("{number} ")
@@ -660,84 +741,100 @@ fn column_rows(sessions: &[SessionRow], width: usize, wide: bool) -> Vec<Row> {
             } else {
                 Role::Muted
             };
-            let mut row = vec![
+            let badge = if session.agents > 0 {
+                format!("  ↳{}", session.agents)
+            } else {
+                String::new()
+            };
+            let room = width.saturating_sub(6 + badge.width());
+            rows.push(vec![
                 marker,
                 span(digit, Role::Faint),
                 span(
                     format!("{} ", session.state.glyph()),
                     session.state.row_role(),
                 ),
-                span(session.title.clone(), title_role),
-            ];
-            if session.agents > 0 {
-                row.push(span(format!("  ↳{}", session.agents), Role::Faint));
-            }
-            rows.push(clip(row, width));
+                span(fit(&session.title, room), title_role),
+                span(badge, Role::Faint),
+            ]);
             if wide && !session.activity.is_empty() {
-                let mut detail = session.activity.clone();
-                if !session.cost.is_empty() {
-                    detail.push_str(" · ");
-                    detail.push_str(&session.cost);
-                }
-                rows.push(clip(
-                    vec![span(format!("      {detail}"), Role::Faint)],
-                    width,
-                ));
+                let indent = span(" ".repeat(6), Role::Text);
+                let cost = span(session.cost.clone(), Role::Faint);
+                let room = width.saturating_sub(6 + session.cost.width() + 2);
+                let activity = span(fit(&session.activity, room), Role::Faint);
+                rows.push(right_aligned(vec![indent, activity], vec![cost], width));
             }
         }
     }
     rows
 }
 
-fn dock_rows(dock: &Dock, width: usize, height: usize, column: bool) -> Vec<Row> {
-    let mut rows = Vec::new();
-    let mut panel = dock.panel.clone();
-    let cap = height / 2;
-    if panel.len() > cap {
-        panel.truncate(cap);
+fn status_row(dock: &Dock, width: usize, compact: bool) -> Row {
+    let mut parts = vec![dock.model.clone()];
+    if !compact {
+        parts.push(dock.context.clone());
+        parts.push(dock.cost.clone());
     }
-    let rule_role = dock.state.role();
-    let left_text = if dock.activity.is_empty() {
-        if dock.state == State::Idle {
-            String::new()
-        } else {
-            format!("{} ", dock.state.glyph())
-        }
-    } else {
-        format!("{} {} ", dock.state.glyph(), dock.activity)
-    };
+    if let Some(mode) = dock.mode.label() {
+        parts.push(mode.to_owned());
+    }
+    parts.retain(|part| !part.is_empty());
+    let mut left = vec![blank_lane(), span(dock.title.clone(), Role::Text)];
+    for part in parts {
+        left.push(span(" · ", Role::Faint));
+        left.push(span(part, Role::Muted));
+    }
+    let right = vec![span(dock.place.clone(), Role::Faint)];
+    if compact || width_of(&left) + width_of(&right) + 2 > width {
+        return clip(left, width);
+    }
+    right_aligned(left, right, width)
+}
+
+fn rule_row(dock: &Dock, width: usize, column: bool) -> Row {
+    let role = dock.state.role();
+    let mut left = Vec::new();
+    if dock.state != State::Idle || !dock.activity.is_empty() {
+        left.push(lane(dock.state.glyph(), role));
+    }
+    if !dock.activity.is_empty() {
+        left.push(span(format!("{} ", dock.activity), Role::Text));
+    }
     let attention = if column || dock.compact_attention.is_empty() {
         &dock.attention
     } else {
         &dock.compact_attention
     };
-    let right_text = if attention.is_empty() {
-        String::new()
-    } else {
-        format!(" {attention}")
-    };
-    let fill = (width - 1).saturating_sub(1 + left_text.width() + right_text.width());
-    rows.push(vec![
-        span(" ─", rule_role),
-        span(left_text, rule_role),
-        span("─".repeat(fill), rule_role),
-        span(right_text, Role::Warning),
-    ]);
-    for row in panel {
-        let mut indented = vec![span("   ", Role::Text)];
-        indented.extend(row);
-        rows.push(indented);
+    let mut right = Vec::new();
+    if !attention.is_empty() {
+        let attention_role = if attention.contains(State::NeedsYou.glyph()) {
+            Role::Warning
+        } else {
+            Role::Faint
+        };
+        right.push(span(format!(" {attention}"), attention_role));
+    }
+    let fill = width.saturating_sub(width_of(&left) + width_of(&right));
+    left.push(span("─".repeat(fill), role));
+    left.extend(right);
+    left
+}
+
+fn dock_rows(dock: &Dock, width: usize, column: bool) -> Vec<Row> {
+    let mut rows = vec![rule_row(dock, width, column)];
+    for row in &dock.panel {
+        rows.push(clip(row.clone(), width));
     }
     for draft in &dock.queued {
-        for line in wrap(draft, width.saturating_sub(4)).into_iter().take(2) {
-            rows.push(vec![span(" ┋ ", Role::Faint), span(line, Role::Muted)]);
+        for line in wrap(draft, width - LANE).into_iter().take(2) {
+            rows.push(vec![lane("┋", Role::Faint), span(line, Role::Muted)]);
         }
     }
-    let rail = span(" ┃ ", dock.mode.rail_role());
+    let rail = lane("┃", dock.mode.rail_role());
     match &dock.composer {
         Composer::Placeholder => rows.push(vec![rail, span("Ask QQ…", Role::Faint)]),
         Composer::Draft(text) => {
-            for line in wrap(text, width.saturating_sub(4)) {
+            for line in wrap(text, width - LANE) {
                 rows.push(vec![rail.clone(), span(line, Role::Text)]);
             }
             if let Some(last) = rows.last_mut() {
@@ -746,39 +843,17 @@ fn dock_rows(dock: &Dock, width: usize, height: usize, column: bool) -> Vec<Row>
         }
         Composer::Keys(keys) => {
             let mut row = vec![rail];
-            for (index, (key, label)) in keys.iter().enumerate() {
-                if index > 0 {
-                    row.push(span("   ", Role::Text));
-                }
-                row.push(bold(key.clone(), Role::Text));
-                row.push(span(format!(" {label}"), Role::Muted));
-            }
-            rows.push(row);
+            row.extend(keys_row(keys));
+            rows.push(clip(row, width));
         }
     }
-    if let Some(hints) = &dock.hints {
-        let mut row = vec![span("   ", Role::Text)];
-        row.extend(hints.iter().cloned());
-        rows.push(row);
-        return rows;
-    }
-    let mut status = vec![dock.title.clone()];
-    for part in [&dock.model, &dock.context, &dock.cost] {
-        if !part.is_empty() && width >= REGULAR || part == &dock.model {
-            status.push(part.clone());
-        }
-    }
-    if let Some(mode) = dock.mode.label() {
-        status.push(mode.to_owned());
-    }
-    status.retain(|part| !part.is_empty());
-    let left = vec![span(format!("   {}", status.join(" · ")), Role::Muted)];
-    let right = if width >= REGULAR && !dock.place.is_empty() {
-        vec![span(format!("{} ", dock.place), Role::Faint)]
+    if dock.hints.is_empty() {
+        rows.push(status_row(dock, width, !column && width < REGULAR));
     } else {
-        Vec::new()
-    };
-    rows.push(right_aligned(left, right, width));
+        let mut row = vec![blank_lane()];
+        row.extend(keys_row(&dock.hints));
+        rows.push(clip(row, width));
+    }
     rows
 }
 

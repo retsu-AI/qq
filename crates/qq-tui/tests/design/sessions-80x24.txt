@@ -1,8 +1,8 @@
   ┃ plan the release
 
-  Drafted the checklist.
+    Drafted the checklist.
 
-  ● Spawned  1 agent                                                         ◇ 1
+  ● Spawned  1 agent                                                       ◇ 1
   └ ◇ deploy helper   wants to run rm -rf build
 
 
@@ -19,6 +19,6 @@
 
 
 
- ────────────────────────────────────────────────────── 8 sessions  ◐ 2  ◇ 2  ^G
- ┃ Ask QQ…
-   release · gpt-5.5
+  ─────────────────────────────────────────────────── 8 sessions  ◐ 2  ◇ 2  ^G
+  ┃ Ask QQ…
+    release · gpt-5.5

@@ -1,8 +1,8 @@
-                                                                         ┃ fix the off-by-one in wrap.rs
+  ┃ fix the off-by-one in wrap.rs
 
-                                                                         I'll patch the loop bound.
+    I'll patch the loop bound.
 
-                                                                         ◇ Edit     crates/qq-tui/src/view/wrap.rs                                                    waiting
+  ◇ Edit     crates/qq-tui/src/view/wrap.rs                                                      waiting
 
 
 
@@ -82,9 +82,9 @@
 
 
 
- ─◇ apply this edit? ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-     40     let mut column = 0;
-     41 -   while column <= width {
-     41 +   while column < width {
- ┃ y apply   n deny   Y / N with a note   e full diff
-   wrap fix · gpt-5.5 high · 18% · $0.12 · ask                                                                                                                                                                                                                                                                       ~/qq  main
+  ◇ apply this edit? ───────────────────────────────────────────────────────────────────────────────────
+    40     let mut column = 0;
+    41 -   while column <= width {
+    41 +   while column < width {
+  ┃ y apply   n deny   Y / N with a note   e full diff
+    wrap fix · gpt-5.5 high · 18% · $0.12 · ask                                               ~/qq  main

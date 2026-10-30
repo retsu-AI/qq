@@ -1,13 +1,13 @@
   ┃ split the v0.1.11 plan into twenty agents
 
-  ● Spawned  20 agents                                       ◐ 15  ◇ 1  ● 3  ✕ 1
+  ● Spawned  20 agents                                     ◐ 15  ◇ 1  ● 3  ✕ 1
   ├ ◇ deploy helper   wants to run cargo publish --dry-run
   ├ ✕ fix flake       exit 101 in reconnect
   ├ ◐ audit parser    reading src/audit_parser.rs
   ├ ◐ docs pass       reading src/docs_pass.rs
   ├ ◐ lint sweep      reading src/lint_sweep.rs
   ├ ◐ port sse        reading src/port_sse.rs
-  └ +14 more  ^T
+  └ +14 more   ^T all agents
 
 
 
@@ -19,6 +19,6 @@
 
 
 
- ─◐ 16 agents working · 2m 10s ─────────────────────── 3 sessions  ◐ 16  ◇ 2  ^G
- ┃ Ask QQ…
-   v0.1.11 · gpt-5.5 high
+  ◐ 16 agents working · 2m 10s ───────────────────── 3 sessions  ◐ 16  ◇ 2  ^G
+  ┃ Ask QQ…
+    v0.1.11 · gpt-5.5 high

@@ -1,11 +1,9 @@
   ┃ why does the test flake?
 
-  ∴ 12s
+  ∴ thought for 12s
 
-  The test slept on wall-clock time; pausing the runtime clock removes the
-  race.
-
-
+    The test slept on wall-clock time; pausing the runtime clock removes the
+    race.
 
 
 
@@ -19,6 +17,8 @@
 
 
 
- ───────────────────────────────────────────────────────────────────────────────
- ┃ Ask QQ…
-   flake · gpt-5.5 high
+
+
+  ────────────────────────────────────────────────────────────────────────────
+  ┃ Ask QQ…
+    flake · gpt-5.5 high
