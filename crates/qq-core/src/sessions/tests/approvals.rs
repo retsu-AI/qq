@@ -2383,9 +2383,9 @@ async fn a_childs_timed_out_hold_pauses_the_goal_after_its_expired_owner_cancell
         })
         .await
         .unwrap();
-    tokio::time::advance(Duration::from_millis(600_001)).await;
+    let decided = decision.await.unwrap();
     tokio::time::resume();
-    assert!(matches!(decision.await.unwrap(), GateDecision::Deny { .. }));
+    assert!(matches!(decided, GateDecision::Deny { .. }));
     let goal = harness
         .runtime
         .snapshot(SnapshotRequest::new(
