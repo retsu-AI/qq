@@ -35,7 +35,7 @@ PLACEHOLDER = "Ask QQ"
 CSI = re.compile(rb"\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b[=>78]")
 MARK = re.compile(r"mark(\d+)")
 STREAM_TEXT = "words keep flowing in small lowercase pieces "
-DRAFT = "QXZJVKWYPQZXJKVWYQPJXZ"
+DRAFT = "QXZJVKWYPQZXJKVWYQPJXZKV"
 TIMEOUT = 20.0
 
 
@@ -65,8 +65,13 @@ class Fake(BaseHTTPRequestHandler):
                     self.active[0] += 1
                 try:
                     deadline = time.monotonic() + self.stream_seconds
+                    found = re.search(r"STREAM (\d+)", body)
+                    stream = found.group(1) if found else "0"
+                    count = 0
                     while time.monotonic() < deadline:
-                        self.wfile.write(sse({"type": "response.output_text.delta", "delta": STREAM_TEXT}))
+                        count += 1
+                        delta = f"{STREAM_TEXT}flow{stream}x{count} "
+                        self.wfile.write(sse({"type": "response.output_text.delta", "delta": delta}))
                         self.wfile.flush()
                         time.sleep(self.delta_interval)
                 finally:
@@ -266,32 +271,43 @@ def switch_samples(args, home, sessions, warm, cold):
     return samples
 
 
-def keystroke_samples(args, home):
-    tty = Tty(pinned([args.qq], args.qq_cpu), home.env, home.cwd)
+def keystroke_samples(args, scratch, port):
+    home = Home(scratch, port, "streams")
+    sessions = seed(args, home, 8)
+    tty = Tty(pinned([args.qq, "--session", sessions[1]], args.qq_cpu), home.env, home.cwd)
     samples = []
     try:
-        tty.wait_for("New session")
+        tty.wait_for("ANS01ANS")
         for stream in range(8):
             if stream:
-                since = tty.mark()
-                tty.type("/new")
+                tty.type("/sessions")
                 tty.send("\r")
-                tty.wait_for("New session", since)
+                since = tty.mark()
+                tty.type(f"mark{stream + 1:02d}")
+                tty.wait_for(f"mark{stream + 1:02d}", since)
+                since = tty.mark()
+                tty.send("\r")
+                tty.wait_for(f"ANS{stream + 1:02d}ANS", since)
             since = tty.mark()
             tty.type(f"STREAM {stream}")
             tty.send("\r")
-            tty.wait_for("flowing", since)
+            tty.wait_for(f"flow{stream}x", since)
         draft = ""
         active = []
-        for index in range(args.keystrokes):
-            character = DRAFT[index % len(DRAFT)]
+        for _ in range(args.keystrokes):
+            if len(draft) == len(DRAFT):
+                since = tty.mark()
+                tty.send("\x7f" * len(draft))
+                tty.wait_for("Steer the run", since)
+                draft = ""
+            character = DRAFT[len(draft)]
             draft += character
             active.append(Fake.active[0])
             since = tty.mark()
             sent = tty.send(character)
             samples.append(ms(tty.wait_for(draft[-12:], since) - sent))
         try:
-            still_streaming = bool(tty.wait_for("flowing", tty.mark(), 2.0))
+            still_streaming = bool(tty.wait_for("flow7x", tty.mark(), 2.0))
         except TimeoutError:
             still_streaming = False
     finally:
@@ -371,10 +387,10 @@ def main():
         report["raw"]["first_frame_daemon_resume"] = first
         report["raw"]["transcript_daemon_resume"] = transcript
 
-        streams = Home(scratch, port, "streams")
-        keys, streaming, fewest, most = keystroke_samples(args, streams)
+        keys, streaming, fewest, most = keystroke_samples(args, scratch, port)
         report["raw"]["keystroke_echo_8_streams"] = keys
-        report["notes"].append(f"keystroke echo: provider streams open per sample min {fewest} max {most}, "
+        report["notes"].append("keystroke echo: 8 seeded sessions, each opened via /sessions and sent a "
+                               f"streaming prompt; provider streams open per sample min {fewest} max {most}, "
                                f"a delta every {Fake.delta_interval * 1000:.0f} ms each; "
                                f"focused still streaming after: {streaming}")
     finally:
