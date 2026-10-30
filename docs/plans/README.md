@@ -26,10 +26,10 @@ they run in the user's terminal. Safety comes from three things:
    almost never intended, such as force-pushing or reading `~/.ssh`. A stop
    is a tool error that tells the agent to find another way.
 
-There is no per-action reviewer model. fx (`.source/fx`) spends about 17k
-lines on a shell planner plus a reviewer, and its reviewer deliberately
-clears destructive actions that aren't malicious. That is a lot of code and
-latency for little protection. pi ships no permission system at all.
+There is no per-action reviewer model. A shell planner plus a reviewer
+costs thousands of lines, and a reviewer tuned to clear actions that
+aren't malicious still clears destructive ones. That is a lot of code and
+latency for little protection.
 
 Stronger isolation means running QQ inside a container, VM or dedicated
 account. The guide shows how (section G). QQ doesn't reimplement any of it.
