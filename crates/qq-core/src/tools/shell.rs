@@ -3,6 +3,8 @@ use sha2::{Digest, Sha256};
 use tokio::{io::AsyncReadExt, sync::mpsc};
 
 mod child_exit;
+#[cfg(unix)]
+mod descendants;
 
 #[cfg(windows)]
 pub(crate) type NativeChild = super::windows_job::Child;
@@ -751,7 +753,7 @@ async fn stop_shell(
 ) -> Result<(), String> {
     #[cfg(test)]
     let observed_pid = child.id();
-    if let Err(error) = guard.kill() {
+    if let Err(error) = guard.kill().await {
         return Err(format!(
             "could not terminate the command process group: {error}"
         ));
@@ -968,6 +970,10 @@ pub(crate) struct ProcessGroupGuard {
     #[cfg(unix)]
     killed_pgid: Option<rustix::process::Pid>,
     #[cfg(unix)]
+    leader: Option<rustix::process::Pid>,
+    #[cfg(unix)]
+    descendants: Vec<descendants::Tracked>,
+    #[cfg(unix)]
     watcher: Option<tokio::process::Child>,
 }
 
@@ -1026,6 +1032,8 @@ impl ProcessGroupGuard {
                     .and_then(|id| i32::try_from(id).ok())
                     .and_then(rustix::process::Pid::from_raw),
                 killed_pgid: None,
+                leader: None,
+                descendants: Vec::new(),
                 watcher: None,
             }
         }
@@ -1037,8 +1045,11 @@ impl ProcessGroupGuard {
     }
 
     #[cfg(unix)]
-    pub(crate) fn watch(&mut self, watcher: tokio::process::Child) {
+    pub(crate) fn watch(&mut self, watcher: tokio::process::Child, leader: Option<u32>) {
         self.watcher = Some(watcher);
+        self.leader = leader
+            .and_then(|id| i32::try_from(id).ok())
+            .and_then(rustix::process::Pid::from_raw);
     }
 
     #[cfg(unix)]
@@ -1065,7 +1076,23 @@ impl ProcessGroupGuard {
         }
     }
 
-    pub(crate) fn kill(&mut self) -> std::io::Result<()> {
+    pub(crate) async fn kill(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid {
+            let leader = self.leader;
+            let collected =
+                tokio::task::spawn_blocking(move || descendants::stop_and_kill(pgid, leader))
+                    .await
+                    .map_err(std::io::Error::other)
+                    .and_then(|collected| collected);
+            let killed = self.kill_group();
+            self.descendants = collected?;
+            return killed;
+        }
+        self.kill_group()
+    }
+
+    fn kill_group(&mut self) -> std::io::Result<()> {
         #[cfg(unix)]
         if let Some(pgid) = self.pgid {
             match rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL) {
@@ -1081,8 +1108,8 @@ impl ProcessGroupGuard {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn kill_exited(&mut self) -> std::io::Result<()> {
-        let result = self.kill();
+    async fn kill_exited(&mut self) -> std::io::Result<()> {
+        let result = self.kill().await;
         #[cfg(target_os = "macos")]
         if result.as_ref().is_err_and(|error| {
             error.raw_os_error() == Some(rustix::io::Errno::PERM.raw_os_error())
@@ -1101,7 +1128,9 @@ impl ProcessGroupGuard {
         #[cfg(target_os = "linux")]
         if let Some(pgid) = self.killed_pgid {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let tracked = std::mem::take(&mut self.descendants);
             return tokio::task::spawn_blocking(move || {
+                descendants::confirm(tracked, deadline)?;
                 super::process_group::confirm_linux_group_exit(pgid, deadline)
             })
             .await
@@ -1109,16 +1138,19 @@ impl ProcessGroupGuard {
         }
         #[cfg(all(unix, not(target_os = "linux")))]
         if let Some(pgid) = self.killed_pgid {
-            let result =
-                super::native_exit::confirm(
-                    move || match rustix::process::test_kill_process_group(pgid) {
-                        Err(rustix::io::Errno::SRCH) => Ok(true),
-                        Err(rustix::io::Errno::PERM) if cfg!(target_os = "macos") => Ok(false),
-                        Err(error) => Err(error.into()),
-                        Ok(()) => Ok(false),
-                    },
-                )
-                .await;
+            let tracked = std::mem::take(&mut self.descendants);
+            let result = super::native_exit::confirm(move || {
+                if !descendants::gone(&tracked)? {
+                    return Ok(false);
+                }
+                match rustix::process::test_kill_process_group(pgid) {
+                    Err(rustix::io::Errno::SRCH) => Ok(true),
+                    Err(rustix::io::Errno::PERM) if cfg!(target_os = "macos") => Ok(false),
+                    Err(error) => Err(error.into()),
+                    Ok(()) => Ok(false),
+                }
+            })
+            .await;
             return result;
         }
         Ok(())
@@ -1127,7 +1159,7 @@ impl ProcessGroupGuard {
 
 impl Drop for ProcessGroupGuard {
     fn drop(&mut self) {
-        let _ = self.kill();
+        let _ = self.kill_group();
     }
 }
 

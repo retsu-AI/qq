@@ -293,7 +293,7 @@ async fn run_host_process(
                     Ok(Err(error)) => break Err(ProcessError::Observe(error)),
                     Err(error) => break Err(ProcessError::ObserverTask(error)),
                 }
-                if let Err(error) = group.kill() { break Err(ProcessError::Kill(error)); }
+                if let Err(error) = group.kill().await { break Err(ProcessError::Kill(error)); }
                 #[cfg(target_os = "linux")]
                 if let Err(error) = confirm_group_exit(pgid).await {
                     break Err(ProcessError::Cleanup { original: None, group: Some(error), leader: None, reap: None });
@@ -354,7 +354,7 @@ async fn run_host_process(
         tail.extend(read);
     };
     if !matches!(outcome, Ok(ProcessOutcome::Exited { .. })) {
-        let group_error = group.kill().err();
+        let group_error = group.kill().await.err();
         let leader_error = child.start_kill().err();
         let observer_error = if !observed {
             match exited.await {

@@ -49,7 +49,7 @@ impl ChildExit {
                     return Err(std::io::Error::other("command exit notifications stopped"));
                 }
             }
-            group.kill_exited()?;
+            group.kill_exited().await?;
         }
         let status = child.wait().await;
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
