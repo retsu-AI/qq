@@ -233,6 +233,11 @@ tree, untracked files included, as a hidden Git commit under
 `refs/qq/snapshots/`. The last 50 per repository are kept, and with
 [`retention_days`](configuration.md#top-level-keys) set, none older than that.
 
+Runs in child sessions you create take their own snapshots. A spawned
+sub-agent skips its snapshot only when a sponsoring run or one of its
+sponsors already has a snapshot for the same workspace; undoing that run
+also reverts the sub-agent's edits.
+
 ```sh
 qq undo          # restore the newest run's snapshot for this directory
 qq undo --list   # list snapshots, newest first

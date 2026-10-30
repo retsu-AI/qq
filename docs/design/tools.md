@@ -20,8 +20,11 @@ host network and the real HOME. QQ does not copy the workspace, publish edits
 back, isolate the network, or apply an operating-system sandbox; built-in
 edits and shell commands see the same files, and edits land immediately.
 Safety comes from the approval mode, the fixed stops (§ Fixed Stops), managed
-denies, and a snapshot before each run's first change (`qq undo`). Stronger
-isolation means running QQ inside a container, VM or dedicated account.
+denies, and a snapshot before each run's first change (`qq undo`). Runs in
+user-created child sessions take their own snapshots. A delegated run skips
+its snapshot only when a sponsoring ancestor already has a snapshot for the
+same workspace. Stronger isolation means running QQ inside a container, VM
+or dedicated account.
 
 A command does not outlive the process that started it. On Unix each
 command's process group is led by a small watcher that reads a pipe only

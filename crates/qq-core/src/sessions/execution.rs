@@ -2561,14 +2561,14 @@ async fn execute_started_run(
                 if internal {
                     continue;
                 }
-                if may_change_files && !snapshot_taken && !claimed.identity.child {
+                if may_change_files && !snapshot_taken {
                     snapshot_taken = true;
                     let mut stop = cancellation.clone();
                     let cancelled = tokio::select! {
                         biased;
                         _ = stop.wait_for(|cancelled| *cancelled) => true,
                         () = tool_cancellation.cancelled() => true,
-                        () = snapshot_workspace(&claimed, inner.retention) => false,
+                        () = snapshot_workspace(&inner.store, &claimed, inner.retention) => false,
                     };
                     if cancelled {
                         continue;
@@ -3265,9 +3265,39 @@ async fn execute_started_run(
     }
 }
 
-async fn snapshot_workspace(claimed: &ClaimedRun, retention: Option<Duration>) {
+async fn snapshot_workspace(store: &Store, claimed: &ClaimedRun, retention: Option<Duration>) {
     let workspace = Path::new(&claimed.workspace);
     let run = claimed.identity.run_id;
+    if let Some(qq_protocol::RunOrigin::Delegated { owner_run_id, .. }) = claimed.origin {
+        let workspace_id = claimed.identity.workspace_id;
+        let owners = store.call(store::Priority::AwaitControl, move |connection| {
+            let mut owners = Vec::new();
+            let mut owner = Some(owner_run_id);
+            for _ in 0..MAX_CHILD_DEPTH {
+                let Some(run) = owner else { break };
+                let origin: Option<String> = connection.query_row(
+                    "SELECT r.origin_json FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.id=?1 AND s.workspace_id=?2",
+                    params![run.to_string(), workspace_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                owners.push(run);
+                owner = match origin.as_deref().map(serde_json::from_str).transpose()? {
+                    Some(qq_protocol::RunOrigin::Delegated { owner_run_id, .. }) => Some(owner_run_id),
+                    _ => None,
+                };
+            }
+            Ok(owners)
+        }).await;
+        if let Ok(owners) = owners
+            && let Ok(snapshots) = crate::undo::list(workspace).await
+            && snapshots.iter().any(|snapshot| {
+                snapshot.workspace == workspace
+                    && matches!(snapshot.kind, crate::undo::SnapshotKind::Run(owner) if owners.contains(&owner))
+            })
+        {
+            return;
+        }
+    }
     match crate::undo::snapshot(workspace, crate::undo::SnapshotKind::Run(run), retention).await {
         Ok(Some(snapshot)) => {
             tracing::debug!(%run, commit = %snapshot.commit, "workspace snapshot recorded");
