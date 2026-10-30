@@ -35,8 +35,8 @@
 | `{"tool":"write_file","args":{"path":"x.txt","content":"hi"}}` | `--approval read-only` | `tool_call_finished` with state `denied`; exit 0; no `x.txt` |
 | same | (default `auto`) | state `completed`; `workspace/x.txt` exists after the run |
 | `{"tool":"shell","args":{"command":"rm -f gone.txt"}}` | `--approval auto` | no approval events; state `completed`; `gone.txt` removed from `workspace/` |
-| `{"tool":"shell","args":{"command":"git push --force"}}` | `--approval auto` | state `denied`; the result starts `permission_denied: fixed_stop: ` |
 | same | `--approval ask` | `tool_approval_requested`, then `tool_approval_resolved` with `denied` |
+| `{"tool":"shell","args":{"command":"git push --force"}}` | `--approval auto` | state `denied`; the result starts `permission_denied: fixed_stop: ` |
 | `{"tool":"ask_user","args":{"questions":[{"prompt":"Which?","options":["a","b"]}]}}` | any | outcome `needs_input`, exit 5 |
 
 Rewriting `script.jsonl` restarts the fake's reply sequence, so you can run
