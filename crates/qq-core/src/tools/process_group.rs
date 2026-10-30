@@ -1,4 +1,11 @@
-fn group_member_identity(pid: u32) -> std::io::Result<Option<(i32, u64)>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProcessStat {
+    pub(crate) parent: i32,
+    pub(crate) group: i32,
+    pub(crate) started: u64,
+}
+
+pub(crate) fn group_member_identity(pid: u32) -> std::io::Result<Option<ProcessStat>> {
     let file = match std::fs::File::open(format!("/proc/{pid}/stat")) {
         Ok(file) => file,
         Err(error)
@@ -12,7 +19,7 @@ fn group_member_identity(pid: u32) -> std::io::Result<Option<(i32, u64)>> {
     read_group_member_identity(file)
 }
 
-fn read_group_member_identity(file: std::fs::File) -> std::io::Result<Option<(i32, u64)>> {
+fn read_group_member_identity(file: std::fs::File) -> std::io::Result<Option<ProcessStat>> {
     use std::io::Read;
     let mut stat = Vec::new();
     match file.take(4097).read_to_end(&mut stat) {
@@ -37,8 +44,13 @@ fn read_group_member_identity(file: std::fs::File) -> std::io::Result<Option<(i3
         .ok_or_else(malformed)?;
     let fields = std::str::from_utf8(&stat[delimiter + 2..]).map_err(|_| malformed())?;
     let mut fields = fields.split_ascii_whitespace();
+    let parent = fields
+        .nth(1)
+        .ok_or_else(malformed)?
+        .parse()
+        .map_err(|_| malformed())?;
     let group = fields
-        .nth(2)
+        .next()
         .ok_or_else(malformed)?
         .parse()
         .map_err(|_| malformed())?;
@@ -47,7 +59,11 @@ fn read_group_member_identity(file: std::fs::File) -> std::io::Result<Option<(i3
         .ok_or_else(malformed)?
         .parse()
         .map_err(|_| malformed())?;
-    Ok(Some((group, started)))
+    Ok(Some(ProcessStat {
+        parent,
+        group,
+        started,
+    }))
 }
 
 #[cfg(test)]
@@ -71,7 +87,6 @@ pub(crate) fn confirm_linux_group_exit(
     pgid: rustix::process::Pid,
     deadline: std::time::Instant,
 ) -> std::io::Result<()> {
-    use rustix::event::{PollFd, PollFlags, Timespec, poll};
     let mut confirmed = std::collections::HashSet::new();
     loop {
         let check_deadline = || {
@@ -102,10 +117,10 @@ pub(crate) fn confirm_linux_group_exit(
             else {
                 continue;
             };
-            let Some((group, started)) = group_member_identity(pid)? else {
+            let Some(stat) = group_member_identity(pid)? else {
                 continue;
             };
-            if group != pgid.as_raw_nonzero().get() {
+            if stat.group != pgid.as_raw_nonzero().get() {
                 continue;
             }
             if members.len() >= 4096 {
@@ -127,50 +142,66 @@ pub(crate) fn confirm_linux_group_exit(
                 };
             match group_member_identity(pid)? {
                 None => continue,
-                Some(identity) if identity == (group, started) => {}
+                Some(identity) if identity.started == stat.started => {}
                 Some(_) => {
                     return Err(std::io::Error::other(
                         "check group member identity changed during observation",
                     ));
                 }
             }
-            identities.insert((pid, started));
+            identities.insert((pid, stat.started));
             members.push(descriptor);
         }
-        for member in &members {
-            loop {
-                let remaining = check_deadline()?;
-                let timeout = Timespec::try_from(remaining).map_err(std::io::Error::other)?;
-                let mut descriptors = [PollFd::new(member, PollFlags::IN)];
-                match poll(&mut descriptors, Some(&timeout)) {
-                    Err(rustix::io::Errno::INTR) => continue,
-                    Err(error) => return Err(error.into()),
-                    Ok(_)
-                        if descriptors[0]
-                            .revents()
-                            .intersects(PollFlags::IN | PollFlags::HUP) =>
-                    {
-                        break;
-                    }
-                    Ok(0) => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "check group member did not exit",
-                        ));
-                    }
-                    Ok(_) => {
-                        return Err(std::io::Error::other(
-                            "unexpected check group member readiness",
-                        ));
-                    }
-                }
-            }
-        }
+        wait_for_exits(&members, deadline)?;
         if identities.is_subset(&confirmed) {
             return Ok(());
         }
         confirmed = identities;
     }
+}
+
+pub(crate) fn wait_for_exits(
+    members: &[rustix::fd::OwnedFd],
+    deadline: std::time::Instant,
+) -> std::io::Result<()> {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    for member in members {
+        loop {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "a command process did not exit",
+                    )
+                })?;
+            let timeout = Timespec::try_from(remaining).map_err(std::io::Error::other)?;
+            let mut descriptors = [PollFd::new(member, PollFlags::IN)];
+            match poll(&mut descriptors, Some(&timeout)) {
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(error) => return Err(error.into()),
+                Ok(_)
+                    if descriptors[0]
+                        .revents()
+                        .intersects(PollFlags::IN | PollFlags::HUP) =>
+                {
+                    break;
+                }
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "a command process did not exit",
+                    ));
+                }
+                Ok(_) => {
+                    return Err(std::io::Error::other(
+                        "unexpected command process readiness",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

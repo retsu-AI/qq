@@ -276,7 +276,7 @@ impl PreparedLaunch {
                 }
             };
             let mut guard = super::shell::ProcessGroupGuard::new(u32::try_from(group).ok());
-            guard.watch(watcher);
+            guard.watch(watcher, child.id());
             (child, guard)
         };
         #[cfg(windows)]
@@ -389,7 +389,7 @@ pub(super) fn prepare(
         )
     };
     #[cfg(not(target_os = "linux"))]
-    let (cwd_path, cwd_identity) = (workspace.path().join(relative), CwdIdentity::Unbound);
+    let (cwd_path, cwd_identity) = (workspace.path().join(&relative), CwdIdentity::Unbound);
 
     #[cfg(target_os = "linux")]
     let mut image = None;
@@ -440,7 +440,16 @@ pub(super) fn prepare(
     if matches!(verdict, ExecutionVerdict::VerifiedRead { .. }) {
         command.env_clear().envs(environment);
     } else {
-        command.env("TERM", "dumb");
+        let mut logical_cwd = workspace.path().to_path_buf();
+        logical_cwd.extend(
+            relative
+                .components()
+                .filter(|part| !matches!(part, std::path::Component::CurDir)),
+        );
+        command
+            .env("PWD", logical_cwd)
+            .env_remove("OLDPWD")
+            .env("TERM", "dumb");
         for (name, value) in PLAIN_OUTPUT_ENV {
             if std::env::var_os(name).is_none() {
                 command.env(name, value);
@@ -798,7 +807,7 @@ mod tests {
             .collect::<Vec<_>>();
         base.sort();
         assert_eq!(explicit(&prepared), base);
-        let mut plain = vec!["TERM".to_owned()];
+        let mut plain = vec!["OLDPWD".to_owned(), "PWD".to_owned(), "TERM".to_owned()];
         plain.extend(
             PLAIN_OUTPUT_ENV
                 .iter()
