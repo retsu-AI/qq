@@ -43,7 +43,8 @@ write one" in [`adr/README.md`](adr/README.md).
 
 The [v0.1.10 plan](plans/README.md) records the evidence behind the
 release and the release check that remains before tagging. The
-[v0.1.11 plan](plans/0.1.11.md) is next. The proposed
+[v0.1.11 plan](plans/0.1.11.md) is next, then the
+[v0.1.12 plan](plans/0.1.12.md). The proposed
 [desktop, mobile and fleet plan](plans/desktop-mobile-fleet.md) is deferred
 until after both. Issues and PRs carry assignments and verification.
 Retired plans and evidence remain recoverable through Git history; no
