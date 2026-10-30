@@ -59,6 +59,68 @@ pub(crate) fn basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
+pub(super) fn git_options_end(args: &[Option<String>]) -> usize {
+    let mut index = 0;
+    while let Some(Some(word)) = args.get(index) {
+        if !word.starts_with('-') {
+            break;
+        }
+        index += if matches!(
+            word.as_str(),
+            "-C" | "-c"
+                | "--git-dir"
+                | "--work-tree"
+                | "--namespace"
+                | "--exec-path"
+                | "--super-prefix"
+                | "--config-env"
+                | "--attr-source"
+        ) {
+            2
+        } else {
+            1
+        };
+    }
+    index.min(args.len())
+}
+
+fn without_git_options(argv: &[Option<String>]) -> Vec<&Option<String>> {
+    match argv.split_first() {
+        Some((program, args)) if program.as_deref().map(basename) == Some("git") => {
+            std::iter::once(program)
+                .chain(&args[git_options_end(args)..])
+                .collect()
+        }
+        _ => argv.iter().collect(),
+    }
+}
+
+fn argv_has_prefix(
+    argv: &[Option<String>],
+    prefix: &[Option<String>],
+    same_program: impl Fn(&str, &str) -> bool,
+) -> bool {
+    let starts_with = |argv: Vec<&Option<String>>| {
+        !prefix.is_empty()
+            && argv.len() >= prefix.len()
+            && prefix
+                .iter()
+                .zip(argv)
+                .enumerate()
+                .all(|(index, (expected, actual))| {
+                    let (Some(expected), Some(actual)) = (expected, actual) else {
+                        return false;
+                    };
+                    if index == 0 {
+                        same_program(actual, expected)
+                    } else {
+                        actual == expected
+                    }
+                })
+    };
+    starts_with(argv.iter().collect()) || starts_with(without_git_options(argv))
+}
+
 pub(super) fn shell_commands(command: &str) -> Vec<SimpleCommand> {
     let mut commands = Vec::new();
     if command.len() > MAX_CLASSIFIED_BYTES {
@@ -176,61 +238,26 @@ pub(crate) fn shell_prefix_denied(command: &str, denied_prefixes: &[String]) -> 
     if denied_prefixes.is_empty() {
         return false;
     }
-    let commands = literal_policy_argv(command);
+    let Some(commands) = policy_commands(command) else {
+        return true;
+    };
     denied_prefixes.iter().any(|prefix| {
-        let prefixes = literal_policy_argv(prefix);
+        let Some(prefixes) = policy_commands(prefix) else {
+            return false;
+        };
         let [prefix] = prefixes.as_slice() else {
             return false;
         };
-        !prefix.is_empty()
-            && commands.iter().any(|argv| {
-                argv.len() >= prefix.len()
-                    && prefix
-                        .iter()
-                        .zip(argv)
-                        .enumerate()
-                        .all(|(index, (expected, actual))| {
-                            let (Some(expected), Some(actual)) = (expected, actual) else {
-                                return false;
-                            };
-                            if index == 0 && !expected.contains(['/', '\\']) {
-                                basename(actual) == basename(expected)
-                            } else {
-                                actual == expected
-                            }
-                        })
-            })
-    })
-}
-
-fn literal_policy_argv(source: &str) -> Vec<Vec<Option<String>>> {
-    let Some(tree) = parser().parse(source, None) else {
-        return Vec::new();
-    };
-    let mut nodes = vec![tree.root_node()];
-    let mut commands = Vec::new();
-    while let Some(node) = nodes.pop() {
-        if node.kind() == "command" {
-            let mut argv = Vec::new();
-            for child in node.named_children(&mut node.walk()) {
-                match child.kind() {
-                    "command_name" => argv.push(
-                        child
-                            .named_child(0)
-                            .and_then(|name| literal_word(name, source.as_bytes())),
-                    ),
-                    "variable_assignment"
-                    | "file_redirect"
-                    | "heredoc_redirect"
-                    | "herestring_redirect" => {}
-                    _ => argv.push(literal_word(child, source.as_bytes())),
+        commands.iter().any(|simple| {
+            argv_has_prefix(&simple.argv, &prefix.argv, |actual, expected| {
+                if expected.contains(['/', '\\']) {
+                    actual == expected
+                } else {
+                    basename(actual) == basename(expected)
                 }
-            }
-            commands.push(argv);
-        }
-        nodes.extend(node.named_children(&mut node.walk()));
-    }
-    commands
+            })
+        })
+    })
 }
 
 #[must_use]
@@ -361,21 +388,9 @@ pub fn goal_check_shell_denied(command: &str, denied_prefixes: &[String]) -> boo
             return true;
         }
         if commands.iter().any(|simple| {
-            simple.argv.len() >= prefix.argv.len()
-                && simple.argv.iter().zip(&prefix.argv).enumerate().all(
-                    |(index, (word, denied))| {
-                        if index == 0 {
-                            word.as_deref()
-                                .zip(denied.as_deref())
-                                .is_some_and(|(word, denied)| {
-                                    goal_program_name(word)
-                                        .eq_ignore_ascii_case(goal_program_name(denied))
-                                })
-                        } else {
-                            word == denied
-                        }
-                    },
-                )
+            argv_has_prefix(&simple.argv, &prefix.argv, |word, denied| {
+                goal_program_name(word).eq_ignore_ascii_case(goal_program_name(denied))
+            })
         }) {
             return true;
         }
@@ -409,6 +424,15 @@ fn goal_policy_commands(source: &str) -> Option<Vec<SimpleCommand>> {
     if !goal_policy_syntax_resolved(root, source.as_bytes()) {
         return None;
     }
+    collect_policy_commands(source, root)
+}
+
+fn policy_commands(source: &str) -> Option<Vec<SimpleCommand>> {
+    let tree = parser().parse(source, None)?;
+    collect_policy_commands(source, tree.root_node())
+}
+
+fn collect_policy_commands(source: &str, root: Node<'_>) -> Option<Vec<SimpleCommand>> {
     let mut commands = Vec::new();
     let mut unresolved = false;
     Collector::<true> {
@@ -435,10 +459,6 @@ fn goal_policy_syntax_resolved(root: Node<'_>, source: &[u8]) -> bool {
         nodes.extend(node.named_children(&mut cursor));
     }
     true
-}
-
-fn literal_word(node: Node<'_>, source: &[u8]) -> Option<String> {
-    word(node, source, false)
 }
 
 fn word(node: Node<'_>, source: &[u8], home: bool) -> Option<String> {
@@ -1000,7 +1020,40 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
 
 #[cfg(test)]
 mod managed_policy_tests {
-    use super::{MAX_CLASSIFIED_BYTES, shell_prefix_denied};
+    use super::{MAX_CLASSIFIED_BYTES, goal_check_shell_denied, shell_prefix_denied};
+
+    const WRAPPED_CARGO_PUBLISH: [&str; 8] = [
+        "env A=b cargo publish",
+        "timeout 9 cargo publish",
+        "nice cargo publish",
+        "nohup cargo publish",
+        "command cargo publish",
+        "sh -c 'cargo publish'",
+        "bash -lc \"cd x && cargo publish\"",
+        "true; (timeout 9 cargo publish) | cat",
+    ];
+
+    const GIT_PUSH_WITH_GLOBALS: [&str; 6] = [
+        "git -C . push origin main",
+        "git -c a=b push origin main",
+        "git --git-dir=.git --work-tree=. push origin main",
+        "git --no-pager -C sub push origin main",
+        "sh -c 'git -C . push origin main'",
+        "env A=b git -c a=b push origin main --tags",
+    ];
+
+    #[test]
+    fn goal_check_denies_wrapped_prefixes() {
+        let denied = vec!["cargo publish".to_owned()];
+        for command in WRAPPED_CARGO_PUBLISH {
+            assert!(goal_check_shell_denied(command, &denied), "{command}");
+        }
+        assert!(!goal_check_shell_denied("echo cargo publish", &denied));
+        let push = vec!["git push origin main".to_owned()];
+        for command in GIT_PUSH_WITH_GLOBALS {
+            assert!(goal_check_shell_denied(command, &push), "{command}");
+        }
+    }
 
     #[test]
     fn shell_prefix_denies_match_literal_commands_without_classifying_unknown_programs() {
@@ -1028,6 +1081,26 @@ mod managed_policy_tests {
             assert!(!shell_prefix_denied(command, &denied), "{command}");
         }
         assert!(!shell_prefix_denied("cargo publish", &[]));
+        for command in WRAPPED_CARGO_PUBLISH {
+            assert!(shell_prefix_denied(command, &denied), "{command}");
+        }
+        for command in ["cargo build", "echo cargo publish", "env A=b cargo build"] {
+            assert!(!shell_prefix_denied(command, &denied), "{command}");
+        }
+        let push = vec!["git push origin main".to_owned()];
+        for command in GIT_PUSH_WITH_GLOBALS {
+            assert!(shell_prefix_denied(command, &push), "{command}");
+        }
+        for command in [
+            "git -C . push origin feature",
+            "git -C . status",
+            "git -c a=b log push origin main",
+        ] {
+            assert!(!shell_prefix_denied(command, &push), "{command}");
+        }
+        let pagerless = vec!["git --no-pager log".to_owned()];
+        assert!(shell_prefix_denied("git --no-pager log -1", &pagerless));
+        assert!(!shell_prefix_denied("git status", &pagerless));
         let long_literal = format!("cargo publish # {}", "x".repeat(MAX_CLASSIFIED_BYTES + 1));
         assert!(shell_prefix_denied(&long_literal, &denied));
     }
