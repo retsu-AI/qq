@@ -563,19 +563,37 @@ fn server_check(paths: &server::ServerPaths) -> Check {
 }
 
 fn snapshots_check(cwd: &Path) -> Check {
-    const NAME: &str = "snapshots";
-    let covered = tokio::runtime::Builder::new_current_thread()
+    let probed = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())
         .and_then(|runtime| {
             runtime
-                .block_on(qq_core::undo::covers(cwd))
+                .block_on(async {
+                    let covered = qq_core::undo::covers(cwd).await?;
+                    let version = qq_core::undo::git_version(cwd).await?;
+                    Ok::<_, qq_core::undo::UndoError>((covered, version))
+                })
                 .map_err(|error| error.to_string())
         });
-    match covered {
-        Ok(true) => Check::ok(NAME, crate::environment::snapshot_summary(true)),
-        Ok(false) => Check::warn(
+    snapshots_verdict(probed, qq_core::undo::MINIMUM_GIT_VERSION)
+}
+
+fn snapshots_verdict(
+    probed: Result<(bool, Option<qq_core::undo::GitVersion>), String>,
+    minimum: qq_core::undo::GitVersion,
+) -> Check {
+    const NAME: &str = "snapshots";
+    match probed {
+        Ok((_, Some(version))) if version < minimum => Check::warn(
+            NAME,
+            format!(
+                "off: Git {version} is older than {minimum}, so `qq undo` cannot restore changes"
+            ),
+            format!("install Git {minimum} or newer"),
+        ),
+        Ok((true, _)) => Check::ok(NAME, crate::environment::snapshot_summary(true)),
+        Ok((false, _)) => Check::warn(
             NAME,
             crate::environment::snapshot_summary(false),
             "run qq inside a Git repository (`git init` here) so each run can be undone",
@@ -1170,6 +1188,22 @@ mod tests {
         let text = String::from_utf8(buffer).unwrap();
         assert!(text.lines().last() == Some("all checks passed"), "{text}");
         assert!(text.contains("\x1b[32mok   \x1b[0m"), "{text}");
+    }
+
+    #[test]
+    fn snapshots_warn_and_name_the_minimum_when_git_is_too_old() {
+        let minimum = qq_core::undo::MINIMUM_GIT_VERSION;
+        let old = qq_core::undo::GitVersion::parse("git version 2.31.8").unwrap();
+        let current = qq_core::undo::GitVersion::parse("git version 2.39.5").unwrap();
+        let stale = snapshots_verdict(Ok((true, Some(old))), minimum);
+        assert_eq!(stale.status, Status::Warn, "{stale:#?}");
+        assert_eq!(
+            stale.summary,
+            "off: Git 2.31 is older than 2.32, so `qq undo` cannot restore changes"
+        );
+        assert_eq!(stale.remedy.as_deref(), Some("install Git 2.32 or newer"));
+        let fresh = snapshots_verdict(Ok((true, Some(current))), minimum);
+        assert_eq!(fresh.status, Status::Ok, "{fresh:#?}");
     }
 
     #[test]

@@ -159,6 +159,12 @@ Windows. Nothing else needs setting up: commands run in your checkout, as
 you, with your environment and network. See
 [Permissions › Where commands run](permissions.md#where-commands-run).
 
+Snapshots and `qq undo` need Git 2.32 or newer on your `PATH`. Stock macOS
+Git (2.39), Debian 12 (2.39) and Ubuntu 22.04 (2.34) qualify; Debian 11
+(2.30) and Ubuntu 20.04 (2.25) do not. With an older Git, `qq doctor` warns
+on the `snapshots` line, runs are not snapshotted, and `qq undo` refuses
+with an error naming the minimum.
+
 ## Check the install
 
 ```sh
