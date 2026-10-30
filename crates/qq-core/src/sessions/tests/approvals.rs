@@ -2265,6 +2265,171 @@ async fn an_expired_goal_hold_survives_the_gate_winning_cancellation() {
     }
 }
 
+#[tokio::test]
+async fn a_childs_timed_out_hold_pauses_the_goal_after_its_expired_owner_cancelled_it() {
+    let mut harness = scripted_runs_harness(ApprovalMode::Ask, Vec::new()).await;
+    let inner = &harness.runtime.inner;
+    let permits = inner
+        .permits
+        .acquire_many(inner.max_active_runs as u32)
+        .await
+        .unwrap();
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "type":"set_goal", "session_id":harness.session_id,
+                "objective":"keep the child's unanswered hold",
+                "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+7_200_000}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    inner.store.drive_goals(now_ms()).await.unwrap();
+    let parent = inner.store.claim_next_run(false).await.unwrap().unwrap();
+    inner
+        .store
+        .create_child_run(
+            &parent,
+            ToolCallId::generate().unwrap(),
+            ChildAdmission {
+                reasoning_effort: None,
+                profile: AgentProfileId::default(),
+                model: parent.model.clone(),
+                task: "ask the operator".to_owned(),
+                limits: RunLimits::default(),
+                approval_mode: ApprovalMode::ReadOnly,
+                purpose: SessionPurpose::Task,
+                detached: false,
+            },
+        )
+        .await
+        .unwrap();
+    let child = inner.store.claim_next_run(true).await.unwrap().unwrap();
+    assert!(child.goal_spend_owner.is_some());
+    let call = RuntimeToolCall {
+        id: ToolCallId::generate().unwrap(),
+        turn_ordinal: 1,
+        call_ordinal: 1,
+        provider_call_id: "call_1".to_owned(),
+        name: "ask_user".to_owned(),
+        effect: crate::catalog::EffectClass::Interactive,
+        arguments: ASK_ARGUMENTS.to_owned(),
+        rejection: None,
+    };
+    inner
+        .store
+        .persist_model_turn(
+            &child,
+            ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
+                turn_ordinal: 1,
+                message: Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::ToolCall {
+                        id: call.provider_call_id.clone(),
+                        name: call.name.clone(),
+                        arguments: serde_json::from_str(&call.arguments).unwrap(),
+                    }],
+                ),
+                calls: vec![call.clone()],
+                turn_message: None,
+                context_tokens: None,
+                occupancy_basis: None,
+                usage: None,
+                estimated_cost_usd_nanos: None,
+                accounting: None,
+                truncated: false,
+                notice: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (_cancel, cancellation) = watch::channel(false);
+    let gate = crate::sessions::approvals::SessionToolGate::new(
+        Arc::clone(inner),
+        child.clone(),
+        cancellation,
+        Arc::new(crate::tools::network::NetworkPolicy::default()),
+        Arc::new(crate::ShellPolicy::default()),
+    );
+    let decision = tokio::spawn(gate.resolve(&call));
+    collect_until_approval_requested(&mut harness.events).await;
+    tokio::time::pause();
+    inner.goal_deadlines.lock().unwrap().insert(
+        parent.identity.run_id,
+        crate::runtime::RunDeadline::new(
+            RunLimits {
+                max_duration_ms: Some(1),
+                ..RunLimits::default()
+            },
+            tokio::time::Instant::now() - Duration::from_millis(2),
+        )
+        .unwrap(),
+    );
+    let held = child.identity.run_id;
+    inner
+        .store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "UPDATE runs SET cancel_requested=1 WHERE id=?1",
+                [held.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let decided = decision.await.unwrap();
+    tokio::time::resume();
+    assert!(matches!(decided, GateDecision::Deny { .. }));
+    let goal = harness
+        .runtime
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            1,
+            1,
+        ))
+        .await
+        .unwrap()
+        .focused
+        .unwrap()
+        .goal
+        .unwrap();
+    assert!(
+        matches!(goal.status, qq_protocol::GoalStatus::Paused {
+            reason: qq_protocol::GoalPauseReason::NeedsUser {
+                cause: qq_protocol::GoalNeedsUser::Approval { tool_call_id }
+            }
+        } if tool_call_id == call.id),
+        "a child's hold that timed out after its expired owner cancelled it must pause the goal: {:?}",
+        goal.status
+    );
+    inner
+        .goal_deadlines
+        .lock()
+        .unwrap()
+        .remove(&parent.identity.run_id);
+    for claimed in [&child, &parent] {
+        inner
+            .store
+            .finish_run(
+                claimed,
+                RunOutcome::Cancelled,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+    }
+    drop(permits);
+    harness.runtime.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval() {
     for (run_duration, preparation_ms, wall_clock_lags) in [

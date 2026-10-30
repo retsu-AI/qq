@@ -1927,11 +1927,19 @@ impl Store {
         claimed: &ClaimedRun,
         tool_call_id: ToolCallId,
         timed_out: bool,
+        expired_owners: Vec<RunId>,
     ) -> Result<ConcludedApproval, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            conclude_tool_approval(connection, store_id, identity, tool_call_id, timed_out, &[])
+            conclude_tool_approval(
+                connection,
+                store_id,
+                identity,
+                tool_call_id,
+                timed_out,
+                &expired_owners,
+            )
         })
         .await
     }

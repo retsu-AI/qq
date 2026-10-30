@@ -287,15 +287,33 @@ async fn sleep_until_or_never(deadline: Option<tokio::time::Instant>) {
     }
 }
 
+fn expired_goal_owners(inner: &SessionRuntimeInner) -> Result<Vec<RunId>, SessionRuntimeError> {
+    Ok(inner
+        .goal_deadlines
+        .lock()
+        .map_err(|_| SessionRuntimeError::Unavailable)?
+        .iter()
+        .filter_map(|(run, deadline)| deadline.expired().then_some(*run))
+        .collect())
+}
+
 async fn conclude(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
     call_id: ToolCallId,
     timed_out: bool,
 ) -> GateDecision {
+    let expired_owners = if timed_out {
+        match expired_goal_owners(inner) {
+            Ok(owners) => owners,
+            Err(error) => return approval_persistence_failure(error),
+        }
+    } else {
+        Vec::new()
+    };
     match inner
         .store
-        .conclude_tool_approval(claimed, call_id, timed_out)
+        .conclude_tool_approval(claimed, call_id, timed_out, expired_owners)
         .await
     {
         Ok(ConcludedApproval::Approved) => GateDecision::Execute,
@@ -346,13 +364,7 @@ pub(super) async fn expire_goal_hold(
     if claimed.goal.is_none() && claimed.goal_spend_owner.is_none() {
         return Ok(());
     }
-    let expired_owners = inner
-        .goal_deadlines
-        .lock()
-        .map_err(|_| SessionRuntimeError::Unavailable)?
-        .iter()
-        .filter_map(|(run, deadline)| deadline.expired().then_some(*run))
-        .collect::<Vec<_>>();
+    let expired_owners = expired_goal_owners(inner)?;
     let identity = claimed.identity;
     let store_id = inner.store.store_id();
     let concluded = inner.store.call(store::Priority::Output, move |connection| {
