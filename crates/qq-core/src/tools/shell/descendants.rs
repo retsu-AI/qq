@@ -275,9 +275,10 @@ mod tests {
             .kill_on_drop(true);
         let mut child = command.spawn().unwrap();
         let leader = rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap();
-        let state = |pid: rustix::process::Pid| {
-            let stat =
-                std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero())).unwrap();
+        let state = |pid: rustix::process::Pid| async move {
+            let stat = tokio::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero()))
+                .await
+                .unwrap();
             let fields = &stat[stat.rfind(") ").unwrap() + 2..];
             fields.chars().next().unwrap()
         };
@@ -289,13 +290,20 @@ mod tests {
         .await
         .unwrap();
         collected.0.unwrap();
-        let (leader_state, watcher_state) = (state(leader), state(watcher_pid));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while state(leader).await != 'T' {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the command never stopped"
+            );
+            tokio::task::yield_now().await;
+        }
+        let watcher_state = state(watcher_pid).await;
         child.start_kill().unwrap();
         child.wait().await.unwrap();
         watcher.start_kill().unwrap();
         watcher.wait().await.unwrap();
         assert_eq!(collected.1.len(), 1);
-        assert_eq!(leader_state, 'T');
         assert_ne!(watcher_state, 'T', "the crash watcher was frozen");
     }
 }

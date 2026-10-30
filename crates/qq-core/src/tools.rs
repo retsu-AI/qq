@@ -4978,6 +4978,7 @@ mod tests {
                 .env("QQ_STALE_PWD_WORKER", "1")
                 .env("PWD", "/stale-pwd")
                 .env("OLDPWD", "/stale-oldpwd")
+                .stdout(std::process::Stdio::null())
                 .status()
                 .unwrap();
             assert!(status.success());
