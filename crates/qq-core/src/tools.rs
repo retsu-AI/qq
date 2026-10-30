@@ -4804,7 +4804,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn escaped_tree_commands() -> [(String, String, usize); 2] {
+    async fn escaped_tree_commands() -> [(String, String, usize); 2] {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let marker = || {
             let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4812,12 +4812,11 @@ mod tests {
         };
         let (piped, escaped) = (marker(), marker());
         let has = |program: &str| {
-            std::process::Command::new("/bin/sh")
-                .args(["-c", &format!("command -v {program} >/dev/null")])
-                .status()
-                .is_ok_and(|status| status.success())
+            let mut probe = tokio::process::Command::new("/bin/sh");
+            probe.args(["-c", &format!("command -v {program} >/dev/null")]);
+            async move { probe.status().await.is_ok_and(|status| status.success()) }
         };
-        let piped_command = if has("timeout") {
+        let piped_command = if has("timeout").await {
             (format!("timeout 600 sleep {piped} 2>&1 | cat"), 2)
         } else {
             (
@@ -4825,7 +4824,7 @@ mod tests {
                 1,
             )
         };
-        let escaped_command = if has("setsid") {
+        let escaped_command = if has("setsid").await {
             format!("setsid sleep {escaped}; true")
         } else {
             format!("perl -MPOSIX -e 'setsid; exec @ARGV' sleep {escaped}; true")
@@ -4837,10 +4836,11 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn marked_pids(marker: &str) -> Vec<u32> {
-        let listing = std::process::Command::new("ps")
+    async fn marked_pids(marker: &str) -> Vec<u32> {
+        let listing = tokio::process::Command::new("ps")
             .args(["-A", "-o", "pid=,args="])
             .output()
+            .await
             .unwrap();
         String::from_utf8_lossy(&listing.stdout)
             .lines()
@@ -4859,7 +4859,7 @@ mod tests {
     async fn wait_for_marked(marker: &str, count: usize) -> Vec<u32> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let pids = marked_pids(marker);
+            let pids = marked_pids(marker).await;
             if pids.len() >= count {
                 return pids;
             }
@@ -4876,7 +4876,11 @@ mod tests {
         for pid in pids {
             assert_process_exits(pid).await;
         }
-        assert_eq!(marked_pids(marker), Vec::<u32>::new(), "marker {marker}");
+        assert_eq!(
+            marked_pids(marker).await,
+            Vec::<u32>::new(),
+            "marker {marker}"
+        );
     }
 
     #[cfg(unix)]
@@ -4885,7 +4889,7 @@ mod tests {
         let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         for timeout in [false, true] {
-            for (command, marker, count) in escaped_tree_commands() {
+            for (command, marker, count) in escaped_tree_commands().await {
                 let cancelled = RunCancellation::new();
                 let arguments = match timeout {
                     true => serde_json::json!({"command": command, "timeout_seconds": 3}),
@@ -4932,7 +4936,7 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let tasks = ToolTasks::default();
         let mut started = Vec::new();
-        for (command, marker, count) in escaped_tree_commands() {
+        for (command, marker, count) in escaped_tree_commands().await {
             let result = execute(
                 workspace.clone(),
                 Arc::new(FileState::default()),
@@ -4962,42 +4966,54 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn commands_see_their_working_directory_in_pwd_and_no_oldpwd() {
+    #[test]
+    fn commands_see_their_working_directory_in_pwd_and_no_oldpwd() {
+        if std::env::var_os("QQ_STALE_PWD_WORKER").is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tools::tests::commands_see_their_working_directory_in_pwd_and_no_oldpwd",
+                    "--nocapture",
+                ])
+                .env("QQ_STALE_PWD_WORKER", "1")
+                .env("PWD", "/stale-pwd")
+                .env("OLDPWD", "/stale-oldpwd")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        assert_eq!(std::env::var("OLDPWD").unwrap(), "/stale-oldpwd");
         let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         fs::create_dir(directory.path().join("sub")).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        let expected = workspace.path().join("sub");
-        for (tool, arguments) in [
-            (
-                "shell",
-                r#"{"command":"echo pwd=$PWD old=${OLDPWD-unset}","cwd":"sub"}"#,
-            ),
-            (
-                "exec",
-                r#"{"program":"sh","args":["-c","echo pwd=$PWD old=${OLDPWD-unset}"],"cwd":"sub"}"#,
-            ),
-        ] {
-            let result = execute(
+        let expected = format!("\nPWD={}\n", workspace.path().join("sub").display());
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(execute(
                 workspace.clone(),
                 Arc::new(FileState::default()),
-                tool.to_owned(),
-                arguments.to_owned(),
+                "exec".to_owned(),
+                r#"{"program":"perl","args":["-e","print \"PWD=$ENV{PWD}\\nOLDPWD=\", $ENV{OLDPWD} // \"unset\", \"\\n\""],"cwd":"sub"}"#.to_owned(),
                 RunCancellation::new(),
                 None,
                 ToolTasks::default(),
                 Arc::new(crate::runtime::ShellPolicy::default()),
                 Arc::default(),
-            )
-            .await;
-            assert!(
-                result
-                    .model_text
-                    .contains(&format!("pwd={} old=unset\n", expected.display())),
-                "{tool}: {}",
-                result.model_text
-            );
-        }
+            ));
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(
+            result.model_text.contains(&expected),
+            "{}",
+            result.model_text
+        );
+        assert!(
+            result.model_text.contains("\nOLDPWD=unset\n"),
+            "{}",
+            result.model_text
+        );
     }
 
     #[cfg(unix)]

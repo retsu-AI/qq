@@ -22,15 +22,14 @@ struct Entry {
     started: u64,
 }
 
-pub(super) fn stop_and_kill(group: Pid, leader: Option<Pid>) -> std::io::Result<Vec<Tracked>> {
-    match rustix::process::kill_process_group(group, Signal::STOP) {
-        Ok(()) | Err(Errno::SRCH | Errno::PERM) => {}
-        Err(error) => return Err(error.into()),
-    }
-    let mut seen = HashSet::new();
+pub(super) fn stop_and_kill(
+    group: Pid,
+    leader: Option<Pid>,
+    watcher: Option<Pid>,
+) -> std::io::Result<Vec<Tracked>> {
     let mut tracked = Vec::new();
-    let collected = collect(group, leader, &mut seen, &mut tracked);
-    for process in &tracked {
+    let collected = collect(group, leader, watcher, &mut tracked);
+    for process in tracked.iter().rev() {
         match signal(process, Signal::KILL) {
             Ok(()) | Err(Errno::SRCH | Errno::PERM) => {}
             Err(error) => return Err(error.into()),
@@ -39,20 +38,39 @@ pub(super) fn stop_and_kill(group: Pid, leader: Option<Pid>) -> std::io::Result<
     collected.map(|()| tracked)
 }
 
+struct Membership {
+    group: i32,
+    leader: Option<i32>,
+    watcher: Option<i32>,
+}
+
+impl Membership {
+    fn admits(&self, entry: &Entry, stopped: &HashSet<i32>) -> bool {
+        Some(entry.pid) != self.watcher
+            && (Some(entry.pid) == self.leader
+                || entry.group == self.group
+                || stopped.contains(&entry.parent))
+    }
+}
+
 fn collect(
     group: Pid,
     leader: Option<Pid>,
-    seen: &mut HashSet<i32>,
+    watcher: Option<Pid>,
     tracked: &mut Vec<Tracked>,
 ) -> std::io::Result<()> {
-    let group = group.as_raw_nonzero().get();
-    let leader = leader.map(|leader| leader.as_raw_nonzero().get());
+    let membership = Membership {
+        group: group.as_raw_nonzero().get(),
+        leader: leader.map(|leader| leader.as_raw_nonzero().get()),
+        watcher: watcher.map(|watcher| watcher.as_raw_nonzero().get()),
+    };
+    let mut seen = HashSet::new();
+    let mut stopped = HashSet::new();
     for _ in 0..MAX_ROUNDS {
+        let stopped_before = stopped.clone();
         let mut found = false;
         for entry in snapshot()? {
-            let member =
-                entry.group == group || Some(entry.pid) == leader || seen.contains(&entry.parent);
-            if !member || seen.contains(&entry.pid) {
+            if !membership.admits(&entry, &stopped_before) || seen.contains(&entry.pid) {
                 continue;
             }
             if tracked.len() >= MAX_TRACKED {
@@ -64,7 +82,13 @@ fn collect(
                 continue;
             };
             match signal(&process, Signal::STOP) {
-                Ok(()) | Err(Errno::PERM) => {}
+                Ok(()) => {
+                    stopped.insert(entry.pid);
+                }
+                Err(Errno::PERM) => {
+                    seen.insert(entry.pid);
+                    continue;
+                }
                 Err(Errno::SRCH) => continue,
                 Err(error) => return Err(error.into()),
             }
@@ -72,6 +96,14 @@ fn collect(
             tracked.push(process);
             found = true;
         }
+        #[cfg(not(target_os = "linux"))]
+        release_strangers(
+            &membership,
+            &stopped_before,
+            &mut stopped,
+            &mut seen,
+            tracked,
+        )?;
         if !found {
             return Ok(());
         }
@@ -79,6 +111,42 @@ fn collect(
     Err(std::io::Error::other(
         "command descendants kept appearing while they were stopped",
     ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn release_strangers(
+    membership: &Membership,
+    stopped_before: &HashSet<i32>,
+    stopped: &mut HashSet<i32>,
+    seen: &mut HashSet<i32>,
+    tracked: &mut Vec<Tracked>,
+) -> std::io::Result<()> {
+    let current = snapshot()?
+        .into_iter()
+        .map(|entry| (entry.pid, entry))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut kept = Vec::with_capacity(tracked.len());
+    for process in tracked.drain(..) {
+        let pid = process.as_raw_nonzero().get();
+        let verified = stopped_before.contains(&pid)
+            || current
+                .get(&pid)
+                .is_some_and(|entry| membership.admits(entry, stopped_before));
+        if verified {
+            kept.push(process);
+            continue;
+        }
+        if current.contains_key(&pid) {
+            match rustix::process::kill_process(process, Signal::CONT) {
+                Ok(()) | Err(Errno::SRCH | Errno::PERM) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        stopped.remove(&pid);
+        seen.remove(&pid);
+    }
+    *tracked = kept;
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -188,4 +256,46 @@ pub(super) fn gone(tracked: &[Tracked]) -> std::io::Result<bool> {
         }
     }
     Ok(true)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[tokio::test]
+    async fn collection_freezes_the_command_but_not_its_crash_watcher() {
+        let mut watcher = super::super::spawn_watcher(
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        let watcher_pid = rustix::process::Pid::from_raw(watcher.id().unwrap() as i32).unwrap();
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "exec tail -f /dev/null"])
+            .process_group(watcher_pid.as_raw_nonzero().get())
+            .kill_on_drop(true);
+        let mut child = command.spawn().unwrap();
+        let leader = rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap();
+        let state = |pid: rustix::process::Pid| {
+            let stat =
+                std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero())).unwrap();
+            let fields = &stat[stat.rfind(") ").unwrap() + 2..];
+            fields.chars().next().unwrap()
+        };
+        let mut tracked = Vec::new();
+        let collected = tokio::task::spawn_blocking(move || {
+            let result = super::collect(watcher_pid, Some(leader), Some(watcher_pid), &mut tracked);
+            (result, tracked)
+        })
+        .await
+        .unwrap();
+        collected.0.unwrap();
+        let (leader_state, watcher_state) = (state(leader), state(watcher_pid));
+        child.start_kill().unwrap();
+        child.wait().await.unwrap();
+        watcher.start_kill().unwrap();
+        watcher.wait().await.unwrap();
+        assert_eq!(collected.1.len(), 1);
+        assert_eq!(leader_state, 'T');
+        assert_ne!(watcher_state, 'T', "the crash watcher was frozen");
+    }
 }

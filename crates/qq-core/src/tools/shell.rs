@@ -1080,11 +1080,18 @@ impl ProcessGroupGuard {
         #[cfg(unix)]
         if let Some(pgid) = self.pgid {
             let leader = self.leader;
-            let collected =
-                tokio::task::spawn_blocking(move || descendants::stop_and_kill(pgid, leader))
-                    .await
-                    .map_err(std::io::Error::other)
-                    .and_then(|collected| collected);
+            let watcher = self
+                .watcher
+                .as_ref()
+                .and_then(tokio::process::Child::id)
+                .and_then(|id| i32::try_from(id).ok())
+                .and_then(rustix::process::Pid::from_raw);
+            let collected = tokio::task::spawn_blocking(move || {
+                descendants::stop_and_kill(pgid, leader, watcher)
+            })
+            .await
+            .map_err(std::io::Error::other)
+            .and_then(|collected| collected);
             let killed = self.kill_group();
             self.descendants = collected?;
             #[cfg(target_os = "macos")]
