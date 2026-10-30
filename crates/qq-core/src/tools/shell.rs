@@ -1087,6 +1087,13 @@ impl ProcessGroupGuard {
                     .and_then(|collected| collected);
             let killed = self.kill_group();
             self.descendants = collected?;
+            #[cfg(target_os = "macos")]
+            if killed.as_ref().is_err_and(|error| {
+                error.raw_os_error() == Some(rustix::io::Errno::PERM.raw_os_error())
+            }) {
+                self.killed_pgid = self.pgid.take();
+                return Ok(());
+            }
             return killed;
         }
         self.kill_group()
@@ -1105,19 +1112,6 @@ impl ProcessGroupGuard {
             }
         }
         Ok(())
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    async fn kill_exited(&mut self) -> std::io::Result<()> {
-        let result = self.kill().await;
-        #[cfg(target_os = "macos")]
-        if result.as_ref().is_err_and(|error| {
-            error.raw_os_error() == Some(rustix::io::Errno::PERM.raw_os_error())
-        }) {
-            self.killed_pgid = self.pgid.take();
-            return Ok(());
-        }
-        result
     }
 
     async fn confirm_stopped(&mut self) -> std::io::Result<()> {
