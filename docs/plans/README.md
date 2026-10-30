@@ -133,8 +133,12 @@ Every section has shipped: snapshots and `qq undo` (#482, #486), fixed stops
 (#483), running in place (#487), long commands that yield (#488), tool-call
 recovery (#485, #489), the prompt (#491, prompt version 27), skills (#496),
 the environment notes, container and unattended guide (#490), and the
-reliability items, store retention and server-side `/undo` (#501, #502).
-What remains before tagging is the release check below.
+reliability items, store retention and server-side `/undo` (#501, #502), and
+the pre-release fixes: undo on Git older than 2.42 (#507), snapshots in
+user-created child sessions (#506), edits that mix line numbers (#505), and
+`deny_shell_prefixes` through wrappers (#508). What remains before tagging is
+killing a command's whole tree, including `timeout` and `setsid` children,
+and the release check below.
 
 Out of scope for v0.1.10: the [desktop, mobile and fleet
 plan](desktop-mobile-fleet.md), the TUI session-rail branches, new
