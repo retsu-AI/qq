@@ -242,14 +242,12 @@ pub(crate) fn shell_prefix_denied(command: &str, denied_prefixes: &[String]) -> 
         return true;
     };
     denied_prefixes.iter().any(|prefix| {
-        let Some(prefixes) = policy_commands(prefix) else {
-            return false;
-        };
+        let prefixes = literal_policy_argv(prefix);
         let [prefix] = prefixes.as_slice() else {
             return false;
         };
         commands.iter().any(|simple| {
-            argv_has_prefix(&simple.argv, &prefix.argv, |actual, expected| {
+            argv_has_prefix(&simple.argv, prefix, |actual, expected| {
                 if expected.contains(['/', '\\']) {
                     actual == expected
                 } else {
@@ -258,6 +256,36 @@ pub(crate) fn shell_prefix_denied(command: &str, denied_prefixes: &[String]) -> 
             })
         })
     })
+}
+
+fn literal_policy_argv(source: &str) -> Vec<Vec<Option<String>>> {
+    let Some(tree) = parser().parse(source, None) else {
+        return Vec::new();
+    };
+    let mut nodes = vec![tree.root_node()];
+    let mut commands = Vec::new();
+    while let Some(node) = nodes.pop() {
+        if node.kind() == "command" {
+            let mut argv = Vec::new();
+            for child in node.named_children(&mut node.walk()) {
+                match child.kind() {
+                    "command_name" => argv.push(
+                        child
+                            .named_child(0)
+                            .and_then(|name| word(name, source.as_bytes(), false)),
+                    ),
+                    "variable_assignment"
+                    | "file_redirect"
+                    | "heredoc_redirect"
+                    | "herestring_redirect" => {}
+                    _ => argv.push(word(child, source.as_bytes(), false)),
+                }
+            }
+            commands.push(argv);
+        }
+        nodes.extend(node.named_children(&mut node.walk()));
+    }
+    commands
 }
 
 #[must_use]
@@ -558,7 +586,8 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                 let mut body = None;
                 let mut stream_only = true;
                 let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
+                let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+                for &child in &children {
                     match child.kind() {
                         "file_redirect" => {
                             let (target, raw) = redirect_target(child, self.source, self.home);
@@ -580,6 +609,14 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                 for simple in &mut self.commands[before..] {
                     simple.redirects.extend(redirects.iter().cloned());
                     simple.raw_redirects.extend(raw_redirects.iter().cloned());
+                }
+                for child in children {
+                    if matches!(
+                        child.kind(),
+                        "file_redirect" | "heredoc_redirect" | "herestring_redirect"
+                    ) {
+                        self.substitutions(child);
+                    }
                 }
             }
             "program" | "list" | "pipeline" => {
@@ -651,8 +688,9 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                     let (target, raw) = redirect_target(child, self.source, self.home);
                     redirects.push(target);
                     raw_redirects.extend(raw);
+                    deferred.push(child);
                 }
-                "heredoc_redirect" | "herestring_redirect" => {}
+                "heredoc_redirect" | "herestring_redirect" => deferred.push(child),
                 _ if child.is_named() => {
                     argv.push(word(child, self.source, self.home));
                     deferred.push(child);
@@ -1049,6 +1087,12 @@ mod managed_policy_tests {
             assert!(goal_check_shell_denied(command, &denied), "{command}");
         }
         assert!(!goal_check_shell_denied("echo cargo publish", &denied));
+        for command in [
+            "echo hi > \"$(cargo publish)\"",
+            "cat <<< \"$(cargo publish)\"",
+        ] {
+            assert!(goal_check_shell_denied(command, &denied), "{command}");
+        }
         let push = vec!["git push origin main".to_owned()];
         for command in GIT_PUSH_WITH_GLOBALS {
             assert!(goal_check_shell_denied(command, &push), "{command}");
@@ -1101,6 +1145,21 @@ mod managed_policy_tests {
         let pagerless = vec!["git --no-pager log".to_owned()];
         assert!(shell_prefix_denied("git --no-pager log -1", &pagerless));
         assert!(!shell_prefix_denied("git status", &pagerless));
+        for (prefix, command) in [
+            ("env A=b cargo publish", "env A=b cargo publish"),
+            (
+                "timeout 9 cargo publish",
+                "timeout 9 cargo publish --dry-run",
+            ),
+            ("sh -c 'cargo publish'", "sh -c 'cargo publish'"),
+            ("cargo publish", "echo hi > \"$(cargo publish)\""),
+            ("cargo publish", "cat <<< \"$(cargo publish)\""),
+        ] {
+            assert!(
+                shell_prefix_denied(command, &[prefix.to_owned()]),
+                "{prefix}: {command}"
+            );
+        }
         let long_literal = format!("cargo publish # {}", "x".repeat(MAX_CLASSIFIED_BYTES + 1));
         assert!(shell_prefix_denied(&long_literal, &denied));
     }

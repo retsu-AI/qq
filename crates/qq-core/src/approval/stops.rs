@@ -191,7 +191,9 @@ fn force_push(args: &[Option<String>]) -> bool {
     let mut value = false;
     for arg in &args[index + 1..] {
         let Some(arg) = arg.as_deref() else {
-            positional += 1;
+            if !std::mem::take(&mut value) {
+                positional += 1;
+            }
             continue;
         };
         if std::mem::take(&mut value) {
@@ -433,6 +435,8 @@ mod tests {
             "git push --del x",
             "git push --de origin x",
             "git push --pru origin",
+            "git push --recurse-submodules \"$MODE\" --force origin x",
+            "git push --repo \"$R\" -f origin x",
         ] {
             assert_stopped(command, Stop::ForcePush);
         }
