@@ -5430,7 +5430,7 @@ mod tests {
             ));
             let mut marker = String::new();
             let chunk = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                while !marker.contains("pid:") {
+                while !marker.contains("pid:") || !marker.ends_with('\n') {
                     marker.push_str(
                         &receiver
                             .recv()

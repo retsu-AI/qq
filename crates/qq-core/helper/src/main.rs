@@ -514,6 +514,7 @@ fn reap_direct_children() {
 fn confirm_gone(identities: &[ProcessIdentity]) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
+        reap_direct_children();
         let snapshot = scan_processes();
         let alive = identities.iter().any(|identity| {
             snapshot
