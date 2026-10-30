@@ -96,6 +96,7 @@ impl HeldSnapshot {
         let fifos = tempfile::tempdir().unwrap();
         let entered = fifos.path().join("entered");
         let release = fifos.path().join("release");
+        let held = fifos.path().join("held");
         for fifo in [&entered, &release] {
             let status = std::process::Command::new("mkfifo")
                 .arg(fifo)
@@ -111,9 +112,10 @@ impl HeldSnapshot {
                 "config",
                 "filter.hold.clean",
                 &format!(
-                    "sh -c 'echo > \"{}\"; cat \"{}\" > /dev/null; cat'",
-                    entered.display(),
-                    release.display()
+                    "sh -c 'if mkdir \"{}\" 2>/dev/null; then exec 3<> \"{}\"; echo > \"{}\"; read _ <&3; fi; cat'",
+                    held.display(),
+                    release.display(),
+                    entered.display()
                 ),
             ],
         );
@@ -149,7 +151,13 @@ impl HeldSnapshot {
 #[cfg(unix)]
 impl Drop for HeldSnapshot {
     fn drop(&mut self) {
-        open_for_writing(&self.release);
+        if let Ok(writer) = rustix::fs::open(
+            &self.release,
+            rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::NONBLOCK,
+            rustix::fs::Mode::empty(),
+        ) {
+            let _ = rustix::io::write(&writer, b"\n");
+        }
     }
 }
 
