@@ -5392,7 +5392,8 @@ mod tests {
         }
         assert!(
             reaped.is_ok(),
-            "an escaped child {pid} survived teardown: {context}"
+            "an escaped child {pid} survived teardown: {context}; stat={:?}",
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
         );
     }
 

@@ -152,7 +152,7 @@ fn check_executable_blocking(
         .find(|(key, _)| key == "PATH")
         .and_then(|(_, value)| value.clone())
         .or_else(|| std::env::var_os("PATH"))
-        .ok_or_else(not_found)?;
+        .unwrap_or_else(|| std::ffi::OsString::from("/bin:/usr/bin"));
     for directory in std::env::split_paths(&path) {
         if resolve(directory.join(program)) {
             return Ok(());
