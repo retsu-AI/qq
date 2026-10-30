@@ -1,0 +1,90 @@
+                                                                         ┃ /goal finish the billing migration
+
+                                                                         Backfill verified.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ─◇ goal needs check consent ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇ 1 needs you  ^G
+   Finish the billing migration
+   runs      4 / 10
+   tokens    0 / 1000
+   cost      $0.00 / $1.00
+   deadline  2027-01-15 08:00 UTC
+   audits    1 · 1 failed check
+   check     cargo test -p billing · 5.0s · consent used
+   ● verify invoices
+   ◐ ship migration
+   ✕ last check exit 7  missing invoice
+   ◇ completion claim awaiting verification
+ ┃ c check consent   p pause   esc back
+   billing · gpt-5.5 high · 4%                                                                                                                                                                                                                                                                                       ~/qq  main

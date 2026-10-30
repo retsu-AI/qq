@@ -1,0 +1,40 @@
+  ┃ make the sse reconnect test deterministic                                               NEEDS YOU
+                                                                                            1 ◇ deploy helper
+  ● Read     crates/qq-client/src/sse.rs                                      412 lines     WORKING
+  ✕ Ran      cargo test -p qq-client reconnect                                 exit 101   ▎ 2 ◐ sse reconnect  ↳3
+  │ thread 'reconnect' panicked at sse.rs:212: timed out                                    RECENT
+  ◐ Editing  crates/qq-client/src/sse.rs                                                    3 ○ refactor cli
+  │  208    let mut clock = Clock::system();                                                4 ● release notes
+  │  208 -  tokio::time::sleep(Duration::from_millis(50)).await;
+  │  208 +  tokio::time::pause();
+
+  The test slept on wall-clock time; pausing the runtime clock removes the race.
+  Applying the edit now.▍
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ─◐ editing sse.rs · 14s ───────────────────────────────────────────────────────────────────────────── ◇ 1 needs you  ^G
+ ┃ Ask QQ…
+   sse reconnect · gpt-5.5 high · 31% · $0.42                                                                ~/qq  main

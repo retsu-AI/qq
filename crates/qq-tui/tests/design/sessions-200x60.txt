@@ -1,0 +1,60 @@
+  ┃ plan the release                                                                                                                                                        NEEDS YOU
+                                                                                                                                                                            1 ◇ Refactor
+  Drafted the checklist.                                                                                                                                                        finished · unseen · $0.1
+                                                                                                                                                                            WORKING
+  ● Spawned  1 agent                                                                               ◇ 1                                                                      2 ◐ Survey callers
+  └ ◇ deploy helper   wants to run rm -rf build                                                                                                                                 Found twelve call sites
+                                                                                                                                                                            3 ◐ Write tests
+                                                                                                                                                                                compacting context
+                                                                                                                                                                            RECENT
+                                                                                                                                                                          ▎ 4 ○ release  ↳1
+                                                                                                                                                                                ◇ deploy helper
+                                                                                                                                                                            5 ○ Scratch
+                                                                                                                                                                            6 ○ Notes
+                                                                                                                                                                            7 ● Migrate
+                                                                                                                                                                                done · $0.04
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇ 1 needs you  ^G
+ ┃ Ask QQ…
+   release · gpt-5.5 · 4%                                                                                                                                                                    ~/qq  main

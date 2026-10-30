@@ -175,6 +175,23 @@ symbolic link or a regular file is hard-linked outside the fixture. Bare `qq`,
 `qq run`, and every other command retain their production behavior; the option
 is valid only for bare interactive QQ.
 
+## Reviewing the v0.1.11 design (R0)
+
+`crates/qq-tui/src/design.rs` draws the target frames for the v0.1.11
+redesign from a declarative model; `crates/qq-tui/tests/design/` pins them
+as text. To review them in color, in a real terminal at least as large as
+the frame:
+
+```sh
+cargo test -p qq-tui --test gallery -- --ignored
+cat target/qq-tui-gallery/design/ink/golden-path-120x40.ans
+cat target/qq-tui-gallery/design/terminal/golden-path-120x40.ans
+```
+
+Every scene is written at 80×24, 120×40, 200×60, 320×90 and 480×120 under
+every theme. Review `ink` and `terminal`; the sign-off is approving those
+frames.
+
 ## Expected isolated paths
 
 | Purpose | Path |
