@@ -67,6 +67,11 @@ fn run() -> i32 {
 
     let mut command = std::process::Command::new(&program);
     command.args(&program_args);
+    if let Some(arg0) = std::env::var_os("QQ_WATCHER_ARG0") {
+        use std::os::unix::process::CommandExt as _;
+        command.arg0(arg0);
+    }
+    command.env_remove("QQ_WATCHER_ARG0");
     command.env_remove("QQ_WATCHER_STDIN_FILE");
     if let Some(path) = stdin_file {
         match std::fs::File::open(&path) {
@@ -283,6 +288,11 @@ fn run() -> i32 {
 
     let mut command = std::process::Command::new(&program);
     command.args(&program_args);
+    if let Some(arg0) = std::env::var_os("QQ_WATCHER_ARG0") {
+        use std::os::unix::process::CommandExt as _;
+        command.arg0(arg0);
+    }
+    command.env_remove("QQ_WATCHER_ARG0");
     command.env_remove("QQ_WATCHER_STDIN_FILE");
     if let Some(path) = stdin_file {
         match std::fs::File::open(&path) {
@@ -340,7 +350,19 @@ struct Watched {
 #[cfg(target_os = "macos")]
 impl Watched {
     fn record(&mut self, snapshot: &[ProcessEntry]) {
-        for pid in descendants(std::process::id(), snapshot) {
+        self.identities.retain(|identity| {
+            snapshot
+                .iter()
+                .any(|entry| entry.pid == identity.pid && entry.start == identity.start)
+        });
+        for pid in descendants(std::process::id(), snapshot).into_iter().chain(
+            snapshot
+                .iter()
+                .filter(|entry| {
+                    entry.group == std::process::id() && entry.pid != std::process::id()
+                })
+                .map(|entry| entry.pid),
+        ) {
             let Some(start) = snapshot
                 .iter()
                 .find(|entry| entry.pid == pid)
@@ -512,17 +534,23 @@ fn confirm_gone(identities: &[ProcessIdentity]) -> bool {
 struct ProcessEntry {
     pid: u32,
     ppid: u32,
+    group: u32,
     start: String,
 }
 
 #[cfg(target_os = "macos")]
 fn scan_processes() -> Vec<ProcessEntry> {
     let Ok(output) = std::process::Command::new("/bin/ps")
-        .args(["-axo", "pid=,ppid=,lstart="])
+        .args(["-axo", "pid=,ppid=,pgid=,lstart="])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .spawn()
     else {
+        return Vec::new();
+    };
+    let scanner = output.id();
+    let Ok(output) = output.wait_with_output() else {
         return Vec::new();
     };
     let Ok(text) = String::from_utf8(output.stdout) else {
@@ -537,8 +565,18 @@ fn scan_processes() -> Vec<ProcessEntry> {
         let Some(ppid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
             continue;
         };
+        let Some(group) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
         let start = fields.collect::<Vec<_>>().join(" ");
-        entries.push(ProcessEntry { pid, ppid, start });
+        if pid != scanner {
+            entries.push(ProcessEntry {
+                pid,
+                ppid,
+                group,
+                start,
+            });
+        }
     }
     entries
 }

@@ -5136,7 +5136,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn exec_pins_the_working_directory_inside_the_workspace() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory =
+            tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         fs::create_dir(directory.path().join("sub")).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         let run = |arguments: &'static str| {
@@ -5180,7 +5181,8 @@ mod tests {
     async fn a_yielded_command_runs_in_the_pinned_working_directory() {
         use std::io::Write as _;
 
-        let directory = tempfile::tempdir().unwrap();
+        let directory =
+            tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         fs::create_dir(directory.path().join("sub")).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         let release = directory.path().join("sub/release");
@@ -5398,7 +5400,8 @@ mod tests {
     #[tokio::test]
     async fn shell_timeout_kills_children_that_leave_the_process_group() {
         for command in escape_commands() {
-            let directory = tempfile::tempdir().unwrap();
+            let directory =
+                tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
             let workspace = Workspace::open(directory.path()).unwrap();
             let arguments =
                 serde_json::json!({ "command": command, "timeout_seconds": 1 }).to_string();
@@ -5413,7 +5416,8 @@ mod tests {
     #[tokio::test]
     async fn shell_cancellation_kills_children_that_leave_the_process_group() {
         for command in escape_commands() {
-            let directory = tempfile::tempdir().unwrap();
+            let directory =
+                tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
             let workspace = Workspace::open(directory.path()).unwrap();
             let cancelled = RunCancellation::new();
             let (sender, mut receiver) = mpsc::channel::<String>(16);
@@ -5455,7 +5459,8 @@ mod tests {
     #[tokio::test]
     async fn yielded_escaped_command_tree_dies_at_run_end() {
         for command in escape_commands() {
-            let directory = tempfile::tempdir().unwrap();
+            let directory =
+                tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
             let tasks = ToolTasks::default();
             let cancelled = RunCancellation::new();
             let result = execute(
@@ -5485,7 +5490,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn shell_and_exec_set_pwd_and_remove_oldpwd() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory =
+            tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         fs::create_dir(directory.path().join("sub")).unwrap();
         let expected = fs::canonicalize(directory.path().join("sub")).unwrap();
         for (tool, arguments) in [

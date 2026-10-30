@@ -296,6 +296,10 @@ impl PreparedLaunch {
             if let Some(cwd) = cwd {
                 watcher.current_dir(cwd);
             }
+            #[cfg(target_os = "linux")]
+            if let Some((_, original)) = &self._image {
+                watcher.env("QQ_WATCHER_ARG0", original);
+            }
             let stdin = match self.stdin_text.take() {
                 Some(text) => {
                     let stdin = super::shell::watcher::stdin_file(text.into_bytes()).await?;

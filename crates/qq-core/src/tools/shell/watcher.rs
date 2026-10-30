@@ -98,7 +98,7 @@ pub(crate) async fn command(
     Ok(command)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn test_image_path() -> std::io::Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(image()?.path()))
 }
@@ -154,9 +154,6 @@ fn check_executable_blocking(
         .or_else(|| std::env::var_os("PATH"))
         .ok_or_else(not_found)?;
     for directory in std::env::split_paths(&path) {
-        if directory.as_os_str().is_empty() {
-            continue;
-        }
         if resolve(directory.join(program)) {
             return Ok(());
         }
@@ -189,15 +186,23 @@ pub(crate) async fn command_child_pid(
     cancelled: &ToolCancellation,
     deadline: Instant,
 ) -> (Option<u32>, Option<std::os::unix::net::UnixStream>) {
-    use tokio::io::AsyncReadExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let Readiness { mut parent, child } = readiness;
     drop(child);
-    let read = parent.read_u32_le();
+    let mut read = Box::pin(parent.read_u32_le());
     let pid = tokio::select! {
         biased;
-        () = cancelled.cancelled() => None,
-        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => None,
-        result = read => result.ok(),
+        result = &mut read => result.ok(),
+        () = cancelled.cancelled() => {
+            let result = read.await.ok();
+            let _ = parent.shutdown().await;
+            result
+        },
+        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            let result = read.await.ok();
+            let _ = parent.shutdown().await;
+            result
+        },
     };
     let liveness = parent
         .into_std()

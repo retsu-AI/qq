@@ -511,7 +511,7 @@ pub(super) async fn run_shell(
             assert!(!hook.panic, "injected shell task panic after process spawn");
         }
     }
-    #[cfg(windows)]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     if let (Some(text), Some(mut stdin)) = (stdin_text, child.stdin.take()) {
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt as _;
@@ -519,7 +519,7 @@ pub(super) async fn run_shell(
             let _ = stdin.shutdown().await;
         });
     }
-    #[cfg(not(windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let _ = stdin_text;
     #[cfg(test)]
     let mut read_fault = {
@@ -1463,7 +1463,7 @@ mod watcher_tests {
                 started.elapsed() < std::time::Duration::from_secs(20),
                 "the escapee never started"
             );
-            std::thread::park_timeout(std::time::Duration::from_millis(10));
+            std::thread::yield_now();
         };
         assert!(rustix::process::test_kill_process(escapee).is_ok());
         drop(writer);
@@ -1473,7 +1473,7 @@ mod watcher_tests {
                 stopped.elapsed() < std::time::Duration::from_secs(10),
                 "the setsid escapee survived the watcher teardown"
             );
-            std::thread::park_timeout(std::time::Duration::from_millis(10));
+            std::thread::yield_now();
         }
         child.wait().unwrap();
     }
@@ -1542,7 +1542,7 @@ mod orphan_tests {
                 started.elapsed() < std::time::Duration::from_secs(20),
                 "command never started"
             );
-            std::thread::park_timeout(std::time::Duration::from_millis(10));
+            std::thread::yield_now();
         };
         let mut pids = pids
             .split_whitespace()
@@ -1558,7 +1558,7 @@ mod orphan_tests {
                     stopped.elapsed() < std::time::Duration::from_secs(10),
                     "the command outlived the process that started it"
                 );
-                std::thread::park_timeout(std::time::Duration::from_millis(10));
+                std::thread::yield_now();
             }
         }
     }
