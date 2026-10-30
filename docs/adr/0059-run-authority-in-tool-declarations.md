@@ -43,4 +43,5 @@ request-time host configuration cannot change an existing plan's authority.
 
 AB4's captured direct, granted/ungranted external and strict read-only recovery
 fixtures, catalog selector/index tests and prompt identity tests record the
-behavior. Qualification and performance receipts live in the action-bias ledger.
+behavior. Qualification and performance receipts lived in the action-bias ledger,
+removed in v0.1.10; see Git history.

@@ -31,9 +31,13 @@ command's process group is led by a small watcher that reads a pipe only
 the QQ process holds open; the watcher ignores the group signals a script
 may send before the command joins, and when QQ exits for any reason,
 SIGKILL included, it kills the group. On Windows each command's job is killed when
-its handle closes. On Unix a command that leaves its process group (`setsid`, a
-double fork into a new group) escapes this, as it escapes timeouts; Windows
-jobs follow every descendant. Commands share the user's terminal, so a
+its handle closes. On Unix a timeout, a cancellation or the end of the run also
+stops descendants that left the group (GNU `timeout`, `setsid`):
+`tools/shell/descendants.rs` freezes the group, follows parent process IDs
+from it until no new process appears, then kills and confirms each one. A
+process whose parent had already exited when the stop began escapes, and so
+does anything outside the group when QQ itself dies, since the watcher kills
+only its group; Windows jobs follow every descendant. Commands share the user's terminal, so a
 command that prompts there waits until its timeout or a cancel. There is no
 disk-space reserve for commands. On
 restart, runs and commands that were in flight are settled as interrupted;
@@ -1254,15 +1258,15 @@ control, not that the model needs new verbs.
   `rebase` and `push` run under Auto and Full and ask under Ask, like any
   other command. Force-pushes and remote ref deletion are fixed stops; a
   `deny_shell_prefixes` entry (for example `git push`) refuses more.
-- **jj is a policy entry, not a dependency.** jj users overwhelmingly
+- **jj needs no special support.** jj users overwhelmingly
   run colocated repos, so git-shaped harness features work for them
   unchanged. QQ takes no jj-lib
   dependency; revisit only if jj-native workspaces become a real ask.
 
 ## Network Tools
 
-`fetch` exists so the model stops reaching for `curl` through the shell
-classifier when it wants documentation or an API response. It is the one
+`fetch` exists so the model stops reaching for `curl` through `shell`
+when it wants documentation or an API response. It is the one
 built-in whose authority is over the outside world rather than the
 workspace, and it has its own effect class and refusal rules (ADR-0021).
 

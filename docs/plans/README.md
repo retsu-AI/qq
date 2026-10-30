@@ -9,8 +9,7 @@ whose rows 1–5 shipped in v0.1.8 and v0.1.9 (#378, #432–#439, #463–#468,
 #470–#472). That plan is in Git history at
 [`2cafa65`](https://github.com/retsu-AI/qq/blob/2cafa6537e61495f0a7ef022eef9b985ade9dc22/docs/plans/README.md).
 
-Issues and PRs carry assignments and verification. This page states what to
-change, why, and how each change is accepted. Remove a section when it ships.
+Issues and PRs carry assignments and verification.
 
 ## Direction
 
@@ -39,6 +38,9 @@ that kept breaking ordinary work and still left the user's own credentials
 reachable.
 
 ## Evidence
+
+This section records the state before v0.1.10's changes; every gap it
+lists has since been fixed.
 
 **Default Auto, probed on 2026-10-26.** A debug build at `fd15a11` (which
 includes #463) ran scripted shell calls through the `verify-qq` fake
@@ -79,7 +81,7 @@ counts, not task success rates:
 | Runs killed by `DiskFull` | 5; the store is 1 GB |
 
 **The old reviewer had no context.** Its system prompt
-(`REVIEWER_SYSTEM_PROMPT` in `qq-host/src/runtime.rs`) told it: "you have no
+(`REVIEWER_SYSTEM_PROMPT`, deleted in #487) told it: "you have no
 transcript and must not assume intent beyond the stated task." For a root
 session it got the tool name, the arguments and a list of recent tool
 names. It never saw the user's request. As a result it denied `git push` in
@@ -94,7 +96,8 @@ list of stops plus undo is easier to predict.
   required a supervised Full session, and the binary created none. It has
   since been deleted.
 - The containment code was about 28k lines including tests. Everything but
-  the approval classifier has since been deleted:
+  the approval classifier has since been deleted, and the classifier's rules
+  were replaced by fixed stops (#483):
 
   | Code | Lines |
   | --- | --- |
@@ -124,67 +127,22 @@ list of stops plus undo is easier to predict.
 - `$ARGUMENTS` is not substituted, the skill's directory is not given, and
   `.agents/skills` is invisible to the model.
 
-## E. Prompt
+## Shipped
 
-Shipped in prompt version 27 (PR `feat/plan-e-prompt`): one Environment
-section, policy out of tool descriptions, a shorter nested-instructions
-bullet, a final-answer rule, and the golden file
-`crates/qq-core/tests/golden/root_prompt.txt`.
-
-**Accepted when** the six tasks below show no more offers or questions at
-the end of completed runs than the v0.1.9 baseline, with Claude Opus
-included.
-
-## F. Skills
-
-- The index tells the model: when the task matches a skill's description,
-  `load_skill` it before acting.
-- Show each skill's directory, and resolve its relative paths against it.
-  Substitute `$ARGUMENTS`. Parse `name:`.
-- Disclose `.agents/skills`, removing duplicates of `.qq/skills` by name.
-  Add a global root at `~/.config/qq/skills`. Cap the index at about 8 KB.
-
-**Accepted when** there are tests for each rule, and a scripted run loads a
-matching skill, resolves a script beside it, and receives the substituted
-arguments.
-
-## G. Running unattended: set up the environment
-
-- `qq doctor` and the first-run screen say plainly that commands run as the
-  user, with the user's network and credentials. They show whether QQ is on
-  the host or inside a container, and whether the workspace has snapshots.
-- Ship a `.devcontainer/` and a `Dockerfile` that run `qq` or `qq daemon`
-  with only the project mounted.
-- Add `guide/running-unattended.md`. It covers:
-  - mounting only the project;
-  - a fine-grained token per repository;
-  - a separate Git identity for agents;
-  - managed `deny_shell_prefixes`;
-  - why a machine with production credentials is the wrong host for
-    unattended goals.
-- Headless `qq run --goal` on the host prints a one-line note pointing at
-  that guide. It never blocks.
-
-**Accepted when** the devcontainer builds and runs one deterministic smoke
-task against the loopback fake provider in CI.
-
-## Order
-
-F and G in parallel with disjoint owned paths.
-
-Each PR:
-- shows its regression failing before the fix;
-- exercises the real CLI, TUI or server path;
-- runs `cargo xtask check` once;
-- states size or latency budget overruns in its description instead of
-  blocking on them.
+Every section has shipped: snapshots and `qq undo` (#482, #486), fixed stops
+(#483), running in place (#487), long commands that yield (#488), tool-call
+recovery (#485, #489), the prompt (#491, prompt version 27), skills (#496),
+the environment notes, container and unattended guide (#490), and the
+reliability items, store retention and server-side `/undo` (#501, #502),
+and the pre-release fixes: edits that mix line numbers (#505), snapshots in
+user-created child sessions (#506), undo on Git older than 2.42 (#507),
+`deny_shell_prefixes` through wrappers (#508), and stopping a command's
+escaped descendants (#511). What remains before tagging is the release
+check below.
 
 Out of scope for v0.1.10: the [desktop, mobile and fleet
 plan](desktop-mobile-fleet.md), the TUI session-rail branches, new
-providers, and any in-process sandbox. Parallel goals that need separate
-trees will use `git worktree add` under `.worktrees/`, which keeps a real
-`.git` and the build cache, never copies; that waits until the fleet plan
-needs it.
+providers, and any in-process sandbox.
 
 ## Release check
 
@@ -213,7 +171,9 @@ Also run three adversarial tasks on the final build:
   uncommitted work.
 
 Record whether a fixed stop caught each one, and whether
-`qq undo` recovered the third.
+`qq undo` recovered the third. The prompt (#491) is accepted when the six
+tasks show no more offers or questions at the end of completed runs than
+the v0.1.9 baseline, with Claude Opus included.
 
 Before tagging, run each task once on v0.1.9 and once on the final v0.1.10
 build, with the same model, effort and config, from an authorized account
@@ -223,6 +183,6 @@ intervention as observed. Never combine passes from different builds or
 rerun until green. Run the `run-in-place` smoke scenario on the same build.
 
 After a week of v0.1.10 use, recount runs that repeat the same tool error
-three or more times. D (tool-call recovery, #485 and its follow-up) shipped
+three or more times. Tool-call recovery (#485 and #489) shipped
 against the 9.6% in the evidence table; the newest pre-v0.1.9 build showed
 0.3%. Record the count, window and build in the release notes.

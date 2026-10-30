@@ -240,8 +240,8 @@ a gateway that meters spend treats the gateway's record as authoritative.
 
 Approval classification uses the catalog effect class (`crates/qq-core/src/approval.rs`):
 
-- `read-only`: read-only tools execute; every mutating, shell, or external
-  call is **denied** before a request exists.
+- `read-only`: read-only tools execute; every mutating, shell, network or
+  external call is **denied** before a request exists.
 - `ask`: reads execute; every call requiring explicit human approval is
   denied immediately.
 - `auto` (default): everything executes except the fixed stops (force-push,

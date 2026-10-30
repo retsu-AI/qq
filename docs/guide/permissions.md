@@ -166,12 +166,12 @@ Only Ask puts a call on hold for a human. An Ask prompt looks like this:
 ```
 ◇ approval needed
 $ npm install left-pad  (in ~/repo)
-y once   n deny   ask: approval applies once
+y approve   n deny
 ```
 
 | Key | Effect |
 | --- | --- |
-| `y` | run this call once |
+| `y` | approve this call once |
 | `n` | deny; the model receives the denial as a tool error and continues |
 | `Shift-Y` / `Shift-N` | decide and then steer the run with a note |
 | `Esc` | deny, like `n`; after `Shift-Y` / `Shift-N` it first cancels the note and leaves the prompt open |

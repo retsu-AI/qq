@@ -1,6 +1,6 @@
 # ADR-0003 — Persist before publish; observers read committed events only
 
-**Status:** Accepted; synchronous-decision list superseded in part by [ADR-0028](0028-mandatory-typed-jev-checkpoints.md) (Jev was later removed)
+**Status:** Accepted (ADR-0028's partial supersession lapsed when Jev was removed)
 **Date:** 2026-08 (backfilled 2026-09-08)
 **Deciders:** lead
 **Implements:** [`architecture.md` § Observers](../design/architecture.md#observers)

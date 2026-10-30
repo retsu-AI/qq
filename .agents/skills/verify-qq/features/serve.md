@@ -9,11 +9,11 @@
 - Routes (`crates/qq-server/src/lib.rs`, `SessionCommandKind::route`):
   - `GET /v1/health`
   - `GET /v1/workspaces/{id}/events` (SSE)
-  - `POST /v1/workspaces/resolve`, `/v1/workspaces/snapshot`, `/v1/capabilities`, `/v1/models`
+  - `POST /v1/workspaces/resolve`, `/v1/workspaces/snapshot`, `/v1/workspaces/undo`, `/v1/capabilities`, `/v1/models`
   - `POST /v1/sessions`, `/v1/sessions/prompts`
   - `POST /v1/runs/steer`, `/v1/runs/cancel`
   - `POST /v1/tools/approvals`
-  - `POST /v1/sessions/{approval-mode, approval-delegate, model, profile, effort, delete, prune, compact, compact/rollback, side-questions, side-questions/cancel}`
+  - `POST /v1/sessions/{approval-mode, model, profile, effort, goal, goal/control, delete, prune, compact, compact/rollback, side-questions, side-questions/cancel}`
 
 ## How to get to it (user POV)
 

@@ -202,7 +202,7 @@ policy: (
 | Key | Who may set it | Meaning |
 | --- | --- | --- |
 | `builtin_preference` | any; only tightens | how hard the model is steered from shell habits to built-in tools |
-| `exposed_tools` | any; intersects | the tool catalog; empty list exposes nothing |
+| `exposed_tools` | any; intersects | the tool catalog; empty list exposes nothing. `command_status` comes with `shell` or `exec` and is not listed on its own: it waits on, reads, or cancels a command still running when its `yield_after_seconds` (default 30) passed |
 | `allowed_providers` / `denied_providers` | managed layers only | which providers a model route may use; denies accumulate |
 | `max_output_tokens` | managed layers only | ceiling for the top-level key; only lowers |
 | `require_https` | managed layers only | reject `http://` custom endpoints (loopback exempt); default `true` |
@@ -312,10 +312,6 @@ A run that may spawn sub-agents also gets `wait_agents` (wait for its
 background sub-agents) and `cancel_agent` (stop one). They come and go with
 `spawn_agent`: denying or exposing `spawn_agent` in policy, or allowing or
 denying it in a pack, applies to all three, and the two are not tool names of their own there.
-
-`command_status` follows `shell` and `exec` the same way: a run with either
-gets it, to wait on, read, or cancel a command that was still running when its
-`yield_after_seconds` (default 30) passed.
 
 Up to 8 roster entries. Each route must resolve like `model`. An entry may pin
 the reasoning effort its children run at with `effort: low` (any effort value);

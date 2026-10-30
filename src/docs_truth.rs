@@ -1042,6 +1042,16 @@ mod tests {
     }
 
     #[test]
+    fn the_repository_project_config_loads() {
+        let config =
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(".qq/config.ron"))
+                .unwrap();
+        if let Err(error) = SampleRoot::new().load(SampleFile::Config, &config) {
+            panic!(".qq/config.ron does not load: {error}");
+        }
+    }
+
+    #[test]
     fn every_qq_command_in_the_guide_parses() {
         use clap::Parser as _;
 

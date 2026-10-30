@@ -18,7 +18,7 @@ routes) before running, keeping the *same* primary `--model` for every arm
 | A2 | `a2-read-children-fast-worker.ron` | does cheap breadth lower $/pass |
 | A3 | `a3-depth-two.ron` | does recursion add anything over A2 |
 | B1 | `b1-audit-heuristic.ron` | does the audit raise pass rate; at what cost |
-| C1 | `c1-write-children.ron` | do supervised writers finish more tasks |
+| C1 | `c1-write-children.ron` | do write children finish more tasks |
 | T1 | (no overlay) | continuation: compare a build before and after D1 |
 
 Every arm turns the audit off except B1, so audit spend never confounds a

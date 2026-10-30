@@ -42,9 +42,9 @@ a last resort) to `/installed-agent/ca-certificates.crt` and points
 `qq run` inside the container uses `--approval full` by default: task
 containers are disposable, and the reference harnesses run unrestricted, so
 `full` is the comparable setting. Pass `--approval auto` (or `read-only`) to
-`cargo xtask eval run` for ablations; `auto` denies dangerous shell shapes such
-as `rm -r`, `kill`, `chown`, `sudo`, and `git push`, which many Terminal-Bench
-tasks legitimately need. The policy is recorded in the manifest and stamped on
+`cargo xtask eval run` for ablations; `auto` runs everything except the fixed
+stops (force-pushes, `sudo`, removing `/` or home, disk and power commands,
+credential-file reads), which some Terminal-Bench tasks legitimately need. The policy is recorded in the manifest and stamped on
 every trial, so `eval report` refuses to mix them.
 
 ## Routing Through A LiteLLM Gateway

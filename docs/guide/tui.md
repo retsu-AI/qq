@@ -27,9 +27,9 @@ below works the same either way.
 - **Top row**: workspace and session breadcrumb; on the right the model,
   `as <profile>` when not default, the approval mode when not `auto`,
   context used, cost, and `connecting` / `offline` when relevant.
-- **Sidebar** (100 columns and wider; `Ctrl-\` toggles): sessions grouped by
+- **Sidebar** (90 columns and wider; `Ctrl-\` toggles): sessions grouped by
   what you should do — NEEDS YOU, WORKING, IDLE, DONE — with unread counts.
-  Below 100 columns a one-line agent strip above the composer carries the
+  Below 90 columns a one-line agent strip above the composer carries the
   same counts.
 - **Transcript**: your prompts, the model's text, and one row per tool call
   with live elapsed time. `Ctrl-Up` / `Ctrl-Down` select a row; `Enter`
@@ -112,7 +112,7 @@ session switched to `ask` with `/approval`, every non-read call waits:
 ```
 ◇ approval needed
 $ cargo test  (in ~/my-project)
-y once   n deny   ask: approval applies once
+y approve   n deny
 ```
 
 `y` / `n`; `Shift-Y` / `Shift-N` decide and steer with a note.
@@ -148,7 +148,8 @@ Custom providers appear once their `auth` reference resolves — see
 run` refuse to start.
 
 - **Project not yet trusted**: startup continues with trusted configuration;
-  sensitive project settings stay disabled until you run `qq trust`.
+  sensitive project settings stay disabled until you run `qq trust` on the
+  server host. See [Permissions and trust](permissions.md#project-trust).
 - **No `model` configured**: the top row reads `no model` and the composer
   rule reads `choose a model with /models` until you pick one. `Enter` in
   the picker creates the first session with the highlighted model, which
@@ -159,17 +160,6 @@ run` refuse to start.
   session.`; `Alt-N` repeats the same line as a warning. Add the credential
   in another terminal and start `qq` again — the credential check runs at
   startup.
-
-## Trust
-
-The TUI starts without a project-trust prompt. Sensitive project models,
-providers, MCP servers, profiles, and packs stay disabled until you explicitly
-review and accept them with `qq trust` on the server host. Configure your model
-and connections globally to make them available before project trust.
-
-Trust covers the exact sensitive content. Changing that content disables the
-changed settings on subsequent loads until you trust it again. See
-[Permissions and trust](permissions.md#project-trust).
 
 ## Your first session
 
@@ -326,19 +316,16 @@ searchable palette that runs the highlighted command on `Enter`.
 
 Keys shown beside `?`, `Enter`, `Esc`, and `Esc Esc` apply only in context:
 `?` on an empty composer, `Enter` steers only while a run is active, `Esc`
-focuses the parent only when there is no overlay, trust, approval, or
+focuses the parent only when there is no overlay, approval, or
 question prompt, `@` completion list, transcript selection, open view, error notice,
 or active run to claim it, and `Esc Esc` cancels only while running.
-The keys for creating sessions, the navigator, cancel, and interrupt are
-defaults; rebind them in [`tui.ron`](configuration.md#tuiron).
+Rebind `toggle_navigator`, `create_root_session`, `create_child_session`,
+`cancel_run`, and `interrupt_run` in [`tui.ron`](configuration.md#tuiron);
+every hint that mentions a rebound key updates.
 
 Scrolling: mouse wheel, `PageUp` / `PageDown`, `Shift-Up` / `Shift-Down`,
 `Ctrl-Home` / `Ctrl-End` for top and live tail. Hold `Shift` to select text
 with the mouse, or `/mouse` to hand the mouse back to the terminal.
-
-Rebind `toggle_navigator`, `create_root_session`, `create_child_session`,
-`cancel_run`, and `interrupt_run` in [`tui.ron`](configuration.md#tuiron);
-every hint that mentions a rebound key updates.
 
 ## Notifications
 

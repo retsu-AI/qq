@@ -1,6 +1,6 @@
 # ADR-0021 — `Interactive` and `Network` effect classes: a question is a hold, not a permission; a fetch is authority over the outside, not the workspace
 
-**Status:** Accepted (`Interactive` merged in #49, `Network` in #50)
+**Status:** Accepted (`Interactive` merged in #49, `Network` in #50); host grants removed in #487: Auto and Full fetch any public host, and private, metadata and `deny_hosts` addresses stay refused
 **Date:** 2026-09-15
 **Deciders:** tool-layer plan T8/T9
 **Implements:** [`tool-layer.md` § D7](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/tool-layer.md#d7--fetch-ask_user-view_image-select_tools-t8-t9-t11),

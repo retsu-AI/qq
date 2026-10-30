@@ -186,10 +186,10 @@ Runs the user-scoped server in the foreground until `Ctrl-C`, SIGTERM or
 `qq daemon stop`. Without it,
 each `qq` starts a server inside itself when none is running, and quitting
 that `qq` cancels its runs ([Exiting](tui.md#exiting)). `qq serve` is for
-keeping runs going after the TUI quits, for several TUIs on one machine, and
-for remote clients over a private network. It prints `qq server listening
-at ADDR`; a second `qq serve` reports the existing one. Stopping it cancels
-every queued and running run, as quitting an owning TUI does.
+keeping runs going after the TUI quits and for several TUIs on one machine.
+It prints `qq server listening at ADDR`; a second `qq serve` reports the
+existing one. Stopping it cancels every queued and running run, as quitting
+an owning TUI does.
 
 ## `qq daemon` — a background server
 

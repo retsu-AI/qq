@@ -1,20 +1,21 @@
 # Runbook: Windows CI
 
 QQ's default development and qualification host is Linux. Windows-specific
-behavior is limited to process teardown in the shell tool and child ownership
-in the session runtime; it is qualified by a targeted CI job, not a full
-workspace run.
+behavior is process teardown and job objects in the shell tool, child
+ownership in the session runtime, and the daemon's job; it is qualified by
+two targeted CI jobs, not a full workspace run.
 
 ## The `windows-teardown` job
 
-`.github/workflows/ci.yml` runs nine exact tests on `windows-latest` with
+`.github/workflows/ci.yml` runs eleven exact tests on `windows-latest` with
 `bash .github/scripts/test-exact.sh <path>`. The helper invokes
 `cargo test --locked -p qq-core --lib <path> -- --exact --color never`, preserves
 command failures, and requires the named test plus exactly one passing,
 non-ignored result. A stale selector, ignored case, or missing result fails
 the step instead of silently qualifying zero tests. Git Bash supplies the
-shell on the Windows runner. They cover: dropped
-shell waiter kills the owned process; timeout confirms exit; a panicked
+shell on the Windows runner. They cover: an oversized
+first read row returns a budget error; Unicode read headers keep repaired
+windows; dropped shell waiter kills the owned process; timeout confirms exit; a panicked
 process leaves cleanup unconfirmed; unconfirmed exit blocks session
 continuation; dropped write drains the atomic apply; child mutation drains
 before replacement work; steering retains pending child admission; shutdown
@@ -23,6 +24,15 @@ continuation.
 
 The job records `rustc --version --verbose` so the qualified compiler is in
 the run log.
+
+## The `native-run-in-place` job
+
+The same workflow runs on `macos-latest` and `windows-latest`: the
+`run-in-place`, `run-then-undo`, `run-command-deadlines` and
+`permission-dispatch` smoke scenarios, the `QQ_HOME` path tests, Clippy on
+`qq-core`, the goal approval recovery test and the embedding example. On
+Windows it adds the command-job tests (`tools::windows_job::tests::…`) and
+the detached-daemon job test; on macOS, the process-group exit test.
 
 ## Adding a Windows-sensitive test
 

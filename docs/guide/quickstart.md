@@ -85,7 +85,7 @@ To review each action yourself, switch the session to `ask` with
 ```
 ◇ approval needed
 $ cargo test  (in ~/your-project)
-y once   n deny
+y approve   n deny
 ```
 
 `y` runs it once, and `n` denies and tells the model why. `/approval

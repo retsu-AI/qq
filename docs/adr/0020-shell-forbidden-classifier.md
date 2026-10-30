@@ -1,9 +1,9 @@
 # ADR-0020 — Shell `Forbidden` is a policy decision above every approval mode, produced by a CST classifier whose rules are self-tested data
 
-**Status:** Accepted
+**Status:** Superseded — the CST rule table and its Allow/Prompt/Forbidden tiers were replaced by fixed stops (#483), which Full does not apply; see [`tools.md` § Fixed Stops](../design/tools.md#fixed-stops). Kept for history.
 **Date:** 2026-09-14
 **Deciders:** tool-layer plan T6
-**Implements:** [`tools.md` § Shell Classification](../design/tools.md#shell-classification) (design as built; the plan's D5 is a pointer to it),
+**Implements:** `tools.md` § Shell Classification (deleted in #483) (design as built; the plan's D5 is a pointer to it),
 [`tools.md` § Approval Policy](../design/tools.md#approval-policy)
 
 ## Context

@@ -6,9 +6,10 @@
   - Help: `/help`, `/commands`.
   - Sessions and agents: `/sessions`, `/resume`, `/agents`, `/new`, `/clear`.
   - History: `/compact`, `/rollback`, `/prune`.
-  - Settings: `/models`, `/profile`, `/approval`, `/effort`, `/delegate`, `/skills`, `/theme`, `/mouse`, `/attention`.
+  - Settings: `/models`, `/profile`, `/approval`, `/effort`, `/skills`, `/theme`, `/mouse`, `/attention`.
+  - Goals: `/goal`.
   - Side questions: `/btw`, `/ask`, `/btw-new`, `/btw-cancel`.
-  - Other: `/changes`, `/editor`, `/quit`.
+  - Other: `/changes`, `/undo`, `/editor`, `/quit`.
 - **Keys:**
 
   | Key | Action |
@@ -22,7 +23,7 @@
   | `Alt-R` | reasoning |
   | `Alt-N` / `Alt-C` | new session / new child |
   | `Ctrl-G` | next session that needs you |
-  | `y` `n` (Ask); `a` `w` also for supervised non-Ask holds | approvals |
+  | `y` `n` (Ask) | approvals |
 
 ## How to get to it (user POV)
 
