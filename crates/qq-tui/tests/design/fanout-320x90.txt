@@ -1,0 +1,90 @@
+  ┃ split the v0.1.11 plan into twenty agents
+                                                                                                                                                                                                                                                                                          NEEDS YOU
+  ● Spawned  20 agents   ◐ 15  ◇ 1  ● 3  ✕ 1                                                                                                                                                                                                                                              1 ◇ deploy helper
+  ├ ◇ deploy helper   wants to run cargo publish --dry-run                                                                                                                                                                                                                                    wants to run cargo publish
+  ├ ✕ fix flake       exit 101 in reconnect                                                                                                                                                                                                                                               2 ◇ fix flake
+  ├ ◐ audit parser    reading src/audit_parser.rs                                                                                                                                                                                                                                             exit 101 in reconnect
+  ├ ◐ docs pass       reading src/docs_pass.rs
+  ├ ◐ lint sweep      reading src/lint_sweep.rs                                                                                                                                                                                                                                           WORKING
+  ├ ◐ port sse        reading src/port_sse.rs                                                                                                                                                                                                                                           ▎ 3 ◐ v0.1.11  ↳20
+  └ +14 more   ^T all agents                                                                                                                                                                                                                                                                  ◐ 16  ◇ 1  ✕ 1  ● 3        $3.40
+
+                                                                                                                                                                                                                                                                                          RECENT
+                                                                                                                                                                                                                                                                                          4 ○ refactor cli
+                                                                                                                                                                                                                                                                                          5 ● release notes
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ◐ 16 agents working · 2m 10s ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇ 2 need you  ^G
+  ┃ Ask QQ…
+    v0.1.11 · gpt-5.5 high · 22% · $3.40                                                                                                                                                                                                                                  ~/qq  main

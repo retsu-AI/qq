@@ -1,0 +1,24 @@
+  ┃ make the sse reconnect test deterministic
+
+  ● Read     crates/qq-client/src/sse.rs  412 lines
+  ✕ Ran      cargo test -p qq-client reconnect  exit 101
+  │ thread 'reconnect' panicked at sse.rs:212: timed out
+  ◐ Editing  crates/qq-client/src/sse.rs
+  │  208    let mut clock = Clock::system();
+  │  208 -  tokio::time::sleep(Duration::from_millis(50)).await;
+  │  208 +  tokio::time::pause();
+
+    The test slept on wall-clock time; pausing the runtime clock removes the
+    race. Applying the edit now.▍
+
+
+
+
+
+  ○ switch ─────────────────────────────────────────────────────── 30 sessions
+    ◇ deploy helper           2m   wants to run cargo publish --dry-run
+  ▎ ◐ sse reconnect     ↳3   now   editing crates/qq-client/src/sse.rs
+    ○ refactor cli            1h   Done. Every file compiles.
+    ● release notes           3h   Drafted the checklist.
+  ┃ sse▍
+    enter open   tab agents   ^A all agents   ^D delete   esc back

@@ -5,6 +5,8 @@ mod app;
 pub mod bench_support;
 mod commands;
 mod composer;
+#[cfg(feature = "bench-support")]
+pub mod design;
 mod effect;
 #[cfg(any(test, feature = "bench-support"))]
 pub mod fixtures;

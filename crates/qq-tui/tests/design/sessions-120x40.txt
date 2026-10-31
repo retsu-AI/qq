@@ -1,0 +1,40 @@
+  ┃ plan the release
+                                                                                            NEEDS YOU
+    Drafted the checklist.                                                                  1 ◇ Refactor
+
+  ● Spawned  1 agent   ◇ 1                                                                  WORKING
+  └ ◇ deploy helper   wants to run rm -rf build                                             2 ◐ Survey callers
+                                                                                            3 ◐ Write tests
+
+                                                                                            RECENT
+                                                                                          ▎ 4 ○ release  ↳1
+                                                                                            5 ○ Scratch
+                                                                                            6 ○ Notes
+                                                                                            7 ● Migrate
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ────────────────────────────────────────────────────────────────── ◇ 1 needs you  ^G
+  ┃ Ask QQ…
+    release · gpt-5.5 · 4%                                                  ~/qq  main

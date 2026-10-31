@@ -418,6 +418,71 @@ impl BenchHarness {
 }
 
 impl BenchHarness {
+    #[must_use]
+    pub fn with_agents(size: (u16, u16), roots: u8, agents_per_root: u8) -> Self {
+        let mut harness = Self::new(size, roots, 8);
+        let total = u16::from(roots) + u16::from(roots) * u16::from(agents_per_root);
+        assert!(total <= 256, "session ids are one byte");
+        for root in 0..roots {
+            for agent in 0..agents_per_root {
+                let index = roots + root * agents_per_root + agent;
+                let mut session = summary(session_id(index), SessionStatus::Idle);
+                session.title = format!("Agent {agent} of session {root}");
+                session.parent_id = Some(session_id(root));
+                session.updated_at_ms = u64::from(index);
+                harness.apply(
+                    index,
+                    SessionEvent::SessionCreated {
+                        session: Box::new(session),
+                    },
+                );
+            }
+        }
+        harness
+    }
+
+    pub fn start_agent_stream(&mut self, index: u8) -> MessageId {
+        let session = session_id(index);
+        let mut running = self.app.sessions.get(&session).map_or_else(
+            || summary(session, SessionStatus::Idle),
+            |known| known.summary.clone(),
+        );
+        running.status = SessionStatus::Running;
+        running.active_run_id = Some(run_id(index));
+        let message = assistant_message(session, 0xF0, "");
+        let id = message.id;
+        self.apply(
+            index,
+            SessionEvent::RunStarted {
+                origin: None,
+                session: Box::new(running),
+                run_id: run_id(index),
+                plan: None,
+            },
+        );
+        self.apply(
+            index,
+            SessionEvent::RunActivityChanged {
+                run_id: run_id(index),
+                activity: RunActivity::GeneratingResponse,
+            },
+        );
+        self.apply(index, SessionEvent::AssistantMessageStarted { message });
+        id
+    }
+
+    pub fn open_session_picker(&mut self) -> bool {
+        self.app
+            .execute(crate::commands::Command::OpenSessions)
+            .redraws()
+    }
+
+    pub fn escape(&mut self) -> bool {
+        self.app
+            .handle_terminal_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
+            .redraws()
+    }
+
     pub fn wheel_up(&mut self) -> bool {
         self.app
             .handle_terminal_event(Event::Mouse(crossterm::event::MouseEvent {
@@ -464,6 +529,43 @@ mod tests {
         ] {
             assert!(frame.contains(needle), "{needle} missing from frame");
         }
+    }
+
+    #[test]
+    fn the_agent_rail_parents_four_agents_under_each_of_fifty_sessions() {
+        let mut harness = BenchHarness::with_agents((160, 48), 50, 4);
+        assert_eq!(harness.app.sessions.thread_order().len(), 250);
+        let agents = harness
+            .app
+            .sessions
+            .thread_order()
+            .iter()
+            .filter_map(|id| harness.app.sessions[id].summary.parent_id)
+            .filter(|parent| *parent == session_id(7))
+            .count();
+        assert_eq!(agents, 4);
+        harness.start_agent_stream(50);
+        assert_eq!(
+            harness.app.sessions[&session_id(50)].summary.parent_id,
+            Some(session_id(0))
+        );
+        assert_eq!(
+            harness.app.sessions[&session_id(50)].summary.status,
+            SessionStatus::Running
+        );
+    }
+
+    #[test]
+    fn the_switcher_filter_narrows_fifty_sessions_and_esc_closes_it() {
+        let mut harness = BenchHarness::new((160, 48), 50, 0);
+        assert!(harness.open_session_picker());
+        assert_eq!(harness.app.filtered_sessions().len(), 50);
+        for character in "sn4".chars() {
+            harness.keystroke(character);
+        }
+        assert_eq!(harness.app.filtered_sessions().len(), 14);
+        harness.escape();
+        assert!(harness.app.filtered_sessions().is_empty());
     }
 
     #[test]

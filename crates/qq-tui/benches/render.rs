@@ -10,6 +10,10 @@ const BACKGROUND_SESSIONS: u8 = 8;
 const DELTA: &str = "streamed text that keeps arriving in small pieces and eventually forms a paragraph of prose.\n\n";
 const RUN_ON_DELTA: &str = "streamed text that keeps arriving in small pieces ";
 const LIVE_PREFILL: usize = 340;
+const SWITCHER_FILTER: &str = "sn4";
+const RAIL_ROOTS: u8 = 50;
+const AGENTS_PER_ROOT: u8 = 4;
+const STREAMING_AGENTS: u8 = 8;
 
 fn main() {
     let iterations = std::env::var("QQ_BENCH_ITERATIONS")
@@ -39,6 +43,74 @@ fn main() {
     compact_80x24(iterations);
     wide_160x48_full(iterations);
     resize_ultra(iterations);
+    switcher_open_and_filter(iterations);
+    agents_200_rail(iterations);
+    keystroke_with_8_streams(iterations);
+}
+
+fn switcher_open_and_filter(iterations: u32) {
+    let mut harness = BenchHarness::new(SIZE, 50, STEADY_MESSAGES);
+    harness.hide_sidebar();
+    harness.hide_inspector();
+    harness.settle_highlights();
+    let samples = collect(iterations, || {
+        let mut bytes = 0;
+        harness.open_session_picker();
+        bytes += harness.draw().len();
+        for character in SWITCHER_FILTER.chars() {
+            harness.keystroke(character);
+            bytes += harness.draw().len();
+        }
+        harness.escape();
+        bytes + harness.draw().len()
+    });
+    report_samples("switcher_50_open_filter_3_close_cycle", &samples);
+}
+
+fn agents_200_rail(iterations: u32) {
+    let mut harness = BenchHarness::with_agents(SIZE, RAIL_ROOTS, AGENTS_PER_ROOT);
+    harness.show_sidebar();
+    harness.hide_inspector();
+    harness.settle_highlights();
+    let samples = collect(iterations, || harness.draw().len());
+    report_samples("rail_50_sessions_200_agents_frame", &samples);
+    let first_agent = RAIL_ROOTS;
+    let messages: Vec<_> = (first_agent..first_agent + STREAMING_AGENTS)
+        .map(|index| (index, harness.start_agent_stream(index)))
+        .collect();
+    black_box(harness.draw());
+    let samples = collect(iterations, || {
+        for (index, message) in &messages {
+            harness.append(*index, *message, DELTA);
+        }
+        harness.draw().len()
+    });
+    report_samples(
+        "rail_50_sessions_200_agents_8_streaming_delta_to_frame",
+        &samples,
+    );
+}
+
+fn keystroke_with_8_streams(iterations: u32) {
+    let mut harness = BenchHarness::new(SIZE, BACKGROUND_SESSIONS, STEADY_MESSAGES);
+    harness.hide_sidebar();
+    harness.hide_inspector();
+    let messages: Vec<_> = (0..BACKGROUND_SESSIONS)
+        .map(|index| (index, harness.start_stream(index)))
+        .collect();
+    black_box(harness.draw());
+    let mut alphabet = ('a'..='z').cycle();
+    let samples = collect(iterations, || {
+        for (index, message) in &messages {
+            harness.append(*index, *message, DELTA);
+        }
+        harness.keystroke(alphabet.next().expect("cycle is infinite"));
+        harness.draw().len()
+    });
+    report_samples(
+        "keystroke_with_focused_and_7_background_streams_to_frame",
+        &samples,
+    );
 }
 
 fn steady_state(iterations: u32) {

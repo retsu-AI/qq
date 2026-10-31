@@ -1,0 +1,24 @@
+  ┃ why does the test flake?
+
+  ∴ thought for 12s
+
+    The test slept on wall-clock time; pausing the runtime clock removes the
+    race.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ────────────────────────────────────────────────────────────────────────────
+  ┃ Ask QQ…
+    flake · gpt-5.5 high

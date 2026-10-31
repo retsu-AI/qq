@@ -1,0 +1,24 @@
+  ┃ tidy the reconnect module
+
+    the model turn
+
+  ┃ prefer edit_file
+    steered
+
+  ┃ never mind
+    not sent · the run finished first
+
+
+
+
+
+
+
+
+
+
+
+  ◐ thinking · 6s ────────────────────────────────────────────────────────────
+  ┋ also check the tests
+  ┃ keep the public API▍
+    steering · gpt-5.5 high
