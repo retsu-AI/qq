@@ -861,7 +861,7 @@ impl App {
                 self.refresh_session_picker();
             }
         }
-        if initial && self.focused().is_some() && !self.startup_submits.is_empty() {
+        if self.focused().is_some() && !self.startup_submits.is_empty() {
             let draft = std::mem::take(&mut self.composer);
             let submits = std::mem::take(&mut self.startup_submits);
             for prompt in submits {
