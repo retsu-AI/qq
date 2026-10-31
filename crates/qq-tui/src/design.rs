@@ -7,13 +7,11 @@ mod scenes;
 
 pub use scenes::DesignScene;
 
-pub const MEASURE: usize = 100;
 pub const MARGIN: usize = 2;
 const LANE: usize = 2;
-const PAGE: usize = LANE + MEASURE;
-const COLUMN_REGULAR: usize = 26;
-const COLUMN_WIDE: usize = 34;
-const COLUMN_GUTTER: usize = 4;
+const SIDEBAR_REGULAR: usize = 32;
+const SIDEBAR_WIDE: usize = 42;
+const SIDEBAR_PADDING: usize = 2;
 const REGULAR: usize = 90;
 const WIDE: usize = 160;
 
@@ -268,6 +266,7 @@ pub struct Frame {
     pub rows: Vec<Row>,
     pub width: usize,
     pub body: usize,
+    pub sidebar: usize,
 }
 
 impl Frame {
@@ -386,45 +385,76 @@ pub fn render(scene: &Scene, size: (u16, u16)) -> Frame {
     let width = usize::from(size.0);
     let height = usize::from(size.1);
     let wide = width >= WIDE;
-    let column_width = match (width >= REGULAR && scene.sessions.len() >= 2, wide) {
+    let sidebar = match (width >= REGULAR && scene.sessions.len() >= 2, wide) {
         (false, _) => 0,
-        (true, false) => COLUMN_REGULAR,
-        (true, true) => COLUMN_WIDE,
+        (true, false) => SIDEBAR_REGULAR,
+        (true, true) => SIDEBAR_WIDE,
     };
-    let beside = if column_width > 0 {
-        COLUMN_GUTTER + column_width
-    } else {
-        0
-    };
-    let page = width
-        .saturating_sub(2 * MARGIN)
-        .saturating_sub(beside)
-        .min(PAGE);
-    let dock = dock_rows(&scene.dock, page + beside, column_width > 0);
+    let pane = width - sidebar;
+    let content = pane - 2 * MARGIN;
+    let dock = dock_rows(&scene.dock, content, sidebar > 0);
     let body = height - dock.len();
-    let mut transcript = transcript_rows(&scene.blocks, page - LANE);
+    let mut transcript = transcript_rows(&scene.blocks, content - LANE);
     if transcript.len() > body {
         transcript.drain(..transcript.len() - body);
     }
-    let column = column_rows(&scene.sessions, column_width, wide);
-    let mut rows = Vec::with_capacity(height);
+    let mut left = Vec::with_capacity(height);
     for index in 0..body {
-        let mut row = vec![span(" ".repeat(MARGIN), Role::Text)];
-        let line = transcript.get(index).cloned().unwrap_or_default();
-        let used = width_of(&line);
-        row.extend(line);
-        if let Some(entry) = column.get(index) {
-            row.push(span(" ".repeat(page + COLUMN_GUTTER - used), Role::Text));
-            row.extend(entry.iter().cloned());
-        }
-        rows.push(clip(row, width));
+        left.push(transcript.get(index).cloned().unwrap_or_default());
     }
-    for line in dock {
-        let mut row = vec![span(" ".repeat(MARGIN), Role::Text)];
-        row.extend(line);
-        rows.push(clip(row, width));
+    left.extend(dock);
+    let side = sidebar_rows(&scene.sessions, sidebar, wide);
+    let rows = left
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let mut row = vec![span(" ".repeat(MARGIN), Role::Text)];
+            row.extend(clip(line, content));
+            if sidebar > 0 {
+                let row = pad(row, pane);
+                let mut row = row;
+                let entry = side.get(index).cloned().unwrap_or_default();
+                row.extend(
+                    pad(entry, sidebar)
+                        .into_iter()
+                        .map(|span| Span { fill: true, ..span }),
+                );
+                row
+            } else {
+                row
+            }
+        })
+        .collect();
+    Frame {
+        rows,
+        width,
+        body,
+        sidebar,
     }
-    Frame { rows, width, body }
+}
+
+fn pad(row: Row, width: usize) -> Row {
+    let mut row = clip(row, width);
+    let used = width_of(&row);
+    if used < width {
+        row.push(span(" ".repeat(width - used), Role::Text));
+    }
+    row
+}
+
+fn sidebar_rows(sessions: &[SessionRow], sidebar: usize, wide: bool) -> Vec<Row> {
+    if sidebar == 0 {
+        return Vec::new();
+    }
+    let inner = sidebar - 2 * SIDEBAR_PADDING;
+    let indent = || span(" ".repeat(SIDEBAR_PADDING), Role::Text);
+    let mut rows = vec![Vec::new()];
+    for entry in column_rows(sessions, inner, wide) {
+        let mut row = vec![indent()];
+        row.extend(clip(entry, inner));
+        rows.push(row);
+    }
+    rows
 }
 
 fn clip(row: Row, width: usize) -> Row {
@@ -596,16 +626,15 @@ fn tool_rows(tool: &Tool, text: usize, rows: &mut Vec<Row>) {
         Role::Faint
     };
     let room = text.saturating_sub(VERB + tool.metric.width() + 2);
-    let left = vec![
+    let mut row = vec![
         lane(tool.state.glyph(), tool.state.row_role()),
         span(format!("{:<VERB$}", tool.verb), Role::Text),
         span(fit(&tool.subject, room), Role::Muted),
     ];
-    rows.push(right_aligned(
-        left,
-        vec![span(tool.metric.clone(), metric_role)],
-        LANE + text,
-    ));
+    if !tool.metric.is_empty() {
+        row.push(span(format!("  {}", tool.metric), metric_role));
+    }
+    rows.push(row);
     for line in &tool.tail {
         rows.push(vec![
             lane("│", Role::Faint),
@@ -654,12 +683,16 @@ fn agent_rows(lanes: &[Lane], text: usize, rows: &mut Vec<Row>) {
         }
     }
     let noun = if lanes.len() == 1 { "agent" } else { "agents" };
-    let header = vec![
+    let mut header = vec![
         lane("●", State::Done.role()),
         span(format!("{:<VERB$}", "Spawned"), Role::Text),
         span(format!("{} {noun}", lanes.len()), Role::Muted),
     ];
-    rows.push(right_aligned(header, tally, LANE + text));
+    if !tally.is_empty() {
+        header.push(span("   ", Role::Text));
+        header.extend(tally);
+    }
+    rows.push(header);
     let urgency = |state: State| match state {
         State::NeedsYou => 0,
         State::Failed => 1,

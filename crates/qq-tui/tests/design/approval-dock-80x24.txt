@@ -1,4 +1,4 @@
-  ◇ Edit     crates/qq-tui/src/view/wrap.rs                            waiting
+  ◇ Edit     crates/qq-tui/src/view/wrap.rs  waiting
 
 
 

@@ -95,26 +95,25 @@ fn the_golden_path_gives_the_transcript_more_rows_than_today() {
 }
 
 #[test]
-fn the_page_stays_left_anchored_as_the_terminal_widens() {
+fn the_frame_spans_the_whole_terminal_at_every_size() {
     for scene in DesignScene::ALL {
-        let frames: Vec<Vec<String>> = [(200, 60), (320, 90), (480, 120)]
-            .into_iter()
-            .map(|size| render(scene, size))
-            .collect();
-        for frame in &frames[1..] {
-            assert_eq!(frame[..12], frames[0][..12], "{scene:?} body moved");
-            assert_eq!(
-                frame[frame.len() - 3..],
-                frames[0][frames[0].len() - 3..],
-                "{scene:?} dock moved"
-            );
-        }
-        for row in render(scene, (480, 120)) {
-            let indent = row.len() - row.trim_start().len();
+        for &(width, height) in GOLDEN_SIZES {
+            let frame = design::render(&scene.scene(), (width, height));
+            let width = usize::from(width);
+            let rows = frame.plain();
+            let rule = &rows[frame.body];
+            let pane = width - frame.sidebar;
+            let reach = unicode_columns(rule.trim_end());
             assert!(
-                row.is_empty() || indent <= 120,
-                "{scene:?} pads {indent} columns: {row:?}"
+                reach + 2 >= pane - 2,
+                "{scene:?} {width}: rule stops at {reach} of {pane}"
             );
+            if frame.sidebar > 0 {
+                for row in &frame.rows {
+                    let columns: usize = row.iter().map(|span| unicode_columns(&span.text)).sum();
+                    assert_eq!(columns, width, "{scene:?} {width}: sidebar not flush right");
+                }
+            }
         }
     }
 }

@@ -1,13 +1,13 @@
-  ┃ make the sse reconnect test deterministic                                                 NEEDS YOU
-                                                                                              1 ◇ deploy helper
-  ● Read     crates/qq-client/src/sse.rs                                       412 lines
-  ✕ Ran      cargo test -p qq-client reconnect                                  exit 101      WORKING
-  │ thread 'reconnect' panicked at sse.rs:212: timed out                                    ▎ 2 ◐ sse reconnect  ↳3
-  ◐ Editing  crates/qq-client/src/sse.rs
-  │  208    let mut clock = Clock::system();                                                  RECENT
-  │  208 -  tokio::time::sleep(Duration::from_millis(50)).await;                              3 ○ refactor cli
-  │  208 +  tokio::time::pause();                                                             4 ● release notes
-
+  ┃ make the sse reconnect test deterministic
+                                                                                            NEEDS YOU
+  ● Read     crates/qq-client/src/sse.rs  412 lines                                         1 ◇ deploy helper
+  ✕ Ran      cargo test -p qq-client reconnect  exit 101
+  │ thread 'reconnect' panicked at sse.rs:212: timed out                                    WORKING
+  ◐ Editing  crates/qq-client/src/sse.rs                                                  ▎ 2 ◐ sse reconnect  ↳3
+  │  208    let mut clock = Clock::system();
+  │  208 -  tokio::time::sleep(Duration::from_millis(50)).await;                            RECENT
+  │  208 +  tokio::time::pause();                                                           3 ○ refactor cli
+                                                                                            4 ● release notes
     The test slept on wall-clock time; pausing the runtime clock removes the race.
     Applying the edit now.▍
 
@@ -35,6 +35,6 @@
 
 
 
-  ◐ editing sse.rs · 14s ─────────────────────────────────────────────────────────────────────────── ◇ 1 needs you  ^G
+  ◐ editing sse.rs · 14s ─────────────────────────────────────────── ◇ 1 needs you  ^G
   ┃ Ask QQ…
-    sse reconnect · gpt-5.5 high · 31% · $0.42                                                              ~/qq  main
+    sse reconnect · gpt-5.5 high · 31% · $0.42                              ~/qq  main

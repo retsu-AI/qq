@@ -47,7 +47,7 @@
 
 
 
-  ──────────────────────────────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     New goal
     Objective
     finish the migration and verify the workspace
@@ -57,4 +57,4 @@
     configured defaults · 200 runs · 24h · 256 turns per run
     A check command runs only after /goal check consent.
   ┃ tab next field   ←→ budget   enter create   esc back
-    billing · gpt-5.5 high · 4%                                                               ~/qq  main
+    billing · gpt-5.5 high · 4%                                                                                                                                                             ~/qq  main

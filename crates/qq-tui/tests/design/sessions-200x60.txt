@@ -1,23 +1,21 @@
-  ┃ plan the release                                                                                          NEEDS YOU
-                                                                                                              1 ◇ Refactor
-    Drafted the checklist.                                                                                        finished · unseen      $0.12
+  ┃ plan the release
+                                                                                                                                                                  NEEDS YOU
+    Drafted the checklist.                                                                                                                                        1 ◇ Refactor
+                                                                                                                                                                      finished · unseen          $0.12
+  ● Spawned  1 agent   ◇ 1
+  └ ◇ deploy helper   wants to run rm -rf build                                                                                                                   WORKING
+                                                                                                                                                                  2 ◐ Survey callers
+                                                                                                                                                                      Found twelve call sites
+                                                                                                                                                                  3 ◐ Write tests
+                                                                                                                                                                      compacting context
 
-  ● Spawned  1 agent                                                                                 ◇ 1      WORKING
-  └ ◇ deploy helper   wants to run rm -rf build                                                               2 ◐ Survey callers
-                                                                                                                  Found twelve call sites
-                                                                                                              3 ◐ Write tests
-                                                                                                                  compacting context
-
-                                                                                                              RECENT
-                                                                                                            ▎ 4 ○ release  ↳1
-                                                                                                                  ◇ deploy helper
-                                                                                                              5 ○ Scratch
-                                                                                                              6 ○ Notes
-                                                                                                              7 ● Migrate
-                                                                                                                  done                   $0.04
-
-
-
+                                                                                                                                                                  RECENT
+                                                                                                                                                                ▎ 4 ○ release  ↳1
+                                                                                                                                                                      ◇ deploy helper
+                                                                                                                                                                  5 ○ Scratch
+                                                                                                                                                                  6 ○ Notes
+                                                                                                                                                                  7 ● Migrate
+                                                                                                                                                                      done                       $0.04
 
 
 
@@ -55,6 +53,8 @@
 
 
 
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇ 1 needs you  ^G
+
+
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇ 1 needs you  ^G
   ┃ Ask QQ…
-    release · gpt-5.5 · 4%                                                                                                          ~/qq  main
+    release · gpt-5.5 · 4%                                                                                                                        ~/qq  main

@@ -1,6 +1,6 @@
   ┃ split the v0.1.11 plan into twenty agents
 
-  ● Spawned  20 agents                                     ◐ 15  ◇ 1  ● 3  ✕ 1
+  ● Spawned  20 agents   ◐ 15  ◇ 1  ● 3  ✕ 1
   ├ ◇ deploy helper   wants to run cargo publish --dry-run
   ├ ✕ fix flake       exit 101 in reconnect
   ├ ◐ audit parser    reading src/audit_parser.rs

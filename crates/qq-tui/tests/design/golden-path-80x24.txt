@@ -1,7 +1,7 @@
   ┃ make the sse reconnect test deterministic
 
-  ● Read     crates/qq-client/src/sse.rs                             412 lines
-  ✕ Ran      cargo test -p qq-client reconnect                        exit 101
+  ● Read     crates/qq-client/src/sse.rs  412 lines
+  ✕ Ran      cargo test -p qq-client reconnect  exit 101
   │ thread 'reconnect' panicked at sse.rs:212: timed out
   ◐ Editing  crates/qq-client/src/sse.rs
   │  208    let mut clock = Clock::system();

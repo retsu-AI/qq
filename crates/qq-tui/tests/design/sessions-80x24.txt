@@ -2,7 +2,7 @@
 
     Drafted the checklist.
 
-  ● Spawned  1 agent                                                       ◇ 1
+  ● Spawned  1 agent   ◇ 1
   └ ◇ deploy helper   wants to run rm -rf build
 
 

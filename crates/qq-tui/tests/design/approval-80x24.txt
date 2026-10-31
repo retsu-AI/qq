@@ -2,7 +2,7 @@
 
     I'll patch the loop bound.
 
-  ◇ Edit     crates/qq-tui/src/view/wrap.rs                            waiting
+  ◇ Edit     crates/qq-tui/src/view/wrap.rs  waiting
 
 
 
