@@ -3957,12 +3957,7 @@ fn edit_diffs_keep_line_numbers_and_sign_colors_on_the_rail() {
     let lines = expanded_call_rows(&call, 60);
     assert_eq!(
         squashed_rows(&lines),
-        [
-            "│ 10 context",
-            "│ 11 - old",
-            "│ 11 + new",
-            "│ … 1 more line"
-        ]
+        ["│ 10 context", "│ 11 - old", "│ 11 + new", "│ 12 tail"]
     );
     assert!(lines.iter().all(is_rail_row), "{lines:?}");
     assert_eq!(style_of(&lines, "new"), Some(success()));
