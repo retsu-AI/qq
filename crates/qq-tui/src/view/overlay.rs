@@ -703,10 +703,7 @@ pub(super) fn goal_check_picker(app: &App, width: usize, height: usize) -> Vec<L
         .lines()
         .map(|line| line.chars().filter_map(terminal_safe_character).collect())
         .collect();
-    let fits_on_rule = lines.len() == 1
-        && text_width(&lines[0]) <= super::chrome::GOAL_CHECK_RULE_COMMAND
-        && text_width(&lines[0]) + 24 <= width;
-    if !fits_on_rule {
+    {
         let wrapped: Vec<Line> = lines
             .iter()
             .flat_map(|line| {

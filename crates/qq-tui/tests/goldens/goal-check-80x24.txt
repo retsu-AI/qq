@@ -15,8 +15,8 @@
 
 
 
-
-  ◇ run cargo test -p billing in /workspace? ────────────────────── 3 sessions
+  ◇ run this check in /workspace? ───────────────────────────────── 3 sessions
+    $ cargo test -p billing
   ▎ deny                                withhold consent; pause an active goal
     allow once                          one start; a failure does not refund…
     allow repeated checks               this goal and this exact command only

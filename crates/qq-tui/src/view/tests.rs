@@ -6157,3 +6157,13 @@ fn the_selected_goal_check_scope_stays_visible_on_a_short_terminal() {
     assert!(text.contains("▎ allow repeated checks"), "{text}");
     assert!(text.contains("$ echo"), "{text}");
 }
+
+#[test]
+fn the_goal_check_panel_always_shows_the_command_even_under_a_notice() {
+    let mut app = goal_check_app("cargo test");
+    app.note_editor_failure("earlier failure");
+    let rule = frame_rows(&[super::chrome::dock_rule(&app, 116, true)]).join("");
+    assert!(rule.contains("earlier failure"), "{rule}");
+    let panel = frame_rows(&super::overlay::goal_check_picker(&app, 116, 12)).join("\n");
+    assert!(panel.contains("$ cargo test"), "{panel}");
+}

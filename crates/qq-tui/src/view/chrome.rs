@@ -121,8 +121,6 @@ pub(super) fn status_row(app: &App, width: usize, compact: bool) -> Line {
     }
 }
 
-pub(super) const GOAL_CHECK_RULE_COMMAND: usize = 40;
-
 pub(crate) const fn mode_name(mode: ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::ReadOnly => "read-only",
@@ -193,19 +191,7 @@ pub(super) fn rule_activity(app: &App) -> Option<String> {
         return Some(verb.to_owned());
     }
     if let Some(crate::input::Overlay::GoalCheck { target, .. }) = &app.overlay {
-        let command: String = target
-            .command
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .filter_map(terminal_safe_character)
-            .collect();
-        return Some(format!(
-            "run {} in {}?",
-            preview(&command, GOAL_CHECK_RULE_COMMAND),
-            target.workspace_path
-        ));
+        return Some(format!("run this check in {}?", target.workspace_path));
     }
     if let Some(goal) = session.goal.as_deref() {
         match &goal.status {
