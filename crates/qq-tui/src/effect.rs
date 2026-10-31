@@ -6,8 +6,20 @@ pub(crate) enum Effect {
     Redraw(Redraw),
     Send(ClientRequest),
     Editor(String),
-    ResolveMentions(PendingSubmit),
-    CompleteMention { query: String, recent: Vec<String> },
+    ResolveMentions {
+        id: u64,
+        submit: PendingSubmit,
+    },
+    CompleteMention {
+        id: u64,
+        query: String,
+        recent: Vec<String>,
+    },
+    PrefetchBody {
+        id: u64,
+        workspace_id: qq_protocol::WorkspaceId,
+        session_id: qq_protocol::SessionId,
+    },
     Attention(Attention),
     MouseCapture(bool),
     Quit,
@@ -25,6 +37,7 @@ pub(crate) enum SubmitTarget {
         session_id: qq_protocol::SessionId,
     },
     Steer {
+        session_id: qq_protocol::SessionId,
         run_id: qq_protocol::RunId,
         interrupt: bool,
     },
@@ -40,8 +53,8 @@ pub(crate) enum Redraw {
 pub(crate) struct Effects(Vec<Effect>);
 
 impl Effects {
-    pub(crate) fn resolve_mentions(submit: PendingSubmit) -> Self {
-        Self(vec![Effect::ResolveMentions(submit)])
+    pub(crate) fn resolve_mentions(id: u64, submit: PendingSubmit) -> Self {
+        Self(vec![Effect::ResolveMentions { id, submit }])
     }
 
     #[must_use]

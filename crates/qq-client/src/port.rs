@@ -13,9 +13,39 @@ pub enum ClientRequest {
     Models(qq_protocol::ModelSelection),
 }
 
+#[derive(Clone)]
+pub struct StartupUpdate(Arc<dyn std::any::Any + Send + Sync>);
+
+impl StartupUpdate {
+    #[must_use]
+    pub fn new(value: impl std::any::Any + Send + Sync) -> Self {
+        Self(Arc::new(value))
+    }
+
+    #[must_use]
+    pub fn downcast_ref<T: std::any::Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+}
+
+impl std::fmt::Debug for StartupUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("StartupUpdate")
+    }
+}
+
+impl PartialEq for StartupUpdate {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for StartupUpdate {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientUpdate {
     Connection(ConnectionState),
+    Startup(StartupUpdate),
     Snapshot(WorkspaceSnapshot),
     ResetSnapshot(WorkspaceSnapshot),
     Models {

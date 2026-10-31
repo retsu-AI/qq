@@ -32,7 +32,9 @@ mod time;
 
 #[cfg(feature = "native")]
 pub use interactive::{InitialSession, TuiClient};
-pub use port::{ClientFailure, ClientPort, ClientRequest, ClientUpdate, ConnectionState};
+pub use port::{
+    ClientFailure, ClientPort, ClientRequest, ClientUpdate, ConnectionState, StartupUpdate,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub trait MaybeSend: Send {}
