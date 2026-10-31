@@ -169,10 +169,12 @@ impl FrameRenderer {
         let max_composer_rows = layout::max_composer_rows(width, height)
             .min(height.saturating_sub(4))
             .max(1);
-        let draft_lines = queued_drafts(app, dock_width);
         let (composer_lines, caret) = composer(app, dock_width, max_composer_rows);
+        let fixed_rows = 2 + composer_lines.len();
+        let draft_budget = (height / 4).min(height.saturating_sub(fixed_rows + 1));
+        let draft_lines = queued_drafts(app, dock_width, draft_budget);
         let mode = app.mode();
-        let panel_limit = (height.saturating_sub(3 + composer_lines.len() + draft_lines.len())) / 2;
+        let panel_limit = height.saturating_sub(fixed_rows + draft_lines.len()) / 2;
         let panel = dock_panel(app, dock_width, panel_limit.max(1));
         let mut dock: Vec<Line> = Vec::new();
         dock.push(dock_rule(app, dock_width, rail_width > 0));

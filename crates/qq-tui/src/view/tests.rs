@@ -5990,3 +5990,83 @@ fn diff_rows_keep_every_leading_space_of_the_source() {
     assert_eq!(body(&rows[1]).as_deref(), Some("run_job()"), "{rows:#?}");
     assert_eq!(body(&rows[2]).as_deref(), Some("    keep()"), "{rows:#?}");
 }
+
+#[test]
+fn the_current_question_keeps_every_option_when_answered_history_overflows_the_dock() {
+    let mut app = app_with_messages(1);
+    let session_id = app.focused().unwrap();
+    let tool_call = tool_call_snapshot(
+        9,
+        "ask_user",
+        "{}",
+        ToolCallState::AwaitingApproval,
+        None,
+        false,
+    );
+    let question = |prompt: &str, options: usize| qq_protocol::Question {
+        prompt: prompt.to_owned(),
+        options: (1..=options)
+            .map(|index| format!("option-{index}"))
+            .collect(),
+        free_text: false,
+    };
+    app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(tool_call.run_id),
+        occurred_at_ms: 2,
+        ..fixtures::envelope(
+            2,
+            session_id,
+            SessionEvent::ToolApprovalRequested {
+                tool_call,
+                shell: None,
+                edit: None,
+                question: Some(Box::new(qq_protocol::QuestionPreview {
+                    questions: vec![
+                        question("First?", 2),
+                        question("Second?", 2),
+                        question("Third?", 2),
+                        question("Fourth?", 6),
+                    ],
+                })),
+                fetch: None,
+            },
+        )
+    }));
+    for _ in 0..3 {
+        app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Char('1'),
+            KeyModifiers::NONE,
+        )));
+    }
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
+    let text = rows.join("\n");
+    assert!(text.contains("Fourth?"), "{text}");
+    assert!(text.contains("option-6"), "{text}");
+    assert!(text.contains("esc decline"), "{text}");
+}
+
+#[test]
+fn many_queued_drafts_never_push_the_composer_or_status_line_off_screen() {
+    let mut app = app_with_messages(1);
+    let session = app.sessions.get_mut(&SESSION).unwrap();
+    for index in 0..8 {
+        session.drafts.push_back(format!(
+            "draft {index} {}",
+            "long enough to wrap onto a second row of the dock ".repeat(2)
+        ));
+    }
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 80, 20));
+    assert_eq!(rows.len(), 20);
+    assert!(
+        rows[18].trim_start().starts_with("┃ Ask QQ…"),
+        "composer is on the row above the status line: {rows:#?}"
+    );
+    assert!(rows[19].contains("gpt-test"), "{rows:#?}");
+    assert!(
+        rows.iter().any(|row| row.contains("more queued")),
+        "{rows:#?}"
+    );
+    let cursor = renderer.cursor.expect("composer caret");
+    assert_eq!(cursor.row, 18);
+}

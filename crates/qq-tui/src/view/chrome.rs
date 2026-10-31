@@ -480,7 +480,7 @@ pub(super) fn dock_panel(app: &App, width: usize, limit: usize) -> Vec<Line> {
         Mode::Sessions => session_picker(app, width, limit),
         Mode::Commands => command_picker(app, width, limit),
         Mode::History => history_picker(app, width, limit),
-        Mode::Approval => approval_block(app, width),
+        Mode::Approval => approval_block(app, width, limit),
         Mode::Compose => match app.view() {
             View::Goal(session_id) => {
                 let rows = goal_panel(app, session_id, width);
@@ -905,7 +905,7 @@ pub(super) fn composer(
     (wrapped, caret)
 }
 
-pub(super) fn queued_drafts(app: &App, width: usize) -> Vec<Line> {
+pub(super) fn queued_drafts(app: &App, width: usize, budget: usize) -> Vec<Line> {
     let Some(session_id) = app.focused() else {
         return Vec::new();
     };
@@ -920,12 +920,12 @@ pub(super) fn queued_drafts(app: &App, width: usize) -> Vec<Line> {
     let drafts: Vec<&str> = waiting_steers
         .chain(app.queued_drafts(session_id))
         .collect();
-    if drafts.is_empty() {
+    if drafts.is_empty() || budget == 0 {
         return Vec::new();
     }
-    drafts
+    let rows: Vec<Vec<Line>> = drafts
         .into_iter()
-        .flat_map(|draft| {
+        .map(|draft| {
             let safe: String = draft.chars().filter_map(terminal_safe_character).collect();
             wrap_line(
                 Line::styled(safe, muted()),
@@ -942,7 +942,28 @@ pub(super) fn queued_drafts(app: &App, width: usize) -> Vec<Line> {
             })
             .collect::<Vec<_>>()
         })
-        .collect()
+        .collect();
+    let total: usize = rows.iter().map(Vec::len).sum();
+    if total <= budget {
+        return rows.into_iter().flatten().collect();
+    }
+    let mut kept: Vec<Vec<Line>> = Vec::new();
+    let mut used = 1;
+    for draft in rows.iter().rev() {
+        if used + draft.len() > budget {
+            break;
+        }
+        used += draft.len();
+        kept.push(draft.clone());
+    }
+    kept.reverse();
+    let hidden = rows.len() - kept.len();
+    let mut out = vec![truncate_line(
+        Line::styled(format!("┋ +{hidden} more queued"), faint()),
+        width,
+    )];
+    out.extend(kept.into_iter().flatten());
+    out
 }
 
 pub(super) fn dock_keys(app: &App) -> Option<Vec<(&'static str, &'static str)>> {

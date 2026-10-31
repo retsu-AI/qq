@@ -476,22 +476,31 @@ pub(super) fn command_picker(app: &App, width: usize, height: usize) -> Vec<Line
     )
 }
 
-pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
+pub(super) fn approval_block(app: &App, width: usize, limit: usize) -> Vec<Line> {
     let mut lines = Vec::new();
     if let Some(question) = app.pending_question() {
         let answered = app.question_answers.len();
+        let current = question.questions.get(answered);
+        let current_rows = current.map_or(0, |item| 2 + item.options.len());
+        let heading_rows = usize::from(question.questions.len() > 1);
+        let history_room = limit.saturating_sub(heading_rows + current_rows);
+        let shown_history = answered.min(history_room);
         if question.questions.len() > 1 {
-            lines.push(Line::styled(
-                format!(
-                    "  question {}/{}",
-                    (answered + 1).min(question.questions.len()),
-                    question.questions.len()
-                ),
-                faint(),
-            ));
+            let mut heading = format!(
+                "  question {}/{}",
+                (answered + 1).min(question.questions.len()),
+                question.questions.len()
+            );
+            if shown_history < answered {
+                heading.push_str(&format!(" · {} answered", answered - shown_history));
+            }
+            lines.push(Line::styled(heading, faint()));
         }
         for (index, item) in question.questions.iter().enumerate() {
             if index < answered {
+                if index < answered - shown_history {
+                    continue;
+                }
                 let mut line = Line::styled("  ", normal());
                 line.push(item.prompt.as_str(), muted());
                 line.push(" → ", faint());
@@ -505,10 +514,34 @@ pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
             let mut line = Line::styled("  ", normal());
             line.push(item.prompt.as_str(), normal().bold());
             lines.push(truncate_line(line, width));
-            for (option_index, option) in item.options.iter().enumerate() {
-                let mut line = Line::styled(format!("  {} ", option_index + 1), normal());
-                line.push(option.as_str(), muted());
-                lines.push(truncate_line(line, width));
+            let option_room = limit.saturating_sub(lines.len() + 1).max(1);
+            let options: Vec<String> = item
+                .options
+                .iter()
+                .enumerate()
+                .map(|(option_index, option)| format!("{} {option}", option_index + 1))
+                .collect();
+            if options.len() <= option_room {
+                for option in &options {
+                    let (number, label) = option.split_once(' ').unwrap_or((option, ""));
+                    let mut line = Line::styled(format!("  {number} "), normal());
+                    line.push(label, muted());
+                    lines.push(truncate_line(line, width));
+                }
+            } else {
+                let per_row = options.len().div_ceil(option_room);
+                for chunk in options.chunks(per_row) {
+                    let mut line = Line::styled("  ", normal());
+                    for (position, option) in chunk.iter().enumerate() {
+                        if position > 0 {
+                            line.push("   ", normal());
+                        }
+                        let (number, label) = option.split_once(' ').unwrap_or((option, ""));
+                        line.push(format!("{number} "), normal());
+                        line.push(label, muted());
+                    }
+                    lines.push(truncate_line(line, width));
+                }
             }
             let mut hint = Line::styled("  ", normal());
             hint.push(
