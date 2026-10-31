@@ -132,62 +132,83 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, tier: Tier) -> Vec
         row
     };
     let (entries, _) = rail_entries(app);
-    let mut plan: Vec<Line> = vec![Line::default()];
+    enum Row {
+        Blank,
+        Header(&'static str),
+        Session(usize),
+        Detail(usize),
+    }
+    let mut plan: Vec<Row> = vec![Row::Blank];
     let mut focused_row = 0;
     let mut current: Option<&str> = None;
     for (index, entry) in entries.iter().enumerate() {
         let label = rail_group_label(entry.group);
         if current != Some(label) {
             if current.is_some() {
-                plan.push(Line::default());
+                plan.push(Row::Blank);
             }
             current = Some(label);
-            plan.push(Line::styled(format!("  {label}"), faint()));
+            plan.push(Row::Header(label));
         }
-        let focused = app.focused() == Some(entry.id);
-        if focused {
+        if app.focused() == Some(entry.id) {
             focused_row = plan.len();
         }
-        let view = &app.sessions[&entry.id];
-        let mut line = if focused {
-            Line::styled("▎ ", accent())
-        } else {
-            Line::styled("  ", normal())
-        };
-        line.push(
-            if index < 9 {
-                format!("{} ", index + 1)
-            } else {
-                "  ".to_owned()
-            },
-            faint(),
-        );
-        let (glyph, glyph_style) = rail_glyph(app, entry.id);
-        line.push(format!("{glyph} "), glyph_style);
-        let agents = app
-            .sessions
-            .children_of(entry.id)
-            .iter()
-            .filter(|child| app.sessions.contains_key(child))
-            .count();
-        let badge = if agents > 0 {
-            format!("  ↳{agents}")
-        } else if entry.unread > 0 {
-            format!("  {} new", entry.unread)
-        } else {
-            String::new()
-        };
-        let room = inner.saturating_sub(line.width() + text_width(&badge));
-        line.push(
-            fit_text(&view.summary.title, room),
-            if focused { normal() } else { muted() },
-        );
-        line.push(badge, faint());
-        plan.push(line);
-        if wide {
-            let activity = live_status_line(app, entry.id).map(|(text, _)| text);
-            let cost = entry.cost.map(format_cost);
-            if activity.is_some() || cost.is_some() {
+        plan.push(Row::Session(index));
+        if wide && (entry.live || entry.cost.is_some()) {
+            plan.push(Row::Detail(index));
+        }
+    }
+    let start = focused_row
+        .saturating_sub(height / 2)
+        .min(plan.len().saturating_sub(height));
+    let render = |row: &Row| -> Line {
+        match *row {
+            Row::Blank => Line::default(),
+            Row::Header(label) => Line::styled(format!("  {label}"), faint()),
+            Row::Session(index) => {
+                let entry = &entries[index];
+                let focused = app.focused() == Some(entry.id);
+                let view = &app.sessions[&entry.id];
+                let mut line = if focused {
+                    Line::styled("▎ ", accent())
+                } else {
+                    Line::styled("  ", normal())
+                };
+                line.push(
+                    if index < 9 {
+                        format!("{} ", index + 1)
+                    } else {
+                        "  ".to_owned()
+                    },
+                    faint(),
+                );
+                let (glyph, glyph_style) = rail_glyph(app, entry.id);
+                line.push(format!("{glyph} "), glyph_style);
+                let agents = app
+                    .sessions
+                    .children_of(entry.id)
+                    .iter()
+                    .filter(|child| app.sessions.contains_key(child))
+                    .count();
+                let badge = if agents > 0 {
+                    format!("  ↳{agents}")
+                } else if entry.unread > 0 {
+                    format!("  {} new", entry.unread)
+                } else {
+                    String::new()
+                };
+                let room = inner.saturating_sub(line.width() + text_width(&badge));
+                line.push(
+                    fit_text(&view.summary.title, room),
+                    if focused { normal() } else { muted() },
+                );
+                line.push(badge, faint());
+                line
+            }
+            Row::Detail(index) => {
+                let entry = &entries[index];
+                let activity = live_status_line(app, entry.id).map(|(text, _)| text);
+                let cost = entry.cost.map(format_cost);
                 let mut line = Line::styled("      ", normal());
                 let cost_width = cost.as_deref().map_or(0, |cost| text_width(cost) + 2);
                 let room = inner.saturating_sub(line.width() + cost_width);
@@ -199,18 +220,15 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, tier: Tier) -> Vec
                     pad_line(&mut line, inner.saturating_sub(text_width(&cost)));
                     line.push(cost, faint());
                 }
-                plan.push(line);
+                line
             }
         }
-    }
-    let start = focused_row
-        .saturating_sub(height / 2)
-        .min(plan.len().saturating_sub(height));
+    };
     let mut lines: Vec<Line> = plan
-        .into_iter()
+        .iter()
         .skip(start)
         .take(height)
-        .map(fill)
+        .map(|row| fill(render(row)))
         .collect();
     while lines.len() < height {
         lines.push(fill(Line::default()));
