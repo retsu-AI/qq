@@ -6142,3 +6142,18 @@ fn paging_the_goal_check_command_reaches_every_wrapped_row() {
         .collect();
     assert!(missing.is_empty(), "never shown: {missing:?}");
 }
+
+#[test]
+fn the_selected_goal_check_scope_stays_visible_on_a_short_terminal() {
+    let mut app = goal_check_app("echo one\necho two");
+    for _ in 0..2 {
+        app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+    }
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 10));
+    let text = rows.join("\n");
+    assert!(text.contains("▎ allow repeated checks"), "{text}");
+    assert!(text.contains("$ echo"), "{text}");
+}

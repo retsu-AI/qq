@@ -716,7 +716,8 @@ pub(super) fn goal_check_picker(app: &App, width: usize, height: usize) -> Vec<L
                 )
             })
             .collect();
-        let visible = height.saturating_sub(3).max(1);
+        let choice_rows = picker.filtered().len().max(1);
+        let visible = height.saturating_sub(choice_rows).max(1);
         let start = (*detail_row).min(wrapped.len().saturating_sub(visible));
         for line in wrapped.into_iter().skip(start).take(visible) {
             let mut row = Line::styled("  $ ", faint());
@@ -726,8 +727,18 @@ pub(super) fn goal_check_picker(app: &App, width: usize, height: usize) -> Vec<L
             rows.push(truncate_line(row, width));
         }
     }
-    for (index, (_, row)) in picker.filtered().enumerate() {
-        let selected = index == picker.cursor();
+    let choices_room = height.saturating_sub(rows.len()).max(1);
+    let cursor = picker.cursor();
+    let first_choice = cursor
+        .saturating_sub(choices_room.saturating_sub(1))
+        .min(picker.filtered().len().saturating_sub(choices_room));
+    for (index, (_, row)) in picker
+        .filtered()
+        .enumerate()
+        .skip(first_choice)
+        .take(choices_room)
+    {
+        let selected = index == cursor;
         let mut line = if selected {
             Line::styled("▎ ", accent())
         } else {
