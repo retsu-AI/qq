@@ -39,7 +39,7 @@ fn picker_frame<T: PickerItem>(
     if let Some(question) = question {
         lines.push(truncate_line(question, width));
     }
-    if height >= chrome_rows + PICKER_SPACER_MIN_RESULTS + 1 {
+    if height > chrome_rows + PICKER_SPACER_MIN_RESULTS {
         lines.push(Line::default());
     }
     if picker.filtered().len() == 0 {
