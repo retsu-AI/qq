@@ -377,6 +377,15 @@ impl App {
                 }
                 Effects::redraw(Redraw::Immediate)
             }
+            (PickerOutcome::Changed, Overlay::Sessions { picker, .. }) => {
+                let selected = picker.current().map(|row| row.id);
+                self.cancel_prefetch();
+                let mut effects = Effects::redraw(Redraw::Immediate);
+                if let Some(selected) = selected {
+                    effects.extend(self.prefetch_session(selected));
+                }
+                effects
+            }
             (PickerOutcome::Changed, _) => Effects::redraw(Redraw::Immediate),
             (PickerOutcome::Cancel, Overlay::Themes { restore, .. }) => {
                 let restore = *restore;
@@ -385,7 +394,11 @@ impl App {
                 Effects::redraw(Redraw::Immediate)
             }
             (PickerOutcome::Cancel, _) => {
+                let closing_sessions = matches!(self.overlay, Some(Overlay::Sessions { .. }));
                 self.overlay = None;
+                if closing_sessions {
+                    self.cancel_prefetch();
+                }
                 Effects::redraw(Redraw::Immediate)
             }
             (PickerOutcome::Accept, Overlay::GoalForm(_)) => self.accept_goal_form(),
@@ -447,6 +460,7 @@ impl App {
                     return Effects::none();
                 };
                 self.overlay = None;
+                self.cancel_prefetch();
                 self.focus_session(id)
             }
             (PickerOutcome::Accept, Overlay::History(picker)) => {
@@ -882,6 +896,7 @@ impl App {
     }
 
     fn open_session_picker(&mut self, scope: Option<SessionId>) -> Effects {
+        self.cancel_prefetch();
         let mut picker = Picker::with_items(self.session_rows(scope));
         if let Some(focused) = self.focused()
             && let Some(index) = picker.items().iter().position(|row| row.id == focused)
@@ -893,7 +908,11 @@ impl App {
             scope,
             confirm: None,
         });
-        Effects::redraw(Redraw::Immediate)
+        let mut effects = Effects::redraw(Redraw::Immediate);
+        if let Some(selected) = self.session_picker_selected() {
+            effects.extend(self.prefetch_session(selected));
+        }
+        effects
     }
 
     fn session_rows(&self, scope: Option<SessionId>) -> Vec<SessionRow> {
@@ -936,7 +955,6 @@ impl App {
         false
     }
 
-    #[cfg(test)]
     pub(crate) fn session_picker_selected(&self) -> Option<SessionId> {
         match &self.overlay {
             Some(Overlay::Sessions { picker, .. }) => picker.current().map(|row| row.id),

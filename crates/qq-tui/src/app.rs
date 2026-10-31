@@ -258,6 +258,13 @@ enum PendingIntent {
     Undo,
 }
 
+#[derive(Debug)]
+struct QueuedPrompt {
+    text: String,
+    session_id: Option<SessionId>,
+    view: View,
+}
+
 pub(crate) struct App {
     pub settings: Settings,
     pub model: ModelSelection,
@@ -285,6 +292,9 @@ pub(crate) struct App {
     slash: Picker,
     pub(crate) mention: MentionCompletion,
     resolving: usize,
+    next_effect_id: u64,
+    pending_resolutions: std::collections::HashSet<u64>,
+    pending_prefetch: Option<(SessionId, u64)>,
     esc_armed_at: Option<usize>,
     capabilities: Option<Arc<ServerCapabilities>>,
     shown_host_warning: Option<String>,
@@ -313,6 +323,7 @@ pub(crate) struct App {
     pending: HashMap<CommandId, PendingIntent>,
     answered_approvals: std::collections::HashSet<qq_protocol::ToolCallId>,
     acknowledged_side_questions: HashMap<SessionId, RunId>,
+    startup_submits: VecDeque<QueuedPrompt>,
 }
 
 impl App {
@@ -344,6 +355,9 @@ impl App {
             slash: Picker::new(),
             mention: MentionCompletion::default(),
             resolving: 0,
+            next_effect_id: 0,
+            pending_resolutions: std::collections::HashSet::new(),
+            pending_prefetch: None,
             esc_armed_at: None,
             capabilities: None,
             shown_host_warning: None,
@@ -376,7 +390,26 @@ impl App {
             pending: HashMap::new(),
             answered_approvals: std::collections::HashSet::new(),
             acknowledged_side_questions: HashMap::new(),
+            startup_submits: VecDeque::new(),
         }
+    }
+
+    fn apply_startup_options(&mut self, options: TuiOptions) -> Effects {
+        self.settings = options.settings;
+        self.model = options.model;
+        self.models = options.models;
+        self.unauthenticated_providers = options.unauthenticated_providers;
+        self.environment = options.environment;
+        self.workspace_root = options.workspace_root;
+        self.goal_defaults = options.goals;
+        self.themes = if options.themes.is_empty() {
+            vec![Theme::default()]
+        } else {
+            options.themes
+        };
+        self.theme = 0;
+        self.theme_generation = self.theme_generation.wrapping_add(1);
+        Effects::redraw(Redraw::Immediate)
     }
 
     pub(crate) fn mode(&self) -> Mode {
@@ -414,6 +447,13 @@ impl App {
 
     pub fn apply_client_update(&mut self, update: ClientUpdate) -> Effects {
         match update {
+            ClientUpdate::Startup(update) => match update.downcast_ref::<TuiOptions>() {
+                Some(options) => self.apply_startup_options(options.clone()),
+                None => {
+                    self.set_warning("client sent incompatible startup options".to_owned());
+                    Effects::redraw(Redraw::Scheduled)
+                }
+            },
             ClientUpdate::Connection(connection) => {
                 self.connection = connection;
                 Effects::redraw(Redraw::Scheduled)
@@ -828,6 +868,7 @@ impl App {
                 self.refresh_session_picker();
             }
         }
+        effects.extend(self.replay_queued_prompts());
         effects
     }
 
@@ -1529,6 +1570,7 @@ impl App {
             Command::ToggleSessions => {
                 if matches!(self.overlay, Some(Overlay::Sessions { .. })) {
                     self.overlay = None;
+                    self.cancel_prefetch();
                     Effects::redraw(Redraw::Immediate)
                 } else {
                     self.open_sessions()
@@ -1775,6 +1817,24 @@ impl App {
         if prompt.is_empty() {
             return Effects::none();
         }
+        if self.workspace_id.is_none() || self.resolving > 0 {
+            if self.startup_submits.len() >= MAX_QUEUED_DRAFTS {
+                self.set_warning(format!(
+                    "at most {MAX_QUEUED_DRAFTS} prompts can wait while qq starts"
+                ));
+                return Effects::redraw(Redraw::Immediate);
+            }
+            self.startup_submits.push_back(QueuedPrompt {
+                text: prompt,
+                session_id: self.focused(),
+                view: self.view(),
+            });
+            self.composer.clear();
+            self.reset_history_browse();
+            self.slash.select(0);
+            self.set_info("prompt queued while qq starts".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        }
         let (name, question) = prompt
             .split_once(char::is_whitespace)
             .unwrap_or((&prompt, ""));
@@ -1878,11 +1938,17 @@ impl App {
         self.slash.select(0);
         self.esc_armed_at = None;
         if self.workspace_root.is_some() && has_mention_syntax(&text) {
-            self.resolving += 1;
-            return Effects::resolve_mentions(PendingSubmit {
-                text,
-                target: SubmitTarget::Steer { run_id, interrupt },
-            });
+            return Effects::resolve_mentions(
+                self.start_resolution(),
+                PendingSubmit {
+                    text,
+                    target: SubmitTarget::Steer {
+                        session_id,
+                        run_id,
+                        interrupt,
+                    },
+                },
+            );
         }
         self.send(
             PendingIntent::Steer {
@@ -1906,11 +1972,13 @@ impl App {
             self.status = None;
         }
         if self.workspace_root.is_some() && has_mention_syntax(&prompt) {
-            self.resolving += 1;
-            return Effects::resolve_mentions(PendingSubmit {
-                text: prompt,
-                target: SubmitTarget::Prompt { session_id },
-            });
+            return Effects::resolve_mentions(
+                self.start_resolution(),
+                PendingSubmit {
+                    text: prompt,
+                    target: SubmitTarget::Prompt { session_id },
+                },
+            );
         }
         self.submit_parts(
             session_id,
@@ -1937,12 +2005,100 @@ impl App {
         )
     }
 
+    fn next_effect_id(&mut self) -> u64 {
+        self.next_effect_id = self.next_effect_id.wrapping_add(1);
+        self.next_effect_id
+    }
+
+    fn start_resolution(&mut self) -> u64 {
+        let id = self.next_effect_id();
+        self.pending_resolutions.insert(id);
+        self.resolving = self.pending_resolutions.len();
+        id
+    }
+
     pub(crate) fn apply_resolved_mentions(
         &mut self,
+        id: u64,
         submit: PendingSubmit,
         resolved: Result<qq_core::mentions::ResolvedPrompt, String>,
     ) -> Effects {
-        self.resolving = self.resolving.saturating_sub(1);
+        let mut effects = self.finish_resolved_mentions(id, submit, resolved);
+        if self.resolving == 0 && self.focused().is_some() {
+            effects.extend(self.replay_queued_prompts());
+        }
+        effects
+    }
+
+    fn replay_queued_prompts(&mut self) -> Effects {
+        if self.focused().is_none() {
+            return Effects::none();
+        }
+        let draft = std::mem::take(&mut self.composer);
+        let queued = std::mem::take(&mut self.startup_submits);
+        let mut effects = Effects::none();
+        for prompt in queued {
+            let current_session = self.focused();
+            let same_route = match prompt.session_id {
+                Some(session_id) => {
+                    current_session == Some(session_id) && self.view() == prompt.view
+                }
+                None => {
+                    current_session.is_some()
+                        && prompt.view == View::Transcript(None)
+                        && self.view() == View::Transcript(current_session)
+                }
+            };
+            if same_route {
+                self.composer.replace(prompt.text);
+                effects.extend(self.submit_prompt());
+            } else {
+                self.set_warning(
+                    "queued prompt rejected because its session or view changed".to_owned(),
+                );
+                effects.extend(Effects::redraw(Redraw::Immediate));
+            }
+        }
+        self.composer = draft;
+        effects
+    }
+
+    fn finish_resolved_mentions(
+        &mut self,
+        id: u64,
+        submit: PendingSubmit,
+        resolved: Result<qq_core::mentions::ResolvedPrompt, String>,
+    ) -> Effects {
+        if !self.pending_resolutions.remove(&id) {
+            return Effects::none();
+        }
+        self.resolving = self.pending_resolutions.len();
+        let valid = match submit.target {
+            SubmitTarget::Prompt { session_id } => self.focused() == Some(session_id),
+            SubmitTarget::Steer {
+                session_id, run_id, ..
+            } => {
+                self.focused() == Some(session_id)
+                    && self
+                        .sessions
+                        .get(&session_id)
+                        .and_then(|session| session.summary.active_run_id)
+                        == Some(run_id)
+            }
+        };
+        if !valid {
+            if let SubmitTarget::Steer { session_id, .. } = submit.target
+                && self.focused() == Some(session_id)
+                && self.composer.text.is_empty()
+            {
+                self.composer.replace(submit.text);
+                self.set_warning(
+                    "run finished while resolving mentions; input restored".to_owned(),
+                );
+                return Effects::redraw(Redraw::Immediate);
+            }
+            return Effects::none();
+        }
         let resolved = match resolved {
             Ok(resolved) => resolved,
             Err(error) => {
@@ -1992,30 +2148,34 @@ impl App {
             SubmitTarget::Prompt { session_id } => {
                 self.submit_parts(session_id, submit.text, parts)
             }
-            SubmitTarget::Steer { run_id, interrupt } => {
-                let Some(session_id) = self.focused() else {
-                    return Effects::redraw(Redraw::Immediate);
-                };
-                self.send(
-                    PendingIntent::Steer {
-                        session_id,
-                        text: submit.text,
-                    },
-                    SessionCommand::SteerRun {
-                        run_id,
-                        input: parts,
-                        interrupt,
-                    },
-                )
-            }
+            SubmitTarget::Steer {
+                session_id,
+                run_id,
+                interrupt,
+            } => self.send(
+                PendingIntent::Steer {
+                    session_id,
+                    text: submit.text,
+                },
+                SessionCommand::SteerRun {
+                    run_id,
+                    input: parts,
+                    interrupt,
+                },
+            ),
         }
     }
 
     pub(crate) fn apply_mention_completions(
         &mut self,
+        id: u64,
         query: String,
         candidates: Vec<String>,
     ) -> bool {
+        let expected = format!("{id}:{query}");
+        if self.mention.query.as_deref() != Some(expected.as_str()) {
+            return false;
+        }
         let current = self
             .composer
             .mention_token()
@@ -2024,9 +2184,67 @@ impl App {
             return false;
         }
         self.mention.candidates = candidates;
-        self.mention.query = Some(query);
         self.mention.cursor.select(0);
         true
+    }
+
+    pub(crate) fn apply_prefetch(&mut self, id: u64, session_id: SessionId) -> Effects {
+        if self.pending_prefetch != Some((session_id, id)) {
+            return Effects::none();
+        }
+        self.pending_prefetch = None;
+        if self.session_picker_selected() != Some(session_id)
+            || self
+                .sessions
+                .get(&session_id)
+                .is_none_or(|session| session.is_warm())
+        {
+            return Effects::none();
+        }
+        let Some(workspace_id) = self.workspace_id else {
+            return Effects::none();
+        };
+        Effects::send(ClientRequest::Snapshot(qq_protocol::SnapshotRequest {
+            workspace_id,
+            focused_session_id: None,
+            include_sessions: vec![session_id],
+            session_limit: 512,
+            message_limit: 256,
+        }))
+    }
+
+    pub(crate) fn reject_prefetch(&mut self, id: u64, session_id: SessionId) {
+        if self.pending_prefetch == Some((session_id, id)) {
+            self.pending_prefetch = None;
+        }
+    }
+
+    pub(super) fn cancel_prefetch(&mut self) {
+        self.pending_prefetch = None;
+    }
+
+    pub(super) fn prefetch_session(&mut self, session_id: SessionId) -> Effects {
+        let Some(workspace_id) = self.workspace_id else {
+            return Effects::none();
+        };
+        if self
+            .pending_prefetch
+            .is_some_and(|(pending, _)| pending == session_id)
+            || self.sessions.get(&session_id).is_none_or(|session| {
+                session.is_warm() || session.summary.purpose == qq_protocol::SessionPurpose::Audit
+            })
+        {
+            return Effects::none();
+        }
+        let id = self.next_effect_id();
+        self.pending_prefetch = Some((session_id, id));
+        let mut effects = Effects::none();
+        effects.push(Effect::PrefetchBody {
+            id,
+            workspace_id,
+            session_id,
+        });
+        effects
     }
 
     fn queue_draft(&mut self) -> Effects {
@@ -2540,13 +2758,16 @@ impl App {
             return Effects::redraw(Redraw::Immediate);
         }
         let query = token.to_owned();
+        let id = self.next_effect_id();
+        self.mention.clear();
+        self.mention.query = Some(format!("{id}:{query}"));
         let recent = self
             .focused()
             .and_then(|id| self.sessions.get(&id))
             .map(|session| recently_edited_paths(session, 8))
             .unwrap_or_default();
         let mut effects = Effects::redraw(Redraw::Immediate);
-        effects.push(Effect::CompleteMention { query, recent });
+        effects.push(Effect::CompleteMention { id, query, recent });
         effects
     }
 
