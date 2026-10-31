@@ -305,7 +305,6 @@ impl Frame {
                 out.push_str(&format!("\x1b[{}m{}\x1b[0m", codes.join(";"), span.text));
             }
         }
-        out.push_str("\r\n");
         out.into_bytes()
     }
 }
@@ -972,6 +971,15 @@ mod tests {
             }
         );
         assert_eq!(faint(&Palette::TERMINAL), Color::DarkGrey);
+    }
+
+    #[test]
+    fn ansi_frames_end_on_their_last_row_without_scrolling() {
+        let frame = render(&DesignScene::GoldenPath.scene(), (80, 24));
+        let bytes = frame.ansi(&Palette::TERMINAL);
+        let text = String::from_utf8(bytes).expect("utf-8");
+        assert_eq!(text.matches("\r\n").count(), 23);
+        assert!(!text.ends_with('\n'));
     }
 
     #[test]
