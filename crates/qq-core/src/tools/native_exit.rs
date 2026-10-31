@@ -8,7 +8,7 @@ pub(super) async fn confirm(
     mut stopped: impl FnMut() -> io::Result<bool> + Send + 'static,
 ) -> io::Result<()> {
     static SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + super::shell::EXIT_CONFIRMATION;
     let permit = Arc::clone(SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(16))))
         .acquire_owned()
         .await

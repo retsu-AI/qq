@@ -4786,15 +4786,9 @@ mod tests {
 
     #[cfg(unix)]
     async fn assert_process_exits(pid: u32) {
+        let pid = i32::try_from(pid).unwrap();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let alive = i32::try_from(pid)
-                .ok()
-                .and_then(rustix::process::Pid::from_raw)
-                .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok());
-            if !alive {
-                return;
-            }
+        while !shell::process_has_exited(pid) {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "process {pid} is still alive after the kill deadline"
@@ -4804,83 +4798,75 @@ mod tests {
     }
 
     #[cfg(unix)]
-    async fn escaped_tree_commands() -> [(String, String, usize); 2] {
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let marker = || {
-            let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            format!("{}", 7_000_000 + (std::process::id() % 100_000) * 16 + next)
-        };
-        let (piped, escaped) = (marker(), marker());
-        let has = |program: &str| {
-            let mut probe = tokio::process::Command::new("/bin/sh");
-            probe.args(["-c", &format!("command -v {program} >/dev/null")]);
-            async move { probe.status().await.is_ok_and(|status| status.success()) }
-        };
-        let piped_command = if has("timeout").await {
-            (format!("timeout 600 sleep {piped} 2>&1 | cat"), 2)
-        } else {
-            (
-                format!("perl -e 'setpgrp; exec @ARGV' sleep {piped} 2>&1 | cat"),
-                1,
-            )
-        };
-        let escaped_command = if has("setsid").await {
-            format!("setsid sleep {escaped}; true")
-        } else {
-            format!("perl -MPOSIX -e 'setsid; exec @ARGV' sleep {escaped}; true")
-        };
-        [
-            (piped_command.0, piped, piped_command.1),
-            (escaped_command, escaped, 1),
-        ]
+    struct EscapedTree {
+        command: String,
+        report: std::path::PathBuf,
+        _directory: tempfile::TempDir,
     }
 
     #[cfg(unix)]
-    async fn marked_pids(marker: &str) -> Vec<u32> {
-        let listing = tokio::process::Command::new("ps")
-            .args(["-A", "-o", "pid=,args="])
-            .output()
-            .await
-            .unwrap();
-        String::from_utf8_lossy(&listing.stdout)
-            .lines()
-            .filter(|line| {
-                line.split_ascii_whitespace()
-                    .skip(1)
-                    .any(|word| word == marker)
-                    && !line.contains("/bin/sh -c")
-                    && !line.contains("perl")
-            })
-            .filter_map(|line| line.split_ascii_whitespace().next()?.parse().ok())
-            .collect()
+    fn on_path(program: &str) -> bool {
+        std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
+        })
     }
 
     #[cfg(unix)]
-    async fn wait_for_marked(marker: &str, count: usize) -> Vec<u32> {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let pids = marked_pids(marker).await;
-            if pids.len() >= count {
-                return pids;
+    fn escaped_trees() -> [EscapedTree; 2] {
+        let reporter = "sh -c 'echo $PPID $$ > \"$0\"; exec sleep 600'";
+        let piped = if on_path("timeout") {
+            format!("timeout 600 {reporter} {{report}} 2>&1 | cat")
+        } else {
+            format!("perl -e 'setpgrp; exec @ARGV' {reporter} {{report}} 2>&1 | cat")
+        };
+        let escaped = if on_path("setsid") {
+            format!("setsid {reporter} {{report}}; true")
+        } else {
+            format!("perl -MPOSIX -e 'setsid; exec @ARGV' {reporter} {{report}}; true")
+        };
+        [piped, escaped].map(|template| {
+            let directory = tempfile::tempdir().unwrap();
+            let report = directory.path().join("pids");
+            let status = std::process::Command::new("mkfifo")
+                .arg(&report)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            EscapedTree {
+                command: template.replace("{report}", &format!("'{}'", report.display())),
+                report,
+                _directory: directory,
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "marker {marker} found {pids:?}, expected {count} processes"
-            );
-            tokio::task::yield_now().await;
-        }
+        })
     }
 
     #[cfg(unix)]
-    async fn assert_marked_gone(marker: &str, pids: Vec<u32>) {
+    async fn reported_pids(tree: &EscapedTree, parent_left_the_group: bool) -> Vec<u32> {
+        let report = tree.report.clone();
+        let reader = tokio::task::spawn_blocking(move || std::fs::read_to_string(report));
+        let text = match tokio::time::timeout(std::time::Duration::from_secs(20), reader).await {
+            Ok(text) => text.unwrap().unwrap(),
+            Err(_) => {
+                drop(std::fs::OpenOptions::new().write(true).open(&tree.report));
+                panic!("the escaped command never reported its pids");
+            }
+        };
+        let mut pids: Vec<u32> = text
+            .split_ascii_whitespace()
+            .map(|pid| pid.parse().unwrap())
+            .collect();
+        assert_eq!(pids.len(), 2, "{text}");
+        if !parent_left_the_group {
+            pids.remove(0);
+        }
+        pids
+    }
+
+    #[cfg(unix)]
+    async fn assert_all_exit(pids: Vec<u32>) {
         for pid in pids {
             assert_process_exits(pid).await;
         }
-        assert_eq!(
-            marked_pids(marker).await,
-            Vec::<u32>::new(),
-            "marker {marker}"
-        );
     }
 
     #[cfg(unix)]
@@ -4889,7 +4875,8 @@ mod tests {
         let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         for timeout in [false, true] {
-            for (command, marker, count) in escaped_tree_commands().await {
+            for (index, tree) in escaped_trees().into_iter().enumerate() {
+                let command = tree.command.clone();
                 let cancelled = RunCancellation::new();
                 let arguments = match timeout {
                     true => serde_json::json!({"command": command, "timeout_seconds": 3}),
@@ -4906,7 +4893,7 @@ mod tests {
                     Arc::new(crate::runtime::ShellPolicy::default()),
                     Arc::default(),
                 ));
-                let pids = wait_for_marked(&marker, count).await;
+                let pids = reported_pids(&tree, index == 0 && on_path("timeout")).await;
                 if !timeout {
                     cancelled.cancel();
                 }
@@ -4924,7 +4911,7 @@ mod tests {
                     "{command}: {}",
                     result.model_text
                 );
-                assert_marked_gone(&marker, pids).await;
+                assert_all_exit(pids).await;
             }
         }
     }
@@ -4936,12 +4923,12 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let tasks = ToolTasks::default();
         let mut started = Vec::new();
-        for (command, marker, count) in escaped_tree_commands().await {
+        for (index, tree) in escaped_trees().into_iter().enumerate() {
             let result = execute(
                 workspace.clone(),
                 Arc::new(FileState::default()),
                 "shell".to_owned(),
-                serde_json::json!({"command": command, "yield_after_seconds": 1}).to_string(),
+                serde_json::json!({"command": tree.command, "yield_after_seconds": 1}).to_string(),
                 RunCancellation::new(),
                 None,
                 tasks.clone(),
@@ -4954,14 +4941,14 @@ mod tests {
                 "{}",
                 result.model_text
             );
-            started.push((marker.clone(), wait_for_marked(&marker, count).await));
+            started.push(reported_pids(&tree, index == 0 && on_path("timeout")).await);
         }
         tokio::time::timeout(std::time::Duration::from_secs(20), tasks.drain())
             .await
             .expect("the run end must stop yielded commands")
             .unwrap();
-        for (marker, pids) in started {
-            assert_marked_gone(&marker, pids).await;
+        for pids in started {
+            assert_all_exit(pids).await;
         }
     }
 

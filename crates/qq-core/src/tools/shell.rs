@@ -24,6 +24,7 @@ use super::{
 const MAX_LIVE_OUTPUT_BYTES: usize = 128 * 1024;
 const MAX_CAPTURE_BYTES: usize = super::output::MAX_SPILL_ITEM_BYTES - 64 * 1024;
 const EXIT_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
+pub(super) const EXIT_CONFIRMATION: std::time::Duration = std::time::Duration::from_secs(10);
 pub(super) const SHELL_BOUNDS: Bounds = Bounds::new(16 * 1024, 4_000);
 const SHELL_READ_CHUNK_BYTES: usize = 8 * 1024;
 const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
@@ -87,6 +88,23 @@ static READ_FAULTS: std::sync::Mutex<Vec<(std::path::PathBuf, bool)>> =
 #[cfg(test)]
 static STOP_OBSERVERS: std::sync::Mutex<Vec<(u32, tokio::sync::oneshot::Sender<()>)>> =
     std::sync::Mutex::new(Vec::new());
+
+#[cfg(all(test, unix))]
+pub(crate) fn process_has_exited(pid: i32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+            stat.rfind(") ")
+                .and_then(|end| stat[end + 2..].chars().next())
+                .is_some_and(|state| matches!(state, 'Z' | 'X'))
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        rustix::process::Pid::from_raw(pid)
+            .is_none_or(|pid| rustix::process::test_kill_process(pid).is_err())
+    }
+}
 
 #[cfg(test)]
 pub(crate) fn observe_shell_termination(pid: u32) -> tokio::sync::oneshot::Receiver<()> {
@@ -1061,7 +1079,7 @@ impl ProcessGroupGuard {
     pub(crate) async fn reap_watcher(&mut self) -> std::io::Result<()> {
         if let Some(mut watcher) = self.watcher.take() {
             let _ = watcher.start_kill();
-            tokio::time::timeout(std::time::Duration::from_secs(2), watcher.wait())
+            tokio::time::timeout(EXIT_CONFIRMATION, watcher.wait())
                 .await
                 .map_err(|_| std::io::Error::other("command watcher did not exit"))??;
         }
@@ -1128,7 +1146,7 @@ impl ProcessGroupGuard {
         }
         #[cfg(target_os = "linux")]
         if let Some(pgid) = self.killed_pgid {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let deadline = std::time::Instant::now() + EXIT_CONFIRMATION;
             let tracked = std::mem::take(&mut self.descendants);
             return tokio::task::spawn_blocking(move || {
                 descendants::confirm(tracked, deadline)?;
@@ -1440,6 +1458,43 @@ mod watcher_tests {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod exit_tests {
+    #[test]
+    fn an_unreaped_zombie_counts_as_exited() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        rustix::process::waitid(
+            rustix::process::WaitId::Pid(rustix::process::Pid::from_raw(pid).unwrap()),
+            rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT,
+        )
+        .unwrap();
+        assert!(
+            rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap())
+                .is_ok()
+        );
+        assert!(super::process_has_exited(pid));
+        child.wait().unwrap();
+        assert!(super::process_has_exited(pid));
+    }
+
+    #[test]
+    fn a_running_process_has_not_exited() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exec tail -f /dev/null"])
+            .spawn()
+            .unwrap();
+        assert!(!super::process_has_exited(
+            i32::try_from(child.id()).unwrap()
+        ));
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+}
+
 #[cfg(all(test, unix))]
 mod orphan_tests {
     #[test]
@@ -1508,13 +1563,13 @@ mod orphan_tests {
         let mut pids = pids
             .split_whitespace()
             .map(|pid| pid.parse::<i32>().unwrap());
-        let leader = rustix::process::Pid::from_raw(pids.next().unwrap()).unwrap();
-        let background = rustix::process::Pid::from_raw(pids.next().unwrap()).unwrap();
+        let leader = pids.next().unwrap();
+        let background = pids.next().unwrap();
         server.kill().unwrap();
         server.wait().unwrap();
         let stopped = std::time::Instant::now();
         for pid in [leader, background] {
-            while rustix::process::test_kill_process(pid).is_ok() {
+            while !super::process_has_exited(pid) {
                 assert!(
                     stopped.elapsed() < std::time::Duration::from_secs(10),
                     "the command outlived the process that started it"
