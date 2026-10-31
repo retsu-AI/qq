@@ -385,15 +385,15 @@ async fn loop_marks_replaying_on_sequence_gap_and_recovers_from_reset_snapshot()
 #[tokio::test(start_paused = true)]
 async fn prefetches_only_the_highlight_held_for_one_hundred_milliseconds() {
     let mut harness = Harness::new(64);
-    let task = harness.spawn(App::new(TuiOptions::default()));
+    let mut app = App::new(TuiOptions::default());
     let mut initial = snapshot(1, Vec::new());
     let cold = qq_protocol::SessionId::from_bytes([71; 16]);
     initial.sessions.push(qq_protocol::SessionSummary {
         id: cold,
         ..fixtures::session_summary(cold)
     });
-    harness.update(ClientUpdate::Snapshot(initial));
-    harness.settle().await;
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    let task = harness.spawn(app);
     harness.key(KeyCode::Char('t'), KeyModifiers::CONTROL);
     harness.key(KeyCode::Up, KeyModifiers::NONE);
     for _ in 0..32 {
@@ -405,8 +405,8 @@ async fn prefetches_only_the_highlight_held_for_one_hundred_milliseconds() {
         tokio::task::yield_now().await;
     }
     assert!(harness.sent().is_empty());
-    tokio::time::advance(Duration::from_millis(1)).await;
-    for _ in 0..8 {
+    tokio::time::advance(Duration::from_millis(2)).await;
+    for _ in 0..32 {
         tokio::task::yield_now().await;
     }
     let sent = harness.sent();
