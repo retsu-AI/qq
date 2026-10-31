@@ -390,12 +390,15 @@ async fn prefetches_only_the_highlight_held_for_one_hundred_milliseconds() {
     let cold = qq_protocol::SessionId::from_bytes([71; 16]);
     initial.sessions.push(qq_protocol::SessionSummary {
         id: cold,
+        title: "unique prefetch target".to_owned(),
         ..fixtures::session_summary(cold)
     });
     app.apply_client_update(ClientUpdate::Snapshot(initial));
     let task = harness.spawn(app);
     harness.key(KeyCode::Char('t'), KeyModifiers::CONTROL);
-    harness.key(KeyCode::Up, KeyModifiers::NONE);
+    for character in "unique".chars() {
+        harness.key(KeyCode::Char(character), KeyModifiers::NONE);
+    }
     for _ in 0..32 {
         tokio::task::yield_now().await;
     }
