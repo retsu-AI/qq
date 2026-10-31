@@ -1,6 +1,6 @@
 use super::*;
 use layout::Tier;
-use qq_client::state::{Group, Need};
+pub(super) use qq_client::state::{Group, Need};
 
 pub(super) fn session_line(app: &App, session_id: SessionId, width: usize, prefix: &str) -> Line {
     let view = &app.sessions[&session_id];
@@ -88,166 +88,154 @@ pub(super) fn rail_entries(app: &App) -> (Vec<RailEntry>, [usize; 4]) {
     (entries, counts)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RailDensity {
-    Compact,
-    Detailed,
-}
+pub(super) const RAIL_PADDING: usize = 2;
 
-impl RailDensity {
-    pub(super) const fn of(tier: Tier) -> Self {
-        match tier {
-            Tier::Compact | Tier::Regular => Self::Compact,
-            Tier::Wide | Tier::Ultra => Self::Detailed,
-        }
+pub(super) fn rail_glyph(app: &App, session_id: SessionId) -> (&'static str, Style) {
+    let view = &app.sessions[&session_id];
+    match view.need() {
+        Some(Need::Approval) => ("◇", warning()),
+        Some(Need::Failed) => ("✕", failure()),
+        Some(Need::FinishedUnread) => ("●", accent()),
+        None => match view.summary.status {
+            SessionStatus::Running => ("◐", info()),
+            SessionStatus::Queued => ("○", warning()),
+            SessionStatus::Idle => match view.summary.last_outcome.as_ref() {
+                Some(qq_protocol::RunOutcome::Failed { .. }) => ("✕", failure()),
+                Some(qq_protocol::RunOutcome::Completed) => ("●", faint()),
+                Some(_) => ("◌", faint()),
+                None => ("○", faint()),
+            },
+        },
     }
 }
 
-pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensity) -> Vec<Line> {
-    let inner = width.saturating_sub(2);
-    let mut rows: Vec<Line> = Vec::new();
+const fn rail_group_label(group: Group) -> &'static str {
+    match group {
+        Group::NeedsYou => "NEEDS YOU",
+        Group::Working => "WORKING",
+        Group::Idle | Group::Done => "RECENT",
+    }
+}
+
+pub(super) fn sidebar(app: &App, width: usize, height: usize, tier: Tier) -> Vec<Line> {
+    let wide = tier >= Tier::Wide;
+    let inner = width.saturating_sub(2 * RAIL_PADDING);
+    let fill = |line: Line| {
+        let mut row = Line::styled(" ".repeat(RAIL_PADDING), normal());
+        for span in truncate_line(line, inner).spans {
+            row.push(span.text, span.style);
+        }
+        pad_line(&mut row, width);
+        for span in &mut row.spans {
+            span.style = surface(span.style);
+        }
+        row
+    };
+    let (entries, _) = rail_entries(app);
+    let mut plan: Vec<Line> = vec![Line::default()];
     let mut focused_row = 0;
-    let (entries, counts) = rail_entries(app);
-    enum Entry {
-        Gap,
-        Header(Group, usize),
-        Session(RailEntry),
-        Detail(RailEntry),
-    }
-    let mut plan: Vec<Entry> = Vec::with_capacity(entries.len() * 2 + 8);
-    let mut current: Option<Group> = None;
-    for entry in entries {
-        if current != Some(entry.group) {
-            current = Some(entry.group);
-            if !plan.is_empty() {
-                plan.push(Entry::Gap);
+    let mut current: Option<&str> = None;
+    for (index, entry) in entries.iter().enumerate() {
+        let label = rail_group_label(entry.group);
+        if current != Some(label) {
+            if current.is_some() {
+                plan.push(Line::default());
             }
-            plan.push(Entry::Header(entry.group, counts[entry.group as usize]));
+            current = Some(label);
+            plan.push(Line::styled(format!("  {label}"), faint()));
         }
-        if app.focused() == Some(entry.id) {
+        let focused = app.focused() == Some(entry.id);
+        if focused {
             focused_row = plan.len();
         }
-        plan.push(Entry::Session(entry));
-        let detail = match density {
-            RailDensity::Compact => entry.live,
-            RailDensity::Detailed => entry.live || entry.cost.is_some(),
+        let view = &app.sessions[&entry.id];
+        let mut line = if focused {
+            Line::styled("▎ ", accent())
+        } else {
+            Line::styled("  ", normal())
         };
-        if detail {
-            plan.push(Entry::Detail(entry));
+        line.push(
+            if index < 9 {
+                format!("{} ", index + 1)
+            } else {
+                "  ".to_owned()
+            },
+            faint(),
+        );
+        let (glyph, glyph_style) = rail_glyph(app, entry.id);
+        line.push(format!("{glyph} "), glyph_style);
+        let agents = app
+            .sessions
+            .children_of(entry.id)
+            .iter()
+            .filter(|child| app.sessions.contains_key(child))
+            .count();
+        let badge = if agents > 0 {
+            format!("  ↳{agents}")
+        } else if entry.unread > 0 {
+            format!("  {} new", entry.unread)
+        } else {
+            String::new()
+        };
+        let room = inner.saturating_sub(line.width() + text_width(&badge));
+        line.push(
+            fit_text(&view.summary.title, room),
+            if focused { normal() } else { muted() },
+        );
+        line.push(badge, faint());
+        plan.push(line);
+        if wide {
+            let activity = live_status_line(app, entry.id).map(|(text, _)| text);
+            let cost = entry.cost.map(format_cost);
+            if activity.is_some() || cost.is_some() {
+                let mut line = Line::styled("      ", normal());
+                let cost_width = cost.as_deref().map_or(0, |cost| text_width(cost) + 2);
+                let room = inner.saturating_sub(line.width() + cost_width);
+                line.push(
+                    fit_text(activity.as_deref().unwrap_or_default(), room),
+                    faint(),
+                );
+                if let Some(cost) = cost {
+                    pad_line(&mut line, inner.saturating_sub(text_width(&cost)));
+                    line.push(cost, faint());
+                }
+                plan.push(line);
+            }
         }
-    }
-    if plan.is_empty() {
-        rows.push(Line::styled("│   no sessions yet", muted().italic()));
     }
     let start = focused_row
         .saturating_sub(height / 2)
         .min(plan.len().saturating_sub(height));
-    for entry in plan.into_iter().skip(start).take(height) {
-        rows.push(match entry {
-            Entry::Gap => Line::styled("│", border()),
-            Entry::Header(group, count) => {
-                let mut header = Line::styled("│ ", border());
-                header.push(
-                    group.label(),
-                    match group {
-                        Group::NeedsYou => warning().bold(),
-                        Group::Working => info().bold(),
-                        Group::Idle | Group::Done => muted().bold(),
-                    },
-                );
-                header.push(format!("  {count}"), muted());
-                truncate_line(header, width)
-            }
-            Entry::Session(entry) => {
-                let indent = "  ".repeat(app.sessions.depth(entry.id).min(4));
-                let focused = app.focused() == Some(entry.id);
-                let badge = if entry.unread > 0 {
-                    if width >= layout::RAIL_MIN_WIDTH + 6 {
-                        format!("{} new", entry.unread)
-                    } else {
-                        entry.unread.to_string()
-                    }
-                } else {
-                    String::new()
-                };
-                let title_width = width.saturating_sub(if badge.is_empty() {
-                    0
-                } else {
-                    badge.chars().count() + 3
-                });
-                let mut line = session_line(app, entry.id, title_width, &format!("│ {indent}"));
-                if !badge.is_empty() {
-                    pad_line(&mut line, title_width + 2);
-                    line.push(badge, accent());
-                }
-                if focused {
-                    pad_line(&mut line, width);
-                    for span in &mut line.spans[1..] {
-                        span.style = selection(span.style);
-                    }
-                }
-                truncate_line(line, width)
-            }
-            Entry::Detail(entry) => {
-                let indent = "  ".repeat(app.sessions.depth(entry.id).min(4));
-                let mut line = Line::styled(format!("│ {indent}   "), muted());
-                let used = line.width();
-                match density {
-                    RailDensity::Compact => {
-                        let (text, style) = live_status_line(app, entry.id)
-                            .unwrap_or_else(|| (String::new(), muted()));
-                        line.push(preview(&text, inner.saturating_sub(used)), style);
-                    }
-                    RailDensity::Detailed => {
-                        let cost = entry.cost.map(format_cost);
-                        let cost_width = cost.as_ref().map_or(0, |cost| cost.chars().count() + 3);
-                        let tail_width = inner.saturating_sub(used).saturating_sub(cost_width);
-                        let (text, style) = live_status_line(app, entry.id)
-                            .unwrap_or_else(|| (String::new(), muted()));
-                        line.push(preview(&text, tail_width), style);
-                        if let Some(cost) = cost {
-                            pad_line(&mut line, width.saturating_sub(cost.chars().count() + 1));
-                            line.push(cost, muted());
-                        }
-                    }
-                }
-                truncate_line(line, width)
-            }
-        });
-    }
-    let mut lines = rows;
+    let mut lines: Vec<Line> = plan
+        .into_iter()
+        .skip(start)
+        .take(height)
+        .map(fill)
+        .collect();
     while lines.len() < height {
-        lines.push(Line::styled("│", border()));
+        lines.push(fill(Line::default()));
     }
-    lines.truncate(height);
     lines
 }
 
-pub(super) fn agent_strip(app: &App, width: usize) -> Option<Line> {
-    let (entries, counts) = rail_entries(app);
-    if entries.len() < 2 {
-        return None;
+pub(super) fn fit_text(text: &str, width: usize) -> String {
+    let plain = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text_width(&plain) <= width {
+        return plain;
     }
-    let needs = counts[Group::NeedsYou as usize];
-    let working = counts[Group::Working as usize];
-    let unread = entries.iter().filter(|entry| entry.unread > 0).count();
-    let mut line = Line::styled(format!(" {} agents", entries.len()), muted());
-    if working > 0 {
-        line.push("  ", muted());
-        line.push(format!("{} {working}", spinner(app.animation_tick)), info());
+    if width == 0 {
+        return String::new();
     }
-    if needs > 0 {
-        line.push("  ", muted());
-        line.push(format!("◇ {needs}"), warning().bold());
-        if let Some(chord) = app.chord_label(crate::commands::Command::FocusNextApproval) {
-            line.push(format!(" ({chord})"), muted());
+    let mut kept = String::new();
+    for character in plain.chars() {
+        let next = text_width(&kept)
+            + unicode_width::UnicodeWidthChar::width(character).unwrap_or_default();
+        if next + 1 > width {
+            break;
         }
+        kept.push(character);
     }
-    if unread > 0 {
-        line.push("  ", muted());
-        line.push(format!("● {unread} unread"), accent());
-    }
-    Some(truncate_line(line, width))
+    format!("{}…", kept.trim_end())
 }
 
 pub(super) fn child_rows(app: &App, tool_call_id: ToolCallId, width: usize) -> Vec<Line> {
@@ -255,51 +243,39 @@ pub(super) fn child_rows(app: &App, tool_call_id: ToolCallId, width: usize) -> V
         return Vec::new();
     };
     let view = &app.sessions[&child];
-    let mut line = session_line(app, child, width, "       ↳ ");
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(tool) = &view.live.active_tool {
-        parts.push(tool.clone());
+    let (glyph, style) = rail_glyph(app, child);
+    let mut line = Line::styled("└ ", faint());
+    line.push(format!("{glyph} "), style);
+    line.push(view.summary.title.clone(), normal());
+    let activity = live_status_line(app, child)
+        .map(|(text, _)| text)
+        .or_else(|| {
+            let calls = view
+                .runs
+                .values()
+                .map(|stats| stats.tool_calls)
+                .sum::<u32>();
+            (calls > 0).then(|| format!("done · {}", count_noun(calls as usize, "call", "calls")))
+        });
+    if let Some(activity) = activity {
+        line.push("   ", normal());
+        let room = width.saturating_sub(line.width());
+        line.push(fit_text(&activity, room), muted());
     }
-    let calls = view
-        .runs
-        .values()
-        .map(|stats| stats.tool_calls)
-        .sum::<u32>();
-    if calls > 0 {
-        parts.push(count_noun(calls as usize, "tool", "tools"));
-    }
-    if let Some(stats) = view
-        .summary
-        .active_run_id
-        .and_then(|run| view.runs.get(&run))
-        && let Some(started) = stats.started_at_ms
-    {
-        parts.push(format_duration_ms(app.now_ms.saturating_sub(started)));
-    }
-    if view.unread > 0 && app.focused() != Some(child) {
-        parts.push(format!("{} new", view.unread));
-    }
-    if !parts.is_empty() {
-        line.push(format!("  {}", parts.join(" · ")), muted());
-    }
-    let mut rows = vec![truncate_line(line, width)];
-    if let Some((text, style)) = live_status_line(app, child)
-        && view.live.active_tool.is_none()
-    {
-        let mut line = Line::styled("            ", muted());
-        let used = line.width();
-        line.push(preview(&text, width.saturating_sub(used)), style);
-        rows.push(truncate_line(line, width));
-    }
-    rows
+    vec![truncate_line(line, width)]
 }
 
 pub(super) fn live_status_line(app: &App, session_id: SessionId) -> Option<(String, Style)> {
     let session = app.sessions.get(&session_id)?;
     let live = &session.live;
     if !live.awaiting_approval.is_empty() {
-        let tool = live.active_tool.as_deref().map_or("tool", tool_verb);
-        return Some((format!("◇ approve {tool}"), warning().bold()));
+        let tool = match live.active_tool.as_deref() {
+            Some("shell" | "exec") => "run a command",
+            Some("edit_file" | "write_file") => "edit a file",
+            Some("web_fetch") => "fetch a URL",
+            Some(_) | None => "use a tool",
+        };
+        return Some((format!("wants to {tool}"), warning()));
     }
     if session.summary.status == SessionStatus::Running {
         if let Some(tool) = &live.active_tool {
@@ -310,13 +286,13 @@ pub(super) fn live_status_line(app: &App, session_id: SessionId) -> Option<(Stri
             return Some((live.tail.clone(), muted()));
         }
         let label = match activity {
-            Some(qq_protocol::RunActivity::WaitingForProvider) | None => "waiting for provider",
-            Some(qq_protocol::RunActivity::Reasoning) => "reasoning",
-            Some(qq_protocol::RunActivity::GeneratingResponse) => "responding",
+            Some(qq_protocol::RunActivity::WaitingForProvider) | None => "waiting for model",
+            Some(qq_protocol::RunActivity::Reasoning) => "thinking",
+            Some(qq_protocol::RunActivity::GeneratingResponse) => "writing",
             Some(qq_protocol::RunActivity::PreparingToolCall) => "preparing a tool call",
             Some(qq_protocol::RunActivity::Compacting) => "compacting context",
         };
-        return Some((label.to_owned(), muted().italic()));
+        return Some((label.to_owned(), muted()));
     }
     if session.summary.queued_prompts > 0 {
         return Some((
@@ -332,15 +308,15 @@ pub(super) fn live_status_line(app: &App, session_id: SessionId) -> Option<(Stri
 
 fn tool_verb(name: &str) -> &str {
     match name {
-        "read_file" => "read",
-        "tree" | "list_dir" => "list",
-        "search" => "search",
-        "read_tool_result" => "recall",
-        "edit_file" => "edit",
-        "write_file" => "write",
-        "shell" | "exec" => "run",
-        "spawn_agent" => "spawn",
-        "web_fetch" => "fetch",
+        "read_file" => "reading",
+        "tree" | "list_dir" => "listing",
+        "search" => "searching",
+        "read_tool_result" => "recalling",
+        "edit_file" => "editing",
+        "write_file" => "writing",
+        "shell" | "exec" => "running",
+        "spawn_agent" => "spawning",
+        "web_fetch" => "fetching",
         other => other
             .strip_prefix("mcp__")
             .and_then(|rest| rest.split_once("__"))

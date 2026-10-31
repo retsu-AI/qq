@@ -2735,10 +2735,6 @@ impl App {
         Some(siblings[next])
     }
 
-    pub(crate) fn sessions_awaiting_approval(&self) -> Vec<SessionId> {
-        self.sessions.awaiting_approval()
-    }
-
     pub(crate) fn sessions_needing_attention(&self) -> Vec<SessionId> {
         self.sessions.needing_attention()
     }

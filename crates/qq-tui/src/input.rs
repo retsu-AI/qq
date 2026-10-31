@@ -171,18 +171,18 @@ impl PickerItem for GoalCheckRow {
 pub(crate) const GOAL_CHECK_ROWS: [GoalCheckRow; 3] = [
     GoalCheckRow {
         scope: None,
-        label: "Deny",
-        description: "withhold check consent; pause an active goal",
+        label: "deny",
+        description: "withhold consent; pause an active goal",
     },
     GoalCheckRow {
         scope: Some(qq_protocol::GoalCheckScope::Once),
-        label: "Allow once",
-        description: "one start only; failure does not refund consent",
+        label: "allow once",
+        description: "one start; a failure does not refund it",
     },
     GoalCheckRow {
         scope: Some(qq_protocol::GoalCheckScope::ForGoal),
-        label: "Allow repeated checks for this goal",
-        description: "only this goal and its exact check command",
+        label: "allow repeated checks",
+        description: "this goal and this exact command only",
     },
 ];
 

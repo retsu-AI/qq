@@ -15,7 +15,6 @@ use crate::{
     render::{code_keyword, success, surface, surface_color},
     theme::Palette,
     view::markdown::{code_panel_row, tests::style_of},
-    view::tools::TOOL_PANEL_PADDING_ROWS,
 };
 
 fn completed_message(byte: u8, output: String) -> MessageSnapshot {
@@ -454,8 +453,14 @@ fn completed_edit_results_color_diff_shaped_content_at_expanded_detail() {
             .map(|span| span.style)
     };
     assert_eq!(style_of(&lines, "@@ -1 +1 @@"), Some(surface(muted())));
-    assert_eq!(style_of(&lines, "-old"), Some(diff_line_style("-")));
-    assert_eq!(style_of(&lines, "+new"), Some(diff_line_style("+")));
+    assert_eq!(
+        style_of(&lines, "-old"),
+        Some(crate::render::diff_line_style("-"))
+    );
+    assert_eq!(
+        style_of(&lines, "+new"),
+        Some(crate::render::diff_line_style("+"))
+    );
     assert_eq!(style_of(&lines, " context"), Some(surface(normal())));
 
     let summary_call = tool_call_snapshot(
@@ -510,8 +515,14 @@ fn display_payload_diffs_replace_the_result_summary_at_expanded_detail() {
             .find(|span| span.text.contains(needle))
             .map(|span| span.style)
     };
-    assert_eq!(style_of("- old line"), Some(diff_line_style("-")));
-    assert_eq!(style_of("+ new line"), Some(diff_line_style("+")));
+    assert_eq!(
+        style_of("- old line"),
+        Some(crate::render::diff_line_style("-"))
+    );
+    assert_eq!(
+        style_of("+ new line"),
+        Some(crate::render::diff_line_style("+"))
+    );
     assert!(style_of("replaced 1 occurrence").is_none());
 
     let lines = render_tool_calls_simple(
@@ -551,7 +562,7 @@ fn running_calls_show_a_live_output_tail_of_complete_lines() {
             &|_, _| Vec::new(),
         ));
         assert!(rows[0].contains("Run"), "the spinner one-liner stays");
-        let tail_start = rows.len() - MAX_LIVE_TAIL_ROWS - TOOL_PANEL_PADDING_ROWS;
+        let tail_start = rows.len() - MAX_LIVE_TAIL_ROWS;
         let tail: Vec<String> = rows[tail_start..]
             .iter()
             .map(|row| row.trim_end().to_owned())
@@ -584,7 +595,7 @@ fn running_calls_show_a_live_output_tail_of_complete_lines() {
     ));
     assert_eq!(rows[2], format!("   ┃  {}", "x".repeat(14)));
     assert_eq!(rows[3], format!("   ↪  {}", "x".repeat(14)));
-    assert!(rows.len() <= 1 + MAX_LIVE_TAIL_ROWS + TOOL_PANEL_PADDING_ROWS);
+    assert!(rows.len() <= 1 + MAX_LIVE_TAIL_ROWS);
 
     let mut finished = call.clone();
     finished.state = ToolCallState::Completed;
@@ -794,8 +805,8 @@ fn approval_prompts_render_edit_previews_as_colored_diffs() {
             .map(|span| span.style)
     };
     assert_eq!(style_of("@@ -1 +1 @@"), Some(muted()));
-    assert_eq!(style_of("-old"), Some(diff_line_style("-")));
-    assert_eq!(style_of("+new"), Some(diff_line_style("+")));
+    assert_eq!(style_of("-old"), Some(crate::render::diff_line_style("-")));
+    assert_eq!(style_of("+new"), Some(crate::render::diff_line_style("+")));
     assert!(rows.iter().any(|row| {
         let row = squash(row);
         row.contains("y approve") && row.contains("n deny")
@@ -1002,7 +1013,7 @@ fn error_results_expand_under_the_summary_by_default() {
     ));
 
     assert_eq!(squash(&rows[0]), " ✕ Read gone.txt");
-    assert_eq!(rows.len(), 1 + 1 + TOOL_PANEL_PADDING_ROWS);
+    assert_eq!(rows.len(), 1 + 1);
     assert_eq!(rows[1].trim_end(), "   ┃");
     assert_eq!(rows[2].trim_end(), "   ┃  path is not a file");
     assert_eq!(rows[3].trim_end(), "   ┃");
@@ -1043,7 +1054,7 @@ fn error_rows_grade_by_kind_and_corrections_fold_into_their_retry() {
     let (rows, lines) = render(&[&missing], SimpleDetail::Rows);
     assert_eq!(rows[0], " ! Read gone.rs path_not_found");
     assert_eq!(style_of(&lines, "!"), Some(warning()));
-    assert_eq!(rows.len(), 1 + 2 + TOOL_PANEL_PADDING_ROWS, "{rows:?}");
+    assert_eq!(rows.len(), 1 + 2, "{rows:?}");
     assert!(rows[3].contains("closest: src/gone.rs"), "{rows:?}");
 
     let mut retried = tool_call_snapshot(
@@ -1119,7 +1130,6 @@ fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
         &|_| context,
         0,
         120,
-        &|_, _| Vec::new(),
         &|_, _| Vec::new(),
     );
     assert!(
@@ -2256,7 +2266,7 @@ fn top_row_renders_unknown_context_and_cost_without_inventing_zero_usage() {
     session.summary.context_tokens = None;
     session.context_window = Some(272_000);
 
-    let rows = frame_rows(&[top_row(&app, 80)]);
+    let rows = frame_rows(&[status_row(&app, 80, false)]);
 
     assert!(
         !rows[0].contains("ctx"),
@@ -2278,7 +2288,7 @@ fn top_row_uses_legacy_direct_cost_when_structured_accounting_is_absent() {
     session.summary.estimated_cost_usd_nanos = Some(100_000_000);
 
     app.connection = crate::ConnectionState::Live;
-    let rows = frame_rows(&[top_row(&app, 80)]);
+    let rows = frame_rows(&[status_row(&app, 80, false)]);
 
     assert!(rows[0].ends_with("$0.10 "), "{:?}", rows[0]);
 }
@@ -2300,7 +2310,7 @@ fn top_row_displays_inclusive_accounting_cost() {
     });
 
     app.connection = crate::ConnectionState::Live;
-    let rows = frame_rows(&[top_row(&app, 80)]);
+    let rows = frame_rows(&[status_row(&app, 80, false)]);
 
     assert!(rows[0].ends_with("$0.25 "), "{:?}", rows[0]);
 }
@@ -2309,7 +2319,7 @@ fn top_row_displays_inclusive_accounting_cost() {
 fn top_row_names_the_connection_only_when_it_has_a_problem() {
     let mut app = app_with_messages(0);
     app.connection = crate::ConnectionState::Live;
-    let live = frame_rows(&[top_row(&app, 80)])[0].clone();
+    let live = frame_rows(&[status_row(&app, 80, false)])[0].clone();
     assert!(!live.contains("connecting") && !live.contains("offline"));
     for (connection, expected) in [
         (crate::ConnectionState::Connecting, "connecting "),
@@ -2317,7 +2327,7 @@ fn top_row_names_the_connection_only_when_it_has_a_problem() {
         (crate::ConnectionState::Offline, "offline "),
     ] {
         app.connection = connection;
-        let row = frame_rows(&[top_row(&app, 80)])[0].clone();
+        let row = frame_rows(&[status_row(&app, 80, false)])[0].clone();
         assert!(row.ends_with(expected), "{row:?}");
     }
 }
@@ -2723,7 +2733,7 @@ fn the_sidebar_stays_hidden_with_one_session_and_scales_with_width() {
     };
     let auto = LayoutPrefs::default();
     assert_eq!(rail_width(100, auto, 2), 25);
-    assert_eq!(rail_width(200, auto, 2), layout::RAIL_MAX_WIDTH);
+    assert_eq!(rail_width(200, auto, 2), layout::RAIL_REGULAR_WIDTH);
     assert_eq!(rail_width(89, auto, 2), 0);
     assert_eq!(
         rail_width(
@@ -3737,7 +3747,7 @@ fn the_transcript_cursor_selects_a_call_and_enter_expands_only_that_one() {
 fn diffs_render_head_first_with_new_file_line_numbers() {
     let diff =
         "--- a/x.rs\n+++ b/x.rs\n@@ -10,3 +10,4 @@\n context\n-old\n+new one\n+new two\n tail\n";
-    let rows = frame_rows(&diff_lines(diff, 20, 60));
+    let rows = frame_rows(&super::overlay::dock_diff_lines(diff, 20, 60));
     assert_eq!(
         rows.iter().map(|row| squash(row)).collect::<Vec<_>>(),
         [
@@ -3750,7 +3760,11 @@ fn diffs_render_head_first_with_new_file_line_numbers() {
         ]
     );
     let long: String = (0..30).map(|index| format!("+line {index}\n")).collect();
-    let rows = frame_rows(&diff_lines(&format!("@@ -0,0 +1,30 @@\n{long}"), 5, 60));
+    let rows = frame_rows(&super::overlay::dock_diff_lines(
+        &format!("@@ -0,0 +1,30 @@\n{long}"),
+        5,
+        60,
+    ));
     assert_eq!(rows.len(), 6);
     assert!(rows[1].contains("+line 0"));
     assert!(rows[5].contains("… 26 lines more"), "{:?}", rows[5]);
@@ -3811,7 +3825,7 @@ fn expanded_read_detail_is_a_timing_line_above_a_surface_panel() {
         lines[0]
     );
     let panel = &lines[1..];
-    assert_eq!(panel.len(), 5 + TOOL_PANEL_PADDING_ROWS);
+    assert_eq!(panel.len(), 5);
     for line in panel {
         assert!(is_panel_row(line), "{line:?}");
         assert_eq!(line.width(), width);
@@ -3848,7 +3862,7 @@ fn live_output_panels_keep_their_padding_rows_as_the_tail_grows() {
         })
     };
     let first = render("Compiling qq-core\n");
-    assert_eq!(first.len(), 1 + 1 + TOOL_PANEL_PADDING_ROWS);
+    assert_eq!(first.len(), 1 + 1);
     assert!(first[1..].iter().all(is_panel_row), "{first:?}");
     assert!(
         first[1].spans[2..]
@@ -3871,10 +3885,7 @@ fn live_output_panels_keep_their_padding_rows_as_the_tail_grows() {
 
     let many: String = (0..20).map(|n| format!("line {n}\n")).collect();
     let capped = render(&many);
-    assert_eq!(
-        capped.len(),
-        1 + MAX_LIVE_TAIL_ROWS + TOOL_PANEL_PADDING_ROWS
-    );
+    assert_eq!(capped.len(), 1 + MAX_LIVE_TAIL_ROWS);
     let rows = frame_rows(&capped);
     assert_eq!(rows[1].trim_end(), "   ┃");
     assert!(rows[2].contains("line 14"), "{rows:?}");
@@ -3902,7 +3913,7 @@ fn error_tails_keep_the_error_color_on_the_panel_surface() {
         60,
         &|_, _| Vec::new(),
     );
-    assert_eq!(lines.len(), 1 + 2 + TOOL_PANEL_PADDING_ROWS);
+    assert_eq!(lines.len(), 1 + 2);
     assert!(lines[1..].iter().all(is_panel_row), "{lines:?}");
     for needle in ["error[E0308]: mismatched types", " --> src/lib.rs:4:5"] {
         assert_eq!(
@@ -3922,10 +3933,7 @@ fn error_tails_keep_the_error_color_on_the_panel_surface() {
         60,
         &|_, _| Vec::new(),
     );
-    assert_eq!(
-        lines.len(),
-        1 + 1 + MAX_TOOL_ERROR_ROWS + TOOL_PANEL_PADDING_ROWS
-    );
+    assert_eq!(lines.len(), 1 + 1 + MAX_TOOL_ERROR_ROWS);
     assert_eq!(style_of(&lines, "…"), Some(surface(muted())));
     assert!(frame_rows(&lines)[3].contains("e4"), "tail of the error");
 }
@@ -4035,7 +4043,7 @@ fn the_panel_adds_exactly_its_padding_rows_to_every_detail_budget() {
     let lines = expanded_call_rows(&read, 80);
     assert_eq!(
         lines.len(),
-        1 + MAX_TOOL_RESULT_ROWS + 1 + TOOL_PANEL_PADDING_ROWS,
+        1 + MAX_TOOL_RESULT_ROWS + 1,
         "timing + head budget + more marker + padding"
     );
     let text = frame_text(&lines);
@@ -4051,10 +4059,7 @@ fn the_panel_adds_exactly_its_padding_rows_to_every_detail_budget() {
         false,
     );
     let lines = expanded_call_rows(&run, 80);
-    assert_eq!(
-        lines.len(),
-        1 + 1 + MAX_TOOL_RESULT_ROWS + TOOL_PANEL_PADDING_ROWS
-    );
+    assert_eq!(lines.len(), 1 + 1 + MAX_TOOL_RESULT_ROWS);
 
     let arguments = (0..12)
         .map(|n| format!("\"k{n}\":\"v{n}\""))
@@ -4072,7 +4077,7 @@ fn the_panel_adds_exactly_its_padding_rows_to_every_detail_budget() {
     assert!(lines[1..].iter().all(is_panel_row), "{lines:?}");
     assert_eq!(
         lines.len(),
-        1 + MAX_TOOL_ARGUMENT_ROWS + 1 + 1 + 1 + TOOL_PANEL_PADDING_ROWS,
+        1 + MAX_TOOL_ARGUMENT_ROWS + 1 + 1 + 1,
         "timing + argument budget + marker + separator + result + padding"
     );
     let rows: Vec<String> = frame_rows(&lines)
@@ -4604,10 +4609,6 @@ fn the_rail_is_one_row_per_session_at_regular_and_adds_tail_and_cost_at_wide() {
         wide[focused + 1].trim() == "│",
         "a session with no tail and no spend still takes one row: {wide:#?}"
     );
-    assert_eq!(RailDensity::of(layout::Tier::Compact), RailDensity::Compact);
-    assert_eq!(RailDensity::of(layout::Tier::Regular), RailDensity::Compact);
-    assert_eq!(RailDensity::of(layout::Tier::Wide), RailDensity::Detailed);
-    assert_eq!(RailDensity::of(layout::Tier::Ultra), RailDensity::Detailed);
 }
 
 #[test]
@@ -4854,12 +4855,12 @@ fn profile_picker_lists_mode_pack_and_the_active_profile() {
 fn top_row_names_a_non_default_profile_only() {
     let mut app = app_with_messages(0);
     app.connection = crate::ConnectionState::Live;
-    let plain = frame_rows(&[top_row(&app, 80)])[0].clone();
+    let plain = frame_rows(&[status_row(&app, 80, false)])[0].clone();
     assert!(!plain.contains("as "), "{plain}");
 
     let session = app.sessions.get_mut(&app.focused().unwrap()).unwrap();
     session.summary.profile = qq_protocol::AgentProfileId::new("reviewer").unwrap();
-    let badged = frame_rows(&[top_row(&app, 80)])[0].clone();
+    let badged = frame_rows(&[status_row(&app, 80, false)])[0].clone();
     assert!(badged.contains("as reviewer"), "{badged}");
 }
 
@@ -4867,7 +4868,7 @@ fn top_row_names_a_non_default_profile_only() {
 fn approval_mode_picker_and_badge_name_the_mode_in_effect() {
     let mut app = app_with_messages(0);
     app.connection = crate::ConnectionState::Live;
-    let plain = frame_rows(&[top_row(&app, 80)])[0].clone();
+    let plain = frame_rows(&[status_row(&app, 80, false)])[0].clone();
     assert!(
         !plain.contains("auto") && !plain.contains("read_only"),
         "{plain}"
@@ -4875,7 +4876,7 @@ fn approval_mode_picker_and_badge_name_the_mode_in_effect() {
 
     let session = app.sessions.get_mut(&app.focused().unwrap()).unwrap();
     session.summary.approval_mode = qq_protocol::ApprovalMode::ReadOnly;
-    let badged = frame_rows(&[top_row(&app, 80)])[0].clone();
+    let badged = frame_rows(&[status_row(&app, 80, false)])[0].clone();
     assert!(badged.contains("read_only"), "{badged}");
 
     app.apply_client_update(ClientUpdate::Capabilities(std::sync::Arc::new(
@@ -5612,7 +5613,7 @@ fn goal_view_names_states_reasons_consent_and_unknown_budgets() {
         goal.counters.estimated_cost_usd_nanos = None;
         snapshot.focused.as_mut().unwrap().goal = Some(goal);
         app.apply_client_update(ClientUpdate::Snapshot(snapshot));
-        let rows = super::workspace::goal_body(&app, session, 80);
+        let rows = super::chrome::goal_panel(&app, session, 80);
         let text = frame_rows(&rows).join("\n");
         for expected in [
             label,
@@ -5650,7 +5651,7 @@ fn goal_view_names_states_reasons_consent_and_unknown_budgets() {
             SessionEvent::GoalUpdated { goal },
         )));
         assert!(
-            frame_rows(&super::workspace::goal_body(&app, session, 80))
+            frame_rows(&super::chrome::goal_panel(&app, session, 80))
                 .join("\n")
                 .contains(label)
         );
@@ -5673,7 +5674,7 @@ fn goal_view_wraps_untrusted_text_and_preserves_failure_tail_and_independent_hol
     });
     app.apply_client_update(ClientUpdate::Snapshot(snapshot));
     for width in [8, 20, 80] {
-        let rows = super::workspace::goal_body(&app, session, width);
+        let rows = super::chrome::goal_panel(&app, session, width);
         assert!(rows.iter().all(|row| row.width() <= width));
         let text = frame_rows(&rows).join("");
         assert!(text.contains("preserved-check-tail"));
@@ -5706,7 +5707,7 @@ fn goal_view_reports_audit_method_without_claiming_unperformed_verification() {
     });
     snapshot.focused.as_mut().unwrap().goal = Some(goal);
     app.apply_client_update(ClientUpdate::Snapshot(snapshot));
-    let text = frame_rows(&super::workspace::goal_body(&app, session, 80)).join("\n");
+    let text = frame_rows(&super::chrome::goal_panel(&app, session, 80)).join("\n");
     assert!(text.contains("Verification method: independent model audit"));
     assert!(!text.contains("Completion verified"));
     assert!(text.contains("Tokens: 10 / 1000"));
@@ -5736,7 +5737,7 @@ fn goal_view_keeps_workspace_holds_visible_after_the_goal_is_cleared() {
             revision: 8,
         },
     )));
-    let text = frame_rows(&super::workspace::goal_body(&app, session, 80)).join("\n");
+    let text = frame_rows(&super::chrome::goal_panel(&app, session, 80)).join("\n");
     assert!(text.contains("No goal for this session"));
     assert!(text.contains("Workspace held"));
 }
@@ -5803,7 +5804,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
     goal.next_run_at_ms = 240_000;
     initial.focused.as_mut().unwrap().goal = Some(goal);
     app.apply_client_update(ClientUpdate::Snapshot(initial));
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let text = frame_rows(&[super::chrome::dock_rule(&app, 120, true)]).join("");
     for expected in ["goal", "run 12/200", "17h left", "next 4m"] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
@@ -5813,7 +5814,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
         qq_protocol::RunId::from_bytes([0x71; 16]),
         qq_protocol::RunActivity::PreparingToolCall,
     ));
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 80)]).join("");
+    let text = frame_rows(&[super::chrome::dock_rule(&app, 80, true)]).join("");
     assert!(
         text.contains("17h left") && text.contains("next 4m"),
         "{text}"
@@ -5825,7 +5826,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
         reason: GoalPauseReason::User,
     };
     goal.pending_run_id = Some(qq_protocol::RunId::from_bytes([0x71; 16]));
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let text = frame_rows(&[super::chrome::dock_rule(&app, 120, true)]).join("");
     assert!(text.contains("paused by you"), "{text}");
     assert!(text.contains("cancellation draining"), "{text}");
     assert!(!text.contains("/goal resume"), "{text}");
@@ -5836,7 +5837,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
         .as_mut()
         .unwrap()
         .pending_run_id = None;
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let text = frame_rows(&[super::chrome::dock_rule(&app, 120, true)]).join("");
     assert!(text.contains("/goal resume"), "{text}");
     app.sessions
         .get_mut(&session_id)
@@ -5845,7 +5846,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
         .as_mut()
         .unwrap()
         .status = GoalStatus::Achieved;
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 40)]).join("");
+    let text = frame_rows(&[super::chrome::dock_rule(&app, 40, true)]).join("");
     assert!(text.contains("goal") && text.contains("achieved"), "{text}");
     assert!(!text.contains("/goal resume"), "{text}");
     assert!(unicode_width::UnicodeWidthStr::width(text.as_str()) <= 40);
@@ -5860,7 +5861,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
             reason: "bad\u{1b}[2J\ninput".to_owned(),
         },
     };
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let text = frame_rows(&[super::chrome::dock_rule(&app, 120, true)]).join("");
     assert!(text.contains("blocked"), "{text}");
     assert!(!text.contains('\u{1b}') && !text.contains('\n'), "{text}");
 }

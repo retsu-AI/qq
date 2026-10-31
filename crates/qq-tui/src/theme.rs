@@ -12,6 +12,7 @@ pub struct Theme {
 pub struct Palette {
     pub text: Color,
     pub muted: Color,
+    pub faint: Color,
     pub accent: Color,
     pub brand: Color,
     pub warning: Color,
@@ -38,6 +39,7 @@ impl Palette {
     pub const TERMINAL: Self = Self {
         text: Color::White,
         muted: Color::DarkGrey,
+        faint: Color::DarkGrey,
         accent: Color::Cyan,
         brand: Color::Rgb {
             r: 255,
@@ -121,6 +123,7 @@ impl Palette {
         Self {
             text,
             muted,
+            faint: blend_halfway(muted, surface),
             accent,
             brand,
             warning,
@@ -181,6 +184,25 @@ impl Palette {
             self.syn_punctuation = color.into();
         }
         self
+    }
+}
+
+#[must_use]
+pub const fn blend_halfway(color: Color, background: Color) -> Color {
+    match (color, background) {
+        (
+            Color::Rgb { r, g, b },
+            Color::Rgb {
+                r: br,
+                g: bg,
+                b: bb,
+            },
+        ) => Color::Rgb {
+            r: ((r as u16 + br as u16 / 2) / 2) as u8,
+            g: ((g as u16 + bg as u16 / 2) / 2) as u8,
+            b: ((b as u16 + bb as u16 / 2) / 2) as u8,
+        },
+        (color, _) => color,
     }
 }
 

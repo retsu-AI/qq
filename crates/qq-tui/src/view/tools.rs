@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 
 use super::*;
-use markdown::{CODE_PANEL_INSET, panel_content_width, panel_rows, panel_rows_at};
 use qq_client::state::ToolCallTiming;
 use qq_protocol::ToolErrorKind;
 
@@ -9,16 +8,13 @@ pub(super) const TOOL_FOLD_THRESHOLD: usize = 3;
 pub(super) const TOOL_MARKER_PREFIX: &str = "…[qq: ";
 pub(super) const TOOL_SUBJECT_WIDTH: usize = 48;
 pub(super) const MAX_TOOL_ERROR_BYTES: usize = 2 * 1024;
-pub(super) const MAX_TOOL_ERROR_ROWS: usize = 6;
+pub(super) const MAX_TOOL_ERROR_ROWS: usize = 3;
 pub(super) const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
 pub(super) const MAX_TOOL_ARGUMENT_ROWS: usize = 8;
-pub(super) const MAX_TOOL_RESULT_ROWS: usize = 12;
-pub(super) const MAX_LIVE_TAIL_ROWS: usize = 6;
+pub(super) const MAX_TOOL_RESULT_ROWS: usize = 3;
+pub(super) const MAX_LIVE_TAIL_ROWS: usize = 3;
 pub(super) const TOOL_SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
-const FOLD_NAMED_FILES: usize = 3;
 const TRUNCATED_SUFFIX: &str = " · truncated";
-const TOOL_PANEL_INDENT: &str = "   ";
-pub(super) const TOOL_PANEL_PADDING_ROWS: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolRow {
@@ -518,8 +514,6 @@ pub(crate) struct ToolRowContext<'a> {
 
 pub(super) type ChildRows<'a> = &'a dyn Fn(ToolCallId, usize) -> Vec<Line>;
 
-pub(super) type ApprovalRows<'a> = &'a dyn Fn(ToolCallId, usize) -> Vec<Line>;
-
 pub(super) type RowLookup<'a> = &'a dyn Fn(&ToolCallSnapshot) -> ToolRowContext<'a>;
 
 pub(super) fn render_tool_calls(
@@ -529,7 +523,6 @@ pub(super) fn render_tool_calls(
     tick: usize,
     width: usize,
     children: ChildRows<'_>,
-    approval: ApprovalRows<'_>,
 ) -> Vec<Line> {
     let shown: Vec<&ToolCallSnapshot>;
     let calls = if calls.iter().any(|call| call.is_error) {
@@ -551,19 +544,37 @@ pub(super) fn render_tool_calls(
     let quiet = |call: &ToolCallSnapshot| {
         call.state == ToolCallState::Completed
             && !call.is_error
+            && !nonzero_exit(call)
             && !lookup(call).expanded
             && !lookup(call).selected
             && children(call.id, width).is_empty()
     };
     let fold = calls.first().is_some_and(|call| lookup(call).fold);
-    if fold && calls.len() > TOOL_FOLD_THRESHOLD && calls.iter().all(|call| quiet(call)) {
-        return vec![tool_fold_line(calls, lookup, width)];
-    }
+    let settled = calls.iter().all(|call| {
+        !matches!(
+            call.state,
+            ToolCallState::Running | ToolCallState::Requested | ToolCallState::AwaitingApproval
+        )
+    });
     let mut lines = Vec::with_capacity(calls.len());
+    let mut folded: Vec<&ToolCallSnapshot> = Vec::new();
+    if fold && settled {
+        let routine: Vec<&ToolCallSnapshot> = calls
+            .iter()
+            .copied()
+            .filter(|call| quiet(call) && !is_edit(call))
+            .collect();
+        if routine.len() >= TOOL_FOLD_THRESHOLD.min(calls.len()) && !routine.is_empty() {
+            lines.push(tool_fold_line(calls, lookup, width));
+            folded = routine;
+        }
+    }
     for call in calls {
+        if folded.iter().any(|folded| folded.id == call.id) {
+            continue;
+        }
         let context = lookup(call);
         lines.push(tool_summary_line(call, context, tick, width));
-        lines.extend(approval(call.id, width));
         if let Some(result) = call.result.as_deref() {
             let panel = match (call.error_kind(), call.is_error) {
                 (Some(ToolErrorKind::Failure), _) | (None, true) => {
@@ -573,6 +584,9 @@ pub(super) fn render_tool_calls(
                     None
                 }
                 (Some(ToolErrorKind::Outcome), _) => Some((1, warning())),
+                (None, false) if nonzero_exit(call) && !context.expanded => {
+                    Some((MAX_TOOL_ERROR_ROWS, muted()))
+                }
                 (Some(ToolErrorKind::Correction), _) | (None, false) => None,
             };
             if let Some((rows, style)) = panel {
@@ -598,50 +612,114 @@ pub(super) fn render_tool_calls(
     lines
 }
 
+fn is_edit(call: &ToolCallSnapshot) -> bool {
+    matches!(call.name.as_str(), "edit_file" | "write_file")
+}
+
 pub(super) fn tool_fold_line(
     calls: &[&ToolCallSnapshot],
     lookup: RowLookup<'_>,
     width: usize,
 ) -> Line {
-    let mut counts: Vec<(String, usize)> = Vec::new();
+    let mut counts: Vec<(&'static str, usize)> = Vec::new();
     let mut files: Vec<String> = Vec::new();
+    let mut added = 0;
+    let mut removed = 0;
+    let mut started: Option<u64> = None;
+    let mut finished: Option<u64> = None;
     for call in calls {
-        let row = lookup(call).row;
-        let label = row.label(call);
-        match counts.iter_mut().find(|(name, _)| *name == label) {
+        let context = lookup(call);
+        let row = context.row;
+        let noun = match row.verb {
+            "Read" => "read",
+            "List" => "listed",
+            "Search" => "searched",
+            "Edit" | "Write" => "edited",
+            "Run" => "ran",
+            "Spawn" => "spawned",
+            "Fetch" => "fetched",
+            _ => "called",
+        };
+        match counts.iter_mut().find(|(name, _)| *name == noun) {
             Some((_, count)) => *count += 1,
-            None => counts.push((label, 1)),
+            None => counts.push((noun, 1)),
         }
-        if row.subject_is_path
-            && let Some(subject) = &row.subject
-        {
-            let name = subject.rsplit('/').next().unwrap_or(subject).to_owned();
-            if !files.contains(&name) {
-                files.push(name);
+        if is_edit(call) {
+            if let Some(subject) = &row.subject
+                && !files.contains(subject)
+            {
+                files.push(subject.clone());
+            }
+            if let Some((plus, minus)) = row.metric.as_deref().and_then(|metric| {
+                let (plus, minus) = metric.split_once(' ')?;
+                Some((
+                    plus.strip_prefix('+')?.parse::<usize>().ok()?,
+                    minus.strip_prefix('−')?.parse::<usize>().ok()?,
+                ))
+            }) {
+                added += plus;
+                removed += minus;
             }
         }
-    }
-    let mut line = Line::styled(" ▸ ", accent());
-    for (index, (name, count)) in counts.iter().enumerate() {
-        if index > 0 {
-            line.push("  ", muted());
+        let timing = context.clock.timing;
+        if let Some(start) = timing.started_at_ms {
+            started = Some(started.map_or(start, |current| current.min(start)));
         }
-        line.push(name, normal());
-        line.push(format!(" ×{count}"), muted());
+        if let Some(end) = timing.finished_at_ms {
+            finished = Some(finished.map_or(end, |current| current.max(end)));
+        }
     }
+    let mut summary = count_noun(calls.len(), "call", "calls");
+    for (name, count) in counts {
+        summary.push_str(&format!(" · {name} {count}"));
+    }
+    let mut line = Line::styled("● ", faint());
+    line.push(summary, muted());
     if !files.is_empty() {
-        line.push("  ", muted());
-        let shown = files
-            .iter()
-            .take(FOLD_NAMED_FILES)
-            .cloned()
-            .collect::<Vec<_>>();
-        line.push(shown.join(", "), muted());
-        if files.len() > FOLD_NAMED_FILES {
-            line.push(format!(", +{}", files.len() - FOLD_NAMED_FILES), muted());
+        let mut changed = count_noun(files.len(), "file", "files");
+        if added + removed > 0 {
+            changed.push_str(&format!(" +{added} −{removed}"));
         }
+        line.push(format!("   {changed}"), faint());
+    }
+    if let (Some(start), Some(end)) = (started, finished)
+        && end.saturating_sub(start) >= 1000
+    {
+        line.push(format!("   {}", format_duration_ms(end - start)), faint());
     }
     truncate_line(line, width)
+}
+
+pub(super) const TOOL_VERB_WIDTH: usize = 9;
+
+fn verb_for(row: &ToolRow, call: &ToolCallSnapshot) -> String {
+    if row.raw_name {
+        return row.label(call);
+    }
+    let running = matches!(
+        call.state,
+        ToolCallState::Running | ToolCallState::Requested
+    );
+    let waiting = call.state == ToolCallState::AwaitingApproval;
+    let (past, present) = match row.verb {
+        "Read" => ("Read", "Reading"),
+        "List" => ("Listed", "Listing"),
+        "Search" => ("Searched", "Searching"),
+        "Edit" => ("Edited", "Editing"),
+        "Write" => ("Wrote", "Writing"),
+        "Run" => ("Ran", "Running"),
+        "Spawn" => ("Spawned", "Spawning"),
+        "Recall" => ("Recalled", "Recalling"),
+        "Fetch" => ("Fetched", "Fetching"),
+        other => (other, other),
+    };
+    if waiting {
+        row.verb.to_owned()
+    } else if running {
+        present.to_owned()
+    } else {
+        past.to_owned()
+    }
 }
 
 pub(super) fn tool_summary_line(
@@ -652,131 +730,112 @@ pub(super) fn tool_summary_line(
 ) -> Line {
     let row = context.row;
     let (glyph, glyph_style) = tool_state_glyph(call, tick);
-    let mut line = Line::styled(if context.selected { "▶" } else { " " }, accent());
-    line.push(glyph, glyph_style);
-    line.push(" ", muted());
-    let label = row.label(call);
-    let label_width = label.chars().count().max(6);
+    let mut line = Line::styled(format!("{glyph} "), glyph_style);
+    if context.selected {
+        line = Line::styled(format!("{glyph} "), accent());
+    }
+    let verb = verb_for(row, call);
+    let verb_width = text_width(&verb).max(TOOL_VERB_WIDTH - 1) + 1;
     line.push(
-        format!("{label:<label_width$} "),
-        if row.raw_name { muted() } else { normal() },
+        format!("{verb:<verb_width$}"),
+        if context.selected {
+            normal().bold()
+        } else {
+            normal()
+        },
     );
-    let mut used = 3 + label_width + 1;
     let running = call.state == ToolCallState::Running;
-    let metric = row.metric.as_deref().filter(|metric| !metric.is_empty());
-    let metric_width = metric.map_or(0, |metric| {
-        text_width(metric)
-            + if row.truncated {
-                text_width(TRUNCATED_SUFFIX)
-            } else {
-                0
-            }
-    });
-    let exit_in_metric = call.error_kind() == Some(ToolErrorKind::Outcome)
-        && metric.is_some()
-        && call
-            .result
-            .as_deref()
-            .and_then(|result| header_field(result, &call.name, "exit"))
-            .is_some();
-    let state = match call.error_kind() {
+    let mut tail: Vec<(String, Style)> = Vec::new();
+    match call.error_kind() {
         Some(kind @ (ToolErrorKind::Correction | ToolErrorKind::Outcome)) => {
-            Some(tool_error_label(call, kind))
+            let exit = call
+                .result
+                .as_deref()
+                .and_then(|result| header_field(result, &call.name, "exit"));
+            match (kind, exit) {
+                (ToolErrorKind::Outcome, Some(code)) => {
+                    tail.push((format!("exit {code}"), failure()));
+                }
+                _ => {
+                    let (label, style) = tool_error_label(call, kind);
+                    tail.push((label.to_owned(), style));
+                }
+            }
         }
         Some(ToolErrorKind::Failure) | None => {
-            (call.state != ToolCallState::Completed).then(|| {
-                (
-                    tool_state_label(call.state),
-                    match call.state {
-                        ToolCallState::Failed | ToolCallState::Denied => failure(),
-                        ToolCallState::AwaitingApproval => warning(),
-                        ToolCallState::Running => info(),
-                        ToolCallState::Requested
-                        | ToolCallState::Interrupted
-                        | ToolCallState::Completed => muted(),
-                    },
-                )
-            })
+            if let Some(metric) = row.metric.as_deref().filter(|metric| !metric.is_empty()) {
+                let mut metric = metric.to_owned();
+                if row.truncated {
+                    metric.push_str(TRUNCATED_SUFFIX);
+                }
+                let style = if nonzero_exit(call) {
+                    failure()
+                } else {
+                    faint()
+                };
+                tail.push((metric, style));
+            }
+            match call.state {
+                ToolCallState::Completed | ToolCallState::Running => {}
+                ToolCallState::AwaitingApproval => tail.push(("waiting".to_owned(), warning())),
+                ToolCallState::Failed | ToolCallState::Denied => {
+                    tail.push((tool_state_label(call.state).to_owned(), failure()));
+                }
+                ToolCallState::Requested | ToolCallState::Interrupted => {
+                    tail.push((tool_state_label(call.state).to_owned(), faint()));
+                }
+            }
         }
-    };
-    let state_width = state.map_or(0, |(label, _)| label.len());
-    let duration = context.clock.duration(running).map(format_duration_ms);
-    let duration_width = duration.as_deref().map_or(0, |text| text.len() + 2);
-    let mut show_duration = duration.is_some();
-    let mut show_metric = metric.is_some();
-    let right_width = |show_metric: bool, show_duration: bool| {
-        let mut total = if show_metric { metric_width } else { 0 };
-        if state.is_some() && !(exit_in_metric && show_metric) {
-            total += if show_metric { 3 } else { 0 } + state_width;
-        }
-        if show_duration {
-            total += duration_width;
-        }
-        total
-    };
-    let subject_min = if row.subject.is_some() { 6 } else { 0 };
-    let fits = |show_metric: bool, show_duration: bool| {
-        let right = right_width(show_metric, show_duration);
-        let gap = if right > 0 { 2 } else { 0 };
-        used + subject_min + gap + right <= width
-    };
-    if show_duration && !fits(show_metric, show_duration) {
-        show_duration = false;
     }
-    if show_metric && !fits(show_metric, show_duration) {
-        show_metric = false;
+    if let Some(duration) = context.clock.duration(running).filter(|ms| *ms >= 1000) {
+        tail.push((format_duration_ms(duration), faint()));
     }
-    let right_width = right_width(show_metric, show_duration);
-    let gap = if right_width > 0 { 2 } else { 0 };
+    let used = line.width();
+    let mut tail_width: usize = tail.iter().map(|(text, _)| text_width(text) + 2).sum();
+    while used + 6 + tail_width > width && !tail.is_empty() {
+        let (text, _) = tail.pop().expect("tail is not empty");
+        tail_width -= text_width(&text) + 2;
+    }
     if let Some(subject) = &row.subject {
-        let available = width.saturating_sub(used + gap + right_width);
+        let available = width.saturating_sub(used + tail_width);
         let text = if row.subject_is_path {
             elide_path(subject, available)
         } else {
             preview(subject, available)
         };
-        used += text_width(&text);
-        line.push(text, normal());
+        line.push(text, muted());
     }
-    if right_width > 0 {
-        line.push(
-            " ".repeat(width.saturating_sub(used + right_width).max(gap)),
-            muted(),
-        );
-        if show_metric && let Some(metric) = metric {
-            line.push(metric, muted());
-            if row.truncated {
-                line.push(TRUNCATED_SUFFIX, muted());
-            }
-        }
-        if let Some((label, style)) = state.filter(|_| !(exit_in_metric && show_metric)) {
-            if show_metric {
-                line.push(" · ", muted());
-            }
-            line.push(label, style);
-        }
-        if show_duration && let Some(duration) = duration {
-            let style = if running { info() } else { muted() };
-            line.push("  ", style);
-            line.push(duration, style);
-        }
+    for (text, style) in tail {
+        line.push("  ", normal());
+        line.push(text, style);
     }
     truncate_line(line, width)
 }
 
+pub(super) fn nonzero_exit(call: &ToolCallSnapshot) -> bool {
+    matches!(call.name.as_str(), "shell" | "exec")
+        && call
+            .result
+            .as_deref()
+            .and_then(|result| header_field(result, &call.name, "exit"))
+            .is_some_and(|code| code != "0")
+}
+
 pub(super) fn tool_state_glyph(call: &ToolCallSnapshot, tick: usize) -> (&'static str, Style) {
+    if call.state == ToolCallState::Completed && nonzero_exit(call) {
+        return ("✕", failure());
+    }
     match call.state {
         ToolCallState::Running => (spinner(tick), info()),
-        ToolCallState::Requested => ("○", muted()),
+        ToolCallState::Requested => ("○", faint()),
         ToolCallState::Completed | ToolCallState::Failed => match call.error_kind() {
-            None => ("●", muted()),
-            Some(ToolErrorKind::Correction) => ("↻", muted()),
-            Some(ToolErrorKind::Outcome) => ("!", warning()),
-            Some(ToolErrorKind::Failure) => ("✕", failure()),
+            None => ("●", faint()),
+            Some(ToolErrorKind::Correction) => ("↻", faint()),
+            Some(ToolErrorKind::Outcome | ToolErrorKind::Failure) => ("✕", failure()),
         },
         ToolCallState::Denied => ("✕", failure()),
         ToolCallState::AwaitingApproval => ("◇", warning()),
-        ToolCallState::Interrupted => ("◌", muted()),
+        ToolCallState::Interrupted => ("◌", faint()),
     }
 }
 
@@ -836,45 +895,30 @@ pub(super) fn tool_error_lines(
     width: usize,
 ) -> Vec<Line> {
     let text = bounded_tail(result, max_bytes);
-    let total = text.lines().count();
-    let content_width = tool_panel_content_width(width);
-    let mut body = Vec::with_capacity(max_rows + 1);
-    if total > max_rows || text.len() < result.len() {
-        body.push(Line::styled("…", muted()));
+    let rows: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let shown = rows.len().min(max_rows);
+    let mut body = Vec::with_capacity(shown + 1);
+    if rows.len() > shown || text.len() < result.len() {
+        body.push(tail_row("…", faint(), width));
     }
-    for line in text.lines().skip(total.saturating_sub(max_rows)) {
-        body.push(truncate_line(Line::styled(line, style), content_width));
+    for line in &rows[rows.len() - shown..] {
+        body.push(tail_row(line, style, width));
     }
-    if body.is_empty() {
-        return body;
-    }
-    tool_panel_rows(body, None, width)
+    body
 }
 
-fn tool_panel_rows(
-    body: impl IntoIterator<Item = Line>,
-    label: Option<&str>,
-    width: usize,
-) -> Vec<Line> {
-    let indent = TOOL_PANEL_INDENT.len();
-    if width <= indent + CODE_PANEL_INSET {
-        return panel_rows(body, label, width);
-    }
-    panel_rows_at(body, label, width - indent, indent)
+pub(super) fn tail_row(text: &str, style: Style, width: usize) -> Line {
+    let safe: String = text.chars().filter_map(terminal_safe_character).collect();
+    let mut line = Line::styled("│ ", faint());
+    line.push(safe, style);
+    truncate_line(line, width)
 }
 
 fn tool_panel_content_width(width: usize) -> usize {
-    panel_content_width(width.saturating_sub(TOOL_PANEL_INDENT.len()))
-}
-
-pub(crate) fn format_clock(ms: u64) -> String {
-    let seconds = ms / 1000;
-    format!(
-        "{:02}:{:02}:{:02}",
-        (seconds / 3600) % 24,
-        (seconds / 60) % 60,
-        seconds % 60
-    )
+    width.saturating_sub(2).max(1)
 }
 
 pub(super) fn tool_expanded_lines(
@@ -904,32 +948,6 @@ pub(super) fn tool_expanded_lines(
         ),
         Some(ToolErrorKind::Failure) | None => Vec::new(),
     };
-    let timing = context.clock.timing;
-    let running = call.state == ToolCallState::Running;
-    let mut when = Line::styled("     ", muted());
-    let mut fields = Vec::new();
-    if let Some(started) = timing.started_at_ms {
-        fields.push(format!("started {}", format_clock(started)));
-    }
-    match (running, timing.finished_at_ms) {
-        (true, _) => {
-            if let Some(duration) = context.clock.duration(true) {
-                fields.push(format!("running {}", format_duration_ms(duration)));
-            }
-            if let Some(last) = timing.last_output_at_ms {
-                fields.push(format!("last output {}", format_clock(last)));
-            }
-        }
-        (false, Some(finished)) => fields.push(format!("→ {}", format_clock(finished))),
-        (false, None) => {}
-    }
-    if let Some(label) = timing.settled.and_then(|settled| settled.label()) {
-        fields.push(label);
-    }
-    if !fields.is_empty() {
-        when.push(fields.join(" · "), muted());
-        lines.push(truncate_line(when, width));
-    }
     lines.extend(graded);
     let mut cached = row.panel.borrow_mut();
     if !cached
@@ -965,7 +983,11 @@ fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line>
         if !body.is_empty() {
             body.push(Line::default());
         }
-        body.extend(diff_lines(diff, MAX_TOOL_RESULT_ROWS, content_width));
+        body.extend(super::overlay::dock_diff_lines(
+            diff,
+            MAX_TOOL_RESULT_ROWS,
+            content_width,
+        ));
         None
     } else {
         call.result.as_deref().filter(|_| !call.is_error)
@@ -988,10 +1010,10 @@ fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line>
                 if total > MAX_TOOL_RESULT_ROWS {
                     body.push(Line::styled(
                         format!(
-                            "… {} more",
-                            count_noun(total - MAX_TOOL_RESULT_ROWS, "line", "lines")
+                            "… {}",
+                            count_noun(total - MAX_TOOL_RESULT_ROWS, "more line", "more lines")
                         ),
-                        muted(),
+                        faint(),
                     ));
                 }
             }
@@ -999,7 +1021,7 @@ fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line>
                 let text = bounded_tail(result, MAX_TOOL_DETAIL_BYTES);
                 let total = text.lines().count();
                 if total > MAX_TOOL_RESULT_ROWS || text.len() < result.len() {
-                    body.push(Line::styled("…", muted()));
+                    body.push(Line::styled("…", faint()));
                 }
                 for line in text
                     .lines()
@@ -1010,85 +1032,24 @@ fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line>
             }
         }
     }
-    if body.is_empty() {
-        return Vec::new();
-    }
-    tool_panel_rows(body, None, width)
-}
-
-pub(crate) fn diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<Line> {
-    let mut lines = Vec::new();
-    let mut new_line: Option<usize> = None;
-    let total = diff.lines().count();
-    for (shown, text) in diff.lines().enumerate() {
-        if shown == max_rows {
-            lines.push(Line::styled(
-                format!("     … {} more", count_noun(total - shown, "line", "lines")),
-                muted(),
-            ));
-            break;
-        }
-        if text.starts_with("@@") {
-            new_line = text
-                .split_whitespace()
-                .nth(2)
-                .and_then(|range| range.strip_prefix('+'))
-                .and_then(|range| range.split(',').next())
-                .and_then(|start| start.parse().ok());
-            lines.push(truncate_line(
-                Line::styled(format!("     {text}"), muted()),
-                width,
-            ));
-            continue;
-        }
-        if text.starts_with("+++") || text.starts_with("---") {
-            continue;
-        }
-        let style = diff_line_style(text);
-        let (number, advance) = match text.chars().next() {
-            Some('-') => (None, false),
-            _ => (new_line, true),
-        };
-        let gutter = match number {
-            Some(number) => format!(" {number:>4} "),
-            None => "      ".to_owned(),
-        };
-        if advance && let Some(number) = new_line.as_mut() {
-            *number += 1;
-        }
-        let mut line = Line::styled(gutter, muted());
-        line.push(text, style);
-        pad_line(&mut line, width);
-        lines.push(truncate_line(line, width));
-    }
-    lines
+    body.into_iter()
+        .map(|line| {
+            let mut row = Line::styled("│ ", faint());
+            for span in line.spans {
+                row.push(span.text, span.style);
+            }
+            truncate_line(row, width)
+        })
+        .collect()
 }
 
 pub(super) fn tool_live_output_lines(output: &str, width: usize) -> Vec<Line> {
     let complete = &output[..output.rfind('\n').map_or(0, |index| index + 1)];
-    if complete.is_empty() {
-        return Vec::new();
-    }
-    let total = complete.lines().count();
-    let mut rows = tool_panel_rows(
-        complete
-            .lines()
-            .skip(total.saturating_sub(MAX_LIVE_TAIL_ROWS))
-            .map(|line| {
-                let safe = line
-                    .chars()
-                    .filter_map(terminal_safe_character)
-                    .collect::<String>();
-                Line::styled(safe, muted())
-            }),
-        None,
-        width,
-    );
-    let excess = (rows.len() - TOOL_PANEL_PADDING_ROWS).saturating_sub(MAX_LIVE_TAIL_ROWS);
-    if excess > 0 {
-        rows.drain(1..1 + excess);
-    }
-    rows
+    let rows: Vec<&str> = complete.lines().collect();
+    rows[rows.len().saturating_sub(MAX_LIVE_TAIL_ROWS)..]
+        .iter()
+        .map(|line| tail_row(line, muted(), width))
+        .collect()
 }
 
 pub(super) fn looks_like_diff(text: &str) -> bool {
@@ -1163,13 +1124,5 @@ pub(super) fn render_tool_calls_simple(
         fold: detail == SimpleDetail::Folded,
         selected: false,
     };
-    render_tool_calls(
-        calls,
-        live_output,
-        &lookup,
-        tick,
-        width,
-        children,
-        &|_, _| Vec::new(),
-    )
+    render_tool_calls(calls, live_output, &lookup, tick, width, children)
 }
