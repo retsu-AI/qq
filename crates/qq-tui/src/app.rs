@@ -34,7 +34,7 @@ use crate::{
 };
 mod pickers;
 
-const GOAL_PAGE_ROWS: usize = 5;
+const GOAL_PAGE_ROWS: usize = 1;
 const MAX_GOAL_SCROLL: usize = 256;
 const MAX_EXPANDED_TOOL_CALLS: usize = 256;
 

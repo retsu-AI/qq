@@ -6208,3 +6208,26 @@ fn a_long_goal_budget_summary_wraps_instead_of_dropping_limits() {
     assert!(summary.contains("turns per run"), "{rows:#?}");
     assert!(!summary.contains('…'), "{rows:#?}");
 }
+
+#[test]
+fn paging_the_goal_panel_reaches_every_row_on_a_short_terminal() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let session = initial.focused.as_ref().unwrap().summary.id;
+    initial.focused.as_mut().unwrap().goal = Some(fixtures::goal_snapshot(session));
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    app.execute(Command::ShowGoal);
+    let all = frame_rows(&super::chrome::goal_panel(&app, session, 76));
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..all.len() + 2 {
+        for row in frame_rows(&super::chrome::dock_panel(&app, 76, 3)) {
+            seen.insert(row);
+        }
+        app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        )));
+    }
+    let missing: Vec<&String> = all.iter().filter(|row| !seen.contains(*row)).collect();
+    assert!(missing.is_empty(), "never shown: {missing:#?}");
+}
