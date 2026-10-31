@@ -604,7 +604,7 @@ pub(super) fn dock_diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<
             faint(),
         );
         line.push(format!("{sign}  "), style);
-        line.push(rest.strip_prefix("   ").unwrap_or(rest), style);
+        line.push(rest, style);
         match sign {
             "-" => old_line = old_line.map(|number| number + 1),
             "+" => new_line = new_line.map(|number| number + 1),
@@ -663,7 +663,9 @@ pub(super) fn goal_check_picker(app: &App, width: usize, height: usize) -> Vec<L
         .filter_map(terminal_safe_character)
         .collect();
     let lines: Vec<&str> = command.lines().collect();
-    let fits_on_rule = lines.len() == 1 && text_width(&command) + 24 <= width;
+    let fits_on_rule = lines.len() == 1
+        && text_width(&command) <= super::chrome::GOAL_CHECK_RULE_COMMAND
+        && text_width(&command) + 24 <= width;
     if !fits_on_rule {
         let wrapped: Vec<Line> = lines
             .iter()
@@ -754,12 +756,20 @@ pub(super) fn goal_form(app: &App, width: usize, height: usize) -> Vec<Line> {
         } else {
             safe(text)
         };
+        let field_width = width.saturating_sub(2).max(1);
+        if editing {
+            let before = format!("{}▏", safe(&text[..cursor])).replace('\n', " ");
+            let caret_row = wrap_line_chars(Line::styled(before, normal()), field_width)
+                .len()
+                .saturating_sub(1);
+            selected = out.len() + caret_row;
+        }
         if shown.is_empty() {
             out.push(Line::styled("  (empty)", faint()));
         } else {
             for row in wrap_line_chars(
                 Line::styled(shown.replace('\n', " "), normal()),
-                width.saturating_sub(2).max(1),
+                field_width,
             ) {
                 let mut line = Line::styled("  ", normal());
                 for span in row.spans {

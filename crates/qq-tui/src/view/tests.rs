@@ -5905,3 +5905,88 @@ fn the_rule_takes_the_running_color_while_the_focused_session_runs() {
         "{running:?}"
     );
 }
+
+#[test]
+fn a_goal_check_command_too_long_for_the_rule_stays_readable_in_the_panel() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let session = initial.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session);
+    let command = format!("cargo test -p billing -- {}end-marker", "x".repeat(20));
+    goal.check.as_mut().unwrap().command = command.clone();
+    initial.focused.as_mut().unwrap().goal = Some(goal);
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    app.composer.replace("/goal check".to_owned());
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert!(text_width(&command) > 40 && text_width(&command) + 24 <= 116);
+    let rule = frame_rows(&[super::chrome::dock_rule(&app, 116, true)]).join("");
+    let panel = frame_rows(&super::overlay::goal_check_picker(&app, 116, 12)).join("\n");
+    assert!(
+        rule.contains("end-marker") || panel.contains("end-marker"),
+        "the full command is shown somewhere before consent\nrule: {rule}\npanel: {panel}"
+    );
+}
+
+#[test]
+fn page_down_reveals_goal_rows_past_the_dock_limit() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let session = initial.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session);
+    goal.check_output = Some("exit 7\nlast-line-marker".to_owned());
+    initial.focused.as_mut().unwrap().goal = Some(goal);
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    app.execute(Command::ShowGoal);
+    let panel = |app: &App| frame_rows(&super::chrome::dock_panel(app, 76, 5)).join("\n");
+    let first = panel(&app);
+    assert!(!first.contains("last-line-marker"), "{first}");
+    assert!(first.contains("PgDn"), "{first}");
+    let mut seen = false;
+    for _ in 0..10 {
+        app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        )));
+        seen |= panel(&app).contains("last-line-marker");
+    }
+    assert!(seen, "PageDown never revealed the last goal row");
+}
+
+#[test]
+fn the_goal_form_keeps_the_caret_row_visible_while_editing_a_long_field() {
+    use crossterm::event::Event;
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(fixtures::workspace_snapshot()));
+    app.composer.replace("/goal short".to_owned());
+    app.handle_terminal_event(Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    app.handle_terminal_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    app.handle_terminal_event(Event::Paste(format!("{}caret-marker", "word ".repeat(80))));
+    let rows = frame_rows(&super::overlay::goal_form(&app, 40, 6)).join("\n");
+    assert!(rows.contains('▏'), "caret row is visible: {rows}");
+}
+
+#[test]
+fn connection_warnings_survive_a_status_line_too_long_for_the_width() {
+    let mut app = app_with_messages(1);
+    app.sessions.get_mut(&SESSION).unwrap().summary.title = "t".repeat(120);
+    app.apply_client_update(ClientUpdate::Connection(crate::ConnectionState::Offline));
+    let row = frame_rows(&[status_row(&app, 60, false)]).join("");
+    assert!(row.trim_end().ends_with("offline"), "{row}");
+    assert!(text_width(&row) <= 60, "{row}");
+}
+
+#[test]
+fn diff_rows_keep_every_leading_space_of_the_source() {
+    let diff = "@@ -1,2 +1,2 @@\n-   run_job()\n+run_job()\n     keep()";
+    let rows = frame_rows(&super::overlay::dock_diff_lines(diff, 8, 60));
+    let body = |row: &String| row.get(8..).map(str::to_owned);
+    assert_eq!(body(&rows[0]).as_deref(), Some("   run_job()"), "{rows:#?}");
+    assert_eq!(body(&rows[1]).as_deref(), Some("run_job()"), "{rows:#?}");
+    assert_eq!(body(&rows[2]).as_deref(), Some("    keep()"), "{rows:#?}");
+}

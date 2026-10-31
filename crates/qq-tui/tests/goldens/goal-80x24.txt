@@ -19,6 +19,6 @@
     audits    1 · 1 failed check
     check     cargo test -p billing · 5.0s · consent used
     notes     Backfill verified
-    ● verify invoices
+    … 4 more rows · PgDn
   ┃ Ask QQ…
     /goal check consent   /goal pause   esc back

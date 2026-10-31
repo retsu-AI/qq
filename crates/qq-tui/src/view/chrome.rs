@@ -112,9 +112,16 @@ pub(super) fn status_row(app: &App, width: usize, compact: bool) -> Line {
         Some((text, style)) if left.width() + text_width(text) + 2 <= width => {
             align_sides(left, Line::styled(text, style), width)
         }
+        Some((text, style)) if app.connection != crate::ConnectionState::Live => {
+            let right = Line::styled(text, style);
+            let room = width.saturating_sub(right.width() + 2);
+            align_sides(truncate_line(left, room), right, width)
+        }
         _ => truncate_line(left, width),
     }
 }
+
+pub(super) const GOAL_CHECK_RULE_COMMAND: usize = 40;
 
 pub(crate) const fn mode_name(mode: ApprovalMode) -> &'static str {
     match mode {
@@ -196,7 +203,7 @@ pub(super) fn rule_activity(app: &App) -> Option<String> {
             .collect();
         return Some(format!(
             "run {} in {}?",
-            preview(&command, 40),
+            preview(&command, GOAL_CHECK_RULE_COMMAND),
             target.workspace_path
         ));
     }
@@ -475,7 +482,23 @@ pub(super) fn dock_panel(app: &App, width: usize, limit: usize) -> Vec<Line> {
         Mode::History => history_picker(app, width, limit),
         Mode::Approval => approval_block(app, width),
         Mode::Compose => match app.view() {
-            View::Goal(session_id) => goal_panel(app, session_id, width),
+            View::Goal(session_id) => {
+                let rows = goal_panel(app, session_id, width);
+                let start = app.goal_scroll.min(rows.len().saturating_sub(limit));
+                let hidden_below = rows.len().saturating_sub(start + limit);
+                let mut shown: Vec<Line> = rows.into_iter().skip(start).collect();
+                if hidden_below > 0 {
+                    shown.truncate(limit.saturating_sub(1));
+                    shown.push(Line::styled(
+                        format!(
+                            "  … {} · PgDn",
+                            count_noun(hidden_below + 1, "more row", "more rows")
+                        ),
+                        faint(),
+                    ));
+                }
+                shown
+            }
             _ => Vec::new(),
         },
     };

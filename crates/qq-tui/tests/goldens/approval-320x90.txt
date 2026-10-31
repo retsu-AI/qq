@@ -82,9 +82,9 @@
 
 
   ◇ apply this edit? ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-    40     let mut column = 0;
-    41 -   while column <= width {
-    41 +   while column < width {
-    42         column += 1;
+    40        let mut column = 0;
+    41 -      while column <= width {
+    41 +      while column < width {
+    42            column += 1;
   ┃ y apply   n deny   Y / N with a note
     Session 0 · gpt-test                                                                                                                                                                                                                                                  /workspace
