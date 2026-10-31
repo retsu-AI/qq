@@ -258,6 +258,13 @@ enum PendingIntent {
     Undo,
 }
 
+#[derive(Debug)]
+struct QueuedPrompt {
+    text: String,
+    session_id: Option<SessionId>,
+    view: View,
+}
+
 pub(crate) struct App {
     pub settings: Settings,
     pub model: ModelSelection,
@@ -316,7 +323,7 @@ pub(crate) struct App {
     pending: HashMap<CommandId, PendingIntent>,
     answered_approvals: std::collections::HashSet<qq_protocol::ToolCallId>,
     acknowledged_side_questions: HashMap<SessionId, RunId>,
-    startup_submits: VecDeque<String>,
+    startup_submits: VecDeque<QueuedPrompt>,
 }
 
 impl App {
@@ -861,15 +868,7 @@ impl App {
                 self.refresh_session_picker();
             }
         }
-        if self.focused().is_some() && !self.startup_submits.is_empty() {
-            let draft = std::mem::take(&mut self.composer);
-            let submits = std::mem::take(&mut self.startup_submits);
-            for prompt in submits {
-                self.composer.replace(prompt);
-                effects.extend(self.submit_prompt());
-            }
-            self.composer = draft;
-        }
+        effects.extend(self.replay_queued_prompts());
         effects
     }
 
@@ -1825,7 +1824,11 @@ impl App {
                 ));
                 return Effects::redraw(Redraw::Immediate);
             }
-            self.startup_submits.push_back(prompt);
+            self.startup_submits.push_back(QueuedPrompt {
+                text: prompt,
+                session_id: self.focused(),
+                view: self.view(),
+            });
             self.composer.clear();
             self.reset_history_browse();
             self.slash.select(0);
@@ -2022,14 +2025,41 @@ impl App {
     ) -> Effects {
         let mut effects = self.finish_resolved_mentions(id, submit, resolved);
         if self.resolving == 0 && self.focused().is_some() {
-            let draft = std::mem::take(&mut self.composer);
-            let queued = std::mem::take(&mut self.startup_submits);
-            for prompt in queued {
-                self.composer.replace(prompt);
-                effects.extend(self.submit_prompt());
-            }
-            self.composer = draft;
+            effects.extend(self.replay_queued_prompts());
         }
+        effects
+    }
+
+    fn replay_queued_prompts(&mut self) -> Effects {
+        if self.focused().is_none() {
+            return Effects::none();
+        }
+        let draft = std::mem::take(&mut self.composer);
+        let queued = std::mem::take(&mut self.startup_submits);
+        let mut effects = Effects::none();
+        for prompt in queued {
+            let current_session = self.focused();
+            let same_route = match prompt.session_id {
+                Some(session_id) => {
+                    current_session == Some(session_id) && self.view() == prompt.view
+                }
+                None => {
+                    current_session.is_some()
+                        && prompt.view == View::Transcript(None)
+                        && self.view() == View::Transcript(current_session)
+                }
+            };
+            if same_route {
+                self.composer.replace(prompt.text);
+                effects.extend(self.submit_prompt());
+            } else {
+                self.set_warning(
+                    "queued prompt rejected because its session or view changed".to_owned(),
+                );
+                effects.extend(Effects::redraw(Redraw::Immediate));
+            }
+        }
+        self.composer = draft;
         effects
     }
 

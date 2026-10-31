@@ -191,6 +191,36 @@ fn frame_text(frame: &[u8]) -> String {
 }
 
 #[test]
+fn saturated_completion_queue_retains_and_coalesces_the_latest_request() {
+    let mut pending = PendingCompletion::default();
+    pending.push(CompletionRequest {
+        id: 1,
+        query: "old".to_owned(),
+        recent: vec!["old.rs".to_owned()],
+    });
+    assert!(pending.take_when_available(MAX_BACKGROUND_JOBS).is_none());
+
+    pending.push(CompletionRequest {
+        id: 2,
+        query: "latest".to_owned(),
+        recent: vec!["latest.rs".to_owned()],
+    });
+    assert!(pending.take_when_available(MAX_BACKGROUND_JOBS).is_none());
+
+    let request = pending
+        .take_when_available(MAX_BACKGROUND_JOBS - 1)
+        .expect("latest completion retained until a slot opens");
+    assert_eq!(request.id, 2);
+    assert_eq!(request.query, "latest");
+    assert_eq!(request.recent, ["latest.rs"]);
+    assert!(
+        pending
+            .take_when_available(MAX_BACKGROUND_JOBS - 1)
+            .is_none()
+    );
+}
+
+#[test]
 fn terminal_input_modes_enable_and_restore_keyboard_mouse_and_paste() {
     let mut entered = Vec::new();
     let mut restored = Vec::new();

@@ -126,6 +126,24 @@ fn repeated_submits_during_startup_capture_each_prompt_and_preserve_the_next_dra
     assert_eq!(prompts, ["first", "second"]);
     assert_eq!(app.composer.text, "still editing");
 }
+
+#[test]
+fn startup_queued_slash_command_keeps_normal_routing() {
+    let mut app = App::new(TuiOptions::default());
+    app.composer.replace("/compact".to_owned());
+    assert!(!app.submit_prompt().requests_anything());
+
+    let (_, requests) = app.apply_snapshot(snapshot()).split();
+
+    assert!(matches!(
+        requests.as_slice(),
+        [ClientRequest::Command(CommandRequest {
+            command: SessionCommand::CompactSession { .. },
+            ..
+        })]
+    ));
+}
+
 #[test]
 fn approval_prompt_captures_keys_and_sends_the_decision() {
     let mut app = App::new(TuiOptions::default());
@@ -4537,6 +4555,97 @@ fn mention_resolution_preserves_later_prompt_order() {
     );
 }
 
+#[test]
+fn queued_prompt_rejects_focus_change_while_mentions_resolve() {
+    let (mut app, first, other) = two_session_app();
+    app.workspace_root = Some(std::path::PathBuf::from("/work"));
+    app.composer.replace("first @src/lib.rs".to_owned());
+    let (id, submit) = app
+        .submit_prompt()
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::ResolveMentions { id, submit } => Some((id, submit)),
+            _ => None,
+        })
+        .unwrap();
+    app.composer.replace("for first".to_owned());
+    assert!(!app.submit_prompt().requests_anything());
+    app.focus_session(other);
+    app.composer.replace("draft for other".to_owned());
+
+    let effects = app.apply_resolved_mentions(
+        id,
+        submit,
+        Ok(qq_core::mentions::ResolvedPrompt {
+            parts: vec![qq_protocol::InputPart::text("first resolved")],
+            notes: Vec::new(),
+            skill: None,
+        }),
+    );
+
+    assert!(!effects.requests_anything());
+    assert_eq!(app.focused(), Some(other));
+    assert_ne!(app.focused(), Some(first));
+    assert_eq!(app.composer.text, "draft for other");
+    assert_eq!(
+        app.status.as_deref(),
+        Some("queued prompt rejected because its session or view changed")
+    );
+}
+
+#[test]
+fn queued_prompt_rejects_routing_view_change_while_mentions_resolve() {
+    let mut app = App::new(TuiOptions {
+        workspace_root: Some(std::path::PathBuf::from("/work")),
+        ..TuiOptions::default()
+    });
+    app.apply_snapshot(snapshot());
+    let session_id = app.focused().unwrap();
+    app.composer.replace("first @src/lib.rs".to_owned());
+    let (id, submit) = app
+        .submit_prompt()
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::ResolveMentions { id, submit } => Some((id, submit)),
+            _ => None,
+        })
+        .unwrap();
+    app.composer.replace("main follow-up".to_owned());
+    assert!(!app.submit_prompt().requests_anything());
+    app.execute(Command::ShowSideQuestions);
+    assert_eq!(app.view(), View::SideQuestions(session_id));
+    app.composer.replace("side draft".to_owned());
+
+    let effects = app.apply_resolved_mentions(
+        id,
+        submit,
+        Ok(qq_core::mentions::ResolvedPrompt {
+            parts: vec![qq_protocol::InputPart::text("first resolved")],
+            notes: Vec::new(),
+            skill: None,
+        }),
+    );
+
+    let requests = effects.into_requests();
+    assert!(matches!(
+        requests.as_slice(),
+        [ClientRequest::Command(CommandRequest {
+            command: SessionCommand::SubmitPrompt {
+                session_id: target,
+                input,
+                ..
+            },
+            ..
+        })] if *target == session_id
+            && input.as_slice() == [qq_protocol::InputPart::text("first resolved")]
+    ));
+    assert_eq!(app.view(), View::SideQuestions(session_id));
+    assert_eq!(app.composer.text, "side draft");
+    assert_eq!(
+        app.status.as_deref(),
+        Some("queued prompt rejected because its session or view changed")
+    );
+}
 #[test]
 fn completion_request_clears_previously_selectable_candidates() {
     let mut app = App::new(TuiOptions {

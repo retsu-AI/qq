@@ -175,7 +175,7 @@ async fn run_tui_client(
             if valid
                 && empty_rx.await.unwrap_or(false)
                 && let Some(snapshot) =
-                    create_initial_session(&client, workspace_id, selection).await
+                    create_initial_session_if_empty(&client, workspace_id, selection).await
             {
                 let _ = updates.send(ClientUpdate::Snapshot(snapshot)).await;
             }
@@ -224,6 +224,7 @@ async fn run_tui_client(
                         workspace.clone(),
                         workspace_id,
                         selection.clone(),
+                        snapshot.sessions.is_empty(),
                         updates.clone(),
                     ));
                     reconnect_delay = Duration::from_millis(50);
@@ -321,6 +322,7 @@ async fn run_tui_client(
                     workspace.clone(),
                     workspace_id,
                     selection.clone(),
+                    snapshot.sessions.is_empty(),
                     updates.clone(),
                 ));
                 reconnect_delay = Duration::from_millis(50);
@@ -351,10 +353,25 @@ fn start_tui_model_load(
     workspace: PathBuf,
     workspace_id: WorkspaceId,
     selection: ModelSelection,
+    create_initial: bool,
     updates: mpsc::Sender<ClientUpdate>,
 ) -> BackgroundTask {
     BackgroundTask(tokio::spawn(async move {
-        load_tui_models(client, workspace, workspace_id, selection, updates).await;
+        let valid = load_tui_models(
+            client.clone(),
+            workspace,
+            workspace_id,
+            selection.clone(),
+            updates.clone(),
+        )
+        .await;
+        if valid
+            && create_initial
+            && let Some(snapshot) =
+                create_initial_session_if_empty(&client, workspace_id, selection).await
+        {
+            let _ = updates.send(ClientUpdate::Snapshot(snapshot)).await;
+        }
     }))
 }
 
@@ -398,11 +415,24 @@ async fn load_tui_models(
     selection_is_valid
 }
 
-async fn create_initial_session(
+async fn create_initial_session_if_empty(
     client: &SessionClient,
     workspace_id: WorkspaceId,
     selection: ModelSelection,
 ) -> Option<WorkspaceSnapshot> {
+    let snapshot = client
+        .snapshot(SnapshotRequest {
+            workspace_id,
+            focused_session_id: None,
+            include_sessions: Vec::new(),
+            session_limit: 1,
+            message_limit: 1,
+        })
+        .await
+        .ok()?;
+    if !snapshot.sessions.is_empty() {
+        return None;
+    }
     let command_id = CommandId::generate().ok()?;
     let receipt = client
         .command(

@@ -35,6 +35,28 @@ const ANIMATION_INTERVAL: Duration = Duration::from_millis(crate::app::ANIMATION
 const MAX_BACKGROUND_JOBS: usize = 16;
 const MAX_BACKGROUND_CONCURRENCY: usize = 4;
 
+struct CompletionRequest {
+    id: u64,
+    query: String,
+    recent: Vec<String>,
+}
+
+#[derive(Default)]
+struct PendingCompletion(Option<CompletionRequest>);
+
+impl PendingCompletion {
+    fn push(&mut self, request: CompletionRequest) {
+        self.0 = Some(request);
+    }
+
+    fn take_when_available(&mut self, running: usize) -> Option<CompletionRequest> {
+        if running < MAX_BACKGROUND_JOBS {
+            self.0.take()
+        } else {
+            None
+        }
+    }
+}
 type BackgroundFuture = std::pin::Pin<Box<dyn Future<Output = BackgroundResult> + Send>>;
 
 enum BackgroundResult {
@@ -181,6 +203,7 @@ where
 
     let mut jobs = FuturesUnordered::<BackgroundFuture>::new();
     let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_BACKGROUND_CONCURRENCY));
+    let mut pending_completion = PendingCompletion::default();
     loop {
         if redraw == Some(Redraw::Immediate) {
             app.refresh_goal_clock();
@@ -313,33 +336,7 @@ where
                     }));
                 }
                 Effect::CompleteMention { id, query, recent } => {
-                    if jobs.len() >= MAX_BACKGROUND_JOBS {
-                        continue;
-                    }
-                    let Some(root) = app.workspace_root.clone() else {
-                        continue;
-                    };
-                    let permits = std::sync::Arc::clone(&permits);
-                    jobs.push(Box::pin(async move {
-                        let candidates = match permits.acquire_owned().await {
-                            Ok(permit) => {
-                                let walk_query = query.clone();
-                                let candidates = tokio::task::spawn_blocking(move || {
-                                    qq_core::mentions::complete_paths(&root, &walk_query, &recent)
-                                })
-                                .await
-                                .unwrap_or_default();
-                                drop(permit);
-                                candidates
-                            }
-                            Err(_) => Vec::new(),
-                        };
-                        BackgroundResult::Completed {
-                            id,
-                            query,
-                            candidates,
-                        }
-                    }));
+                    pending_completion.push(CompletionRequest { id, query, recent });
                 }
                 Effect::PrefetchBody {
                     id,
@@ -370,6 +367,32 @@ where
         }
         if quit {
             break;
+        }
+        if let Some(CompletionRequest { id, query, recent }) =
+            pending_completion.take_when_available(jobs.len())
+            && let Some(root) = app.workspace_root.clone()
+        {
+            let permits = std::sync::Arc::clone(&permits);
+            jobs.push(Box::pin(async move {
+                let candidates = match permits.acquire_owned().await {
+                    Ok(permit) => {
+                        let walk_query = query.clone();
+                        let candidates = tokio::task::spawn_blocking(move || {
+                            qq_core::mentions::complete_paths(&root, &walk_query, &recent)
+                        })
+                        .await
+                        .unwrap_or_default();
+                        drop(permit);
+                        candidates
+                    }
+                    Err(_) => Vec::new(),
+                };
+                BackgroundResult::Completed {
+                    id,
+                    query,
+                    candidates,
+                }
+            }));
         }
         if state_may_change
             && app.workspace_id.is_some()
