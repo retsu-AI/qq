@@ -416,7 +416,7 @@ async fn prefetches_only_the_highlight_held_for_one_hundred_milliseconds() {
     assert!(
         matches!(
             sent.as_slice(),
-            [ClientRequest::Snapshot(request)] if request.focused_session_id == Some(cold)
+            [ClientRequest::Snapshot(request)] if request.focused_session_id.is_none() && request.include_sessions == vec![cold]
         ),
         "sent={sent:?}"
     );
@@ -486,7 +486,7 @@ async fn loop_accepts_input_while_a_delayed_prefetch_effect_is_pending() {
     assert!(
         harness.sent().iter().all(|request| !matches!(
             request,
-            ClientRequest::Snapshot(request) if request.focused_session_id == Some(cold)
+            ClientRequest::Snapshot(request) if request.focused_session_id.is_none() && request.include_sessions == vec![cold]
         )),
         "the delayed prefetch did not have to finish before input was handled"
     );

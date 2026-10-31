@@ -865,7 +865,8 @@ impl App {
             let draft = std::mem::take(&mut self.composer);
             let submits = std::mem::take(&mut self.startup_submits);
             for prompt in submits {
-                effects.extend(self.submit_text(self.focused().expect("focused session"), prompt));
+                self.composer.replace(prompt);
+                effects.extend(self.submit_prompt());
             }
             self.composer = draft;
         }
@@ -1817,7 +1818,7 @@ impl App {
         if prompt.is_empty() {
             return Effects::none();
         }
-        if self.workspace_id.is_none() {
+        if self.workspace_id.is_none() || self.resolving > 0 {
             if self.startup_submits.len() >= MAX_QUEUED_DRAFTS {
                 self.set_warning(format!(
                     "at most {MAX_QUEUED_DRAFTS} prompts can wait while qq starts"
@@ -2019,6 +2020,25 @@ impl App {
         submit: PendingSubmit,
         resolved: Result<qq_core::mentions::ResolvedPrompt, String>,
     ) -> Effects {
+        let mut effects = self.finish_resolved_mentions(id, submit, resolved);
+        if self.resolving == 0 && self.focused().is_some() {
+            let draft = std::mem::take(&mut self.composer);
+            let queued = std::mem::take(&mut self.startup_submits);
+            for prompt in queued {
+                self.composer.replace(prompt);
+                effects.extend(self.submit_prompt());
+            }
+            self.composer = draft;
+        }
+        effects
+    }
+
+    fn finish_resolved_mentions(
+        &mut self,
+        id: u64,
+        submit: PendingSubmit,
+        resolved: Result<qq_core::mentions::ResolvedPrompt, String>,
+    ) -> Effects {
         if !self.pending_resolutions.remove(&id) {
             return Effects::none();
         }
@@ -2037,6 +2057,16 @@ impl App {
             }
         };
         if !valid {
+            if let SubmitTarget::Steer { session_id, .. } = submit.target
+                && self.focused() == Some(session_id)
+                && self.composer.text.is_empty()
+            {
+                self.composer.replace(submit.text);
+                self.set_warning(
+                    "run finished while resolving mentions; input restored".to_owned(),
+                );
+                return Effects::redraw(Redraw::Immediate);
+            }
             return Effects::none();
         }
         let resolved = match resolved {
@@ -2144,10 +2174,13 @@ impl App {
         let Some(workspace_id) = self.workspace_id else {
             return Effects::none();
         };
-        Effects::send(ClientRequest::Snapshot(body_request(
+        Effects::send(ClientRequest::Snapshot(qq_protocol::SnapshotRequest {
             workspace_id,
-            session_id,
-        )))
+            focused_session_id: None,
+            include_sessions: vec![session_id],
+            session_limit: 512,
+            message_limit: 256,
+        }))
     }
 
     pub(crate) fn reject_prefetch(&mut self, id: u64, session_id: SessionId) {
@@ -2696,6 +2729,7 @@ impl App {
         }
         let query = token.to_owned();
         let id = self.next_effect_id();
+        self.mention.clear();
         self.mention.query = Some(format!("{id}:{query}"));
         let recent = self
             .focused()

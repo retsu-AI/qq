@@ -4492,6 +4492,64 @@ fn mention_completion_rejects_same_text_aba_results() {
 }
 
 #[test]
+fn mention_resolution_preserves_later_prompt_order() {
+    let mut app = App::new(TuiOptions {
+        workspace_root: Some(std::path::PathBuf::from("/work")),
+        ..TuiOptions::default()
+    });
+    app.apply_snapshot(snapshot());
+    app.composer.replace("first @src/lib.rs".to_owned());
+    let first = app.submit_prompt();
+    let (id, submit) = first
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::ResolveMentions { id, submit } => Some((id, submit)),
+            _ => None,
+        })
+        .unwrap();
+    app.composer.replace("second".to_owned());
+    assert!(!app.submit_prompt().requests_anything());
+    let effects = app.apply_resolved_mentions(
+        id,
+        submit,
+        Ok(qq_core::mentions::ResolvedPrompt {
+            parts: vec![qq_protocol::InputPart::text("first resolved")],
+            notes: Vec::new(),
+            skill: None,
+        }),
+    );
+    let prompts: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Send(ClientRequest::Command(command)) => match &command.command {
+                SessionCommand::SubmitPrompt { input, .. } => Some(input.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        prompts,
+        vec![
+            vec![qq_protocol::InputPart::text("first resolved")],
+            vec![qq_protocol::InputPart::text("second")]
+        ]
+    );
+}
+
+#[test]
+fn completion_request_clears_previously_selectable_candidates() {
+    let mut app = App::new(TuiOptions {
+        workspace_root: Some(std::path::PathBuf::from("/work")),
+        ..TuiOptions::default()
+    });
+    app.mention.candidates = vec!["src/lib.rs".to_owned()];
+    app.composer.replace("@st".to_owned());
+    app.request_mention_completion();
+    assert!(app.mention.candidates.is_empty());
+}
+
+#[test]
 fn stale_resolution_cannot_submit_after_focus_changes() {
     let mut initial = snapshot();
     let other = id(91, SessionId::from_bytes);

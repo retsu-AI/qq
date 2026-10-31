@@ -463,7 +463,7 @@ async fn bootstrap_tui(
         InitialSession::Open(session_id) => Some(*session_id),
         InitialSession::Existing => None,
     };
-    let snapshot = client
+    let mut snapshot = client
         .snapshot(SnapshotRequest {
             workspace_id,
             focused_session_id,
@@ -478,6 +478,36 @@ async fn bootstrap_tui(
             }
             _ => error,
         })?;
+    if *initial == InitialSession::Existing
+        && snapshot.focused.is_none()
+        && let Some(session_id) = snapshot
+            .sessions
+            .iter()
+            .find(|session| {
+                session.parent_id.is_none() && session.purpose != qq_protocol::SessionPurpose::Audit
+            })
+            .map(|session| session.id)
+    {
+        snapshot = client
+            .snapshot(SnapshotRequest {
+                workspace_id,
+                focused_session_id: Some(session_id),
+                include_sessions: snapshot
+                    .sessions
+                    .iter()
+                    .filter(|session| {
+                        session.parent_id.is_none()
+                            && session.purpose != qq_protocol::SessionPurpose::Audit
+                            && session.id != session_id
+                    })
+                    .take(4)
+                    .map(|session| session.id)
+                    .collect(),
+                session_limit: 512,
+                message_limit: 256,
+            })
+            .await?;
+    }
     if let InitialSession::Open(session_id) = initial {
         match snapshot
             .sessions
