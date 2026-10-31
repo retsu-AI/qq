@@ -1,14 +1,10 @@
- qq  Session 0                                           openai/gpt-test  $0.00
 
- ▌ YOU
- ▌ plan the release
+  ┃ plan the release
 
-   QQ
-   Drafted the checklist.
-   ✓ 0.0s · ttft 0.0s
+    Drafted the checklist.
 
-  related sessions
-  ↳ ◇ Deploy helper
+  ● Spawned  1 agent   ◇ 1
+  └ ◇ Deploy helper   wants to run a command
 
 
 
@@ -18,7 +14,11 @@
 
 
 
- 8 agents  ◐ 2  ◇ 2 (Ctrl-G)  ● 3 unread
- ◇ Deploy helper needs approval  Ctrl-G jump  Alt-A/Alt-D answer ───────────────
- › Ask QQ...
 
+
+
+
+
+  ─────────────────────────────────────────────────── 8 sessions  ◐ 2  ◇ 2  ^G
+  ┃ Ask QQ…
+    Session 0 · gpt-test

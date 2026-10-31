@@ -1,24 +1,24 @@
- qq  Session 0                                           openai/gpt-test  $0.00
- GOAL Esc returns to the transcript
 
-check consent required
-Finish the billing migration
+    Ask QQ to begin this session.
 
-Runs: 4 / 10
-Tokens: 0 / 1000
-Cost: $0.00 / $1.00
-Deadline: 2027-01-15 08:00:00 UTC
-Audits: 1 · failed checks: 1
-Completion claim awaiting independent verification
 
-Check: cargo test -p billing
-Check timeout: 5.0s
-used; new consent required
-✓ verify invoices
-→ ship migration
 
-Notes
- 3 agents
- goal · check consent required ───────────────── ? help  ^K commands  ^O detail
- › Ask QQ...
 
+
+
+
+
+
+  ◇ goal needs check consent ────────────────────────────────────── 3 sessions
+    Finish the billing migration
+    status    check consent required
+    runs      4 / 10
+    tokens    0 / 1000
+    cost      $0.00 / $1.00
+    deadline  2027-01-15 08:00 UTC
+    audits    1 · 1 failed check
+    check     cargo test -p billing · 5.0s · consent used
+    notes     Backfill verified
+    … 4 more rows · PgDn
+  ┃ Ask QQ…
+    /goal check consent   /goal pause   esc back

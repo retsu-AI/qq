@@ -32,8 +32,9 @@ Bare `qq`, or `qq --session ID`. Both stdin and stdout must be a terminal.
 ## Driving it headlessly
 
 1. **Rendering:** `cargo nextest run -p qq-tui --test goldens` covers
-   12 scenes × 5 sizes, and `--test design` pins the v0.1.11 design
-   frames (16 scenes × 5 sizes) in `crates/qq-tui/tests/design/`. Regenerate the frames with `QQ_UPDATE_GOLDENS=1`,
+   12 scenes × 5 sizes in `crates/qq-tui/tests/goldens/`, which now follow
+   the v0.1.11 design; `--test design` still pins the R0 reference frames
+   (16 scenes × 5 sizes) in `crates/qq-tui/tests/design/`. Regenerate the frames with `QQ_UPDATE_GOLDENS=1`,
    then review `git diff crates/qq-tui/tests/goldens/`. For ANSI frames you
    can `cat`, run `cargo test -p qq-tui --test gallery -- --ignored`, which
    writes to `target/qq-tui-gallery/`.

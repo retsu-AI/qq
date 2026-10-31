@@ -1,40 +1,40 @@
- qq  Session 0                                                                                   openai/gpt-test  $0.00
-                                                                                            │ WORKING  1
-   QQ                                                                                       │ ◐ Session 0
-   the model turn                                                                           │    the model turn
-                                                                                            │
-                                                                                            │ IDLE  2
- ▌ YOU  steering  waiting for the next turn                                                 │ ○ Session 1
- ▌ pending steer: also check the tests                                                      │ ○ Session 2
-                                                                                            │
-                                                                                            │
- ▌ YOU  steered                                                                             │
- ▌ applied steer: prefer edit_file                                                          │
-                                                                                            │
-                                                                                            │
- ▌ YOU  steering  run finished first                                                        │
- ▌ late steer: never mind                                                                   │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
- ◐ working ───────────────────────────────────────────────────────────────────────────── ? help  ^K commands  ^O detail
- › Ask QQ...
 
+    the model turn                                                                          WORKING
+  ┃ applied steer: prefer edit_file                                                       ▎ 1 ◐ Session 0
+    steered
+  ┃ late steer: never mind                                                                  RECENT
+    not sent · the run finished first                                                       2 ○ Session 1
+                                                                                            3 ○ Session 2
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ◐ working ──────────────────────────────────────────────────────────────────────────
+  ┋ pending steer: also check the tests
+  ┃ Ask QQ…
+    Session 0 · gpt-test                                                    /workspace

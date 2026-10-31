@@ -1,60 +1,60 @@
- qq  Session 0                                                                                                                                                                   openai/gpt-test  $0.00
-                                                                                                      │ INSPECTOR                                                           │ NEEDS YOU  2
- ▌ YOU                                                                                                │ Nothing expanded — Ctrl-Up selects a tool row, Enter expands it     │ ● Refactor          1 new
- ▌ plan the release                                                                                   │                                                                     │                     $0.12
-                                                                                                      │                                                                     │   ◇ Deploy helper
-   QQ                                                                                                 │                                                                     │      ◇ approve run
-   Drafted the checklist.                                                                             │                                                                     │
-   ✓ 0.0s · ttft 0.0s                                                                                 │                                                                     │ WORKING  2
-                                                                                                      │                                                                     │ ◐ Write tests       1 new
-  related sessions                                                                                    │                                                                     │    compacting context
-  ↳ ◇ Deploy helper                                                                                   │                                                                     │ ◐ Survey callers    1 new
-                                                                                                      │                                                                     │    Found twelve call ...
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │ IDLE  3
-                                                                                                      │                                                                     │ ○ Scratch
-                                                                                                      │                                                                     │ ○ Notes
-                                                                                                      │                                                                     │ ○ Session 0
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │ DONE  1
-                                                                                                      │                                                                     │ ● Migrate
-                                                                                                      │                                                                     │                     $0.04
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
- ◇ Deploy helper needs approval  Ctrl-G jump  Alt-A/Alt-D answer ─────────────────────────────────────────────────────────────────────────────────────────────────────── ? help  ^K commands  ^O detail
- › Ask QQ...
 
+  ┃ plan the release                                                                                                                                              NEEDS YOU
+                                                                                                                                                                  1 ● Refactor  1 new
+    Drafted the checklist.                                                                                                                                                                       $0.12
+                                                                                                                                                                  2 ◇ Deploy helper
+  ● Spawned  1 agent   ◇ 1                                                                                                                                            wants to run a command
+  └ ◇ Deploy helper   wants to run a command
+                                                                                                                                                                  WORKING
+                                                                                                                                                                  3 ◐ Write tests  1 new
+                                                                                                                                                                      compacting context
+                                                                                                                                                                  4 ◐ Survey callers  1 new
+                                                                                                                                                                      Found twelve call sites across…
+
+                                                                                                                                                                  RECENT
+                                                                                                                                                                  5 ○ Scratch
+                                                                                                                                                                  6 ○ Notes
+                                                                                                                                                                ▎ 7 ○ Session 0  ↳1
+                                                                                                                                                                  8 ● Migrate
+                                                                                                                                                                                                 $0.04
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇ 1 needs you  ^G
+  ┃ Ask QQ…
+    Session 0 · gpt-test                                                                                                                          /workspace

@@ -160,12 +160,15 @@ pub(crate) fn truncate_line(line: Line, width: usize) -> Line {
     if line.width() <= width {
         return line;
     }
-    if width <= 3 {
-        return Line::styled(".".repeat(width), muted());
+    if width == 0 {
+        return Line::default();
     }
-    let mut output = Line::default();
-    let mut used = 0_usize;
-    let content_width = width - 3;
+    let mut output = Line {
+        indent: line.indent,
+        spans: Vec::new(),
+    };
+    let mut used = line.indent;
+    let content_width = width - 1;
     for span in line.spans {
         let mut text = String::new();
         for character in span.text.chars() {
@@ -181,8 +184,20 @@ pub(crate) fn truncate_line(line: Line, width: usize) -> Line {
             break;
         }
     }
-    output.push("...", muted());
+    trim_trailing_space(&mut output);
+    output.push("…", muted());
     output
+}
+
+fn trim_trailing_space(line: &mut Line) {
+    while let Some(last) = line.spans.last_mut() {
+        let kept = last.text.trim_end().len();
+        last.text.truncate(kept);
+        if !last.text.is_empty() {
+            break;
+        }
+        line.spans.pop();
+    }
 }
 
 pub(crate) fn selection_viewport(
@@ -216,14 +231,11 @@ pub(crate) fn preview(text: &str, width: usize) -> String {
     let plain = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if plain.chars().count() <= width {
         plain
+    } else if width == 0 {
+        String::new()
     } else {
-        format!(
-            "{}...",
-            plain
-                .chars()
-                .take(width.saturating_sub(3))
-                .collect::<String>()
-        )
+        let kept: String = plain.chars().take(width - 1).collect();
+        format!("{}…", kept.trim_end())
     }
 }
 

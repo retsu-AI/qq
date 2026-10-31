@@ -12,6 +12,7 @@ pub struct Theme {
 pub struct Palette {
     pub text: Color,
     pub muted: Color,
+    pub faint: Color,
     pub accent: Color,
     pub brand: Color,
     pub warning: Color,
@@ -38,6 +39,7 @@ impl Palette {
     pub const TERMINAL: Self = Self {
         text: Color::White,
         muted: Color::DarkGrey,
+        faint: Color::DarkGrey,
         accent: Color::Cyan,
         brand: Color::Rgb {
             r: 255,
@@ -121,6 +123,7 @@ impl Palette {
         Self {
             text,
             muted,
+            faint: blend_halfway(muted, surface),
             accent,
             brand,
             warning,
@@ -181,6 +184,25 @@ impl Palette {
             self.syn_punctuation = color.into();
         }
         self
+    }
+}
+
+#[must_use]
+pub const fn blend_halfway(color: Color, background: Color) -> Color {
+    match (color, background) {
+        (
+            Color::Rgb { r, g, b },
+            Color::Rgb {
+                r: br,
+                g: bg,
+                b: bb,
+            },
+        ) => Color::Rgb {
+            r: ((r as u16 + br as u16 / 2) / 2) as u8,
+            g: ((g as u16 + bg as u16 / 2) / 2) as u8,
+            b: ((b as u16 + bb as u16 / 2) / 2) as u8,
+        },
+        (color, _) => color,
     }
 }
 
@@ -306,6 +328,24 @@ pub(crate) fn active() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn faint_is_muted_blended_halfway_toward_the_background() {
+        let rgb = |r, g, b| Color::Rgb { r, g, b };
+        let palette = Palette::derive([
+            rgb(216, 222, 233),
+            rgb(123, 132, 151),
+            rgb(143, 184, 232),
+            rgb(224, 160, 113),
+            rgb(230, 192, 123),
+            rgb(236, 123, 141),
+            rgb(143, 211, 166),
+            rgb(32, 36, 44),
+        ]);
+        assert_eq!(palette.faint, rgb(69, 75, 86));
+        assert_ne!(palette.faint, palette.muted);
+        assert_eq!(Palette::TERMINAL.faint, Palette::TERMINAL.muted);
+    }
 
     #[test]
     fn the_default_palette_is_the_compiled_terminal_look() {

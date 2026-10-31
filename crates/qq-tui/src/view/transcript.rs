@@ -470,9 +470,8 @@ impl TranscriptCache {
         let workspace_rows = match view {
             View::Attention => Some(attention_body(app, width)),
             View::Changes => Some(changes_body(app, width)),
-            View::Goal(session_id) => Some(goal_body(app, session_id, width)),
             View::SideQuestions(session_id) => Some(side_questions_body(app, session_id, width)),
-            View::Transcript(_) => None,
+            View::Goal(_) | View::Transcript(_) => None,
         };
         if let Some(rows) = workspace_rows {
             let mut body = VirtualBody::default();
@@ -630,8 +629,7 @@ impl TranscriptCache {
 
     fn refresh_live(&mut self, message: &MessageSnapshot, width: usize) {
         let source = MessageText::new(message);
-        let content_width = width.saturating_sub(3).max(1);
-        let (prefix, prefix_style, _, _) = message_presentation(message.role);
+        let content_width = width.saturating_sub(LANE).max(1);
         let entry = self.live.entry(message.id).or_insert(LiveMarkdown {
             width,
             settled_bytes: 0,
@@ -654,9 +652,7 @@ impl TranscriptCache {
         let settled = settled_prefix_end(&text);
         if settled > 0 {
             let rows = markdown_lines(&text[..settled], content_width, false);
-            entry
-                .rows
-                .extend(indent_lines(rows, prefix, prefix_style, width));
+            entry.rows.extend(message_rows(rows, message.role, width));
             entry.settled_bytes = scan_from + settled;
             text.drain(..settled);
         }
@@ -697,15 +693,14 @@ impl TranscriptCache {
             return;
         }
         let source = MessageText::new(message);
-        let content_width = width.saturating_sub(3).max(1);
-        let (prefix, prefix_style, _, _) = message_presentation(message.role);
+        let content_width = width.saturating_sub(LANE).max(1);
         let mut needs_highlight = false;
         let body = if source.len() <= MAX_FULL_MARKDOWN_BYTES {
             let content = source.as_cow();
             let lines = markdown_lines(&content, content_width, false);
             if lines.len() <= MAX_FULL_MARKDOWN_ROWS {
                 needs_highlight = has_fenced_code(&content);
-                CachedMessageBody::Markdown(indent_lines(lines, prefix, prefix_style, width))
+                CachedMessageBody::Markdown(message_rows(lines, message.role, width))
             } else {
                 CachedMessageBody::Plain(PlainTextIndex::new(source, content_width))
             }
@@ -759,16 +754,10 @@ impl TranscriptCache {
         role: MessageRole,
     ) -> bool {
         let content = source.as_cow().into_owned();
-        let content_width = key.width.saturating_sub(3).max(1);
+        let content_width = key.width.saturating_sub(LANE).max(1);
         let width = key.width;
-        let (prefix, prefix_style, _, _) = message_presentation(role);
         highlighter.request(key, move || {
-            indent_lines(
-                markdown_lines(&content, content_width, true),
-                prefix,
-                prefix_style,
-                width,
-            )
+            message_rows(markdown_lines(&content, content_width, true), role, width)
         })
     }
 
@@ -816,10 +805,7 @@ impl TranscriptCache {
                 .collect();
             if !children.is_empty() {
                 body.push_line(Line::default());
-                body.push_line(Line::styled("  related sessions", muted().bold()));
-                for child in children {
-                    body.push_line(session_line(app, child, width, "  ↳ "));
-                }
+                body.extend_owned(agent_lanes(app, &children, width));
             }
         }
         body
@@ -879,17 +865,14 @@ impl TranscriptCache {
         for prompt in app.pending_prompts(session_id) {
             if !body.is_empty() {
                 body.push_line(Line::default());
-                body.push_line(Line::default());
             }
-            let mut line = Line::styled(" ▌ ", warning());
-            line.push("YOU  pending", warning().bold());
-            body.push_line(line);
             body.extend_owned(indent_lines(
-                pending_markdown_lines(prompt, width.saturating_sub(3)),
-                " ▌ ",
-                warning(),
+                pending_markdown_lines(prompt, width.saturating_sub(LANE)),
+                "┃ ",
+                faint(),
                 width,
             ));
+            body.push_line(Line::styled("  pending", faint()));
         }
         if body.is_empty() {
             let first_session = app.sessions.len() == 1 && session.prompt_history.is_empty();
@@ -897,29 +880,10 @@ impl TranscriptCache {
                 if let Some(remedy) = app.configured_provider_remedy() {
                     body.push_line(Line::styled(format!("  {}", remedy.message()), warning()));
                 }
-                body.push_line(Line::styled("  Try one of these:", muted().bold()));
-                for command in [
-                    crate::commands::Command::OpenModels,
-                    crate::commands::Command::OpenApprovalModes,
-                    crate::commands::Command::OpenSkills,
-                ] {
-                    let spec = crate::commands::spec(command);
-                    let Some(spelling) = spec.slash.first() else {
-                        continue;
-                    };
-                    let mut line = Line::styled(format!("    {spelling:<11}"), accent());
-                    line.push(spec.title, muted());
-                    body.push_line(line);
-                }
-                let mut line = Line::styled(format!("    {:<11}", "@path"), accent());
-                line.push("mention a file in your prompt", muted());
-                body.push_line(line);
+                body.extend_owned(banner(app, width));
                 push_environment(&mut body, app, width);
             } else {
-                body.push_line(Line::styled(
-                    "  Ask QQ to begin this session.",
-                    muted().italic(),
-                ));
+                body.push_line(Line::styled("  Ask QQ to begin this session.", faint()));
             }
         }
         body
@@ -967,11 +931,11 @@ impl TranscriptCache {
         let turns = TurnIndex::build(messages, tool_calls);
         for index in indices {
             let message = &messages[index];
-            if !body.is_empty() {
+            if message.steering && message.state == MessageState::Queued {
+                continue;
+            }
+            if !body.is_empty() && !(message.steering && message.role == MessageRole::User) {
                 body.push_line(Line::default());
-                if message.role == MessageRole::User {
-                    body.push_line(Line::default());
-                }
             }
             if message.role == MessageRole::Assistant {
                 let first_of_run = turns.first_assistant(message.run_id) == Some(index);
@@ -1001,7 +965,6 @@ impl TranscriptCache {
                         app.animation_tick,
                         width,
                         &|call_id, width| child_rows(app, call_id, width),
-                        &|call_id, width| approval_rows(app, call_id, width),
                     ));
                     body.push_line(Line::default());
                 }
@@ -1022,7 +985,6 @@ impl TranscriptCache {
                         app.animation_tick,
                         width,
                         &|call_id, width| child_rows(app, call_id, width),
-                        &|call_id, width| approval_rows(app, call_id, width),
                     ));
                 }
                 if next_turn == u32::MAX
@@ -1043,7 +1005,6 @@ impl TranscriptCache {
                             app.animation_tick,
                             width,
                             &|call_id, width| child_rows(app, call_id, width),
-                            &|call_id, width| approval_rows(app, call_id, width),
                         ));
                     }
                 }
@@ -1057,8 +1018,7 @@ impl TranscriptCache {
         message: &MessageSnapshot,
         width: usize,
     ) {
-        let (prefix, prefix_style, _, _) = message_presentation(message.role);
-        body.push_line(truncate_line(message_header(message), width));
+        let (prefix, prefix_style) = message_presentation(message.role);
         let content_start = body.rows;
         if message_is_terminal(message) {
             let Some(cached) = self.markdown.get(&message.id) else {
@@ -1082,21 +1042,26 @@ impl TranscriptCache {
                 }
             }
         } else {
-            let lines = self.live_lines(message, width);
+            let mut lines = self.live_lines(message, width);
             if lines.is_empty() {
-                body.push_line(message_ellipsis(prefix, prefix_style));
-            } else {
-                body.extend_owned(lines);
+                lines.push(message_ellipsis(prefix, prefix_style));
+            } else if message.state == MessageState::Streaming
+                && let Some(last) = lines.last_mut()
+            {
+                last.push("▍", accent());
             }
+            body.extend_owned(lines);
             body.live_message_ranges
                 .push((message.id, content_start..body.rows));
+        }
+        if let Some(note) = message_note(message) {
+            body.push_line(truncate_line(note, width));
         }
     }
 
     fn live_lines(&self, message: &MessageSnapshot, width: usize) -> Vec<Line> {
         let source = MessageText::new(message);
-        let content_width = width.saturating_sub(3).max(1);
-        let (prefix, prefix_style, _, _) = message_presentation(message.role);
+        let content_width = width.saturating_sub(LANE).max(1);
         let (settled_bytes, settled_rows, cached_tail) = match self.live.get(&message.id) {
             Some(live) if live.width == width && live.settled_bytes <= source.len() => (
                 live.settled_bytes,
@@ -1117,10 +1082,9 @@ impl TranscriptCache {
         } else {
             source.bounded_tail(MAX_LIVE_MARKDOWN_BYTES)
         };
-        let tail_rows = indent_lines(
+        let tail_rows = message_rows(
             markdown_lines(&tail, content_width, false),
-            prefix,
-            prefix_style,
+            message.role,
             width,
         );
         let total = settled_rows.len() + tail_rows.len();
@@ -1157,8 +1121,8 @@ impl TranscriptCache {
         } else {
             self.refresh_live(message, width);
         }
-        let (prefix, prefix_style, _, _) = message_presentation(message.role);
-        let mut lines = vec![truncate_line(message_header(message), width)];
+        let (prefix, prefix_style) = message_presentation(message.role);
+        let mut lines = Vec::new();
         if message_is_terminal(message) {
             match &self.markdown.get(&message.id).expect("message cached").body {
                 CachedMessageBody::Markdown(body) => lines.extend_from_slice(body),
@@ -1173,9 +1137,10 @@ impl TranscriptCache {
         } else {
             lines.extend(self.live_lines(message, width));
         }
-        if lines.len() == 1 {
+        if lines.is_empty() {
             lines.push(message_ellipsis(prefix, prefix_style));
         }
+        lines.extend(message_note(message));
         lines
     }
 }
@@ -1206,12 +1171,130 @@ pub(super) fn shown_view(app: &App, pane: &TranscriptPane, inline_detail: bool) 
             View::Transcript(None)
         }
         View::Goal(session_id) if !app.sessions.contains_key(&session_id) => View::Transcript(None),
+        View::Goal(session_id) => View::Transcript(Some(session_id)),
         View::Attention | View::Changes if !inline_detail => View::Transcript(
             app.view_return()
                 .filter(|session_id| app.sessions.contains_key(session_id)),
         ),
         view => view,
     }
+}
+
+pub(super) fn banner(app: &App, width: usize) -> Vec<Line> {
+    let mut title = Line::styled(
+        format!("  qq {}", env!("CARGO_PKG_VERSION")),
+        normal().bold(),
+    );
+    if !app.workspace_path.is_empty() {
+        title.push(format!(" · {}", app.workspace_path), muted());
+    }
+    if let Some(model) = app.model.model.as_deref() {
+        let short = model.split_once('/').map_or(model, |(_, name)| name);
+        title.push(format!(" · {short}"), muted());
+    }
+    let mut hints = Line::styled("  ", normal());
+    let switch = app
+        .chord_label(crate::commands::Command::OpenSessions)
+        .map_or_else(|| "/sessions".to_owned(), |chord| compact_chord(&chord));
+    for (index, (key, label)) in [
+        ("/models".to_owned(), "choose a model"),
+        ("@path".to_owned(), "mention a file"),
+        (switch, "switch session"),
+        ("?".to_owned(), "help"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            hints.push("    ", normal());
+        }
+        hints.push(key, normal());
+        hints.push(format!("  {label}"), faint());
+    }
+    vec![
+        truncate_line(title, width),
+        Line::default(),
+        truncate_line(hints, width),
+    ]
+}
+
+const FOLDED_LANES: usize = 6;
+
+pub(super) fn agent_lanes(app: &App, children: &[SessionId], width: usize) -> Vec<Line> {
+    let urgency = |id: &SessionId| match app.sessions[id].group() {
+        qq_client::state::Group::NeedsYou => 0,
+        qq_client::state::Group::Working => 1,
+        qq_client::state::Group::Done => 2,
+        qq_client::state::Group::Idle => 3,
+    };
+    let mut tally = [0_usize; 4];
+    for child in children {
+        let index = match rail_glyph(app, *child).0 {
+            "◐" => 0,
+            "◇" => 1,
+            "●" => 2,
+            "✕" => 3,
+            _ => continue,
+        };
+        tally[index] += 1;
+    }
+    let mut header = Line::styled("● ", faint());
+    header.push(format!("{:<9}", "Spawned"), normal());
+    header.push(count_noun(children.len(), "agent", "agents"), muted());
+    let mut first = true;
+    for ((glyph, style), count) in [
+        ("◐", info()),
+        ("◇", warning()),
+        ("●", faint()),
+        ("✕", failure()),
+    ]
+    .into_iter()
+    .zip(tally)
+    {
+        if count > 0 {
+            header.push(if first { "   " } else { "  " }, normal());
+            header.push(format!("{glyph} {count}"), style);
+            first = false;
+        }
+    }
+    let mut rows = vec![truncate_line(header, width)];
+    let mut shown: Vec<SessionId> = children.to_vec();
+    let folded = shown.len() > FOLDED_LANES;
+    if folded {
+        shown.sort_by_key(urgency);
+        shown.truncate(FOLDED_LANES);
+    }
+    let title_width = shown
+        .iter()
+        .map(|id| text_width(&app.sessions[id].summary.title))
+        .max()
+        .unwrap_or(0);
+    for (index, child) in shown.iter().enumerate() {
+        let view = &app.sessions[child];
+        let connector = if index + 1 == shown.len() && !folded {
+            "└ "
+        } else {
+            "├ "
+        };
+        let (glyph, style) = rail_glyph(app, *child);
+        let mut line = Line::styled(connector, faint());
+        line.push(format!("{glyph} "), style);
+        line.push(format!("{:<title_width$}   ", view.summary.title), normal());
+        if let Some((activity, _)) = live_status_line(app, *child) {
+            let room = width.saturating_sub(line.width());
+            line.push(fit_text(&activity, room), muted());
+        }
+        rows.push(truncate_line(line, width));
+    }
+    if folded {
+        let mut line = Line::styled("└ ", faint());
+        line.push(format!("+{} more", children.len() - FOLDED_LANES), muted());
+        if let Some(chord) = app.chord_label(crate::commands::Command::OpenSessions) {
+            line.push(format!("   {}", compact_chord(&chord)), faint());
+        }
+        rows.push(truncate_line(line, width));
+    }
+    rows
 }
 
 pub(super) fn find_message(app: &App, message_id: MessageId) -> Option<&MessageSnapshot> {
@@ -1232,18 +1315,31 @@ pub(super) const fn message_is_terminal(message: &MessageSnapshot) -> bool {
     )
 }
 
-pub(super) fn message_presentation(
-    role: MessageRole,
-) -> (&'static str, Style, &'static str, Style) {
+pub(super) const LANE: usize = 2;
+
+pub(super) fn message_rows(lines: Vec<Line>, role: MessageRole, width: usize) -> Vec<Line> {
+    let (prefix, prefix_style) = message_presentation(role);
+    let mut rows = indent_lines(lines, prefix, prefix_style, width);
+    if role == MessageRole::User {
+        for row in &mut rows {
+            for span in row.spans.iter_mut().skip(1) {
+                span.style = span.style.bold();
+            }
+        }
+    }
+    rows
+}
+
+pub(super) fn message_presentation(role: MessageRole) -> (&'static str, Style) {
     match role {
-        MessageRole::User => (" ▌ ", accent(), "YOU", accent().bold()),
-        MessageRole::Assistant => ("   ", muted(), "QQ", brand().bold()),
+        MessageRole::User => ("┃ ", accent()),
+        MessageRole::Assistant => ("  ", normal()),
     }
 }
 
 pub(super) fn message_ellipsis(prefix: &'static str, prefix_style: Style) -> Line {
     let mut ellipsis = Line::styled(prefix, prefix_style);
-    ellipsis.push("...", muted());
+    ellipsis.push("▍", accent());
     ellipsis
 }
 pub(super) fn reasoning_rows(
@@ -1262,42 +1358,25 @@ pub(super) fn reasoning_rows(
     if reasoning.text.is_empty() && !reasoning.streaming {
         return Vec::new();
     }
-    let seconds = reasoning.ticks / 8;
-    let mut header = Line::styled(" ∴ ", muted());
     if reasoning.streaming {
-        header.push(
-            format!(
-                "{} thinking… {seconds}s",
-                TOOL_SPINNER[app.animation_tick % TOOL_SPINNER.len()]
-            ),
-            muted().italic(),
-        );
-    } else {
-        header.push(format!("thought for {seconds}s"), muted().italic());
+        return Vec::new();
     }
+    let seconds = reasoning.ticks / 8;
+    let mut header = Line::styled("∴ ", faint());
+    header.push(format!("thought for {seconds}s"), faint());
     match app.reasoning_detail {
-        crate::app::ReasoningDetail::Collapsed => {
-            let first = reasoning.text.split("\n\n").next().unwrap_or_default();
-            let summary = preview(first, width.saturating_sub(header.width() + 12));
-            if !summary.is_empty() {
-                header.push(format!("  {summary}"), muted());
-            }
-            if let Some(chord) = app.chord_label(crate::commands::Command::ToggleReasoning) {
-                header.push(format!("  {chord}"), muted());
-            }
-            vec![truncate_line(header, width)]
-        }
+        crate::app::ReasoningDetail::Collapsed => vec![truncate_line(header, width)],
         crate::app::ReasoningDetail::Expanded => {
             let mut rows = vec![truncate_line(header, width)];
-            let content_width = width.saturating_sub(3).max(1);
+            let content_width = width.saturating_sub(LANE).max(1);
             for paragraph in reasoning.text.split("\n\n") {
                 for line in paragraph.lines() {
                     let safe = line
                         .chars()
                         .filter_map(terminal_safe_character)
                         .collect::<String>();
-                    for wrapped in wrap_line(Line::styled(safe, muted().italic()), content_width) {
-                        let mut row = Line::styled(" ┆ ", muted());
+                    for wrapped in wrap_line(Line::styled(safe, muted()), content_width) {
+                        let mut row = Line::styled("│ ", faint());
                         for span in wrapped.spans {
                             row.push(span.text, span.style);
                         }
@@ -1315,90 +1394,23 @@ pub(super) fn run_completion_line(
     width: usize,
 ) -> Option<Line> {
     let stats = session.runs.get(&run_id)?;
-    let outcome = stats.outcome.as_ref()?;
-    let (glyph, style) = match outcome {
-        qq_protocol::RunOutcome::Completed => ("✓", success()),
-        qq_protocol::RunOutcome::Cancelled | qq_protocol::RunOutcome::Interrupted => {
-            ("◌", warning())
-        }
-        qq_protocol::RunOutcome::BudgetExhausted { .. } => ("◌", warning()),
-        qq_protocol::RunOutcome::Paused { .. } => ("◌", warning()),
-        qq_protocol::RunOutcome::Failed { .. } => ("✕", failure()),
+    let (glyph, style, label) = match stats.outcome.as_ref()? {
+        qq_protocol::RunOutcome::Completed => return None,
+        qq_protocol::RunOutcome::Cancelled => ("◌", warning(), "cancelled"),
+        qq_protocol::RunOutcome::Interrupted => ("◌", warning(), "interrupted"),
+        qq_protocol::RunOutcome::BudgetExhausted { .. } => ("◌", warning(), "budget exhausted"),
+        qq_protocol::RunOutcome::Paused { .. } => ("◌", warning(), "paused"),
+        qq_protocol::RunOutcome::Failed { .. } => ("✕", failure(), "failed"),
     };
-    let mut parts: Vec<String> = Vec::with_capacity(4);
-    if let (Some(started), Some(finished)) = (stats.started_at_ms, stats.finished_at_ms) {
-        parts.push(format_duration_ms(finished.saturating_sub(started)));
-    }
-    if stats.turns > 1 {
-        parts.push(count_noun(
-            usize::try_from(stats.turns).unwrap_or(usize::MAX),
-            "turn",
-            "turns",
-        ));
-    }
-    if stats.tool_calls > 0 {
-        parts.push(count_noun(stats.tool_calls as usize, "tool", "tools"));
-    }
-    if let Some(usage) = stats.usage {
-        let tokens = usage.input_tokens
-            + usage.cache_read_input_tokens
-            + usage.cache_write_input_tokens
-            + usage.output_tokens;
-        if tokens > 0 {
-            parts.push(format!("{} tok", format_count(tokens)));
-        }
-    }
-    if let Some(cost) = stats.cost_usd_nanos
-        && cost > 0
+    let mut line = Line::styled(format!("{glyph} "), style);
+    line.push(label, normal());
+    if let (Some(started), Some(finished)) = (stats.started_at_ms, stats.finished_at_ms)
+        && finished.saturating_sub(started) >= 1000
     {
-        parts.push(format_cost(cost));
-    }
-    if let (Some(started), Some(first)) = (stats.started_at_ms, stats.first_token_at_ms) {
-        parts.push(format!(
-            "ttft {}",
-            format_duration_ms(first.saturating_sub(started))
-        ));
-    }
-    if let (Some(first), Some(finished), Some(usage)) =
-        (stats.first_token_at_ms, stats.finished_at_ms, stats.usage)
-        && finished > first
-        && usage.output_tokens > 0
-    {
-        let per_second = usage.output_tokens * 1000 / (finished - first);
-        if per_second > 0 {
-            parts.push(format!("{per_second} tok/s"));
-        }
-    }
-    if let Some(route) = &stats.resolved_route
-        && session.summary.model.as_deref() != Some(route.as_str())
-    {
-        parts.push(format!("on {route}"));
-    }
-    if let Some((profile, digest)) = &stats.plan {
-        parts.push(if profile.is_default() {
-            format!("plan {digest}")
-        } else {
-            format!("as {} · plan {digest}", profile.as_str())
-        });
-    }
-    if parts.is_empty() && matches!(outcome, qq_protocol::RunOutcome::Completed) {
-        return None;
-    }
-    let mut line = Line::styled(format!("   {glyph} "), style);
-    if parts.is_empty() {
         line.push(
-            match outcome {
-                qq_protocol::RunOutcome::Cancelled => "cancelled",
-                qq_protocol::RunOutcome::Interrupted => "interrupted",
-                qq_protocol::RunOutcome::BudgetExhausted { .. } => "budget exhausted",
-                qq_protocol::RunOutcome::Paused { .. } => "paused",
-                qq_protocol::RunOutcome::Failed { .. } => "failed",
-                qq_protocol::RunOutcome::Completed => "",
-            },
-            muted(),
+            format!("  {}", format_duration_ms(finished - started)),
+            faint(),
         );
-    } else {
-        line.push(parts.join(" · "), muted());
     }
     Some(truncate_line(line, width))
 }
@@ -1418,67 +1430,31 @@ pub(super) fn format_duration_ms(ms: u64) -> String {
     format!("{}h{:02}m", minutes / 60, minutes % 60)
 }
 
-pub(super) fn format_count(count: u64) -> String {
-    if count < 1_000 {
-        count.to_string()
-    } else if count < 1_000_000 {
-        format!("{}.{}k", count / 1_000, (count % 1_000) / 100)
+pub(super) fn message_note(message: &MessageSnapshot) -> Option<Line> {
+    let (glyph, label, style) = if message.steering {
+        match message.state {
+            MessageState::Queued => return None,
+            MessageState::Complete => ("", "steered", faint()),
+            MessageState::Cancelled => ("", "not sent · the run finished first", faint()),
+            MessageState::Streaming => return None,
+            MessageState::Failed => ("✕ ", "failed", failure()),
+            MessageState::Interrupted => ("", "interrupted", warning()),
+        }
     } else {
-        format!("{}.{}M", count / 1_000_000, (count % 1_000_000) / 100_000)
-    }
+        match message.state {
+            MessageState::Complete | MessageState::Streaming => return None,
+            MessageState::Queued => ("", "queued", faint()),
+            MessageState::Cancelled => ("", "cancelled", warning()),
+            MessageState::Interrupted => ("", "interrupted", warning()),
+            MessageState::Failed => ("✕ ", "failed", failure()),
+        }
+    };
+    let mut line = Line::styled("  ", normal());
+    line.push(glyph, style);
+    line.push(label, style);
+    Some(line)
 }
 
-fn approval_rows(app: &App, call_id: ToolCallId, width: usize) -> Vec<Line> {
-    match app.pending_approval() {
-        Some(call) if call.id == call_id => approval_block(app, width),
-        _ => Vec::new(),
-    }
-}
-
-pub(super) fn message_header(message: &MessageSnapshot) -> Line {
-    let (prefix, prefix_style, role, role_style) = message_presentation(message.role);
-    let mut header = Line::styled(prefix, prefix_style);
-    header.push(role, role_style);
-    if message.steering {
-        let (label, style) = match message.state {
-            MessageState::Queued => ("steering  waiting for the next turn", warning()),
-            MessageState::Complete => ("steered", muted()),
-            MessageState::Cancelled => ("steering  run finished first", warning()),
-            MessageState::Streaming | MessageState::Failed | MessageState::Interrupted => (
-                message_state_label(message.state),
-                status_style(message.state),
-            ),
-        };
-        header.push(format!("  {label}"), style);
-    } else if !matches!(message.state, MessageState::Complete) {
-        header.push(
-            format!("  {}", message_state_label(message.state)),
-            status_style(message.state),
-        );
-    }
-    header
-}
-
-pub(super) fn message_state_label(state: MessageState) -> &'static str {
-    match state {
-        MessageState::Queued => "queued",
-        MessageState::Streaming => "streaming",
-        MessageState::Complete => "complete",
-        MessageState::Cancelled => "cancelled",
-        MessageState::Failed => "failed",
-        MessageState::Interrupted => "interrupted",
-    }
-}
-
-pub(super) fn status_style(state: MessageState) -> Style {
-    match state {
-        MessageState::Queued => warning(),
-        MessageState::Streaming => accent(),
-        MessageState::Complete => muted(),
-        MessageState::Cancelled | MessageState::Interrupted => warning(),
-        MessageState::Failed => failure(),
-    }
-}
 pub(super) fn pending_markdown_lines(source: &str, width: usize) -> Vec<Line> {
     let source_was_truncated = source.len() > MAX_LIVE_MARKDOWN_BYTES;
     let mut lines = markdown_lines(bounded_tail(source, MAX_LIVE_MARKDOWN_BYTES), width, false);

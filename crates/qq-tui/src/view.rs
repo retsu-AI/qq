@@ -28,8 +28,8 @@ use crate::{
     app::{App, SessionView, ToolDetail, terminal_safe_character},
     input::{Mode, SessionConfirm, approval_mode_label, effort_label},
     render::{
-        Line, Style, accent, border, brand, diff_line_style, failure, info, muted, normal,
-        selection, success, text_width, warning, write_line,
+        Line, Style, accent, border, brand, failure, faint, info, muted, normal, selection,
+        success, surface, text_width, warning, write_line,
     },
     theme,
     viewport::{MAX_PANES, TranscriptPane, View, Viewport},
@@ -41,7 +41,7 @@ pub(crate) use highlight::{Highlighted, Highlighter};
 pub(crate) use layout::LayoutPrefs;
 #[cfg(any(test, feature = "bench-support"))]
 pub(crate) use layout::PanePref;
-use layout::{TranscriptSlot, compute_layout};
+use layout::{Tier, TranscriptSlot, compute_layout};
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
 use overlay::*;
 use sidebar::*;
@@ -75,7 +75,7 @@ pub(crate) fn render_size(actual_size: (u16, u16)) -> (usize, usize) {
 }
 
 pub(crate) fn rail_visible(width: usize, prefs: LayoutPrefs, sessions: usize) -> bool {
-    compute_layout(width, layout::MIN_HEIGHT, 0, prefs, sessions).rail_visible()
+    layout::rail_width(width, prefs, sessions) > 0
 }
 
 #[derive(Default)]
@@ -163,19 +163,32 @@ impl FrameRenderer {
         }
 
         self.cursor = None;
-        let mut lines = vec![top_row(app, width)];
-        let padding_rows = layout::composer_padding_rows(height);
-        let fixed_rows = layout::fixed_chrome_rows(height);
-        let max_composer_rows = height
-            .saturating_sub(fixed_rows)
-            .saturating_sub(1)
-            .clamp(1, layout::max_composer_rows(width, height));
-        let draft_lines = queued_drafts(app, width);
-        let (composer_lines, caret) = composer(app, width, max_composer_rows);
-        let chrome_rows = fixed_rows - 1 + draft_lines.len() + composer_lines.len();
-        let layout = compute_layout(width, height, chrome_rows, app.layout, app.sessions.len());
-        let body_height = layout.body.height;
+        let rail_width = layout::rail_width(width, app.layout, app.sessions.len());
+        let pane_width = width - rail_width;
+        let dock_width = pane_width.saturating_sub(2 * layout::MARGIN).max(1);
+        let max_composer_rows = layout::max_composer_rows(width, height)
+            .min(height.saturating_sub(4))
+            .max(1);
+        let (composer_lines, caret) = composer(app, dock_width, max_composer_rows);
+        let fixed_rows = 2 + composer_lines.len();
+        let draft_budget = (height / 4).min(height.saturating_sub(fixed_rows + 1));
+        let draft_lines = queued_drafts(app, dock_width, draft_budget);
         let mode = app.mode();
+        let panel_limit = height.saturating_sub(fixed_rows + draft_lines.len()) / 2;
+        let panel = dock_panel(app, dock_width, panel_limit.max(1));
+        let mut dock: Vec<Line> = Vec::new();
+        dock.push(dock_rule(app, dock_width, rail_width > 0));
+        dock.extend(panel);
+        dock.extend(draft_lines);
+        let composer_top = dock.len();
+        dock.extend(composer_lines);
+        dock.push(dock_footer(
+            app,
+            dock_width,
+            rail_width == 0 && Tier::of(width) == Tier::Compact,
+        ));
+        let layout = compute_layout(width, height, dock.len(), app.layout, app.sessions.len());
+        let body_height = layout.body.height;
         let inline_detail = layout.inspector.is_none();
         let slots = layout.transcripts.len();
         let first_shown = app
@@ -190,39 +203,17 @@ impl FrameRenderer {
         let mut body: Vec<Line> = Vec::new();
         let mut columns: Vec<(usize, Vec<Line>)> = Vec::with_capacity(slots + 1);
         for ((index, pane), slot) in shown_panes().zip(&layout.transcripts) {
-            let slot_width = slot.area.width;
-            let rows = if index == app.focused_pane {
-                match mode {
-                    Mode::GoalForm => goal_form(app, slot_width, body_height),
-                    Mode::GoalCheck => goal_check_picker(app, slot_width, body_height),
-                    Mode::Models => model_picker(app, slot_width, body_height),
-                    Mode::Profiles => profile_picker(app, slot_width, body_height),
-                    Mode::ApprovalModes => approval_mode_picker(app, slot_width, body_height),
-                    Mode::Effort => effort_picker(app, slot_width, body_height),
-                    Mode::Skills => skill_picker(app, slot_width, body_height),
-                    Mode::Themes => theme_picker(app, slot_width, body_height),
-                    Mode::Sessions => session_picker(app, slot_width, body_height),
-                    Mode::Commands => command_picker(app, slot_width, body_height),
-                    Mode::History => history_picker(app, slot_width, body_height),
-                    Mode::Approval => {
-                        self.body(app, index, pane, *slot, body_height, inline_detail)
-                    }
-                    Mode::Compose => {
-                        let mut rows =
-                            self.body(app, index, pane, *slot, body_height, inline_detail);
-                        let menu = mention_autocomplete(app, slot_width, body_height);
-                        let menu = if menu.is_empty() {
-                            slash_autocomplete(app, slot_width, body_height)
-                        } else {
-                            menu
-                        };
-                        overlay_slash_autocomplete(&mut rows, menu);
-                        rows
-                    }
-                }
-            } else {
-                self.body(app, index, pane, *slot, body_height, inline_detail)
-            };
+            let slot_width = slot.content_width;
+            let mut rows = self.body(app, index, pane, *slot, body_height, inline_detail);
+            if index == app.focused_pane && mode == Mode::Compose {
+                let menu = mention_autocomplete(app, slot_width, body_height);
+                let menu = if menu.is_empty() {
+                    slash_autocomplete(app, slot_width, body_height)
+                } else {
+                    menu
+                };
+                overlay_slash_autocomplete(&mut rows, menu);
+            }
             if slot.area.x == 0 {
                 body = fit_height(rows, body_height);
             } else {
@@ -235,27 +226,31 @@ impl FrameRenderer {
                 inspector_pane(app, &self.cache, app.pane(), inspector.width, body_height),
             ));
         }
+        for line in &mut dock {
+            line.indent = layout::MARGIN;
+        }
+        body.extend(dock);
         if let Some(rail) = layout.rail {
-            let density = RailDensity::of(layout.tier);
-            columns.push((rail.x, sidebar(app, rail.width, body_height, density)));
+            columns.push((rail.x, sidebar(app, rail.width, height, layout.tier)));
         }
         if !columns.is_empty() {
             for (index, slot) in body.iter_mut().enumerate() {
-                let extra: usize = columns
-                    .iter()
-                    .map(|(_, column)| column.get(index).map_or(0, |cells| cells.spans.len() + 1))
-                    .sum();
                 let mut used = slot.width();
                 let first = std::mem::take(slot);
                 let mut row = Line {
                     indent: first.indent,
-                    spans: Vec::with_capacity(first.spans.len() + extra + 1),
+                    spans: first.spans,
                 };
-                row.spans.extend(first.spans);
                 for (x, column) in &mut columns {
                     let Some(cells) = column.get_mut(index).map(std::mem::take) else {
                         continue;
                     };
+                    if used > *x {
+                        let indent = row.indent;
+                        row = truncate_line(std::mem::take(&mut row), x.saturating_sub(indent));
+                        row.indent = indent;
+                        used = row.width();
+                    }
                     let start = *x + cells.indent;
                     if used < start {
                         row.push(" ".repeat(start - used), normal());
@@ -272,27 +267,17 @@ impl FrameRenderer {
                 *slot = row;
             }
         }
-        lines.extend(body);
-        if layout.strip
-            && let Some(strip) = agent_strip(app, width)
-        {
-            lines.push(strip);
-        }
-        lines.extend(draft_lines);
-        lines.push(composer_rule(app, width));
-        let composer_top = lines.len();
-        lines.extend(composer_lines);
-        lines.extend(std::iter::repeat_n(Line::default(), padding_rows));
-        if (mode == Mode::Compose || app.approval_amendment.is_some())
+        let composer_top = body_height + composer_top;
+        if (mode == Mode::Compose || app.approval_amendment.is_some() || answering_question(app))
             && let Some((column, row)) = caret
             && let (Ok(column), Ok(row)) = (
-                u16::try_from(column.min(width.saturating_sub(1))),
+                u16::try_from((layout::MARGIN + column).min(width.saturating_sub(1))),
                 u16::try_from(composer_top + row),
             )
         {
             self.cursor = Some(CursorPosition { column, row });
         }
-        fit_height(lines, height)
+        fit_height(body, height)
     }
 
     fn body(

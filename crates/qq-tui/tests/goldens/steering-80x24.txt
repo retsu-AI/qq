@@ -1,24 +1,24 @@
- qq  Session 0                                           openai/gpt-test  $0.00
 
-   QQ
-   the model turn
-
-
- ▌ YOU  steering  waiting for the next turn
- ▌ pending steer: also check the tests
-
-
- ▌ YOU  steered
- ▌ applied steer: prefer edit_file
-
-
- ▌ YOU  steering  run finished first
- ▌ late steer: never mind
+    the model turn
+  ┃ applied steer: prefer edit_file
+    steered
+  ┃ late steer: never mind
+    not sent · the run finished first
 
 
 
 
- 3 agents  ◐ 1
- ◐ working ───────────────────────────────────── ? help  ^K commands  ^O detail
- › Ask QQ...
 
+
+
+
+
+
+
+
+
+
+  ◐ working ────────────────────────────────────────────────── 3 sessions  ◐ 1
+  ┋ pending steer: also check the tests
+  ┃ Ask QQ…
+    Session 0 · gpt-test

@@ -1,24 +1,24 @@
- qq  Session 0                                           openai/gpt-test  $0.00
- REPLACE GOAL review specification
-Replace this goal? y confirms · n edits · PgUp/PgDn review · Esc cancels
-Replaces: Finish the billing migration
 
-  Objective
-finish the migration and verify the workspace
-
-> Check command (optional; consent is separate)
-cargo test --workspace
-
-  Budget: Configured defaults
-200 runs; 24h from submission; per-run model turns: 256
-Check commands require separate /goal check consent. Editing a stopped goal does
-not resume it.
+    Ask QQ to begin this session.
 
 
 
 
 
- 3 agents
- goal · achieved ───────────────────────────────────────────────────────────────
- › Ask QQ...
 
+
+
+
+
+  ○ goal achieved ───────────────────────────────────────────────── 3 sessions
+    Replace goal
+    replaces  Finish the billing migration
+    Objective
+    finish the migration and verify the workspace
+  ▎ Check command  optional
+    cargo test --workspace
+    Budget
+    configured defaults · 200 runs · 24h · 256 turns per run
+    A check command runs only after /goal check consent.
+  ┃ y replace   n edit   esc back
+    Session 0 · gpt-test

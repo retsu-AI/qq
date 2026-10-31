@@ -1,40 +1,40 @@
- qq  Session 0                                                                                   openai/gpt-test  $0.00
- CREATE GOAL review specification                                                           │ IDLE  3
-Tab / ↑↓ fields · ←→ budget preset · Enter submits · Esc cancels                            │ ○ Session 0
-  Objective                                                                                 │ ○ Session 1
-finish the migration and verify the workspace                                               │ ○ Session 2
-                                                                                            │
-> Check command (optional; consent is separate)                                             │
-cargo test --workspace▏                                                                     │
-                                                                                            │
-  Budget: Configured defaults                                                               │
-200 runs; 24h from submission; per-run model turns: 256                                     │
-Check commands require separate /goal check consent. Editing a stopped goal does not resume │
-it.                                                                                         │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- › Ask QQ...
 
+    Ask QQ to begin this session.                                                           RECENT
+                                                                                          ▎ 1 ○ Session 0
+                                                                                            2 ○ Session 1
+                                                                                            3 ○ Session 2
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ────────────────────────────────────────────────────────────────────────────────────
+    New goal
+    Objective
+    finish the migration and verify the workspace
+  ▎ Check command  optional
+    cargo test --workspace▏
+    Budget
+    configured defaults · 200 runs · 24h · 256 turns per run
+    A check command runs only after /goal check consent.
+  ┃ tab next field   ←→ budget   enter create   esc back
+    Session 0 · gpt-test                                                    /workspace

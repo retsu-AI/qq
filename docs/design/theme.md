@@ -31,7 +31,7 @@ Two themes are always present and one of them is the default
 | `warning` | yellow |
 | `error` | red |
 | `success` | green |
-| `surface` | `#262830` (code-block background) |
+| `surface` | `#262830` (code-block and sessions-column background) |
 
 Theme files use `#RRGGBB` literals only, so a named theme looks the same
 everywhere; `terminal` is built in code because a file cannot name ANSI
@@ -155,20 +155,30 @@ Rules:
 | `text` | Primary foreground |
 | `muted` | Secondary / de-emphasized text |
 | `accent` | Interactive highlights, user-turn markers, list markers |
-| `brand` | Product mark (`qq` header) |
+| `brand` | Product mark (`qq` on the too-small notice) |
 | `warning` | Pending work, caution, non-fatal attention |
 | `error` | Failures, destructive emphasis, diff removals |
 | `success` | Completed success, diff additions |
-| `surface` | Recessed panel background (code blocks) |
+| `surface` | Recessed panel background (code blocks, the sessions column) |
 
 Markdown and unified diffs reuse these roles in v1:
 
 - headings and list markers → `accent`
-- block quotes and chrome → `muted`
-- inline code emphasis may use `warning` where the renderer already does
+- block quotes → `muted`
+- inline code → `text` on `surface`
 - diff additions → `success`
 - diff removals → `error`
-- diff hunk headers → muted `accent`
+
+### Derived Faint Role
+
+The interface uses three brightness levels: `text`, `muted`, and `faint`.
+`faint` carries idle state, group labels, receipts, tool metrics and
+durations, the `│` tail rail, key labels, and the composer placeholder. It is
+not a theme key: `Palette::derive` computes it as `muted` blended halfway
+toward half of `surface` (`theme::blend_halfway`) when both are RGB, and uses
+`muted` unchanged when either is a terminal color, so the compiled
+`terminal` theme paints `faint` as dark grey. `info` (running) is derived as
+`accent`.
 
 ### Syntax Block
 
@@ -241,9 +251,9 @@ pub struct Palette {
     pub error: Color,
     pub success: Color,
     pub surface: Color,
-    // Derived: surface_alt, selection_bg, border, diff_add_bg, diff_del_bg,
-    // info, and the eight syn_* roles (keyword, function, type, string,
-    // constant, comment, property, punctuation).
+    // Derived: faint, surface_alt, selection_bg, border, diff_add_bg,
+    // diff_del_bg, info, and the eight syn_* roles (keyword, function, type,
+    // string, constant, comment, property, punctuation).
 }
 ```
 

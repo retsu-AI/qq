@@ -34,6 +34,8 @@ use crate::{
 };
 mod pickers;
 
+const GOAL_PAGE_ROWS: usize = 5;
+const MAX_GOAL_SCROLL: usize = 256;
 const MAX_EXPANDED_TOOL_CALLS: usize = 256;
 
 const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -301,6 +303,7 @@ pub(crate) struct App {
     pub(crate) expanded_tool_calls: std::collections::HashSet<qq_protocol::ToolCallId>,
     pub(crate) transcript_cursor: Option<qq_protocol::ToolCallId>,
     pub reasoning_detail: ReasoningDetail,
+    pub(crate) goal_scroll: usize,
     pub layout: crate::view::LayoutPrefs,
     pub(crate) mouse_capture: bool,
     terminal_width: usize,
@@ -360,6 +363,7 @@ impl App {
             expanded_tool_calls: std::collections::HashSet::new(),
             transcript_cursor: None,
             reasoning_detail: ReasoningDetail::default(),
+            goal_scroll: 0,
             layout: crate::view::LayoutPrefs::default(),
             terminal_width: 0,
             mouse_capture: true,
@@ -1415,6 +1419,7 @@ impl App {
     }
 
     pub(crate) fn set_view(&mut self, view: View) {
+        self.goal_scroll = 0;
         self.pane_mut().view = view;
     }
 
@@ -1476,6 +1481,15 @@ impl App {
     }
 
     fn scroll_focused_page(&mut self, up: bool) -> bool {
+        if matches!(self.view(), View::Goal(_)) {
+            let before = self.goal_scroll;
+            self.goal_scroll = if up {
+                before.saturating_sub(GOAL_PAGE_ROWS)
+            } else {
+                before.saturating_add(GOAL_PAGE_ROWS).min(MAX_GOAL_SCROLL)
+            };
+            return self.goal_scroll != before;
+        }
         let page = isize::try_from(self.viewport().height()).unwrap_or(isize::MAX);
         self.viewport_mut().scroll(if up { page } else { -page })
     }
@@ -1572,7 +1586,7 @@ impl App {
                 Effects::redraw(Redraw::Immediate)
             }
             Command::ToggleInspector => {
-                self.layout.inspector = self.layout.inspector.toggled();
+                self.layout.inspector = self.layout.inspector.toggled_from_hidden();
                 Effects::redraw(Redraw::Immediate)
             }
             Command::FocusParent => match self
@@ -2733,10 +2747,6 @@ impl App {
         let position = siblings.iter().position(|id| *id == focused)?;
         let next = (position as isize + offset).rem_euclid(siblings.len() as isize) as usize;
         Some(siblings[next])
-    }
-
-    pub(crate) fn sessions_awaiting_approval(&self) -> Vec<SessionId> {
-        self.sessions.awaiting_approval()
     }
 
     pub(crate) fn sessions_needing_attention(&self) -> Vec<SessionId> {

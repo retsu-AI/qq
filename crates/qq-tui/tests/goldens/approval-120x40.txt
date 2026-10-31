@@ -1,40 +1,40 @@
- qq  Session 0                                                                                   openai/gpt-test  $0.00
-                                                                                            │ NEEDS YOU  1
- ▌ YOU                                                                                      │ ◇ Session 0
- ▌ fix the off-by-one in wrap.rs                                                            │    ◇ approve edit
-                                                                                            │
-   QQ                                                                                       │ IDLE  2
-   I’ll patch the loop bound.                                                               │ ○ Session 1
-                                                                                            │ ○ Session 2
- ◇ Edit   crates/qq-tui/src/view/wrap.rs                                   awaiting approval│
-     ◇ approval needed                                                                      │
-       crates/qq-tui/src/view/wrap.rs                                                       │
-       @@ -40,3 +40,3 @@                                                                    │
-     40      let mut column = 0;                                                            │
-        -    while column <= width {                                                        │
-     41 +    while column < width {                                                         │
-     42          column += 1;                                                               │
-       y approve   n deny                                                                   │
-   ✓ 0.0s · ttft 0.0s                                                                       │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
- ◐ working ──────────────────────────────────────────────────────────────────────────────────────────────────── F1 help
- ✎ Answer the approval above
 
+  ┃ fix the off-by-one in wrap.rs                                                           NEEDS YOU
+                                                                                          ▎ 1 ◇ Session 0
+    I’ll patch the loop bound.
+                                                                                            RECENT
+  ◇ Edit     crates/qq-tui/src/view/wrap.rs  waiting                                        2 ○ Session 1
+                                                                                            3 ○ Session 2
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ◇ apply this edit? ─────────────────────────────────────────────────────────────────
+    40        let mut column = 0;
+    41 -      while column <= width {
+    41 +      while column < width {
+    42            column += 1;
+  ┃ y apply   n deny   Y / N with a note
+    Session 0 · gpt-test                                                    /workspace

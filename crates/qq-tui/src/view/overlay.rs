@@ -30,12 +30,18 @@ fn picker_frame<T: PickerItem>(
         question,
         empty,
     } = chrome;
-    let mut lines = vec![section(title, hint)];
+    let chrome_rows = 2 + usize::from(question.is_some());
+    let mut lines = Vec::with_capacity(height);
+    if height > chrome_rows {
+        lines.push(section(title, hint));
+    }
     lines.push(search_line(&picker.query, placeholder));
     if let Some(question) = question {
         lines.push(truncate_line(question, width));
     }
-    lines.push(Line::default());
+    if height > chrome_rows + PICKER_SPACER_MIN_RESULTS {
+        lines.push(Line::default());
+    }
     if picker.filtered().len() == 0 {
         lines.push(Line::styled(empty, muted().italic()));
         return fit_height(lines, height);
@@ -57,6 +63,8 @@ fn picker_frame<T: PickerItem>(
     ));
     fit_height(lines, height)
 }
+
+const PICKER_SPACER_MIN_RESULTS: usize = 3;
 
 pub(super) fn search_line(query: &str, placeholder: &str) -> Line {
     Line::styled(
@@ -476,28 +484,34 @@ pub(super) fn command_picker(app: &App, width: usize, height: usize) -> Vec<Line
     )
 }
 
-pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
+pub(super) fn approval_block(app: &App, width: usize, limit: usize) -> Vec<Line> {
     let mut lines = Vec::new();
     if let Some(question) = app.pending_question() {
         let answered = app.question_answers.len();
-        let mut title = Line::styled("     ◇ ", warning());
-        title.push("question", warning().bold());
+        let current = question.questions.get(answered);
+        let current_rows = current.map_or(0, |item| 2 + item.options.len());
+        let heading_rows = usize::from(question.questions.len() > 1);
+        let history_room = limit.saturating_sub(heading_rows + current_rows);
+        let shown_history = answered.min(history_room);
         if question.questions.len() > 1 {
-            title.push(
-                format!(
-                    "  {}/{}",
-                    (answered + 1).min(question.questions.len()),
-                    question.questions.len()
-                ),
-                muted(),
+            let mut heading = format!(
+                "  question {}/{}",
+                (answered + 1).min(question.questions.len()),
+                question.questions.len()
             );
+            if shown_history < answered {
+                heading.push_str(&format!(" · {} answered", answered - shown_history));
+            }
+            lines.push(Line::styled(heading, faint()));
         }
-        lines.push(truncate_line(title, width));
         for (index, item) in question.questions.iter().enumerate() {
             if index < answered {
-                let mut line = Line::styled("       ", muted());
+                if index < answered - shown_history {
+                    continue;
+                }
+                let mut line = Line::styled("  ", normal());
                 line.push(item.prompt.as_str(), muted());
-                line.push(" → ", muted());
+                line.push(" → ", faint());
                 line.push(app.question_answers[index].as_str(), normal());
                 lines.push(truncate_line(line, width));
                 continue;
@@ -505,82 +519,147 @@ pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
             if index > answered {
                 break;
             }
-            let mut line = Line::styled("       ", muted());
+            let mut line = Line::styled("  ", normal());
             line.push(item.prompt.as_str(), normal().bold());
             lines.push(truncate_line(line, width));
-            for (option_index, option) in item.options.iter().enumerate() {
-                let mut line = Line::styled("         ", muted());
-                line.push(format!("{}", option_index + 1), accent().bold());
-                line.push(format!(" {option}"), normal());
-                lines.push(truncate_line(line, width));
-            }
-            let mut hint = Line::styled("       ", muted());
-            if item.free_text {
-                hint.push("type an answer and press Enter", muted());
-                if !item.options.is_empty() {
-                    hint.push(", or a number to pick", muted());
+            let option_room = limit.saturating_sub(lines.len() + 1).max(1);
+            let options: Vec<String> = item
+                .options
+                .iter()
+                .enumerate()
+                .map(|(option_index, option)| format!("{} {option}", option_index + 1))
+                .collect();
+            if options.len() <= option_room {
+                for option in &options {
+                    let (number, label) = option.split_once(' ').unwrap_or((option, ""));
+                    let mut line = Line::styled(format!("  {number} "), normal());
+                    line.push(label, muted());
+                    lines.push(truncate_line(line, width));
                 }
             } else {
-                hint.push("press a number to pick", muted());
+                let per_row = options.len().div_ceil(option_room);
+                for chunk in options.chunks(per_row) {
+                    let mut line = Line::styled("  ", normal());
+                    for (position, option) in chunk.iter().enumerate() {
+                        if position > 0 {
+                            line.push("   ", normal());
+                        }
+                        let (number, label) = option.split_once(' ').unwrap_or((option, ""));
+                        line.push(format!("{number} "), normal());
+                        line.push(label, muted());
+                    }
+                    lines.push(truncate_line(line, width));
+                }
             }
-            hint.push("   ", muted());
-            hint.push("Esc", accent().bold());
-            hint.push(" decline", muted());
+            let mut hint = Line::styled("  ", normal());
+            hint.push(
+                if item.free_text && !item.options.is_empty() {
+                    "type an answer or a number"
+                } else if item.free_text {
+                    "type an answer"
+                } else {
+                    "press a number"
+                },
+                faint(),
+            );
+            hint.push("   esc", normal());
+            hint.push(" decline", faint());
             lines.push(truncate_line(hint, width));
         }
         return lines;
     }
-    let mut title = Line::styled("     ◇ ", warning());
-    title.push("approval needed", warning().bold());
-    lines.push(truncate_line(title, width));
     let preview = app.pending_approval_preview();
     if let Some(shell) = preview.and_then(|preview| preview.shell.as_ref()) {
-        let mut line = Line::styled("       $ ", muted());
-        line.push(shell.command.as_str(), normal().bold());
+        let mut line = Line::styled("  $ ", faint());
+        line.push(shell.command.as_str(), normal());
         if let Some(cwd) = &shell.cwd {
-            line.push(format!("  (in {cwd})"), muted());
+            line.push(format!("  in {cwd}"), faint());
         }
         lines.push(truncate_line(line, width));
     }
     if let Some(fetch) = preview.and_then(|preview| preview.fetch.as_ref()) {
-        let mut line = Line::styled("       ", muted());
-        line.push(fetch.method.as_deref().unwrap_or("GET"), muted());
-        line.push(" ", muted());
-        line.push(fetch.url.as_str(), normal().bold());
+        let mut line = Line::styled("  ", normal());
+        line.push(fetch.method.as_deref().unwrap_or("GET"), faint());
+        line.push(" ", normal());
+        line.push(fetch.url.as_str(), normal());
         lines.push(truncate_line(line, width));
     }
     if let Some(edit) = preview.and_then(|preview| preview.edit.as_ref()) {
-        let mut line = Line::styled("       ", muted());
-        line.push(
-            elide_path(&edit.path, width.saturating_sub(9)),
-            normal().bold(),
-        );
-        lines.push(truncate_line(line, width));
-        lines.extend(
-            diff_lines(&edit.diff, MAX_APPROVAL_DIFF_ROWS, width.saturating_sub(2))
-                .into_iter()
-                .map(|line| {
-                    let mut indented = Line::styled("  ", muted());
-                    for span in line.spans {
-                        indented.push(span.text, span.style);
-                    }
-                    indented
-                }),
-        );
+        lines.extend(dock_diff_lines(&edit.diff, MAX_APPROVAL_DIFF_ROWS, width));
     }
-    let mut choices = Line::styled("       ", muted());
-    for (index, (key, label)) in [("y", "approve"), ("n", "deny")].into_iter().enumerate() {
-        if index > 0 {
-            choices.push("   ", muted());
+    if lines.is_empty()
+        && let Some(call) = app.pending_approval()
+    {
+        let row = ToolRow::derive(call);
+        let mut line = Line::styled("  ", normal());
+        line.push(row.verb, normal());
+        if let Some(subject) = row.subject {
+            line.push(format!("  {subject}"), muted());
         }
-        choices.push(key, accent().bold());
-        choices.push(format!(" {label}"), muted());
+        lines.push(truncate_line(line, width));
     }
-    lines.push(truncate_line(choices, width));
     lines
 }
 
-const MAX_APPROVAL_DIFF_ROWS: usize = 12;
+pub(super) fn dock_diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<Line> {
+    let mut lines = Vec::new();
+    let mut old_line: Option<usize> = None;
+    let mut new_line: Option<usize> = None;
+    let body: Vec<&str> = diff
+        .lines()
+        .filter(|line| !line.starts_with("+++") && !line.starts_with("---"))
+        .collect();
+    let total = body.iter().filter(|line| !line.starts_with("@@")).count();
+    for text in body {
+        if let Some(header) = text.strip_prefix("@@") {
+            let mut ranges = header.split_whitespace();
+            let parse = |range: Option<&str>, sign: char| {
+                range
+                    .and_then(|range| range.strip_prefix(sign))
+                    .and_then(|range| range.split(',').next())
+                    .and_then(|start| start.parse().ok())
+            };
+            old_line = parse(ranges.next(), '-');
+            new_line = parse(ranges.next(), '+');
+            continue;
+        }
+        if lines.len() == max_rows {
+            lines.push(Line::styled(
+                format!(
+                    "  … {}",
+                    count_noun(total - max_rows, "more line", "more lines")
+                ),
+                faint(),
+            ));
+            break;
+        }
+        let safe: String = text.chars().filter_map(terminal_safe_character).collect();
+        let (sign, rest) = safe.split_at(safe.chars().next().map_or(0, char::len_utf8));
+        let (number, style, sign) = match sign {
+            "-" => (old_line, failure(), "-"),
+            "+" => (new_line, success(), "+"),
+            _ => (new_line, normal(), " "),
+        };
+        let mut line = Line::styled(
+            number.map_or_else(|| "      ".to_owned(), |number| format!("{number:>4} ")),
+            faint(),
+        );
+        line.push(format!("{sign}  "), style);
+        line.push(rest, style);
+        match sign {
+            "-" => old_line = old_line.map(|number| number + 1),
+            "+" => new_line = new_line.map(|number| number + 1),
+            _ => {
+                old_line = old_line.map(|number| number + 1);
+                new_line = new_line.map(|number| number + 1);
+            }
+        }
+        lines.push(truncate_line(line, width));
+    }
+    lines
+}
+
+const MAX_APPROVAL_DIFF_ROWS: usize = 8;
 
 pub(super) fn history_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(picker) = app.history_picker() else {
@@ -615,226 +694,201 @@ pub(super) fn goal_check_picker(app: &App, width: usize, height: usize) -> Vec<L
         detail_row,
     }) = &app.overlay
     else {
-        return fit_height(Vec::new(), height);
+        return Vec::new();
     };
     let width = width.max(1);
-    let mut details = Vec::new();
-    for text in format!(
-        "Workspace: {}\nCommand:\n{}",
-        target.workspace_path, target.command
-    )
-    .lines()
-    {
-        let safe: String = text.chars().filter_map(terminal_safe_character).collect();
-        details.extend(wrap_line(Line::styled(safe, normal()), width));
-    }
-    let mut choices = Vec::new();
-    let mut selected_row = 0;
-    for (index, (_, row)) in picker.filtered().enumerate() {
-        let selected = index == picker.cursor();
-        if selected {
-            selected_row = choices.len();
+    let mut rows = Vec::new();
+    let lines: Vec<String> = target
+        .command
+        .lines()
+        .map(|line| line.chars().filter_map(terminal_safe_character).collect())
+        .collect();
+    let fits_on_rule = lines.len() == 1
+        && text_width(&lines[0]) <= super::chrome::GOAL_CHECK_RULE_COMMAND
+        && text_width(&lines[0]) + 24 <= width;
+    if !fits_on_rule {
+        let wrapped: Vec<Line> = lines
+            .iter()
+            .flat_map(|line| {
+                wrap_line_chars(
+                    Line::styled(line.as_str(), muted()),
+                    width.saturating_sub(4).max(1),
+                )
+            })
+            .collect();
+        let choice_rows = picker.filtered().len().max(1);
+        let visible = height.saturating_sub(choice_rows).max(1);
+        let start = (*detail_row).min(wrapped.len().saturating_sub(visible));
+        for line in wrapped.into_iter().skip(start).take(visible) {
+            let mut row = Line::styled("  $ ", faint());
+            for span in line.spans {
+                row.push(span.text, span.style);
+            }
+            rows.push(truncate_line(row, width));
         }
-        let style = if selected {
-            selection(normal().bold())
+    }
+    let choices_room = height.saturating_sub(rows.len()).max(1);
+    let cursor = picker.cursor();
+    let first_choice = cursor
+        .saturating_sub(choices_room.saturating_sub(1))
+        .min(picker.filtered().len().saturating_sub(choices_room));
+    for (index, (_, row)) in picker
+        .filtered()
+        .enumerate()
+        .skip(first_choice)
+        .take(choices_room)
+    {
+        let selected = index == cursor;
+        let mut line = if selected {
+            Line::styled("▎ ", accent())
         } else {
-            normal()
+            Line::styled("  ", normal())
         };
-        choices.extend(wrap_line(
-            Line::styled(
-                format!("{}{}", if selected { "> " } else { "  " }, row.label),
-                style,
-            ),
-            width,
-        ));
-        choices.extend(wrap_line(Line::styled(row.description, muted()), width));
+        line.push(
+            format!("{:<36}", row.label),
+            if selected { normal() } else { muted() },
+        );
+        line.push(row.description, faint());
+        rows.push(truncate_line(line, width));
     }
-    if choices.is_empty() {
-        choices.push(Line::styled("No matching choice. Esc cancels.", muted()));
+    if picker.filtered().len() == 0 {
+        rows.push(Line::styled("  No matching choice. esc cancels.", faint()));
     }
-    let body_height = height.saturating_sub(3);
-    let choice_height = choices.len().min(body_height / 2);
-    let detail_height = body_height.saturating_sub(choice_height);
-    let mut rows = vec![
-        truncate_line(section("GOAL CHECK", "explicit consent"), width),
-        truncate_line(
-            Line::styled(
-                "PgUp/PgDn read command · arrows choose · Enter applies · Esc cancels",
-                muted(),
-            ),
-            width,
-        ),
-        truncate_line(search_line(&picker.query, "deny, once, repeated"), width),
-    ];
-    let detail_row = (*detail_row).min(details.len().saturating_sub(1));
-    rows.extend(fit_height(
-        selection_viewport(details, detail_height, detail_row),
-        detail_height,
-    ));
-    rows.extend(selection_viewport(choices, choice_height, selected_row));
-    fit_height(rows, height)
+    rows
 }
 
 pub(super) fn goal_form(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(Overlay::GoalForm(form)) = &app.overlay else {
-        return fit_height(Vec::new(), height);
+        return Vec::new();
     };
     let width = width.max(1);
-    let mut rows = Vec::new();
+    let safe =
+        |text: &str| -> String { text.chars().filter_map(terminal_safe_character).collect() };
+    let mut out = vec![Line::styled(
+        format!(
+            "  {}",
+            if form.replace {
+                "Replace goal"
+            } else if form.expected.is_some() {
+                "Edit goal"
+            } else {
+                "New goal"
+            }
+        ),
+        normal().bold(),
+    )];
     if let Some(previous) = &form.previous_objective {
-        let safe: String = previous
-            .chars()
-            .filter_map(terminal_safe_character)
-            .collect();
-        rows.extend(wrap_line(
-            Line::styled(format!("Replaces: {safe}"), warning()),
-            width,
-        ));
-        rows.push(Line::default());
+        let mut line = Line::styled("  replaces  ", faint());
+        line.push(safe(previous), muted());
+        out.push(truncate_line(line, width));
     }
+    let marker = |selected: bool| {
+        if selected {
+            Line::styled("▎ ", accent())
+        } else {
+            Line::styled("  ", normal())
+        }
+    };
     let mut selected = 0;
-    for (index, label) in ["Objective", "Check command (optional; consent is separate)"]
+    for (index, (label, note)) in [("Objective", ""), ("Check command", "  optional")]
         .into_iter()
         .enumerate()
     {
+        let mut line = marker(form.field == index);
+        line.push(label, muted());
+        line.push(note, faint());
         if form.field == index {
-            selected = rows.len();
+            selected = out.len();
         }
-        rows.push(truncate_line(
-            Line::styled(
-                format!("{} {label}", if form.field == index { ">" } else { " " }),
-                accent(),
-            ),
-            width,
-        ));
+        out.push(truncate_line(line, width));
         let editor = &form.fields[index];
         let text = &editor.text;
         let cursor = editor.cursor();
         let editing = form.field == index && !form.confirm && form.sending.is_none();
-        let decorated;
-        let display = if editing {
-            decorated = format!("{}▏{}", &text[..cursor], &text[cursor..]);
-            decorated.as_str()
+        let shown = if editing {
+            format!("{}▏{}", safe(&text[..cursor]), safe(&text[cursor..]))
         } else {
-            text.as_str()
+            safe(text)
         };
-        let safe: String = display
-            .chars()
-            .filter_map(terminal_safe_character)
-            .collect();
+        let field_width = width.saturating_sub(2).max(1);
         if editing {
-            let prefix: String = text[..cursor]
-                .chars()
-                .filter_map(terminal_safe_character)
-                .collect();
-            let wrapped = prefix
-                .lines()
-                .map(|line| {
-                    wrap_line(Line::styled(line.to_owned(), normal()), width)
-                        .len()
-                        .max(1)
-                })
-                .sum::<usize>();
-            selected = selected.saturating_add(wrapped);
+            let before = format!("{}▏", safe(&text[..cursor])).replace('\n', " ");
+            let caret_row = wrap_line_chars(Line::styled(before, normal()), field_width)
+                .len()
+                .saturating_sub(1);
+            selected = out.len() + caret_row;
         }
-        if safe.is_empty() {
-            rows.push(Line::styled("(empty)", muted()));
+        if shown.is_empty() {
+            out.push(Line::styled("  (empty)", faint()));
         } else {
-            for line in safe.lines() {
-                rows.extend(wrap_line(Line::styled(line.to_owned(), normal()), width));
+            for row in wrap_line_chars(
+                Line::styled(shown.replace('\n', " "), normal()),
+                field_width,
+            ) {
+                let mut line = Line::styled("  ", normal());
+                for span in row.spans {
+                    line.push(span.text, span.style);
+                }
+                out.push(truncate_line(line, width));
             }
         }
-        rows.push(Line::default());
     }
+    let mut line = marker(form.field == 2);
+    line.push("Budget", muted());
     if form.field == 2 {
-        selected = rows.len();
+        selected = out.len();
     }
-    rows.extend(wrap_line(
-        Line::styled(
-            format!(
-                "{} Budget: {}",
-                if form.field == 2 { ">" } else { " " },
-                form.preset_label()
-            ),
-            accent(),
-        ),
-        width,
-    ));
+    out.push(truncate_line(line, width));
     let budget = form.budget(0);
     let window = if form.preset == 0 {
-        format!(
-            "deadline {} (unchanged)",
-            goal_timestamp(budget.deadline_ms)
-        )
+        format!("until {}", goal_timestamp(budget.deadline_ms))
     } else {
-        format!("{} from submission", goal_duration(budget.deadline_ms))
+        goal_duration(budget.deadline_ms)
     };
-    rows.extend(wrap_line(
-        Line::styled(
-            format!(
-                "{} runs; {window}; per-run model turns: {}",
-                budget.max_goal_runs,
-                budget
-                    .per_run
-                    .max_model_turns
-                    .map_or_else(|| "unbounded".to_owned(), |value| value.to_string())
-            ),
-            normal(),
-        ),
-        width,
-    ));
+    let mut summary = format!(
+        "{} · {} runs · {window}",
+        form.preset_label().to_lowercase(),
+        budget.max_goal_runs
+    );
+    if let Some(turns) = budget.per_run.max_model_turns {
+        summary.push_str(&format!(" · {turns} turns per run"));
+    }
     if let Some(tokens) = budget.max_total_tokens {
-        rows.extend(wrap_line(
-            Line::styled(format!("Total token limit: {tokens}"), normal()),
-            width,
-        ));
+        summary.push_str(&format!(" · {tokens} tokens"));
     }
     if let Some(cost) = budget.max_cost_usd_nanos {
-        rows.extend(wrap_line(
-            Line::styled(
-                format!(
-                    "Total cost limit: ${}.{:09}",
-                    cost / 1_000_000_000,
-                    cost % 1_000_000_000
-                ),
-                normal(),
-            ),
+        summary.push_str(&format!(" · {}", format_cost(cost)));
+    }
+    out.push(truncate_line(
+        Line::styled(format!("  {summary}"), normal()),
+        width,
+    ));
+    let note = if form.sending.is_some() {
+        Some(("submitting…", faint()))
+    } else if form.refresh == crate::input::GoalFormRefresh::Pending {
+        Some(("refreshing the current goal; the draft is kept", faint()))
+    } else if form.refresh == crate::input::GoalFormRefresh::Failed {
+        Some(("refresh failed; enter retries", warning()))
+    } else {
+        Some((
+            "A check command runs only after /goal check consent.",
+            faint(),
+        ))
+    };
+    if let Some((text, style)) = note {
+        out.push(truncate_line(
+            Line::styled(format!("  {text}"), style),
             width,
         ));
     }
-    rows.extend(wrap_line(Line::styled("Check commands require separate /goal check consent. Editing a stopped goal does not resume it.", muted()), width));
-    let title = if form.replace {
-        "REPLACE GOAL"
-    } else if form.expected.is_some() {
-        "EDIT GOAL"
-    } else {
-        "CREATE GOAL"
-    };
-    let mut out = vec![truncate_line(section(title, "review specification"), width)];
-    let hint = if form.sending.is_some() {
-        "Submitting · Esc closes the form"
-    } else if form.refresh == crate::input::GoalFormRefresh::Pending {
-        "Refreshing current goal · draft retained · Esc closes"
-    } else if form.refresh == crate::input::GoalFormRefresh::Failed {
-        "Refresh failed · Enter retries refresh · Esc closes"
-    } else if form.confirm {
-        "Replace this goal? y confirms · n edits · PgUp/PgDn review · Esc cancels"
-    } else {
-        "Tab / ↑↓ fields · ←→ budget preset · Enter submits · Esc cancels"
-    };
-    out.extend(wrap_line(
-        Line::styled(hint, if form.confirm { warning() } else { muted() }),
-        width,
-    ));
     if let Some(error) = &form.error {
-        out.extend(wrap_line(Line::styled(error.clone(), failure()), width));
+        let mut line = Line::styled("  ✕ ", failure());
+        line.push(safe(error), normal());
+        out.push(truncate_line(line, width));
     }
-    let remaining = height.saturating_sub(out.len());
-    let anchor = if form.confirm { 0 } else { selected };
-    out.extend(selection_viewport(
-        rows,
-        remaining,
-        anchor.saturating_add_signed(form.scroll),
-    ));
-    fit_height(out, height)
+    if out.len() > height {
+        let anchor = if form.confirm { 0 } else { selected };
+        return selection_viewport(out, height, anchor.saturating_add_signed(form.scroll));
+    }
+    out
 }
