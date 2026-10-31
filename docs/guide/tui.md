@@ -196,7 +196,7 @@ The first session in a workspace opens with a short banner in the
 transcript:
 
 ```
-  qq 0.1.11 · ~/qq  main · gpt-5.5 high
+  qq 0.1.9 · ~/qq  main · gpt-5.5 high
 
   /models  choose a model    @path  mention a file    ^T  switch session    ?  help
 
