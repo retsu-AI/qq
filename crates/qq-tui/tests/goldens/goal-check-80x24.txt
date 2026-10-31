@@ -1,10 +1,5 @@
- qq  Session 0                                           openai/gpt-test  $0.00
- GOAL CHECK explicit consent
-PgUp/PgDn read command · arrows choose · Enter applies · Esc cancels
-  search: deny, once, repeated
-Workspace: /workspace
-Command:
-cargo test -p billing
+
+    Ask QQ to begin this session.
 
 
 
@@ -12,13 +7,18 @@ cargo test -p billing
 
 
 
-> Deny
-withhold check consent; pause an active goal
-  Allow once
-one start only; failure does not refund consent
-  Allow repeated checks for this goal
-only this goal and its exact check command
- 3 agents
- goal · check consent required ─────────────────────────────────────────────────
- › Ask QQ...
 
+
+
+
+
+
+
+
+
+  ◇ run cargo test -p billing in /workspace? ────────────────────── 3 sessions
+  ▎ deny                                withhold consent; pause an active goal
+    allow once                          one start; a failure does not refund…
+    allow repeated checks               this goal and this exact command only
+  ┃ enter apply   ↑↓ choose   esc back
+    Session 0 · gpt-test

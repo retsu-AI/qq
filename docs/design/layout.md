@@ -13,10 +13,10 @@ each pane is described in [`transcript.md`](./transcript.md) and
    every size. A wider terminal shows more at once; it never unlocks anything.
 2. **Height selects density, never structure.** A short terminal gives the
    composer fewer rows and collapses detail budgets; it does not remove panes.
-3. **Prose has a measure.** Transcript content lays out at most
-   `TRANSCRIPT_MEASURE` (100) columns wide regardless of pane width, so a line
-   of prose never stretches past a readable length. The pane's remaining width
-   is margin.
+3. **The screen is the application.** Panes tile the whole terminal at every
+   size; nothing is centred or capped at a reading measure. Transcript content
+   fills its pane less a 2-column margin on each side (`layout::MARGIN`), and
+   the dock runs the same width.
 4. **The layout is a pure function.** `view::layout::compute_layout(width,
    height, chrome_rows, prefs, sessions)` runs once per frame with no access
    to the model beyond the session count, and every pane paints inside the
@@ -26,58 +26,67 @@ each pane is described in [`transcript.md`](./transcript.md) and
 
 | Tier | Columns | Panes |
 | --- | --- | --- |
-| Compact | < 90 | One transcript column. When more than one session exists, a one-row agent strip above the composer rule. Composer grows to at most 4 rows. |
-| Regular | 90–159 | Transcript plus a sessions rail on the right (a quarter of the width, 20–28 columns) when more than one session exists or the rail is pinned. |
-| Wide | 160–239 | Regular, plus an inspector pane between the transcript and the rail: the focused session's expanded tool detail and the workspace views render there so the prose column stays prose. |
+| Compact | < 90 | One transcript column. When more than one session exists, the rule's right side carries the session counts (`8 sessions  ◐ 2  ◇ 2  ^G`). Composer grows to at most 4 rows. |
+| Regular | 90–159 | Transcript plus a 32-column sessions column flush right when at least two sessions exist or the column is pinned. |
+| Wide | 160–239 | Regular, with a 42-column sessions column that adds a second row per session. |
 | Ultra | ≥ 240 | Wide; the tier is distinct, but the layout still shows one transcript pane. |
 
 The breakpoints are `view::layout::{REGULAR_MIN_WIDTH, WIDE_MIN_WIDTH,
-ULTRA_MIN_WIDTH}`. The inspector's `Auto` state shows it from Wide. The
-layout produces one transcript slot at every tier (`compute_layout` in
-`view/layout.rs`).
+ULTRA_MIN_WIDTH}`; the column widths are `RAIL_REGULAR_WIDTH` and
+`RAIL_WIDE_WIDTH`. The inspector never appears on its own: it shows only
+after the inspector toggle (§ Inspector). The layout produces one transcript
+slot at every tier (`compute_layout` in `view/layout.rs`).
 
 Below 32 × 9 the frame is a "terminal is too small" notice.
 
 ## Geometry
 
-Row 0 is the top row (brand, breadcrumb, status items). The last rows are, in
-order: the agent strip when shown, queued drafts, the composer rule (which
-doubles as the status and key-hint line), the composer, and — when the
-terminal has at least `COMPOSER_PADDING_MIN_HEIGHT` (20) rows — one blank
-padding row so the caret does not sit on the bottom edge. Shorter terminals
-give that row to the transcript instead. The **body** is everything between,
-and the panes divide it left to right: transcript pane(s), inspector, rail.
+There is no header row: the transcript starts on row 0. The last rows are
+the **dock**, from top to bottom: the rule, a panel when one is open
+(approval, question, goal summary or form, goal-check choices, or a picker),
+queued drafts, the composer, and the status line. The **body** is everything
+above the dock, and the panes divide it left to right: transcript pane,
+inspector when shown. The sessions column is the one exception: it runs the
+full terminal height, beside the dock as well as the body. At 80 × 24, with
+an approval open in the dock (`approval-80x24`):
 
-The fixed chrome is `layout::fixed_chrome_rows(height)`: the top row and the
-rule (`FIXED_CHROME_ROWS`, 2) plus the padding row when present. The frame
-lays the composer out first against what remains after the fixed chrome, so
-its row cap (`max_composer_rows`: 4 at Compact or under 30 rows, else 8)
-still holds at 80 × 24 with the padding row: a full compact composer leaves
-17 body rows there (24 − top − rule − 4 − padding). The transcript itself
-opens with one blank padding row under the top row
-([`transcript.md`](./transcript.md) § Spacing), so the body reads with
-breathing room at both ends.
+```
+  ◇ Edit     crates/qq-tui/src/view/wrap.rs  waiting
 
-The rail takes `width / 4` clamped to 20–28 columns, and gives way to the
-strip when that would leave the transcript narrower than 32 columns. The
-inspector is carved only from width past one full measure plus its rail, so
-the transcript never narrows below the measure to make room for it; it is
-40–80 columns.
+  ◇ apply this edit? ───────────────────────────────────── 3 sessions  ◇ 1  ^G
+    40     let mut column = 0;
+    41 -   while column <= width {
+    41 +   while column < width {
+    42         column += 1;
+  ┃ y apply   n deny   Y / N with a note
+    Session 0 · gpt-test
+```
 
-A transcript pane wider than the measure places the content column one third
-of the way across its spare width (`inset = (pane - measure) / 3`), not dead
-center: the eye starts at the left edge, where the brand and the composer
-caret live, and a lone pane on an ultra-wide display should read as anchored,
-not adrift. Rows carry the inset as a count (`Line::indent`); the renderer
+The frame builds the dock first, at the transcript pane's width less the
+margin on each side, and passes its row count to `compute_layout` as
+`chrome_rows`. The composer's row cap (`max_composer_rows`: 4 at Compact or
+under 30 rows, else 8) applies before the panel is sized, and a panel takes
+at most half of what the rule, composer, drafts and status line leave. At
+80 × 24 a full compact composer leaves 18 body rows (24 − rule − 4 −
+status). The transcript itself opens with one blank padding row
+([`transcript.md`](./transcript.md) § Spacing).
+
+The sessions column is 32 columns at Regular and 42 from Wide up, and gives
+way when it would leave the transcript narrower than 32 columns. The
+inspector is carved only from pane width past 100 transcript columns
+(`INSPECTOR_TRANSCRIPT_MIN`), so the transcript never narrows below that to
+make room for it; it is 40–80 columns.
+
+Rows carry the 2-column margin as a count (`Line::indent`); the renderer
 emits one cursor move per row rather than a run of spaces, and the
 width-keyed transcript caches are untouched by the margin.
 
-Side panes are blitted onto the body rows after the transcript is laid out:
-each row is padded to the pane's `x`, the pane's cells appended, and the row
-padded to the terminal width so the border columns line up. The transcript
-caches key on the pane's content width, so a resize that leaves the content
-width unchanged (any two widths at or above the measure in the same rail
-state) costs no relayout.
+Side panes are blitted onto the frame rows after the transcript and dock are
+laid out: each row is padded to the pane's `x`, the pane's cells appended,
+and the row padded to the terminal width. The sessions column paints every
+row on the `surface` fill, so the split reads without a border. The
+transcript caches key on the pane's content width, so a resize re-lays
+messages only when that width changes.
 
 ## Panes and state
 
@@ -98,7 +107,8 @@ Each frame the renderer zips the layout's transcript slots with the shown
 panes (the window of `panes` that contains the focused one), renders each
 pane's body into its slot, and collects one reconciled state per pane;
 `commit` writes them back after composition so building a frame never
-mutates the model. Overlays paint into the focused pane's slot only. A pane
+mutates the model. Autocomplete menus paint into the focused pane's slot
+only; pickers and prompts open in the dock. A pane
 whose session no longer exists renders the empty prompt rather than a
 loading notice. The layout produces one slot, so exactly the focused pane is
 on screen.
@@ -106,19 +116,21 @@ on screen.
 ## Preferences
 
 `LayoutPrefs { rail, inspector }`, each a `PanePref::{Auto, Shown, Hidden}`.
-`Auto` follows the tier. The rail toggle (`Ctrl-\` by default) and the
-inspector toggle (`Alt-I`) move `Auto` or `Shown` to `Hidden` and `Hidden`
-to `Shown`, so the first press from the default state always hides the pane
-the user is reaching to dismiss. The preferences are runtime state, not
-configuration; they reset per launch.
+For the sessions column, `Auto` follows the tier and session count; its
+toggle (`Ctrl-\` by default) moves `Auto` or `Shown` to `Hidden` and `Hidden`
+to `Shown`, so the first press hides the column the user is reaching to
+dismiss. The inspector's `Auto` keeps it off; its toggle (`Alt-I`) moves
+`Auto` or `Hidden` to `Shown` and `Shown` to `Hidden`, so the first press
+shows it. The preferences are runtime state, not configuration; they reset
+per launch.
 
 ## Inspector
 
 The inspector (`view/workspace.rs::inspector_pane`) is the focused pane's
-detail column: 40–80 columns carved only from width past one full measure
-plus the rail, so opening it never narrows the transcript below its measure.
-`Auto` shows it at Wide and Ultra; `Shown` pins it at any width that can
-carve one (142 columns and up with no rail); `Hidden` keeps it off.
+detail column: 40–80 columns carved only from pane width past 100 transcript
+columns, so opening it never narrows the transcript below that. `Shown`
+shows it at any width that can carve one (140 columns and up with no
+sessions column); `Auto` and `Hidden` keep it off.
 
 What it holds, top to bottom under a `│ INSPECTOR` header:
 
@@ -150,52 +162,73 @@ Rows are bounded by the pane: content past the height is cut with a `… N
 rows more` line and no row is built beyond what fits. The inspector follows
 the focused pane and does not scroll.
 
-## Sessions rail
+## Sessions column
 
-The rail (`view/sidebar.rs`) lists every session grouped by what the user
-should do about it: **NEEDS YOU** (an approval waiting, a failure, or a
-finish not yet looked at), then **WORKING**, **IDLE**, **DONE**. Within a
-group sessions keep tree order (roots newest first, each followed by its
-children oldest first, indented two columns per level). A group header shows
-its label and count; one blank rail row separates groups; the focused row is
-padded to the rail width on the `selection` background.
+The sessions column (`view/sidebar.rs`) lists every session grouped by what
+the user should do about it: **NEEDS YOU** (an approval waiting, a failure,
+or a finish not yet looked at), then **WORKING**, then **RECENT** (idle and
+done sessions). Within a group sessions keep tree order (roots newest first,
+each followed by its children oldest first). Group labels are `faint`, one
+blank row separates groups, and the column has 2 columns of padding on the
+`surface` fill with no border:
 
-The rail and the one-row agent strip are built from one pass,
+```
+  NEEDS YOU
+  1 ● Refactor  1 new
+                                 $0.12
+  2 ◇ Deploy helper
+      wants to run a command
+
+  WORKING
+  3 ◐ Write tests  1 new
+      compacting context
+  4 ◐ Survey callers  1 new
+      Found twelve call sites across…
+
+  RECENT
+  5 ○ Scratch
+  6 ○ Notes
+▎ 7 ○ Session 0  ↳1
+  8 ● Migrate
+                                 $0.04
+```
+
+The column and the rule's Compact counts are built from one pass,
 `rail_entries`, which walks the sessions once and yields, per session, its
-group, unread count, whether it has a live status row, and its own reported
-spend. The rail plans rows from that list and paints only the rows inside its
-scrolled window (centered on the focused session); the strip counts from the
-same list. Neither surface re-derives grouping, so `8 agents ◐ 2 ◇ 2` on the
-strip and the headers on the rail always agree.
+group, unread count, whether it has a live status, and its own reported
+spend. The column plans rows from that list and paints only the rows inside
+its scrolled window (centered on the focused session); the rule counts from
+the same list. Neither surface re-derives grouping, so `8 sessions  ◐ 2  ◇ 2`
+on the rule and the groups in the column always agree.
 
-Each row starts with a state glyph in the state's color and the session
-title, truncated to leave room for the badge: `◇` `warning` while an approval
-waits, `✕` `error` after a failure, `●` `accent` for a finish not yet looked
-at, the shared tool spinner in `info` while running, `○` `warning` while
-queued, and `○`, `●`, or `◌` `muted` for idle, seen-complete, and stopped
-early. When a session has unread messages and is not focused, an `N new`
-badge in `accent` sits right-aligned on its row (`N` alone when the rail is
-narrower than 26 columns). The accent is the only attention color on the
-rail besides the group headers; `warning` and `error` appear only for a real
-pending or failed state.
+Each row is a `faint` number (`1`–`9`, blank past nine), a state glyph in
+the state's color, and the session title in `muted`, truncated with `…` to
+leave room for the badge. The focused row's title is `text` behind an
+`accent` `▎`. Glyphs: `◇` `warning` while an approval waits, `✕` `error`
+after a failure, `●` `accent` for a finish not yet looked at, `◐` `info`
+while running, `○` `warning` while queued, and `○`, `●`, or `◌` `faint` for
+idle, seen-complete, and stopped early. The badge is `faint`: `↳N` when the
+session has child agents, otherwise `N new` when it has unread messages and
+is not focused.
 
-Density follows the tier the rail's width follows; height never changes it:
+Density follows the tier; height never changes it:
 
-| Tier | Rail | Rows per session |
+| Tier | Column | Rows per session |
 | --- | --- | --- |
-| Compact | Hidden unless pinned; the agent strip lists counts | Glyph, title, badge; a live status row while running or waiting |
-| Regular | 20–28 columns | The same one row, plus the live status row (approval, tool verb, streamed tail, or activity; `compacting context` outranks the tail, see transcript.md § Run Activity) while the session has one |
-| Wide, Ultra | 28 columns | The same, plus a second muted row for any session with a live status or a reported spend: the tail on the left, `$0.12` right-aligned |
+| Compact | Hidden unless pinned; the rule carries the counts | — |
+| Regular | 32 columns | Number, glyph, title, badge |
+| Wide, Ultra | 42 columns | The same, plus a second `faint` row for any session with a live status or a reported spend: the activity on the left (approval, tool verb, streamed tail, or run activity; `compacting context` outranks the tail, see transcript.md § Run Activity), `$0.12` right-aligned |
 
 A session with nothing to say (idle, no spend reported) takes one row at
 every density so a quiet list stays dense. The cost is the session's own
 direct spend (`SessionSummary.accounting.direct`, or the compatibility
 alias); a known zero is not shown.
 
-Pinning the rail (`PanePref::Shown`) shows it at any width where a
-20-column rail leaves the transcript at least 32 columns (60 columns and up);
-below that the layout keeps the strip and the pin is remembered. Hiding the
-rail at any width brings the strip back when more than one session exists.
+Pinning the column (`PanePref::Shown`) shows it at any width where a
+32-column column leaves the transcript at least 32 columns (64 columns and
+up); below that the rule keeps the counts and the pin is remembered. Hiding
+the column at any width moves the counts back to the rule when more than one
+session exists.
 
 ## Bounds
 
@@ -209,12 +242,15 @@ raise per-frame streaming work.
 ## Evidence
 
 `crates/qq-tui/tests/goldens/` pins every review scene at 80 × 24, 120 × 40,
-200 × 60, 320 × 90, and 480 × 120 (the `sessions-*` scene shows the strip
-and every rail density; `tools-expanded-*` shows the same detail inline at
-120 and in the inspector at 200 and up, and a test asserts the rows are the
-same text); `cargo test -p qq-tui --test gallery -- --ignored` writes the
-same frames as ANSI for a real terminal. The render bench (`cargo bench -p
-qq-tui --bench render`) includes `compact_80x24`, `wide_160x48_full`,
-`tool_calls_32_expanded_inspector`, and `resize_ultra_480x120` alongside the
-legacy 160 × 48 scenes, which hold the rail and inspector off so they
-measure one transcript column at a fixed geometry across changes.
+200 × 60, 320 × 90, and 480 × 120 (the `sessions-*` scene shows the Compact
+rule counts and both column densities; `tools-expanded-*` shows detail
+inline, and a view test asserts the inspector shows the same rows once
+toggled on). The goldens now follow the v0.1.11 design; the R0 reference
+renderer `crates/qq-tui/src/design.rs` and its frames in
+`crates/qq-tui/tests/design/` remain alongside them. `cargo test -p qq-tui
+--test gallery -- --ignored` writes both sets as ANSI for a real terminal.
+The render bench (`cargo bench -p qq-tui --bench render`) includes
+`compact_80x24`, `wide_160x48_full`, `tool_calls_32_expanded_inspector`, and
+`resize_ultra_480x120` alongside the legacy 160 × 48 scenes, which hold the
+sessions column and inspector off so they measure one transcript column at a
+fixed geometry across changes.

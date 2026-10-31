@@ -56,6 +56,14 @@ impl PanePref {
             Self::Hidden => Self::Shown,
         }
     }
+
+    #[must_use]
+    pub(crate) const fn toggled_from_hidden(self) -> Self {
+        match self {
+            Self::Shown => Self::Hidden,
+            Self::Auto | Self::Hidden => Self::Shown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -315,5 +323,8 @@ mod tests {
         assert_eq!(PanePref::Auto.toggled(), PanePref::Hidden);
         assert_eq!(PanePref::Hidden.toggled(), PanePref::Shown);
         assert_eq!(PanePref::Shown.toggled(), PanePref::Hidden);
+        assert_eq!(PanePref::Auto.toggled_from_hidden(), PanePref::Shown);
+        assert_eq!(PanePref::Shown.toggled_from_hidden(), PanePref::Hidden);
+        assert_eq!(PanePref::Hidden.toggled_from_hidden(), PanePref::Shown);
     }
 }

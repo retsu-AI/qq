@@ -330,6 +330,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn faint_is_muted_blended_halfway_toward_the_background() {
+        let rgb = |r, g, b| Color::Rgb { r, g, b };
+        let palette = Palette::derive([
+            rgb(216, 222, 233),
+            rgb(123, 132, 151),
+            rgb(143, 184, 232),
+            rgb(224, 160, 113),
+            rgb(230, 192, 123),
+            rgb(236, 123, 141),
+            rgb(143, 211, 166),
+            rgb(32, 36, 44),
+        ]);
+        assert_eq!(palette.faint, rgb(69, 75, 86));
+        assert_ne!(palette.faint, palette.muted);
+        assert_eq!(Palette::TERMINAL.faint, Palette::TERMINAL.muted);
+    }
+
+    #[test]
     fn the_default_palette_is_the_compiled_terminal_look() {
         assert_eq!(Theme::default().name, "terminal");
         assert_eq!(Palette::default(), Palette::TERMINAL);

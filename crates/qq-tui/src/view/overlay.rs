@@ -663,17 +663,22 @@ pub(super) fn goal_check_picker(app: &App, width: usize, height: usize) -> Vec<L
         .filter_map(terminal_safe_character)
         .collect();
     let lines: Vec<&str> = command.lines().collect();
-    if lines.len() > 1 {
-        let start = (*detail_row).min(lines.len().saturating_sub(1));
-        for line in lines
+    let fits_on_rule = lines.len() == 1 && text_width(&command) + 24 <= width;
+    if !fits_on_rule {
+        let wrapped: Vec<Line> = lines
             .iter()
-            .skip(start)
-            .take(height.saturating_sub(3).max(1))
-        {
-            rows.push(truncate_line(
-                Line::styled(format!("  $ {line}"), muted()),
-                width,
-            ));
+            .flat_map(|line| {
+                wrap_line_chars(Line::styled(*line, muted()), width.saturating_sub(4).max(1))
+            })
+            .collect();
+        let visible = height.saturating_sub(3).max(1);
+        let start = (*detail_row).min(wrapped.len().saturating_sub(visible));
+        for line in wrapped.into_iter().skip(start).take(visible) {
+            let mut row = Line::styled("  $ ", faint());
+            for span in line.spans {
+                row.push(span.text, span.style);
+            }
+            rows.push(truncate_line(row, width));
         }
     }
     for (index, (_, row)) in picker.filtered().enumerate() {
@@ -749,12 +754,20 @@ pub(super) fn goal_form(app: &App, width: usize, height: usize) -> Vec<Line> {
         } else {
             safe(text)
         };
-        let shown = if shown.is_empty() {
-            Line::styled("  (empty)", faint())
+        if shown.is_empty() {
+            out.push(Line::styled("  (empty)", faint()));
         } else {
-            Line::styled(format!("  {}", shown.replace('\n', " ")), normal())
-        };
-        out.push(truncate_line(shown, width));
+            for row in wrap_line_chars(
+                Line::styled(shown.replace('\n', " "), normal()),
+                width.saturating_sub(2).max(1),
+            ) {
+                let mut line = Line::styled("  ", normal());
+                for span in row.spans {
+                    line.push(span.text, span.style);
+                }
+                out.push(truncate_line(line, width));
+            }
+        }
     }
     let mut line = marker(form.field == 2);
     line.push("Budget", muted());

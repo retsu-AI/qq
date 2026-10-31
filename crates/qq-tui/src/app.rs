@@ -1572,7 +1572,7 @@ impl App {
                 Effects::redraw(Redraw::Immediate)
             }
             Command::ToggleInspector => {
-                self.layout.inspector = self.layout.inspector.toggled();
+                self.layout.inspector = self.layout.inspector.toggled_from_hidden();
                 Effects::redraw(Redraw::Immediate)
             }
             Command::FocusParent => match self

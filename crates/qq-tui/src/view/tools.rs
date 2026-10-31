@@ -565,7 +565,7 @@ pub(super) fn render_tool_calls(
             .filter(|call| quiet(call) && !is_edit(call))
             .collect();
         if routine.len() >= TOOL_FOLD_THRESHOLD.min(calls.len()) && !routine.is_empty() {
-            lines.push(tool_fold_line(calls, lookup, width));
+            lines.push(tool_fold_line(&routine, calls, lookup, width));
             folded = routine;
         }
     }
@@ -617,7 +617,8 @@ fn is_edit(call: &ToolCallSnapshot) -> bool {
 }
 
 pub(super) fn tool_fold_line(
-    calls: &[&ToolCallSnapshot],
+    folded: &[&ToolCallSnapshot],
+    turn: &[&ToolCallSnapshot],
     lookup: RowLookup<'_>,
     width: usize,
 ) -> Line {
@@ -627,9 +628,36 @@ pub(super) fn tool_fold_line(
     let mut removed = 0;
     let mut started: Option<u64> = None;
     let mut finished: Option<u64> = None;
-    for call in calls {
+    for call in turn {
         let context = lookup(call);
         let row = context.row;
+        let timing = context.clock.timing;
+        if let Some(start) = timing.started_at_ms {
+            started = Some(started.map_or(start, |current| current.min(start)));
+        }
+        if let Some(end) = timing.finished_at_ms {
+            finished = Some(finished.map_or(end, |current| current.max(end)));
+        }
+        if !folded.iter().any(|candidate| candidate.id == call.id) {
+            if is_edit(call) {
+                if let Some(subject) = &row.subject
+                    && !files.contains(subject)
+                {
+                    files.push(subject.clone());
+                }
+                if let Some((plus, minus)) = row.metric.as_deref().and_then(|metric| {
+                    let (plus, minus) = metric.split_once(' ')?;
+                    Some((
+                        plus.strip_prefix('+')?.parse::<usize>().ok()?,
+                        minus.strip_prefix('−')?.parse::<usize>().ok()?,
+                    ))
+                }) {
+                    added += plus;
+                    removed += minus;
+                }
+            }
+            continue;
+        }
         let noun = match row.verb {
             "Read" => "read",
             "List" => "listed",
@@ -644,32 +672,8 @@ pub(super) fn tool_fold_line(
             Some((_, count)) => *count += 1,
             None => counts.push((noun, 1)),
         }
-        if is_edit(call) {
-            if let Some(subject) = &row.subject
-                && !files.contains(subject)
-            {
-                files.push(subject.clone());
-            }
-            if let Some((plus, minus)) = row.metric.as_deref().and_then(|metric| {
-                let (plus, minus) = metric.split_once(' ')?;
-                Some((
-                    plus.strip_prefix('+')?.parse::<usize>().ok()?,
-                    minus.strip_prefix('−')?.parse::<usize>().ok()?,
-                ))
-            }) {
-                added += plus;
-                removed += minus;
-            }
-        }
-        let timing = context.clock.timing;
-        if let Some(start) = timing.started_at_ms {
-            started = Some(started.map_or(start, |current| current.min(start)));
-        }
-        if let Some(end) = timing.finished_at_ms {
-            finished = Some(finished.map_or(end, |current| current.max(end)));
-        }
     }
-    let mut summary = count_noun(calls.len(), "call", "calls");
+    let mut summary = count_noun(folded.len(), "call", "calls");
     for (name, count) in counts {
         summary.push_str(&format!(" · {name} {count}"));
     }
@@ -792,8 +796,11 @@ pub(super) fn tool_summary_line(
     }
     let used = line.width();
     let mut tail_width: usize = tail.iter().map(|(text, _)| text_width(text) + 2).sum();
-    while used + 6 + tail_width > width && !tail.is_empty() {
-        let (text, _) = tail.pop().expect("tail is not empty");
+    while used + 6 + tail_width > width {
+        let Some(index) = tail.iter().rposition(|(_, style)| *style != failure()) else {
+            break;
+        };
+        let (text, _) = tail.remove(index);
         tail_width -= text_width(&text) + 2;
     }
     if let Some(subject) = &row.subject {

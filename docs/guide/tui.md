@@ -9,38 +9,57 @@ below works the same either way.
 ## Layout
 
 ```
- qq  my-project › fix parser                    anthropic/claude-sonnet-5  12% ctx  $0.04
- ─────────────────────────────────────────────────────────────────────────────────────────
- │ NEEDS YOU                 │  you › Fix the failing test in parser.rs
- │   ◇ add-tests   approval  │
- │ WORKING                   │  ● Read   src/parser.rs                          0.1s
- │   ● fix parser            │  ● Search "fn parse_duration"                    0.0s
- │ IDLE                      │  ● Edit   src/parser.rs  +4 −1                   0.3s
- │   refactor cli            │  ● Shell  cargo test -p parser                   4.1s
- │                           │
- │                           │  The test expected seconds but the parser…
- ─────────────────────────────────────────────────────────────────────────────────────────
- running · 12s · first token 0.8s                         ? help  ^K commands  ^O detail
- › Ask QQ...
+  ┃ make the sse reconnect test deterministic                                               WORKING
+                                                                                          ▎ 1 ◐ Session 0
+  ● Read     crates/qq-client/src/sse.rs  412 lines
+  ✕ Ran      cargo test -p qq-client reconnect  exit 101                                    RECENT
+  │ running 4 tests                                                                         2 ○ Session 1
+  │ test reconnect_replays ... FAILED                                                       3 ○ Session 2
+  │ test result: FAILED. 3 passed; 1 failed
+  ◐ Editing  crates/qq-client/src/sse.rs
+
+    The test slept on wall-clock time; pausing the runtime clock removes the race.
+    Applying the edit now. More.▍
+
+  ◐ editing ──────────────────────────────────────────────────────────────────────────
+  ┃ Ask QQ…
+    Session 0 · gpt-test                                                    /workspace
 ```
 
-- **Top row**: workspace and session breadcrumb; on the right the model,
-  `as <profile>` when not default, the approval mode when not `auto`,
-  context used, cost, and `connecting` / `offline` when relevant.
-- **Sidebar** (90 columns and wider; `Ctrl-\` toggles): sessions grouped by
-  what you should do — NEEDS YOU, WORKING, IDLE, DONE — with unread counts.
-  Below 90 columns a one-line agent strip above the composer carries the
-  same counts.
-- **Transcript**: your prompts, the model's text, and one row per tool call
-  with live elapsed time. `Ctrl-Up` / `Ctrl-Down` select a row; `Enter`
-  expands it (a read shows the result head, an edit its diff, a command its
-  output tail, an MCP call its arguments). `Ctrl-O` folds finished blocks
-  to one row each; `Alt-R` shows or hides reasoning.
-- **Rule**: running activity, elapsed time, time to first token, or the last
-  notice; key hints for the current state at the right. The help hint reads
-  `? help` while the composer is empty and `F1 help` once you have typed.
+There is no header row; everything you control sits in the dock at the
+bottom.
+
+- **Transcript**: your prompts on an `┃` rail, the model's answers below
+  them, and one row per tool call: verb, subject, then a metric such as
+  `412 lines`, `+4 −1` or `exit 101`, and the duration once it passes a
+  second. A failed command keeps its last three output rows under it.
+  `Ctrl-Up` / `Ctrl-Down` select a row; `Enter` expands it (a read shows the
+  result head, an edit its diff, a command its output tail, an MCP call its
+  arguments). `Ctrl-O` folds each finished turn's routine calls into one
+  receipt row (`● 6 calls · read 2 · edited 2 · ran 2   2 files`); edits
+  and failures keep their rows. `Alt-R` shows or hides reasoning, which
+  otherwise reads `∴ thought for 12s`.
+- **Sessions column** (90 columns and wider, with two or more sessions;
+  `Ctrl-\` toggles): sessions numbered 1–9 and grouped by what you should
+  do — NEEDS YOU, WORKING, RECENT — with `N new` for unread replies and
+  `↳N` for child agents. From 160 columns each session gets a second row
+  with its activity and cost. Below 90 columns the column is gone and the
+  rule carries the counts instead (`8 sessions  ◐ 2  ◇ 2  ^G`).
+- **Rule**: the focused session's state and activity (`◐ editing · 14s`),
+  or the last notice. Its color follows the session: dim when idle, blue
+  while running, yellow when it needs you, red after a failure. On the
+  right, `◇ N needs you ^G` counts approvals waiting in other sessions.
+- **Panel**: approvals, questions, `/goal`, and every picker (`/sessions`,
+  `/models`, `/theme`, …) open here, between the rule and the composer, and
+  take at most half the screen. `Esc` closes them with your draft intact.
 - **Composer**: type and press `Enter`. `Shift-Enter` or `Alt-Enter` inserts
-  a newline. `Alt-E` or `/editor` opens the draft in `$EDITOR`.
+  a newline. `Alt-E` or `/editor` opens the draft in `$EDITOR`. The `┃`
+  rail is dim for a read-only session, the accent color for `ask` and
+  `auto`, and yellow for `full`. Queued drafts sit above it on a `┋` rail.
+- **Status line**: the session title, model and effort, context used, cost,
+  and the approval mode when it is not `auto`; the workspace on the right,
+  or `connecting` / `reconnecting` / `offline` when relevant. A picker shows
+  its keys here instead.
 
 ## Sessions
 
@@ -79,7 +98,9 @@ in a terminal multiplexer to watch two.
 | pull the newest queued draft back | `Alt-Up` |
 | cancel the run | `Ctrl-X`, or `Esc Esc` |
 
-Steering appears in the transcript as a `steering` row until applied.
+Steering appears in the transcript as your prompt with a dim note under it:
+`waiting for the next turn` until applied, then `steered`, or `not sent ·
+the run finished first`.
 
 ## Side questions without interrupting work
 
@@ -107,12 +128,19 @@ clients.
 ## Approvals and questions
 
 Under the default `auto` mode the agent does not stop for approval. In a
-session switched to `ask` with `/approval`, every non-read call waits:
+session switched to `ask` with `/approval`, every non-read call waits. The
+transcript row reads `waiting`, and the dock shows the call and its keys:
 
 ```
-◇ approval needed
-$ cargo test  (in ~/my-project)
-y approve   n deny
+  ◇ Edit     crates/qq-tui/src/view/wrap.rs  waiting
+
+  ◇ apply this edit? ─────────────────────────────────────────────────────────────────
+    40     let mut column = 0;
+    41 -   while column <= width {
+    41 +   while column < width {
+    42         column += 1;
+  ┃ y apply   n deny   Y / N with a note
+    Session 0 · gpt-test                                                    /workspace
 ```
 
 `y` / `n`; `Shift-Y` / `Shift-N` decide and steer with a note.
@@ -122,7 +150,8 @@ note and leaves the prompt open.
 `/attention` lists everything waiting across the workspace. Details in
 [Permissions and trust](permissions.md#the-approval-prompt).
 
-When the agent asks *you* a question (`◇ question`), type an answer and
+When the agent asks *you* a question (the rule reads `◇ answer the
+question`), type an answer and
 press `Enter`, press a number to pick an option, or `Esc` to decline.
 
 ## Choosing model, profile, mode, theme
@@ -130,7 +159,7 @@ press `Enter`, press a number to pick an option, or `Esc` to decline.
 | Picker | Slash | What it applies to |
 | --- | --- | --- |
 | model | `/models` | the focused session, or the default for the next `/new`; `Ctrl-N` inside the picker creates a session with the highlighted model |
-| agent profile | `/profile` | the focused idle session, or the default for new sessions; top row shows `as NAME` |
+| agent profile | `/profile` | the focused idle session, or the default for new sessions; the status line shows `as NAME` |
 | approval mode | `/approval` | the focused session from its next held call, or the default for new sessions |
 | reasoning effort | `/effort` | the focused idle session's next run, or the default for new sessions; rows are the levels the model's catalog entry advertises (plus `default` and `none`), or every level when it advertises none; a pin outside an advertised ladder fails the run at plan time naming the accepted levels |
 | theme | `/theme` | live preview; `Enter` keeps it for the session, `Esc` restores; the notice shows the `tui.ron` line to make it permanent |
@@ -150,8 +179,8 @@ run` refuse to start.
 - **Project not yet trusted**: startup continues with trusted configuration;
   sensitive project settings stay disabled until you run `qq trust` on the
   server host. See [Permissions and trust](permissions.md#project-trust).
-- **No `model` configured**: the top row reads `no model` and the composer
-  rule reads `choose a model with /models` until you pick one. `Enter` in
+- **No `model` configured**: the status line reads `no model` and the rule
+  reads `choose a model with /models` until you pick one. `Enter` in
   the picker creates the first session with the highlighted model, which
   also becomes the default for `Alt-N`.
 - **Model configured, provider has no credential**: the empty transcript
@@ -163,14 +192,13 @@ run` refuse to start.
 
 ## Your first session
 
-The first session in a workspace opens with a short list in the transcript:
+The first session in a workspace opens with a short banner in the
+transcript:
 
 ```
-  Try one of these:
-    /models    choose a model
-    /approval  choose an approval mode
-    /skills    list workspace commands and skills
-    @path      mention a file in your prompt
+  qq 0.1.11 · ~/qq  main · gpt-5.5 high
+
+  /models  choose a model    @path  mention a file    ^T  switch session    ?  help
 
   QQ is on the host: commands run as you, with this machine's network and credentials.
   Snapshots on: `qq undo` restores the workspace as it was before each run.
@@ -189,7 +217,7 @@ restores an older one.
 It disappears as soon as you send your first prompt and never shows for a
 second session; those read `Ask QQ to begin this session.` instead. When the
 configured provider still needs a credential, that remedy is printed above
-the list.
+the banner.
 
 ## Prompts
 
@@ -207,16 +235,16 @@ the list.
 
 ## Session goals
 
-`/goal` opens the focused session's durable goal. It shows the objective,
-checklist, notes, run/token/cost budgets, UTC deadline, waits, verification state
-and last check output. Unknown usage and cost remain labelled unknown. Check
+`/goal` opens the focused session's durable goal in the dock. It shows the
+objective, status, run/token/cost budgets, UTC deadline, audits, check
+command, notes, waits, checklist, verification state and last check output. Unknown usage and cost remain labelled unknown. Check
 consent distinguishes one execution, repeated checks for this goal, and a used
 one-shot grant that needs renewed consent.
 
-The composer status line keeps the goal's run allowance, time left and next
-wake visible while active, and shows the reason when it stops. After a user
-pause, it shows cancellation draining until the pending run settles, then
-`/goal resume`.
+The rule keeps the goal's run allowance and next wake visible while active
+(`goal run 4/10 · next 5m`), and shows the reason when it stops. After a
+user pause, it shows cancellation draining until the pending run settles,
+then `/goal resume`.
 
 The view follows committed snapshots and live updates. Scroll to read long
 check output; `Esc` or `/goal` returns to the transcript. Opening it does not
@@ -257,8 +285,8 @@ do not grant check consent.
 ## Files the agents changed
 
 `/changes` lists every file edited in this workspace by any session,
-flagging files touched by more than one. `Alt-I` opens the inspector pane
-with the focused session's details.
+flagging files touched by more than one. `Alt-I` shows the inspector pane
+with the focused session's details (it stays off until you press it).
 
 ## Every command
 

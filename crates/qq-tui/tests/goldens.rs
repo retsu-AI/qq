@@ -73,96 +73,84 @@ fn every_golden_frame_fits_the_terminal() {
 }
 
 #[test]
-fn frames_fill_every_golden_size() {
+fn frames_fill_every_golden_size_with_the_dock_on_the_last_rows() {
     for &(width, height) in GOLDEN_SIZES {
         let mut harness = BenchHarness::scene(Scene::GoldenPath, (width, height));
         let rows = harness.plain_frame();
         assert_eq!(rows.len(), usize::from(height), "{width}x{height}");
-        let widest = rows
-            .iter()
-            .map(|row| row.chars().count())
-            .max()
-            .unwrap_or(0);
+        let composer = &rows[rows.len() - 2];
         assert!(
-            widest + 1 >= usize::from(width),
-            "{width}x{height}: widest row is {widest} columns"
+            composer.starts_with("  ┃ Ask QQ…"),
+            "{width}x{height}: composer row is {composer:?}"
         );
-        if width >= 90 {
-            let body_rows = &rows[1..rows.len() - 3];
-            assert!(
-                body_rows
-                    .iter()
-                    .all(|row| row.chars().count() >= usize::from(width) - 28),
-                "{width}x{height}: a body row stops before the rail"
-            );
+        let rule = &rows[rows.len() - 3];
+        assert!(
+            rule.trim_start().contains("───"),
+            "{width}x{height}: rule row is {rule:?}"
+        );
+    }
+}
+
+#[test]
+fn the_redesign_has_no_header_label_strip_or_permanent_hints() {
+    for scene in Scene::ALL {
+        for &size in GOLDEN_SIZES {
+            let rows = BenchHarness::scene(scene, size).plain_frame();
+            for row in &rows {
+                for banned in [
+                    "▌ YOU",
+                    "^K commands",
+                    "ttft",
+                    "Alt-R",
+                    "› Ask",
+                    " qq  Session",
+                    "approval needed",
+                ] {
+                    assert!(
+                        !row.contains(banned),
+                        "{scene:?} {size:?} shows {banned:?}: {row:?}"
+                    );
+                }
+            }
         }
     }
 }
 
-#[test]
-fn prose_is_placed_at_the_measure_on_wide_terminals() {
-    let mut harness = BenchHarness::scene(Scene::MarkdownGallery, (320, 90));
-    let rows = harness.plain_frame();
-    let first_paragraph = rows
+fn transcript_rows(size: (u16, u16)) -> usize {
+    BenchHarness::scene(Scene::GoldenPath, size)
+        .plain_frame()
         .iter()
-        .find(|row| row.contains("First paragraph of prose."))
-        .expect("gallery paragraph");
-    let indent = first_paragraph.len() - first_paragraph.trim_start().len();
-    assert_eq!(indent, 37 + 3, "{first_paragraph:?}");
+        .rposition(|row| row.contains("───"))
+        .expect("the rule row")
 }
 
 #[test]
-fn expanded_tool_detail_reads_the_same_inline_and_in_the_inspector() {
-    let inline = BenchHarness::scene(Scene::ToolsExpanded, (120, 40)).plain_frame();
-    let wide = BenchHarness::scene(Scene::ToolsExpanded, (200, 80)).plain_frame();
-    let column = |rows: &[String], index: usize| -> Vec<String> {
-        rows[1..rows.len() - 3]
-            .iter()
-            .map(|row| {
-                row.split('│')
-                    .nth(index)
-                    .unwrap_or_default()
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .filter(|row| !row.is_empty())
-            .collect()
-    };
-    let mut inline_rows = column(&inline, 0);
-    let inspector = column(&wide, 1);
-    let transcript = column(&wide, 0);
-    assert_eq!(inspector[0], "INSPECTOR");
-    let inspector = &inspector[1..];
-    assert!(inline_rows.pop().is_some_and(|row| row.starts_with("✓ ")));
+fn dropping_the_header_and_strip_gives_the_transcript_more_rows() {
+    let compact_v0_1_11 = 24 - 1 - 1 - 3;
     assert!(
-        inline_rows.len() > 20 && inspector.ends_with(&inline_rows),
-        "inline rows are not the tail of the inspector\ninline: {inline_rows:#?}\ninspector: {inspector:#?}"
+        transcript_rows((80, 24)) >= compact_v0_1_11 + 2,
+        "80x24 transcript has {} rows; v0.1.11 had {compact_v0_1_11}",
+        transcript_rows((80, 24))
     );
+    let regular_v0_1_11 = 40 - 1 - 3;
     assert!(
-        inspector.iter().filter(|row| row.starts_with("● ")).count() == 6,
-        "every expanded call heads its detail: {inspector:#?}"
+        transcript_rows((120, 40)) > regular_v0_1_11,
+        "120x40 transcript has {} rows; v0.1.11 had {regular_v0_1_11}",
+        transcript_rows((120, 40))
     );
-    for row in &transcript {
-        assert!(
-            !row.starts_with("fn main") && !row.starts_with("→ ") && !row.starts_with('┃'),
-            "detail leaked inline at 200: {row:?}"
-        );
-    }
-    for row in inspector {
-        assert!(
-            row.starts_with("● ") || row.starts_with("→ ") || row.starts_with('┃'),
-            "inspector row outside the panel: {row:?}"
-        );
-    }
-    assert_eq!(
-        transcript
+}
+
+#[test]
+fn prose_starts_at_the_two_column_margin_at_every_width() {
+    for &size in GOLDEN_SIZES {
+        let rows = BenchHarness::scene(Scene::MarkdownGallery, size).plain_frame();
+        let paragraph = rows
             .iter()
-            .filter(|row| row.starts_with("● "))
-            .count(),
-        6,
-        "summary rows stay in the transcript: {transcript:#?}"
-    );
+            .find(|row| row.contains("Tail paragraph."))
+            .expect("gallery tail paragraph");
+        let indent = paragraph.len() - paragraph.trim_start().len();
+        assert_eq!(indent, 4, "{size:?}: {paragraph:?}");
+    }
 }
 
 #[test]

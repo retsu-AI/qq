@@ -865,17 +865,14 @@ impl TranscriptCache {
         for prompt in app.pending_prompts(session_id) {
             if !body.is_empty() {
                 body.push_line(Line::default());
-                body.push_line(Line::default());
             }
-            let mut line = Line::styled(" ▌ ", warning());
-            line.push("YOU  pending", warning().bold());
-            body.push_line(line);
             body.extend_owned(indent_lines(
                 pending_markdown_lines(prompt, width.saturating_sub(LANE)),
-                " ▌ ",
-                warning(),
+                "┃ ",
+                faint(),
                 width,
             ));
+            body.push_line(Line::styled("  pending", faint()));
         }
         if body.is_empty() {
             let first_session = app.sessions.len() == 1 && session.prompt_history.is_empty();
@@ -934,6 +931,9 @@ impl TranscriptCache {
         let turns = TurnIndex::build(messages, tool_calls);
         for index in indices {
             let message = &messages[index];
+            if message.steering && message.state == MessageState::Queued {
+                continue;
+            }
             if !body.is_empty() && !(message.steering && message.role == MessageRole::User) {
                 body.push_line(Line::default());
             }
@@ -1433,7 +1433,7 @@ pub(super) fn format_duration_ms(ms: u64) -> String {
 pub(super) fn message_note(message: &MessageSnapshot) -> Option<Line> {
     let (glyph, label, style) = if message.steering {
         match message.state {
-            MessageState::Queued => ("", "waiting for the next turn", faint()),
+            MessageState::Queued => return None,
             MessageState::Complete => ("", "steered", faint()),
             MessageState::Cancelled => ("", "not sent · the run finished first", faint()),
             MessageState::Streaming => return None,

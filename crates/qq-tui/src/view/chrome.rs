@@ -194,7 +194,11 @@ pub(super) fn rule_activity(app: &App) -> Option<String> {
             .chars()
             .filter_map(terminal_safe_character)
             .collect();
-        return Some(format!("run {command} in {}?", target.workspace_path));
+        return Some(format!(
+            "run {} in {}?",
+            preview(&command, 40),
+            target.workspace_path
+        ));
     }
     if let Some(goal) = session.goal.as_deref() {
         match &goal.status {
@@ -217,6 +221,9 @@ pub(super) fn rule_activity(app: &App) -> Option<String> {
                 let (label, _) = super::workspace::goal_status(status);
                 let safe: String = label.chars().filter_map(terminal_safe_character).collect();
                 if session.summary.status != SessionStatus::Running {
+                    if goal.pending_run_id.is_some() {
+                        return Some(format!("goal {safe} · cancellation draining"));
+                    }
                     return Some(format!("goal {safe}"));
                 }
             }
@@ -234,7 +241,7 @@ pub(super) fn rule_activity(app: &App) -> Option<String> {
             let mut activity = if let Some(reasoning) = reasoning {
                 format!("thinking · {}s", reasoning.ticks / 8)
             } else {
-                let label = match (
+                match (
                     session.live.active_tool.as_deref(),
                     session.activity.map(|(_, activity)| activity),
                 ) {
@@ -253,8 +260,7 @@ pub(super) fn rule_activity(app: &App) -> Option<String> {
                         "compacting context".to_owned()
                     }
                     (None, None) => "working".to_owned(),
-                };
-                label
+                }
             };
             if reasoning.is_none()
                 && let Some(started) = session
@@ -486,15 +492,31 @@ pub(super) fn dock_panel(app: &App, width: usize, limit: usize) -> Vec<Line> {
 
 pub(super) fn goal_panel(app: &App, session_id: SessionId, width: usize) -> Vec<Line> {
     use qq_protocol::{GoalCheckAuthorization, GoalChecklistState};
+    let hold = app.check_interruption.map(|hold| {
+        let mut line = Line::styled("  ◇ ", warning());
+        line.push(
+            format!(
+                "Workspace held by interrupted check {}; resolve its effects and acknowledge it",
+                hold.run_id
+            ),
+            normal(),
+        );
+        truncate_line(line, width)
+    });
     let Some(goal) = app
         .sessions
         .get(&session_id)
         .and_then(|view| view.goal.as_deref())
     else {
-        return vec![Line::styled(
-            "  No goal for this session. /goal <objective> opens the form.",
-            faint(),
+        let mut rows = vec![truncate_line(
+            Line::styled(
+                "  No goal for this session. /goal <objective> opens the form.",
+                faint(),
+            ),
+            width,
         )];
+        rows.extend(hold);
+        return rows;
     };
     let safe =
         |text: &str| -> String { text.chars().filter_map(terminal_safe_character).collect() };
@@ -507,6 +529,10 @@ pub(super) fn goal_panel(app: &App, session_id: SessionId, width: usize) -> Vec<
         Line::styled(format!("  {}", safe(&goal.objective)), normal().bold()),
         width,
     )];
+    rows.push(field(
+        "status",
+        safe(&super::workspace::goal_status(&goal.status).0),
+    ));
     rows.push(field(
         "runs",
         format!("{} / {}", goal.counters.runs, goal.budget.max_goal_runs),
@@ -570,6 +596,21 @@ pub(super) fn goal_panel(app: &App, session_id: SessionId, width: usize) -> Vec<
                 format_duration_ms(check.timeout_ms)
             ),
         ));
+    } else {
+        rows.push(field("check", "none · independent model audit".to_owned()));
+    }
+    if !goal.notes.trim().is_empty() {
+        rows.push(field("notes", preview(&safe(&goal.notes), width)));
+    }
+    if let Some(wait) = &goal.wait {
+        rows.push(field(
+            "wait",
+            format!(
+                "until {} · {}",
+                super::workspace::goal_timestamp(wait.until_ms),
+                safe(&wait.reason)
+            ),
+        ));
     }
     for item in &goal.checklist {
         let (glyph, style, text) = match item.state {
@@ -583,17 +624,32 @@ pub(super) fn goal_panel(app: &App, session_id: SessionId, width: usize) -> Vec<
         rows.push(truncate_line(line, width));
     }
     if let Some(output) = &goal.check_output {
-        let mut parts = output
+        let parts: Vec<&str> = output
             .lines()
             .map(str::trim)
-            .filter(|line| !line.is_empty());
+            .filter(|line| !line.is_empty())
+            .collect();
         let mut line = Line::styled("  ✕ ", failure());
         line.push(
-            format!("last check {}", safe(parts.next().unwrap_or_default())),
+            format!(
+                "last check {}",
+                safe(parts.first().copied().unwrap_or_default())
+            ),
             muted(),
         );
-        if let Some(detail) = parts.next() {
-            line.push(format!("  {}", safe(detail)), muted());
+        if let Some(detail) = parts.get(1..).and_then(<[&str]>::last) {
+            let detail = safe(detail);
+            let room = width.saturating_sub(line.width() + 2);
+            let count = detail.chars().count();
+            let shown = if count <= room {
+                detail
+            } else if room == 0 {
+                String::new()
+            } else {
+                let tail: String = detail.chars().skip(count + 1 - room).collect();
+                format!("…{tail}")
+            };
+            line.push(format!("  {shown}"), muted());
         }
         rows.push(truncate_line(line, width));
     }
@@ -602,6 +658,7 @@ pub(super) fn goal_panel(app: &App, session_id: SessionId, width: usize) -> Vec<
         line.push("completion claim awaiting verification", normal());
         rows.push(truncate_line(line, width));
     }
+    rows.extend(hold);
     rows
 }
 
@@ -829,7 +886,17 @@ pub(super) fn queued_drafts(app: &App, width: usize) -> Vec<Line> {
     let Some(session_id) = app.focused() else {
         return Vec::new();
     };
-    let drafts: Vec<&str> = app.queued_drafts(session_id).collect();
+    let waiting_steers = app
+        .sessions
+        .get(&session_id)
+        .and_then(|session| session.messages.as_ref())
+        .into_iter()
+        .flatten()
+        .filter(|message| message.steering && message.state == MessageState::Queued)
+        .map(|message| message.output.as_str());
+    let drafts: Vec<&str> = waiting_steers
+        .chain(app.queued_drafts(session_id))
+        .collect();
     if drafts.is_empty() {
         return Vec::new();
     }
