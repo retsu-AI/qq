@@ -30,16 +30,16 @@ fn picker_frame<T: PickerItem>(
         question,
         empty,
     } = chrome;
-    let short = height < PICKER_FULL_CHROME_ROWS;
+    let chrome_rows = 2 + usize::from(question.is_some());
     let mut lines = Vec::with_capacity(height);
-    if !short {
+    if height > chrome_rows {
         lines.push(section(title, hint));
     }
     lines.push(search_line(&picker.query, placeholder));
     if let Some(question) = question {
         lines.push(truncate_line(question, width));
     }
-    if !short {
+    if height >= chrome_rows + PICKER_SPACER_MIN_RESULTS + 1 {
         lines.push(Line::default());
     }
     if picker.filtered().len() == 0 {
@@ -64,7 +64,7 @@ fn picker_frame<T: PickerItem>(
     fit_height(lines, height)
 }
 
-const PICKER_FULL_CHROME_ROWS: usize = 6;
+const PICKER_SPACER_MIN_RESULTS: usize = 3;
 
 pub(super) fn search_line(query: &str, placeholder: &str) -> Line {
     Line::styled(
