@@ -4812,7 +4812,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn escaped_trees() -> [EscapedTree; 2] {
+    async fn escaped_trees() -> Vec<EscapedTree> {
         let reporter = "sh -c 'echo $PPID $$ > \"$0\"; exec sleep 600'";
         let piped = if on_path("timeout") {
             format!("timeout 600 {reporter} {{report}} 2>&1 | cat")
@@ -4824,20 +4824,18 @@ mod tests {
         } else {
             format!("perl -MPOSIX -e 'setsid; exec @ARGV' {reporter} {{report}}; true")
         };
-        [piped, escaped].map(|template| {
+        let mut trees = Vec::new();
+        for template in [piped, escaped] {
             let directory = tempfile::tempdir().unwrap();
             let report = directory.path().join("pids");
-            let status = std::process::Command::new("mkfifo")
-                .arg(&report)
-                .status()
-                .unwrap();
-            assert!(status.success());
-            EscapedTree {
+            create_test_fifo(&report).await;
+            trees.push(EscapedTree {
                 command: template.replace("{report}", &format!("'{}'", report.display())),
                 report,
                 _directory: directory,
-            }
-        })
+            });
+        }
+        trees
     }
 
     #[cfg(unix)]
@@ -4875,7 +4873,7 @@ mod tests {
         let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         for timeout in [false, true] {
-            for (index, tree) in escaped_trees().into_iter().enumerate() {
+            for (index, tree) in escaped_trees().await.into_iter().enumerate() {
                 let command = tree.command.clone();
                 let cancelled = RunCancellation::new();
                 let arguments = match timeout {
@@ -4923,7 +4921,7 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let tasks = ToolTasks::default();
         let mut started = Vec::new();
-        for (index, tree) in escaped_trees().into_iter().enumerate() {
+        for (index, tree) in escaped_trees().await.into_iter().enumerate() {
             let result = execute(
                 workspace.clone(),
                 Arc::new(FileState::default()),
