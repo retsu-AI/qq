@@ -6167,3 +6167,49 @@ fn the_goal_check_panel_always_shows_the_command_even_under_a_notice() {
     let panel = frame_rows(&super::overlay::goal_check_picker(&app, 116, 12)).join("\n");
     assert!(panel.contains("$ cargo test"), "{panel}");
 }
+
+#[test]
+fn edit_diffs_drop_leading_context_so_the_change_is_shown() {
+    let diff = "@@ -10,7 +10,7 @@\n context one\n context two\n context three\n-    old_call();\n+    new_call();\n trailing";
+    let rows = frame_rows(&super::overlay::dock_diff_lines(diff, 3, 60));
+    let text = rows.join("\n");
+    assert!(
+        text.contains("old_call()") && text.contains("new_call()"),
+        "{text}"
+    );
+    assert!(!text.contains("context one"), "{text}");
+    assert!(text.contains("context three"), "{text}");
+    let first = rows
+        .iter()
+        .find(|row| row.contains("context three"))
+        .unwrap();
+    assert!(
+        first.trim_start().starts_with("12 "),
+        "renumbered from the hunk: {rows:#?}"
+    );
+}
+
+#[test]
+fn a_long_goal_budget_summary_wraps_instead_of_dropping_limits() {
+    use crossterm::event::Event;
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(fixtures::workspace_snapshot()));
+    app.composer.replace("/goal short".to_owned());
+    app.handle_terminal_event(Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let rows = frame_rows(&super::overlay::goal_form(&app, 40, 30));
+    let budget = rows
+        .iter()
+        .position(|row| row.trim() == "Budget")
+        .expect("budget label");
+    let summary = rows[budget + 1..]
+        .iter()
+        .take_while(|row| !row.contains("check command runs"))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(summary.contains("turns per run"), "{rows:#?}");
+    assert!(!summary.contains('…'), "{rows:#?}");
+}

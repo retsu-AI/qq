@@ -12,6 +12,7 @@ pub(super) const MAX_TOOL_ERROR_ROWS: usize = 3;
 pub(super) const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
 pub(super) const MAX_TOOL_ARGUMENT_ROWS: usize = 8;
 pub(super) const MAX_TOOL_RESULT_ROWS: usize = 3;
+pub(super) const MAX_TOOL_DIFF_ROWS: usize = 8;
 pub(super) const MAX_LIVE_TAIL_ROWS: usize = 3;
 pub(super) const TOOL_SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const TRUNCATED_SUFFIX: &str = " · truncated";
@@ -992,7 +993,7 @@ fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line>
         }
         body.extend(super::overlay::dock_diff_lines(
             diff,
-            MAX_TOOL_RESULT_ROWS,
+            MAX_TOOL_DIFF_ROWS,
             content_width,
         ));
         None

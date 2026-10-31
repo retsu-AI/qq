@@ -602,6 +602,8 @@ pub(super) fn approval_block(app: &App, width: usize, limit: usize) -> Vec<Line>
 }
 
 pub(super) fn dock_diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<Line> {
+    let diff = trim_leading_context(diff, DIFF_LEADING_CONTEXT);
+    let diff = diff.as_str();
     let mut lines = Vec::new();
     let mut old_line: Option<usize> = None;
     let mut new_line: Option<usize> = None;
@@ -660,6 +662,64 @@ pub(super) fn dock_diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<
 }
 
 const MAX_APPROVAL_DIFF_ROWS: usize = 8;
+const DIFF_LEADING_CONTEXT: usize = 1;
+
+fn trim_leading_context(diff: &str, keep: usize) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut lead: Vec<&str> = Vec::new();
+    let mut header: Option<usize> = None;
+    let flush = |out: &mut Vec<String>, lead: &mut Vec<&str>, header: Option<usize>| {
+        let skipped = lead.len().saturating_sub(keep);
+        if let Some(index) = header
+            && skipped > 0
+        {
+            out[index] = shift_hunk(&out[index], skipped);
+        }
+        out.extend(lead.drain(skipped..).map(str::to_owned));
+        lead.clear();
+    };
+    for line in diff.lines() {
+        if line.starts_with("@@") {
+            flush(&mut out, &mut lead, header);
+            header = Some(out.len());
+            out.push(line.to_owned());
+            continue;
+        }
+        if header.is_some() && line.starts_with(' ') {
+            lead.push(line);
+            continue;
+        }
+        flush(&mut out, &mut lead, header);
+        header = None;
+        out.push(line.to_owned());
+    }
+    out.extend(lead.into_iter().map(str::to_owned));
+    out.join("\n")
+}
+
+fn shift_hunk(header: &str, skipped: usize) -> String {
+    header
+        .split(' ')
+        .enumerate()
+        .map(|(index, part)| {
+            let sign = match index {
+                1 => '-',
+                2 => '+',
+                _ => return part.to_owned(),
+            };
+            let Some(range) = part.strip_prefix(sign) else {
+                return part.to_owned();
+            };
+            let (start, rest) = range.split_once(',').unwrap_or((range, ""));
+            match start.parse::<usize>() {
+                Ok(start) if rest.is_empty() => format!("{sign}{}", start + skipped),
+                Ok(start) => format!("{sign}{},{rest}", start + skipped),
+                Err(_) => part.to_owned(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 pub(super) fn history_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(picker) = app.history_picker() else {
@@ -856,10 +916,16 @@ pub(super) fn goal_form(app: &App, width: usize, height: usize) -> Vec<Line> {
     if let Some(cost) = budget.max_cost_usd_nanos {
         summary.push_str(&format!(" · {}", format_cost(cost)));
     }
-    out.push(truncate_line(
-        Line::styled(format!("  {summary}"), normal()),
-        width,
-    ));
+    for row in wrap_line(
+        Line::styled(summary, normal()),
+        width.saturating_sub(2).max(1),
+    ) {
+        let mut line = Line::styled("  ", normal());
+        for span in row.spans {
+            line.push(span.text, span.style);
+        }
+        out.push(truncate_line(line, width));
+    }
     let note = if form.sending.is_some() {
         Some(("submitting…", faint()))
     } else if form.refresh == crate::input::GoalFormRefresh::Pending {
