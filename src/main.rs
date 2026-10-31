@@ -690,143 +690,147 @@ async fn interactive(
         )
         .into());
     }
-    let environment = InteractiveEnvironment::open(overrides, tui_qa_root)?;
     let approved_read_images = overrides.approved_read_images.clone();
-    let factory = environment.factory;
-    let request = environment.request;
-    let loader = environment.config;
-    let server_paths = environment.server_paths;
-    let workspace = environment.workspace;
-    let config_factory = factory.clone();
-    let truecolor = truecolor_support(std::env::var_os("COLORTERM").as_deref());
-    let snapshots = {
-        let workspace = workspace.clone();
-        tokio::spawn(async move { qq_core::undo::covers(&workspace).await })
-    };
-    let (model_state, tui, themes) = tokio::task::spawn_blocking(move || {
-        let snapshot = config_factory.load_for_client(&request)?;
-        let model_state = config_factory.tui_model_state(&snapshot, &request);
-        let (tui_snapshot, tui) = load_tui_config(&loader, request.cwd())?;
-        let themes = load_tui_themes(
-            &loader,
-            request.cwd(),
-            tui_snapshot.settings().theme(),
-            truecolor,
-        )?;
-        Ok::<_, runtime::RuntimeBuildError>((model_state, tui, themes))
-    })
-    .await??;
-    let runtime::TuiModelState {
-        goals,
-        configured_model,
-        model,
-        tui_model,
-        models,
-        unauthenticated_providers,
-        approval_timeout,
-        retention,
-    } = model_state;
-    let models = models
-        .into_iter()
-        .map(Into::into)
-        .collect::<Vec<qq_tui::ModelOption>>();
-    let unauthenticated_providers = unauthenticated_providers
-        .into_iter()
-        .map(tui_provider_remedy)
-        .collect();
-    let workspace_root = workspace.clone();
-    let snapshots = match snapshots.await {
-        Ok(Ok(coverage)) => coverage,
-        Ok(Err(_)) | Err(_) => qq_core::undo::Coverage::NotGit,
-    };
-    let environment_lines = environment::first_run_lines(
-        &environment::Environment::detect_off_workers().await,
-        snapshots,
-    );
-
+    let overrides = overrides.clone();
     let (embedded_tx, mut embedded_rx) = tokio::sync::oneshot::channel::<EmbeddedRuntime>();
-    let connect = {
-        let model = model.clone();
-        let server_paths = server_paths.clone();
-        let factory = factory.clone();
-        async move {
-            factory
-                .validate_isolated_tui_qa_state()
-                .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?;
-            let options =
-                server::ServerOptions::new(server_paths.clone()).with_version(cli::BUILD_VERSION);
-            let initial = |owns_server: bool| match (session, owns_server, &model) {
-                (Some(id), _, _) => qq_client::InitialSession::Open(id),
-                (None, true, Some(model)) => qq_client::InitialSession::New(model.clone()),
-                (None, _, _) => qq_client::InitialSession::Existing,
-            };
-            let (connection, initial) = match server::reserve(options)
-                .await
-                .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?
-            {
-                server::ReserveOutcome::Existing(connection) => {
-                    reject_read_approvals_for_existing_server(&approved_read_images)
-                        .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?;
-                    (connection, initial(false))
-                }
-                server::ReserveOutcome::Reserved(reservation) => {
-                    let handler = Arc::new(
-                        runtime::RuntimeHandler::open_owned(
-                            factory.clone(),
-                            approval_timeout,
-                            retention,
-                        )
-                        .await
-                        .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
-                    );
-                    let identity = handler.server_identity(None);
-                    let server = match reservation.start(handler.clone(), identity) {
-                        Ok(server) => server,
-                        Err(error) => {
-                            let _ = handler.shutdown().await;
-                            return Err(qq_tui::ClientFailure::new(error.to_string()));
-                        }
-                    };
-                    let connection = server.connection().clone();
-                    let _ = embedded_tx.send(EmbeddedRuntime { server, handler });
-                    (connection, initial(true))
-                }
-            };
-            client::TuiClient::start(
-                connection.into(),
-                workspace,
-                configured_model,
-                initial,
-                move || {
-                    let server_paths = server_paths.clone();
-                    let factory = factory.clone();
-                    async move {
-                        factory.validate_isolated_tui_qa_state().ok()?;
-                        server::discover_at(&server_paths)
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(client::Connection::from)
+    let startup = async move {
+        let environment = tokio::task::spawn_blocking(move || {
+            InteractiveEnvironment::open(&overrides, tui_qa_root)
+                .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))
+        })
+        .await
+        .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))??;
+        let factory = environment.factory;
+        let request = environment.request;
+        let loader = environment.config;
+        let server_paths = environment.server_paths;
+        let workspace = environment.workspace;
+        let config_factory = factory.clone();
+        let truecolor = truecolor_support(std::env::var_os("COLORTERM").as_deref());
+        let snapshot_workspace = workspace.clone();
+        let snapshots =
+            tokio::spawn(async move { qq_core::undo::covers(&snapshot_workspace).await });
+        let cwd = request.cwd().to_path_buf();
+        let (model_state, tui, themes) = tokio::task::spawn_blocking(move || {
+            let snapshot = config_factory.load_for_client(&request)?;
+            let model_state = config_factory.tui_model_state(&snapshot, &request);
+            let (tui_snapshot, tui) = load_tui_config(&loader, &cwd)?;
+            let themes =
+                load_tui_themes(&loader, &cwd, tui_snapshot.settings().theme(), truecolor)?;
+            Ok::<_, runtime::RuntimeBuildError>((model_state, tui, themes))
+        })
+        .await
+        .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?
+        .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?;
+        let runtime::TuiModelState {
+            goals,
+            configured_model,
+            model,
+            tui_model,
+            models,
+            unauthenticated_providers,
+            approval_timeout,
+            retention,
+        } = model_state;
+        let models = models
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<qq_tui::ModelOption>>();
+        let unauthenticated_providers = unauthenticated_providers
+            .into_iter()
+            .map(tui_provider_remedy)
+            .collect();
+        let snapshots = match snapshots.await {
+            Ok(Ok(coverage)) => coverage,
+            Ok(Err(_)) | Err(_) => qq_core::undo::Coverage::NotGit,
+        };
+        let environment_lines = environment::first_run_lines(
+            &environment::Environment::detect_off_workers().await,
+            snapshots,
+        );
+        let validation_factory = factory.clone();
+        tokio::task::spawn_blocking(move || validation_factory.validate_isolated_tui_qa_state())
+            .await
+            .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?
+            .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?;
+        let options =
+            server::ServerOptions::new(server_paths.clone()).with_version(cli::BUILD_VERSION);
+        let initial = |owns_server: bool| match (session, owns_server, &model) {
+            (Some(id), _, _) => qq_client::InitialSession::Open(id),
+            (None, true, Some(model)) => qq_client::InitialSession::New(model.clone()),
+            (None, _, _) => qq_client::InitialSession::Existing,
+        };
+        let (connection, initial) = match server::reserve(options)
+            .await
+            .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?
+        {
+            server::ReserveOutcome::Existing(connection) => {
+                reject_read_approvals_for_existing_server(&approved_read_images)
+                    .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?;
+                (connection, initial(false))
+            }
+            server::ReserveOutcome::Reserved(reservation) => {
+                let handler = Arc::new(
+                    runtime::RuntimeHandler::open_owned(
+                        factory.clone(),
+                        approval_timeout,
+                        retention,
+                    )
+                    .await
+                    .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
+                );
+                let identity = handler.server_identity(None);
+                let server = match reservation.start(handler.clone(), identity) {
+                    Ok(server) => server,
+                    Err(error) => {
+                        let _ = handler.shutdown().await;
+                        return Err(qq_tui::ClientFailure::new(error.to_string()));
                     }
-                },
-            )
-            .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))
-        }
-    };
-    let result = qq_tui::run(
-        qq_tui::LazyPort::new(connect),
-        qq_tui::TuiOptions {
+                };
+                let connection = server.connection().clone();
+                let _ = embedded_tx.send(EmbeddedRuntime { server, handler });
+                (connection, initial(true))
+            }
+        };
+        let client = client::TuiClient::start(
+            connection.into(),
+            workspace.clone(),
+            configured_model,
+            initial,
+            move || {
+                let server_paths = server_paths.clone();
+                let factory = factory.clone();
+                async move {
+                    let server_paths = tokio::task::spawn_blocking(move || {
+                        factory.validate_isolated_tui_qa_state().ok()?;
+                        Some(server_paths)
+                    })
+                    .await
+                    .ok()
+                    .flatten()?;
+                    server::discover_at(&server_paths)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(client::Connection::from)
+                }
+            },
+        )
+        .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?;
+        let options = qq_tui::TuiOptions {
             goals: tui_goal_defaults(&goals),
             settings: tui,
             model: tui_model,
             models,
             unauthenticated_providers,
             themes,
-            workspace_root: Some(workspace_root),
+            workspace_root: Some(workspace),
             environment: environment_lines,
-        },
-    )
-    .await;
+        };
+        Ok((client, options))
+    };
+    let startup = qq_tui::StartupPort::new(startup);
+    let result = qq_tui::run(startup, qq_tui::TuiOptions::default()).await;
 
     if let Ok(embedded) = embedded_rx.try_recv() {
         embedded.shutdown().await?;

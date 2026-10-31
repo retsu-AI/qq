@@ -6,6 +6,12 @@ open `qq` started — and otherwise starts one inside itself that lives
 exactly as long as that `qq` does (see [Exiting](#exiting)). Everything
 below works the same either way.
 
+
+The first frame appears before configuration and server attachment finish.
+You can type immediately; prompts submitted while connecting wait for the
+initial session, without consuming a newer draft. File mention resolution
+and `@` completion run in the background. Highlighting a cold session in
+the session list for 100 ms starts loading its history before you open it.
 ## Layout
 
 ```

@@ -15,7 +15,7 @@ use crossterm::{
     style::{Attribute, Print, ResetColor, SetAttribute},
     terminal::{self, Clear, ClearType, EndSynchronizedUpdate},
 };
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, stream::FuturesUnordered};
 use qq_protocol::{SessionEvent, SessionEventEnvelope, SessionId};
 use tokio::{
     io::{AsyncWrite, AsyncWriteExt},
@@ -32,6 +32,27 @@ use crate::{
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 const ANIMATION_INTERVAL: Duration = Duration::from_millis(crate::app::ANIMATION_INTERVAL_MS);
 
+const MAX_BACKGROUND_JOBS: usize = 16;
+const MAX_BACKGROUND_CONCURRENCY: usize = 4;
+
+type BackgroundFuture = std::pin::Pin<Box<dyn Future<Output = BackgroundResult> + Send>>;
+
+enum BackgroundResult {
+    Resolved {
+        id: u64,
+        submit: crate::effect::PendingSubmit,
+        result: Result<qq_core::mentions::ResolvedPrompt, String>,
+    },
+    Completed {
+        id: u64,
+        query: String,
+        candidates: Vec<String>,
+    },
+    Prefetch {
+        id: u64,
+        session_id: SessionId,
+    },
+}
 pub async fn run<P>(client: P, app: App) -> Result<Option<SessionId>, TuiError>
 where
     P: ClientPort,
@@ -158,6 +179,8 @@ where
     let mut last_client_failure: Option<String> = None;
     let mut state_may_change = false;
 
+    let mut jobs = FuturesUnordered::<BackgroundFuture>::new();
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_BACKGROUND_CONCURRENCY));
     loop {
         if redraw == Some(Redraw::Immediate) {
             app.refresh_goal_clock();
@@ -208,6 +231,19 @@ where
             highlighted = renderer.highlighter.next() => {
                 Effects::changed(renderer.apply_highlight(highlighted))
             }
+            result = jobs.next(), if !jobs.is_empty() => {
+                match result.expect("background jobs are nonempty") {
+                    BackgroundResult::Resolved { id, submit, result } => {
+                        app.apply_resolved_mentions(id, submit, result)
+                    }
+                    BackgroundResult::Completed { id, query, candidates } => {
+                        Effects::changed(app.apply_mention_completions(id, query, candidates))
+                    }
+                    BackgroundResult::Prefetch { id, session_id } => {
+                        app.apply_prefetch(id, session_id)
+                    }
+                }
+            }
             _ = animation_tick.tick(), if app.has_activity() => {
                 Effects::changed(app.advance_animation())
             }
@@ -244,34 +280,81 @@ where
                     renderer.invalidate();
                     redraw = Some(Redraw::Immediate);
                 }
-                Effect::ResolveMentions(submit) => {
+                Effect::ResolveMentions { id, submit } => {
+                    if jobs.len() >= MAX_BACKGROUND_JOBS {
+                        queue.extend(app.apply_resolved_mentions(
+                            id,
+                            submit,
+                            Err("too many background file jobs".to_owned()),
+                        ));
+                        continue;
+                    }
                     let root = app.workspace_root.clone();
-                    let text = submit.text.clone();
-                    let resolved = match root {
-                        Some(root) => tokio::task::spawn_blocking(move || {
-                            qq_core::mentions::resolve_prompt(&root, &text)
-                        })
-                        .await
-                        .map_err(|_| "mention resolution stopped unexpectedly".to_owned()),
-                        None => Err("this client has no workspace tree".to_owned()),
-                    };
-                    queue.extend(app.apply_resolved_mentions(submit, resolved));
+                    let permits = std::sync::Arc::clone(&permits);
+                    jobs.push(Box::pin(async move {
+                        let permit = permits.acquire_owned().await;
+                        let text = submit.text.clone();
+                        let result = match (permit, root) {
+                            (Ok(permit), Some(root)) => {
+                                let result = tokio::task::spawn_blocking(move || {
+                                    qq_core::mentions::resolve_prompt(&root, &text)
+                                })
+                                .await
+                                .map_err(|_| "mention resolution stopped unexpectedly".to_owned());
+                                drop(permit);
+                                result
+                            }
+                            (Ok(_), None) => Err("this client has no workspace tree".to_owned()),
+                            (Err(_), _) => {
+                                Err("mention resolution stopped unexpectedly".to_owned())
+                            }
+                        };
+                        BackgroundResult::Resolved { id, submit, result }
+                    }));
                 }
-                Effect::CompleteMention { query, recent } => {
+                Effect::CompleteMention { id, query, recent } => {
+                    if jobs.len() >= MAX_BACKGROUND_JOBS {
+                        continue;
+                    }
                     let Some(root) = app.workspace_root.clone() else {
                         continue;
                     };
-                    let walk_query = query.clone();
-                    let candidates = tokio::task::spawn_blocking(move || {
-                        qq_core::mentions::complete_paths(&root, &walk_query, &recent)
-                    })
-                    .await
-                    .unwrap_or_default();
-                    if app.apply_mention_completions(query, candidates) {
-                        redraw = Some(redraw.map_or(Redraw::Scheduled, |existing| {
-                            existing.max(Redraw::Scheduled)
-                        }));
+                    let permits = std::sync::Arc::clone(&permits);
+                    jobs.push(Box::pin(async move {
+                        let candidates = match permits.acquire_owned().await {
+                            Ok(permit) => {
+                                let walk_query = query.clone();
+                                let candidates = tokio::task::spawn_blocking(move || {
+                                    qq_core::mentions::complete_paths(&root, &walk_query, &recent)
+                                })
+                                .await
+                                .unwrap_or_default();
+                                drop(permit);
+                                candidates
+                            }
+                            Err(_) => Vec::new(),
+                        };
+                        BackgroundResult::Completed {
+                            id,
+                            query,
+                            candidates,
+                        }
+                    }));
+                }
+                Effect::PrefetchBody {
+                    id,
+                    workspace_id: _,
+                    session_id,
+                } => {
+                    if jobs.len() >= MAX_BACKGROUND_JOBS {
+                        app.reject_prefetch(id, session_id);
+                        continue;
                     }
+                    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+                    jobs.push(Box::pin(async move {
+                        tokio::time::sleep_until(deadline).await;
+                        BackgroundResult::Prefetch { id, session_id }
+                    }));
                 }
                 Effect::Attention(attention) => {
                     output.write_all(&attention_bytes(&attention)).await?;

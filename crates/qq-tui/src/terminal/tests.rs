@@ -383,6 +383,113 @@ async fn loop_marks_replaying_on_sequence_gap_and_recovers_from_reset_snapshot()
 }
 
 #[tokio::test(start_paused = true)]
+async fn prefetches_only_the_highlight_held_for_one_hundred_milliseconds() {
+    let mut harness = Harness::new(64);
+    let task = harness.spawn(App::new(TuiOptions::default()));
+    let mut initial = snapshot(1, Vec::new());
+    let cold = qq_protocol::SessionId::from_bytes([71; 16]);
+    initial.sessions.push(qq_protocol::SessionSummary {
+        id: cold,
+        ..fixtures::session_summary(cold)
+    });
+    harness.update(ClientUpdate::Snapshot(initial));
+    harness.settle().await;
+    harness.key(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    harness.key(KeyCode::Up, KeyModifiers::NONE);
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+
+    tokio::time::advance(Duration::from_millis(99)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(harness.sent().is_empty());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    let sent = harness.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientRequest::Snapshot(request)] if request.focused_session_id == Some(cold)
+        ),
+        "sent={sent:?}"
+    );
+
+    harness.quit();
+    task.await.expect("loop task").expect("loop exits cleanly");
+}
+
+#[test]
+fn moving_or_closing_the_navigator_suppresses_delayed_prefetch() {
+    for closing in [false, true] {
+        let mut app = App::new(TuiOptions::default());
+        let mut initial = snapshot(1, Vec::new());
+        let cold = qq_protocol::SessionId::from_bytes([72; 16]);
+        initial.sessions.push(qq_protocol::SessionSummary {
+            id: cold,
+            ..fixtures::session_summary(cold)
+        });
+        app.apply_client_update(ClientUpdate::Snapshot(initial));
+        let opened = app.execute(crate::commands::Command::ToggleSessions);
+        let up =
+            app.handle_terminal_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        let down =
+            app.handle_terminal_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        let (id, session_id) = opened
+            .iter()
+            .chain(up.iter())
+            .chain(down.iter())
+            .find_map(|effect| match effect {
+                Effect::PrefetchBody { id, session_id, .. } => Some((*id, *session_id)),
+                _ => None,
+            })
+            .expect("cold highlight schedules prefetch");
+        app.handle_terminal_event(Event::Key(KeyEvent::new(
+            if closing { KeyCode::Esc } else { KeyCode::Up },
+            KeyModifiers::NONE,
+        )));
+
+        assert!(app.apply_prefetch(id, session_id).is_empty());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn loop_accepts_input_while_a_delayed_prefetch_effect_is_pending() {
+    let mut harness = Harness::new(64);
+    let task = harness.spawn(App::new(TuiOptions::default()));
+    let mut initial = snapshot(1, Vec::new());
+    let cold = qq_protocol::SessionId::from_bytes([71; 16]);
+    initial.sessions.push(qq_protocol::SessionSummary {
+        id: cold,
+        ..fixtures::session_summary(cold)
+    });
+    harness.update(ClientUpdate::Snapshot(initial));
+    harness.settle().await;
+    for character in "/sessions".chars() {
+        harness.key(KeyCode::Char(character), KeyModifiers::NONE);
+    }
+    harness.key(KeyCode::Enter, KeyModifiers::NONE);
+    harness.key(KeyCode::Down, KeyModifiers::NONE);
+    harness.key(KeyCode::Esc, KeyModifiers::NONE);
+    harness.key(KeyCode::Char('x'), KeyModifiers::NONE);
+    tokio::task::yield_now().await;
+    harness.quit();
+    let app = task.await.expect("loop task").expect("loop exits cleanly");
+
+    assert_eq!(app.composer.text, "x");
+    assert!(
+        harness.sent().iter().all(|request| !matches!(
+            request,
+            ClientRequest::Snapshot(request) if request.focused_session_id == Some(cold)
+        )),
+        "the delayed prefetch did not have to finish before input was handled"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn loop_reports_client_stop() {
     let mut harness = Harness::new(64);
     let task = harness.spawn(App::new(TuiOptions::default()));
@@ -515,6 +622,7 @@ async fn loop_rings_the_terminal_for_an_unfocused_run_finish_only() {
 #[tokio::test(start_paused = true)]
 async fn the_first_frame_paints_before_the_client_port_connects() {
     let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+
     let (updates, update_rx) = mpsc::unbounded_channel::<ClientUpdate>();
     let sent = Arc::new(Mutex::new(Vec::new()));
     let inner = FakePort {
@@ -580,6 +688,74 @@ async fn the_first_frame_paints_before_the_client_port_connects() {
         .unwrap();
     let app = task.await.expect("loop task").expect("loop exits cleanly");
     assert_eq!(app.connection, ConnectionState::Live);
+}
+
+#[tokio::test(start_paused = true)]
+async fn prompt_submitted_before_delayed_startup_is_sent_after_the_snapshot() {
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let (updates, update_rx) = mpsc::unbounded_channel::<ClientUpdate>();
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let inner = FakePort {
+        updates: update_rx,
+        sent: Arc::clone(&sent),
+        capacity: 64,
+    };
+    let port = crate::StartupPort::new(async move {
+        release_rx.await.expect("release");
+        Ok((inner, TuiOptions::default()))
+    });
+    let (events, event_rx) = mpsc::unbounded_channel();
+    let task = tokio::spawn(run_loop(
+        port,
+        App::new(TuiOptions::default()),
+        EventQueue(event_rx),
+        FrameLog::default(),
+        || Ok((100, 30)),
+        std::future::pending(),
+        Hooks {
+            editor: |_| -> EditorFuture { Box::pin(async { Err(EditorError::NotConfigured) }) },
+            herdr: None,
+        },
+    ));
+    events
+        .send(Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        ))))
+        .unwrap();
+    events
+        .send(Ok(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))))
+        .unwrap();
+    tokio::task::yield_now().await;
+    assert!(sent.lock().unwrap().is_empty());
+
+    updates
+        .send(ClientUpdate::Snapshot(snapshot(1, Vec::new())))
+        .unwrap();
+    release_tx.send(()).unwrap();
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(matches!(
+        sent.lock().unwrap().as_slice(),
+        [ClientRequest::Command(request)]
+            if matches!(
+                &request.command,
+                qq_protocol::SessionCommand::SubmitPrompt { input, .. }
+                    if input.as_slice() == [qq_protocol::InputPart::text("x")]
+            )
+    ));
+
+    events
+        .send(Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ))))
+        .unwrap();
+    task.await.expect("loop task").expect("loop exits cleanly");
 }
 
 #[tokio::test(start_paused = true)]

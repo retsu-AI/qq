@@ -1,6 +1,8 @@
 use super::*;
 use crate::tools::output::escaped_len;
 
+const IMPLICIT_PREWARM_SESSIONS: usize = 4;
+
 pub(super) fn load_snapshot(
     connection: &mut Connection,
     store_id: StoreId,
@@ -41,8 +43,22 @@ pub(super) fn load_snapshot(
         )?);
     }
     let mut budget = SnapshotBudget::new(SNAPSHOT_BODY_BUDGET_BYTES);
-    let mut focused = request
-        .focused_session_id
+    let implicit_focus =
+        request.focused_session_id.is_none() && request.include_sessions.is_empty();
+    let focused_session_id = request.focused_session_id.or_else(|| {
+        implicit_focus
+            .then(|| {
+                sessions
+                    .iter()
+                    .find(|session| {
+                        session.parent_id.is_none()
+                            && session.purpose != qq_protocol::SessionPurpose::Audit
+                    })
+                    .map(|session| session.id)
+            })
+            .flatten()
+    });
+    let mut focused = focused_session_id
         .map(|session_id| {
             if session_workspace(&transaction, session_id)? != request.workspace_id {
                 return Err(SessionRuntimeError::SessionNotFound);
@@ -50,9 +66,22 @@ pub(super) fn load_snapshot(
             load_session_body(&transaction, session_id, request.message_limit, &mut budget)
         })
         .transpose()?;
-    let mut included = Vec::with_capacity(request.include_sessions.len());
-    for session_id in &request.include_sessions {
-        if Some(*session_id) == request.focused_session_id {
+    let include_sessions = if implicit_focus {
+        sessions
+            .iter()
+            .filter(|session| {
+                session.parent_id.is_none() && session.purpose != qq_protocol::SessionPurpose::Audit
+            })
+            .map(|session| session.id)
+            .filter(|session_id| Some(*session_id) != focused_session_id)
+            .take(IMPLICIT_PREWARM_SESSIONS)
+            .collect::<Vec<_>>()
+    } else {
+        request.include_sessions
+    };
+    let mut included = Vec::with_capacity(include_sessions.len());
+    for session_id in &include_sessions {
+        if Some(*session_id) == focused_session_id {
             continue;
         }
         match session_workspace(&transaction, *session_id) {

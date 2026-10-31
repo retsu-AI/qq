@@ -21,7 +21,6 @@ use crate::{
 const TUI_REQUEST_CAPACITY: usize = 64;
 const TUI_UPDATE_CAPACITY: usize = 256;
 const TUI_CONCURRENT_REQUESTS: usize = 8;
-const PREWARM_SESSIONS: usize = 4;
 
 type ReconnectFuture = Pin<Box<dyn Future<Output = Option<Connection>> + Send + 'static>>;
 type ConnectionResolver = Arc<dyn Fn() -> ReconnectFuture + Send + Sync + 'static>;
@@ -151,16 +150,46 @@ async fn run_tui_client(
     {
         return;
     }
-    let (mut workspace_id, snapshot) = match bootstrap_tui(&client, &workspace, &initial).await {
-        Ok(bootstrap) => bootstrap,
+    let (mut workspace_id, _) = match client.resolve_workspace(&workspace).await {
+        Ok(workspace) => workspace,
         Err(error) => {
             send_bootstrap_failure(&updates, error).await;
             return;
         }
     };
+    let (empty_tx, empty_rx) = tokio::sync::oneshot::channel();
+    let mut catalog_task = {
+        let client = client.clone();
+        let workspace = workspace.clone();
+        let selection = selection.clone();
+        let updates = updates.clone();
+        BackgroundTask(tokio::spawn(async move {
+            let valid = load_tui_models(
+                client.clone(),
+                workspace,
+                workspace_id,
+                selection.clone(),
+                updates.clone(),
+            )
+            .await;
+            if valid
+                && empty_rx.await.unwrap_or(false)
+                && let Some(snapshot) =
+                    create_initial_session(&client, workspace_id, selection).await
+            {
+                let _ = updates.send(ClientUpdate::Snapshot(snapshot)).await;
+            }
+        }))
+    };
+    let snapshot = match bootstrap_tui(&client, workspace_id, &initial).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            send_bootstrap_failure(&updates, error).await;
+            return;
+        }
+    };
+    let create_initial = initial == InitialSession::Existing && snapshot.sessions.is_empty();
     let mut cursor = snapshot.cursor;
-    let create_after_validation =
-        initial == InitialSession::Existing && snapshot.sessions.is_empty();
     if updates
         .send(ClientUpdate::Snapshot(snapshot))
         .await
@@ -168,14 +197,7 @@ async fn run_tui_client(
     {
         return;
     }
-    let mut catalog_task = start_tui_model_load(
-        client.clone(),
-        workspace.clone(),
-        workspace_id,
-        selection.clone(),
-        create_after_validation,
-        updates.clone(),
-    );
+    let _ = empty_tx.send(create_initial);
 
     let request_permits = Arc::new(Semaphore::new(TUI_CONCURRENT_REQUESTS));
     let mut reconnect_delay = Duration::from_millis(50);
@@ -202,7 +224,6 @@ async fn run_tui_client(
                         workspace.clone(),
                         workspace_id,
                         selection.clone(),
-                        snapshot.sessions.is_empty(),
                         updates.clone(),
                     ));
                     reconnect_delay = Duration::from_millis(50);
@@ -300,7 +321,6 @@ async fn run_tui_client(
                     workspace.clone(),
                     workspace_id,
                     selection.clone(),
-                    snapshot.sessions.is_empty(),
                     updates.clone(),
                 ));
                 reconnect_delay = Duration::from_millis(50);
@@ -331,17 +351,11 @@ fn start_tui_model_load(
     workspace: PathBuf,
     workspace_id: WorkspaceId,
     selection: ModelSelection,
-    create_initial_session: bool,
     updates: mpsc::Sender<ClientUpdate>,
 ) -> BackgroundTask {
-    BackgroundTask(tokio::spawn(load_tui_models(
-        client,
-        workspace,
-        workspace_id,
-        selection,
-        create_initial_session,
-        updates,
-    )))
+    BackgroundTask(tokio::spawn(async move {
+        load_tui_models(client, workspace, workspace_id, selection, updates).await;
+    }))
 }
 
 async fn load_tui_models(
@@ -349,25 +363,24 @@ async fn load_tui_models(
     workspace: PathBuf,
     workspace_id: WorkspaceId,
     selection: ModelSelection,
-    create_initial_session: bool,
     updates: mpsc::Sender<ClientUpdate>,
-) {
-    if let Ok(capabilities) = client.capabilities(Some(workspace_id)).await
+) -> bool {
+    let capabilities = client.capabilities(Some(workspace_id));
+    let models = client.models(ModelCatalogRequest {
+        workspace: workspace.to_string_lossy().into_owned(),
+        selection: selection.clone(),
+    });
+    let (capabilities, models) = tokio::join!(capabilities, models);
+    if let Ok(capabilities) = capabilities
         && updates
             .send(ClientUpdate::Capabilities(Arc::new(capabilities)))
             .await
             .is_err()
     {
-        return;
+        return false;
     }
-    let Ok(models) = client
-        .models(ModelCatalogRequest {
-            workspace: workspace.to_string_lossy().into_owned(),
-            selection: selection.clone(),
-        })
-        .await
-    else {
-        return;
+    let Ok(models) = models else {
+        return false;
     };
     let selection_is_valid = models
         .iter()
@@ -375,34 +388,23 @@ async fn load_tui_models(
     if updates
         .send(ClientUpdate::Models {
             models,
-            selected: selection_is_valid.then_some(selection.clone()),
+            selected: selection_is_valid.then_some(selection),
         })
         .await
         .is_err()
-        || !create_initial_session
-        || !selection_is_valid
     {
-        return;
+        return false;
     }
-    let Ok(snapshot) = client
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: None,
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 1,
-        })
-        .await
-    else {
-        return;
-    };
-    if !snapshot.sessions.is_empty() {
-        return;
-    }
-    let Ok(command_id) = CommandId::generate() else {
-        return;
-    };
-    let Ok(receipt) = client
+    selection_is_valid
+}
+
+async fn create_initial_session(
+    client: &SessionClient,
+    workspace_id: WorkspaceId,
+    selection: ModelSelection,
+) -> Option<WorkspaceSnapshot> {
+    let command_id = CommandId::generate().ok()?;
+    let receipt = client
         .command(
             command_id,
             SessionCommand::CreateSession {
@@ -416,13 +418,11 @@ async fn load_tui_models(
             },
         )
         .await
-    else {
-        return;
-    };
+        .ok()?;
     let qq_protocol::CommandOutcome::SessionCreated { session_id } = receipt.outcome else {
-        return;
+        return None;
     };
-    let Ok(snapshot) = client
+    client
         .snapshot(SnapshotRequest {
             workspace_id,
             focused_session_id: Some(session_id),
@@ -431,28 +431,15 @@ async fn load_tui_models(
             message_limit: 256,
         })
         .await
-    else {
-        return;
-    };
-    let _ = updates.send(ClientUpdate::Snapshot(snapshot)).await;
+        .ok()
 }
 
 async fn bootstrap_tui(
     client: &SessionClient,
-    workspace: &Path,
+    workspace_id: WorkspaceId,
     initial: &InitialSession,
-) -> Result<(WorkspaceId, WorkspaceSnapshot), ClientError> {
-    let (workspace_id, _) = client.resolve_workspace(workspace).await?;
-    let snapshot = client
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: None,
-            include_sessions: Vec::new(),
-            session_limit: 512,
-            message_limit: 256,
-        })
-        .await?;
-    let focused = match initial {
+) -> Result<WorkspaceSnapshot, ClientError> {
+    let focused_session_id = match initial {
         InitialSession::New(model) => {
             let receipt = client
                 .command(
@@ -471,41 +458,38 @@ async fn bootstrap_tui(
             let qq_protocol::CommandOutcome::SessionCreated { session_id } = receipt.outcome else {
                 return Err(ClientError::MalformedEvent);
             };
-            session_id
+            Some(session_id)
         }
-        InitialSession::Open(session_id) => {
-            match snapshot
-                .sessions
-                .iter()
-                .find(|session| session.id == *session_id)
-            {
-                Some(session) if session.parent_id.is_none() => *session_id,
-                Some(_) => return Err(ClientError::SessionIsChild(*session_id)),
-                None => return Err(ClientError::SessionNotInWorkspace(*session_id)),
-            }
-        }
-        InitialSession::Existing => match snapshot.sessions.first() {
-            Some(session) => session.id,
-            None => return Ok((workspace_id, snapshot)),
-        },
+        InitialSession::Open(session_id) => Some(*session_id),
+        InitialSession::Existing => None,
     };
-    let include_sessions = snapshot
-        .sessions
-        .iter()
-        .map(|session| session.id)
-        .filter(|id| *id != focused)
-        .take(PREWARM_SESSIONS)
-        .collect();
     let snapshot = client
         .snapshot(SnapshotRequest {
             workspace_id,
-            focused_session_id: Some(focused),
-            include_sessions,
+            focused_session_id,
+            include_sessions: Vec::new(),
             session_limit: 512,
             message_limit: 256,
         })
-        .await?;
-    Ok((workspace_id, snapshot))
+        .await
+        .map_err(|error| match (initial, &error) {
+            (InitialSession::Open(session_id), ClientError::ServerMessage { status: 400, .. }) => {
+                ClientError::SessionNotInWorkspace(*session_id)
+            }
+            _ => error,
+        })?;
+    if let InitialSession::Open(session_id) = initial {
+        match snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == *session_id)
+        {
+            Some(session) if session.parent_id.is_none() => {}
+            Some(_) => return Err(ClientError::SessionIsChild(*session_id)),
+            None => return Err(ClientError::SessionNotInWorkspace(*session_id)),
+        }
+    }
+    Ok(snapshot)
 }
 
 async fn recover_tui_client(
@@ -520,10 +504,14 @@ async fn recover_tui_client(
             | ClientError::EventTooLarge
             | ClientError::ServerResponse { status: 400 }
             | ClientError::ServerMessage { status: 400, .. }
-    ) && let Ok((workspace_id, snapshot)) =
-        bootstrap_tui(current, workspace, &InitialSession::Existing).await
+    ) && let Ok(snapshot) = bootstrap_tui(
+        current,
+        current.resolve_workspace(workspace).await.ok()?.0,
+        &InitialSession::Existing,
+    )
+    .await
     {
-        return Some((current.clone(), workspace_id, snapshot));
+        return Some((current.clone(), snapshot.workspace.id, snapshot));
     }
     if !matches!(
         error,
@@ -533,7 +521,8 @@ async fn recover_tui_client(
     }
     let connection = resolve_connection().await?;
     let client = SessionClient::new(connection).ok()?;
-    let (workspace_id, snapshot) = bootstrap_tui(&client, workspace, &InitialSession::Existing)
+    let workspace_id = client.resolve_workspace(workspace).await.ok()?.0;
+    let snapshot = bootstrap_tui(&client, workspace_id, &InitialSession::Existing)
         .await
         .ok()?;
     Some((client, workspace_id, snapshot))

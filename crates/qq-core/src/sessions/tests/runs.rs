@@ -95,6 +95,42 @@ async fn snapshots_include_extra_session_bodies_without_evicting_the_focus() {
 }
 
 #[tokio::test]
+async fn snapshot_without_focus_selects_and_prewarms_recent_sessions() {
+    let (directory, runtime) = test_runtime().await;
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let mut ids = Vec::new();
+    for _ in 0..6 {
+        let CommandOutcome::SessionCreated { session_id } =
+            create_session(&runtime, workspace_id, None).await.outcome
+        else {
+            panic!("unexpected receipt")
+        };
+        ids.push(session_id);
+    }
+
+    let snapshot = runtime
+        .snapshot(SnapshotRequest {
+            workspace_id,
+            focused_session_id: None,
+            include_sessions: Vec::new(),
+            session_limit: 8,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.focused.unwrap().summary.id, ids[5]);
+    assert_eq!(
+        snapshot
+            .included
+            .iter()
+            .map(|body| body.summary.id)
+            .collect::<Vec<_>>(),
+        vec![ids[4], ids[3], ids[2], ids[1]]
+    );
+}
+
+#[tokio::test]
 async fn only_the_first_prompt_names_a_session() {
     let (directory, runtime) = test_runtime().await;
     let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;

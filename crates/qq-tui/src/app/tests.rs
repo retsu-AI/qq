@@ -96,6 +96,37 @@ fn submit_is_optimistic_but_restores_a_rejected_prompt() {
 }
 
 #[test]
+fn repeated_submits_during_startup_capture_each_prompt_and_preserve_the_next_draft() {
+    let mut app = App::new(TuiOptions::default());
+    for prompt in ["first", "second"] {
+        app.composer.replace(prompt.to_owned());
+        let (_, requests) = app
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .split();
+        assert!(requests.is_empty());
+        assert!(app.composer.text.is_empty());
+    }
+    app.composer.replace("still editing".to_owned());
+
+    let (_, requests) = app.apply_snapshot(snapshot()).split();
+
+    let prompts = requests
+        .into_iter()
+        .map(|request| match request {
+            ClientRequest::Command(CommandRequest {
+                command: SessionCommand::SubmitPrompt { input, .. },
+                ..
+            }) => match input.as_slice() {
+                [qq_protocol::InputPart::Text { text }] => text.clone(),
+                _ => panic!("expected one text input"),
+            },
+            _ => panic!("expected prompt command"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(prompts, ["first", "second"]);
+    assert_eq!(app.composer.text, "still editing");
+}
+#[test]
 fn approval_prompt_captures_keys_and_sends_the_decision() {
     let mut app = App::new(TuiOptions::default());
     let initial = snapshot();
@@ -1430,6 +1461,25 @@ fn first_focused_snapshot_can_arrive_after_the_workspace_snapshot() {
     assert!(app.focused().is_some());
 }
 
+#[test]
+fn startup_options_preserve_a_draft_typed_while_loading() {
+    let mut app = App::new(TuiOptions::default());
+    app.composer.replace("typed before startup".to_owned());
+    let configured = TuiOptions {
+        model: ModelSelection {
+            model: Some("openai/configured".to_owned()),
+            ..ModelSelection::default()
+        },
+        ..TuiOptions::default()
+    };
+
+    app.apply_client_update(ClientUpdate::Startup(qq_client::StartupUpdate::new(
+        configured.clone(),
+    )));
+
+    assert_eq!(app.composer.text, "typed before startup");
+    assert_eq!(app.model, configured.model);
+}
 #[test]
 fn model_picker_applies_to_the_focused_session_and_ctrl_n_creates() {
     let selection = ModelSelection {
@@ -4351,14 +4401,22 @@ fn typing_an_at_token_requests_completion_and_tab_accepts_a_candidate() {
             assert!(
                 effects.iter().any(|effect| matches!(
                     effect,
-                    Effect::CompleteMention { query, .. } if query == "sr"
+                    Effect::CompleteMention { id: _, query, .. } if query == "sr"
                 )),
                 "{effects:?}"
             );
         }
     }
-    assert!(!app.apply_mention_completions("s".to_owned(), vec!["src/".to_owned()]));
+    let completion_id = app
+        .mention
+        .query
+        .as_deref()
+        .and_then(|value| value.split_once(':'))
+        .and_then(|(id, _)| id.parse().ok())
+        .unwrap();
+    assert!(!app.apply_mention_completions(completion_id, "s".to_owned(), vec!["src/".to_owned()]));
     assert!(app.apply_mention_completions(
+        completion_id,
         "sr".to_owned(),
         vec!["src/".to_owned(), "srv.rs".to_owned()],
     ));
@@ -4368,17 +4426,131 @@ fn typing_an_at_token_requests_completion_and_tab_accepts_a_candidate() {
     assert_eq!(app.composer.text, "see @srv.rs ");
     assert!(app.mention.candidates.is_empty());
     app.composer.replace("see @sr".to_owned());
-    assert!(app.apply_mention_completions("sr".to_owned(), vec!["src/".to_owned()]));
+    let effects = app.request_mention_completion();
+    let id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::CompleteMention { id, .. } => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    assert!(app.apply_mention_completions(id, "sr".to_owned(), vec!["src/".to_owned()]));
     let effects = app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.composer.text, "see @src/");
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::CompleteMention { query, .. } if query == "src/"
     )));
-    assert!(app.apply_mention_completions("src/".to_owned(), vec!["src/lib.rs".to_owned()]));
+    let id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::CompleteMention { id, .. } => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    assert!(app.apply_mention_completions(id, "src/".to_owned(), vec!["src/lib.rs".to_owned()]));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.mention.candidates.is_empty());
     assert_eq!(app.composer.text, "see @src/");
+}
+
+#[test]
+fn mention_completion_rejects_same_text_aba_results() {
+    let mut app = App::new(TuiOptions {
+        workspace_root: Some(std::path::PathBuf::from("/work")),
+        ..TuiOptions::default()
+    });
+    app.apply_snapshot(snapshot());
+    app.composer.replace("see @same".to_owned());
+    let first = app.request_mention_completion();
+    let first_id = first
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::CompleteMention { id, .. } => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    app.composer.replace("see @other".to_owned());
+    app.request_mention_completion();
+    app.composer.replace("see @same".to_owned());
+    let latest = app.request_mention_completion();
+    let latest_id = latest
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::CompleteMention { id, .. } => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+
+    assert!(!app.apply_mention_completions(first_id, "same".to_owned(), vec!["stale".to_owned()]));
+    assert!(app.apply_mention_completions(
+        latest_id,
+        "same".to_owned(),
+        vec!["current".to_owned()]
+    ));
+    assert_eq!(app.mention.candidates, ["current"]);
+}
+
+#[test]
+fn stale_resolution_cannot_submit_after_focus_changes() {
+    let mut initial = snapshot();
+    let other = id(91, SessionId::from_bytes);
+    initial.sessions.push(SessionSummary {
+        id: other,
+        ..fixtures::session_summary(other)
+    });
+    let mut app = App::new(TuiOptions {
+        workspace_root: Some(std::path::PathBuf::from("/work")),
+        ..TuiOptions::default()
+    });
+    app.apply_snapshot(initial);
+    app.composer.replace("explain @src/lib.rs".to_owned());
+    let effects = app.submit_prompt();
+    let (resolution_id, submit) = effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::ResolveMentions { id, submit } => Some((id, submit)),
+            _ => None,
+        })
+        .unwrap();
+    app.focus_session(other);
+    let resolved = qq_core::mentions::ResolvedPrompt {
+        parts: vec![qq_protocol::InputPart::text("stale")],
+        notes: Vec::new(),
+        skill: None,
+    };
+
+    assert!(
+        app.apply_resolved_mentions(resolution_id, submit, Ok(resolved))
+            .is_empty()
+    );
+}
+
+#[test]
+fn cold_body_prefetch_is_delayed_deduplicated_and_excludes_audits() {
+    let mut initial = snapshot();
+    let cold = id(92, SessionId::from_bytes);
+    let audit = id(93, SessionId::from_bytes);
+    initial.sessions.push(SessionSummary {
+        id: cold,
+        ..fixtures::session_summary(cold)
+    });
+    initial.sessions.push(SessionSummary {
+        id: audit,
+        purpose: qq_protocol::SessionPurpose::Audit,
+        ..fixtures::session_summary(audit)
+    });
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(initial);
+
+    let first = app.prefetch_session(cold);
+    assert!(matches!(
+        first.iter().next(),
+        Some(Effect::PrefetchBody { session_id, .. }) if *session_id == cold
+    ));
+    assert!(app.prefetch_session(cold).is_empty());
+    assert!(app.prefetch_session(audit).is_empty());
+    assert!(!first.requests_anything());
 }
 
 #[test]
@@ -4395,16 +4567,16 @@ fn prompts_with_mentions_resolve_off_the_loop_and_submit_the_parts() {
     assert!(
         !effects
             .iter()
-            .any(|effect| matches!(effect, Effect::ResolveMentions(_)))
+            .any(|effect| matches!(effect, Effect::ResolveMentions { .. }))
     );
 
     app.composer.replace("explain @src/lib.rs:1-3".to_owned());
     let effects = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(!effects.requests_anything());
-    let submit = effects
+    let (resolution_id, submit) = effects
         .into_iter()
         .find_map(|effect| match effect {
-            Effect::ResolveMentions(submit) => Some(submit),
+            Effect::ResolveMentions { id, submit } => Some((id, submit)),
             _ => None,
         })
         .expect("a mention prompt resolves off the loop");
@@ -4425,7 +4597,7 @@ fn prompts_with_mentions_resolve_off_the_loop_and_submit_the_parts() {
         skill: None,
     };
     let requests = app
-        .apply_resolved_mentions(submit.clone(), Ok(resolved))
+        .apply_resolved_mentions(resolution_id, submit.clone(), Ok(resolved))
         .into_requests();
     assert!(matches!(
         requests.as_slice(),
@@ -4437,8 +4609,9 @@ fn prompts_with_mentions_resolve_off_the_loop_and_submit_the_parts() {
     ));
     assert_eq!(app.status.as_deref(), Some("attached 1 file"));
 
+    let failure_id = app.start_resolution();
     let requests = app
-        .apply_resolved_mentions(submit, Err("disk gone".to_owned()))
+        .apply_resolved_mentions(failure_id, submit, Err("disk gone".to_owned()))
         .into_requests();
     assert!(requests.is_empty());
     assert_eq!(app.composer.text, "explain @src/lib.rs:1-3");
@@ -4447,8 +4620,10 @@ fn prompts_with_mentions_resolve_off_the_loop_and_submit_the_parts() {
         text: "@skill:review this".to_owned(),
         target: SubmitTarget::Prompt { session_id },
     };
+    let skilled_id = app.start_resolution();
     let requests = app
         .apply_resolved_mentions(
+            skilled_id,
             skilled,
             Ok(qq_core::mentions::ResolvedPrompt {
                 parts: vec![qq_protocol::InputPart::text(" this")],

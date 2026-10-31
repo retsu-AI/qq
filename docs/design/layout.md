@@ -22,6 +22,25 @@ each pane is described in [`transcript.md`](./transcript.md) and
    to the model beyond the session count, and every pane paints inside the
    `Rect` it is handed.
 
+## Startup and input work
+
+The loop paints a default connecting frame before polling startup. Configuration,
+themes, environment detection and server attachment then load asynchronously;
+loaded options replace configuration-owned state without replacing the composer.
+Submitted startup prompts are bounded and retained separately from newer drafts.
+
+Bootstrap uses the existing snapshot request to obtain the recent session list,
+focused body and four prewarmed bodies together. Model discovery runs in parallel
+and does not gate an existing transcript. An empty workspace may require session
+creation and a second snapshot after model validation. This changes server-side
+snapshot defaults, not wire types or the protocol version.
+
+Mention walks run off the input loop with bounded admission and concurrency.
+Generation IDs discard superseded completions, and resolved submissions are
+checked against their original focus and run. A session-list highlight held for
+100 ms prefetches a cold body without moving focus; moving or closing the list
+invalidates its timer.
+
 ## Tiers
 
 | Tier | Columns | Panes |
