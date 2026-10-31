@@ -30,12 +30,18 @@ fn picker_frame<T: PickerItem>(
         question,
         empty,
     } = chrome;
-    let mut lines = vec![section(title, hint)];
+    let short = height < PICKER_FULL_CHROME_ROWS;
+    let mut lines = Vec::with_capacity(height);
+    if !short {
+        lines.push(section(title, hint));
+    }
     lines.push(search_line(&picker.query, placeholder));
     if let Some(question) = question {
         lines.push(truncate_line(question, width));
     }
-    lines.push(Line::default());
+    if !short {
+        lines.push(Line::default());
+    }
     if picker.filtered().len() == 0 {
         lines.push(Line::styled(empty, muted().italic()));
         return fit_height(lines, height);
@@ -57,6 +63,8 @@ fn picker_frame<T: PickerItem>(
     ));
     fit_height(lines, height)
 }
+
+const PICKER_FULL_CHROME_ROWS: usize = 6;
 
 pub(super) fn search_line(query: &str, placeholder: &str) -> Line {
     Line::styled(
@@ -690,20 +698,22 @@ pub(super) fn goal_check_picker(app: &App, width: usize, height: usize) -> Vec<L
     };
     let width = width.max(1);
     let mut rows = Vec::new();
-    let command: String = target
+    let lines: Vec<String> = target
         .command
-        .chars()
-        .filter_map(terminal_safe_character)
+        .lines()
+        .map(|line| line.chars().filter_map(terminal_safe_character).collect())
         .collect();
-    let lines: Vec<&str> = command.lines().collect();
     let fits_on_rule = lines.len() == 1
-        && text_width(&command) <= super::chrome::GOAL_CHECK_RULE_COMMAND
-        && text_width(&command) + 24 <= width;
+        && text_width(&lines[0]) <= super::chrome::GOAL_CHECK_RULE_COMMAND
+        && text_width(&lines[0]) + 24 <= width;
     if !fits_on_rule {
         let wrapped: Vec<Line> = lines
             .iter()
             .flat_map(|line| {
-                wrap_line_chars(Line::styled(*line, muted()), width.saturating_sub(4).max(1))
+                wrap_line_chars(
+                    Line::styled(line.as_str(), muted()),
+                    width.saturating_sub(4).max(1),
+                )
             })
             .collect();
         let visible = height.saturating_sub(3).max(1);

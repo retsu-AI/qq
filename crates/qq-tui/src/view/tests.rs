@@ -6070,3 +6070,75 @@ fn many_queued_drafts_never_push_the_composer_or_status_line_off_screen() {
     let cursor = renderer.cursor.expect("composer caret");
     assert_eq!(cursor.row, 18);
 }
+
+#[test]
+fn a_short_terminal_still_shows_the_selected_picker_result() {
+    let mut app = app_with_messages(1);
+    app.execute(Command::OpenCommands);
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 10));
+    let text = rows.join("\n");
+    let Some((picker, _)) = app.command_picker() else {
+        panic!("command picker open")
+    };
+    let selected = picker
+        .filtered()
+        .nth(picker.cursor())
+        .map(|(_, row)| row.spec.title)
+        .expect("a selected command");
+    assert!(text.contains(selected), "{selected} missing:\n{text}");
+}
+
+fn goal_check_app(command: &str) -> App {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let session = initial.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session);
+    goal.check.as_mut().unwrap().command = command.to_owned();
+    initial.focused.as_mut().unwrap().goal = Some(goal);
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    app.composer.replace("/goal check".to_owned());
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    app
+}
+
+#[test]
+fn a_short_multiline_goal_check_shows_every_line_before_consent() {
+    let app = goal_check_app("echo safe\nrm -f victim");
+    let rule = frame_rows(&[super::chrome::dock_rule(&app, 116, true)]).join("");
+    let panel = frame_rows(&super::overlay::goal_check_picker(&app, 116, 12)).join("\n");
+    assert!(
+        panel.contains("$ echo safe") && panel.contains("$ rm -f victim"),
+        "rule: {rule}\npanel: {panel}"
+    );
+}
+
+#[test]
+fn paging_the_goal_check_command_reaches_every_wrapped_row() {
+    let markers: Vec<String> = (0..12).map(|row| format!("m{row:02}")).collect();
+    let command = markers
+        .iter()
+        .map(|marker| format!("{marker}{}", "x".repeat(66)))
+        .collect::<String>();
+    let mut app = goal_check_app(&command);
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..20 {
+        let panel = frame_rows(&super::overlay::goal_check_picker(&app, 76, 8)).join("\n");
+        for marker in &markers {
+            if panel.contains(marker.as_str()) {
+                seen.insert(marker.clone());
+            }
+        }
+        app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        )));
+    }
+    let missing: Vec<&String> = markers
+        .iter()
+        .filter(|marker| !seen.contains(*marker))
+        .collect();
+    assert!(missing.is_empty(), "never shown: {missing:?}");
+}

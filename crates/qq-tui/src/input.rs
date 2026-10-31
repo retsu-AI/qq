@@ -168,6 +168,8 @@ impl PickerItem for GoalCheckRow {
     }
 }
 
+pub(crate) const GOAL_CHECK_PAGE_ROWS: usize = 1;
+
 pub(crate) const GOAL_CHECK_ROWS: [GoalCheckRow; 3] = [
     GoalCheckRow {
         scope: None,
@@ -328,11 +330,11 @@ impl Overlay {
                 picker, detail_row, ..
             } => match key.code {
                 KeyCode::PageUp => {
-                    *detail_row = detail_row.saturating_sub(10);
+                    *detail_row = detail_row.saturating_sub(GOAL_CHECK_PAGE_ROWS);
                     PickerOutcome::Changed
                 }
                 KeyCode::PageDown => {
-                    *detail_row = detail_row.saturating_add(10);
+                    *detail_row = detail_row.saturating_add(GOAL_CHECK_PAGE_ROWS);
                     PickerOutcome::Changed
                 }
                 _ => dispatch(picker, key),
