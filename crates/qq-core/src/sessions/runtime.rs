@@ -1144,6 +1144,19 @@ impl SessionRuntime {
             .map_err(|_| SessionRuntimeError::Unavailable)
     }
 
+    #[doc(hidden)]
+    pub async fn expire_delivery_history_for_test(&self) -> Result<(), SessionRuntimeError> {
+        self.inner
+            .store
+            .call_write(store::Priority::Control, |connection| {
+                let transaction = store::begin_unit(connection)?;
+                events::prune(&transaction, 0, 0)?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .await
+    }
+
     pub(super) fn request_schedule(&self) {
         if *self.inner.shutdown.borrow() {
             return;
