@@ -16,6 +16,7 @@ mod feeds;
 mod goal_admission;
 mod goal_check;
 mod goal_check_recovery;
+#[cfg(unix)]
 mod goal_driver_soak;
 mod goal_final_slot;
 mod goal_model_audit;
