@@ -893,12 +893,13 @@ impl Provider for DeadlineProvider {
 async fn duration_expires_during_shell_execution_and_drains_before_session_reuse() {
     let directory = tempfile::tempdir().unwrap();
     let printed = directory.path().join("printed");
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        &printed,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    )
-    .unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&printed)
+            .status()
+            .unwrap()
+            .success()
+    );
     let shell_printed = tokio::task::spawn_blocking(move || std::fs::read(printed));
     let spawned =
         crate::tools::observe_shell_spawn(&std::fs::canonicalize(directory.path()).unwrap(), false);
