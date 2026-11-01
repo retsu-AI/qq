@@ -3125,11 +3125,13 @@ fn valid_model_route(route: &str) -> bool {
         .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
 }
 
-fn message_source(message: &qq_protocol::MessageSnapshot) -> &str {
-    if message.output.is_empty() {
-        &message.refusal
-    } else {
-        &message.output
+fn message_source(message: &qq_protocol::MessageSnapshot) -> std::borrow::Cow<'_, str> {
+    match (message.output.is_empty(), message.refusal.is_empty()) {
+        (_, true) => std::borrow::Cow::Borrowed(&message.output),
+        (true, false) => std::borrow::Cow::Borrowed(&message.refusal),
+        (false, false) => {
+            std::borrow::Cow::Owned(format!("{}\n\n{}", message.output, message.refusal))
+        }
     }
 }
 
@@ -3219,16 +3221,23 @@ impl App {
                 .and_then(|messages| messages.iter().find(|message| message.id == id))
         };
         let text = match cursor {
-            Block::Message(id) => message(id).map(|message| message_source(message).to_owned()),
+            Block::Message(id) => message(id).map(|message| message_source(message).into_owned()),
             Block::Code(id, from_end) => message(id).and_then(|message| {
-                let mut blocks = crate::view::code_blocks(message_source(message));
+                let mut blocks = crate::view::code_blocks(&message_source(message));
                 let index = blocks.len().checked_sub(from_end + 1)?;
                 Some(blocks.swap_remove(index))
             }),
-            Block::Tool(id) => session
-                .and_then(|session| session.tool_calls.as_ref())
-                .and_then(|calls| calls.iter().find(|call| call.id == id))
-                .map(crate::view::tool_copy_text),
+            Block::Tool(id) => session.and_then(|session| {
+                let call = session
+                    .tool_calls
+                    .as_ref()?
+                    .iter()
+                    .find(|call| call.id == id)?;
+                Some(crate::view::tool_copy_text(
+                    call,
+                    session.live_tool_output.get(&id).map(String::as_str),
+                ))
+            }),
         };
         self.copy_text(text.as_deref())
     }
@@ -3239,10 +3248,9 @@ impl App {
             return Effects::redraw(Redraw::Immediate);
         };
         if !code {
-            let answer = answer.to_owned();
             return self.copy_text(Some(&answer));
         }
-        let Some(block) = crate::view::code_blocks(answer).pop() else {
+        let Some(block) = crate::view::code_blocks(&answer).pop() else {
             self.set_warning("the last answer has no code block".to_owned());
             return Effects::redraw(Redraw::Immediate);
         };
@@ -3287,7 +3295,7 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    pub(crate) fn last_answer(&self) -> Option<&str> {
+    pub(crate) fn last_answer(&self) -> Option<String> {
         let session = self.sessions.get(&self.focused()?)?;
         session
             .messages
@@ -3297,6 +3305,7 @@ impl App {
             .filter(|message| message.role == qq_protocol::MessageRole::Assistant)
             .map(message_source)
             .find(|text| !text.trim().is_empty())
+            .map(std::borrow::Cow::into_owned)
     }
 
     pub(crate) fn composer_mode(&self) -> crate::view::ComposerMode {

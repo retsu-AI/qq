@@ -118,7 +118,7 @@ where
     let app = app?;
     drop(terminal);
     if let Some(answer) = app.last_answer() {
-        let answer = crate::selection::strip_escapes(answer);
+        let answer = crate::selection::strip_escapes(&answer);
         let answer = answer.trim_end();
         if !answer.is_empty() {
             use std::io::Write as _;
@@ -128,6 +128,20 @@ where
         }
     }
     Ok(app.focused())
+}
+
+fn copy_job(
+    helpers: Vec<crate::clipboard::Helper>,
+    copied: crate::selection::Copied,
+) -> BackgroundFuture {
+    Box::pin(async move {
+        let confirmed = crate::clipboard::run_helpers(helpers, copied.text).await;
+        BackgroundResult::Copied {
+            lines: copied.lines,
+            truncated: copied.truncated,
+            confirmed,
+        }
+    })
 }
 
 fn external_editor(draft: String) -> EditorFuture {
@@ -226,6 +240,8 @@ where
     let mut state_may_change = false;
 
     let mut jobs = FuturesUnordered::<BackgroundFuture>::new();
+    let mut copying = false;
+    let mut next_copy: Option<crate::selection::Copied> = None;
     let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_BACKGROUND_CONCURRENCY));
     let mut pending_completion = PendingCompletion::default();
     loop {
@@ -290,7 +306,15 @@ where
                         app.apply_prefetch(id, session_id)
                     }
                     BackgroundResult::Copied { lines, truncated, confirmed } => {
-                        app.apply_copy_result(lines, truncated, confirmed)
+                        copying = false;
+                        match next_copy.take() {
+                            Some(copied) => {
+                                copying = true;
+                                jobs.push(copy_job(clipboard.helpers.clone(), copied));
+                                Effects::none()
+                            }
+                            None => app.apply_copy_result(lines, truncated, confirmed),
+                        }
                     }
                 }
             }
@@ -406,24 +430,18 @@ where
                         .write_all(&crate::clipboard::osc52(&copied.text, clipboard.tmux))
                         .await?;
                     output.flush().await?;
-                    let crate::selection::Copied {
-                        text,
-                        lines,
-                        truncated,
-                    } = copied;
-                    if clipboard.helpers.is_empty() || jobs.len() >= MAX_BACKGROUND_JOBS {
-                        queue.extend(app.apply_copy_result(lines, truncated, false));
+                    if clipboard.helpers.is_empty()
+                        || (!copying && jobs.len() >= MAX_BACKGROUND_JOBS)
+                    {
+                        queue.extend(app.apply_copy_result(copied.lines, copied.truncated, false));
                         continue;
                     }
-                    let helpers = clipboard.helpers.clone();
-                    jobs.push(Box::pin(async move {
-                        let confirmed = crate::clipboard::run_helpers(helpers, text).await;
-                        BackgroundResult::Copied {
-                            lines,
-                            truncated,
-                            confirmed,
-                        }
-                    }));
+                    if copying {
+                        next_copy = Some(copied);
+                        continue;
+                    }
+                    copying = true;
+                    jobs.push(copy_job(clipboard.helpers.clone(), copied));
                 }
                 Effect::Quit => quit = true,
             }

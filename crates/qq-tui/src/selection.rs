@@ -1,4 +1,4 @@
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::render::{Join, Line, RowKind, Span, Style, normal, selection};
 
@@ -394,7 +394,7 @@ pub(crate) fn cells(line: &Line) -> Vec<Cell> {
             open_flag = !continues && is_regional_indicator(character);
             if continues && let Some(last) = out.last_mut() {
                 last.2.push(character);
-                last.1 = last.0 + crate::render::text_width(&last.2).max(last.1 - last.0);
+                last.1 = last.0 + UnicodeWidthStr::width(last.2.as_str());
                 column = last.1;
                 continue;
             }

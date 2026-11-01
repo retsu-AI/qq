@@ -590,7 +590,13 @@ pub(super) fn render_tool_blocks(
             .filter(|call| quiet(call) && !is_edit(call))
             .collect();
         if routine.len() >= TOOL_FOLD_THRESHOLD.min(calls.len()) && !routine.is_empty() {
+            let row = lines.len();
             lines.push(tool_fold_line(&routine, calls, lookup, width));
+            blocks.extend(
+                routine
+                    .iter()
+                    .map(|call| (Block::Tool(call.id), row..row + 1)),
+            );
             folded = routine;
         }
     }
@@ -639,7 +645,7 @@ pub(super) fn render_tool_blocks(
     lines
 }
 
-pub(crate) fn tool_copy_text(call: &ToolCallSnapshot) -> String {
+pub(crate) fn tool_copy_text(call: &ToolCallSnapshot, live_output: Option<&str>) -> String {
     let arguments = serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
     let field = |key: &str| {
         arguments
@@ -671,6 +677,7 @@ pub(crate) fn tool_copy_text(call: &ToolCallSnapshot) -> String {
         .result
         .as_deref()
         .map(|result| strip_header(result, header_word(&call.name)).trim_end())
+        .or_else(|| live_output.map(str::trim_end))
         .unwrap_or_default();
     if output.is_empty() {
         command

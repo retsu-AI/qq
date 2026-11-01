@@ -128,6 +128,24 @@ fn wide_and_joined_glyphs_copy_whole_from_any_cell() {
 }
 
 #[test]
+fn a_joined_emoji_takes_its_displayed_two_columns() {
+    let frame = vec![Line::styled("👩\u{200d}💻 hello", normal())];
+    let word = Selection::start(area(20, 1), 3, 0, Unit::Word).unwrap();
+    assert_eq!(word.text(&frame, &shapes(&frame)).text, "hello");
+}
+
+#[test]
+fn a_long_token_after_a_full_row_keeps_its_separating_space() {
+    let rows = crate::view::message_rows_for_test(
+        "12345678901 abcdefghijklmnop",
+        MessageRole::Assistant,
+        14,
+    );
+    assert!(rows.len() >= 3, "{rows:?}");
+    assert_eq!(select_all(&rows, 14), "12345678901 abcdefghijklmnop");
+}
+
+#[test]
 fn a_copy_is_capped_at_one_mebibyte_on_a_grapheme_boundary() {
     let text = format!("{}e\u{301}tail", "a".repeat(MAX_COPY_BYTES - 1));
     let copied = Copied::new(&text);

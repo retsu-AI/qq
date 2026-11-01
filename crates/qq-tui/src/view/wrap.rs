@@ -86,14 +86,20 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
             }
             used = group_width;
         } else {
+            let mut first = true;
             for token in group {
                 let span = &spans[token.span];
                 for character in span.text[token.range.clone()].chars() {
                     let character_width = UnicodeWidthChar::width(character).unwrap_or_default();
                     if used > 0 && used + character_width > width {
-                        output.push(Line::default().joined(Join::Glue));
+                        output.push(Line::default().joined(if first {
+                            Join::Space
+                        } else {
+                            Join::Glue
+                        }));
                         used = 0;
                     }
+                    first = false;
                     let mut encoded = [0; 4];
                     output
                         .last_mut()

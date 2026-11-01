@@ -378,6 +378,59 @@ fn slash_copy_takes_the_last_answer_or_its_last_code_block() {
 }
 
 #[test]
+fn copies_keep_a_refusal_and_running_tool_output() {
+    let mut app = app();
+    let session = app.sessions.get_mut(&fixtures::SESSION).unwrap();
+    session.messages.as_mut().unwrap()[1].refusal = "I can't run that.".to_owned();
+    let call = &mut session.tool_calls.as_mut().unwrap()[0];
+    call.state = ToolCallState::Running;
+    call.result = None;
+    session.live_tool_output.insert(
+        ToolCallId::from_bytes([3; 16]),
+        "Compiling qq-core\n".to_owned(),
+    );
+    let renderer = FrameRenderer::default();
+    app.composer.text = "/copy".to_owned();
+    assert_eq!(
+        copies(app.submit_prompt(), &renderer),
+        [format!("{}\n\nI can't run that.", answer())]
+    );
+    app.block_cursor = Some(Block::Tool(ToolCallId::from_bytes([3; 16])));
+    let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+    assert_eq!(
+        copies(app.handle_key(y), &renderer),
+        ["$ cargo test\nCompiling qq-core"]
+    );
+}
+
+#[test]
+fn folded_tool_calls_stay_reachable_by_the_block_cursor() {
+    let mut app = app();
+    let session = app.sessions.get_mut(&fixtures::SESSION).unwrap();
+    let calls = session.tool_calls.as_mut().unwrap();
+    let first = calls[0].clone();
+    calls.extend((4..7).map(|byte| qq_protocol::ToolCallSnapshot {
+        id: ToolCallId::from_bytes([byte; 16]),
+        ..first.clone()
+    }));
+    app.tool_detail = ToolDetail::Folded;
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    let tools: Vec<Block> = app
+        .pane()
+        .blocks
+        .iter()
+        .map(|(block, _)| *block)
+        .filter(|block| matches!(block, Block::Tool(_)))
+        .collect();
+    assert_eq!(tools.len(), 4, "{tools:?}");
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+    draw(&mut app, &mut renderer);
+    let selected = app.block_cursor.expect("the cursor landed");
+    assert!(matches!(selected, Block::Tool(_)), "{selected:?}");
+}
+
+#[test]
 fn copy_notices_say_whether_a_helper_confirmed_the_write() {
     let mut app = app();
     app.apply_copy_result(12, false, true);
