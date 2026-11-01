@@ -8,4 +8,4 @@ crates/qq-core/src/sessions/tests/nonblocking.rs	1736	fn stream(&self, request: 
 crates/qq-core/src/sessions/tests/nonblocking.rs	2498	fn cancel_first(children: &[String]) -> String {	tokio::time::sleep(Duration::from_millis(300)).await;
 crates/qq-core/src/sessions/tests/settlement.rs	1268	async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime() {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/tools.rs	236	pub(crate) async fn assert_panicked_process_exits(pid: u32) {	tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-crates/qq-core/src/tools.rs	4802	async fn assert_process_exits(pid: u32) {	tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+crates/qq-core/src/tools.rs	4799	async fn assert_process_exits(pid: u32) {	tokio::time::sleep(std::time::Duration::from_millis(25)).await;

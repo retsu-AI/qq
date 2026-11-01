@@ -2691,20 +2691,11 @@ mod tests {
     }
 
     async fn retire_delivery_history(fixture: &Fixture) {
-        let database = fixture
-            ._directory
-            .path()
-            .canonicalize()
-            .unwrap()
-            .join("sessions.sqlite3");
-        tokio::task::spawn_blocking(move || {
-            rusqlite::Connection::open(database)
-                .unwrap()
-                .execute("DELETE FROM events", [])
-                .unwrap();
-        })
-        .await
-        .unwrap();
+        fixture
+            .sessions
+            .expire_delivery_history_for_test()
+            .await
+            .unwrap();
     }
 
     fn options(workspace: &Path) -> HeadlessOptions {
@@ -7333,13 +7324,7 @@ mod tests {
             sequence: 0,
             ..through
         };
-        let database = fixture._directory.path().join("sessions.sqlite3");
-        tokio::task::spawn_blocking(move || {
-            let connection = rusqlite::Connection::open(database).unwrap();
-            connection.execute("DELETE FROM events", []).unwrap();
-        })
-        .await
-        .unwrap();
+        retire_delivery_history(&fixture).await;
         let handle = SessionHandle {
             approval: HeadlessApproval::ReadOnly,
             workspace_id: workspace,
@@ -7379,7 +7364,6 @@ mod tests {
     async fn a_finished_run_recovers_its_answer_after_delivery_history_expires() {
         struct StalledOutput {
             sessions: SessionRuntime,
-            database: PathBuf,
             retired: bool,
             bytes: Vec<u8>,
         }
@@ -7400,10 +7384,7 @@ mod tests {
                             }
                         }
                         drop(events);
-                        let database = self.database.clone();
-                        tokio::task::spawn_blocking(move || {
-                            rusqlite::Connection::open(database).unwrap().execute("DELETE FROM events",[]).unwrap();
-                        }).await.unwrap();
+                        self.sessions.expire_delivery_history_for_test().await.unwrap();
                     })
                     });
                     self.retired = true;
@@ -7427,12 +7408,6 @@ mod tests {
         let fixture = fixture(move || CountedTextProvider(Arc::clone(&observed))).await;
         let mut output = StalledOutput {
             sessions: fixture.sessions.clone(),
-            database: fixture
-                ._directory
-                .path()
-                .canonicalize()
-                .unwrap()
-                .join("sessions.sqlite3"),
             retired: false,
             bytes: Vec::new(),
         };

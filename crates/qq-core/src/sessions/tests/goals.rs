@@ -250,19 +250,29 @@ async fn revision_notices_across_reactive_checkpoint_overflow_reopen_in_order() 
     };
     runtime.close().await.unwrap();
     drop(runtime);
+    assert_eq!(
+        reopened_run_context(path, session_id, run).await,
+        expected,
+        "reactive retry must preserve goal/static/goal notice order"
+    );
+}
+
+async fn reopened_run_context(path: PathBuf, session_id: SessionId, run_id: RunId) -> Vec<Message> {
     let reopened = Store::open(path).await.unwrap();
     let replayed = reopened
         .call(Priority::Control, move |connection| {
             let transaction = connection.transaction()?;
-            load_model_context(&transaction, session_id, u64::MAX)
+            let prompt_ordinal: u64 = transaction.query_row(
+                "SELECT ordinal FROM messages WHERE run_id = ?1 AND role = 'user' AND steering = 0",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )?;
+            load_model_context(&transaction, session_id, prompt_ordinal)
         })
         .await
         .unwrap();
-    assert_eq!(
-        replayed, expected,
-        "reactive retry must preserve goal/static/goal notice order"
-    );
     reopened.close().await.unwrap();
+    replayed
 }
 
 #[tokio::test]
@@ -553,7 +563,7 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
                 after: receipt.committed_through,
             })
             .unwrap();
-        runtime.command(CommandId::generate().unwrap(), SessionCommand::SubmitPrompt {
+        let submitted = runtime.command(CommandId::generate().unwrap(), SessionCommand::SubmitPrompt {
         session_id, input: vec![InputPart::text("work")], limits: RunLimits::default(),
         correlation: Correlation::default(),
         output: repair.then(|| Box::new(qq_protocol::OutputContract {
@@ -561,6 +571,9 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
             repair_turns: 1,
         })),
     }).await.unwrap();
+        let CommandOutcome::PromptQueued { run_id: run, .. } = submitted.outcome else {
+            panic!("prompt");
+        };
         entered.notified().await;
         runtime
             .command(
@@ -575,14 +588,11 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
             .await
             .unwrap();
         release.notify_one();
-        let finished = collect_through_finished_generously(&mut events).await;
-        assert!(finished.iter().any(|event| matches!(
-            event.event,
-            SessionEvent::RunFinished {
-                outcome: RunOutcome::Completed,
-                ..
-            }
-        )));
+        let finished = collect_until(&mut events, finished_for(run)).await;
+        assert_eq!(
+            finished_outcome(&finished, run),
+            Some(RunOutcome::Completed)
+        );
         let expected = {
             let requests = requests.lock().unwrap();
             assert_eq!(requests.len(), if repair { 2 } else { 3 });
@@ -601,14 +611,7 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
         };
         runtime.close().await.unwrap();
         drop(runtime);
-        let reopened = Store::open(path).await.unwrap();
-        let replayed = reopened
-            .call(Priority::Control, move |connection| {
-                let transaction = connection.transaction()?;
-                load_model_context(&transaction, session_id, u64::MAX)
-            })
-            .await
-            .unwrap();
+        let replayed = reopened_run_context(path, session_id, run).await;
         assert!(
             replayed.iter().any(|message| {
                 message.content().iter().any(|block| {
@@ -621,7 +624,6 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
             replayed, expected,
             "stored revision notice must replay in the actual request position"
         );
-        reopened.close().await.unwrap();
     }
 }
 
