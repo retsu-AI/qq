@@ -65,7 +65,7 @@ fn search_skips_oversized_and_binary_files_and_counts_them() {
 
 #[cfg(unix)]
 #[test]
-fn ab2_names_discovery_reports_safe_instruction_links_and_blocks_bad_links() {
+fn names_discovery_reports_safe_instruction_links_and_blocks_bad_links() {
     use std::os::unix::fs::symlink;
     let directory = tempfile::tempdir().unwrap();
     fs::create_dir(directory.path().join("src")).unwrap();
@@ -104,7 +104,7 @@ fn ab2_names_discovery_reports_safe_instruction_links_and_blocks_bad_links() {
 
 #[cfg(unix)]
 #[test]
-fn ab2_instruction_link_pages_resume_without_following_directory_links() {
+fn instruction_link_pages_resume_without_following_directory_links() {
     use std::os::unix::fs::symlink;
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("rules"), "instructions\n").unwrap();
@@ -150,7 +150,7 @@ fn ab2_instruction_link_pages_resume_without_following_directory_links() {
 
 #[cfg(unix)]
 #[test]
-fn ab2_names_scan_budget_advances_past_nonmatching_links() {
+fn names_scan_budget_advances_past_nonmatching_links() {
     crate::tools::search::with_scan_entries(128, || {
         use std::os::unix::fs::symlink;
         let directory = tempfile::tempdir().unwrap();
@@ -187,7 +187,7 @@ fn ab2_names_scan_budget_advances_past_nonmatching_links() {
 }
 
 #[test]
-fn ab2_names_scan_budget_advances_past_empty_directories() {
+fn names_scan_budget_advances_past_empty_directories() {
     crate::tools::search::with_scan_entries(128, || {
         let directory = tempfile::tempdir().unwrap();
         for index in 0..128 {
@@ -225,7 +225,7 @@ fn ab2_names_scan_budget_advances_past_empty_directories() {
 }
 
 #[test]
-fn ab2_cursor_path_boundary_round_trips_without_header_clipping() {
+fn cursor_path_boundary_round_trips_without_header_clipping() {
     for path in ["a".repeat(4_096), "界".repeat(1_365) + "/"] {
         let cursor = crate::tools::search::Cursor {
             path,
@@ -312,7 +312,7 @@ fn ab2_cursor_path_boundary_round_trips_without_header_clipping() {
 }
 
 #[test]
-fn ab2_long_nonmatching_prefix_releases_its_cursor_reservation() {
+fn long_nonmatching_prefix_releases_its_cursor_reservation() {
     let directory = tempfile::tempdir().unwrap();
     let prefix = (0..14)
         .map(|_| "a".repeat(235))
@@ -347,7 +347,7 @@ fn ab2_long_nonmatching_prefix_releases_its_cursor_reservation() {
 
 #[cfg(unix)]
 #[test]
-fn ab2_unrepresentable_match_returns_an_explicit_budget_error() {
+fn unrepresentable_match_returns_an_explicit_budget_error() {
     let directory = tempfile::tempdir().unwrap();
     let root = (0..16)
         .map(|_| "\"".repeat(240))
@@ -371,7 +371,7 @@ fn ab2_unrepresentable_match_returns_an_explicit_budget_error() {
 }
 
 #[test]
-fn ab2_long_directory_watermark_decodes_and_reaches_later_instructions() {
+fn long_directory_watermark_decodes_and_reaches_later_instructions() {
     crate::tools::search::with_scan_entries(128, || {
         let directory = tempfile::tempdir().unwrap();
         let root = format!("{}/{}", "a".repeat(250), "a".repeat(250));
@@ -411,7 +411,7 @@ fn ab2_long_directory_watermark_decodes_and_reaches_later_instructions() {
 }
 
 #[test]
-fn ab2_names_discover_file_ignored_instructions_in_visible_directories() {
+fn names_discover_file_ignored_instructions_in_visible_directories() {
     let directory = tempfile::tempdir().unwrap();
     fs::create_dir(directory.path().join("src")).unwrap();
     fs::create_dir(directory.path().join("hidden")).unwrap();
@@ -438,7 +438,7 @@ fn ab2_names_discover_file_ignored_instructions_in_visible_directories() {
 }
 
 #[test]
-fn ab2_instruction_discovery_depth_windows_cover_boundaries() {
+fn instruction_discovery_depth_windows_cover_boundaries() {
     let directory = tempfile::tempdir().unwrap();
     let mut path = String::new();
     let mut roots = vec![".".to_owned()];
@@ -492,7 +492,7 @@ fn ab2_instruction_discovery_depth_windows_cover_boundaries() {
 }
 
 #[test]
-fn ab2_names_and_content_search_reach_an_explicit_ignored_worktree() {
+fn names_and_content_search_reach_an_explicit_ignored_worktree() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     fs::write(root.join(".gitignore"), "/.worktrees/\n/src/vendor/\n").unwrap();

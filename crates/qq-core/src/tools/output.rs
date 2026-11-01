@@ -1025,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn ab2_sixteen_search_pages_cannot_bypass_the_turn_cap() {
+    fn sixteen_search_pages_cannot_bypass_the_turn_cap() {
         let page = format!(
             "search mode=content rows=128 next=cursor\n{}",
             "path:1:needle\n".repeat(940)
@@ -1263,7 +1263,7 @@ mod tests {
     }
 
     #[test]
-    fn ab2_mixed_pages_and_long_recall_names_fit_all_sixty_four_replies() {
+    fn mixed_pages_and_long_recall_names_fit_all_sixty_four_replies() {
         let long_name = "x".repeat(128);
         let page = format!(
             "search . mode=names next=YWJjADA\n{}",

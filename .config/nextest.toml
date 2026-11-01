@@ -49,7 +49,7 @@ test-group = 'real-process'
 filter = '''
 (package(qq-core) & (
     test(=sessions::tests::compaction::pruning::a_session_without_a_window_still_sheds_stale_reads_before_the_storage_backstop)
-    | test(=tools::tests::read::ab3_scan_cap_offsets_remain_readable_until_a_terminal_marker)
+    | test(=tools::tests::read::scan_cap_offsets_remain_readable_until_a_terminal_marker)
     | test(=sessions::tests::compaction::in_run::maximum_goal_is_verbatim_immediately_after_three_in_run_summaries)
     | test(=tools::tests::shell::cancel_and_timeout_kill_descendants_that_left_the_group)
     | test(=sessions::tests::compaction::in_run::an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verbatim)
@@ -100,10 +100,10 @@ default-filter = '''
 | package(qq-core) & (
     test(/^tools::windows_job::tests::/)
     | test(=tools::shell::cmd_text_tests::quoted_redirection_reaches_cmd_unchanged)
-    | test(=approval::tests::ab1_cmd_separators_and_native_sort_output_are_work)
+    | test(=approval::tests::cmd_separators_and_native_sort_output_are_work)
     | test(=sessions::tests::approvals::goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied_actions)
-    | test(=tools::tests::read::ab3_native_zero_row_window_returns_a_budget_error)
-    | test(=tools::tests::read::ab3_native_unicode_header_preserves_repaired_read_windows)
+    | test(=tools::tests::read::native_zero_row_window_returns_a_budget_error)
+    | test(=tools::tests::read::native_unicode_header_preserves_repaired_read_windows)
     | test(=tools::tests::shell::dropped_windows_shell_waiter_kills_the_owned_process_before_drain)
     | test(=tools::tests::shell::windows_shell_timeout_kills_the_owned_process)
     | test(=tools::tests::shell::panicked_shell_task_never_reports_confirmed_quiescence)

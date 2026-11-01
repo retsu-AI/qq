@@ -1473,7 +1473,7 @@ mod action_bias_tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
     #[test]
-    fn ab2_pruning_preserves_long_search_cursor_and_is_idempotent() {
+    fn pruning_preserves_long_search_cursor_and_is_idempotent() {
         let path = format!("{}/file.txt", "a".repeat(4_000));
         let cursor = URL_SAFE_NO_PAD.encode(format!("{path}\0{}", 0));
         let header = format!("search . mode=names next={cursor}");
@@ -1495,7 +1495,7 @@ mod action_bias_tests {
     }
 
     #[test]
-    fn ab2_replay_matches_live_projection_for_sixty_four_mixed_replies() {
+    fn replay_matches_live_projection_for_sixty_four_mixed_replies() {
         let long_name = "x".repeat(128);
         let page = format!(
             "search . mode=names next=YWJjADA\n{}",
@@ -1597,7 +1597,7 @@ mod action_bias_tests {
     }
 
     #[test]
-    fn ab2_replay_preserves_complete_late_search_pages() {
+    fn replay_preserves_complete_late_search_pages() {
         let path = format!("{}/file.txt", "a".repeat(2_000));
         let cursor = URL_SAFE_NO_PAD.encode(format!("{path}\0{}", 0));
         let page = format!(

@@ -770,7 +770,7 @@ fn delegation_guidance_asks_for_a_question_a_purpose_and_an_answer_shape() {
 }
 
 #[test]
-fn ab4_read_only_root_states_authority_and_has_no_action_obligation() {
+fn read_only_root_states_authority_and_has_no_action_obligation() {
     let instructions = workspace::WorkspaceInstructions::empty();
     let read_only = tools::specs()
         .into_iter()

@@ -19,7 +19,7 @@ use std::{
 use super::*;
 
 #[test]
-fn ab2_unresolved_projection_keeps_the_server_recovery_message() {
+fn unresolved_projection_keeps_the_server_recovery_message() {
     let error = SessionRuntimeError::ToolProjectionUnavailable {
         run: "historical-run".to_owned(),
     };

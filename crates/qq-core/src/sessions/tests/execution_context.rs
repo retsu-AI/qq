@@ -294,7 +294,7 @@ pub(super) async fn pending_process_call(
 }
 
 #[tokio::test]
-async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
+async fn execution_receipt_is_atomic_bounded_and_survives_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let store = Store::open(path.clone()).await.unwrap();
@@ -474,7 +474,7 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
 }
 
 #[tokio::test]
-async fn ab1_historical_context_stays_unavailable_and_wrong_schema_is_rejected() {
+async fn historical_context_stays_unavailable_and_wrong_schema_is_rejected() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let store = Store::open(path.clone()).await.unwrap();

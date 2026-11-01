@@ -228,7 +228,7 @@ async fn read_tools_overlap_and_cancellation_stops_in_flight_work() {
 }
 
 #[tokio::test]
-async fn ab3_parallel_default_reads_recover_every_line_under_the_turn_budget() {
+async fn parallel_default_reads_recover_every_line_under_the_turn_budget() {
     struct State {
         turn: usize,
         seen: Vec<Vec<bool>>,
@@ -349,7 +349,7 @@ async fn ab3_parallel_default_reads_recover_every_line_under_the_turn_budget() {
 }
 
 #[tokio::test]
-async fn ab2_deferred_searches_do_not_trigger_a_premature_slice_checkpoint() {
+async fn deferred_searches_do_not_trigger_a_premature_slice_checkpoint() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("AGENTS.md"), "instructions").unwrap();
     let turns = (0..20).map(|turn| (0..16).map(|index| {
@@ -404,7 +404,7 @@ async fn ab2_deferred_searches_do_not_trigger_a_premature_slice_checkpoint() {
 }
 
 #[tokio::test]
-async fn ab2_batched_searches_defer_before_execution_and_retry_unchanged() {
+async fn batched_searches_defer_before_execution_and_retry_unchanged() {
     for count in [16, 64] {
         let directory = tempfile::tempdir().unwrap();
         for index in 0..100 {
@@ -571,7 +571,7 @@ async fn ab2_batched_searches_defer_before_execution_and_retry_unchanged() {
 }
 
 #[tokio::test]
-async fn ab2_late_direct_search_preserves_complete_pages_and_continuation() {
+async fn late_direct_search_preserves_complete_pages_and_continuation() {
     let directory = tempfile::tempdir().unwrap();
     let root = std::iter::repeat_n("a".repeat(240), 8)
         .collect::<Vec<_>>()

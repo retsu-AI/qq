@@ -67,7 +67,7 @@ impl Provider for RepeatingCalls {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn ac4_runtime_refuses_third_identical_error_in_the_same_turn() {
+async fn runtime_refuses_third_identical_error_in_the_same_turn() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "present\n").unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -137,7 +137,7 @@ async fn ac4_runtime_refuses_third_identical_error_in_the_same_turn() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn ac4_process_work_receipts_reset_repeated_successes() {
+async fn process_work_receipts_reset_repeated_successes() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "present\n").unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -185,7 +185,7 @@ async fn ac4_process_work_receipts_reset_repeated_successes() {
 }
 
 #[tokio::test]
-async fn ac4_runtime_refuses_fifth_identical_success_in_the_same_turn() {
+async fn runtime_refuses_fifth_identical_success_in_the_same_turn() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "present\n").unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -246,7 +246,7 @@ async fn ac4_runtime_refuses_fifth_identical_success_in_the_same_turn() {
 }
 
 #[tokio::test]
-async fn ac4_runtime_pauses_after_512_quiet_attempts_despite_requested_reports() {
+async fn runtime_pauses_after_512_quiet_attempts_despite_requested_reports() {
     let directory = tempfile::tempdir().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let runtime = Runtime::new(
@@ -348,7 +348,7 @@ impl Provider for SequenceCalls {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-fn ac4_verified_process_reads_keep_repeated_observations() {
+fn verified_process_reads_keep_repeated_observations() {
     use sha2::Digest as _;
     use std::os::unix::fs::PermissionsExt as _;
     if std::env::var_os("QQ_CONTEXT_GUARD_WORKER").is_none() {
@@ -362,7 +362,7 @@ fn ac4_verified_process_reads_keep_repeated_observations() {
         std::fs::set_permissions(root.join("grep"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
         crate::test_support::run_worker(
-            "tests::loop_guard::ac4_verified_process_reads_keep_repeated_observations",
+            "tests::loop_guard::verified_process_reads_keep_repeated_observations",
             "QQ_CONTEXT_GUARD_WORKER",
             |command| {
                 command
@@ -434,7 +434,7 @@ fn ac4_verified_process_reads_keep_repeated_observations() {
 }
 
 #[tokio::test]
-async fn ac4_runtime_mutation_allows_the_same_read_after_four_results() {
+async fn runtime_mutation_allows_the_same_read_after_four_results() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "old\n").unwrap();
     let mut calls = vec![("read_file", r#"{"path":"note.txt"}"#.to_owned()); 4];
@@ -494,7 +494,7 @@ async fn ac4_runtime_mutation_allows_the_same_read_after_four_results() {
 }
 
 #[tokio::test]
-async fn ac4_runtime_alternating_stable_reads_pause_after_two_novel_results() {
+async fn runtime_alternating_stable_reads_pause_after_two_novel_results() {
     let directory = tempfile::tempdir().unwrap();
     for path in ["a.txt", "b.txt"] {
         std::fs::write(directory.path().join(path), "same\n").unwrap();
@@ -541,7 +541,7 @@ async fn ac4_runtime_alternating_stable_reads_pause_after_two_novel_results() {
 }
 
 #[tokio::test]
-async fn ac4_runtime_novel_reads_complete_and_keep_reporting() {
+async fn runtime_novel_reads_complete_and_keep_reporting() {
     const READS: usize = 3 * STALL_REPORT_CALLS as usize + 8;
     let directory = tempfile::tempdir().unwrap();
     let calls = (0..READS)
@@ -650,7 +650,7 @@ impl runtime::SpillReader for RecallFailure {
 }
 
 #[tokio::test]
-async fn ac4_runtime_host_refusals_do_not_establish_executed_error_streaks() {
+async fn runtime_host_refusals_do_not_establish_executed_error_streaks() {
     for (tool, arguments, expected, backing_calls) in [
         ("spawn_agent", "{}", "invalid arguments", 0),
         (
@@ -747,7 +747,7 @@ async fn ac4_runtime_host_refusals_do_not_establish_executed_error_streaks() {
 }
 
 #[tokio::test]
-async fn ac4_runtime_unavailable_recall_does_not_prove_an_executed_error_streak() {
+async fn runtime_unavailable_recall_does_not_prove_an_executed_error_streak() {
     for (tool, arguments, expected) in [
         (
             "search_history",
@@ -854,7 +854,7 @@ impl ExternalToolHost for IdentifiedFixtureHost {
 }
 
 #[tokio::test]
-async fn ac4_runtime_external_producer_identity_survives_equal_previews() {
+async fn runtime_external_producer_identity_survives_equal_previews() {
     let directory = tempfile::tempdir().unwrap();
     let registry = MockMcpRegistry::returning(HostToolResult {
         content: "[image content omitted]".to_owned(),
@@ -898,7 +898,7 @@ async fn ac4_runtime_external_producer_identity_survives_equal_previews() {
 }
 
 #[tokio::test]
-async fn ac4_runtime_1500_changed_results_for_one_call_remain_novel() {
+async fn runtime_1500_changed_results_for_one_call_remain_novel() {
     let directory = tempfile::tempdir().unwrap();
     let registry = MockMcpRegistry::returning(HostToolResult {
         content: "[image content omitted]".to_owned(),

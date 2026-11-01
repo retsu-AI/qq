@@ -278,7 +278,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ab1_read_image_approvals_are_explicit_closed_and_bounded() {
+    fn read_image_approvals_are_explicit_closed_and_bounded() {
         let hash = "01".repeat(32);
         let approval: ApprovedReadImage = format!("grep:{hash}").parse().unwrap();
         assert_eq!(approval.family, ReadImageFamily::Grep);
@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn t20_prefixes_and_path_operands_do_not_overstate_replaceability() {
+    fn prefixes_and_path_operands_do_not_overstate_replaceability() {
         for command in [
             "cd /tmp && sed -n 1,5p log",
             "cd ../x && sed -n 1,5p a",

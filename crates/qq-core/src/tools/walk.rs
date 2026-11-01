@@ -467,7 +467,7 @@ mod tests {
     use crate::tools::dispatch::ToolCancellation;
 
     #[test]
-    fn ab2_directory_listing_stops_at_mid_enumeration_cancellation() {
+    fn directory_listing_stops_at_mid_enumeration_cancellation() {
         let directory = tempfile::tempdir().unwrap();
         for name in ["c", "a", "b"] {
             std::fs::write(directory.path().join(name), "").unwrap();
@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn ab2_directory_listing_is_bounded_before_ordered_pages() {
+    fn directory_listing_is_bounded_before_ordered_pages() {
         let directory = tempfile::tempdir().unwrap();
         for name in ["c", "a", "b"] {
             std::fs::write(directory.path().join(name), "").unwrap();

@@ -1294,7 +1294,7 @@ pub(super) async fn model_goal_claim(goal_origin: bool) -> (TempDir, Store, Clai
 }
 
 #[tokio::test]
-async fn ac4_checklist_mutation_evidence_tracks_actual_changes_and_stays_off_wire() {
+async fn checklist_mutation_evidence_tracks_actual_changes_and_stays_off_wire() {
     let (_directory, store, claim) = model_goal_claim(false).await;
     let add = serde_json::from_value(serde_json::json!({
         "checklist":[{"type":"add","text":"verify"}],

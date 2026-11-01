@@ -934,7 +934,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn ab1_cmd_separators_and_native_sort_output_are_work() {
+    fn cmd_separators_and_native_sort_output_are_work() {
         for command in [
             "echo 'x & cargo fmt & echo x'",
             "sort input.txt /o output.txt",
@@ -945,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn ab1_sed_extended_regex_is_read_without_write_options() {
+    fn sed_extended_regex_is_read_without_write_options() {
         for options in [
             vec!["-E", "-n"],
             vec!["-r", "-n"],
@@ -968,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn ab1_literal_exec_arguments_remain_reads() {
+    fn literal_exec_arguments_remain_reads() {
         for args in [
             r#"{"program":"rg","args":["--no-config","foo bar","f.rs"]}"#,
             r#"{"program":"rg","args":["--no-config","it's $HOME!^%","f.rs"]}"#,

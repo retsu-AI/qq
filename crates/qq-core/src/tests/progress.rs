@@ -973,7 +973,7 @@ async fn a_final_answer_turn_over_its_cost_bound_settles_as_exhausted() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn ab1_cd_prefixed_reads_without_context_verification_count_as_work() {
+async fn cd_prefixed_reads_without_context_verification_count_as_work() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("sub")).unwrap();
     std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
@@ -1017,7 +1017,7 @@ async fn ab1_cd_prefixed_reads_without_context_verification_count_as_work() {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-fn ab1_verified_exec_reads_report_on_request_sixty_five() {
+fn verified_exec_reads_report_on_request_sixty_five() {
     use sha2::Digest as _;
     use std::os::unix::fs::PermissionsExt as _;
     if std::env::var_os("QQ_CONTEXT_STALL_WORKER").is_none() {
@@ -1028,7 +1028,7 @@ fn ab1_verified_exec_reads_report_on_request_sixty_five() {
         std::fs::set_permissions(root.join("grep"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
         crate::test_support::run_worker(
-            "tests::progress::ab1_verified_exec_reads_report_on_request_sixty_five",
+            "tests::progress::verified_exec_reads_report_on_request_sixty_five",
             "QQ_CONTEXT_STALL_WORKER",
             |command| {
                 command

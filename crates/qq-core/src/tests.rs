@@ -2,6 +2,7 @@
 mod audit_regression;
 mod checkpoints;
 mod delegation;
+mod dispatch_corrections;
 mod external_tools;
 mod instructions;
 mod loop_guard;
@@ -9,7 +10,6 @@ mod mcp;
 mod progress;
 mod retries;
 mod summaries;
-mod t20;
 mod tool_loop;
 mod truncation;
 
@@ -661,7 +661,7 @@ impl ExternalToolHost for MockMcpRegistry {
 
 #[cfg(unix)]
 #[test]
-fn ab1_inherited_path_shadowed_read_counts_as_work_and_audit() {
+fn inherited_path_shadowed_read_counts_as_work_and_audit() {
     use std::os::unix::fs::PermissionsExt;
     if std::env::var_os("QQ_CONTEXT_SHADOW_WORKER").is_none() {
         let directory = tempfile::tempdir().unwrap();
@@ -677,7 +677,7 @@ fn ab1_inherited_path_shadowed_read_counts_as_work_and_audit() {
         .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         crate::test_support::run_worker(
-            "tests::ab1_inherited_path_shadowed_read_counts_as_work_and_audit",
+            "tests::inherited_path_shadowed_read_counts_as_work_and_audit",
             "QQ_CONTEXT_SHADOW_WORKER",
             |command| {
                 command

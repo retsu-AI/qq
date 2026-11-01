@@ -1069,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    fn ab4_cached_declarations_honor_absent_result_recall() {
+    fn cached_declarations_honor_absent_result_recall() {
         let mut tools = statics();
         tools.push(StaticTool::new(
             ToolSpec::new(
@@ -1094,7 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn ab4_progressive_eligibility_filters_indexes_pins_and_selector_reports() {
+    fn progressive_eligibility_filters_indexes_pins_and_selector_reports() {
         let tools = (0..40)
             .map(|i| external(&format!("mcp__srv__tool{i:02}"), "Widget operation"))
             .collect();
@@ -1154,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn ab4_read_only_runs_are_never_offered_schemas_their_policy_denies() {
+    fn read_only_runs_are_never_offered_schemas_their_policy_denies() {
         let mut tools = statics();
         tools.extend([
             StaticTool::new(

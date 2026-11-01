@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn ab2_known_historical_projection_preserves_the_eighth_search_page() {
+async fn known_historical_projection_preserves_the_eighth_search_page() {
     for version in 10..=14 {
         historical_projection_fixture(version).await;
     }
@@ -203,7 +203,7 @@ async fn projection_fixture(
 }
 
 #[tokio::test]
-async fn ab2_replay_uses_exact_persisted_replies_and_a_legacy_correction_notice() {
+async fn replay_uses_exact_persisted_replies_and_a_legacy_correction_notice() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let store = Store::open(path.clone()).await.unwrap();
@@ -286,7 +286,7 @@ async fn ab2_replay_uses_exact_persisted_replies_and_a_legacy_correction_notice(
 }
 
 #[tokio::test]
-async fn ab2_projection_retries_and_invalid_writes_preserve_first_commit() {
+async fn projection_retries_and_invalid_writes_preserve_first_commit() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path().join("sessions.sqlite3"))
         .await
@@ -394,7 +394,7 @@ async fn ab2_projection_retries_and_invalid_writes_preserve_first_commit() {
 }
 
 #[tokio::test]
-async fn ab2_projection_write_failure_stops_before_next_provider_request() {
+async fn projection_write_failure_stops_before_next_provider_request() {
     let mut harness = scripted_runs_harness(
         ApprovalMode::ReadOnly,
         vec![vec![("read_file", r#"{"path":"note.txt"}"#.to_owned())]],
@@ -436,7 +436,7 @@ async fn ab2_projection_write_failure_stops_before_next_provider_request() {
 }
 
 #[test]
-fn ab2_projection_migration_preserves_old_rows_and_refuses_incompatible_stores() {
+fn projection_migration_preserves_old_rows_and_refuses_incompatible_stores() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let (connection, _) = open_database(&path).unwrap();
@@ -463,7 +463,7 @@ fn ab2_projection_migration_preserves_old_rows_and_refuses_incompatible_stores()
 }
 
 #[tokio::test]
-async fn ab2_ambiguous_history_is_not_assigned_the_current_projection() {
+async fn ambiguous_history_is_not_assigned_the_current_projection() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path().join("sessions.sqlite3"))
         .await
@@ -503,7 +503,7 @@ async fn ab2_ambiguous_history_is_not_assigned_the_current_projection() {
 }
 
 #[tokio::test]
-async fn ab2_ambiguous_history_fails_only_its_run_and_keeps_fresh_sessions_usable() {
+async fn ambiguous_history_fails_only_its_run_and_keeps_fresh_sessions_usable() {
     let mut harness = scripted_runs_harness(
         ApprovalMode::ReadOnly,
         vec![
@@ -561,12 +561,12 @@ async fn ab2_ambiguous_history_fails_only_its_run_and_keeps_fresh_sessions_usabl
 }
 
 #[tokio::test]
-async fn ab2_checkpoint_review_without_exact_projection_cannot_lose_its_verdict() {
+async fn checkpoint_review_without_exact_projection_cannot_lose_its_verdict() {
     checkpoint_without_exact_projection_fails_closed(true).await;
 }
 
 #[tokio::test]
-async fn ab2_started_checkpoint_without_verdict_or_projection_fails_closed() {
+async fn started_checkpoint_without_verdict_or_projection_fails_closed() {
     checkpoint_without_exact_projection_fails_closed(false).await;
 }
 

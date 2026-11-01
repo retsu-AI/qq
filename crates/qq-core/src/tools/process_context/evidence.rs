@@ -35,7 +35,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn ab6_configured_producer_survives_plan_compile_and_real_process_execution() {
+    async fn configured_producer_survives_plan_compile_and_real_process_execution() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = std::fs::canonicalize(directory.path()).unwrap();
         let producer = Arc::new(crate::ProcessProducer::new(&"a".repeat(40)));
@@ -81,7 +81,7 @@ mod tests {
     }
 
     #[test]
-    fn ab6_ten_image_v2_receipt_fits_the_existing_store_bound() {
+    fn ten_image_v2_receipt_fits_the_existing_store_bound() {
         let families = [
             ReadImageFamily::Cat,
             ReadImageFamily::Head,
@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn ab6_v2_proof_requires_call_manifest_plan_policy_and_pinned_producer() {
+    fn v2_proof_requires_call_manifest_plan_policy_and_pinned_producer() {
         let directory = tempfile::tempdir().unwrap();
         let image = ApprovedReadImage {
             family: ReadImageFamily::Grep,

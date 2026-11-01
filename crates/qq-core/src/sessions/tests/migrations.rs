@@ -1315,7 +1315,7 @@ async fn a_store_older_than_the_first_release_fails_to_open_naming_its_schema() 
 }
 
 #[test]
-fn ab5_store_open_rejects_the_next_schema_before_loading_sessions() {
+fn store_open_rejects_the_next_schema_before_loading_sessions() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let (connection, _) = open_database(&path).unwrap();
@@ -1403,7 +1403,7 @@ fn migrating_a_v0_1_6_store_keeps_its_structure_and_store_identity() {
 }
 
 #[test]
-fn ab5_schema_fifty_cannot_hide_a_missing_execution_receipt_column() {
+fn schema_fifty_cannot_hide_a_missing_execution_receipt_column() {
     for previous in [50, STORE_SCHEMA_VERSION] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sessions.sqlite3");

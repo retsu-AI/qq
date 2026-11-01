@@ -109,7 +109,7 @@ fn exposure_intersects_profile_mcp_admission_before_member_validation() {
 }
 
 #[test]
-fn ab1_factory_clones_profiles_and_cache_keep_host_read_approvals() {
+fn factory_clones_profiles_and_cache_keep_host_read_approvals() {
     let fixture = RuntimeFixture::new();
     let request = fixture.request(r#"(version: 1, model: "custom/test", providers: {"custom": Custom(connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth), models: {"test": (name: "Test")})}, profiles: {"worker": Profile(model: Some("custom/test"))})"#);
     let manifest = qq_core::ApprovedReadImages::new(vec![

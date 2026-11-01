@@ -735,10 +735,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
-    fn ab1_verified_image_is_bound_and_unverified_effects_count_as_work() {
+    fn verified_image_is_bound_and_unverified_effects_count_as_work() {
         if std::env::var_os("QQ_CONTEXT_IMAGE_WORKER").is_none() {
             crate::test_support::run_worker(
-                "tools::process_context::tests::ab1_verified_image_is_bound_and_unverified_effects_count_as_work",
+                "tools::process_context::tests::verified_image_is_bound_and_unverified_effects_count_as_work",
                 "QQ_CONTEXT_IMAGE_WORKER",
                 |command| {
                     command.env("LANG", "C");

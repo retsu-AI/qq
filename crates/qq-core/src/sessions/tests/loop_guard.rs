@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn ac4_runtime_guard_refusal_is_durable_and_reopens_identically() {
+async fn runtime_guard_refusal_is_durable_and_reopens_identically() {
     let mut harness = scripted_runs_harness(
         ApprovalMode::Auto,
         vec![vec![

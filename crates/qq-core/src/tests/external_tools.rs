@@ -255,7 +255,7 @@ async fn side_question_rejects_forbidden_calls_without_dispatch_or_approval() {
 }
 
 #[tokio::test]
-async fn ab4_interactive_inspection_only_profiles_have_no_action_obligation() {
+async fn interactive_inspection_only_profiles_have_no_action_obligation() {
     for exposed in [Vec::new(), vec!["read_file".to_owned()]] {
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -307,7 +307,7 @@ async fn ab4_interactive_inspection_only_profiles_have_no_action_obligation() {
 }
 
 #[tokio::test]
-async fn ab4_direct_external_grants_control_declaration_and_execution() {
+async fn direct_external_grants_control_declaration_and_execution() {
     for granted in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -354,7 +354,7 @@ async fn ab4_direct_external_grants_control_declaration_and_execution() {
 }
 
 #[tokio::test]
-async fn ab4_duplicate_host_grants_authorize_only_the_surviving_owner() {
+async fn duplicate_host_grants_authorize_only_the_surviving_owner() {
     for unattended in [false, true] {
         for (first_granted, later_granted) in
             [(false, true), (true, false), (false, false), (true, true)]
@@ -452,7 +452,7 @@ async fn ab4_duplicate_host_grants_authorize_only_the_surviving_owner() {
 }
 
 #[tokio::test]
-async fn ab4_direct_gate_and_declarations_share_the_compiled_grant_snapshot() {
+async fn direct_gate_and_declarations_share_the_compiled_grant_snapshot() {
     for granted in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -501,7 +501,7 @@ async fn ab4_direct_gate_and_declarations_share_the_compiled_grant_snapshot() {
 }
 
 #[tokio::test]
-async fn ab4_run_messages_uses_grants_at_first_poll_for_gate_and_declarations() {
+async fn run_messages_uses_grants_at_first_poll_for_gate_and_declarations() {
     for granted in [false, true] {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let mut host = WideHost::new(2);
@@ -538,7 +538,7 @@ async fn ab4_run_messages_uses_grants_at_first_poll_for_gate_and_declarations() 
 }
 
 #[tokio::test]
-async fn ab4_read_only_root_hides_write_child_authority_and_denies_injection() {
+async fn read_only_root_hides_write_child_authority_and_denies_injection() {
     let directory = tempfile::tempdir().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let spawner = Arc::new(StubSpawner::new(
@@ -618,7 +618,7 @@ async fn ab4_read_only_root_hides_write_child_authority_and_denies_injection() {
 }
 
 #[tokio::test]
-async fn ab4_direct_requests_declare_only_executable_tools_and_state_authority() {
+async fn direct_requests_declare_only_executable_tools_and_state_authority() {
     let directory = tempfile::tempdir().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let runtime = Runtime::new(
@@ -670,7 +670,7 @@ async fn ab4_direct_requests_declare_only_executable_tools_and_state_authority()
 }
 
 #[tokio::test]
-async fn ab2_captured_subset_prompts_only_instruct_declared_tools() {
+async fn captured_subset_prompts_only_instruct_declared_tools() {
     for exposed in [
         Vec::new(),
         vec!["read_file".to_owned()],
@@ -1051,7 +1051,7 @@ async fn progressive_exposure_pins_selected_tools_for_the_rest_of_the_run() {
 }
 
 #[tokio::test]
-async fn ab4_read_only_recovery_omits_granted_external_pins_and_index() {
+async fn read_only_recovery_omits_granted_external_pins_and_index() {
     let directory = tempfile::tempdir().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let runtime = Runtime::new(

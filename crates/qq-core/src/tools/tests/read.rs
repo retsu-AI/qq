@@ -175,7 +175,7 @@ fn read_search_identity_excludes_advisory_only_search_changes() {
 }
 
 #[test]
-fn ab3_default_reads_fill_the_budget_and_explicit_limits_resume() {
+fn default_reads_fill_the_budget_and_explicit_limits_resume() {
     let directory = tempfile::tempdir().unwrap();
     for (path, lines, content) in [
         ("small", 300, "x\n"),
@@ -237,7 +237,7 @@ fn ab3_default_reads_fill_the_budget_and_explicit_limits_resume() {
 }
 
 #[test]
-fn ab3_long_path_headers_preserve_contiguous_model_visible_rows() {
+fn long_path_headers_preserve_contiguous_model_visible_rows() {
     let directory = tempfile::tempdir().unwrap();
     let prefix = std::iter::repeat_n("a".repeat(100), 6)
         .collect::<Vec<_>>()
@@ -274,7 +274,7 @@ fn ab3_long_path_headers_preserve_contiguous_model_visible_rows() {
 }
 
 #[test]
-fn ab3_full_row_is_not_clipped_again_after_adding_the_gutter() {
+fn full_row_is_not_clipped_again_after_adding_the_gutter() {
     let directory = tempfile::tempdir().unwrap();
     let content = "x".repeat(output::MAX_LINE_BYTES);
     fs::write(directory.path().join("row.txt"), &content).unwrap();
@@ -295,7 +295,7 @@ fn ab3_full_row_is_not_clipped_again_after_adding_the_gutter() {
 }
 
 #[test]
-fn ab3_secret_masking_preserves_contiguous_default_windows() {
+fn secret_masking_preserves_contiguous_default_windows() {
     let directory = tempfile::tempdir().unwrap();
     let prefix = std::iter::repeat_n("a".repeat(100), 6)
         .collect::<Vec<_>>()
@@ -351,7 +351,7 @@ fn ab3_secret_masking_preserves_contiguous_default_windows() {
 
 #[cfg(windows)]
 #[test]
-fn ab3_native_zero_row_window_returns_a_budget_error() {
+fn native_zero_row_window_returns_a_budget_error() {
     let directory = tempfile::tempdir().unwrap();
     let mut dir =
         cap_std::fs::Dir::open_ambient_dir(directory.path(), cap_std::ambient_authority()).unwrap();
@@ -376,7 +376,7 @@ fn ab3_native_zero_row_window_returns_a_budget_error() {
 
 #[cfg(windows)]
 #[test]
-fn ab3_native_unicode_header_preserves_repaired_read_windows() {
+fn native_unicode_header_preserves_repaired_read_windows() {
     let directory = tempfile::tempdir().unwrap();
     let mut dir =
         cap_std::fs::Dir::open_ambient_dir(directory.path(), cap_std::ambient_authority()).unwrap();
@@ -429,7 +429,7 @@ fn ab3_native_unicode_header_preserves_repaired_read_windows() {
 }
 
 #[test]
-fn ab3_continuation_beyond_start_offset_bound_is_terminal() {
+fn continuation_beyond_start_offset_bound_is_terminal() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("many.txt"), "\n".repeat(105_000)).unwrap();
     let workspace = Workspace::open(directory.path()).unwrap();
@@ -449,7 +449,7 @@ fn ab3_continuation_beyond_start_offset_bound_is_terminal() {
 }
 
 #[test]
-fn ab3_rendered_line_bound_continues_contiguously_without_spill() {
+fn rendered_line_bound_continues_contiguously_without_spill() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("empty"), "\n".repeat(4_000)).unwrap();
     let workspace = Workspace::open(directory.path()).unwrap();
@@ -493,7 +493,7 @@ fn ab3_rendered_line_bound_continues_contiguously_without_spill() {
 }
 
 #[test]
-fn ab3_scan_cap_continuation_does_not_claim_an_exact_remainder() {
+fn scan_cap_continuation_does_not_claim_an_exact_remainder() {
     let directory = tempfile::tempdir().unwrap();
     let line = format!("{}\n", "x".repeat(1_023));
     fs::write(directory.path().join("capped"), line.repeat(4_097)).unwrap();
@@ -510,7 +510,7 @@ fn ab3_scan_cap_continuation_does_not_claim_an_exact_remainder() {
 }
 
 #[test]
-fn ab3_scan_cap_offsets_remain_readable_until_a_terminal_marker() {
+fn scan_cap_offsets_remain_readable_until_a_terminal_marker() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(
         directory.path().join("capped"),
@@ -583,7 +583,7 @@ fn read_file_stops_at_its_byte_budget_and_names_the_resume_offset() {
 }
 
 #[test]
-fn t20_oversized_search_and_ranges_keep_lossless_corrections() {
+fn oversized_search_and_ranges_keep_lossless_corrections() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("a"), "x\n".repeat(100)).unwrap();
     let workspace = Workspace::open(directory.path()).unwrap();
