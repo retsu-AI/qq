@@ -6378,3 +6378,45 @@ fn the_rail_scrolls_to_a_focused_agent_below_the_fold() {
         "its session stays in view: {rail}"
     );
 }
+
+#[test]
+fn the_focused_agent_keeps_a_rail_row_past_the_agent_cap() {
+    let mut harness =
+        crate::bench_support::BenchHarness::scene(crate::bench_support::Scene::Fanout, (120, 40));
+    let app = &mut harness.app;
+    for index in 2..=8_u8 {
+        let agent = SessionId::from_bytes({
+            let mut bytes = [0x10; 16];
+            bytes[15] = index;
+            bytes
+        });
+        app.sessions
+            .get_mut(&agent)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([index; 16]));
+    }
+    let focused = SessionId::from_bytes({
+        let mut bytes = [0x10; 16];
+        bytes[15] = 20;
+        bytes
+    });
+    app.focus_session(focused);
+    let rows = harness.plain_frame();
+    let rail: Vec<String> = rows
+        .iter()
+        .map(|row| row.chars().skip(90).collect::<String>().trim().to_owned())
+        .filter(|row| !row.is_empty())
+        .collect();
+    assert!(
+        rail.iter().any(|row| row == "▎   ◐ agent 20"),
+        "the focused agent is listed: {rail:#?}"
+    );
+    assert_eq!(
+        rail.iter().filter(|row| row.contains("◇ agent")).count(),
+        5,
+        "{rail:#?}"
+    );
+    assert!(rail.iter().any(|row| row == "+3 more"), "{rail:#?}");
+}

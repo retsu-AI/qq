@@ -8,7 +8,7 @@ use qq_protocol::{
 use crate::{ClientUpdate, TuiOptions, app::App, fixtures, view::FrameRenderer};
 
 pub struct BenchHarness {
-    app: App,
+    pub(crate) app: App,
     renderer: FrameRenderer,
     size: (u16, u16),
     next_sequence: u64,

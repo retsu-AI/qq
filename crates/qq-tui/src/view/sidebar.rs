@@ -128,7 +128,7 @@ pub(super) fn sidebar(
                     .focused()
                     .and_then(|focused| app.sessions.session_of(focused))
                     == Some(entry.id));
-        let shown: Vec<SessionId> = if wanted {
+        let mut shown: Vec<SessionId> = if wanted {
             app.sessions
                 .agents_of(entry.id)
                 .into_iter()
@@ -140,6 +140,14 @@ pub(super) fn sidebar(
         } else {
             Vec::new()
         };
+        if let Some(position) = shown
+            .iter()
+            .position(|agent| app.focused() == Some(*agent))
+            .filter(|position| *position >= RAIL_AGENT_ROWS)
+        {
+            let focused = shown.remove(position);
+            shown.insert(RAIL_AGENT_ROWS - 1, focused);
+        }
         for agent in shown.iter().take(RAIL_AGENT_ROWS) {
             if app.focused() == Some(*agent) {
                 focused_row = plan.len();
