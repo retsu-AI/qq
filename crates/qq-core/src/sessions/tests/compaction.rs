@@ -1279,26 +1279,23 @@ async fn storage_overflow_compacts_before_the_queued_prompt() {
 
 #[tokio::test]
 async fn compaction_sends_and_persists_the_effective_output_cap() {
+    const WINDOW: u32 = 128 * 1024;
     for (configured, expected) in [(1_024, 1_024), (16_384, 16_384)] {
-        let prior = MAX_CONTEXT_BYTES - 100 * 1024 - usize::try_from(configured).unwrap() * 32;
+        let prior = usize::try_from(WINDOW - configured).unwrap() * 4 - 8 * 1024;
         let mut harness = auto_compact_harness_with_limits(
             vec![
                 AutoCompactScript::Text("x".repeat(prior)),
                 AutoCompactScript::Text(valid_summary("the summary")),
                 AutoCompactScript::Text("done".to_owned()),
             ],
-            None,
+            Some(WINDOW),
             configured,
         )
         .await;
         let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
         collect_until(&mut harness.events, finished_for(first)).await;
-        let prompt = queue_prompt(
-            &harness.runtime,
-            harness.session_id,
-            "y".repeat(MAX_PROMPT_BYTES),
-        )
-        .await;
+        let prompt =
+            queue_prompt(&harness.runtime, harness.session_id, "y".repeat(16 * 1024)).await;
         let observed = collect_until(&mut harness.events, finished_for(prompt)).await;
         let compaction = observed
             .iter()
@@ -3834,14 +3831,24 @@ async fn the_proactive_threshold_stubs_stale_reads_before_it_compacts() {
 
 #[tokio::test]
 async fn a_session_without_a_window_still_sheds_stale_reads_before_the_storage_backstop() {
+    const NOTES: usize = 3;
     let note = format!("{}\n", "n".repeat(127)).repeat(720);
-    let runs = (4 * 1024 * 1024 - 512 * 1024) / (26 * 1024) + 4;
+    let runs = (4 * 1024 * 1024 - 512 * 1024) / (NOTES * 26 * 1024) + 4;
     let mut scripts: Vec<AutoCompactScript> = (0..runs)
-        .map(|_| AutoCompactScript::ReadNoteThenText("ok".to_owned()))
+        .map(|_| AutoCompactScript::ReadNotesThenText {
+            notes: NOTES,
+            text: "ok".to_owned(),
+        })
         .collect();
     scripts.push(AutoCompactScript::Text("still fits".to_owned()));
     let mut harness = auto_compact_harness_with_limits(scripts, None, 16_384).await;
-    std::fs::write(harness.workspace_path.join("note.txt"), &note).unwrap();
+    for index in 0..NOTES {
+        std::fs::write(
+            harness.workspace_path.join(format!("note-{index}.txt")),
+            &note,
+        )
+        .unwrap();
+    }
     for index in 0..=runs {
         let run = queue_prompt(
             &harness.runtime,
@@ -4550,7 +4557,7 @@ async fn in_run_compaction_harness(turns: usize, window: u32, summary: &str) -> 
     auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
             requests: Arc::new(StdMutex::new(Vec::new())),
-            scripts: vec![AutoCompactScript::ShellRepeatedlyWithSummaries {
+            scripts: vec![AutoCompactScript::ToolRepeatedlyWithSummaries {
                 turns,
                 text: "task complete".to_owned(),
                 summary: valid_summary(summary),
@@ -4568,7 +4575,7 @@ async fn in_run_compaction_harness(turns: usize, window: u32, summary: &str) -> 
 #[tokio::test]
 async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
     for max_runs in [200, 1] {
-        let mut harness = in_run_compaction_harness(72, 16 * 1024, "goal progress").await;
+        let mut harness = in_run_compaction_harness(30, 16 * 1024, "goal progress").await;
         let held = Arc::clone(&harness.runtime.inner.permits)
             .acquire_many_owned(harness.runtime.inner.permits.available_permits() as u32)
             .await
@@ -4622,7 +4629,7 @@ async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
         let observed = collect_until(&mut harness.events, finished_for(run)).await;
         assert!(observed.iter().any(|event| matches!(event.event,
         SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if run_id == run
-    )), "the multi-window goal run must complete");
+    )), "the multi-window goal run must complete: {:?}", finished_outcome(&observed, run));
         let compactions = observed
             .iter()
             .filter(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
@@ -5036,7 +5043,7 @@ async fn an_in_run_summarizer_keeps_the_session_context_before_its_prompt() {
             requests: Arc::new(StdMutex::new(Vec::new())),
             scripts: vec![
                 AutoCompactScript::Text("first answer".to_owned()),
-                AutoCompactScript::ShellRepeatedlyWithSummaries {
+                AutoCompactScript::ToolRepeatedlyWithSummaries {
                     turns: 48,
                     text: "task complete".to_owned(),
                     summary: valid_summary("work so far"),
@@ -5097,7 +5104,7 @@ async fn a_dense_tokenizer_compacts_in_run_instead_of_failing_at_the_guard() {
         AutoCompactLoader {
             requests: Arc::new(StdMutex::new(Vec::new())),
             scripts: vec![AutoCompactScript::Measured {
-                script: Box::new(AutoCompactScript::ShellRepeatedlyWithSummaries {
+                script: Box::new(AutoCompactScript::ToolRepeatedlyWithSummaries {
                     turns,
                     text: "task complete".to_owned(),
                     summary: valid_summary("work so far"),
@@ -5181,7 +5188,7 @@ async fn a_rejected_in_run_summary_fails_the_run_closed_without_resending_the_ov
     let mut harness = auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
             requests: Arc::new(StdMutex::new(Vec::new())),
-            scripts: vec![AutoCompactScript::ShellRepeatedlyWithSummaries {
+            scripts: vec![AutoCompactScript::ToolRepeatedlyWithSummaries {
                 turns,
                 text: "task complete".to_owned(),
                 summary: "not a summary".to_owned(),
@@ -5307,7 +5314,7 @@ async fn cancelling_during_in_run_compaction_settles_both_runs_once() {
     let mut harness = auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
             requests: Arc::new(StdMutex::new(Vec::new())),
-            scripts: vec![AutoCompactScript::ShellRepeatedlyWithSummaries {
+            scripts: vec![AutoCompactScript::ToolRepeatedlyWithSummaries {
                 turns,
                 text: "task complete".to_owned(),
                 summary: STALL_SUMMARY.to_owned(),
@@ -5748,7 +5755,7 @@ async fn a_provider_window_rejection_compacts_the_run_and_continues() {
     let mut harness = auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
             requests: Arc::new(StdMutex::new(Vec::new())),
-            scripts: vec![AutoCompactScript::ShellRepeatedlyWithProviderOverflow {
+            scripts: vec![AutoCompactScript::ToolRepeatedlyWithProviderOverflow {
                 turns: 12,
                 overflow_at: 7,
                 text: "task complete".to_owned(),
@@ -5809,7 +5816,7 @@ async fn an_empty_faulted_attempt_inside_the_replaced_span_keeps_replay_equal_to
     let mut harness = auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
             requests: Arc::new(StdMutex::new(Vec::new())),
-            scripts: vec![AutoCompactScript::ShellRepeatedlyWithEarlyFault {
+            scripts: vec![AutoCompactScript::ToolRepeatedlyWithEarlyFault {
                 turns: 30,
                 fault_at: 2,
                 text: "task complete".to_owned(),
@@ -6140,7 +6147,7 @@ async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verba
         let turns = 48;
         let summary = valid_summary("continued");
         let cut = summary.find("Decis").unwrap() + "Decis".len();
-        let script = AutoCompactScript::ShellRepeatedlyWithTruncatedSummaries {
+        let script = AutoCompactScript::ToolRepeatedlyWithTruncatedSummaries {
             turns,
             text: "task complete".to_owned(),
             summary: summary.clone(),

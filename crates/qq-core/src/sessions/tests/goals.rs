@@ -8481,6 +8481,23 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
             }))
         }
     }
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let mut runtimes = Vec::new();
+    for denied in [false, true] {
+        let mut options =
+            SessionRuntimeOptions::new(root.join(format!("sessions-{denied}.sqlite3")));
+        options.policy_authority = Some(Arc::new(Authority(denied)));
+        let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
+            .await
+            .unwrap();
+        let held = Arc::clone(&runtime.inner.permits)
+            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+            .await
+            .unwrap();
+        runtimes.push((runtime, held));
+    }
+    let mut row = 0;
     for (mode, denied, command, expected) in [
         (ApprovalMode::Auto, false, "true", "task_scoped"),
         (ApprovalMode::Auto, true, "true", "denied"),
@@ -8493,21 +8510,12 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
             Some(qq_protocol::GoalCheckScope::Once),
             Some(qq_protocol::GoalCheckScope::ForGoal),
         ] {
-            let directory = TempDir::new().unwrap();
-            let root = directory.path().canonicalize().unwrap();
-            let workspace = root.join("work");
+            row += 1;
+            let workspace = root.join(format!("work-{row}"));
             std::fs::create_dir(&workspace).unwrap();
-            let mut options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
-            options.policy_authority = Some(Arc::new(Authority(denied)));
-            let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
-                .await
-                .unwrap();
-            let held = Arc::clone(&runtime.inner.permits)
-                .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-                .await
-                .unwrap();
-            let (workspace_id, _) = resolve_workspace(&runtime, &workspace).await;
-            let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
+            let runtime = &runtimes[usize::from(denied)].0;
+            let (workspace_id, _) = resolve_workspace(runtime, &workspace).await;
+            let created = create_session_with_mode(runtime, workspace_id, None, mode).await;
             let CommandOutcome::SessionCreated { session_id } = created.outcome else {
                 panic!("session")
             };
@@ -8584,9 +8592,11 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
                     "refused checks must not leave a paused goal requiring consent"
                 );
             }
-            drop(held);
-            runtime.shutdown().await.unwrap();
         }
+    }
+    for (runtime, held) in runtimes {
+        drop(held);
+        runtime.shutdown().await.unwrap();
     }
 }
 

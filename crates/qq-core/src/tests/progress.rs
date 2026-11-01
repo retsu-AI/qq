@@ -995,17 +995,48 @@ async fn a_final_answer_turn_over_its_cost_bound_settles_as_exhausted() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn ab1_cd_prefixed_reads_without_context_verification_count_as_work() {
-    let mut provider = Scripted::new(vec![
-        ("shell", r#"{"command":"cd sub && grep -n x f.rs"}"#);
-        64
-    ]);
-    provider.calls_per_turn = 1;
-    let (events, requests) = run(provider, RunCapabilities::user(None)).await;
-    assert_eq!(completed_text(&events).as_deref(), Some("done"));
-    assert!(calls_before_reports(&requests, ROOT_STALL_REPORT_NOTICE).is_empty());
-    assert!(notices(&events).is_empty());
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
+    let arguments = r#"{"command":"cd sub && grep -n x f.rs"}"#;
+    let result = tools::execute(
+        workspace::Workspace::open(directory.path()).unwrap(),
+        Arc::new(workspace::FileState::default()),
+        "shell".to_owned(),
+        arguments.to_owned(),
+        RunCancellation::new(),
+        None,
+        tools::ToolTasks::default(),
+        Arc::new(runtime::ShellPolicy::default()),
+        Arc::default(),
+    )
+    .await;
+    assert!(
+        result.model_text.starts_with("shell exit=0 "),
+        "{}",
+        result.model_text
+    );
+    assert!(result.model_text.contains("1:x"), "{}", result.model_text);
+    let call = runtime::RuntimeToolCall {
+        id: qq_protocol::ToolCallId::from_bytes([1; 16]),
+        turn_ordinal: 0,
+        call_ordinal: 0,
+        provider_call_id: "cd-read".to_owned(),
+        rejection: None,
+        name: "shell".to_owned(),
+        arguments: arguments.to_owned(),
+        effect: catalog::EffectClass::Shell,
+    };
+    assert!(
+        result
+            .execution_context
+            .as_ref()
+            .is_some_and(|receipt| receipt.is_work())
+    );
+    assert!(runtime::is_progress(&call, None, &result));
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

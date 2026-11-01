@@ -854,6 +854,7 @@ pub struct Runtime {
     pub(crate) process_producer: Arc<ProcessProducer>,
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
     pub(crate) turn_recovery: TurnRecoveryPolicy,
+    pub(crate) tool_calls_per_slice: usize,
 }
 
 impl Runtime {
@@ -903,12 +904,19 @@ impl Runtime {
             process_producer: Arc::default(),
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
+            tool_calls_per_slice: MAX_TOOL_CALLS_PER_SLICE,
         })
     }
 
     #[must_use]
     pub const fn with_turn_recovery(mut self, policy: TurnRecoveryPolicy) -> Self {
         self.turn_recovery = policy;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn with_tool_calls_per_slice(mut self, calls: usize) -> Self {
+        self.tool_calls_per_slice = calls;
         self
     }
 
@@ -5064,23 +5072,33 @@ mod tests {
             };
         let runtime =
             Runtime::new(ReleaseOnSecondTurn { script, gate }, "test-model", 256).unwrap();
-        let events = tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            runtime
-                .run_loop_with_spawner(
-                    vec![Message::user("build")],
-                    directory.path().to_owned(),
-                    RunCancellation::new(),
-                    Arc::new(StaticPolicyGate {
-                        mode: ApprovalMode::Full,
-                        tools: Default::default(),
-                        network: Arc::default(),
-                    }),
-                    Arc::new(workspace::FileState::default()),
-                    RunCapabilities::user(None).with_tool_tasks(tool_tasks.clone()),
-                )
-                .collect::<Vec<_>>(),
-        )
+        let events = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let mut stream = runtime.run_loop_with_spawner(
+                vec![Message::user("build")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Full,
+                    tools: Default::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_tool_tasks(tool_tasks.clone()),
+            );
+            let mut events = Vec::new();
+            let mut printed = std::collections::HashSet::new();
+            while let Some(event) = stream.next().await {
+                if let RuntimeEvent::ToolCallOutputDelta { id, .. } = &event
+                    && printed.insert(*id)
+                {
+                    tokio::time::pause();
+                    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+                    tokio::time::resume();
+                }
+                events.push(event);
+            }
+            events
+        })
         .await
         .expect("a yielded command must not hold the run");
         tokio::time::timeout(

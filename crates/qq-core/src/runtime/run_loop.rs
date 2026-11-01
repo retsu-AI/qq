@@ -924,7 +924,7 @@ impl RunState {
                         let slice_checkpoint = !budget_final_turn && !run.goal_handoff_requested
                             && slice.slice_tool_calls
                                 .saturating_add(MAX_TOOL_CALLS_PER_TURN)
-                                > MAX_TOOL_CALLS_PER_SLICE;
+                                > env.plan.runtime.tool_calls_per_slice;
                         let report_due = match (budget_final_turn || run.goal_handoff_requested, slice.placed_report) {
                             (true, _) => runtime::ReportDue::None,
                             (false, Some(runtime::TurnNotice::FinalAnswer)) => runtime::ReportDue::FinalAnswer,

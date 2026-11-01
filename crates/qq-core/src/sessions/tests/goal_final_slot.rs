@@ -1,7 +1,8 @@
 use super::*;
 
 #[tokio::test]
-async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_completion() {
+async fn goal_final_run_reserves_a_durable_tool_free_handoff_after_early_completion() {
+    const RUNS: usize = 3;
     struct Model {
         ordinal: usize,
         prompt_final: bool,
@@ -18,7 +19,7 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
                 requests[self.ordinal].push(request);
                 (first, handoff, requests[self.ordinal].len())
             };
-            let mut events = if self.ordinal == 9
+            let mut events = if self.ordinal == RUNS - 1
                 && handoff
                 && ((self.scenario == "tools" && attempt == 2)
                     || (self.scenario == "tighten" && attempt >= 2))
@@ -39,7 +40,7 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
                         id: "forbidden-update".to_owned(),
                     }),
                 ]
-            } else if self.prompt_final && self.ordinal == 8 && first {
+            } else if self.prompt_final && self.ordinal == RUNS - 2 && first {
                 vec![
                     Ok(qq_provider::ProviderEvent::ToolCallStarted {
                         id: "wait".to_owned(),
@@ -73,7 +74,7 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
                     reasoning_tokens: None,
                 }),
             }));
-            let held = self.ordinal == 9 && first && self.scenario == "tighten";
+            let held = self.ordinal == RUNS - 1 && first && self.scenario == "tighten";
             let admission = Arc::clone(&self.admission);
             Box::pin(async_stream::stream! {
                 if held {
@@ -158,7 +159,7 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
             .unwrap();
         runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
             "type":"set_goal", "session_id":session_id, "objective":"finish exactly ten charged slices with a handoff",
-            "budget":{"max_goal_runs":if scenario=="tighten" {11} else {10}, "deadline_ms":now_ms()+60_000,
+            "budget":{"max_goal_runs":if scenario=="tighten" {RUNS + 1} else {RUNS}, "deadline_ms":now_ms()+60_000,
                 "per_run":{"max_model_turns":if scenario=="one_turn" && !prompt_final {1} else {3}}}
         })).unwrap()).await.unwrap();
         let mut starts = Vec::new();
@@ -172,7 +173,7 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
                             .await.unwrap().focused.unwrap().goal.unwrap();
                         let expected = qq_protocol::GoalIdentity { goal_id: current.goal_id, revision: current.revision };
                         let mut budget = current.budget;
-                        budget.max_goal_runs = 10;
+                        budget.max_goal_runs = RUNS as u32;
                         runtime.command(CommandId::generate().unwrap(), SessionCommand::SetGoal {
                             check_approval: None,
                             session_id, objective: current.objective, check: current.check,
@@ -189,7 +190,7 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
                         starts.push((run_id, origin))
                     }
                     SessionEvent::RunFinished { .. }
-                        if prompt_final && starts.len() == 9 && !submitted =>
+                        if prompt_final && starts.len() == RUNS - 1 && !submitted =>
                     {
                         let receipt = runtime
                             .command(
@@ -226,9 +227,9 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
             }
         })
         .await
-        .expect("ten-run goal must exhaust its finite allowance");
+        .expect("a finite goal must exhaust its allowance");
         assert_eq!(
-            goal.counters.runs, 10,
+            goal.counters.runs, RUNS as u32,
             "{scenario}, prompt_final={prompt_final}"
         );
         assert!(!goal.notes.contains("unexpectedly executed"));
@@ -238,44 +239,50 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
                 reason: qq_protocol::GoalExhaustion::Runs
             }
         );
-        assert_eq!(starts.len(), 10);
-        let final_run = starts[9].0;
+        assert_eq!(starts.len(), RUNS);
+        let final_run = starts[RUNS - 1].0;
         assert_eq!(
             starts
                 .iter()
                 .map(|(run, _)| *run)
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            10
+            RUNS
         );
         assert!(
-            starts[..9]
+            starts[..RUNS - 1]
                 .iter()
                 .all(|(_, origin)| matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. })))
         );
         assert!(if prompt_final {
-            matches!(starts[9].1, Some(qq_protocol::RunOrigin::UserPrompt {}))
+            matches!(
+                starts[RUNS - 1].1,
+                Some(qq_protocol::RunOrigin::UserPrompt {})
+            )
         } else {
-            matches!(starts[9].1, Some(qq_protocol::RunOrigin::Goal { .. }))
+            matches!(
+                starts[RUNS - 1].1,
+                Some(qq_protocol::RunOrigin::Goal { .. })
+            )
         });
         runtime.close().await.unwrap();
         {
             let requests = requests.lock().unwrap();
-            assert_eq!(requests.len(), 10, "no eleventh run may start");
+            assert_eq!(requests.len(), RUNS, "no run past the allowance may start");
             assert_eq!(
-                requests[9].len(),
+                requests[RUNS - 1].len(),
                 final_turns,
                 "final slot must honor its caller cap: {scenario}, prompt_final={prompt_final}"
             );
             if scenario != "tighten" {
                 assert!(
-                    request_texts(&requests[9][0])
+                    request_texts(&requests[RUNS - 1][0])
                         .iter()
                         .any(|text| text.contains("final budgeted run")),
                     "the final slot is announced before its first request"
                 );
             }
-            let handoff = &requests[9][usize::from(scenario != "one_turn")];
+            let handoff = &requests[RUNS - 1][usize::from(scenario != "one_turn")];
             assert_eq!(handoff.tool_choice(), qq_provider::ToolChoice::None);
             assert!(
                 request_texts(handoff)

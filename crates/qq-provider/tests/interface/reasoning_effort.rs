@@ -40,8 +40,11 @@ fn compile(
         ),
         _ => EndpointSpec::base(format!("{}/v1", server.base_url), true),
     };
-    ProviderCompiler::new()
-        .unwrap()
+    thread_local! {
+        static COMPILER: ProviderCompiler = ProviderCompiler::new().unwrap();
+    }
+    COMPILER
+        .with(ProviderCompiler::clone)
         .with_attempt_policy(attempts)
         .compile(ProviderRecipe::http(HttpProviderRecipe::new(
             endpoint, protocol, auth,

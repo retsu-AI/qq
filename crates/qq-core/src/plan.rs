@@ -104,6 +104,8 @@ pub struct AgentProfile {
     side_question_denies: Vec<String>,
     context_sources: Vec<Arc<dyn ContextSource>>,
     context_cache: Option<Arc<ContextCache>>,
+    #[cfg(test)]
+    pub(crate) tool_calls_per_slice: usize,
 }
 
 impl AgentProfile {
@@ -148,6 +150,8 @@ impl AgentProfile {
             side_question_denies: Vec::new(),
             context_sources: Vec::new(),
             context_cache: None,
+            #[cfg(test)]
+            tool_calls_per_slice: crate::MAX_TOOL_CALLS_PER_SLICE,
         }
     }
 
@@ -204,6 +208,8 @@ impl AgentProfile {
                 .map(|registered| Arc::clone(&registered.source))
                 .collect(),
             context_cache: Some(Arc::clone(&runtime.context_cache)),
+            #[cfg(test)]
+            tool_calls_per_slice: runtime.tool_calls_per_slice,
         }
     }
 
@@ -566,6 +572,8 @@ impl CompiledAgentPlan {
             side_question_denies,
             context_sources,
             context_cache,
+            #[cfg(test)]
+            tool_calls_per_slice,
         } = profile;
         if context_sources.len() > crate::MAX_CONTEXT_SOURCES {
             return Err(PlanCompileError::TooManyContextSources {
@@ -588,6 +596,10 @@ impl CompiledAgentPlan {
         .with_process_producer(process_producer)
         .with_network_policy(network)
         .with_turn_recovery(turn_recovery);
+        #[cfg(test)]
+        {
+            runtime = runtime.with_tool_calls_per_slice(tool_calls_per_slice);
+        }
         if let Some(effort) = reasoning_effort {
             runtime = runtime.with_reasoning_effort(effort);
         }

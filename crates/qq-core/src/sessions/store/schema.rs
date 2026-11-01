@@ -29,6 +29,7 @@ const OWNERSHIP_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
 pub(in crate::sessions) fn acquire_ownership(
     path: &std::path::Path,
+    wait: std::time::Duration,
 ) -> Result<StoreOwnership, SessionRuntimeError> {
     let mut lock_path = path.as_os_str().to_owned();
     lock_path.push(OWNER_LOCK_SUFFIX);
@@ -48,7 +49,7 @@ pub(in crate::sessions) fn acquire_ownership(
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600));
     }
-    let deadline = std::time::Instant::now() + OWNERSHIP_WAIT;
+    let deadline = std::time::Instant::now() + wait;
     loop {
         match file.try_lock() {
             Ok(()) => return Ok(StoreOwnership { _file: file }),

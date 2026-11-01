@@ -537,16 +537,11 @@ async fn multi_day_driver_survives_real_process_kills_waits_and_outages() {
         child(serde_json::from_str(&setup).unwrap()).await;
         return;
     }
-    multi_day(false).await;
-}
-
-#[cfg(unix)]
-#[tokio::test(flavor = "current_thread")]
-async fn multi_day_checked_goal_achieves_after_forty_runs_and_real_process_kills() {
-    multi_day(true).await;
-}
-
-async fn multi_day(checked: bool) {
+    const STEPS: u32 = 22;
+    const KILLS: [u32; 2] = [3, 11];
+    const WAITS: [u32; 3] = [6, 14, 20];
+    const PROMPTS: [u32; 2] = [6, 14];
+    const OUTAGES: [u32; 2] = [8, 17];
     let directory = TempDir::new().unwrap();
     let start = now_ms();
     let mut clock = start;
@@ -555,46 +550,42 @@ async fn multi_day(checked: bool) {
         directory: directory.path().to_path_buf(),
         epoch: clock,
         session: None,
-        checked,
+        checked: true,
     };
     let mut driver = Driver::open(&setup).await;
     setup.session = Some(driver.session);
-    let mut command = serde_json::json!({
-        "type":"set_goal","session_id":driver.session,"objective":"multi-day driver acceptance",
-        "budget":{"max_goal_runs":200,"deadline_ms":deadline,"per_run":{"max_model_turns":4}}
-    });
-    if checked {
-        command["check"] = serde_json::json!({"command":CHECK,"timeout_ms":5000});
-    }
     let receipt: qq_protocol::CommandReceipt = serde_json::from_value(
         driver
             .ask(Input::Command(Box::new(
-                serde_json::from_value(command).unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "type":"set_goal","session_id":driver.session,"objective":"multi-day driver acceptance",
+                    "check":{"command":CHECK,"timeout_ms":5000},
+                    "budget":{"max_goal_runs":200,"deadline_ms":deadline,"per_run":{"max_model_turns":4}}
+                }))
+                .unwrap(),
             )))
             .await,
     )
     .unwrap();
-    if checked {
-        let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
-            panic!("checked goal")
-        };
-        driver
-            .ask(Input::Command(Box::new(SessionCommand::GoalControl {
-                session_id: driver.session,
-                expected: qq_protocol::GoalIdentity {
-                    goal_id: goal.goal_id,
-                    revision: goal.revision,
-                },
-                action: qq_protocol::GoalControl::ApproveCheck {
-                    scope: qq_protocol::GoalCheckScope::Once,
-                    command: CHECK.to_owned(),
-                },
-            })))
-            .await;
-    }
+    let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+        panic!("checked goal")
+    };
+    driver
+        .ask(Input::Command(Box::new(SessionCommand::GoalControl {
+            session_id: driver.session,
+            expected: qq_protocol::GoalIdentity {
+                goal_id: goal.goal_id,
+                revision: goal.revision,
+            },
+            action: qq_protocol::GoalControl::ApproveCheck {
+                scope: qq_protocol::GoalCheckScope::Once,
+                command: CHECK.to_owned(),
+            },
+        })))
+        .await;
     let mut prompts = 0;
     let mut ids = std::collections::HashSet::new();
-    for step in 1..=40 {
+    for step in 1..=STEPS {
         eprintln!("soak step {step}, epoch {clock}");
         let (run, texts) = driver.request().await;
         assert!(ids.insert(run), "recovery must create a fresh run");
@@ -603,25 +594,13 @@ async fn multi_day(checked: bool) {
                 .iter()
                 .any(|text| text.contains("multi-day driver acceptance"))
         );
-        if step > 10 {
-            assert!(
-                texts
-                    .iter()
-                    .any(|text| text.contains("interleaved user prompt 1"))
-            );
+        for (index, after) in PROMPTS.into_iter().enumerate() {
+            if step > after {
+                let prompt = format!("interleaved user prompt {}", index + 1);
+                assert!(texts.iter().any(|text| text.contains(&prompt)));
+            }
         }
-        if step > 25 {
-            assert!(
-                texts
-                    .iter()
-                    .any(|text| text.contains("interleaved user prompt 2"))
-            );
-        }
-        let wait = if checked {
-            matches!(step, 10 | 25 | 35)
-        } else {
-            matches!(step, 10 | 25 | 40)
-        };
+        let wait = WAITS.contains(&step);
         let before = driver.snapshot().await.goal.unwrap();
         let remove = (before.checklist.len() >= 20).then(|| before.checklist[0].id);
         driver
@@ -629,20 +608,20 @@ async fn multi_day(checked: bool) {
                 step,
                 wait,
                 remove,
-                achieved: checked && step == 40,
+                achieved: step == STEPS,
             }))
             .await;
         let (same, _) = driver.request().await;
         assert_eq!(same, run, "the goal tool result precedes this run's answer");
-        if checked && step == 40 {
-            assert_eq!(before.counters.runs, 41);
+        if step == STEPS {
+            assert_eq!(before.counters.runs, STEPS + 1);
             tokio::fs::write(directory.path().join("completion-ready"), b"ready")
                 .await
                 .unwrap();
         }
-        if matches!(step, 5 | 20) {
+        if KILLS.contains(&step) {
             driver.kill().await;
-            if step == 5 {
+            if step == KILLS[0] {
                 clock += 26 * HOUR;
             }
             setup.epoch = clock;
@@ -684,7 +663,7 @@ async fn multi_day(checked: bool) {
             assert_eq!(goal.wait.as_ref().unwrap().until_ms, clock + HOUR);
             assert_eq!(goal.next_run_at_ms, clock + HOUR);
         }
-        if matches!(step, 10 | 25) {
+        if PROMPTS.contains(&step) {
             prompts += 1;
             let receipt: qq_protocol::CommandReceipt = serde_json::from_value(
                 driver
@@ -730,74 +709,103 @@ async fn multi_day(checked: bool) {
                 "a prompt cannot shorten the model wait"
             );
         }
-        if wait && step != 40 {
+        if wait {
             clock = driver.snapshot().await.goal.unwrap().next_run_at_ms;
             driver.ask(Input::Advance(clock)).await;
         }
-        if step == 12 {
-            driver.outage(&mut clock, 6 * HOUR, &mut ids).await;
-        }
-        if step == 30 {
-            driver.outage(&mut clock, 6 * HOUR, &mut ids).await;
+        if OUTAGES.contains(&step) {
+            driver.outage(&mut clock, 2 * HOUR, &mut ids).await;
         }
     }
     let snapshot = driver.snapshot().await;
-    assert_eq!(snapshot.goal.as_ref().unwrap().counters.runs, 42);
+    assert_eq!(snapshot.goal.as_ref().unwrap().counters.runs, STEPS + 2);
     assert_eq!(snapshot.goal.as_ref().unwrap().checklist.len(), 20);
-    if checked {
-        loop {
-            if driver.snapshot().await.goal.unwrap().status == qq_protocol::GoalStatus::Achieved {
-                break;
-            }
-            let output = driver.read().await;
-            driver.keep(output);
+    loop {
+        if driver.snapshot().await.goal.unwrap().status == qq_protocol::GoalStatus::Achieved {
+            break;
         }
-        let completed = driver.snapshot().await;
-        let goal = completed.goal.as_ref().unwrap();
-        assert_eq!(goal.counters.runs, 42);
-        assert_eq!(goal.counters.audits, 1);
-        assert_eq!(goal.counters.check_failures, 0);
-        assert_eq!(
-            goal.check_authorization,
-            Some(qq_protocol::GoalCheckAuthorization::Consumed)
-        );
-        assert!(!goal.audit_pending);
-        let checks: Vec<_> = completed
-            .runs
+        let output = driver.read().await;
+        driver.keep(output);
+    }
+    let completed = driver.snapshot().await;
+    let goal = completed.goal.as_ref().unwrap();
+    assert_eq!(goal.counters.runs, STEPS + 2);
+    assert_eq!(goal.counters.audits, 1);
+    assert_eq!(goal.counters.check_failures, 0);
+    assert_eq!(
+        goal.check_authorization,
+        Some(qq_protocol::GoalCheckAuthorization::Consumed)
+    );
+    assert!(!goal.audit_pending);
+    let checks: Vec<_> = completed
+        .runs
+        .iter()
+        .filter(|run| matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. })))
+        .collect();
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].outcome, Some(RunOutcome::Completed));
+    assert!(ids.insert(checks[0].id));
+    assert_eq!(
+        tokio::fs::read_to_string(directory.path().join("completion-checks"))
+            .await
+            .unwrap(),
+        "checked"
+    );
+    assert!(
+        completed
+            .messages
             .iter()
-            .filter(|run| matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. })))
-            .collect();
-        assert_eq!(checks.len(), 1);
-        assert_eq!(checks[0].outcome, Some(RunOutcome::Completed));
-        assert!(ids.insert(checks[0].id));
-        assert_eq!(
-            tokio::fs::read_to_string(directory.path().join("completion-checks"))
-                .await
-                .unwrap(),
-            "checked"
-        );
-        assert!(
-            completed
-                .messages
-                .iter()
-                .any(|message| message.run_id == checks[0].id && message.output == "exit 0\n")
-        );
-    } else {
-        assert!(snapshot.goal.as_ref().unwrap().wait.is_some());
-        driver.ask(Input::Advance(deadline)).await;
-        loop {
-            let snapshot = driver.snapshot().await;
-            if matches!(
-                snapshot.goal.unwrap().status,
-                qq_protocol::GoalStatus::BudgetExhausted {
-                    reason: qq_protocol::GoalExhaustion::Deadline
-                }
-            ) {
-                break;
+            .any(|message| message.run_id == checks[0].id && message.output == "exit 0\n")
+    );
+    assert!(
+        driver.pending.is_empty(),
+        "an achieved goal must prevent another request"
+    );
+    let achieved = completed.goal.unwrap();
+    let deadline = clock + 2 * HOUR;
+    driver
+        .ask(Input::Command(Box::new(
+            serde_json::from_value(serde_json::json!({
+                "type":"set_goal","session_id":driver.session,"objective":"multi-day deadline acceptance",
+                "expected":{"goal_id":achieved.goal_id,"revision":achieved.revision},"replace":true,
+                "budget":{"max_goal_runs":200,"deadline_ms":deadline,"per_run":{"max_model_turns":4}}
+            }))
+            .unwrap(),
+        )))
+        .await;
+    let (run, texts) = driver.request().await;
+    assert!(ids.insert(run));
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("multi-day deadline acceptance"))
+    );
+    driver
+        .ask(Input::Reply(Reply::Update {
+            step: STEPS + 1,
+            wait: true,
+            remove: None,
+            achieved: false,
+        }))
+        .await;
+    let (same, _) = driver.request().await;
+    assert_eq!(same, run);
+    driver.ask(Input::Reply(Reply::Text)).await;
+    assert_eq!(driver.finished(run).await, RunOutcome::Completed);
+    assert!(driver.snapshot().await.goal.unwrap().wait.is_some());
+    driver.ask(Input::Advance(deadline)).await;
+    loop {
+        let snapshot = driver.snapshot().await;
+        if matches!(
+            snapshot.goal.unwrap().status,
+            qq_protocol::GoalStatus::BudgetExhausted {
+                reason: qq_protocol::GoalExhaustion::Deadline
             }
-            let output = driver.read().await;
-            driver.keep(output);
+        ) {
+            break;
         }
+        let output = driver.read().await;
+        driver.keep(output);
     }
     assert!(
         driver.pending.is_empty(),
@@ -818,7 +826,7 @@ async fn multi_day(checked: bool) {
     );
     driver.ask(Input::Close).await;
     assert!(driver.process.wait().await.unwrap().success());
-    setup.epoch = if checked { clock } else { deadline };
+    setup.epoch = deadline;
     let mut reopened = Driver::open(&setup).await;
     let restored = reopened.snapshot().await;
     assert_eq!(

@@ -101,6 +101,10 @@ impl LoadedRuntime {
             .with_context_cache(Arc::clone(&runtime.context_cache))
             .with_turn_recovery(runtime.turn_recovery)
             .with_output_ceiling(runtime.output_ceiling);
+        #[cfg(test)]
+        {
+            profile.tool_calls_per_slice = runtime.tool_calls_per_slice;
+        }
         Ok(Self::new(CompiledAgentPlan::compile_blocking(profile)?))
     }
 

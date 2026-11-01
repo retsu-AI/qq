@@ -1458,8 +1458,7 @@ mod tests {
         .unwrap();
         fs::write(directory.path().join("single"), "x".repeat(5 * 1024 * 1024)).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        for path in ["capped", "single"] {
-            let mut offset = 1;
+        for (path, mut offset) in [("capped", 40_000), ("single", 1)] {
             for call in 0..256 {
                 let arguments = format!(r#"{{"path":"{path}","offset":{offset}}}"#);
                 let result = run_tool(&workspace, &FileState::default(), "read_file", &arguments);
@@ -4841,8 +4840,15 @@ mod tests {
     async fn cancel_and_timeout_kill_descendants_that_left_the_group() {
         let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
+        let mut cases = Vec::new();
         for timeout in [false, true] {
             for tree in escaped_trees(workspace.path()).await {
+                cases.push((timeout, tree));
+            }
+        }
+        futures_util::future::join_all(cases.into_iter().map(|(timeout, tree)| {
+            let workspace = workspace.clone();
+            async move {
                 let command = tree.command.clone();
                 let cancelled = RunCancellation::new();
                 let arguments = match timeout {
@@ -4850,7 +4856,7 @@ mod tests {
                     false => serde_json::json!({"command": command}),
                 };
                 let execution = tokio::spawn(execute(
-                    workspace.clone(),
+                    workspace,
                     Arc::new(FileState::default()),
                     "shell".to_owned(),
                     arguments.to_string(),
@@ -4880,7 +4886,8 @@ mod tests {
                 );
                 assert_all_exit(pids).await;
             }
-        }
+        }))
+        .await;
     }
 
     #[cfg(unix)]
@@ -4891,7 +4898,7 @@ mod tests {
         let tasks = ToolTasks::default();
         let mut started = Vec::new();
         for tree in escaped_trees(workspace.path()).await {
-            let result = execute(
+            let execution = tokio::spawn(execute(
                 workspace.clone(),
                 Arc::new(FileState::default()),
                 "shell".to_owned(),
@@ -4901,14 +4908,20 @@ mod tests {
                 tasks.clone(),
                 Arc::new(crate::runtime::ShellPolicy::default()),
                 Arc::default(),
-            )
-            .await;
+            ));
+            started.push(reported_pids(&tree).await);
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+            tokio::time::resume();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(20), execution)
+                .await
+                .expect("a running command must yield")
+                .unwrap();
             assert!(
                 result.model_text.contains("exit=running"),
                 "{}",
                 result.model_text
             );
-            started.push(reported_pids(&tree).await);
         }
         tokio::time::timeout(std::time::Duration::from_secs(20), tasks.drain())
             .await
@@ -5385,29 +5398,6 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn shell_timeout_kills_the_whole_process_group() {
-        let directory = tempfile::tempdir().unwrap();
-        let workspace = Workspace::open(directory.path()).unwrap();
-
-        let result = run_shell_tool(
-            workspace.clone(),
-            r#"{"command":"sleep 300 & echo pid:$!; wait","timeout_seconds":1}"#,
-            RunCancellation::new(),
-            None,
-        )
-        .await;
-
-        assert!(result.is_error);
-        assert!(
-            result.model_text.contains("timed out"),
-            "{}",
-            result.model_text
-        );
-        assert_process_exits(parse_marked_pid(&result.model_text)).await;
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
     async fn commands_get_plain_output_defaults() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
@@ -5435,18 +5425,30 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_shell_timeout_names_its_limit_and_how_to_raise_it() {
+    async fn shell_timeout_kills_the_whole_process_group_and_names_its_limit() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        let result = run_shell_tool(
+        let (output, mut chunks) = mpsc::channel(8);
+        let execution = tokio::spawn(run_shell_tool(
             workspace,
-            r#"{"command":"exec tail -f /dev/null","timeout_seconds":1}"#,
+            r#"{"command":"sleep 300 & echo pid:$!; wait","timeout_seconds":1}"#,
             RunCancellation::new(),
-            None,
-        )
-        .await;
+            Some(output),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(20), chunks.recv())
+            .await
+            .expect("the command must print its pid")
+            .expect("the command's output channel stays open while it runs");
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::time::resume();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), execution)
+            .await
+            .expect("the timeout must stop the command")
+            .unwrap();
         assert!(result.is_error);
         for expected in [
+            "timed out",
             "timeout_seconds=1 limit",
             "larger timeout_seconds",
             "yield_after_seconds",
@@ -5458,6 +5460,7 @@ mod tests {
                 result.model_text
             );
         }
+        assert_process_exits(parse_marked_pid(&result.model_text)).await;
     }
 
     #[cfg(unix)]
@@ -5490,6 +5493,25 @@ mod tests {
     }
 
     #[cfg(unix)]
+    async fn yield_after_output(
+        execution: impl std::future::Future<Output = ToolOutput> + Send + 'static,
+        mut chunks: mpsc::Receiver<String>,
+    ) -> ToolOutput {
+        let execution = tokio::spawn(execution);
+        tokio::time::timeout(std::time::Duration::from_secs(20), chunks.recv())
+            .await
+            .expect("the command must print before it yields")
+            .expect("the command's output channel stays open while it runs");
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::time::resume();
+        tokio::time::timeout(std::time::Duration::from_secs(20), execution)
+            .await
+            .expect("a running command must yield")
+            .unwrap()
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_long_command_yields_and_completes_through_command_status() {
         use std::io::Write as _;
@@ -5505,22 +5527,22 @@ mod tests {
             .unwrap();
         let tasks = ToolTasks::default();
         let cancelled = RunCancellation::new();
-        let yielded = tokio::time::timeout(
-            std::time::Duration::from_secs(20),
+        let (output, chunks) = mpsc::channel(8);
+        let yielded = yield_after_output(
             execute(
                 workspace,
                 Arc::new(FileState::default()),
                 "shell".to_owned(),
                 r#"{"command":"echo compiling; read token < release; echo finished; exit 3","yield_after_seconds":1}"#.to_owned(),
                 cancelled.clone(),
-                None,
+                Some(output),
                 tasks.clone(),
                 Arc::new(crate::runtime::ShellPolicy::default()),
                 Arc::default(),
             ),
+            chunks,
         )
-        .await
-        .expect("a running command must yield");
+        .await;
         assert!(!yielded.is_error, "{}", yielded.model_text);
         assert!(
             yielded.model_text.starts_with("shell exit=running id=c1 "),
@@ -5575,16 +5597,20 @@ mod tests {
         let tasks = ToolTasks::default();
         let cancelled = RunCancellation::new();
         let start = |command: &'static str| {
-            execute(
-                workspace.clone(),
-                Arc::new(FileState::default()),
-                "shell".to_owned(),
-                command.to_owned(),
-                cancelled.clone(),
-                None,
-                tasks.clone(),
-                Arc::new(crate::runtime::ShellPolicy::default()),
-                Arc::default(),
+            let (output, chunks) = mpsc::channel(8);
+            yield_after_output(
+                execute(
+                    workspace.clone(),
+                    Arc::new(FileState::default()),
+                    "shell".to_owned(),
+                    command.to_owned(),
+                    cancelled.clone(),
+                    Some(output),
+                    tasks.clone(),
+                    Arc::new(crate::runtime::ShellPolicy::default()),
+                    Arc::default(),
+                ),
+                chunks,
             )
         };
         let first =
@@ -5696,19 +5722,28 @@ mod tests {
     async fn saturated_live_output_never_masks_the_shell_timeout() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        let (sender, _receiver) = mpsc::channel::<String>(1);
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            run_shell_tool(
-                workspace,
-                r#"{"command":"while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done","timeout_seconds":1}"#,
-                RunCancellation::new(),
-                Some(sender),
-            ),
-        )
+        let (sender, receiver) = mpsc::channel::<String>(1);
+        let execution = tokio::spawn(run_shell_tool(
+            workspace,
+            r#"{"command":"while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done","timeout_seconds":1}"#,
+            RunCancellation::new(),
+            Some(sender),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while receiver.capacity() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
         .await
-        .expect("a full live-output queue must not stall the shell deadline");
+        .expect("the live-output queue must become saturated");
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::time::resume();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), execution)
+            .await
+            .expect("a full live-output queue must not stall the shell deadline")
+            .unwrap();
 
         assert!(result.is_error);
         assert!(

@@ -936,6 +936,7 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
             requests: Arc::clone(&requests),
             checkpoint_wait: None,
             metered_empty_checkpoint: false,
+            slice_calls: crate::MAX_TOOL_CALLS_PER_SLICE,
         }),
     )
     .await
@@ -1079,6 +1080,7 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
             requests: Arc::clone(&requests),
             checkpoint_wait: None,
             metered_empty_checkpoint: false,
+            slice_calls: crate::MAX_TOOL_CALLS_PER_SLICE,
         }),
     )
     .await
@@ -1134,6 +1136,7 @@ async fn cancellation_at_the_slice_checkpoint_has_one_cancelled_terminal() {
             requests: Arc::clone(&requests),
             checkpoint_wait: Some(Arc::clone(&checkpoint_wait)),
             metered_empty_checkpoint: false,
+            slice_calls: SHORT_SLICE_CALLS,
         }),
     )
     .await
@@ -1186,14 +1189,14 @@ async fn cancellation_at_the_slice_checkpoint_has_one_cancelled_terminal() {
             .iter()
             .filter(|event| matches!(event.event, SessionEvent::ToolCallRequested { .. }))
             .count(),
-        crate::MAX_TOOL_CALLS_PER_SLICE
+        SHORT_SLICE_CALLS
     );
     assert_eq!(
         observed
             .iter()
             .filter(|event| matches!(event.event, SessionEvent::ToolCallFinished { .. }))
             .count(),
-        crate::MAX_TOOL_CALLS_PER_SLICE
+        SHORT_SLICE_CALLS
     );
     assert_eq!(
         std::fs::read_to_string(directory.path().join("slice-effects.txt")).unwrap(),
@@ -1224,6 +1227,7 @@ async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_b
             requests: Arc::clone(&requests),
             checkpoint_wait: None,
             metered_empty_checkpoint: true,
+            slice_calls: SHORT_SLICE_CALLS,
         }),
     )
     .await
@@ -1251,13 +1255,16 @@ async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_b
         }) if *finished == run_id
     ));
 
+    let tool_turns = (SHORT_SLICE_CALLS / crate::MAX_TOOL_CALLS_PER_TURN) as u64;
     let expected_usage = TokenUsage {
-        input_tokens: 26,
+        input_tokens: tool_turns + 3 + 7,
         cache_read_input_tokens: 1,
         cache_write_input_tokens: 2,
-        output_tokens: 24,
+        output_tokens: tool_turns + 5 + 3,
         reasoning_tokens: None,
     };
+    let expected_cost =
+        expected_usage.input_tokens * 1_000 + expected_usage.output_tokens * 2_000 + 100 + 2 * 300;
     let snapshot = runtime
         .snapshot(SnapshotRequest {
             workspace_id,
@@ -1271,7 +1278,7 @@ async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_b
     let focused = snapshot.focused.unwrap();
     assert_eq!(focused.runs[0].usage, Some(expected_usage));
     let cost = focused.runs[0].estimated_cost_usd_nanos;
-    assert!(cost.is_some_and(|cost| cost > 61_700), "{cost:?}");
+    assert_eq!(cost, Some(expected_cost));
     let accounting = focused.summary.accounting.unwrap();
     assert_eq!(accounting.direct.usage, Some(expected_usage));
     assert_eq!(accounting.direct.estimated_cost_usd_nanos, cost);

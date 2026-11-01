@@ -258,8 +258,15 @@ impl Drop for StoreInner {
 
 impl Store {
     pub(super) async fn open(path: PathBuf) -> Result<Self, SessionRuntimeError> {
+        Self::open_waiting(path, schema::OWNERSHIP_WAIT).await
+    }
+
+    async fn open_waiting(
+        path: PathBuf,
+        ownership_wait: std::time::Duration,
+    ) -> Result<Self, SessionRuntimeError> {
         let feed = Arc::new(WorkspaceFeed::default());
-        let started = worker::start(path, Arc::clone(&feed))?;
+        let started = worker::start(path, ownership_wait, Arc::clone(&feed))?;
         let store_id = started
             .ready
             .await
@@ -2334,11 +2341,12 @@ mod tests {
             .ok()
             .map(|metadata| metadata.len());
 
+        let wait = std::time::Duration::from_millis(50);
         let started = std::time::Instant::now();
-        let second = Store::open(path.clone()).await;
+        let second = Store::open_waiting(path.clone(), wait).await;
         assert!(matches!(second, Err(SessionRuntimeError::StoreBusy)));
         let elapsed = started.elapsed();
-        assert!(elapsed >= schema::OWNERSHIP_WAIT, "{elapsed:?}");
+        assert!(elapsed >= wait, "{elapsed:?}");
         assert_eq!(
             std::fs::metadata(&path).unwrap().modified().unwrap(),
             modified_before
@@ -2365,10 +2373,10 @@ mod tests {
     async fn a_busy_store_is_refused_before_the_database_is_created() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sessions.sqlite3");
-        let _foreign = schema::acquire_ownership(&path).unwrap();
+        let _foreign = schema::acquire_ownership(&path, schema::OWNERSHIP_WAIT).unwrap();
 
         assert!(matches!(
-            Store::open(path.clone()).await,
+            Store::open_waiting(path.clone(), std::time::Duration::from_millis(50)).await,
             Err(SessionRuntimeError::StoreBusy)
         ));
         assert!(!path.exists());
