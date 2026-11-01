@@ -70,22 +70,9 @@ async fn historical_projection_fixture(version: u16) {
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                turn_ordinal: 1,
-                message: Message::new(Role::Assistant, blocks),
-                calls: calls.clone(),
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-            },
+            TurnCommit::new(1, Message::new(Role::Assistant, blocks))
+                .calls(calls.clone())
+                .build(),
         )
         .await
         .unwrap();
@@ -190,22 +177,9 @@ async fn projection_fixture(
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                turn_ordinal: 1,
-                message: Message::new(Role::Assistant, blocks),
-                calls,
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-            },
+            TurnCommit::new(1, Message::new(Role::Assistant, blocks))
+                .calls(calls)
+                .build(),
         )
         .await
         .unwrap();
@@ -427,7 +401,7 @@ async fn ab2_projection_write_failure_stops_before_next_provider_request() {
     )
     .await;
     std::fs::write(harness.workspace_path.join("note.txt"), "noted\n").unwrap();
-    harness.runtime.inner.store.call(Priority::Control, |connection| {
+    harness.runtime.store().call(Priority::Control, |connection| {
         connection.execute_batch("CREATE TRIGGER reject_tool_projection BEFORE UPDATE OF tool_results_projection_json ON model_turns BEGIN SELECT RAISE(ABORT,'injected projection failure'); END;")?;
         Ok(())
     }).await.unwrap();
@@ -439,7 +413,7 @@ async fn ab2_projection_write_failure_stops_before_next_provider_request() {
     assert!(observed.iter().any(|event| matches!(&event.event,
         SessionEvent::RunFinished { outcome: RunOutcome::Failed { failure }, .. }
         if failure.message.contains("failed to persist projected tool results"))));
-    let (turns, projections, results): (u32, u32, u32) = harness.runtime.inner.store.call(Priority::Control, |connection| {
+    let (turns, projections, results): (u32, u32, u32) = harness.runtime.store().call(Priority::Control, |connection| {
         Ok(connection.query_row("SELECT (SELECT count(*) FROM model_turns),(SELECT count(*) FROM model_turns WHERE tool_results_projection_json IS NOT NULL),(SELECT count(*) FROM tool_calls WHERE result IS NOT NULL)", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?)
     }).await.unwrap();
     assert_eq!((turns, projections, results), (1, 0, 1));
@@ -543,7 +517,7 @@ async fn ab2_ambiguous_history_fails_only_its_run_and_keeps_fresh_sessions_usabl
     collect_through_finished(&mut harness.events).await;
     let before = harness.requests.lock().unwrap().len();
     assert_eq!(before, 2);
-    harness.runtime.inner.store.call(Priority::Control, |connection| {
+    harness.runtime.store().call(Priority::Control, |connection| {
         connection.execute_batch("UPDATE model_turns SET tool_results_projection_json=NULL; UPDATE runs SET plan_descriptor_json=json_remove(json_set(plan_descriptor_json,'$.version',14,'$.prompt_version',20),'$.tool_output_projection'),plan_identity_json=json_set(plan_identity_json,'$.descriptor_version',14)")?;
         Ok(())
     }).await.unwrap();
@@ -558,8 +532,8 @@ async fn ab2_ambiguous_history_fails_only_its_run_and_keeps_fresh_sessions_usabl
         SessionEvent::RunFinished { outcome: RunOutcome::Failed { failure }, .. }
         if failure.message.contains("start a new session"))));
     assert_eq!(harness.requests.lock().unwrap().len(), before);
-    assert!(!*harness.runtime.inner.failed.borrow());
-    let (preparing, turns, results, projections): (u32,u32,u32,u32) = harness.runtime.inner.store.call(Priority::Control, |connection| {
+    assert!(!harness.runtime.has_failed());
+    let (preparing, turns, results, projections): (u32,u32,u32,u32) = harness.runtime.store().call(Priority::Control, |connection| {
         Ok(connection.query_row("SELECT (SELECT count(*) FROM sessions WHERE preparing_run_id IS NOT NULL),(SELECT count(*) FROM model_turns),(SELECT count(*) FROM tool_calls WHERE result IS NOT NULL),(SELECT count(*) FROM model_turns WHERE tool_results_projection_json IS NOT NULL)", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?)
     }).await.unwrap();
     assert_eq!((preparing, turns, results, projections), (0, 2, 1, 0));
@@ -688,11 +662,11 @@ async fn startup_goal_cursor_survives_delivery_journal_retention() {
         )
         .await
         .unwrap();
-    let command: SessionCommand = serde_json::from_value(serde_json::json!({
-        "type":"set_goal", "session_id":session, "objective":"retain the startup boundary",
-        "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+86_400_000}
-    }))
-    .unwrap();
+    let command: SessionCommand = goal_command(
+        serde_json::json!({"session_id":session, "objective":"retain the startup boundary",
+            "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+86_400_000}
+        }),
+    );
     store
         .command(CommandId::generate().unwrap(), command)
         .await

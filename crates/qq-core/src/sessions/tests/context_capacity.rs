@@ -377,12 +377,9 @@ async fn admitted_tool_calls_store_their_effect_class() {
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![
                         ContentBlock::tool_call(
@@ -397,19 +394,12 @@ async fn admitted_tool_calls_store_their_effect_class() {
                         ),
                     ],
                 ),
-                calls: vec![
-                    runtime_call(1, "p1", "read_file", EffectClass::ReadOnly),
-                    runtime_call(2, "p2", "shell", EffectClass::Shell),
-                ],
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .calls(vec![
+                runtime_call(1, "p1", "read_file", EffectClass::ReadOnly),
+                runtime_call(2, "p2", "shell", EffectClass::Shell),
+            ])
+            .build(),
         )
         .await
         .unwrap();

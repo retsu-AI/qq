@@ -3,11 +3,8 @@ use super::*;
 #[tokio::test]
 async fn prune_deletes_only_idle_sessions_without_messages() {
     let (directory, runtime) = test_runtime().await;
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let kept = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id: kept } = kept.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, kept, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let mut empties = Vec::new();
     for _ in 0..2 {
         let CommandOutcome::SessionCreated { session_id } =
@@ -17,25 +14,8 @@ async fn prune_deletes_only_idle_sessions_without_messages() {
         };
         empties.push(session_id);
     }
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: kept,
-                input: vec![InputPart::text("keep me".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: queued.committed_through,
-        })
-        .unwrap();
+    let queued = try_submit(&runtime, kept, "keep me").await.unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, queued.committed_through);
     collect_through_finished(&mut events).await;
 
     let receipt = runtime
@@ -63,13 +43,7 @@ async fn prune_deletes_only_idle_sessions_without_messages() {
     }
     assert_eq!(deleted, empties);
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: None,
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, None, 8, 8))
         .await
         .unwrap();
     assert_eq!(
@@ -506,8 +480,7 @@ async fn run_activity_is_read_from_the_column_and_the_command_counter_tracks_the
     let session_id = harness.session_id;
     let (column, summary, counted, journaled) = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let column: Option<String> = connection.query_row(
                 "SELECT activity FROM runs WHERE id = ?1",
@@ -834,25 +807,10 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
         else {
             panic!("unexpected receipt")
         };
-        let queued = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("written by v0.1.4".to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        let queued = try_submit(&runtime, session_id, "written by v0.1.4")
             .await
             .unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: queued.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, queued.committed_through);
         collect_through_finished(&mut events).await;
         runtime.shutdown().await.unwrap();
         (workspace_id, session_id)
@@ -889,13 +847,7 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
             .collect::<Vec<_>>()
     };
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);
@@ -919,13 +871,7 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
         assert_eq!(version(&connection), STORE_SCHEMA_VERSION.to_string());
     }
     let reopened = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
         .unwrap();
     assert_eq!(focused_transcript(&reopened), migrated);
@@ -1514,25 +1460,10 @@ async fn retired_supervised_mode_upgrades_from(schema: u32) {
         else {
             panic!("unexpected receipt")
         };
-        let queued = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("written by v0.1.8".to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        let queued = try_submit(&runtime, session_id, "written by v0.1.8")
             .await
             .unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: queued.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, queued.committed_through);
         collect_through_finished(&mut events).await;
         let store_id = runtime.store_id();
         runtime.close().await.unwrap();
@@ -1583,13 +1514,7 @@ async fn retired_supervised_mode_upgrades_from(schema: u32) {
     .await
     .unwrap();
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions[0].approval_mode, ApprovalMode::Auto);
@@ -1598,12 +1523,7 @@ async fn retired_supervised_mode_upgrades_from(schema: u32) {
         workspace_id,
         sequence: 0,
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: start,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, start);
     let replayed = tokio::time::timeout(Duration::from_secs(10), async {
         let mut replayed = Vec::new();
         while let Some(event) = events.next().await {
@@ -1675,25 +1595,10 @@ async fn a_schema_64_store_with_reviewer_delegate_and_grant_state_opens_and_repl
         else {
             panic!("unexpected receipt")
         };
-        let queued = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("written by v0.1.9".to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        let queued = try_submit(&runtime, session_id, "written by v0.1.9")
             .await
             .unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: queued.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, queued.committed_through);
         collect_through_finished(&mut events).await;
         let store_id = runtime.store_id();
         runtime.close().await.unwrap();
@@ -1834,13 +1739,7 @@ async fn a_schema_64_store_with_reviewer_delegate_and_grant_state_opens_and_repl
     .await
     .unwrap();
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);
@@ -1849,12 +1748,7 @@ async fn a_schema_64_store_with_reviewer_delegate_and_grant_state_opens_and_repl
         workspace_id,
         sequence: 0,
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: start,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, start);
     let replayed = tokio::time::timeout(Duration::from_secs(10), async {
         let mut replayed = Vec::new();
         while let Some(event) = events.next().await {

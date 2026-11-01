@@ -70,6 +70,7 @@ pub(crate) use goal_paid::{GoalPaidInput, PaidRequestAdmission};
 pub(crate) use goals::GoalRunInput;
 pub use goals::GoalValidationError;
 mod in_run_compaction;
+mod probe;
 mod projection;
 mod runtime;
 mod scheduler;

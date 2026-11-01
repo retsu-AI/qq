@@ -26,13 +26,7 @@ fn metered(
     mut events: Vec<Result<qq_provider::ProviderEvent, qq_provider::ProviderError>>,
 ) -> ProviderStream {
     events.push(Ok(qq_provider::ProviderEvent::Completed {
-        usage: Some(qq_provider::ProviderUsage {
-            input_tokens: 1,
-            cache_read_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 1,
-            reasoning_tokens: None,
-        }),
+        usage: Some(provider_usage(1, 1)),
     }));
     Box::pin(stream::iter(events))
 }
@@ -103,7 +97,7 @@ async fn delegate_to(
     let child: Arc<dyn Provider> = Arc::new(child);
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
     std::fs::write(
-        harness._directory.path().join("inventory.rs"),
+        harness.directory.path().join("inventory.rs"),
         "struct Widget;\n",
     )
     .unwrap();
@@ -206,7 +200,7 @@ async fn a_child_with_no_text_at_all_is_still_an_error() {
     let child: Arc<dyn Provider> = Arc::new(Silent { inner });
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
     std::fs::write(
-        harness._directory.path().join("inventory.rs"),
+        harness.directory.path().join("inventory.rs"),
         "struct Widget;\n",
     )
     .unwrap();
@@ -245,7 +239,7 @@ async fn a_childs_answer_is_progress_for_the_parent() {
     });
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
     std::fs::write(
-        harness._directory.path().join("inventory.rs"),
+        harness.directory.path().join("inventory.rs"),
         "struct Widget;\n",
     )
     .unwrap();
@@ -281,7 +275,7 @@ async fn a_child_that_answered_its_brief_replays_its_live_context() {
     let child: Arc<dyn Provider> = Arc::new(child);
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
     std::fs::write(
-        harness._directory.path().join("inventory.rs"),
+        harness.directory.path().join("inventory.rs"),
         "struct Widget;\n",
     )
     .unwrap();
@@ -316,7 +310,7 @@ async fn a_child_that_answered_its_brief_replays_its_live_context() {
     assert_eq!(&replayed[..live.len()], live.as_slice());
     assert_eq!(replayed[live.len()..], [Message::user("thanks")]);
     assert_assembly_matches_reference(
-        &harness._directory.path().join("sessions.sqlite3"),
+        &harness.directory.path().join("sessions.sqlite3"),
         child_session,
     );
 }
@@ -432,7 +426,7 @@ async fn a_continued_report_reaches_the_parent_whole() {
     });
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
     std::fs::write(
-        harness._directory.path().join("inventory.rs"),
+        harness.directory.path().join("inventory.rs"),
         "struct Widget;\n",
     )
     .unwrap();
@@ -503,7 +497,7 @@ async fn a_report_retried_after_a_fault_reaches_the_parent_whole() {
     });
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
     std::fs::write(
-        harness._directory.path().join("inventory.rs"),
+        harness.directory.path().join("inventory.rs"),
         "struct Widget;\n",
     )
     .unwrap();
@@ -539,7 +533,7 @@ async fn ab5_read_only_root_notice_replays_and_legacy_notice_keeps_its_text() {
     )
     .await;
     std::fs::write(
-        harness._directory.path().join("inventory.rs"),
+        harness.directory.path().join("inventory.rs"),
         "struct Widget;\n",
     )
     .unwrap();
@@ -588,11 +582,11 @@ async fn ab5_read_only_root_notice_replays_and_legacy_notice_keeps_its_text() {
         );
     }
     assert_assembly_matches_reference(
-        &harness._directory.path().join("sessions.sqlite3"),
+        &harness.directory.path().join("sessions.sqlite3"),
         harness.session_id,
     );
     let connection =
-        rusqlite::Connection::open(harness._directory.path().join("sessions.sqlite3")).unwrap();
+        rusqlite::Connection::open(harness.directory.path().join("sessions.sqlite3")).unwrap();
     assert_eq!(connection.execute("UPDATE model_turns SET notice='stall_report' WHERE run_id=?1 AND notice='root_stall_report'", [run_id.to_string()]).unwrap(), 1);
     drop(connection);
     let legacy = submit_prompt_to(&harness.runtime, harness.session_id, "legacy replay").await;

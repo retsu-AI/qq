@@ -16,13 +16,7 @@ impl Provider for GatedChild {
             permit.forget();
             yield Ok(qq_provider::ProviderEvent::OutputTextDelta { text: answer.to_owned() });
             yield Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(qq_provider::ProviderUsage {
-                    input_tokens: 10,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 5,
-                    reasoning_tokens: None,
-                }),
+                usage: Some(provider_usage(10, 5)),
             });
         })
     }
@@ -60,13 +54,7 @@ impl Provider for ScriptedParent {
         self.requests.lock().unwrap().push(request);
         let current = self.turn.fetch_add(1, Ordering::AcqRel);
         self.turn_started.notify_waiters();
-        let usage = Some(qq_provider::ProviderUsage {
-            input_tokens: 1,
-            cache_read_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 1,
-            reasoning_tokens: None,
-        });
+        let usage = Some(provider_usage(1, 1));
         let script = match self.script.get(current).cloned() {
             Some(ParentTurn::WithChildren(name, arguments)) => {
                 Some(ParentTurn::Calls(vec![(name, arguments(&children))]))
@@ -92,17 +80,8 @@ impl Provider for ScriptedParent {
                 events.push(Ok(qq_provider::ProviderEvent::Completed { usage }));
                 Box::pin(stream::iter(events))
             }
-            Some(ParentTurn::Empty) => {
-                Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                    usage,
-                })]))
-            }
-            None => Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "all done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage }),
-            ])),
+            Some(ParentTurn::Empty) => provider_script([completed(usage)]),
+            None => provider_script([text_delta("all done"), completed(usage)]),
         }
     }
 }
@@ -244,11 +223,7 @@ async fn assert_replay_matches_live(delegation: &mut Delegation) {
             .collect::<Vec<_>>();
         assert_eq!(live_content, replayed_content, "content at {index}");
     }
-    let database = delegation
-        .harness
-        ._directory
-        .path()
-        .join("sessions.sqlite3");
+    let database = delegation.harness.directory.path().join("sessions.sqlite3");
     let session_id = delegation.harness.session_id;
     let mut connection = Connection::open(database).unwrap();
     let transaction = connection.transaction().unwrap();
@@ -280,7 +255,7 @@ async fn assert_replay_matches_live(delegation: &mut Delegation) {
 }
 
 fn harness_root(harness: &SpawnHarness) -> std::path::PathBuf {
-    harness._directory.path().to_path_buf()
+    harness.directory.path().to_path_buf()
 }
 
 async fn parent_sent(delegation: &Delegation, count: usize) {
@@ -320,7 +295,7 @@ async fn a_parent_keeps_working_and_receives_each_answer_once() {
         "widgets live in inventory.rs:1",
     )
     .await;
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -403,7 +378,7 @@ async fn an_answer_after_the_parent_settles_reaches_its_next_run() {
         "the answer for later",
     )
     .await;
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -414,15 +389,7 @@ async fn an_answer_after_the_parent_settles_reaches_its_next_run() {
         .await
         .unwrap()
         .unwrap();
-    delegation
-        .harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: run },
-        )
-        .await
-        .unwrap();
+    cancel_run(&delegation.harness.runtime, run).await.unwrap();
     let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
     assert!(matches!(
         finished_outcome(&observed, run),
@@ -432,8 +399,7 @@ async fn an_answer_after_the_parent_settles_reaches_its_next_run() {
     let context = delegation
         .harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             load_model_context(connection, session_id, u64::MAX)
         })
@@ -464,7 +430,7 @@ async fn steering_wakes_a_parent_waiting_for_answers() {
         "late answer",
     )
     .await;
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -692,8 +658,7 @@ async fn a_budget_final_turn_cancels_running_children() {
     let delivered: Vec<(Option<u32>, String)> = delegation
         .harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             let mut statement =
                 connection.prepare("SELECT turn_ordinal, text FROM child_deliveries")?;
@@ -723,8 +688,7 @@ async fn a_budget_final_turn_cancels_running_children() {
     let context = delegation
         .harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             load_model_context(connection, session_id, u64::MAX)
         })
@@ -793,7 +757,7 @@ async fn the_deadline_ends_a_wait_for_answers() {
         "never released",
     )
     .await;
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let receipt = delegation
         .harness
         .runtime
@@ -921,7 +885,7 @@ async fn an_empty_reply_while_waiting_keeps_the_request_valid() {
         "the survey",
     )
     .await;
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -1109,7 +1073,7 @@ async fn a_spawn_call_dropped_while_its_receipt_is_in_flight_keeps_the_child() {
         "answer despite the interrupt",
     )
     .await;
-    let (held, release) = subagents::hold_child_receipt(delegation.harness.session_id);
+    let (held, release) = PROBE.hold(Checkpoint::ChildReceipt(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -1245,7 +1209,7 @@ async fn wait_agents_with_a_timeout_returns_what_settled() {
         "the late answer",
     )
     .await;
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -1703,13 +1667,7 @@ impl Provider for ReadsUntil {
             requests.push(request);
             requests.len()
         };
-        let usage = Some(qq_provider::ProviderUsage {
-            input_tokens: 1,
-            cache_read_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 1,
-            reasoning_tokens: None,
-        });
+        let usage = Some(provider_usage(1, 1));
         let call = |name: &str, arguments: String| {
             let id = format!("call_{turn}");
             [
@@ -1739,12 +1697,7 @@ impl Provider for ReadsUntil {
                 ),
             );
         }
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "done".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage }),
-        ]))
+        provider_script([text_delta("done"), completed(usage)])
     }
 }
 
@@ -1754,13 +1707,7 @@ struct ReportingChild {
 
 impl Provider for ReportingChild {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
-        let usage = Some(qq_provider::ProviderUsage {
-            input_tokens: 2,
-            cache_read_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 2,
-            reasoning_tokens: None,
-        });
+        let usage = Some(provider_usage(2, 2));
         let last = request
             .messages()
             .last()
@@ -2157,7 +2104,7 @@ async fn an_interim_report_does_not_end_a_tool_free_wait() {
         children_started: started,
         parent_turn,
     };
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -2170,7 +2117,7 @@ async fn an_interim_report_does_not_end_a_tool_free_wait() {
         .unwrap();
     children_started(&delegation, 2).await;
     let session_id = delegation.harness.session_id;
-    let store = &delegation.harness.runtime.inner.store;
+    let store = &delegation.harness.runtime.store();
     let children: Vec<(String, String)> = store
         .call(Priority::Control, move |connection| {
             let mut statement = connection.prepare(
@@ -2322,7 +2269,7 @@ async fn steering_during_a_wait_with_a_pending_report_replays_as_live() {
         children_started: started,
         parent_turn,
     };
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -2335,7 +2282,7 @@ async fn steering_during_a_wait_with_a_pending_report_replays_as_live() {
         .unwrap();
     children_started(&delegation, 1).await;
     let session_id = delegation.harness.session_id;
-    let store = &delegation.harness.runtime.inner.store;
+    let store = &delegation.harness.runtime.store();
     let b: String = store
         .call(Priority::Control, move |connection| {
             Ok(connection.query_row(
@@ -2453,7 +2400,7 @@ async fn cancelling_a_child_that_just_finished_reports_it_finished() {
     .await;
     children_started(&delegation, 1).await;
     let session_id = delegation.harness.session_id;
-    let store = delegation.harness.runtime.inner.store.clone();
+    let store = delegation.harness.runtime.store().clone();
     let child_run: RunId = store
         .call(Priority::Control, move |connection| {
             Ok(connection.query_row(
@@ -2467,7 +2414,7 @@ async fn cancelling_a_child_that_just_finished_reports_it_finished() {
         .unwrap()
         .parse()
         .unwrap();
-    let (mut entered, mut release, _) = store::hold_outcome_read(child_run);
+    let (mut entered, mut release, _) = hold_outcome_read(child_run);
     delegation.gate.add_permits(1);
     let release = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -2485,7 +2432,7 @@ async fn cancelling_a_child_that_just_finished_reports_it_finished() {
             if settled {
                 break release;
             }
-            let (next_entered, next_release, _) = store::hold_outcome_read(child_run);
+            let (next_entered, next_release, _) = hold_outcome_read(child_run);
             release.send(()).unwrap();
             entered = next_entered;
             release = next_release;

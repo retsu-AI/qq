@@ -3,34 +3,13 @@ use super::*;
 #[tokio::test]
 async fn unresolvable_slash_prompts_are_refused_at_admission_without_a_run_row() {
     let (_directory, runtime) = test_runtime().await;
-    let (workspace_id, _) = resolve_workspace(&runtime, _directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, _directory.path(), ApprovalMode::default()).await;
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let submit = |text: &str| {
         let input = vec![InputPart::text(text)];
         let runtime = &runtime;
-        async move {
-            runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::SubmitPrompt {
-                        session_id,
-                        input,
-                        limits: RunLimits::default(),
-                        correlation: Correlation::default(),
-                        output: None,
-                    },
-                )
-                .await
-        }
+        async move { try_submit(runtime, session_id, Prompt::input(input)).await }
     };
     assert_eq!(
         submit("/clear").await,
@@ -82,8 +61,14 @@ async fn empty_attachment_range_fails_as_invalid_input_and_session_remains_usabl
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("empty.txt"), "").unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(MutableResolvedLoader {
             resolved_model: Arc::new(StdMutex::new(test_resolved_model(
                 "test/model",
@@ -93,37 +78,20 @@ async fn empty_attachment_range_fails_as_invalid_input_and_session_remains_usabl
             ))),
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::default(),
+    )
+    .await;
+    try_submit(
+        &runtime,
+        session_id,
+        Prompt::input(vec![InputPart::WorkspaceFile {
+            path: "empty.txt".to_owned(),
+            expected_hash: None,
+            range: Some(qq_protocol::LineRange { start: 1, end: 1 }),
+        }]),
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::WorkspaceFile {
-                    path: "empty.txt".to_owned(),
-                    expected_hash: None,
-                    range: Some(qq_protocol::LineRange { start: 1, end: 1 }),
-                }],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
     let observed = collect_through_finished(&mut events).await;
     let failed_requests = requests.lock().unwrap().len();
     let follow_up = submit_prompt_to(&runtime, session_id, "still usable").await;
@@ -219,30 +187,19 @@ async fn attachment_ranges_preserve_lines_clip_eof_and_reject_nonexistent_starts
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
             panic!("unexpected receipt")
         };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
         let before = requests.lock().unwrap().len();
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::WorkspaceFile {
-                        path: "case.txt".to_owned(),
-                        expected_hash: None,
-                        range,
-                    }],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        try_submit(
+            &runtime,
+            session_id,
+            Prompt::input(vec![InputPart::WorkspaceFile {
+                path: "case.txt".to_owned(),
+                expected_hash: None,
+                range,
+            }]),
+        )
+        .await
+        .unwrap();
         let observed = collect_through_finished(&mut events).await;
         let outcome = observed
             .iter()
@@ -406,7 +363,7 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
     assert!(row.steering);
     assert_eq!(row.state, MessageState::Complete);
     assert_eq!(row.turn_ordinal, 2);
-    let store = harness.runtime.inner.store.clone();
+    let store = harness.runtime.store().clone();
     let session_id = harness.session_id;
     let context = store
         .call(Priority::Control, move |connection| {
@@ -433,7 +390,7 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
     harness.runtime.shutdown().await.unwrap();
     drop(store);
     assert_assembly_matches_reference(
-        &harness._directory.path().join("sessions.sqlite3"),
+        &harness.directory.path().join("sessions.sqlite3"),
         harness.session_id,
     );
 }
@@ -448,7 +405,7 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
         DEFAULT_APPROVAL_TIMEOUT,
     )
     .await;
-    let workspace = harness._directory.path().to_owned();
+    let workspace = harness.directory.path().to_owned();
     std::fs::write(workspace.join("notes.txt"), "STEER_ORIGINAL\nsecond\n").unwrap();
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
     let receipt = harness
@@ -527,7 +484,7 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
     assert!(!live.contains("@notes.txt"), "{live}");
 
     std::fs::write(workspace.join("notes.txt"), "STEER_MODIFIED\n").unwrap();
-    let store = harness.runtime.inner.store.clone();
+    let store = harness.runtime.store().clone();
     let session_id = harness.session_id;
     let context = store
         .call(Priority::Control, move |connection| {
@@ -552,7 +509,7 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
     harness.runtime.shutdown().await.unwrap();
     drop(store);
     assert_assembly_matches_reference(
-        &harness._directory.path().join("sessions.sqlite3"),
+        &harness.directory.path().join("sessions.sqlite3"),
         harness.session_id,
     );
 }
@@ -671,26 +628,7 @@ async fn steering_bounds_and_refusals_are_typed() {
         steer(&harness.runtime, RunId::from_bytes([9; 16]), "x", false).await,
         Err(SessionRuntimeError::RunNotFound)
     );
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("follow-up")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued {
-        run_id: queued_run, ..
-    } = queued.outcome
-    else {
-        panic!("queued")
-    };
+    let queued_run = submit(&harness.runtime, harness.session_id, "follow-up").await;
     assert_eq!(
         steer(&harness.runtime, queued_run, "too early", false).await,
         Err(SessionRuntimeError::RunNotSteerable)
@@ -779,30 +717,15 @@ async fn plan_identity_correlation_and_profile_persist_and_survive_refresh() {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let run_correlation =
         Correlation::new([("job".to_owned(), "j-1".to_owned())].into_iter().collect()).unwrap();
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("work")],
-                limits: RunLimits::default(),
-                correlation: run_correlation.clone(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(
+        &runtime,
+        session_id,
+        Prompt::text("work").correlation(run_correlation.clone()),
+    )
+    .await;
     let observed = collect_through_finished(&mut events).await;
     let started_plan = observed
         .iter()
@@ -864,8 +787,7 @@ async fn plan_identity_correlation_and_profile_persist_and_survive_refresh() {
     let first = runs.iter().find(|run| run.id == run_id).unwrap();
     assert_eq!(first.plan.as_deref(), Some(&*started_plan));
     let stored_descriptor: String = reopened
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection
                 .query_row(
@@ -904,17 +826,9 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
         SessionRuntime::open(SessionRuntimeOptions::new(database.clone()), loader.clone())
             .await
             .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let attach = |text: &str, files: Vec<InputPart>| {
         let mut input = vec![InputPart::text(text)];
         input.extend(files);
@@ -1010,8 +924,7 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
         assert!(prompt_text(last, 3).contains("ALPHA_MODIFIED"));
     }
     let (blobs, references, evicted): (u32, u32, u32) = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             Ok((
                 connection.query_row(
@@ -1053,12 +966,7 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
         )
         .await
         .unwrap();
-    let mut events = reopened
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: queued.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&reopened, workspace_id, queued.committed_through);
     collect_through_finished(&mut events).await;
     {
         let captured = requests.lock().unwrap();
@@ -1098,8 +1006,14 @@ async fn evicted_attachments_render_an_explicit_stub_not_the_placeholder() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("a.txt"), "ALPHA\n").unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(MutableResolvedLoader {
             resolved_model: Arc::new(StdMutex::new(test_resolved_model(
                 "test/model",
@@ -1109,44 +1023,26 @@ async fn evicted_attachments_render_an_explicit_stub_not_the_placeholder() {
             ))),
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::default(),
+    )
+    .await;
+    try_submit(
+        &runtime,
+        session_id,
+        Prompt::input(vec![
+            InputPart::text("inspect"),
+            InputPart::WorkspaceFile {
+                path: "a.txt".to_owned(),
+                expected_hash: None,
+                range: None,
+            },
+        ]),
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![
-                    InputPart::text("inspect"),
-                    InputPart::WorkspaceFile {
-                        path: "a.txt".to_owned(),
-                        expected_hash: None,
-                        range: None,
-                    },
-                ],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
     collect_through_finished(&mut events).await;
     runtime
-        .inner
-        .store
+        .store()
         .call_write(Priority::Control, move |connection| {
             connection.execute(
                 "UPDATE attachment_blobs SET content = NULL, evicted_at_ms = 1
@@ -1157,19 +1053,7 @@ async fn evicted_attachments_render_an_explicit_stub_not_the_placeholder() {
         })
         .await
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    try_submit(&runtime, session_id, "continue").await.unwrap();
     collect_through_finished(&mut events).await;
     let first = {
         let captured = requests.lock().unwrap();
@@ -1210,46 +1094,26 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
         ))),
         requests: Arc::clone(&requests),
     });
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-        loader,
-    )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![
-                    InputPart::text("Summarize"),
-                    InputPart::WorkspaceFile {
-                        path: "notes.md".to_owned(),
-                        expected_hash: None,
-                        range: None,
-                    },
-                ],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(directory, loader, ApprovalMode::default()).await;
+    let run_id = submit(
+        &runtime,
+        session_id,
+        Prompt::input(vec![
+            InputPart::text("Summarize"),
+            InputPart::WorkspaceFile {
+                path: "notes.md".to_owned(),
+                expected_hash: None,
+                range: None,
             },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+        ]),
+    )
+    .await;
     let observed = collect_through_finished(&mut events).await;
     let queued_message = observed
         .iter()
@@ -1279,8 +1143,7 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
         assert!(text.contains("remember the tests"));
     }
     let files: Vec<(String, String)> = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let mut statement = connection
                 .prepare("SELECT path, content_hash FROM session_files WHERE session_id = ?1")?;
@@ -1300,23 +1163,17 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
         they are not durable session rows until a tool records them"
     );
 
-    let stale = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::WorkspaceFile {
-                    path: "notes.md".to_owned(),
-                    expected_hash: Some(ContentHash::from_bytes([7; 32])),
-                    range: None,
-                }],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let stale = try_submit(
+        &runtime,
+        session_id,
+        Prompt::input(vec![InputPart::WorkspaceFile {
+            path: "notes.md".to_owned(),
+            expected_hash: Some(ContentHash::from_bytes([7; 32])),
+            range: None,
+        }]),
+    )
+    .await
+    .unwrap();
     let CommandOutcome::PromptQueued {
         run_id: stale_run, ..
     } = stale.outcome
@@ -1344,22 +1201,16 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
         "no provider request for the failed run"
     );
 
-    let escaped = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::WorkspaceFile {
-                    path: "/etc/passwd".to_owned(),
-                    expected_hash: None,
-                    range: None,
-                }],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await;
+    let escaped = try_submit(
+        &runtime,
+        session_id,
+        Prompt::input(vec![InputPart::WorkspaceFile {
+            path: "/etc/passwd".to_owned(),
+            expected_hash: None,
+            range: None,
+        }]),
+    )
+    .await;
     assert!(matches!(
         escaped,
         Err(SessionRuntimeError::InvalidInput(
@@ -1372,11 +1223,8 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
 #[tokio::test]
 async fn child_limits_are_validated_against_the_runtime_ceilings() {
     let (_directory, runtime) = test_runtime().await;
-    let (workspace_id, _) = resolve_workspace(&runtime, _directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (_, session_id, _) =
+        new_session(&runtime, _directory.path(), ApprovalMode::default()).await;
     for limits in [
         RunLimits {
             max_children: Some(MAX_SPAWNED_CHILDREN_PER_RUN + 1),
@@ -1391,18 +1239,7 @@ async fn child_limits_are_validated_against_the_runtime_ceilings() {
             ..RunLimits::default()
         },
     ] {
-        let result = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("x")],
-                    limits,
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await;
+        let result = try_submit(&runtime, session_id, Prompt::text("x").limits(limits)).await;
         assert_eq!(result, Err(SessionRuntimeError::InvalidRunLimits));
     }
     runtime.shutdown().await.unwrap();
@@ -1420,34 +1257,25 @@ async fn run_snapshot_preserves_prompt_identity_across_restart() {
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(skill.join("SKILL.md"), "Retain exact run provenance.\n").unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database_path.clone()),
         Arc::new(ScriptedLoader),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = submit_prompt_to(&runtime, session_id, "/stable finish the work").await;
     collect_through_finished(&mut events).await;
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 32))
         .await
         .unwrap();
     let run = snapshot
@@ -1497,13 +1325,7 @@ async fn run_snapshot_preserves_prompt_identity_across_restart() {
     .await
     .unwrap();
     let snapshot = reopened
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 32))
         .await
         .unwrap();
     let run = snapshot
@@ -1544,23 +1366,20 @@ async fn resolved_model_and_request_limits_survive_config_mutation_and_restart()
         resolved_model: Arc::clone(&configured),
         requests: Arc::clone(&requests),
     });
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database_path.clone()),
         loader.clone(),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = submit_prompt_to(&runtime, session_id, "work").await;
     let observed = collect_through_finished(&mut events).await;
 
@@ -1579,13 +1398,7 @@ async fn resolved_model_and_request_limits_survive_config_mutation_and_restart()
     }
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let persisted = snapshot
@@ -1609,13 +1422,7 @@ async fn resolved_model_and_request_limits_survive_config_mutation_and_restart()
         .await
         .unwrap();
     let snapshot = reopened
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let persisted_after_restart = snapshot
@@ -1666,13 +1473,12 @@ async fn escaped_slash_is_persisted_as_the_provider_visible_prompt() {
 
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            32,
+        ))
         .await
         .unwrap()
         .focused
@@ -1696,10 +1502,7 @@ async fn prompt_identity_persistence_failure_starts_no_provider_work() {
             let provider_calls = Arc::clone(&self.provider_calls);
             Box::pin(async move {
                 let runtime = Runtime::new(CountingProvider { provider_calls }, "test-model", 256)
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })?;
+                    .map_err(load_error)?;
                 Ok(loaded_runtime(runtime, &request.workspace, None))
             })
         }
@@ -1712,34 +1515,28 @@ async fn prompt_identity_persistence_failure_starts_no_provider_work() {
     impl Provider for CountingProvider {
         fn stream(&self, _request: ModelRequest) -> ProviderStream {
             self.provider_calls.fetch_add(1, Ordering::AcqRel);
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: None,
-            })]))
+            provider_script([completed(None)])
         }
     }
 
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
     let provider_calls = Arc::new(AtomicUsize::new(0));
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database_path.clone()),
         Arc::new(CountingLoader {
             provider_calls: Arc::clone(&provider_calls),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     Connection::open(&database_path)
         .unwrap()
         .execute_batch(
@@ -1778,14 +1575,11 @@ async fn resolved_model_persistence_failure_starts_no_provider_work() {
     impl RuntimeLoader for CountingLoader {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
             let provider_calls = Arc::clone(&self.provider_calls);
-            Box::pin(async move {
-                Runtime::new(CountingProvider { provider_calls }, "test-model", 256)
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
-            })
+            {
+                let loaded = ProviderLoader::new(CountingProvider { provider_calls })
+                    .loaded(&request.workspace);
+                Box::pin(async move { Ok(loaded) })
+            }
         }
     }
 
@@ -1796,34 +1590,28 @@ async fn resolved_model_persistence_failure_starts_no_provider_work() {
     impl Provider for CountingProvider {
         fn stream(&self, _request: ModelRequest) -> ProviderStream {
             self.provider_calls.fetch_add(1, Ordering::AcqRel);
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: None,
-            })]))
+            provider_script([completed(None)])
         }
     }
 
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
     let provider_calls = Arc::new(AtomicUsize::new(0));
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database_path.clone()),
         Arc::new(CountingLoader {
             provider_calls: Arc::clone(&provider_calls),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     Connection::open(&database_path)
         .unwrap()
         .execute_batch(
@@ -1877,44 +1665,36 @@ async fn known_first_turn_context_overflow_starts_no_provider_work() {
                 impl Provider for PricedTinyContextProvider {
                     fn stream(&self, _request: ModelRequest) -> ProviderStream {
                         self.0.fetch_add(1, Ordering::SeqCst);
-                        Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                            usage: None,
-                        })]))
+                        provider_script([completed(None)])
                     }
                 }
 
-                Runtime::new(PricedTinyContextProvider(provider_calls), "test-model", 1)
-                    .map(|runtime| runtime.with_context_window(Some(1)))
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                Ok(
+                    ProviderLoader::new(PricedTinyContextProvider(provider_calls))
+                        .max_output_tokens(1)
+                        .context_window(Some(1))
+                        .loaded(&request.workspace),
+                )
             })
         }
     }
 
     let directory = tempfile::tempdir().unwrap();
     let provider_calls = Arc::new(AtomicUsize::new(0));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(TinyContextLoader {
             provider_calls: Arc::clone(&provider_calls),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     submit_prompt_to(&runtime, session_id, "work").await;
     let observed = collect_through_finished(&mut events).await;
 
@@ -1944,9 +1724,7 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
                 impl Provider for PricedTinyContextProvider {
                     fn stream(&self, _request: ModelRequest) -> ProviderStream {
                         self.0.fetch_add(1, Ordering::SeqCst);
-                        Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                            usage: None,
-                        })]))
+                        provider_script([completed(None)])
                     }
                 }
 
@@ -1966,10 +1744,7 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
                             }),
                         )
                     })
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                    .map_err(load_error)
             })
         }
     }
@@ -1984,36 +1759,16 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let queued = runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("known overflow".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+    let queued = store_command(runtime.store(), session_id, "known overflow")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
         panic!("unexpected receipt")
     };
     let saturated = saturate_control_lane(&runtime).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     runtime.request_schedule();
     tokio::time::sleep(Duration::from_millis(50)).await;
     saturated.release().await;
@@ -2038,13 +1793,7 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
         } if *finished == run_id
     )));
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 2,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 2))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -2056,7 +1805,7 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
         }
     );
     assert!(focused.runs[0].resolved_model.is_some());
-    assert!(!*runtime.inner.failed.borrow());
+    assert!(!runtime.has_failed());
 }
 
 #[tokio::test]
@@ -2068,15 +1817,13 @@ async fn known_later_turn_context_overflow_starts_no_second_provider_request() {
     impl RuntimeLoader for LaterTurnLoader {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
             let provider_calls = Arc::clone(&self.provider_calls);
-            Box::pin(async move {
-                Runtime::new(LaterTurnProvider { provider_calls }, "test-model", 1)
-                    .map(|runtime| runtime.with_context_window(Some(100_000)))
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
-            })
+            {
+                let loaded = ProviderLoader::new(LaterTurnProvider { provider_calls })
+                    .max_output_tokens(1)
+                    .context_window(Some(100_000))
+                    .loaded(&request.workspace);
+                Box::pin(async move { Ok(loaded) })
+            }
         }
     }
 
@@ -2088,28 +1835,11 @@ async fn known_later_turn_context_overflow_starts_no_second_provider_request() {
         fn stream(&self, _request: ModelRequest) -> ProviderStream {
             let call = self.provider_calls.fetch_add(1, Ordering::AcqRel);
             if call == 0 {
-                Box::pin(stream::iter(vec![
-                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                        id: "list".to_owned(),
-                        name: "tree".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                        id: "list".to_owned(),
-                        json: r#"{"path":".","depth":1}"#.to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                        id: "list".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::Completed {
-                        usage: Some(qq_provider::ProviderUsage {
-                            input_tokens: 99_998,
-                            cache_read_input_tokens: 0,
-                            cache_write_input_tokens: 0,
-                            output_tokens: 1,
-                            reasoning_tokens: None,
-                        }),
-                    }),
-                ]))
+                provider_script(
+                    tool_call("list", "tree", r#"{"path":".","depth":1}"#)
+                        .into_iter()
+                        .chain([completed(Some(provider_usage(99_998, 1)))]),
+                )
             } else {
                 Box::pin(stream::iter(vec![Ok(
                     qq_provider::ProviderEvent::Completed { usage: None },
@@ -2120,25 +1850,20 @@ async fn known_later_turn_context_overflow_starts_no_second_provider_request() {
 
     let directory = tempfile::tempdir().unwrap();
     let provider_calls = Arc::new(AtomicUsize::new(0));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(LaterTurnLoader {
             provider_calls: Arc::clone(&provider_calls),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     submit_prompt_to(&runtime, session_id, "work").await;
     let observed = collect_through_finished(&mut events).await;
 
@@ -2157,23 +1882,14 @@ async fn known_later_turn_context_overflow_starts_no_second_provider_request() {
 async fn instruction_hash_tracks_selected_path_and_bytes_deterministically() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("AGENTS.md"), "same\n").unwrap();
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-        Arc::new(ScriptedLoader),
-    )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let SessionFixture {
+        directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(directory, Arc::new(ScriptedLoader), ApprovalMode::default()).await;
 
     let first =
         completed_instruction_hash(&runtime, workspace_id, session_id, &mut events, "first").await;
@@ -2209,18 +1925,7 @@ async fn instruction_hash_tracks_selected_path_and_bytes_deterministically() {
 #[tokio::test]
 async fn set_session_model_applies_to_the_next_run_but_not_the_active_one() {
     let mut harness = session_management_harness().await;
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("first run".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let queued = try_submit(&harness.runtime, harness.session_id, "first run")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
@@ -2307,23 +2012,7 @@ async fn set_session_model_applies_to_the_next_run_but_not_the_active_one() {
         SessionEvent::RunFinished { session, .. } if session.context_tokens.is_none()
     )));
 
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("second run".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(&harness.runtime, harness.session_id, "second run").await;
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
     respond_approval(
         &harness.runtime,
@@ -2344,13 +2033,12 @@ async fn set_session_model_applies_to_the_next_run_but_not_the_active_one() {
     );
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            1,
+            8,
+        ))
         .await
         .unwrap();
     assert_eq!(snapshot.focused.unwrap().summary.context_tokens, Some(7));
@@ -2392,23 +2080,7 @@ async fn active_run_cannot_restore_occupancy_after_same_route_shape_change() {
         .unwrap();
     let updated = harness.events.next().await.unwrap().unwrap();
     assert!(matches!(updated.event, SessionEvent::SessionUpdated { .. }));
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("first run".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(&harness.runtime, harness.session_id, "first run").await;
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
     let connection = Connection::open(harness.directory.path().join("sessions.sqlite3")).unwrap();
     let stored_basis: Option<String> = connection
@@ -2496,13 +2168,12 @@ async fn set_session_effort_pins_and_clears_on_the_published_summary() {
     ));
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 1,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            1,
+            1,
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -2531,23 +2202,7 @@ async fn set_session_effort_pins_and_clears_on_the_published_summary() {
 #[tokio::test]
 async fn delete_session_is_refused_while_running_then_cascades_completely() {
     let mut harness = session_management_harness().await;
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("do work".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(&harness.runtime, harness.session_id, "do work").await;
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
 
     assert_eq!(
@@ -2619,13 +2274,7 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
 
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: None,
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(harness.workspace_id, None, 8, 8))
         .await
         .unwrap();
     assert!(snapshot.sessions.is_empty());
@@ -2697,8 +2346,7 @@ async fn control_and_cleanup_commands_are_admitted_past_the_command_limit() {
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection.execute(
                 "UPDATE metadata SET value = ?1 WHERE key = 'command_count'",
@@ -2709,19 +2357,7 @@ async fn control_and_cleanup_commands_are_admitted_past_the_command_limit() {
         .await
         .unwrap();
 
-    let refused = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("more")],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await;
+    let refused = try_submit(&harness.runtime, harness.session_id, "more").await;
     assert!(
         matches!(refused, Err(SessionRuntimeError::CommandLimitReached)),
         "{refused:?}"
@@ -2803,8 +2439,7 @@ async fn control_commands_are_bounded_by_the_headroom() {
     .await;
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection.execute(
                 "UPDATE metadata SET value = ?1 WHERE key = 'command_count'",
@@ -2872,17 +2507,7 @@ async fn model_fallback_provenance_survives_commands_and_run_reservation() {
             .await
             .unwrap();
         assert!(events.iter().any(|event| matches!(&event.event, SessionEvent::SessionUpdated { session } if session.model_is_fallback == model_is_fallback)));
-        store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("retain choice".to_owned())],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        store_command(&store, session_id, "retain choice")
             .await
             .unwrap();
         let claimed = store.reserve_next_run(false).await.unwrap().unwrap();
@@ -2933,12 +2558,7 @@ async fn retention_deletes_idle_sessions_older_than_the_cutoff_when_the_runtime_
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let deleted = events.next().await.unwrap().unwrap();
     assert!(
         matches!(deleted.event, SessionEvent::SessionDeleted { session_id } if session_id == stale),

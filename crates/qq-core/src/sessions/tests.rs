@@ -13,6 +13,7 @@ mod deadlines;
 mod delegation;
 mod execution_context;
 mod feeds;
+mod fixtures;
 mod goal_admission;
 mod goal_check;
 mod goal_check_recovery;
@@ -46,6 +47,24 @@ use qq_protocol::{BudgetExhaustion, BudgetLimitKind};
 use qq_provider::{ModelRequest, Provider, ProviderStream};
 
 use tempfile::TempDir;
+
+use super::probe::{Checkpoint, FAULTS, PROBE, StoreFault};
+use fixtures::*;
+
+fn hold_outcome_read(
+    run_id: RunId,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    let (entered, release) = PROBE.hold(Checkpoint::OutcomeRead(run_id));
+    (
+        entered,
+        release,
+        PROBE.observe(Checkpoint::OutcomeReadPolled(run_id)),
+    )
+}
 
 pub(super) struct PinnedCalendar {
     now: Arc<std::sync::atomic::AtomicU64>,
@@ -218,27 +237,10 @@ struct ScriptedLoader;
 
 impl RuntimeLoader for ScriptedLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-        Box::pin(async move {
-            Runtime::new(ScriptedProvider, "test-model", 256)
-                .map(|runtime| {
-                    loaded_runtime(
-                        runtime,
-                        &request.workspace,
-                        Some(ModelPricing {
-                            input_usd_nanos_per_token: 1_000,
-                            output_usd_nanos_per_token: 2_000,
-                            cache_read_usd_nanos_per_token: Some(100),
-                            cache_write_usd_nanos_per_token: Some(300),
-                            context_tier: None,
-                            provenance: "test".to_owned(),
-                        }),
-                    )
-                })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        let loaded = ProviderLoader::new(ScriptedProvider)
+            .pricing(test_pricing())
+            .loaded(&request.workspace);
+        Box::pin(async move { Ok(loaded) })
     }
 }
 
@@ -250,41 +252,29 @@ impl Provider for ScriptedProvider {
             .last()
             .is_some_and(|text| text.starts_with("Summarize this conversation"));
         if summarizing {
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: valid_summary("hello"),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 10,
-                        cache_read_input_tokens: 2,
-                        cache_write_input_tokens: 1,
-                        output_tokens: 5,
-                        reasoning_tokens: None,
-                    }),
-                }),
-            ]));
-        }
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "hel".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "l".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "o".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(qq_provider::ProviderUsage {
+            return provider_script([
+                text_delta(valid_summary("hello")),
+                completed(Some(qq_provider::ProviderUsage {
                     input_tokens: 10,
                     cache_read_input_tokens: 2,
                     cache_write_input_tokens: 1,
                     output_tokens: 5,
                     reasoning_tokens: None,
-                }),
-            }),
-        ]))
+                })),
+            ]);
+        }
+        provider_script([
+            text_delta("hel"),
+            text_delta("l"),
+            text_delta("o"),
+            completed(Some(qq_provider::ProviderUsage {
+                input_tokens: 10,
+                cache_read_input_tokens: 2,
+                cache_write_input_tokens: 1,
+                output_tokens: 5,
+                reasoning_tokens: None,
+            })),
+        ])
     }
 }
 
@@ -313,10 +303,7 @@ impl RuntimeLoader for MutableResolvedLoader {
                 )
                 .expect("test plan compiles")
             })
-            .map_err(|error| RuntimeLoadError {
-                kind: RunFailureKind::Configuration,
-                message: error.to_string(),
-            })
+            .map_err(load_error)
         })
     }
 }
@@ -328,12 +315,7 @@ struct CapturedResolvedProvider {
 impl Provider for CapturedResolvedProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
         self.requests.lock().unwrap().push(request);
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "done".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-        ]))
+        text_reply("done")
     }
 }
 
@@ -350,21 +332,14 @@ impl RuntimeLoader for CountingTextLoader {
             impl Provider for CountingTextProvider {
                 fn stream(&self, _request: ModelRequest) -> ProviderStream {
                     self.0.fetch_add(1, Ordering::SeqCst);
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: "done".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply("done")
                 }
             }
 
-            Runtime::new(CountingTextProvider(provider_calls), "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+            Ok(
+                ProviderLoader::new(CountingTextProvider(provider_calls))
+                    .loaded(&request.workspace),
+            )
         })
     }
 }
@@ -373,27 +348,10 @@ struct PricedHangingLoader;
 
 impl RuntimeLoader for PricedHangingLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-        Box::pin(async move {
-            Runtime::new(HangingProvider, "test-model", 256)
-                .map(|runtime| {
-                    loaded_runtime(
-                        runtime,
-                        &request.workspace,
-                        Some(ModelPricing {
-                            input_usd_nanos_per_token: 1_000,
-                            output_usd_nanos_per_token: 2_000,
-                            cache_read_usd_nanos_per_token: Some(100),
-                            cache_write_usd_nanos_per_token: Some(300),
-                            context_tier: None,
-                            provenance: "test".to_owned(),
-                        }),
-                    )
-                })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        let loaded = ProviderLoader::new(HangingProvider)
+            .pricing(test_pricing())
+            .loaded(&request.workspace);
+        Box::pin(async move { Ok(loaded) })
     }
 }
 
@@ -404,14 +362,7 @@ struct UsageSequenceLoader {
 impl RuntimeLoader for UsageSequenceLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let usage = self.usages.lock().unwrap().remove(0);
-        Box::pin(async move {
-            Runtime::new(UsageSequenceProvider { usage }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(UsageSequenceProvider { usage }, &request)
     }
 }
 
@@ -421,12 +372,7 @@ struct UsageSequenceProvider {
 
 impl Provider for UsageSequenceProvider {
     fn stream(&self, _request: ModelRequest) -> ProviderStream {
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "answer".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: self.usage }),
-        ]))
+        provider_script([text_delta("answer"), completed(self.usage)])
     }
 }
 
@@ -437,14 +383,7 @@ struct ReasoningLoader {
 impl RuntimeLoader for ReasoningLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
-        Box::pin(async move {
-            Runtime::new(ReasoningProvider { requests }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(ReasoningProvider { requests }, &request)
     }
 }
 
@@ -497,14 +436,11 @@ struct HangingReasoningLoader {
 impl RuntimeLoader for HangingReasoningLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let buffered = Arc::clone(&self.buffered);
-        Box::pin(async move {
-            Runtime::new(HangingReasoningProvider { buffered }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        {
+            let loaded = ProviderLoader::new(HangingReasoningProvider { buffered })
+                .loaded(&request.workspace);
+            Box::pin(async move { Ok(loaded) })
+        }
     }
 }
 
@@ -537,14 +473,9 @@ struct ChunkingLoader;
 
 impl RuntimeLoader for ChunkingLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-        Box::pin(async move {
-            Runtime::new(ChunkingProvider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        Box::pin(
+            async move { Ok(ProviderLoader::new(ChunkingProvider).loaded(&request.workspace)) },
+        )
     }
 }
 
@@ -552,15 +483,11 @@ struct ChunkingProvider;
 
 impl Provider for ChunkingProvider {
     fn stream(&self, _request: ModelRequest) -> ProviderStream {
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: String::new(),
-            }),
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "é".repeat(MAX_TEXT_CHUNK_BYTES / 2 + 8),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-        ]))
+        provider_script([
+            text_delta(String::new()),
+            text_delta("é".repeat(MAX_TEXT_CHUNK_BYTES / 2 + 8)),
+            completed(None),
+        ])
     }
 }
 
@@ -571,14 +498,7 @@ struct EmptyThenTextLoader {
 impl RuntimeLoader for EmptyThenTextLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
-        Box::pin(async move {
-            Runtime::new(EmptyThenTextProvider { requests }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(EmptyThenTextProvider { requests }, &request)
     }
 }
 
@@ -593,16 +513,9 @@ impl Provider for EmptyThenTextProvider {
         requests.push(request);
         drop(requests);
         if turn == 0 {
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: None,
-            })]))
+            provider_script([completed(None)])
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "ok".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]))
+            text_reply("ok")
         }
     }
 }
@@ -614,14 +527,7 @@ struct CapturingLoader {
 impl RuntimeLoader for CapturingLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
-        Box::pin(async move {
-            Runtime::new(DelayedProvider { requests }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(DelayedProvider { requests }, &request)
     }
 }
 
@@ -636,14 +542,7 @@ struct ToolLoopLoader {
 impl RuntimeLoader for ToolLoopLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
-        Box::pin(async move {
-            Runtime::new(ToolLoopProvider { requests }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(ToolLoopProvider { requests }, &request)
     }
 }
 
@@ -658,43 +557,13 @@ impl Provider for ToolLoopProvider {
         requests.push(request);
         drop(requests);
         if turn == 0 {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: "call_0".to_owned(),
-                    name: "read_file".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: "call_0".to_owned(),
-                    json: r#"{"path":"note.txt"}"#.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                    id: "call_0".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 4,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        output_tokens: 2,
-                        reasoning_tokens: None,
-                    }),
-                }),
-            ]))
+            provider_script(
+                tool_call("call_0", "read_file", r#"{"path":"note.txt"}"#)
+                    .into_iter()
+                    .chain([completed(Some(provider_usage(4, 2)))]),
+            )
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 6,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        output_tokens: 1,
-                        reasoning_tokens: None,
-                    }),
-                }),
-            ]))
+            provider_script([text_delta("done"), completed(Some(provider_usage(6, 1)))])
         }
     }
 }
@@ -794,10 +663,7 @@ impl RuntimeLoader for TruncatedReportLoader {
                     None,
                 )
             })
-            .map_err(|error| RuntimeLoadError {
-                kind: RunFailureKind::Configuration,
-                message: error.to_string(),
-            })
+            .map_err(load_error)
         })
     }
 }
@@ -839,10 +705,7 @@ impl RuntimeLoader for GatedSliceLoader {
                     None,
                 )
             })
-            .map_err(|error| RuntimeLoadError {
-                kind: RunFailureKind::Configuration,
-                message: error.to_string(),
-            })
+            .map_err(load_error)
         })
     }
 }
@@ -868,13 +731,7 @@ impl Provider for GatedSliceProvider {
                 });
             }
             yield Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(qq_provider::ProviderUsage {
-                    input_tokens: 1,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 1,
-                    reasoning_tokens: None,
-                }),
+                usage: Some(provider_usage(1, 1)),
             });
         })
     }
@@ -901,20 +758,10 @@ impl RuntimeLoader for RenewableSliceLoader {
                 loaded_runtime(
                     runtime.with_tool_calls_per_slice(slice_calls),
                     &request.workspace,
-                    metered_empty_checkpoint.then_some(ModelPricing {
-                        input_usd_nanos_per_token: 1_000,
-                        output_usd_nanos_per_token: 2_000,
-                        cache_read_usd_nanos_per_token: Some(100),
-                        cache_write_usd_nanos_per_token: Some(300),
-                        context_tier: None,
-                        provenance: "test".to_owned(),
-                    }),
+                    metered_empty_checkpoint.then_some(test_pricing()),
                 )
             })
-            .map_err(|error| RuntimeLoadError {
-                kind: RunFailureKind::Configuration,
-                message: error.to_string(),
-            })
+            .map_err(load_error)
         })
     }
 }
@@ -946,40 +793,24 @@ impl Provider for RenewableSliceProvider {
                 return Box::pin(stream::pending());
             }
             if self.metered_empty_checkpoint {
-                return Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 3,
-                        cache_read_input_tokens: 1,
-                        cache_write_input_tokens: 2,
-                        output_tokens: 5,
-                        reasoning_tokens: None,
-                    }),
-                })]));
+                return provider_script([completed(Some(qq_provider::ProviderUsage {
+                    input_tokens: 3,
+                    cache_read_input_tokens: 1,
+                    cache_write_input_tokens: 2,
+                    output_tokens: 5,
+                    reasoning_tokens: None,
+                }))]);
             }
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "slice checkpoint".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]));
+            return text_reply("slice checkpoint");
         }
         if current > tool_turns {
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "task complete".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: self
-                        .metered_empty_checkpoint
-                        .then_some(qq_provider::ProviderUsage {
-                            input_tokens: 7,
-                            cache_read_input_tokens: 0,
-                            cache_write_input_tokens: 0,
-                            output_tokens: 3,
-                            reasoning_tokens: None,
-                        }),
-                }),
-            ]));
+            return provider_script([
+                text_delta("task complete"),
+                completed(
+                    self.metered_empty_checkpoint
+                        .then_some(provider_usage(7, 3)),
+                ),
+            ]);
         }
 
         let mut events = Vec::with_capacity(crate::MAX_TOOL_CALLS_PER_TURN * 3 + 1);
@@ -1014,13 +845,7 @@ impl Provider for RenewableSliceProvider {
         events.push(Ok(qq_provider::ProviderEvent::Completed {
             usage: self
                 .metered_empty_checkpoint
-                .then_some(qq_provider::ProviderUsage {
-                    input_tokens: 1,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 1,
-                    reasoning_tokens: None,
-                }),
+                .then_some(provider_usage(1, 1)),
         }));
         Box::pin(stream::iter(events))
     }
@@ -1033,14 +858,7 @@ struct TurnTextLoader {
 impl RuntimeLoader for TurnTextLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
-        Box::pin(async move {
-            Runtime::new(TurnTextProvider { requests }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(TurnTextProvider { requests }, &request)
     }
 }
 
@@ -1073,12 +891,7 @@ impl Provider for TurnTextProvider {
                 Ok(qq_provider::ProviderEvent::Completed { usage: None }),
             ]))
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]))
+            text_reply("done")
         }
     }
 }
@@ -1128,14 +941,7 @@ impl RuntimeLoader for ApprovalLoader {
             tool_turns: self.tool_turns,
             usage: None,
         };
-        Box::pin(async move {
-            Runtime::new(provider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(provider, &request)
     }
 }
 
@@ -1156,27 +962,17 @@ impl Provider for ApprovalProvider {
         *current += 1;
         drop(current);
         if turn < self.tool_turns {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: format!("call_{turn}"),
-                    name: self.tool.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: format!("call_{turn}"),
-                    json: self.arguments.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                    id: format!("call_{turn}"),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: self.usage }),
-            ]))
+            provider_script(
+                tool_call(
+                    format!("call_{turn}"),
+                    self.tool.to_owned(),
+                    self.arguments.to_owned(),
+                )
+                .into_iter()
+                .chain([completed(self.usage)]),
+            )
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: self.usage }),
-            ]))
+            provider_script([text_delta("done"), completed(self.usage)])
         }
     }
 }
@@ -1198,14 +994,7 @@ impl RuntimeLoader for ScriptedRunsLoader {
             script,
             turn: StdMutex::new(0),
         };
-        Box::pin(async move {
-            Runtime::new(provider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(provider, &request)
     }
 }
 
@@ -1222,139 +1011,65 @@ impl Provider for ScriptedRunProvider {
             .is_some_and(|text| text.starts_with("Summarize this conversation"));
         self.requests.lock().unwrap().push(request);
         if summarizing {
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: valid_summary("done"),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]));
+            return text_reply(valid_summary("done"));
         }
         let mut turn = self.turn.lock().unwrap();
         let current = *turn;
         *turn += 1;
         drop(turn);
         match self.script.get(current) {
-            Some((name, arguments)) => Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: format!("call_{current}"),
-                    name: (*name).to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: format!("call_{current}"),
-                    json: arguments.clone(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                    id: format!("call_{current}"),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ])),
-            None => Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ])),
+            Some((name, arguments)) => provider_script(
+                tool_call(
+                    format!("call_{current}"),
+                    (*name).to_owned(),
+                    arguments.clone(),
+                )
+                .into_iter()
+                .chain([completed(None)]),
+            ),
+            None => text_reply("done"),
         }
     }
-}
-
-struct ScriptedRunsHarness {
-    _directory: TempDir,
-    runtime: SessionRuntime,
-    requests: Arc<StdMutex<Vec<ModelRequest>>>,
-    workspace_path: PathBuf,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
-    events: SessionEventStream,
 }
 
 async fn scripted_runs_harness(
     mode: ApprovalMode,
     runs: Vec<Vec<(&'static str, String)>>,
-) -> ScriptedRunsHarness {
-    let directory = test_directory();
+) -> SessionFixture {
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    SessionFixture::open(
         Arc::new(ScriptedRunsLoader {
             requests: Arc::clone(&requests),
             runs,
             loads: StdMutex::new(0),
         }),
+        mode,
     )
     .await
-    .unwrap();
-    let workspace_path = directory.path().to_owned();
-    let (workspace_id, _) = resolve_workspace(&runtime, &workspace_path).await;
-    let created = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: mode,
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    ScriptedRunsHarness {
-        _directory: directory,
-        runtime,
-        requests,
-        workspace_path,
-        workspace_id,
-        session_id,
-        events,
-    }
+    .recording(&requests)
 }
 
-async fn submit_prompt(harness: &ScriptedRunsHarness, prompt: &str) -> RunId {
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text(prompt.to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
-    run_id
+async fn submit_prompt(harness: &SessionFixture, prompt: &str) -> RunId {
+    harness.submit(prompt).await
 }
 
 struct ApprovalHarness {
-    _directory: TempDir,
-    runtime: SessionRuntime,
-    requests: Arc<StdMutex<Vec<ModelRequest>>>,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
+    fixture: SessionFixture,
     run_id: RunId,
-    events: SessionEventStream,
+}
+
+impl std::ops::Deref for ApprovalHarness {
+    type Target = SessionFixture;
+
+    fn deref(&self) -> &SessionFixture {
+        &self.fixture
+    }
+}
+
+impl std::ops::DerefMut for ApprovalHarness {
+    fn deref_mut(&mut self) -> &mut SessionFixture {
+        &mut self.fixture
+    }
 }
 
 async fn approval_harness(
@@ -1364,82 +1079,24 @@ async fn approval_harness(
     tool_turns: usize,
     approval_timeout: Option<Duration>,
 ) -> ApprovalHarness {
-    let directory = test_directory();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions {
-            database_path: directory.path().join("sessions.sqlite3"),
-            max_active_runs: 1,
-            max_active_side_queries: None,
-            side_query_limits: SideQueryLimits::default(),
-            approval_timeout,
-            retention: None,
-            policy_authority: None,
-        },
+    let fixture = SessionFixture::open_with(
         Arc::new(ApprovalLoader {
             requests: Arc::clone(&requests),
             tool,
             arguments,
             tool_turns,
         }),
+        mode,
+        |options| {
+            options.max_active_runs = 1;
+            options.approval_timeout = approval_timeout;
+        },
     )
     .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: mode,
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("mutate something".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
-    ApprovalHarness {
-        _directory: directory,
-        runtime,
-        requests,
-        workspace_id,
-        session_id,
-        run_id,
-        events,
-    }
+    .recording(&requests);
+    let run_id = fixture.submit("mutate something").await;
+    ApprovalHarness { fixture, run_id }
 }
 
 async fn collect_until_approval_requested(
@@ -1525,70 +1182,49 @@ impl RuntimeLoader for RecordingApprovalLoader {
             tool: "__test_mutate",
             arguments: "{}",
             tool_turns: 1,
-            usage: Some(qq_provider::ProviderUsage {
-                input_tokens: 7,
-                cache_read_input_tokens: 0,
-                cache_write_input_tokens: 0,
-                output_tokens: 1,
-                reasoning_tokens: None,
-            }),
+            usage: Some(provider_usage(7, 1)),
         };
-        Box::pin(async move {
-            Runtime::new(provider, "test-model", 256)
-                .map(|runtime| loaded_runtime_for_route(runtime, &request.workspace, route, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        {
+            let loaded = ProviderLoader::new(provider)
+                .route(route)
+                .loaded(&request.workspace);
+            Box::pin(async move { Ok(loaded) })
+        }
     }
 }
 
 struct SessionManagementHarness {
-    directory: TempDir,
-    runtime: SessionRuntime,
+    fixture: SessionFixture,
     models: Arc<StdMutex<Vec<Option<String>>>>,
-    requests: Arc<StdMutex<Vec<ModelRequest>>>,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
-    store_id: StoreId,
-    events: SessionEventStream,
+}
+
+impl std::ops::Deref for SessionManagementHarness {
+    type Target = SessionFixture;
+
+    fn deref(&self) -> &SessionFixture {
+        &self.fixture
+    }
+}
+
+impl std::ops::DerefMut for SessionManagementHarness {
+    fn deref_mut(&mut self) -> &mut SessionFixture {
+        &mut self.fixture
+    }
 }
 
 async fn session_management_harness() -> SessionManagementHarness {
-    let directory = test_directory();
     let models = Arc::new(StdMutex::new(Vec::new()));
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let fixture = SessionFixture::open(
         Arc::new(RecordingApprovalLoader {
             models: Arc::clone(&models),
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::Ask,
     )
     .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Ask).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    SessionManagementHarness {
-        directory,
-        runtime,
-        models,
-        requests,
-        workspace_id,
-        session_id,
-        store_id: created.committed_through.store_id,
-        events,
-    }
+    .recording(&requests);
+    SessionManagementHarness { fixture, models }
 }
 
 async fn store_with_one_spill(
@@ -1613,20 +1249,7 @@ async fn store_with_one_spill(
     let created = store
         .command(
             CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
+            create_session_command(workspace_id, None, ApprovalMode::default()),
         )
         .await
         .unwrap();
@@ -1643,19 +1266,7 @@ async fn spill_one_call(
     text: &str,
     prompt: &str,
 ) -> (ToolCallId, String) {
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text(prompt.to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    store_command(store, session_id, prompt).await.unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     let tool_call_id = ToolCallId::generate().unwrap();
     let call = RuntimeToolCall {
@@ -1671,12 +1282,9 @@ async fn spill_one_call(
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![ContentBlock::ToolCall {
                         id: call.provider_call_id.clone(),
@@ -1684,16 +1292,9 @@ async fn spill_one_call(
                         arguments: serde_json::from_str(&call.arguments).unwrap(),
                     }],
                 ),
-                calls: vec![call],
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .calls(vec![call])
+            .build(),
         )
         .await
         .unwrap();
@@ -1975,54 +1576,8 @@ async fn claimed_store_fixture() -> (TempDir, Store, ClaimedRun) {
     let store = Store::open(directory.path().join("sessions.sqlite3"))
         .await
         .unwrap();
-    let resolved = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::ResolveWorkspace {
-                path: directory.path().to_str().unwrap().to_owned(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let created = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("x".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let (_, session_id) = store_session(&store, directory.path(), ApprovalMode::default()).await;
+    store_command(&store, session_id, "x").await.unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     (directory, store, claimed)
 }
@@ -2079,7 +1634,7 @@ impl SaturatedControlLane {
 async fn saturate_control_lane(runtime: &SessionRuntime) -> SaturatedControlLane {
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release, release_rx) = std::sync::mpsc::channel();
-    let blocked_store = runtime.inner.store.clone();
+    let blocked_store = runtime.store().clone();
     let blocked = tokio::spawn(async move {
         blocked_store
             .call(Priority::Control, move |_| {
@@ -2093,7 +1648,7 @@ async fn saturate_control_lane(runtime: &SessionRuntime) -> SaturatedControlLane
     entered_rx.await.unwrap();
     let mut fillers = Vec::new();
     for _ in 0..store::CONTROL_QUEUE_CAPACITY {
-        let store = runtime.inner.store.clone();
+        let store = runtime.store().clone();
         let mut call = Box::pin(async move { store.call(Priority::Control, |_| Ok(())).await });
         match futures_util::poll!(call.as_mut()) {
             std::task::Poll::Pending => fillers.push(tokio::spawn(call)),
@@ -2102,11 +1657,7 @@ async fn saturate_control_lane(runtime: &SessionRuntime) -> SaturatedControlLane
         }
     }
     assert!(matches!(
-        runtime
-            .inner
-            .store
-            .call(Priority::Control, |_| Ok(()))
-            .await,
+        runtime.store().call(Priority::Control, |_| Ok(())).await,
         Err(SessionRuntimeError::Overloaded)
     ));
     SaturatedControlLane {
@@ -2152,23 +1703,31 @@ async fn create_session_with_mode(
     runtime
         .command(
             CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode,
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
+            create_session_command(workspace_id, parent_id, approval_mode),
         )
         .await
         .unwrap()
+}
+
+fn create_session_command(
+    workspace_id: WorkspaceId,
+    parent_id: Option<SessionId>,
+    approval_mode: ApprovalMode,
+) -> SessionCommand {
+    SessionCommand::CreateSession {
+        workspace_id,
+        parent_id,
+        model: ModelSelection {
+            model_is_fallback: false,
+            model: Some("test/model".to_owned()),
+            max_output_tokens: Some(256),
+            organization: None,
+        },
+        approval_mode,
+        profile: AgentProfileId::default(),
+        reasoning_effort: None,
+        correlation: Correlation::default(),
+    }
 }
 
 mod reference_assembly {
@@ -2942,10 +2501,7 @@ impl RuntimeLoader for AutoCompactLoader {
                     }
                     loaded_runtime_with_model(runtime, &request.workspace, resolved)
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -2974,13 +2530,7 @@ impl Provider for AutoCompactProvider {
                             + tool.input_schema().get().len()) as u64
                     })
                     .sum::<u64>();
-            let usage = qq_provider::ProviderUsage {
-                input_tokens: bytes.div_ceil(*bytes_per_token),
-                cache_read_input_tokens: 0,
-                cache_write_input_tokens: 0,
-                output_tokens: 1,
-                reasoning_tokens: None,
-            };
+            let usage = provider_usage(bytes.div_ceil(*bytes_per_token), 1);
             let inner = AutoCompactProvider {
                 requests: Arc::clone(&self.requests),
                 script: (**script).clone(),
@@ -3043,10 +2593,7 @@ impl Provider for AutoCompactProvider {
             .unwrap_or_default();
         self.requests.lock().unwrap().push(request);
         match &self.script {
-            AutoCompactScript::Text(text) => Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ])),
+            AutoCompactScript::Text(text) => text_reply(text.clone()),
             AutoCompactScript::TextThenTransportFault(text) => Box::pin(stream::iter([
                 Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
                 Err(qq_provider::ProviderError::Transport(
@@ -3088,56 +2635,29 @@ impl Provider for AutoCompactProvider {
                 text,
             } => {
                 if already_read {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: "call_tool".to_owned(),
-                            name: tool.clone(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: "call_tool".to_owned(),
-                            json: arguments.clone(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                            id: "call_tool".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call("call_tool", tool.clone(), arguments.clone())
+                            .into_iter()
+                            .chain([completed(None)]),
+                    )
                 }
             }
             AutoCompactScript::ReadNoteThenText(text) => {
                 if already_read {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: "call_read".to_owned(),
-                            name: "read_file".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: "call_read".to_owned(),
-                            json: r#"{"path":"note.txt"}"#.to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                            id: "call_read".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call("call_read", "read_file", r#"{"path":"note.txt"}"#)
+                            .into_iter()
+                            .chain([completed(None)]),
+                    )
                 }
             }
             AutoCompactScript::ReadNotesThenText { notes, text } => {
                 if already_read {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     let mut events = Vec::new();
                     for note in 0..*notes {
@@ -3158,33 +2678,15 @@ impl Provider for AutoCompactProvider {
                 }
             }
             AutoCompactScript::ReadNoteThenTextMeasured { text, input_tokens } => {
-                let usage = Some(qq_provider::ProviderUsage {
-                    input_tokens: *input_tokens,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 1,
-                    reasoning_tokens: None,
-                });
+                let usage = Some(provider_usage(*input_tokens, 1));
                 if already_read {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage }),
-                    ]))
+                    provider_script([text_delta(text.clone()), completed(usage)])
                 } else {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: "call_read".to_owned(),
-                            name: "read_file".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: "call_read".to_owned(),
-                            json: r#"{"path":"note.txt"}"#.to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                            id: "call_read".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage }),
-                    ]))
+                    provider_script(
+                        tool_call("call_read", "read_file", r#"{"path":"note.txt"}"#)
+                            .into_iter()
+                            .chain([completed(usage)]),
+                    )
                 }
             }
             AutoCompactScript::ToolRepeatedlyWithTruncatedSummaries {
@@ -3196,12 +2698,7 @@ impl Provider for AutoCompactProvider {
                 if last_text.contains("cut off at the output token limit") {
                     let summarized = prior_results.len() + summarized_before;
                     let full = format!("{summary}\nturns_done={summarized}");
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: full[*cut..].to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply(full[*cut..].to_owned());
                 }
                 if last_text.contains("Summarize this conversation") {
                     let summarized = prior_results.len() + summarized_before;
@@ -3218,24 +2715,18 @@ impl Provider for AutoCompactProvider {
                 }
                 let done = prior_results.len() + summarized_before;
                 if done >= *turns {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     let id = format!("call_shell_{done}");
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: id.clone(),
-                            name: "__test_mutate".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: id.clone(),
-                            json: bulk_step_arguments(done, SHELL_STEP_PADDING),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call(
+                            id,
+                            "__test_mutate",
+                            bulk_step_arguments(done, SHELL_STEP_PADDING),
+                        )
+                        .into_iter()
+                        .chain([completed(None)]),
+                    )
                 }
             }
             AutoCompactScript::ToolRepeatedlyWithSummaries {
@@ -3253,19 +2744,11 @@ impl Provider for AutoCompactProvider {
                         return Box::pin(stream::pending());
                     }
                     let summarized = prior_results.len() + summarized_before;
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: format!("{summary}\nturns_done={summarized}"),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply(format!("{summary}\nturns_done={summarized}"));
                 }
                 let done = prior_results.len() + summarized_before;
                 if done >= *turns {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     let id = format!("call_shell_{done}");
                     Box::pin(stream::iter([
@@ -3299,30 +2782,17 @@ impl Provider for AutoCompactProvider {
             AutoCompactScript::ShellBatchesAcrossACheckpoint { calls, text } => {
                 if last_text.contains("Summarize this conversation") {
                     let summarized = prior_results.len() + summarized_before;
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: format!(
-                                "{}\nturns_done={summarized}",
-                                valid_summary("batched shell work")
-                            ),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply(format!(
+                        "{}\nturns_done={summarized}",
+                        valid_summary("batched shell work")
+                    ));
                 }
                 if last_text == crate::SLICE_CHECKPOINT_NOTICE {
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: "report: batches so far are done".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply("report: batches so far are done");
                 }
                 let done = prior_results.len() + summarized_before;
                 if done >= *calls {
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply(text.clone());
                 }
                 let mut events = Vec::new();
                 for index in done..done + crate::MAX_TOOL_CALLS_PER_TURN {
@@ -3352,12 +2822,7 @@ impl Provider for AutoCompactProvider {
             } => {
                 if last_text.contains("Summarize this conversation") {
                     let summarized = prior_results.len() + summarized_before;
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: format!("{summary}\nturns_done={summarized}"),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply(format!("{summary}\nturns_done={summarized}"));
                 }
                 if prior_results.len() == *fault_at
                     && summarized_before == 0
@@ -3370,24 +2835,18 @@ impl Provider for AutoCompactProvider {
                 }
                 let done = prior_results.len() + summarized_before;
                 if done >= *turns {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     let id = format!("call_shell_{done}");
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: id.clone(),
-                            name: "__test_mutate".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: id.clone(),
-                            json: bulk_step_arguments(done, SHELL_STEP_PADDING),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call(
+                            id,
+                            "__test_mutate",
+                            bulk_step_arguments(done, SHELL_STEP_PADDING),
+                        )
+                        .into_iter()
+                        .chain([completed(None)]),
+                    )
                 }
             }
             AutoCompactScript::ToolRepeatedlyWithProviderOverflow {
@@ -3399,12 +2858,7 @@ impl Provider for AutoCompactProvider {
             } => {
                 if last_text.contains("Summarize this conversation") {
                     let summarized = prior_results.len() + summarized_before;
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: format!("{summary}\nturns_done={summarized}"),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply(format!("{summary}\nturns_done={summarized}"));
                 }
                 if prior_results.len() >= *overflow_at && summarized_before == 0 {
                     overflows.fetch_add(1, Ordering::SeqCst);
@@ -3417,69 +2871,46 @@ impl Provider for AutoCompactProvider {
                 }
                 let done = prior_results.len() + summarized_before;
                 if done >= *turns {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     let id = format!("call_shell_{done}");
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: id.clone(),
-                            name: "__test_mutate".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: id.clone(),
-                            json: bulk_step_arguments(done, 0),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call(id, "__test_mutate", bulk_step_arguments(done, 0))
+                            .into_iter()
+                            .chain([completed(None)]),
+                    )
                 }
             }
             AutoCompactScript::ReadNoteRepeatedly { turns, text } => {
                 if prior_results.len() >= *turns {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     let id = format!("call_read_{}", prior_results.len());
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: id.clone(),
-                            name: "read_file".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: id.clone(),
-                            json: serde_json::json!({"path":"note.txt","limit":64+prior_results.len()}).to_string(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call(
+                            id,
+                            "read_file",
+                            serde_json::json!({"path":"note.txt","limit":64+prior_results.len()})
+                                .to_string(),
+                        )
+                        .into_iter()
+                        .chain([completed(None)]),
+                    )
                 }
             }
             AutoCompactScript::SearchHistoryThenText(query, text) => {
                 if already_read {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: "call_history".to_owned(),
-                            name: crate::runtime::SEARCH_HISTORY_TOOL.to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: "call_history".to_owned(),
-                            json: serde_json::json!({ "query": query, "limit": 2 }).to_string(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                            id: "call_history".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call(
+                            "call_history",
+                            crate::runtime::SEARCH_HISTORY_TOOL.to_owned(),
+                            serde_json::json!({ "query": query, "limit": 2 }).to_string(),
+                        )
+                        .into_iter()
+                        .chain([completed(None)]),
+                    )
                 }
             }
             #[cfg(unix)]
@@ -3496,42 +2927,25 @@ impl Provider for AutoCompactProvider {
                     Some(rest[..end].to_owned())
                 });
                 match (results.len(), handle) {
-                    (0, _) => Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: "call_shell".to_owned(),
-                            name: "shell".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: "call_shell".to_owned(),
-                            json: serde_json::json!({ "command": command }).to_string(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                            id: "call_shell".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ])),
+                    (0, _) => provider_script(
+                        tool_call(
+                            "call_shell",
+                            "shell",
+                            serde_json::json!({ "command": command }).to_string(),
+                        )
+                        .into_iter()
+                        .chain([completed(None)]),
+                    ),
                     (1, Some(handle)) => {
                         let mut arguments = recall.clone();
                         arguments["handle"] = serde_json::Value::String(handle);
-                        Box::pin(stream::iter([
-                            Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                                id: "call_recall".to_owned(),
-                                name: "read_tool_result".to_owned(),
-                            }),
-                            Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                                id: "call_recall".to_owned(),
-                                json: arguments.to_string(),
-                            }),
-                            Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                                id: "call_recall".to_owned(),
-                            }),
-                            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                        ]))
+                        provider_script(
+                            tool_call("call_recall", "read_tool_result", arguments.to_string())
+                                .into_iter()
+                                .chain([completed(None)]),
+                        )
                     }
-                    _ => Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ])),
+                    _ => text_reply(text.clone()),
                 }
             }
             AutoCompactScript::Fail => Box::pin(stream::iter([Err(
@@ -3551,15 +2965,7 @@ impl Provider for AutoCompactProvider {
     }
 }
 
-struct AutoCompactHarness {
-    _directory: TempDir,
-    runtime: SessionRuntime,
-    requests: Arc<StdMutex<Vec<ModelRequest>>>,
-    workspace_path: PathBuf,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
-    events: SessionEventStream,
-}
+type AutoCompactHarness = SessionFixture;
 
 async fn auto_compact_harness(scripts: Vec<AutoCompactScript>) -> AutoCompactHarness {
     auto_compact_harness_with_window(scripts, None).await
@@ -3596,55 +3002,14 @@ async fn auto_compact_harness_with_loader_and_mode(
     loader: AutoCompactLoader,
     approval_mode: ApprovalMode,
 ) -> AutoCompactHarness {
-    let directory = test_directory();
     let requests = Arc::clone(&loader.requests);
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-        Arc::new(loader),
-    )
-    .await
-    .unwrap();
-    let workspace_path = directory.path().to_owned();
-    let (workspace_id, _) = resolve_workspace(&runtime, &workspace_path).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, approval_mode).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    AutoCompactHarness {
-        _directory: directory,
-        runtime,
-        requests,
-        workspace_path,
-        workspace_id,
-        session_id,
-        events,
-    }
+    SessionFixture::open(Arc::new(loader), approval_mode)
+        .await
+        .recording(&requests)
 }
 
 async fn queue_prompt(runtime: &SessionRuntime, session_id: SessionId, prompt: String) -> RunId {
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text(prompt)],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
-    run_id
+    submit(runtime, session_id, prompt).await
 }
 
 async fn collect_until(
@@ -3690,52 +3055,9 @@ async fn project_terminal_run_with_tool_boundaries(
     let directory = test_directory();
     let database_path = directory.path().join("sessions.sqlite3");
     let store = Store::open(database_path.clone()).await.unwrap();
-    let resolved = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::ResolveWorkspace {
-                path: directory.path().to_str().unwrap().to_owned(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let created = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("inspect the tool boundaries".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let (workspace_id, session_id) =
+        store_session(&store, directory.path(), ApprovalMode::default()).await;
+    store_command(&store, session_id, "inspect the tool boundaries")
         .await
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
@@ -3788,12 +3110,9 @@ async fn project_terminal_run_with_tool_boundaries(
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     calls
                         .iter()
@@ -3807,16 +3126,9 @@ async fn project_terminal_run_with_tool_boundaries(
                         })
                         .collect(),
                 ),
-                calls,
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .calls(calls)
+            .build(),
         )
         .await
         .unwrap();
@@ -3875,17 +3187,7 @@ async fn project_terminal_run_with_tool_boundaries(
             after,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue safely".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "continue safely")
         .await
         .unwrap();
     let _ = collect_through_finished(&mut events).await;
@@ -3912,17 +3214,7 @@ async fn project_terminal_run_with_tool_boundaries(
             after,
         })
         .unwrap();
-    restarted
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue safely".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&restarted, session_id, "continue safely")
         .await
         .unwrap();
     let _ = collect_through_finished(&mut restarted_events).await;
@@ -3959,10 +3251,7 @@ impl RuntimeLoader for TruncatingLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -3978,13 +3267,7 @@ impl Provider for TruncatingProvider {
         let turn = requests.len();
         requests.push(request);
         drop(requests);
-        let usage = Some(qq_provider::ProviderUsage {
-            input_tokens: 4,
-            cache_read_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 2,
-            reasoning_tokens: None,
-        });
+        let usage = Some(provider_usage(4, 2));
         if turn.is_multiple_of(2) {
             let mut events = Vec::new();
             if !self.empty {
@@ -3998,12 +3281,7 @@ impl Provider for TruncatingProvider {
             }));
             Box::pin(stream::iter(events))
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: " second half".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage }),
-            ]))
+            provider_script([text_delta(" second half"), completed(usage)])
         }
     }
 }
@@ -4012,14 +3290,7 @@ struct ContextBudgetLoader;
 
 impl RuntimeLoader for ContextBudgetLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-        Box::pin(async move {
-            Runtime::new(ContextBudgetProvider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(ContextBudgetProvider, &request)
     }
 }
 
@@ -4027,12 +3298,7 @@ struct ContextBudgetProvider;
 
 impl Provider for ContextBudgetProvider {
     fn stream(&self, _request: ModelRequest) -> ProviderStream {
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "x".repeat(MAX_CONTEXT_BYTES + 1),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-        ]))
+        text_reply("x".repeat(MAX_CONTEXT_BYTES + 1))
     }
 }
 
@@ -4095,10 +3361,7 @@ impl RuntimeLoader for QueueLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -4142,10 +3405,7 @@ impl RuntimeLoader for ResolvingLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -4171,10 +3431,7 @@ impl RuntimeLoader for RejectingWorkerLoader {
         Box::pin(async move {
             Runtime::with_provider(provider, "test-model", 256)
                 .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -4232,10 +3489,7 @@ impl RuntimeLoader for ValidatingLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -4244,12 +3498,7 @@ struct StaticTextProvider;
 
 impl Provider for StaticTextProvider {
     fn stream(&self, _request: ModelRequest) -> ProviderStream {
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "done".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-        ]))
+        text_reply("done")
     }
 }
 
@@ -4259,14 +3508,7 @@ struct AccountingTextProvider {
 
 impl Provider for AccountingTextProvider {
     fn stream(&self, _request: ModelRequest) -> ProviderStream {
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "done".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(self.usage),
-            }),
-        ]))
+        provider_script([text_delta("done"), completed(Some(self.usage))])
     }
 }
 
@@ -4305,30 +3547,11 @@ impl Provider for AccountingSpawnProvider {
                     id: "second".to_owned(),
                 }),
                 Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 2,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        output_tokens: 3,
-                        reasoning_tokens: None,
-                    }),
+                    usage: Some(provider_usage(2, 3)),
                 }),
             ]))
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 5,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        output_tokens: 7,
-                        reasoning_tokens: None,
-                    }),
-                }),
-            ]))
+            provider_script([text_delta("done"), completed(Some(provider_usage(5, 7)))])
         }
     }
 }
@@ -4342,22 +3565,10 @@ impl RuntimeLoader for AccountingSpawnLoader {
                 turn: StdMutex::new(0),
             }),
             Some("test/child-first") => Arc::new(AccountingTextProvider {
-                usage: qq_provider::ProviderUsage {
-                    input_tokens: 11,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 13,
-                    reasoning_tokens: None,
-                },
+                usage: provider_usage(11, 13),
             }),
             Some("test/child-second") => Arc::new(AccountingTextProvider {
-                usage: qq_provider::ProviderUsage {
-                    input_tokens: 17,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 19,
-                    reasoning_tokens: None,
-                },
+                usage: provider_usage(17, 19),
             }),
             other => panic!("unexpected accounting test model: {other:?}"),
         };
@@ -4380,10 +3591,7 @@ impl RuntimeLoader for AccountingSpawnLoader {
                         }),
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -4414,20 +3622,15 @@ struct SpawnThenHangProvider {
 impl Provider for SpawnThenHangProvider {
     fn stream(&self, _request: ModelRequest) -> ProviderStream {
         if self.turn.fetch_add(1, Ordering::AcqRel) == 0 {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: "spawn".to_owned(),
-                    name: "spawn_agent".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: "spawn".to_owned(),
-                    json: r#"{"task":"finish first","model":"test/child"}"#.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                    id: "spawn".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]))
+            provider_script(
+                tool_call(
+                    "spawn",
+                    "spawn_agent",
+                    r#"{"task":"finish first","model":"test/child"}"#,
+                )
+                .into_iter()
+                .chain([completed(None)]),
+            )
         } else {
             self.second_turn_started.notify_one();
             Box::pin(stream::pending())
@@ -4488,12 +3691,7 @@ impl Provider for MultiSpawnProvider {
             events.push(Ok(qq_provider::ProviderEvent::Completed { usage: None }));
             Box::pin(stream::iter(events))
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]))
+            text_reply("done")
         }
     }
 }
@@ -4517,77 +3715,30 @@ async fn create_claimed_parent(
     let root = store
         .command(
             CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
+            create_session_command(workspace_id, None, ApprovalMode::default()),
         )
         .await
         .unwrap();
     let CommandOutcome::SessionCreated { session_id } = root.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("delegate work".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(store, session_id, "delegate work")
         .await
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     (workspace_id, session_id, claimed)
 }
 
-struct SpawnHarness {
-    _directory: TempDir,
-    runtime: SessionRuntime,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
-    events: SessionEventStream,
-}
+type SpawnHarness = SessionFixture;
 
 async fn spawn_harness_with_loader(
     loader: Arc<dyn RuntimeLoader>,
     max_active_runs: usize,
 ) -> SpawnHarness {
-    let directory = test_directory();
-    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-    options.max_active_runs = max_active_runs;
-    let runtime = SessionRuntime::open(options, loader).await.unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    SpawnHarness {
-        _directory: directory,
-        runtime,
-        workspace_id,
-        session_id,
-        events,
-    }
+    SessionFixture::open_with(loader, ApprovalMode::default(), |options| {
+        options.max_active_runs = max_active_runs;
+    })
+    .await
 }
 
 async fn spawn_harness(
@@ -4606,23 +3757,7 @@ async fn spawn_harness(
 }
 
 async fn submit_prompt_to(runtime: &SessionRuntime, session_id: SessionId, prompt: &str) -> RunId {
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text(prompt.to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
-    run_id
+    submit(runtime, session_id, prompt).await
 }
 
 async fn completed_instruction_hash(
@@ -4635,13 +3770,7 @@ async fn completed_instruction_hash(
     let run_id = submit_prompt_to(runtime, session_id, prompt).await;
     collect_through_finished(events).await;
     runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 32))
         .await
         .unwrap()
         .focused
@@ -4706,14 +3835,7 @@ impl RuntimeLoader for TextScriptLoader {
             requests: Arc::clone(&self.requests),
             answers: Arc::clone(&self.answers),
         };
-        Box::pin(async move {
-            Runtime::new(provider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(provider, &request)
     }
 }
 
@@ -4729,74 +3851,23 @@ impl Provider for TextScriptProvider {
         if text == "<hang>" {
             return Box::pin(stream::pending());
         }
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: text.to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-        ]))
+        text_reply(text.to_owned())
     }
 }
 
-struct OutputContractHarness {
-    _directory: TempDir,
-    runtime: SessionRuntime,
-    requests: Arc<StdMutex<Vec<ModelRequest>>>,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
-    events: SessionEventStream,
-}
+type OutputContractHarness = SessionFixture;
 
 async fn output_contract_harness(answers: &[&'static str]) -> OutputContractHarness {
-    let directory = test_directory();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    SessionFixture::open(
         Arc::new(TextScriptLoader {
             requests: Arc::clone(&requests),
             answers: Arc::new(StdMutex::new(answers.iter().copied().collect())),
         }),
+        ApprovalMode::ReadOnly,
     )
     .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::ReadOnly,
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    OutputContractHarness {
-        _directory: directory,
-        runtime,
-        requests,
-        workspace_id,
-        session_id,
-        events,
-    }
+    .recording(&requests)
 }
 
 fn report_contract(repair_turns: u8) -> qq_protocol::OutputContract {
@@ -4815,19 +3886,12 @@ async fn submit_with_contract(
     harness: &OutputContractHarness,
     contract: qq_protocol::OutputContract,
 ) -> Result<RunId, SessionRuntimeError> {
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("report")],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: Some(Box::new(contract)),
-            },
-        )
-        .await?;
+    let queued = try_submit(
+        &harness.runtime,
+        harness.session_id,
+        Prompt::text("report").output(Some(Box::new(contract))),
+    )
+    .await?;
     let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
         panic!("unexpected receipt")
     };
@@ -4851,13 +3915,12 @@ fn finished_final_output(
 async fn run_snapshot(harness: &OutputContractHarness, run_id: RunId) -> RunSnapshot {
     harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            32,
+        ))
         .await
         .unwrap()
         .focused
@@ -4889,10 +3952,7 @@ impl RuntimeLoader for WriteChildLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -4908,42 +3968,21 @@ async fn write_child_harness(
         script: parent_script,
         turn: StdMutex::new(0),
     });
-    let directory = test_directory();
-    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-    options.max_active_runs = 8;
-    options.approval_timeout = Some(Duration::from_secs(2));
-    let runtime = SessionRuntime::open(
-        options,
+    let harness = SessionFixture::open_with(
         Arc::new(WriteChildLoader {
             inner: QueueLoader {
                 routed: vec![("test/child", child)],
                 queue: StdMutex::new(vec![Arc::clone(&parent), parent]),
             },
         }),
-    )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, parent_mode).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    (
-        SpawnHarness {
-            _directory: directory,
-            runtime,
-            workspace_id,
-            session_id,
-            events,
+        parent_mode,
+        |options| {
+            options.max_active_runs = 8;
+            options.approval_timeout = Some(Duration::from_secs(2));
         },
-        parent_requests,
     )
+    .await;
+    (harness, parent_requests)
 }
 
 struct DepthLoader {
@@ -4980,10 +4019,7 @@ impl RuntimeLoader for DepthLoader {
                         pricing,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -5139,12 +4175,7 @@ impl Provider for StatelessFanOut {
                 .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
         });
         if has_results {
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]));
+            return text_reply("done");
         }
         let route = self.route;
         let mut events = Vec::new();
@@ -5219,10 +4250,7 @@ impl RuntimeLoader for AuditLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -5235,20 +4263,10 @@ struct VerdictProvider {
 impl Provider for VerdictProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
         self.requests.lock().unwrap().push(request);
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: self.reply.to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(qq_provider::ProviderUsage {
-                    input_tokens: 50,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 5,
-                    reasoning_tokens: None,
-                }),
-            }),
-        ]))
+        provider_script([
+            text_delta(self.reply.to_owned()),
+            completed(Some(provider_usage(50, 5))),
+        ])
     }
 }
 
@@ -5306,20 +4324,15 @@ impl Provider for MutateThenScriptProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
         self.requests.lock().unwrap().push(request);
         if self.turn.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: "call_0".to_owned(),
-                    name: "write_file".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: "call_0".to_owned(),
-                    json: r#"{"path":"out.txt","content":"hello"}"#.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                    id: "call_0".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]));
+            return provider_script(
+                tool_call(
+                    "call_0",
+                    "write_file",
+                    r#"{"path":"out.txt","content":"hello"}"#,
+                )
+                .into_iter()
+                .chain([completed(None)]),
+            );
         }
         let text = self
             .answers
@@ -5327,12 +4340,7 @@ impl Provider for MutateThenScriptProvider {
             .unwrap()
             .pop_front()
             .unwrap_or("out of script");
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: text.to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-        ]))
+        text_reply(text.to_owned())
     }
 }
 
@@ -5357,10 +4365,7 @@ impl RuntimeLoader for BudgetLoopLoader {
         Box::pin(async move {
             Runtime::new(provider, "test-model", 256)
                 .map(|runtime| loaded_runtime(runtime, &request.workspace, pricing))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -5420,10 +4425,7 @@ impl RuntimeLoader for ChildBudgetLoader {
                         Some(pricing),
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -5461,9 +4463,7 @@ async fn child_budget_harness_with_window(
     audit: crate::runtime::AuditMode,
     child_context_window: Option<u32>,
 ) -> SpawnHarness {
-    let directory = test_directory();
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    SessionFixture::open(
         Arc::new(ChildBudgetLoader {
             inner: QueueLoader {
                 routed: vec![("test/child", child)],
@@ -5473,48 +4473,18 @@ async fn child_budget_harness_with_window(
             child_context_window,
             audit,
         }),
+        ApprovalMode::Full,
     )
     .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("expected session")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    SpawnHarness {
-        _directory: directory,
-        runtime,
-        workspace_id,
-        session_id,
-        events,
-    }
 }
 
 async fn submit_child_budget_prompt(harness: &SpawnHarness, limits: RunLimits) -> RunId {
-    let receipt = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("delegate")],
-                limits,
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
-        panic!("expected run")
-    };
-    run_id
+    submit(
+        &harness.runtime,
+        harness.session_id,
+        Prompt::text("delegate").limits(limits),
+    )
+    .await
 }
 
 struct BudgetLoopProvider {
@@ -5537,31 +4507,20 @@ impl Provider for BudgetLoopProvider {
         }
         let turn = self.turn.fetch_add(1, Ordering::SeqCst);
         if has_tools {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: format!("call_{turn}"),
-                    name: "read_file".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: format!("call_{turn}"),
-                    json: r#"{"path":"note.txt"}"#.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                    id: format!("call_{turn}"),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: self.usage.map(provider_usage_of),
-                }),
-            ]))
+            provider_script(
+                tool_call(
+                    format!("call_{turn}"),
+                    "read_file",
+                    r#"{"path":"note.txt"}"#,
+                )
+                .into_iter()
+                .chain([completed(self.usage.map(provider_usage_of))]),
+            )
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "final status".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: self.usage.map(provider_usage_of),
-                }),
-            ]))
+            provider_script([
+                text_delta("final status"),
+                completed(self.usage.map(provider_usage_of)),
+            ])
         }
     }
 }
@@ -5587,68 +4546,20 @@ fn budget_pricing() -> ModelPricing {
     }
 }
 
-struct BudgetHarness {
-    _directory: TempDir,
-    runtime: SessionRuntime,
-    requests: Arc<StdMutex<Vec<ModelRequest>>>,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
-    events: SessionEventStream,
-    database_path: PathBuf,
-}
+type BudgetHarness = SessionFixture;
 
 async fn budget_harness(loader: BudgetLoopLoader) -> BudgetHarness {
     let directory = test_directory();
     std::fs::write(directory.path().join("note.txt"), "note").unwrap();
     let requests = Arc::clone(&loader.requests);
-    let database_path = directory.path().join("sessions.sqlite3");
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(database_path.clone()),
-        Arc::new(loader),
-    )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    BudgetHarness {
-        _directory: directory,
-        runtime,
-        requests,
-        workspace_id,
-        session_id,
-        events,
-        database_path,
-    }
+    let options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    SessionFixture::open_in(directory, options, Arc::new(loader), ApprovalMode::Auto)
+        .await
+        .recording(&requests)
 }
 
 async fn queue_limited_prompt(harness: &BudgetHarness, limits: RunLimits) -> RunId {
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("loop".to_owned())],
-                limits,
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
-    run_id
+    harness.submit(Prompt::text("loop").limits(limits)).await
 }
 
 fn exhaustion_of(observed: &[SessionEventEnvelope], run_id: RunId) -> BudgetExhaustion {
@@ -5709,11 +4620,10 @@ fn side_capture_omits_an_oversized_unit_before_loading_payload() {
 #[tokio::test]
 async fn side_answer_bypasses_the_main_permit_and_leaves_session_rows_unchanged() {
     let harness = spawn_harness_with_loader(Arc::new(ScriptedLoader), 1).await;
-    let _main_permit = harness.runtime.inner.permits.acquire().await.unwrap();
+    let _main_permit = harness.runtime.hold_scheduling().await;
     let before = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT COUNT(*) FROM messages", [], |row| {
@@ -5739,8 +4649,7 @@ async fn side_answer_bypasses_the_main_permit_and_leaves_session_rows_unchanged(
     assert!(answer.usage.unwrap().output_tokens > 0);
     let after = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT COUNT(*) FROM messages", [], |row| {
@@ -5751,7 +4660,7 @@ async fn side_answer_bypasses_the_main_permit_and_leaves_session_rows_unchanged(
         .await
         .unwrap();
     assert_eq!(before, after);
-    assert_eq!(harness.runtime.inner.permits.available_permits(), 0);
+    assert_eq!(harness.runtime.idle_run_permits(), 0);
     assert_eq!(harness.runtime.inner.side_permits.available_permits(), 1);
     assert!(
         harness
@@ -5806,11 +4715,10 @@ async fn side_answer_cancellation_while_waiting_releases_only_side_admission() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(harness.runtime.inner.permits.available_permits(), 1);
+    assert_eq!(harness.runtime.idle_run_permits(), 1);
     let states = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT state FROM side_questions", [], |row| {
@@ -5886,7 +4794,7 @@ async fn side_threads_continue_explicitly_reset_and_persist_before_return() {
                 .any(|text| text.contains("first side"))
         );
     }
-    let rows = harness.runtime.inner.store.call(Priority::Control, |connection| {
+    let rows = harness.runtime.store().call(Priority::Control, |connection| {
         Ok(connection.query_row("SELECT COUNT(*), COUNT(DISTINCT thread_id) FROM side_questions WHERE state = 'completed'", [],
             |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)))?)
     }).await.unwrap();
@@ -5945,27 +4853,19 @@ async fn recovered_internal_summary_settles_durable_session_cost_once() {
             store
                 .persist_in_run_summary_turn(
                     &summary,
-                    ModelTurnCommit {
-                        model_work: crate::runtime::ModelWorkDisposition::Committed,
-                        goal_notices: Vec::new(),
-                        reserved_goal_notices: 0,
-                        turn_ordinal: 1,
-                        message: Message::new(
+                    TurnCommit::new(
+                        1,
+                        Message::new(
                             Role::Assistant,
                             vec![ContentBlock::Text {
                                 text: "measured prefix".to_owned(),
                             }],
                         ),
-                        calls: Vec::new(),
-                        turn_message: None,
-                        context_tokens: None,
-                        occupancy_basis: None,
-                        usage: Some(usage(7, 3)),
-                        estimated_cost_usd_nanos: Some(13_000),
-                        accounting: Some(accounting.snapshot()),
-                        truncated: false,
-                        notice: None,
-                    },
+                    )
+                    .usage(Some(usage(7, 3)))
+                    .cost(Some(13_000))
+                    .accounting(accounting.snapshot())
+                    .build(),
                 )
                 .await
                 .unwrap();
@@ -6158,30 +5058,24 @@ async fn admitted_summary_turn_survives_a_dropped_waiter_before_settlement() {
             .await
     });
     held.await.unwrap();
-    let mut receipt = Box::pin(store.persist_in_run_summary_turn(
-        &summary,
-        ModelTurnCommit {
-            model_work: crate::runtime::ModelWorkDisposition::Committed,
-            goal_notices: Vec::new(),
-            reserved_goal_notices: 0,
-            turn_ordinal: 1,
-            message: Message::new(
-                Role::Assistant,
-                vec![ContentBlock::Text {
-                    text: "measured prefix".to_owned(),
-                }],
-            ),
-            calls: Vec::new(),
-            turn_message: None,
-            context_tokens: None,
-            occupancy_basis: None,
-            usage: Some(usage(7, 3)),
-            estimated_cost_usd_nanos: Some(13_000),
-            accounting: Some(accounting.snapshot()),
-            truncated: false,
-            notice: None,
-        },
-    ));
+    let mut receipt = Box::pin(
+        store.persist_in_run_summary_turn(
+            &summary,
+            TurnCommit::new(
+                1,
+                Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::Text {
+                        text: "measured prefix".to_owned(),
+                    }],
+                ),
+            )
+            .usage(Some(usage(7, 3)))
+            .cost(Some(13_000))
+            .accounting(accounting.snapshot())
+            .build(),
+        ),
+    );
     assert!(futures_util::poll!(receipt.as_mut()).is_pending());
     drop(receipt);
     let mut settlement =
@@ -6262,27 +5156,18 @@ async fn settled_internal_summary_rejects_stale_turns_without_recharging() {
     let stale = store
         .persist_in_run_summary_turn(
             &summary,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![ContentBlock::Text {
                         text: "late summary".to_owned(),
                     }],
                 ),
-                calls: Vec::new(),
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: Some(usage(7, 3)),
-                estimated_cost_usd_nanos: Some(13_000),
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .usage(Some(usage(7, 3)))
+            .cost(Some(13_000))
+            .build(),
         )
         .await;
     assert!(
@@ -6494,18 +5379,7 @@ async fn side_answer_finishes_while_main_provider_is_active_without_main_request
         1,
     )
     .await;
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("main task")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&harness.runtime, harness.session_id, "main task")
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -6516,7 +5390,7 @@ async fn side_answer_finishes_while_main_provider_is_active_without_main_request
     .await
     .unwrap();
     let session = harness.session_id;
-    let before = harness.runtime.inner.store.call(Priority::Control, move |connection| {
+    let before = harness.runtime.store().call(Priority::Control, move |connection| {
         Ok(connection.query_row("SELECT active_run_id, CAST(estimated_cost_usd_nanos AS TEXT) FROM sessions WHERE id = ?1", [session.to_string()],
             |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)))?)
     }).await.unwrap();
@@ -6527,7 +5401,7 @@ async fn side_answer_finishes_while_main_provider_is_active_without_main_request
         .unwrap();
     assert_eq!(answer.text, "hello");
     assert_eq!(requests.lock().unwrap().len(), 1);
-    let after = harness.runtime.inner.store.call(Priority::Control, move |connection| {
+    let after = harness.runtime.store().call(Priority::Control, move |connection| {
         Ok(connection.query_row("SELECT active_run_id, CAST(estimated_cost_usd_nanos AS TEXT) FROM sessions WHERE id = ?1", [session.to_string()],
             |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)))?)
     }).await.unwrap();
@@ -6558,8 +5432,7 @@ async fn side_recovery_marks_interrupted_without_replaying_provider_work() {
     .await
     .unwrap();
     let state = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT state FROM side_questions", [], |row| {
@@ -6584,27 +5457,14 @@ async fn side_failure_with_a_request_in_flight_reports_unknown_spend_without_cha
                 impl Provider for FailureProvider {
                     fn stream(&self, _: ModelRequest) -> ProviderStream {
                         if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                            Box::pin(stream::iter([
-                                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                                    id: "bad".to_owned(),
-                                    name: "shell".to_owned(),
-                                }),
-                                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                                    id: "bad".to_owned(),
-                                    json: "{}".to_owned(),
-                                }),
-                                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                                    id: "bad".to_owned(),
-                                }),
-                                Ok(qq_provider::ProviderEvent::Completed {
-                                    usage: Some(qq_provider::ProviderUsage {
-                                        input_tokens: 10,
-                                        output_tokens: 2,
-                                        cache_read_input_tokens: 0,
-                                        cache_write_input_tokens: 0,
-                                        reasoning_tokens: None,
-                                    }),
-                                }),
+                            provider_script(tool_call("bad", "shell", "{}").into_iter().chain([
+                                completed(Some(qq_provider::ProviderUsage {
+                                    input_tokens: 10,
+                                    output_tokens: 2,
+                                    cache_read_input_tokens: 0,
+                                    cache_write_input_tokens: 0,
+                                    reasoning_tokens: None,
+                                })),
                             ]))
                         } else {
                             Box::pin(stream::once(async {
@@ -6635,8 +5495,7 @@ async fn side_failure_with_a_request_in_flight_reports_unknown_spend_without_cha
     );
     let row = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(connection.query_row(
                 "SELECT state, usage_json, model_turns FROM side_questions",
@@ -6658,8 +5517,7 @@ async fn side_failure_with_a_request_in_flight_reports_unknown_spend_without_cha
     let session = harness.session_id;
     let main_cost = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             Ok(connection.query_row(
                 "SELECT estimated_cost_usd_nanos FROM sessions WHERE id = ?1",
@@ -6705,8 +5563,7 @@ async fn side_command_replay_launches_once_and_snapshot_matches_terminal_event()
         loop {
             let item = harness
                 .runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     side_questions::load_side_snapshot(connection, side_question_id)
                 })
@@ -6723,8 +5580,7 @@ async fn side_command_replay_launches_once_and_snapshot_matches_terminal_event()
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let snapshot = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, side_question_id)
         })
@@ -6732,8 +5588,7 @@ async fn side_command_replay_launches_once_and_snapshot_matches_terminal_event()
         .unwrap();
     let events = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             let json: String = connection.query_row(
                 "SELECT envelope_json FROM events ORDER BY rowid DESC LIMIT 1",
@@ -6777,15 +5632,14 @@ async fn side_wire_cancel_does_not_cancel_main_and_replays_same_receipt() {
     assert_eq!(first, harness.runtime.command(id, command).await.unwrap());
     let state = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, side_question_id)
         })
         .await
         .unwrap();
     assert_eq!(state.state, qq_protocol::SideQuestionState::Cancelled);
-    assert_eq!(harness.runtime.inner.permits.available_permits(), 1);
+    assert_eq!(harness.runtime.idle_run_permits(), 1);
     harness.runtime.shutdown().await.unwrap();
 }
 
@@ -6813,8 +5667,7 @@ async fn side_submit_then_immediate_shutdown_settles_accepted_work() {
     harness.runtime.shutdown().await.unwrap();
     let item = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, side_question_id)
         })
@@ -6874,8 +5727,7 @@ async fn side_partial_text_is_durable_before_completion_and_cancel_preserves_it(
         loop {
             let item = harness
                 .runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     side_questions::load_side_snapshot(connection, side_question_id)
                 })
@@ -6901,8 +5753,7 @@ async fn side_partial_text_is_durable_before_completion_and_cancel_preserves_it(
     harness.runtime.shutdown().await.unwrap();
     let item = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, side_question_id)
         })
@@ -6947,8 +5798,7 @@ async fn side_public_provider_panic_settles_interrupted_and_shutdown_drains() {
     harness.runtime.shutdown().await.unwrap();
     let state = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT state FROM side_questions", [], |row| {
@@ -7009,15 +5859,13 @@ async fn side_deadline_from_admission_times_out_before_provider_load() {
     let id = RunId::generate().unwrap();
     let (request, messages) = harness
         .runtime
-        .inner
-        .store
+        .store()
         .side_source(harness.session_id, id, "expired".to_owned(), false)
         .await
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection.execute(
                 "UPDATE side_questions SET created_at_ms = 0 WHERE id = ?1",
@@ -7047,8 +5895,7 @@ async fn side_deadline_from_admission_times_out_before_provider_load() {
         loop {
             let item = harness
                 .runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     side_questions::load_side_snapshot(connection, id)
                 })
@@ -7081,8 +5928,7 @@ async fn side_terminal_settlement_is_idempotent_without_duplicate_events() {
         .unwrap();
     let before = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT COUNT(*) FROM events", [], |row| {
@@ -7094,8 +5940,7 @@ async fn side_terminal_settlement_is_idempotent_without_duplicate_events() {
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .finish_side_question(
             answer.id,
             qq_protocol::SideQuestionState::Failed,
@@ -7106,8 +5951,7 @@ async fn side_terminal_settlement_is_idempotent_without_duplicate_events() {
         .unwrap();
     let after = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT COUNT(*) FROM events", [], |row| {
@@ -7120,8 +5964,7 @@ async fn side_terminal_settlement_is_idempotent_without_duplicate_events() {
     assert_eq!(before, after);
     let item = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, answer.id)
         })
@@ -7136,15 +5979,13 @@ async fn side_late_completion_settlement_is_timed_out_not_completed() {
     let id = RunId::generate().unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .side_source(harness.session_id, id, "late".to_owned(), false)
         .await
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection.execute(
                 "UPDATE side_questions SET created_at_ms = 0 WHERE id = ?1",
@@ -7156,15 +5997,13 @@ async fn side_late_completion_settlement_is_timed_out_not_completed() {
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .finish_side_question(id, qq_protocol::SideQuestionState::Completed, true, 120_000)
         .await
         .unwrap();
     let item = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, id)
         })
@@ -7180,8 +6019,7 @@ async fn side_accepted_admission_receipt_survives_deadline_and_is_settled() {
     let (release, wait) = std::sync::mpsc::channel();
     let worker = harness
         .runtime
-        .inner
-        .store
+        .store()
         .enqueue_side_write(None, move |_| {
             let _ = entered.send(());
             wait.recv().unwrap();
@@ -7194,8 +6032,7 @@ async fn side_accepted_admission_receipt_survives_deadline_and_is_settled() {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(20);
     let mut receipt = harness
         .runtime
-        .inner
-        .store
+        .store()
         .enqueue_side_admission(
             harness.session_id,
             id,
@@ -7215,16 +6052,14 @@ async fn side_accepted_admission_receipt_survives_deadline_and_is_settled() {
     receipt.await.unwrap().unwrap();
     let effective = harness
         .runtime
-        .inner
-        .store
+        .store()
         .finish_side_question(id, qq_protocol::SideQuestionState::TimedOut, true, 120_000)
         .await
         .unwrap();
     assert_eq!(effective, qq_protocol::SideQuestionState::TimedOut);
     let again = harness
         .runtime
-        .inner
-        .store
+        .store()
         .finish_side_question(id, qq_protocol::SideQuestionState::Completed, true, 120_000)
         .await
         .unwrap();
@@ -7237,8 +6072,7 @@ async fn side_expired_admission_does_not_enter_worker_queue() {
     let id = RunId::generate().unwrap();
     let result = harness
         .runtime
-        .inner
-        .store
+        .store()
         .enqueue_side_admission(
             harness.session_id,
             id,
@@ -7253,8 +6087,7 @@ async fn side_expired_admission_does_not_enter_worker_queue() {
     ));
     let count = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             Ok(connection.query_row(
                 "SELECT COUNT(*) FROM side_questions WHERE id = ?1",
@@ -7300,14 +6133,7 @@ impl RuntimeLoader for SideScriptLoader {
                     }
                 }
             }
-            let pricing = priced.then(|| ModelPricing {
-                input_usd_nanos_per_token: 1_000,
-                output_usd_nanos_per_token: 2_000,
-                cache_read_usd_nanos_per_token: Some(100),
-                cache_write_usd_nanos_per_token: Some(300),
-                context_tier: None,
-                provenance: "test".to_owned(),
-            });
+            let pricing = priced.then(test_pricing);
             Ok(loaded_runtime(
                 Runtime::new(ScriptProvider(scripts), "test-model", 256).unwrap(),
                 &request.workspace,
@@ -7379,8 +6205,7 @@ async fn submit_side(harness: &SpawnHarness, question: &str) -> RunId {
 async fn side_row(harness: &SpawnHarness, id: RunId) -> qq_protocol::SideQuestionSnapshot {
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, id)
         })
@@ -7409,8 +6234,7 @@ async fn wait_side(
 async fn side_events(harness: &SpawnHarness, id: RunId) -> Vec<qq_protocol::SideQuestionSnapshot> {
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let mut statement =
                 connection.prepare("SELECT envelope_json FROM events ORDER BY rowid")?;
@@ -7538,8 +6362,7 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
         .unwrap();
     assert!(!task.is_finished());
     let state = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT state FROM side_questions", [], |row| {
@@ -7592,7 +6415,7 @@ async fn side_running_question_blocks_delete_and_prune() {
         qq_protocol::SideQuestionState::Running
     );
     harness.runtime.shutdown().await.unwrap();
-    assert!(!*harness.runtime.inner.failed.borrow());
+    assert!(!harness.runtime.has_failed());
 }
 
 #[tokio::test]
@@ -7601,15 +6424,13 @@ async fn side_settlement_tolerates_a_session_deleted_after_cancel() {
     let id = RunId::generate().unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .side_source(harness.session_id, id, "x".to_owned(), true)
         .await
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             connection.execute("UPDATE side_questions SET state = 'cancelled'", [])?;
             Ok(())
@@ -7628,20 +6449,18 @@ async fn side_settlement_tolerates_a_session_deleted_after_cancel() {
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .record_side_turn(id, "late".to_owned(), None, None, 1)
         .await
         .unwrap();
     let effective = harness
         .runtime
-        .inner
-        .store
+        .store()
         .finish_side_question(id, qq_protocol::SideQuestionState::Completed, true, 120_000)
         .await
         .unwrap();
     assert_eq!(effective, qq_protocol::SideQuestionState::Cancelled);
-    assert!(!*harness.runtime.inner.failed.borrow());
+    assert!(!harness.runtime.has_failed());
     harness.runtime.shutdown().await.unwrap();
 }
 
@@ -7699,8 +6518,7 @@ async fn side_running_question_survives_a_snapshot_over_the_body_budget() {
     let session = harness.session_id;
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let transaction = connection.transaction()?;
             let big = "m".repeat(24 * 1024);
@@ -7747,13 +6565,12 @@ async fn side_running_question_survives_a_snapshot_over_the_body_budget() {
         .unwrap();
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(session),
-            include_sessions: Vec::new(),
-            session_limit: 16,
-            message_limit: 256,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(session),
+            16,
+            256,
+        ))
         .await
         .unwrap();
     assert!(serde_json::to_vec(&snapshot).unwrap().len() <= qq_protocol::MAX_SNAPSHOT_BYTES);
@@ -7837,8 +6654,7 @@ async fn side_dropped_submit_future_still_settles_and_frees_the_session() {
     let (release, wait) = std::sync::mpsc::channel();
     let worker = harness
         .runtime
-        .inner
-        .store
+        .store()
         .enqueue_side_write(None, move |_| {
             let _ = entered.send(());
             wait.recv().unwrap();
@@ -7866,8 +6682,7 @@ async fn side_dropped_submit_future_still_settles_and_frees_the_session() {
         loop {
             let found = harness
                 .runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, |connection| {
                     Ok(connection
                         .query_row("SELECT id FROM side_questions", [], |row| {

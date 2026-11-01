@@ -9,9 +9,14 @@ use tokio::sync::{Semaphore, oneshot, watch};
 
 use super::*;
 use feed::WorkspaceFeed;
+use probe::{Checkpoint, FAULTS, PROBE, StoreFault};
 use worker::WorkerMessage;
 
 mod schema;
+#[cfg(test)]
+mod test_api;
+#[cfg(test)]
+pub(super) use test_api::StoreStats;
 mod worker;
 
 pub use schema::STORE_SCHEMA_VERSION;
@@ -23,194 +28,6 @@ pub(super) use schema::open_database;
 pub(super) const CONTROL_QUEUE_CAPACITY: usize = 256;
 const OUTPUT_QUEUE_CAPACITY: usize = 1024;
 const CONTROL_BURST_LIMIT: usize = 4;
-
-#[cfg(test)]
-static CANCELLATION_READ_FAILURES: Mutex<Vec<(RunId, SessionRuntimeError)>> =
-    Mutex::new(Vec::new());
-
-#[cfg(test)]
-static CHILD_CANCELLATION_FAILURES: Mutex<Vec<RunId>> = Mutex::new(Vec::new());
-
-#[cfg(test)]
-pub(super) fn fail_child_cancellation(run_id: RunId) {
-    CHILD_CANCELLATION_FAILURES.lock().unwrap().push(run_id);
-}
-
-#[cfg(test)]
-static RESERVED_SETTLEMENT_FAILURES: Mutex<Vec<(RunId, SessionRuntimeError)>> =
-    Mutex::new(Vec::new());
-
-#[cfg(test)]
-static RESERVED_RELOAD_FAILURES: Mutex<Vec<(RunId, SessionRuntimeError)>> = Mutex::new(Vec::new());
-
-#[cfg(test)]
-struct CancellationReadHook {
-    run_id: RunId,
-    entered: oneshot::Sender<()>,
-    release: oneshot::Receiver<()>,
-}
-
-#[cfg(test)]
-static CANCELLATION_READ_HOOKS: Mutex<Vec<CancellationReadHook>> = Mutex::new(Vec::new());
-
-#[cfg(test)]
-struct OutcomeReadHook {
-    run_id: RunId,
-    entered: oneshot::Sender<()>,
-    release: oneshot::Receiver<()>,
-    attempted: oneshot::Sender<()>,
-}
-
-#[cfg(test)]
-static OUTCOME_READ_HOOKS: Mutex<Vec<OutcomeReadHook>> = Mutex::new(Vec::new());
-
-#[cfg(test)]
-struct ChildCreationHook {
-    session_id: SessionId,
-    entered: oneshot::Sender<RunId>,
-    release: oneshot::Receiver<()>,
-}
-
-#[cfg(test)]
-static CHILD_CREATION_HOOKS: Mutex<Vec<ChildCreationHook>> = Mutex::new(Vec::new());
-
-#[cfg(test)]
-pub(super) fn hold_child_creation(
-    session_id: SessionId,
-) -> (oneshot::Receiver<RunId>, oneshot::Sender<()>) {
-    let (entered, entered_rx) = oneshot::channel();
-    let (release, release_rx) = oneshot::channel();
-    CHILD_CREATION_HOOKS
-        .lock()
-        .unwrap()
-        .push(ChildCreationHook {
-            session_id,
-            entered,
-            release: release_rx,
-        });
-    (entered_rx, release)
-}
-
-#[cfg(test)]
-pub(super) fn hold_outcome_read(
-    run_id: RunId,
-) -> (
-    oneshot::Receiver<()>,
-    oneshot::Sender<()>,
-    oneshot::Receiver<()>,
-) {
-    let (entered, entered_rx) = oneshot::channel();
-    let (release, release_rx) = oneshot::channel();
-    let (attempted, attempted_rx) = oneshot::channel();
-    OUTCOME_READ_HOOKS.lock().unwrap().push(OutcomeReadHook {
-        run_id,
-        entered,
-        release: release_rx,
-        attempted,
-    });
-    (entered_rx, release, attempted_rx)
-}
-
-#[cfg(test)]
-struct ReservedStartHoldHook {
-    run_id: RunId,
-    entered: oneshot::Sender<()>,
-    release: oneshot::Receiver<()>,
-}
-
-#[cfg(test)]
-static RESERVED_START_HOLD_HOOKS: Mutex<Vec<ReservedStartHoldHook>> = Mutex::new(Vec::new());
-
-#[cfg(test)]
-pub(super) fn fail_cancellation_reads(
-    run_id: RunId,
-    failures: impl IntoIterator<Item = SessionRuntimeError>,
-) {
-    CANCELLATION_READ_FAILURES
-        .lock()
-        .unwrap()
-        .extend(failures.into_iter().map(|failure| (run_id, failure)));
-}
-
-#[cfg(test)]
-pub(super) fn fail_reserved_settlements(
-    run_id: RunId,
-    failures: impl IntoIterator<Item = SessionRuntimeError>,
-) {
-    RESERVED_SETTLEMENT_FAILURES
-        .lock()
-        .unwrap()
-        .extend(failures.into_iter().map(|failure| (run_id, failure)));
-}
-
-#[cfg(test)]
-pub(super) fn fail_reserved_reloads(
-    run_id: RunId,
-    failures: impl IntoIterator<Item = SessionRuntimeError>,
-) {
-    RESERVED_RELOAD_FAILURES
-        .lock()
-        .unwrap()
-        .extend(failures.into_iter().map(|failure| (run_id, failure)));
-}
-
-#[cfg(test)]
-pub(super) fn hold_cancellation_read(
-    run_id: RunId,
-) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-    let (entered, entered_rx) = oneshot::channel();
-    let (release, release_rx) = oneshot::channel();
-    CANCELLATION_READ_HOOKS
-        .lock()
-        .unwrap()
-        .push(CancellationReadHook {
-            run_id,
-            entered,
-            release: release_rx,
-        });
-    (entered_rx, release)
-}
-
-#[cfg(test)]
-pub(super) fn hold_failing_reserved_start(
-    run_id: RunId,
-) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-    let (entered, entered_rx) = oneshot::channel();
-    let (release, release_rx) = oneshot::channel();
-    RESERVED_START_HOLD_HOOKS
-        .lock()
-        .unwrap()
-        .push(ReservedStartHoldHook {
-            run_id,
-            entered,
-            release: release_rx,
-        });
-    (entered_rx, release)
-}
-
-#[cfg(test)]
-fn take_cancellation_read_hook(run_id: RunId) -> Option<CancellationReadHook> {
-    let mut hooks = CANCELLATION_READ_HOOKS.lock().unwrap();
-    let index = hooks.iter().position(|hook| hook.run_id == run_id)?;
-    Some(hooks.remove(index))
-}
-
-#[cfg(test)]
-fn take_reserved_start_hold_hook(run_id: RunId) -> Option<ReservedStartHoldHook> {
-    let mut hooks = RESERVED_START_HOLD_HOOKS.lock().unwrap();
-    let index = hooks.iter().position(|hook| hook.run_id == run_id)?;
-    Some(hooks.remove(index))
-}
-
-#[cfg(test)]
-fn take_targeted_failure(
-    failures: &Mutex<Vec<(RunId, SessionRuntimeError)>>,
-    run_id: RunId,
-) -> Option<SessionRuntimeError> {
-    let mut failures = failures.lock().unwrap();
-    let index = failures.iter().position(|(target, _)| *target == run_id)?;
-    Some(failures.remove(index).1)
-}
 
 #[derive(Clone)]
 pub(super) struct Store {
@@ -230,7 +47,6 @@ struct StoreInner {
     output: Sender<WorkerMessage>,
     output_slots: Arc<Semaphore>,
     feed: Arc<WorkspaceFeed>,
-    #[cfg(test)]
     catch_up_reads: std::sync::atomic::AtomicU64,
     shutdown: Sender<()>,
     closed: watch::Receiver<bool>,
@@ -278,7 +94,6 @@ impl Store {
                 output: started.output,
                 output_slots: Arc::new(Semaphore::new(OUTPUT_QUEUE_CAPACITY)),
                 feed,
-                #[cfg(test)]
                 catch_up_reads: std::sync::atomic::AtomicU64::new(0),
                 shutdown: started.shutdown,
                 closed: started.closed,
@@ -344,24 +159,6 @@ impl Store {
         self.store_id
     }
 
-    #[cfg(test)]
-    pub(super) async fn hold_control_capacity(&self) -> tokio::sync::OwnedSemaphorePermit {
-        Arc::clone(&self.inner.control_slots)
-            .acquire_many_owned(CONTROL_QUEUE_CAPACITY as u32)
-            .await
-            .expect("test store must remain open")
-    }
-
-    #[cfg(test)]
-    pub(super) fn catch_up_reads(&self) -> u64 {
-        self.inner.catch_up_reads.load(Ordering::Relaxed)
-    }
-
-    #[cfg(test)]
-    pub(super) fn retained_feeds(&self) -> usize {
-        self.inner.feed.retained_workspaces()
-    }
-
     pub(super) async fn attach_feed(
         &self,
         workspace_id: WorkspaceId,
@@ -372,7 +169,6 @@ impl Store {
             return Ok(FeedAttachment { live, page });
         }
         let feed = Arc::clone(&self.inner.feed);
-        #[cfg(test)]
         self.inner.catch_up_reads.fetch_add(1, Ordering::Relaxed);
         self.call(Priority::Control, move |connection| {
             ensure_workspace(connection, workspace_id)?;
@@ -395,7 +191,6 @@ impl Store {
         if let Some(page) = self.inner.feed.warm_page(workspace_id, sequence, limit) {
             return Ok(page);
         }
-        #[cfg(test)]
         self.inner.catch_up_reads.fetch_add(1, Ordering::Relaxed);
         self.call(Priority::Control, move |connection| {
             read_published_events(connection, workspace_id, sequence, limit)
@@ -628,17 +423,6 @@ impl Store {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(super) async fn recover_interrupted_runs(
-        &self,
-    ) -> Result<Vec<EventCursor>, SessionRuntimeError> {
-        let store_id = self.store_id;
-        self.call_write(Priority::Control, move |connection| {
-            recover_interrupted_runs(connection, store_id)
-        })
-        .await
-    }
-
     pub(super) async fn has_preempting_goal_work(
         &self,
         session: SessionId,
@@ -666,16 +450,6 @@ impl Store {
                 .collect()
         })
         .await
-    }
-
-    #[cfg(test)]
-    pub(super) async fn command(
-        &self,
-        command_id: CommandId,
-        command: SessionCommand,
-    ) -> Result<AppliedCommand, SessionRuntimeError> {
-        self.command_with_admission(command_id, command, CommandAdmission::default())
-            .await
     }
 
     pub(super) async fn command_is_recorded(
@@ -817,13 +591,8 @@ impl Store {
         &self,
         run_id: RunId,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
-        #[cfg(test)]
-        {
-            let mut failures = CHILD_CANCELLATION_FAILURES.lock().unwrap();
-            if let Some(index) = failures.iter().position(|run| *run == run_id) {
-                failures.remove(index);
-                return Err(SessionRuntimeError::CONSTRAINT);
-            }
+        if let Some(failure) = FAULTS.take(StoreFault::ChildCancellation(run_id)) {
+            return Err(failure);
         }
         let store_id = self.store_id;
         let command_id = CommandId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
@@ -856,26 +625,16 @@ impl Store {
             depth: parent.depth,
             root_run_id: parent.root_run_id,
         };
-        #[cfg(test)]
         let parent_session = parent.session_id;
         let created = self
             .call_write(Priority::Control, move |connection| {
                 create_child_run(connection, store_id, parent, admission)
             })
             .await;
-        #[cfg(test)]
         if let Ok(created) = &created {
-            let hook = {
-                let mut hooks = CHILD_CREATION_HOOKS.lock().unwrap();
-                hooks
-                    .iter()
-                    .position(|hook| hook.session_id == parent_session)
-                    .map(|index| hooks.remove(index))
-            };
-            if let Some(hook) = hook {
-                let _ = hook.entered.send(created.run_id);
-                let _ = hook.release.await;
-            }
+            PROBE
+                .reached_with(Checkpoint::ChildCreated(parent_session), created.run_id)
+                .await;
         }
         created
     }
@@ -1056,19 +815,6 @@ impl Store {
         .await
     }
 
-    #[cfg(test)]
-    pub(super) async fn events_after(
-        &self,
-        workspace_id: WorkspaceId,
-        sequence: u64,
-        limit: u16,
-    ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
-        self.call(Priority::Control, move |connection| {
-            read_events(connection, workspace_id, sequence, limit)
-        })
-        .await
-    }
-
     pub(super) fn has_goals(&self) -> bool {
         self.inner.goals_present.load(Ordering::Acquire)
     }
@@ -1100,14 +846,6 @@ impl Store {
         .await
     }
 
-    #[cfg(test)]
-    pub(super) async fn queue_due_goals(
-        &self,
-        now: u64,
-    ) -> Result<Option<u64>, SessionRuntimeError> {
-        Ok(self.drive_goals(now).await?.next_wake)
-    }
-
     pub(super) async fn reserve_next_run_at_depth(
         &self,
         depth: u16,
@@ -1119,45 +857,12 @@ impl Store {
         .await
     }
 
-    #[cfg(test)]
-    pub(super) async fn reserve_next_run(
-        &self,
-        children: bool,
-    ) -> Result<Option<ClaimedRun>, SessionRuntimeError> {
-        self.reserve_next_run_at_depth(u16::from(children)).await
-    }
-
-    #[cfg(test)]
-    pub(super) async fn claim_next_run(
-        &self,
-        children: bool,
-    ) -> Result<Option<ClaimedRun>, SessionRuntimeError> {
-        let Some(claimed) = self.reserve_next_run(children).await? else {
-            return Ok(None);
-        };
-        let audit = test_prepared_audit(&claimed);
-        if self
-            .start_reserved_run(&claimed, audit, None)
-            .await?
-            .map_err(|_| SessionRuntimeError::CONSTRAINT)?
-            .is_none()
-        {
-            return Err(SessionRuntimeError::CONSTRAINT);
-        }
-        Ok(Some(claimed))
-    }
-
     pub(super) async fn cancellation_requested(
         &self,
         run_id: RunId,
     ) -> Result<bool, SessionRuntimeError> {
-        #[cfg(test)]
-        if let Some(hook) = take_cancellation_read_hook(run_id) {
-            let _ = hook.entered.send(());
-            let _ = hook.release.await;
-        }
-        #[cfg(test)]
-        if let Some(failure) = take_targeted_failure(&CANCELLATION_READ_FAILURES, run_id) {
+        PROBE.reached(Checkpoint::CancellationRead(run_id)).await;
+        if let Some(failure) = FAULTS.take(StoreFault::CancellationRead(run_id)) {
             return Err(failure);
         }
         self.call(Priority::AwaitControl, move |connection| {
@@ -1179,10 +884,10 @@ impl Store {
         audit: PreparedRunAudit,
         resolved_input: Option<Arc<crate::input::ResolvedInput>>,
     ) -> Result<claim::RunStart, SessionRuntimeError> {
-        #[cfg(test)]
-        if let Some(hook) = take_reserved_start_hold_hook(claimed.identity.run_id) {
-            let _ = hook.entered.send(());
-            let _ = hook.release.await;
+        if PROBE
+            .reached(Checkpoint::ReservedStart(claimed.identity.run_id))
+            .await
+        {
             return Err(SessionRuntimeError::CONSTRAINT);
         }
         let store_id = self.store_id;
@@ -1225,22 +930,6 @@ impl Store {
             start_auto_compaction(connection, store_id, &original, &audit, cutoff_ordinal)
         })
         .await
-    }
-
-    #[cfg(test)]
-    pub(super) async fn side_source(
-        &self,
-        session_id: SessionId,
-        question_id: RunId,
-        question: String,
-        new_thread: bool,
-    ) -> Result<(RuntimeLoadRequest, Vec<Message>), SessionRuntimeError> {
-        let response = self
-            .enqueue_side_admission(session_id, question_id, question, new_thread, None)
-            .await?;
-        response
-            .await
-            .map_err(|_| SessionRuntimeError::Unavailable)?
     }
 
     pub(super) async fn enqueue_side_admission(
@@ -1387,10 +1076,7 @@ impl Store {
         claimed: &ClaimedRun,
     ) -> Result<Option<(Vec<Message>, ResultEffects, CompactionProgress)>, SessionRuntimeError>
     {
-        #[cfg(test)]
-        if let Some(failure) =
-            take_targeted_failure(&RESERVED_RELOAD_FAILURES, claimed.identity.run_id)
-        {
+        if let Some(failure) = FAULTS.take(StoreFault::ReservedReload(claimed.identity.run_id)) {
             return Err(failure);
         }
         let identity = claimed.identity;
@@ -1463,9 +1149,7 @@ impl Store {
         claimed: &ClaimedRun,
         outcome: RunOutcome,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
-        #[cfg(test)]
-        if let Some(failure) =
-            take_targeted_failure(&RESERVED_SETTLEMENT_FAILURES, claimed.identity.run_id)
+        if let Some(failure) = FAULTS.take(StoreFault::ReservedSettlement(claimed.identity.run_id))
         {
             return Err(failure);
         }
@@ -1968,29 +1652,6 @@ impl Store {
         .await
     }
 
-    #[cfg(test)]
-    pub(super) async fn update_model_goal(
-        &self,
-        claimed: &ClaimedRun,
-        arguments: crate::tools::goal::UpdateGoalArgs,
-    ) -> Result<crate::tools::goal::UpdateGoalResult, SessionRuntimeError> {
-        let store_id = self.store_id;
-        let identity = claimed.identity;
-        let goal = claimed.goal.clone();
-        let origin = claimed.origin;
-        self.call_write(Priority::AwaitControl, move |connection| {
-            goals::update_model(
-                connection,
-                store_id,
-                identity,
-                goal.as_deref(),
-                origin,
-                arguments,
-            )
-        })
-        .await
-    }
-
     pub(super) async fn finish_run(
         &self,
         claimed: &ClaimedRun,
@@ -2004,17 +1665,6 @@ impl Store {
             complete_run(connection, store_id, &claimed, outcome, accounting)
         })
         .await
-    }
-
-    #[cfg(test)]
-    pub(super) async fn start_in_run_compaction(
-        &self,
-        prompt_run: &ClaimedRun,
-        resolved_model: &Arc<ResolvedModel>,
-        turn_cutoff: u32,
-    ) -> Result<Option<(ClaimedRun, SessionEventEnvelope)>, SessionRuntimeError> {
-        self.start_in_run_compaction_target(prompt_run, resolved_model, turn_cutoff, false)
-            .await
     }
 
     pub(super) async fn start_in_run_compaction_target(
@@ -2157,23 +1807,7 @@ impl Store {
         &self,
         run_id: RunId,
     ) -> Result<Option<(RunOutcome, SpawnAgentSpend)>, SessionRuntimeError> {
-        #[cfg(test)]
-        let mut attempted = {
-            let hook = {
-                let mut hooks = OUTCOME_READ_HOOKS.lock().unwrap();
-                hooks
-                    .iter()
-                    .position(|hook| hook.run_id == run_id)
-                    .map(|index| hooks.remove(index))
-            };
-            if let Some(hook) = hook {
-                let _ = hook.entered.send(());
-                let _ = hook.release.await;
-                Some(hook.attempted)
-            } else {
-                None
-            }
-        };
+        let held = PROBE.reached(Checkpoint::OutcomeRead(run_id)).await;
         let read = self.call(Priority::AwaitControl, move |connection| {
             let (outcome, usage) = connection
                 .query_row(
@@ -2198,18 +1832,11 @@ impl Store {
             let spend = deliveries::owned_run_spend(connection, run_id)?;
             Ok(Some((outcome, spend)))
         });
-        #[cfg(test)]
-        let read = async move {
-            let mut read = std::pin::pin!(read);
-            std::future::poll_fn(|cx| {
-                let result = read.as_mut().poll(cx);
-                if let Some(signal) = attempted.take() {
-                    let _ = signal.send(());
-                }
-                result
-            })
-            .await
-        };
+        if held {
+            return PROBE
+                .polled(Checkpoint::OutcomeReadPolled(run_id), read)
+                .await;
+        }
         read.await
     }
 

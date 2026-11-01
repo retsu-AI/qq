@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn unknown_workspace_subscription_churn_retains_no_feeds() {
     let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
-    let before = harness.runtime.inner.store.retained_feeds();
+    let before = harness.runtime.stats().retained_feeds;
     for _ in 0..256 {
         let workspace_id = WorkspaceId::generate().unwrap();
         let mut events = harness
@@ -11,19 +11,19 @@ async fn unknown_workspace_subscription_churn_retains_no_feeds() {
             .subscribe_published(SubscribeRequest {
                 workspace_id,
                 after: EventCursor {
-                    store_id: harness.runtime.inner.store.store_id(),
+                    store_id: harness.runtime.store_id(),
                     workspace_id,
                     sequence: 0,
                 },
             })
             .unwrap();
-        assert_eq!(harness.runtime.inner.store.retained_feeds(), before);
+        assert_eq!(harness.runtime.stats().retained_feeds, before);
         assert_eq!(
             events.next().await.unwrap().unwrap_err(),
             SessionRuntimeError::WorkspaceNotFound
         );
         drop(events);
-        assert_eq!(harness.runtime.inner.store.retained_feeds(), before);
+        assert_eq!(harness.runtime.stats().retained_feeds, before);
     }
     harness.runtime.close().await.unwrap();
 }
@@ -31,30 +31,30 @@ async fn unknown_workspace_subscription_churn_retains_no_feeds() {
 #[tokio::test]
 async fn disconnected_subscribers_release_the_feed_and_replay_missed_commits() {
     let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
     let request = SubscribeRequest {
         workspace_id: harness.workspace_id,
         after: EventCursor {
-            store_id: harness.runtime.inner.store.store_id(),
+            store_id: harness.runtime.store_id(),
             workspace_id: harness.workspace_id,
             sequence: 0,
         },
     };
     let mut first = harness.runtime.subscribe_published(request).unwrap();
     let mut second = harness.runtime.subscribe_published(request).unwrap();
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
     let initial = first.next().await.unwrap().unwrap();
     assert_eq!(second.next().await.unwrap().unwrap().json, initial.json);
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 1);
+    assert_eq!(harness.runtime.stats().retained_feeds, 1);
     drop(first);
     let created = create_session(&harness.runtime, harness.workspace_id, None).await;
     let live = second.next().await.unwrap().unwrap();
     assert_eq!(live.envelope.cursor, created.committed_through);
     drop(second);
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
 
     let missed = create_session(&harness.runtime, harness.workspace_id, None).await;
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
     let mut restarted = harness.runtime.subscribe_published(request).unwrap();
     assert_eq!(restarted.next().await.unwrap().unwrap().json, initial.json);
     let newest = create_session(&harness.runtime, harness.workspace_id, None).await;
@@ -69,7 +69,7 @@ async fn disconnected_subscribers_release_the_feed_and_replay_missed_commits() {
         );
     }
     drop(restarted);
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
     harness.runtime.close().await.unwrap();
 }
 
@@ -79,7 +79,7 @@ async fn canceled_feed_attachment_releases_queued_and_unreceived_replies() {
         let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
         let (entered, waiting) = oneshot::channel();
         let (release, blocked) = std::sync::mpsc::channel();
-        let store = harness.runtime.inner.store.clone();
+        let store = harness.runtime.store().clone();
         let hold = tokio::spawn(async move {
             store
                 .call(Priority::Control, move |_| {
@@ -97,7 +97,7 @@ async fn canceled_feed_attachment_releases_queued_and_unreceived_replies() {
                 .subscribe_published(SubscribeRequest {
                     workspace_id: harness.workspace_id,
                     after: EventCursor {
-                        store_id: harness.runtime.inner.store.store_id(),
+                        store_id: harness.runtime.store_id(),
                         workspace_id: harness.workspace_id,
                         sequence: 0,
                     },
@@ -105,7 +105,7 @@ async fn canceled_feed_attachment_releases_queued_and_unreceived_replies() {
                 .unwrap(),
         );
         assert!(events.as_mut().unwrap().next().now_or_never().is_none());
-        assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+        assert_eq!(harness.runtime.stats().retained_feeds, 0);
         if cancel_before_reply {
             drop(events.take());
         }
@@ -113,17 +113,16 @@ async fn canceled_feed_attachment_releases_queued_and_unreceived_replies() {
         hold.await.unwrap().unwrap();
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, |_| Ok(()))
             .await
             .unwrap();
         assert_eq!(
-            harness.runtime.inner.store.retained_feeds(),
+            harness.runtime.stats().retained_feeds,
             usize::from(!cancel_before_reply)
         );
         drop(events);
-        assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+        assert_eq!(harness.runtime.stats().retained_feeds, 0);
         harness.runtime.close().await.unwrap();
     }
 }
@@ -133,8 +132,7 @@ async fn failed_initial_replay_releases_its_feed() {
     let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             connection.execute("UPDATE events SET envelope_json = 'invalid'", [])?;
             Ok(())
@@ -146,7 +144,7 @@ async fn failed_initial_replay_releases_its_feed() {
         .subscribe_published(SubscribeRequest {
             workspace_id: harness.workspace_id,
             after: EventCursor {
-                store_id: harness.runtime.inner.store.store_id(),
+                store_id: harness.runtime.store_id(),
                 workspace_id: harness.workspace_id,
                 sequence: 0,
             },
@@ -156,7 +154,7 @@ async fn failed_initial_replay_releases_its_feed() {
         events.next().await.unwrap().unwrap_err(),
         SessionRuntimeError::CODEC
     );
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
     harness.runtime.close().await.unwrap();
 }
 
@@ -173,8 +171,7 @@ async fn replay_decodes_events_from_removed_jev_features() {
     ];
     let sequences = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let mut statement =
                 connection.prepare("SELECT sequence FROM events ORDER BY sequence LIMIT 4")?;
@@ -199,7 +196,7 @@ async fn replay_decodes_events_from_removed_jev_features() {
         .subscribe_published(SubscribeRequest {
             workspace_id: harness.workspace_id,
             after: EventCursor {
-                store_id: harness.runtime.inner.store.store_id(),
+                store_id: harness.runtime.store_id(),
                 workspace_id: harness.workspace_id,
                 sequence: 0,
             },
@@ -230,7 +227,7 @@ async fn live_subscribers_read_the_store_once_and_receive_committed_bytes() {
                 .subscribe_published(SubscribeRequest {
                     workspace_id: harness.workspace_id,
                     after: EventCursor {
-                        store_id: harness.runtime.inner.store.store_id(),
+                        store_id: harness.runtime.store_id(),
                         workspace_id: harness.workspace_id,
                         sequence: 0,
                     },
@@ -242,7 +239,7 @@ async fn live_subscribers_read_the_store_once_and_receive_committed_bytes() {
     for subscriber in &mut subscribers {
         caught_up.push(subscriber.next().await.unwrap().unwrap());
     }
-    let reads_before = harness.runtime.inner.store.catch_up_reads();
+    let reads_before = harness.runtime.stats().catch_up_reads;
 
     let run_id = submit_prompt(&harness, "hello").await;
     let mut streams = Vec::with_capacity(8);
@@ -265,7 +262,7 @@ async fn live_subscribers_read_the_store_once_and_receive_committed_bytes() {
     let events_per_subscriber = streams[0].len();
     assert!(events_per_subscriber >= 4, "{events_per_subscriber} events");
     assert_eq!(
-        harness.runtime.inner.store.catch_up_reads(),
+        harness.runtime.stats().catch_up_reads,
         reads_before,
         "8 subscribers observing {events_per_subscriber} events must not read the store"
     );
@@ -273,8 +270,7 @@ async fn live_subscribers_read_the_store_once_and_receive_committed_bytes() {
 
     let replay = harness
         .runtime
-        .inner
-        .store
+        .store()
         .published_events_after(
             harness.workspace_id,
             caught_up[0].envelope.cursor.sequence,
@@ -302,18 +298,18 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
     let request = SubscribeRequest {
         workspace_id: harness.workspace_id,
         after: EventCursor {
-            store_id: harness.runtime.inner.store.store_id(),
+            store_id: harness.runtime.store_id(),
             workspace_id: harness.workspace_id,
             sequence: 0,
         },
     };
     let mut anchor = harness.runtime.subscribe_published(request).unwrap();
     let created = anchor.next().await.unwrap().unwrap();
-    assert_eq!(harness.runtime.inner.store.catch_up_reads(), 1);
+    assert_eq!(harness.runtime.stats().catch_up_reads, 1);
 
     let mut cold = harness.runtime.subscribe_published(request).unwrap();
     assert_eq!(cold.next().await.unwrap().unwrap().json, created.json);
-    assert_eq!(harness.runtime.inner.store.catch_up_reads(), 2);
+    assert_eq!(harness.runtime.stats().catch_up_reads, 2);
     drop(cold);
 
     let mut warm_at_tail = harness
@@ -324,7 +320,7 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
         })
         .unwrap();
     assert!(warm_at_tail.next().now_or_never().is_none());
-    assert_eq!(harness.runtime.inner.store.catch_up_reads(), 2);
+    assert_eq!(harness.runtime.stats().catch_up_reads, 2);
 
     submit_prompt(&harness, "hello").await;
     let mut live = Vec::new();
@@ -345,7 +341,7 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
         let observed = warm_at_tail.next().await.unwrap().unwrap();
         assert_eq!(observed.json, expected.json);
     }
-    assert_eq!(harness.runtime.inner.store.catch_up_reads(), 2);
+    assert_eq!(harness.runtime.stats().catch_up_reads, 2);
 
     let midpoint = live[1].envelope.cursor;
     let mut reconnect = harness
@@ -365,17 +361,17 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
     }
     assert!(reconnect.next().now_or_never().is_none());
     assert_eq!(
-        harness.runtime.inner.store.catch_up_reads(),
+        harness.runtime.stats().catch_up_reads,
         2,
         "warm reconnects must not read the store"
     );
 
     let mut cold_again = harness.runtime.subscribe_published(request).unwrap();
     assert_eq!(cold_again.next().await.unwrap().unwrap().json, created.json);
-    assert_eq!(harness.runtime.inner.store.catch_up_reads(), 3);
+    assert_eq!(harness.runtime.stats().catch_up_reads, 3);
 
     drop((anchor, warm_at_tail, reconnect, cold_again));
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
     let mut after_release = harness
         .runtime
         .subscribe_published(SubscribeRequest {
@@ -387,7 +383,7 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
         after_release.next().await.unwrap().unwrap().envelope.cursor,
         live[2].envelope.cursor
     );
-    assert_eq!(harness.runtime.inner.store.catch_up_reads(), 4);
+    assert_eq!(harness.runtime.stats().catch_up_reads, 4);
     harness.runtime.shutdown().await.unwrap();
 }
 
@@ -401,7 +397,7 @@ async fn a_lagging_subscriber_catches_up_from_the_store_without_gaps_or_duplicat
         .subscribe_published(SubscribeRequest {
             workspace_id: harness.workspace_id,
             after: EventCursor {
-                store_id: harness.runtime.inner.store.store_id(),
+                store_id: harness.runtime.store_id(),
                 workspace_id: harness.workspace_id,
                 sequence: 0,
             },
@@ -504,8 +500,7 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
             .unwrap();
         let stored_previews: String = harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(connection.query_row(
                     "SELECT approval_inputs_json FROM tool_calls WHERE id=?1",
@@ -525,7 +520,7 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
         let run_id = call.run_id;
         let call_id = call.id;
         for missing in [false, true] {
-            let path = harness._directory.path().join(if missing {
+            let path = harness.directory.path().join(if missing {
                 "legacy-missing.sqlite3"
             } else {
                 "legacy-complete.sqlite3"
@@ -533,8 +528,7 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
             let backup = path.clone();
             harness
                 .runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     connection.execute("VACUUM INTO ?1", [backup.to_str().unwrap()])?;
                     Ok(())
@@ -592,8 +586,7 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
         }
         let recovered = harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 for (workspace, session, run) in [
                     (WorkspaceId::generate().unwrap(), session_id, run_id),
@@ -628,8 +621,7 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
         collect_through_finished(&mut harness.events).await;
         let retained: Option<String> = harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(connection.query_row(
                     "SELECT approval_inputs_json FROM tool_calls WHERE id=?1",
@@ -765,7 +757,7 @@ async fn terminal_receipts_remain_scoped_and_recover_from_legacy_delivery_histor
     );
 
     for missing in [false, true] {
-        let path = harness._directory.path().join(if missing {
+        let path = harness.directory.path().join(if missing {
             "missing-receipts.sqlite3"
         } else {
             "legacy-receipts.sqlite3"
@@ -773,8 +765,7 @@ async fn terminal_receipts_remain_scoped_and_recover_from_legacy_delivery_histor
         let backup = path.clone();
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 connection.execute("VACUUM INTO ?1", [backup.to_str().unwrap()])?;
                 Ok(())
@@ -857,8 +848,7 @@ async fn terminal_receipts_remain_scoped_and_recover_from_legacy_delivery_histor
     }
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             connection.execute("DELETE FROM events", [])?;
             Ok(())
@@ -893,8 +883,7 @@ async fn terminal_receipt_pages_bound_rows_and_bytes_without_skipping_runs() {
     };
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let columns = connection
                 .prepare("PRAGMA table_info(runs)")?
@@ -1011,8 +1000,7 @@ async fn a_cold_snapshot_restores_pending_question_details_without_delivery_even
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             connection.execute(
                 "UPDATE messages SET output=?1 WHERE role='user'",
@@ -1067,7 +1055,7 @@ async fn a_cold_cursor_before_the_retained_journal_requires_a_snapshot() {
     let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
     create_session(&harness.runtime, harness.workspace_id, None).await;
     let workspace = harness.workspace_id;
-    let replay = harness.runtime.inner.store.call(Priority::Control, move |connection| {
+    let replay = harness.runtime.store().call(Priority::Control, move |connection| {
         connection.execute("DELETE FROM events WHERE workspace_id=?1 AND sequence=(SELECT MIN(sequence) FROM events WHERE workspace_id=?1)", [workspace.to_string()])?;
         read_published_event_page(connection, workspace, 0, MAX_REPLAY_EVENTS)
     }).await;
@@ -1100,7 +1088,7 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
         ))
         .await
         .unwrap();
-    let other_path = harness._directory.path().join("other-workspace");
+    let other_path = harness.directory.path().join("other-workspace");
     tokio::fs::create_dir(&other_path).await.unwrap();
     let receipt = harness
         .runtime
@@ -1125,11 +1113,10 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
     else {
         panic!("wrong session receipt")
     };
-    let store = harness.runtime.inner.store.store_id();
+    let store = harness.runtime.store_id();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let tail: u64 = connection.query_row(
                 "SELECT next_sequence FROM workspaces WHERE id=?1",
@@ -1170,15 +1157,11 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
         })
         .await
         .unwrap();
-    let legacy_path = harness
-        ._directory
-        .path()
-        .join("legacy-full-journal.sqlite3");
+    let legacy_path = harness.directory.path().join("legacy-full-journal.sqlite3");
     let backup = legacy_path.clone();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection.execute("VACUUM INTO ?1", [backup.to_str().unwrap()])?;
             Ok(())
@@ -1214,7 +1197,7 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
     );
     drop(migrated);
     create_session(&harness.runtime, other, None).await;
-    harness.runtime.inner.store.call(Priority::Control, move |connection| {
+    harness.runtime.store().call(Priority::Control, move |connection| {
         let measure = |connection: &Connection| -> Result<(u64,u64), SessionRuntimeError> {
             let actual: (u64,u64) = connection.query_row("SELECT COALESCE(SUM(length(CAST(envelope_json AS BLOB))),0),COUNT(*) FROM events", [], |row| Ok((row.get(0)?,row.get(1)?)))?;
             let metered = connection.query_row("SELECT bytes,rows FROM event_journal_usage WHERE singleton=1", [], |row| Ok((row.get(0)?,row.get(1)?)))?;
@@ -1241,8 +1224,7 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
     assert_eq!(
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .published_events_after(harness.workspace_id, 0, MAX_REPLAY_EVENTS)
             .await
             .unwrap_err(),
@@ -1289,16 +1271,12 @@ async fn approval_recovery_is_scoped_to_the_root_family() {
     )
     .await
     .unwrap();
-    let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-    let root = create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask).await;
-    let CommandOutcome::SessionCreated { session_id: root } = root.outcome else {
-        panic!("wrong root")
-    };
+    let (workspace, root, _) = new_session(&runtime, directory.path(), ApprovalMode::Ask).await;
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id: workspace,
             after: EventCursor {
-                store_id: runtime.inner.store.store_id(),
+                store_id: runtime.store_id(),
                 workspace_id: workspace,
                 sequence: 0,
             },

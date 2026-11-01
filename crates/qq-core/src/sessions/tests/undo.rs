@@ -78,7 +78,7 @@ async fn undo_root_snapshot_covers_a_spawned_write_child() {
         ApprovalMode::Auto,
     )
     .await;
-    let root = harness._directory.path().to_owned();
+    let root = harness.directory.path().to_owned();
     test_support::repository(&root);
     std::fs::write(root.join(".gitignore"), "sessions.sqlite3*\n").unwrap();
     let run = submit_prompt_to(&harness.runtime, harness.session_id, "delegate the write").await;
@@ -125,7 +125,7 @@ async fn undo_root_snapshot_covers_a_spawned_write_child() {
     assert!(!root.join("child.txt").exists());
 }
 
-fn workspace_repository(harness: &ScriptedRunsHarness) {
+fn workspace_repository(harness: &SessionFixture) {
     let root = &harness.workspace_path;
     test_support::repository(root);
     std::fs::write(root.join(".gitignore"), "sessions.sqlite3*\n").unwrap();
@@ -314,14 +314,7 @@ async fn cancelling_a_run_does_not_wait_for_its_snapshot() {
 
     let run_id = submit_prompt(&harness, "change things").await;
     held.entered().await;
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, run_id).await.unwrap();
     let observed = tokio::time::timeout(Duration::from_secs(10), async {
         collect_until(&mut harness.events, finished_for(run_id)).await
     })
@@ -386,7 +379,7 @@ async fn a_duration_budget_does_not_wait_for_the_snapshot() {
 }
 
 async fn undo_workspace(
-    harness: &ScriptedRunsHarness,
+    harness: &SessionFixture,
     command_id: CommandId,
 ) -> Result<CommandReceipt, SessionRuntimeError> {
     harness
@@ -517,8 +510,7 @@ async fn no_run_starts_in_the_workspace_until_its_restore_finishes() {
     assert!(
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .reserve_next_run(false)
             .await
             .unwrap()
@@ -527,8 +519,7 @@ async fn no_run_starts_in_the_workspace_until_its_restore_finishes() {
     let session = harness.session_id.to_string();
     let reserved: (Option<String>, Option<String>) = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(store::Priority::Control, move |connection| {
             Ok(connection.query_row(
                 "SELECT preparing_run_id, active_run_id FROM sessions WHERE id = ?1",
@@ -606,17 +597,7 @@ async fn undo_is_refused_while_a_prompt_is_queued() {
         workspace_id: claimed.identity.workspace_id,
         snapshot: None,
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: claimed.identity.session_id,
-                input: vec![InputPart::text("queued")],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, claimed.identity.session_id, "queued")
         .await
         .unwrap();
     assert!(matches!(
@@ -722,17 +703,7 @@ async fn no_run_starts_in_a_nested_workspace_while_its_parent_restores() {
         })
         .await
         .unwrap();
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: claimed.identity.session_id,
-                input: vec![InputPart::text("queued")],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, claimed.identity.session_id, "queued")
         .await
         .unwrap();
     assert!(store.reserve_next_run(false).await.unwrap().is_none());
@@ -862,20 +833,7 @@ async fn a_restoring_command_id_is_reserved_against_every_other_request() {
             .runtime
             .command(
                 command_id,
-                SessionCommand::CreateSession {
-                    workspace_id: other_id,
-                    parent_id: None,
-                    model: ModelSelection {
-                        model_is_fallback: false,
-                        model: Some("test/model".to_owned()),
-                        max_output_tokens: Some(256),
-                        organization: None,
-                    },
-                    approval_mode: ApprovalMode::Full,
-                    profile: AgentProfileId::default(),
-                    reasoning_effort: None,
-                    correlation: Correlation::default(),
-                },
+                create_session_command(other_id, None, ApprovalMode::Full),
             )
             .await,
         Err(SessionRuntimeError::IdempotencyConflict)

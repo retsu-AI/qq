@@ -20,13 +20,7 @@ async fn creates_root_and_child_sessions_in_one_workspace_snapshot() {
     };
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(child_id),
-            include_sessions: Vec::new(),
-            session_limit: 32,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(child_id), 32, 32))
         .await
         .unwrap();
 
@@ -109,13 +103,7 @@ async fn snapshot_without_focus_selects_and_prewarms_recent_sessions() {
     }
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: None,
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, None, 8, 8))
         .await
         .unwrap();
 
@@ -133,36 +121,15 @@ async fn snapshot_without_focus_selects_and_prewarms_recent_sessions() {
 #[tokio::test]
 async fn only_the_first_prompt_names_a_session() {
     let (directory, runtime) = test_runtime().await;
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
 
     for prompt in ["New session", "Do not replace the first title"] {
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text(prompt.to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        try_submit(&runtime, session_id, prompt).await.unwrap();
     }
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 4,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 4))
         .await
         .unwrap();
     assert_eq!(snapshot.focused.unwrap().summary.title, "New session");
@@ -206,30 +173,12 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let after_creation = created.committed_through;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: after_creation,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, after_creation);
 
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("first prompt".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "first prompt")
         .await
         .unwrap();
     let observed = collect_through_finished(&mut events).await;
@@ -295,13 +244,7 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
     assert!(buffered_text < later_reasoning);
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let messages = snapshot.focused.unwrap().messages;
@@ -316,12 +259,7 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
             .all(|message| !message.output.contains("private rationale"))
     );
 
-    let mut replay = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: after_creation,
-        })
-        .unwrap();
+    let mut replay = subscribe_after(&runtime, workspace_id, after_creation);
     let replayed = tokio::time::timeout(Duration::from_secs(2), async {
         let mut replayed = Vec::new();
         for _ in 0..observed.len() {
@@ -333,17 +271,7 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
     .unwrap();
     assert_eq!(replayed, observed);
 
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("second prompt".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "second prompt")
         .await
         .unwrap();
     collect_through_finished(&mut events).await;
@@ -363,41 +291,21 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
 async fn cancellation_flushes_the_final_bounded_reasoning_batch_before_settlement() {
     let directory = tempfile::tempdir().unwrap();
     let buffered = Arc::new(tokio::sync::Notify::new());
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(HangingReasoningLoader {
             buffered: Arc::clone(&buffered),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("reason until cancelled".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    .await;
+    let run_id = submit(&runtime, session_id, "reason until cancelled").await;
     buffered.notified().await;
     runtime.inner.cancel(run_id);
 
@@ -436,26 +344,9 @@ async fn streams_committed_run_events_and_snapshots_the_result() {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
 
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("Say hello".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    try_submit(&runtime, session_id, "Say hello").await.unwrap();
 
     let mut observed = Vec::new();
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -538,13 +429,7 @@ async fn streams_committed_run_events_and_snapshots_the_result() {
         } if model == "test/model"
     )));
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 32,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 32, 32))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -648,8 +533,15 @@ async fn streams_committed_run_events_and_snapshots_the_result() {
 #[tokio::test]
 async fn unmeasured_new_prompt_clears_stale_session_context() {
     let directory = tempfile::tempdir().unwrap();
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(UsageSequenceLoader {
             usages: StdMutex::new(vec![
                 Some(qq_provider::ProviderUsage {
@@ -662,20 +554,9 @@ async fn unmeasured_new_prompt_clears_stale_session_context() {
                 None,
             ]),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
 
     let first_run = queue_prompt(&runtime, session_id, "measured".to_owned()).await;
     let first = collect_through_finished(&mut events).await;
@@ -712,13 +593,7 @@ async fn unmeasured_new_prompt_clears_stale_session_context() {
     )));
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -727,8 +602,7 @@ async fn unmeasured_new_prompt_clears_stale_session_context() {
     assert_eq!(focused.runs[0].context_tokens, Some(54_400));
     assert_eq!(focused.runs[1].context_tokens, None);
     let stored_basis = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection
                 .query_row(
@@ -746,36 +620,25 @@ async fn unmeasured_new_prompt_clears_stale_session_context() {
 #[tokio::test]
 async fn cancellation_before_a_model_turn_preserves_known_session_cost() {
     let directory = tempfile::tempdir().unwrap();
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(PricedHangingLoader),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
 
     let run_id = queue_prompt(&runtime, session_id, "cancel".to_owned()).await;
     collect_until(&mut events, |event| {
         matches!(event, SessionEvent::RunStarted { run_id: started, .. } if *started == run_id)
     })
     .await;
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id },
-        )
-        .await
-        .unwrap();
+    cancel_run(&runtime, run_id).await.unwrap();
     let observed = collect_until(&mut events, finished_for(run_id)).await;
 
     assert!(observed.iter().any(|event| matches!(
@@ -793,36 +656,22 @@ async fn persists_tool_transitions_and_reconstructs_follow_up_context() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "tool result\n").unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(ToolLoopLoader {
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("inspect the note".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    .await;
+    try_submit(&runtime, session_id, "inspect the note")
         .await
         .unwrap();
 
@@ -853,13 +702,7 @@ async fn persists_tool_transitions_and_reconstructs_follow_up_context() {
     assert!(requested < started && started < finished);
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -868,16 +711,7 @@ async fn persists_tool_transitions_and_reconstructs_follow_up_context() {
     let result = focused.tool_calls[0].result.as_deref().unwrap();
     assert!(result.starts_with("read note.txt L1/1 h:"), "{result}");
     assert!(result.ends_with("\n1\ttool result\n"), "{result}");
-    assert_eq!(
-        focused.runs[0].usage,
-        Some(TokenUsage {
-            input_tokens: 10,
-            cache_read_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 3,
-            reasoning_tokens: None,
-        })
-    );
+    assert_eq!(focused.runs[0].usage, Some(usage(10, 3)));
     assert_eq!(focused.runs[0].context_tokens, Some(6));
     assert_eq!(focused.summary.context_tokens, Some(6));
     let completed_run = focused.runs[0].id;
@@ -894,17 +728,7 @@ async fn persists_tool_transitions_and_reconstructs_follow_up_context() {
     assert!(increment > 0);
     assert!(base + increment <= MAX_CONTEXT_BYTES as u64);
 
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("what did you read?".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "what did you read?")
         .await
         .unwrap();
     let _ = collect_through_finished(&mut events).await;
@@ -930,7 +754,15 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
     std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database_path.clone()),
         Arc::new(RenewableSliceLoader {
             requests: Arc::clone(&requests),
@@ -938,20 +770,9 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
             metered_empty_checkpoint: false,
             slice_calls: crate::MAX_TOOL_CALLS_PER_SLICE,
         }),
+        ApprovalMode::Auto,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
 
     let observed = collect_until(&mut events, finished_for(run_id)).await;
@@ -999,13 +820,7 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
     );
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 16,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 16))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -1085,12 +900,7 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: replay_after,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, replay_after);
     let follow_up = queue_prompt(&runtime, session_id, "confirm completion".to_owned()).await;
     let replayed = collect_until(&mut events, finished_for(follow_up)).await;
     assert!(matches!(
@@ -1130,40 +940,29 @@ async fn cancellation_at_the_slice_checkpoint_has_one_cancelled_terminal() {
     std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
     let checkpoint_wait = Arc::new(tokio::sync::Notify::new());
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(RenewableSliceLoader {
             requests: Arc::clone(&requests),
             checkpoint_wait: Some(Arc::clone(&checkpoint_wait)),
             metered_empty_checkpoint: false,
             slice_calls: SHORT_SLICE_CALLS,
         }),
+        ApprovalMode::Auto,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
 
     tokio::time::timeout(Duration::from_secs(30), checkpoint_wait.notified())
         .await
         .expect("the run must reach its tool-free checkpoint request");
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id },
-        )
-        .await
-        .unwrap();
+    cancel_run(&runtime, run_id).await.unwrap();
     let observed = collect_until(&mut events, finished_for(run_id)).await;
 
     assert_eq!(
@@ -1221,7 +1020,15 @@ async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_b
     std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let database = directory.path().join("sessions.sqlite3");
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database.clone()),
         Arc::new(RenewableSliceLoader {
             requests: Arc::clone(&requests),
@@ -1229,20 +1036,9 @@ async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_b
             metered_empty_checkpoint: true,
             slice_calls: SHORT_SLICE_CALLS,
         }),
+        ApprovalMode::Auto,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
 
     let observed = collect_until(&mut events, finished_for(run_id)).await;
@@ -1266,13 +1062,7 @@ async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_b
     let expected_cost =
         expected_usage.input_tokens * 1_000 + expected_usage.output_tokens * 2_000 + 100 + 2 * 300;
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 16,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 16))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -1331,52 +1121,9 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
         let store = Store::open(directory.path().join("sessions.sqlite3"))
             .await
             .unwrap();
-        let resolved = store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::ResolveWorkspace {
-                    path: directory.path().to_str().unwrap().to_owned(),
-                },
-            )
-            .await
-            .unwrap();
-        let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
-            panic!("unexpected receipt")
-        };
-        let created = store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::CreateSession {
-                    workspace_id,
-                    parent_id: None,
-                    model: ModelSelection {
-                        model_is_fallback: false,
-                        model: Some("test/model".to_owned()),
-                        max_output_tokens: Some(256),
-                        organization: None,
-                    },
-                    approval_mode: ApprovalMode::default(),
-                    profile: AgentProfileId::default(),
-                    reasoning_effort: None,
-                    correlation: Correlation::default(),
-                },
-            )
-            .await
-            .unwrap();
-        let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
-            panic!("unexpected receipt")
-        };
-        store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("inspect the note".to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        let (_, session_id) =
+            store_session(&store, directory.path(), ApprovalMode::default()).await;
+        store_command(&store, session_id, "inspect the note")
             .await
             .unwrap();
         let claimed = store.claim_next_run(false).await.unwrap().unwrap();
@@ -1394,12 +1141,9 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
         store
             .persist_model_turn(
                 &claimed,
-                ModelTurnCommit {
-                    model_work: crate::runtime::ModelWorkDisposition::Committed,
-                    goal_notices: Vec::new(),
-                    reserved_goal_notices: 0,
-                    turn_ordinal: 1,
-                    message: Message::new(
+                TurnCommit::new(
+                    1,
+                    Message::new(
                         Role::Assistant,
                         vec![ContentBlock::tool_call(
                             call.provider_call_id.clone(),
@@ -1407,16 +1151,9 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
                             &serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
                         )],
                     ),
-                    calls: vec![call],
-                    turn_message: None,
-                    context_tokens: None,
-                    occupancy_basis: None,
-                    usage: None,
-                    estimated_cost_usd_nanos: None,
-                    accounting: None,
-                    truncated: false,
-                    notice: None,
-                },
+                )
+                .calls(vec![call])
+                .build(),
             )
             .await
             .unwrap();
@@ -1444,19 +1181,7 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
             .await
             .unwrap();
 
-        store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("continue".to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        store_command(&store, session_id, "continue").await.unwrap();
         let continued = store.claim_next_run(false).await.unwrap().unwrap();
 
         assert!(matches!(
@@ -1606,52 +1331,9 @@ async fn cancelled_unclaimed_prompt_remains_explicit_in_follow_up_context() {
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
     let store = Store::open(database_path.clone()).await.unwrap();
-    let resolved = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::ResolveWorkspace {
-                path: directory.path().to_str().unwrap().to_owned(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let created = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let queued = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("this prompt never started".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let (workspace_id, session_id) =
+        store_session(&store, directory.path(), ApprovalMode::default()).await;
+    let queued = store_command(&store, session_id, "this prompt never started")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
@@ -1676,23 +1358,8 @@ async fn cancelled_unclaimed_prompt_remains_explicit_in_follow_up_context() {
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: cancelled.receipt.committed_through,
-        })
-        .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue after cancellation".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let mut events = subscribe_after(&runtime, workspace_id, cancelled.receipt.committed_through);
+    try_submit(&runtime, session_id, "continue after cancellation")
         .await
         .unwrap();
     let _ = collect_through_finished(&mut events).await;
@@ -1738,34 +1405,11 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: cursor,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, cursor);
     let submit = |prompt: &str| {
         let input = vec![InputPart::text(prompt.to_owned())];
         let runtime = &runtime;
-        async move {
-            let receipt = runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::SubmitPrompt {
-                        session_id,
-                        input,
-                        limits: qq_protocol::RunLimits::default(),
-                        correlation: Correlation::default(),
-                        output: None,
-                    },
-                )
-                .await
-                .unwrap();
-            let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
-                panic!("unexpected receipt")
-            };
-            run_id
-        }
+        async move { submit(runtime, session_id, Prompt::input(input)).await }
     };
 
     let run_id = submit("write a long answer").await;
@@ -1826,7 +1470,7 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
     let run = focused.runs.iter().find(|run| run.id == run_id).unwrap();
     assert_eq!(run.status, RunStatus::Completed);
 
-    let store = runtime.inner.store.clone();
+    let store = runtime.store().clone();
     let continuations: u16 = store
         .call(Priority::Control, move |connection| {
             connection
@@ -1888,23 +1532,8 @@ async fn a_raised_output_cap_is_what_the_retried_turn_records() {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: cursor,
-        })
-        .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("think hard".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let mut events = subscribe_after(&runtime, workspace_id, cursor);
+    try_submit(&runtime, session_id, "think hard")
         .await
         .unwrap();
     let finished = collect_through_finished(&mut events).await;
@@ -1959,27 +1588,10 @@ async fn an_empty_truncated_turn_continues_and_replays_only_the_reasoning_notice
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: cursor,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, cursor);
     let mut outcomes = Vec::new();
     for prompt in ["think hard", "and now summarize"] {
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text(prompt.to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        try_submit(&runtime, session_id, prompt).await.unwrap();
         let finished = collect_through_finished(&mut events).await;
         outcomes.push(finished.iter().find_map(|envelope| match &envelope.event {
             SessionEvent::RunFinished { outcome, .. } => Some(outcome.clone()),
@@ -2019,52 +1631,9 @@ async fn interrupted_uncommitted_assistant_text_stays_out_of_model_context() {
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
     let store = Store::open(database_path.clone()).await.unwrap();
-    let resolved = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::ResolveWorkspace {
-                path: directory.path().to_str().unwrap().to_owned(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let created = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("begin the task".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let (workspace_id, session_id) =
+        store_session(&store, directory.path(), ApprovalMode::default()).await;
+    store_command(&store, session_id, "begin the task")
         .await
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
@@ -2091,36 +1660,15 @@ async fn interrupted_uncommitted_assistant_text_stays_out_of_model_context() {
     .await
     .unwrap();
     let recovered = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     assert!(recovered.focused.unwrap().messages.iter().any(|message| {
         message.state == MessageState::Interrupted
             && message.output == "partial text from an uncommitted turn"
     }));
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: recovered.cursor,
-        })
-        .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue from durable work".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let mut events = subscribe_after(&runtime, workspace_id, recovered.cursor);
+    try_submit(&runtime, session_id, "continue from durable work")
         .await
         .unwrap();
     let _ = collect_through_finished(&mut events).await;
@@ -2152,52 +1700,9 @@ async fn historical_flat_assistant_output_precedes_the_terminal_notice() {
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
     let store = Store::open(database_path.clone()).await.unwrap();
-    let resolved = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::ResolveWorkspace {
-                path: directory.path().to_str().unwrap().to_owned(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let created = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("legacy prompt".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let (workspace_id, session_id) =
+        store_session(&store, directory.path(), ApprovalMode::default()).await;
+    store_command(&store, session_id, "legacy prompt")
         .await
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
@@ -2254,17 +1759,7 @@ async fn historical_flat_assistant_output_precedes_the_terminal_notice() {
             after,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue from the legacy store".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "continue from the legacy store")
         .await
         .unwrap();
     let _ = collect_through_finished(&mut events).await;
@@ -2296,52 +1791,9 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
     let store = Store::open(database_path.clone()).await.unwrap();
-    let resolved = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::ResolveWorkspace {
-                path: directory.path().to_str().unwrap().to_owned(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let created = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("finish the migration".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let (workspace_id, session_id) =
+        store_session(&store, directory.path(), ApprovalMode::default()).await;
+    store_command(&store, session_id, "finish the migration")
         .await
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
@@ -2359,39 +1811,14 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
         )
         .await
         .unwrap();
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("grow the context".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, session_id, "grow the context")
         .await
         .unwrap();
     let growth_run = store.claim_next_run(false).await.unwrap().unwrap();
     store
         .persist_model_turn(
             &growth_run,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::assistant(over_threshold_output()),
-                calls: Vec::new(),
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            TurnCommit::new(1, Message::assistant(over_threshold_output())).build(),
         )
         .await
         .unwrap();
@@ -2425,13 +1852,7 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
     .await
     .unwrap();
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     assert!(snapshot.focused.unwrap().messages.iter().all(|message| {
@@ -2480,22 +1901,7 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
             after,
         })
         .unwrap();
-    let follow_up = auto_runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("y".repeat(MAX_PROMPT_BYTES))],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = follow_up.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(&auto_runtime, session_id, "y".repeat(MAX_PROMPT_BYTES)).await;
     let _ = collect_until(&mut auto_events, finished_for(run_id)).await;
 
     let auto_requests = auto_requests.lock().unwrap();
@@ -2512,36 +1918,22 @@ async fn multi_turn_runs_emit_one_assistant_message_per_turn() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "noted\n").unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(TurnTextLoader {
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("inspect the note".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    .await;
+    try_submit(&runtime, session_id, "inspect the note")
         .await
         .unwrap();
 
@@ -2584,13 +1976,7 @@ async fn multi_turn_runs_emit_one_assistant_message_per_turn() {
     assert!(call_finished < second_started);
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -2636,13 +2022,12 @@ async fn call_only_turns_persist_no_message_row() {
     let (workspace_id, _) = resolve_workspace(&harness.runtime, &harness.workspace_path).await;
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
+        .snapshot(SnapshotRequest::new(
             workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+            Some(harness.session_id),
+            1,
+            8,
+        ))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -2736,13 +2121,7 @@ fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
     let snapshot = load_snapshot(
         &mut small,
         StoreId::from_bytes([7; 16]),
-        SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(small_session),
-            include_sessions: Vec::new(),
-            session_limit: 512,
-            message_limit: 256,
-        },
+        SnapshotRequest::new(workspace_id, Some(small_session), 512, 256),
     )
     .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -2894,27 +2273,22 @@ async fn steering_during_a_slice_report_lands_before_the_continuation_notice() {
             release: Arc::new(tokio::sync::Notify::new()),
             reply,
         };
-        let runtime = SessionRuntime::open(
+        let SessionFixture {
+            directory: _directory,
+            runtime,
+            session_id,
+            mut events,
+            ..
+        } = SessionFixture::open_in(
+            directory,
             SessionRuntimeOptions::new(database.clone()),
             Arc::new(GatedSliceLoader {
                 requests: Arc::clone(&requests),
                 gate: gate.clone(),
             }),
+            ApprovalMode::Auto,
         )
-        .await
-        .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created =
-            create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("unexpected receipt")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        .await;
         let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
         tokio::time::timeout(Duration::from_secs(30), gate.reached.notified())
             .await
@@ -2975,32 +2349,26 @@ async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
         std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
         let database = directory.path().join("sessions.sqlite3");
         let requests = Arc::new(StdMutex::new(Vec::new()));
-        let runtime = SessionRuntime::open(
+        let SessionFixture {
+            directory: _directory,
+            runtime,
+            session_id,
+            mut events,
+            ..
+        } = SessionFixture::open_in(
+            directory,
             SessionRuntimeOptions::new(database.clone()),
             Arc::new(TruncatedReportLoader {
                 requests: Arc::clone(&requests),
                 fault: false,
             }),
+            ApprovalMode::Auto,
         )
-        .await
-        .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created =
-            create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("unexpected receipt")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        .await;
         if with_goal {
-            runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"retain reports through goal notices",
+            set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"retain reports through goal notices",
             "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         }
         let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
         let observed = collect_until(&mut events, finished_for(run_id)).await;
@@ -3030,8 +2398,7 @@ async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
             "the retried report attempt reuses its notice"
         );
         runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let (typed, ordered):(String,Option<String>)=connection.query_row(
             "SELECT notice,goal_notice FROM model_turns WHERE run_id=?1 AND notice='report'",
@@ -3055,8 +2422,7 @@ async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
             .await
             .unwrap();
         let answer = runtime
-            .inner
-            .store
+            .store()
             .child_answer(run_id, RunOutcome::Cancelled)
             .await
             .unwrap();
@@ -3089,26 +2455,22 @@ async fn a_faulted_slice_report_is_retried_under_one_notice() {
     std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
     let database = directory.path().join("sessions.sqlite3");
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database.clone()),
         Arc::new(TruncatedReportLoader {
             requests: Arc::clone(&requests),
             fault: true,
         }),
+        ApprovalMode::Auto,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
     let observed = collect_until(&mut events, finished_for(run_id)).await;
     assert!(
@@ -3209,13 +2571,12 @@ async fn repaired_read_arguments_execute_once_and_the_note_is_durable() {
     assert!(result.contains("note=ranges_array_coerced,include_ignored_ignored"));
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            1,
+            8,
+        ))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();

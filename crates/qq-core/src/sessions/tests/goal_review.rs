@@ -48,19 +48,13 @@ async fn managed_goal_prompt_limits_are_clamped_at_claim_and_start() {
             requested.max_model_turns = Some(100);
             requested.max_output_tokens = Some(2);
         }
-        store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id: session,
-                    input: vec![InputPart::text("manual goal work")],
-                    limits: requested,
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        store_command(
+            &store,
+            session,
+            Prompt::text("manual goal work").limits(requested),
+        )
+        .await
+        .unwrap();
         let mut claim = store.reserve_next_run(false).await.unwrap().unwrap();
         let mut expected = caps;
         if explicit {
@@ -231,21 +225,13 @@ async fn goal_scheduler_waits_for_uncancelled_sponsored_children() {
             queued.is_none() && pending.is_none(),
             "running={running}: do not reuse allowance while sponsored work is unsettled"
         );
-        let receipt = store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id: session,
-                    input: vec![InputPart::text(
-                        "fresh prompt must share the remaining allowance",
-                    )],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        let receipt = store_command(
+            &store,
+            session,
+            "fresh prompt must share the remaining allowance",
+        )
+        .await
+        .unwrap();
         let CommandOutcome::PromptQueued { run_id: prompt, .. } = receipt.receipt.outcome else {
             panic!("prompt")
         };
@@ -365,17 +351,7 @@ async fn goal_run_start_seeds_zero_before_dispatch() {
             connection.execute("UPDATE runs SET usage_json=?2,estimated_cost_usd_nanos=0 WHERE session_id=?1 AND outcome_json IS NOT NULL",params![session.to_string(),serde_json::to_string(&TokenUsage::default())?])?;
             Ok(())
         }).await.unwrap();
-        store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id: session,
-                    input: vec![InputPart::text("start without dispatch")],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        store_command(&store, session, "start without dispatch")
             .await
             .unwrap();
         let claim = store.reserve_next_run(false).await.unwrap().unwrap();
@@ -468,7 +444,7 @@ async fn sponsored_children_recheck_absolute_deadlines_at_paid_boundaries() {
             .await
             .unwrap();
         if own_goal {
-            store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":child.session_id,"objective":"independent child goal","budget":{"max_goal_runs":10,"deadline_ms":now_ms()+120_000}})).unwrap()).await.unwrap();
+            store.command(CommandId::generate().unwrap(), goal_command(serde_json::json!({"session_id":child.session_id,"objective":"independent child goal","budget":{"max_goal_runs":10,"deadline_ms":now_ms()+120_000}}))).await.unwrap();
         }
         let early_claim = if boundary == "claim" {
             None
@@ -552,9 +528,7 @@ async fn sponsored_child_requests_respect_positive_inherited_token_allowance() {
     impl Provider for Child {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
             self.0.lock().unwrap().push(request.max_output_tokens());
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(provider_usage_of(usage(1, 1))),
-            })]))
+            provider_script([completed(Some(provider_usage_of(usage(1, 1))))])
         }
     }
     let requests = Arc::new(StdMutex::new(Vec::new()));
@@ -575,11 +549,8 @@ async fn sponsored_child_requests_respect_positive_inherited_token_allowance() {
         Some(8192),
     )
     .await;
-    let held = Arc::clone(&harness.runtime.inner.permits)
-        .acquire_many_owned(harness.runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
-    harness.runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":harness.session_id,"objective":"delegate bounded research","budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":100_000}})).unwrap()).await.unwrap();
+    let held = harness.runtime.hold_scheduling().await;
+    set_goal(&harness.runtime, serde_json::json!({"session_id":harness.session_id,"objective":"delegate bounded research","budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":100_000}})).await.unwrap();
     let run = submit_child_budget_prompt(
         &harness,
         RunLimits {
@@ -589,7 +560,7 @@ async fn sponsored_child_requests_respect_positive_inherited_token_allowance() {
     )
     .await;
     drop(held);
-    harness.runtime.inner.schedule.send(()).await.unwrap();
+    harness.runtime.request_schedule();
     let events = collect_until_run_finished(&mut harness.events, run).await;
     harness.runtime.shutdown().await.unwrap();
     let child = events

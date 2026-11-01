@@ -168,11 +168,7 @@ async fn run(
             vec![Message::user("work")],
             directory.path().to_owned(),
             RunCancellation::new(),
-            Arc::new(StaticPolicyGate {
-                mode: ApprovalMode::Full,
-                tools: Default::default(),
-                network: Arc::default(),
-            }),
+            Arc::new(StaticPolicyGate::fixed(ApprovalMode::Full)),
             Arc::new(workspace::FileState::default()),
             capabilities,
         )
@@ -649,11 +645,7 @@ async fn a_truncated_stall_report_is_continued_under_one_notice() {
             vec![Message::user("work")],
             directory.path().to_owned(),
             RunCancellation::new(),
-            Arc::new(StaticPolicyGate {
-                mode: ApprovalMode::Full,
-                tools: Default::default(),
-                network: Arc::default(),
-            }),
+            Arc::new(StaticPolicyGate::fixed(ApprovalMode::Full)),
             Arc::new(workspace::FileState::default()),
         )
         .collect::<Vec<_>>()
@@ -741,11 +733,7 @@ async fn an_interrupted_stall_report_keeps_its_notice_and_the_next_report_gets_o
             vec![Message::user("work")],
             directory.path().to_owned(),
             RunCancellation::new(),
-            Arc::new(StaticPolicyGate {
-                mode: ApprovalMode::Full,
-                tools: Default::default(),
-                network: Arc::default(),
-            }),
+            Arc::new(StaticPolicyGate::fixed(ApprovalMode::Full)),
             Arc::new(workspace::FileState::default()),
             RunCapabilities::user(None).with_steering(receiver),
         )
@@ -847,11 +835,7 @@ async fn an_interrupted_final_answer_stays_final() {
             vec![Message::user("work")],
             directory.path().to_owned(),
             RunCancellation::new(),
-            Arc::new(StaticPolicyGate {
-                mode: ApprovalMode::Full,
-                tools: Default::default(),
-                network: Arc::default(),
-            }),
+            Arc::new(StaticPolicyGate::fixed(ApprovalMode::Full)),
             Arc::new(workspace::FileState::default()),
             RunCapabilities::user(None)
                 .for_subagent(runtime::SubagentAuthority::Read)
@@ -904,11 +888,7 @@ async fn read_only_external_tools_are_reads_and_others_are_work() {
                 vec![Message::user("look things up")],
                 directory.path().to_owned(),
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Full,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::Full)),
                 Arc::new(workspace::FileState::default()),
             )
             .collect::<Vec<_>>()
@@ -966,11 +946,7 @@ async fn a_final_answer_turn_over_its_cost_bound_settles_as_exhausted() {
             vec![Message::user("work")],
             directory.path().to_owned(),
             RunCancellation::new(),
-            Arc::new(StaticPolicyGate {
-                mode: ApprovalMode::Full,
-                tools: Default::default(),
-                network: Arc::default(),
-            }),
+            Arc::new(StaticPolicyGate::fixed(ApprovalMode::Full)),
             Arc::new(workspace::FileState::default()),
             RunCapabilities::user(None)
                 .for_subagent(runtime::SubagentAuthority::Read)
@@ -1051,19 +1027,16 @@ fn ab1_verified_exec_reads_report_on_request_sixty_five() {
         std::fs::write(root.join("grep"), image).unwrap();
         std::fs::set_permissions(root.join("grep"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::progress::ab1_verified_exec_reads_report_on_request_sixty_five",
-                "--nocapture",
-            ])
-            .env("QQ_CONTEXT_STALL_WORKER", "1")
-            .env("QQ_CONTEXT_STALL_ROOT", &root)
-            .env("PATH", &root)
-            .env("LANG", "C")
-            .status()
-            .unwrap();
-        assert!(status.success());
+        crate::test_support::run_worker(
+            "tests::progress::ab1_verified_exec_reads_report_on_request_sixty_five",
+            "QQ_CONTEXT_STALL_WORKER",
+            |command| {
+                command
+                    .env("QQ_CONTEXT_STALL_ROOT", &root)
+                    .env("PATH", &root)
+                    .env("LANG", "C");
+            },
+        );
         return;
     }
     let root = PathBuf::from(std::env::var_os("QQ_CONTEXT_STALL_ROOT").unwrap());
@@ -1101,11 +1074,7 @@ fn ab1_verified_exec_reads_report_on_request_sixty_five() {
                 vec![Message::user("work")],
                 root,
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Full,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::Full)),
                 Arc::default(),
                 RunCapabilities::user(None),
             )

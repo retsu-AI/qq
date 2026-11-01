@@ -25,6 +25,8 @@ pub mod output;
 pub mod plan;
 mod runtime;
 mod sessions;
+#[cfg(test)]
+mod test_support;
 mod tools;
 pub mod undo;
 
@@ -2120,11 +2122,7 @@ mod tests {
                 .execute(
                     vec![Message::user(prompt)],
                     RunCancellation::new(),
-                    Arc::new(StaticPolicyGate {
-                        mode: ApprovalMode::ReadOnly,
-                        tools: Default::default(),
-                        network: Arc::default(),
-                    }),
+                    Arc::new(StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
                     Arc::new(workspace::FileState::default()),
                     capabilities,
                 )
@@ -2731,11 +2729,7 @@ mod tests {
                 .execute(
                     vec![Message::user("hello")],
                     RunCancellation::new(),
-                    Arc::new(StaticPolicyGate {
-                        mode: ApprovalMode::ReadOnly,
-                        tools: Default::default(),
-                        network: Arc::default(),
-                    }),
+                    Arc::new(StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
                     Arc::new(workspace::FileState::default()),
                     capabilities,
                 )
@@ -2821,11 +2815,7 @@ mod tests {
                     Message::user(sessions::COMPACTION_INSTRUCTION),
                 ],
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::ReadOnly,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::restricted().summarizer(plan::PromptPrefixKey {
                     tools: None,
@@ -4219,11 +4209,7 @@ mod tests {
                 vec![Message::user("inspect")],
                 directory.path().to_owned(),
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Full,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::Full)),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(None).stall_exempt(),
             )
@@ -4712,11 +4698,7 @@ mod tests {
                 vec![Message::user("mutate twice")],
                 directory.path().to_owned(),
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Auto,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::Auto)),
                 Arc::new(workspace::FileState::default()),
             )
             .collect::<Vec<_>>()
@@ -5077,11 +5059,7 @@ mod tests {
                 vec![Message::user("build")],
                 directory.path().to_owned(),
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Full,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::Full)),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(None).with_tool_tasks(tool_tasks.clone()),
             );
@@ -5645,11 +5623,7 @@ mod tests {
                 vec![Message::user("think hard")],
                 directory.path().to_owned(),
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::ReadOnly,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(None).with_max_output_tokens(256),
             )
@@ -5706,11 +5680,7 @@ mod tests {
                 vec![Message::user("write a long answer")],
                 directory.path().to_owned(),
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::ReadOnly,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(None).with_max_output_tokens(256),
             )
@@ -5797,11 +5767,7 @@ mod tests {
             .execute(
                 vec![Message::user(sessions::COMPACTION_INSTRUCTION)],
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::ReadOnly,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::restricted().summarizer(plan::PromptPrefixKey {
                     tools: None,
@@ -6154,11 +6120,7 @@ mod tests {
             vec![Message::user("finish")],
             directory.path().to_owned(),
             RunCancellation::new(),
-            Arc::new(StaticPolicyGate {
-                mode: ApprovalMode::ReadOnly,
-                tools: Default::default(),
-                network: Arc::default(),
-            }),
+            Arc::new(StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
             Arc::new(workspace::FileState::default()),
             RunCapabilities::user(None).with_limits(
                 RunLimits {
@@ -6224,11 +6186,7 @@ mod tests {
                 vec![Message::user("work")],
                 directory.path().to_owned(),
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Auto,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::Auto)),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(None).with_limits(
                     RunLimits {
@@ -6287,11 +6245,7 @@ mod tests {
                 vec![Message::user("write a long answer")],
                 directory.path().to_owned(),
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Ask,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::Ask)),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(None).with_limits(limits, None),
             )
@@ -6693,11 +6647,7 @@ mod tests {
                 vec![Message::user("finish a long task")],
                 directory.path().to_owned(),
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Auto,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::Auto)),
                 Arc::new(workspace::FileState::default()),
             )
             .collect::<Vec<_>>()
@@ -7420,11 +7370,7 @@ mod tests {
                 vec![Message::user("long task")],
                 directory.path().to_owned(),
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Auto,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::Auto)),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(None).with_limits(
                     RunLimits {
@@ -7830,11 +7776,7 @@ mod tests {
                 vec![Message::user("read it")],
                 directory.path().to_owned(),
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Ask,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::Ask)),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(None).with_steering(receiver),
             )
@@ -8525,20 +8467,14 @@ mod tests {
             )
             .unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "tests::ab1_inherited_path_shadowed_read_counts_as_work_and_audit",
-                    "--nocapture",
-                ])
-                .env("QQ_CONTEXT_SHADOW_WORKER", "1")
-                .env("QQ_CONTEXT_SHADOW_ROOT", &workspace)
-                .env("PATH", &bin)
-                .status()
-                .unwrap();
-            assert!(
-                status.success(),
-                "shadowed executable classification worker failed"
+            crate::test_support::run_worker(
+                "tests::ab1_inherited_path_shadowed_read_counts_as_work_and_audit",
+                "QQ_CONTEXT_SHADOW_WORKER",
+                |command| {
+                    command
+                        .env("QQ_CONTEXT_SHADOW_ROOT", &workspace)
+                        .env("PATH", &bin);
+                },
             );
             return;
         }
@@ -9852,11 +9788,7 @@ mod tests {
                         vec![Message::user("deploy")],
                         directory.path().to_owned(),
                         RunCancellation::new(),
-                        Arc::new(StaticPolicyGate {
-                            mode,
-                            tools: Default::default(),
-                            network: Arc::default(),
-                        }),
+                        Arc::new(StaticPolicyGate::fixed(mode)),
                         Arc::new(workspace::FileState::default()),
                     )
                     .collect::<Vec<_>>()
@@ -11222,11 +11154,7 @@ mod tests {
             .execute(
                 vec![Message::user("summarize")],
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Ask,
-                    tools: Default::default(),
-                    network: Arc::default(),
-                }),
+                Arc::new(StaticPolicyGate::fixed(ApprovalMode::Ask)),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::restricted(),
             )

@@ -164,48 +164,34 @@ async fn revision_notices_across_reactive_checkpoint_overflow_reopen_in_order() 
     )
     .await
     .unwrap();
-    let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace, None, ApprovalMode::Full).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("session");
-    };
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"original objective",
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let (workspace, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::Full).await;
+    let receipt = set_goal(
+        &runtime,
+        serde_json::json!({"session_id":session_id, "objective":"original objective",
+            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+        }),
+    )
+    .await
+    .unwrap();
     let CommandOutcome::GoalUpdated { mut goal, .. } = receipt.outcome else {
         panic!("goal");
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id: workspace,
-            after: receipt.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace, receipt.committed_through);
     let run = queue_prompt(&runtime, session_id, "work".to_owned()).await;
     for objective in ["revision A", "revision B"] {
         tokio::time::timeout(Duration::from_secs(30), entered.notified())
             .await
             .expect("provider boundary");
-        let receipt = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session_id, "objective":objective,
-                    "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
-                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        let receipt = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id, "objective":objective,
+                "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            }),
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal: revised, .. } = receipt.outcome else {
             panic!("goal revision");
         };
@@ -416,25 +402,12 @@ async fn failed_turn_notice_commit_rolls_back_the_atom_events_and_capacity() {
     let result = store
         .persist_model_turn(
             &claim,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                turn_ordinal: 1,
-                message: Message::assistant("done"),
-                calls: Vec::new(),
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-                goal_notices: vec![crate::runtime::OrderedTurnNotice {
+            TurnCommit::new(1, Message::assistant("done"))
+                .goal_notices(vec![crate::runtime::OrderedTurnNotice {
                     text: notice,
                     preceding_deliveries: 0,
-                }],
-                reserved_goal_notices: 0,
-            },
+                }])
+                .build(),
         )
         .await;
     assert!(result.is_err());
@@ -537,56 +510,34 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
         )
         .await
         .unwrap();
-        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created =
-            create_session_with_mode(&runtime, workspace, None, ApprovalMode::ReadOnly).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session");
-        };
-        let receipt = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session_id, "objective":"original objective",
-                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        let (workspace, session_id, _) =
+            new_session(&runtime, directory.path(), ApprovalMode::ReadOnly).await;
+        let receipt = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id, "objective":"original objective",
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            }),
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("goal");
         };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: receipt.committed_through,
-            })
-            .unwrap();
-        let submitted = runtime.command(CommandId::generate().unwrap(), SessionCommand::SubmitPrompt {
-        session_id, input: vec![InputPart::text("work")], limits: RunLimits::default(),
-        correlation: Correlation::default(),
-        output: repair.then(|| Box::new(qq_protocol::OutputContract {
+        let mut events = subscribe_after(&runtime, workspace, receipt.committed_through);
+        let run = submit(&runtime, session_id, Prompt::text("work").output(repair.then(|| Box::new(qq_protocol::OutputContract {
             schema: serde_json::json!({"type":"object","properties":{"done":{"type":"boolean"}},"required":["done"],"additionalProperties":false}),
             repair_turns: 1,
-        })),
-    }).await.unwrap();
-        let CommandOutcome::PromptQueued { run_id: run, .. } = submitted.outcome else {
-            panic!("prompt");
-        };
+        })))).await;
         entered.notified().await;
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session_id, "objective":"revised objective",
-                    "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
-                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id, "objective":"revised objective",
+                "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            }),
+        )
+        .await
+        .unwrap();
         release.notify_one();
         let finished = collect_until(&mut events, finished_for(run)).await;
         assert_eq!(
@@ -638,12 +589,7 @@ async fn client_revision_is_shown_once_without_refreshing_model_control_authorit
             self.requests.lock().unwrap().push(request);
             let turn = self.turn.fetch_add(1, Ordering::SeqCst);
             if turn >= 3 {
-                return Box::pin(stream::iter([
-                    Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                        text: "done".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                ]));
+                return text_reply("done");
             }
             let (name, args) = if turn == 1 {
                 (
@@ -654,18 +600,11 @@ async fn client_revision_is_shown_once_without_refreshing_model_control_authorit
                 ("tree", serde_json::json!({"path":"."}))
             };
             let id = format!("call-{turn}");
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: id.clone(),
-                    name: name.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: id.clone(),
-                    json: args.to_string(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]))
+            provider_script(
+                tool_call(id, name.to_owned(), args.to_string())
+                    .into_iter()
+                    .chain([completed(None)]),
+            )
         }
     }
     let (directory, store, claim) = model_goal_claim(true).await;
@@ -686,11 +625,7 @@ async fn client_revision_is_shown_once_without_refreshing_model_control_authorit
     let mut events = loaded.plan.execute(
         vec![qq_provider::Message::user("work")],
         RunCancellation::new(),
-        Arc::new(crate::StaticPolicyGate {
-            mode: ApprovalMode::ReadOnly,
-            tools: Default::default(),
-            network: Arc::default(),
-        }),
+        Arc::new(crate::StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
         Arc::new(crate::workspace::FileState::default()),
         capabilities,
     );
@@ -701,11 +636,10 @@ async fn client_revision_is_shown_once_without_refreshing_model_control_authorit
     while let Some(event) = events.next().await {
         if let crate::RuntimeEvent::ToolCallFinished { result, .. } = &event {
             if !edited {
-                store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session, "objective":"client-edited objective",
+                store.command(CommandId::generate().unwrap(), goal_command(serde_json::json!({"session_id":session, "objective":"client-edited objective",
                     "expected":{"goal_id":captured.goal_id,"revision":captured.revision},
                     "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                })).unwrap()).await.unwrap();
+                }))).await.unwrap();
                 edited = true;
             } else {
                 stale_control |= result.contains("stale_revision");
@@ -790,12 +724,7 @@ async fn claimed_goal_exposes_serial_update_tool_without_workspace_approval() {
                 events.push(Ok(qq_provider::ProviderEvent::Completed { usage: None }));
                 Box::pin(stream::iter(events))
             } else {
-                Box::pin(stream::iter([
-                    Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                        text: "done".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                ]))
+                text_reply("done")
             }
         }
     }
@@ -829,20 +758,7 @@ async fn claimed_goal_exposes_serial_update_tool_without_workspace_approval() {
         let receipt = runtime
             .command(
                 CommandId::generate().unwrap(),
-                SessionCommand::CreateSession {
-                    workspace_id,
-                    parent_id: None,
-                    model: ModelSelection {
-                        model: Some("test/model".to_owned()),
-                        max_output_tokens: Some(256),
-                        organization: None,
-                        model_is_fallback: false,
-                    },
-                    approval_mode: ApprovalMode::ReadOnly,
-                    profile: AgentProfileId::default(),
-                    reasoning_effort: None,
-                    correlation: Correlation::default(),
-                },
+                create_session_command(workspace_id, None, ApprovalMode::ReadOnly),
             )
             .await
             .unwrap();
@@ -850,30 +766,17 @@ async fn claimed_goal_exposes_serial_update_tool_without_workspace_approval() {
             panic!("missing session")
         };
         if active {
-            runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"retain this objective",
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
-        }
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: receipt.committed_through,
-            })
-            .unwrap();
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("work")],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
+            set_goal(
+                &runtime,
+                serde_json::json!({"session_id":session_id, "objective":"retain this objective",
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                }),
             )
             .await
             .unwrap();
+        }
+        let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
+        try_submit(&runtime, session_id, "work").await.unwrap();
         let finished = collect_through_finished_generously(&mut events).await;
         assert!(
             !finished
@@ -978,22 +881,17 @@ async fn failed_runtime_goal_event_never_reports_a_successful_tool_write() {
         )]],
     )
     .await;
+    set_goal(
+        &harness.runtime,
+        serde_json::json!({"session_id":harness.session_id, "objective":"protected goal",
+            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+        }),
+    )
+    .await
+    .unwrap();
     harness
         .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":harness.session_id, "objective":"protected goal",
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    harness
-        .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             connection.execute_batch(
                 "CREATE TRIGGER refuse_goal_event BEFORE INSERT ON events
@@ -1035,12 +933,7 @@ struct GoalSteeringCalls {
 impl Provider for GoalSteeringCalls {
     fn stream(&self, _: ModelRequest) -> ProviderStream {
         if self.turn.fetch_add(1, Ordering::SeqCst) != 0 {
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "steer received".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]));
+            return text_reply("steer received");
         }
         let first = if self.first_goal {
             (
@@ -1100,11 +993,7 @@ async fn steering_between_ordered_calls_stops_the_remaining_goal_edits() {
         let mut events = loaded.plan.execute(
             vec![qq_provider::Message::user("work")],
             RunCancellation::new(),
-            Arc::new(crate::StaticPolicyGate {
-                mode: ApprovalMode::ReadOnly,
-                tools: Default::default(),
-                network: Arc::default(),
-            }),
+            Arc::new(crate::StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
             Arc::new(crate::workspace::FileState::default()),
             capabilities,
         );
@@ -1179,11 +1068,7 @@ async fn steering_while_goal_write_waits_for_capacity_prevents_admission() {
     let mut events = loaded.plan.execute(
         vec![qq_provider::Message::user("work")],
         RunCancellation::new(),
-        Arc::new(crate::StaticPolicyGate {
-            mode: ApprovalMode::ReadOnly,
-            tools: Default::default(),
-            network: Arc::default(),
-        }),
+        Arc::new(crate::StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
         Arc::new(crate::workspace::FileState::default()),
         capabilities,
     );
@@ -1306,21 +1191,15 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
     let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
         .await
         .unwrap();
-    let held = Arc::clone(&runtime.inner.permits)
-        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Ask).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("missing session")
-    };
-    let set = serde_json::from_value(serde_json::json!({
-        "type":"set_goal", "session_id":session_id, "objective":"checked work",
-        "check":{"command":"true"},
-        "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-    }))
-    .unwrap();
+    let held = runtime.hold_scheduling().await;
+    let (workspace_id, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::Ask).await;
+    let set = goal_command(
+        serde_json::json!({"session_id":session_id, "objective":"checked work",
+            "check":{"command":"true"},
+            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+        }),
+    );
     let receipt = runtime
         .command(CommandId::generate().unwrap(), set)
         .await
@@ -1351,7 +1230,7 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
     authority.allow.store(true, Ordering::SeqCst);
     let id = CommandId::generate().unwrap();
     let receipt = runtime.command(id, approve.clone()).await.unwrap();
-    runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+    runtime.store().drive_goals(now_ms()).await.unwrap();
     let stable = runtime
         .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
@@ -1400,20 +1279,14 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
             .await,
         Err(SessionRuntimeError::IdempotencyConflict)
     ));
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::GoalControl {
-                session_id,
-                expected: qq_protocol::GoalIdentity {
-                    goal_id: stable_goal.goal_id,
-                    revision: stable_goal.revision,
-                },
-                action: qq_protocol::GoalControl::Pause,
-            },
-        )
-        .await
-        .unwrap();
+    goal_control(
+        &runtime,
+        session_id,
+        identity_of(stable_goal),
+        qq_protocol::GoalControl::Pause,
+    )
+    .await
+    .unwrap();
     runtime
         .command(
             CommandId::generate().unwrap(),
@@ -1437,21 +1310,15 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
 #[tokio::test]
 async fn goal_check_approval_requires_exact_command_and_revision() {
     let (directory, runtime) = test_runtime().await;
-    let held = Arc::clone(&runtime.inner.permits)
-        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Ask).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("missing session")
-    };
-    let set: SessionCommand = serde_json::from_value(serde_json::json!({
-        "type":"set_goal", "session_id":session_id, "objective":"checked work",
-        "check":{"command":"true"},
-        "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-    }))
-    .unwrap();
+    let held = runtime.hold_scheduling().await;
+    let (workspace_id, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::Ask).await;
+    let set: SessionCommand = goal_command(
+        serde_json::json!({"session_id":session_id, "objective":"checked work",
+            "check":{"command":"true"},
+            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+        }),
+    );
     let receipt = runtime
         .command(CommandId::generate().unwrap(), set)
         .await
@@ -1496,7 +1363,7 @@ async fn goal_check_approval_requires_exact_command_and_revision() {
                 .is_err()
         );
     }
-    runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+    runtime.store().drive_goals(now_ms()).await.unwrap();
     let snapshot = runtime
         .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
@@ -1532,24 +1399,20 @@ async fn goal_resume_refuses_spent_unknown_or_draining_state() {
         "draining",
     ] {
         let (directory, runtime) = test_runtime().await;
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace_id, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("missing session")
-        };
-        let command: SessionCommand = serde_json::from_value(serde_json::json!({
-            "type":"set_goal", "session_id":session_id, "objective":"bounded task",
-            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000,
-                "max_total_tokens":20,"max_cost_usd_nanos":10}
-        }))
-        .unwrap();
+        let (workspace_id, session_id, _) =
+            new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+        let command: SessionCommand = goal_command(
+            serde_json::json!({"session_id":session_id, "objective":"bounded task",
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000,
+                    "max_total_tokens":20,"max_cost_usd_nanos":10}
+            }),
+        );
         runtime
             .command(CommandId::generate().unwrap(), command)
             .await
             .unwrap();
         let goal = runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let mut goal = crate::sessions::goals::load_live(connection, session_id)?.unwrap();
                 goal.status = qq_protocol::GoalStatus::Paused {
@@ -1593,11 +1456,8 @@ async fn goal_resume_refuses_spent_unknown_or_draining_state() {
 #[tokio::test]
 async fn invalid_goal_specs_leave_no_goal_event_or_run() {
     let (directory, runtime) = test_runtime().await;
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("missing session")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let now = now_ms();
     let valid = serde_json::json!({"type":"set_goal", "session_id":session_id,
         "objective":"bounded work", "budget":{"max_goal_runs":200, "deadline_ms":now+86_400_000}});
@@ -1653,15 +1513,9 @@ async fn invalid_goal_specs_leave_no_goal_event_or_run() {
 #[tokio::test]
 async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
     let (directory, runtime) = test_runtime().await;
-    let held = Arc::clone(&runtime.inner.permits)
-        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("session creation did not return its identity")
-    };
+    let held = runtime.hold_scheduling().await;
+    let (workspace_id, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let command_id = CommandId::generate().unwrap();
     let deadline_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1673,14 +1527,12 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
         "deadline_ms": deadline_ms,
         "per_run": RunLimits::default()
     });
-    let create: SessionCommand = serde_json::from_value(serde_json::json!({
-        "type": "set_goal", "session_id": session_id,
+    let create: SessionCommand = goal_command(serde_json::json!({"session_id": session_id,
         "objective": "Implement the durable goal contract", "budget": budget
-    }))
-    .expect("set_goal is a public client command");
+    }));
     let receipt = runtime.command(command_id, create.clone()).await.unwrap();
     assert_eq!(runtime.command(command_id, create).await.unwrap(), receipt);
-    runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+    runtime.store().drive_goals(now_ms()).await.unwrap();
     let snapshot = runtime
         .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
@@ -1732,11 +1584,8 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
     )
     .await
     .unwrap();
-    let held = Arc::clone(&runtime.inner.permits)
-        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
-    runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+    let held = runtime.hold_scheduling().await;
+    runtime.store().drive_goals(now_ms()).await.unwrap();
     let restored = runtime
         .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
@@ -1765,12 +1614,10 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
         serde_json::json!({"goal_id": RunId::generate().unwrap(), "revision": 1}),
         serde_json::json!({"goal_id": goal["goal_id"], "revision": 0}),
     ] {
-        let replace: SessionCommand = serde_json::from_value(serde_json::json!({
-            "type": "set_goal", "session_id": session_id,
+        let replace: SessionCommand = goal_command(serde_json::json!({"session_id": session_id,
             "objective": "must not replace", "budget": budget,
             "expected": expected, "replace": true
-        }))
-        .unwrap();
+        }));
         assert!(
             runtime
                 .command(CommandId::generate().unwrap(), replace)
@@ -1788,12 +1635,10 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
         .command(CommandId::generate().unwrap(), pause)
         .await
         .unwrap();
-    let edit: SessionCommand = serde_json::from_value(serde_json::json!({
-        "type": "set_goal", "session_id": session_id,
+    let edit: SessionCommand = goal_command(serde_json::json!({"session_id": session_id,
         "objective": "Edited while paused", "budget": budget,
         "expected": {"goal_id": goal["goal_id"], "revision": 2}
-    }))
-    .unwrap();
+    }));
     runtime
         .command(CommandId::generate().unwrap(), edit)
         .await
@@ -1854,45 +1699,21 @@ async fn queued_prompt_claim_pins_only_the_active_goal_before_start() {
         let receipt = store
             .command(
                 CommandId::generate().unwrap(),
-                SessionCommand::CreateSession {
-                    workspace_id,
-                    parent_id: None,
-                    model: ModelSelection {
-                        model_is_fallback: false,
-                        model: Some("test/model".to_owned()),
-                        max_output_tokens: Some(256),
-                        organization: None,
-                    },
-                    approval_mode: ApprovalMode::default(),
-                    profile: AgentProfileId::default(),
-                    reasoning_effort: None,
-                    correlation: Correlation::default(),
-                },
+                create_session_command(workspace_id, None, ApprovalMode::default()),
             )
             .await
             .unwrap();
         let CommandOutcome::SessionCreated { session_id } = receipt.receipt.outcome else {
             panic!("session")
         };
-        store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("queued before the goal".to_owned())],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        store_command(&store, session_id, "queued before the goal")
             .await
             .unwrap();
         let mut goal = None;
         if state != "absent" {
-            let receipt = store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"original objective",
+            let receipt = store.command(CommandId::generate().unwrap(), goal_command(serde_json::json!({"session_id":session_id, "objective":"original objective",
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
+            }))).await.unwrap();
             let CommandOutcome::GoalUpdated { goal: current, .. } = receipt.receipt.outcome else {
                 panic!("goal")
             };
@@ -1939,12 +1760,12 @@ async fn queued_prompt_claim_pins_only_the_active_goal_before_start() {
             store
                 .command(
                     CommandId::generate().unwrap(),
-                    serde_json::from_value(serde_json::json!({
-                        "type":"set_goal", "session_id":session_id, "objective":"later objective",
-                        "expected":expected, "replace":state == "active",
-                        "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                    }))
-                    .unwrap(),
+                    goal_command(
+                        serde_json::json!({"session_id":session_id, "objective":"later objective",
+                            "expected":expected, "replace":state == "active",
+                            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                        }),
+                    ),
                 )
                 .await
                 .unwrap();
@@ -2148,17 +1969,7 @@ async fn delegated_and_user_followup_origins_survive_reopen() {
             )
             .await
             .unwrap();
-        store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id: child.session_id,
-                    input: vec![InputPart::text("user followup")],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        store_command(&store, child.session_id, "user followup")
             .await
             .unwrap();
         let followup = store.claim_next_run(true).await.unwrap().unwrap();
@@ -2253,17 +2064,7 @@ async fn compaction_origins_keep_the_exact_owner_and_foreground_slot() {
                     foreground,
                 )
             } else {
-                store
-                    .command(
-                        CommandId::generate().unwrap(),
-                        SessionCommand::SubmitPrompt {
-                            session_id,
-                            input: vec![InputPart::text("next prompt")],
-                            limits: RunLimits::default(),
-                            correlation: Correlation::default(),
-                            output: None,
-                        },
-                    )
+                store_command(&store, session_id, "next prompt")
                     .await
                     .unwrap();
                 let prompt = store.reserve_next_run(false).await.unwrap().unwrap();
@@ -2351,44 +2152,20 @@ async fn paid_preparation_freezes_the_optional_goal_before_main_start() {
             let receipt = store
                 .command(
                     CommandId::generate().unwrap(),
-                    SessionCommand::CreateSession {
-                        workspace_id,
-                        parent_id: None,
-                        model: ModelSelection {
-                            model_is_fallback: false,
-                            model: Some("test/model".to_owned()),
-                            max_output_tokens: Some(256),
-                            organization: None,
-                        },
-                        approval_mode: ApprovalMode::default(),
-                        profile: AgentProfileId::default(),
-                        reasoning_effort: None,
-                        correlation: Correlation::default(),
-                    },
+                    create_session_command(workspace_id, None, ApprovalMode::default()),
                 )
                 .await
                 .unwrap();
             let CommandOutcome::SessionCreated { session_id } = receipt.receipt.outcome else {
                 panic!("session")
             };
-            store
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::SubmitPrompt {
-                        session_id,
-                        input: vec![InputPart::text("queued before the goal".to_owned())],
-                        limits: RunLimits::default(),
-                        correlation: Correlation::default(),
-                        output: None,
-                    },
-                )
+            store_command(&store, session_id, "queued before the goal")
                 .await
                 .unwrap();
             let goal = if has_goal {
-                let receipt = store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session_id, "objective":"first objective",
+                let receipt = store.command(CommandId::generate().unwrap(), goal_command(serde_json::json!({"session_id":session_id, "objective":"first objective",
                     "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                })).unwrap()).await.unwrap();
+                }))).await.unwrap();
                 let CommandOutcome::GoalUpdated { goal, .. } = receipt.receipt.outcome else {
                     panic!("goal")
                 };
@@ -2439,11 +2216,10 @@ async fn paid_preparation_freezes_the_optional_goal_before_main_start() {
                 goal_id: goal.goal_id,
                 revision: goal.revision,
             });
-            let receipt = store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"replacement objective",
+            let receipt = store.command(CommandId::generate().unwrap(), goal_command(serde_json::json!({"session_id":session_id, "objective":"replacement objective",
                 "expected":expected, "replace":has_goal,
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
+            }))).await.unwrap();
             let CommandOutcome::GoalUpdated {
                 goal: replacement, ..
             } = receipt.receipt.outcome
@@ -2584,19 +2360,7 @@ async fn malformed_run_origin_refuses_without_committing_a_reservation() {
         )
         .await
         .unwrap();
-    let receipt = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("next")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let receipt = store_command(&store, session_id, "next").await.unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = receipt.receipt.outcome else {
         panic!("prompt")
     };
@@ -2643,30 +2407,18 @@ pub(super) async fn model_goal_claim(goal_origin: bool) -> (TempDir, Store, Clai
     let receipt = store
         .command(
             CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session_id,"objective":"original objective",
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
+            goal_command(
+                serde_json::json!({"session_id":session_id,"objective":"original objective",
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                }),
+            ),
         )
         .await
         .unwrap();
     let CommandOutcome::GoalUpdated { goal, .. } = receipt.receipt.outcome else {
         panic!("goal")
     };
-    let receipt = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("work")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let receipt = store_command(&store, session_id, "work").await.unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = receipt.receipt.outcome else {
         panic!("run")
     };
@@ -2758,11 +2510,10 @@ async fn model_goal_data_merges_after_client_edit_but_stale_controls_do_not() {
         assert!(result.notes_applied);
         assert!(result.rejected.is_empty());
     }
-    store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-        "type":"set_goal","session_id":claim.identity.session_id,"objective":"client edited objective",
+    store.command(CommandId::generate().unwrap(),goal_command(serde_json::json!({"session_id":claim.identity.session_id,"objective":"client edited objective",
         "expected":{"goal_id":captured.goal_id,"revision":captured.revision},
         "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-    })).unwrap()).await.unwrap();
+    }))).await.unwrap();
     let args = serde_json::from_value(serde_json::json!({
         "notes":"merged after edit","checklist":[{"type":"set_state","id":1,"state":"done"}],
         "status":{"type":"achieved","evidence":"done"},"wait":{"seconds":60,"reason":"external"}
@@ -2844,10 +2595,9 @@ async fn model_goal_scope_refuses_stopped_replaced_and_terminal_work() {
                     .unwrap();
             }
             "replace" => {
-                store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":claim.identity.session_id,"objective":"replacement","expected":expected,"replace":true,
+                store.command(CommandId::generate().unwrap(),goal_command(serde_json::json!({"session_id":claim.identity.session_id,"objective":"replacement","expected":expected,"replace":true,
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
+            }))).await.unwrap();
             }
             "cancel" => {
                 store
@@ -2934,10 +2684,9 @@ async fn model_achievement_is_a_bounded_proposal_and_client_edits_clear_it() {
     assert_eq!(proposal.run_id, claim.identity.run_id);
     assert_eq!(proposal.revision, captured.revision);
     assert_eq!(proposal.evidence, "tests passed");
-    store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-        "type":"set_goal","session_id":session,"objective":"edited","expected":{"goal_id":captured.goal_id,"revision":captured.revision},
+    store.command(CommandId::generate().unwrap(),goal_command(serde_json::json!({"session_id":session,"objective":"edited","expected":{"goal_id":captured.goal_id,"revision":captured.revision},
         "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-    })).unwrap()).await.unwrap();
+    }))).await.unwrap();
     let current = store
         .call(Priority::Control, move |connection| {
             crate::sessions::goals::load_live(connection, session)
@@ -3254,13 +3003,11 @@ async fn goal_terminal_spend_is_once_and_stays_with_the_captured_historical_goal
                     let result = store
                         .command(
                             CommandId::generate().unwrap(),
-                            serde_json::from_value(serde_json::json!({
-                                "type":"set_goal", "session_id":session_id,
+                            goal_command(serde_json::json!({"session_id":session_id,
                                 "objective":"replacement work", "replace":true,
                                 "expected":{"goal_id":goal_id,"revision":captured.revision},
                                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                            }))
-                            .unwrap(),
+                            })),
                         )
                         .await
                         .unwrap();
@@ -3296,22 +3043,11 @@ async fn goal_terminal_spend_is_once_and_stays_with_the_captured_historical_goal
                 store
                     .persist_model_turn(
                         &claim,
-                        ModelTurnCommit {
-                            model_work: crate::runtime::ModelWorkDisposition::Committed,
-                            turn_ordinal: 1,
-                            message: Message::assistant("observed model work"),
-                            calls: Vec::new(),
-                            turn_message: None,
-                            context_tokens: None,
-                            occupancy_basis: None,
-                            usage,
-                            estimated_cost_usd_nanos: measured.then_some(37),
-                            accounting: Some(accounting.clone()),
-                            truncated: false,
-                            notice: None,
-                            goal_notices: Vec::new(),
-                            reserved_goal_notices: 0,
-                        },
+                        TurnCommit::new(1, Message::assistant("observed model work"))
+                            .usage(usage)
+                            .cost(measured.then_some(37))
+                            .accounting(accounting.clone())
+                            .build(),
                     )
                     .await
                     .unwrap();
@@ -3410,22 +3146,11 @@ async fn failed_terminal_goal_event_rolls_back_spend_and_outcome_then_retries_on
     store
         .persist_model_turn(
             &claim,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                turn_ordinal: 1,
-                message: Message::assistant("observed model work"),
-                calls: Vec::new(),
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: accounting.usage,
-                estimated_cost_usd_nanos: accounting.estimated_cost_usd_nanos,
-                accounting: Some(accounting.clone()),
-                truncated: false,
-                notice: None,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-            },
+            TurnCommit::new(1, Message::assistant("observed model work"))
+                .usage(accounting.usage)
+                .cost(accounting.estimated_cost_usd_nanos)
+                .accounting(accounting.clone())
+                .build(),
         )
         .await
         .unwrap();
@@ -3545,45 +3270,18 @@ async fn rejected_provider_outage_spends_no_goal_run_or_measured_budget() {
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created =
-        create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::ReadOnly).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("session")
-    };
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session_id,"objective":"survive provider outage",
-                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: receipt.committed_through,
-        })
-        .unwrap();
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("work")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
-        panic!("prompt")
-    };
+    let (workspace_id, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::ReadOnly).await;
+    let receipt = set_goal(
+        &runtime,
+        serde_json::json!({"session_id":session_id,"objective":"survive provider outage",
+            "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+86_400_000}
+        }),
+    )
+    .await
+    .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
+    let run_id = submit(&runtime, session_id, "work").await;
     let events = collect_until_run_finished(&mut events, run_id).await;
     assert!(
         matches!(
@@ -3775,32 +3473,20 @@ async fn owned_compaction_spend_survives_owner_settlement_and_goal_replacement()
                 store
                     .persist_in_run_summary_turn(
                         &helper,
-                        ModelTurnCommit {
-                            model_work: crate::runtime::ModelWorkDisposition::Committed,
-                            turn_ordinal: 1,
-                            message: Message::assistant("observed summary work"),
-                            calls: Vec::new(),
-                            turn_message: None,
-                            context_tokens: None,
-                            occupancy_basis: None,
-                            usage: Some(usage),
-                            estimated_cost_usd_nanos: Some(43),
-                            accounting: Some(accounting),
-                            truncated: false,
-                            notice: None,
-                            goal_notices: Vec::new(),
-                            reserved_goal_notices: 0,
-                        },
+                        TurnCommit::new(1, Message::assistant("observed summary work"))
+                            .usage(Some(usage))
+                            .cost(Some(43))
+                            .accounting(accounting)
+                            .build(),
                     )
                     .await
                     .unwrap();
             }
             if replace {
-                store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session, "objective":"replacement", "replace":true,
+                store.command(CommandId::generate().unwrap(), goal_command(serde_json::json!({"session_id":session, "objective":"replacement", "replace":true,
                     "expected":{"goal_id":id,"revision":goal.revision},
                     "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                })).unwrap()).await.unwrap();
+                }))).await.unwrap();
             }
             if state == "measured" && !replace {
                 store
@@ -3919,17 +3605,7 @@ async fn between_run_compactor_charges_its_goal_after_owner_cancel_and_reopen() 
                 )
                 .await
                 .unwrap();
-            store
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::SubmitPrompt {
-                        session_id: session,
-                        input: vec![InputPart::text("needs a summary")],
-                        limits: RunLimits::default(),
-                        correlation: Correlation::default(),
-                        output: None,
-                    },
-                )
+            store_command(&store, session, "needs a summary")
                 .await
                 .unwrap();
             let owner = store.reserve_next_run(false).await.unwrap().unwrap();
@@ -3966,22 +3642,11 @@ async fn between_run_compactor_charges_its_goal_after_owner_cancel_and_reopen() 
             store
                 .persist_in_run_summary_turn(
                     &helper,
-                    ModelTurnCommit {
-                        model_work: crate::runtime::ModelWorkDisposition::Committed,
-                        turn_ordinal: 1,
-                        message: Message::assistant("measured summary prefix"),
-                        calls: Vec::new(),
-                        turn_message: None,
-                        context_tokens: None,
-                        occupancy_basis: None,
-                        usage: Some(usage),
-                        estimated_cost_usd_nanos: Some(61),
-                        accounting: Some(accounting),
-                        truncated: false,
-                        notice: None,
-                        goal_notices: Vec::new(),
-                        reserved_goal_notices: 0,
-                    },
+                    TurnCommit::new(1, Message::assistant("measured summary prefix"))
+                        .usage(Some(usage))
+                        .cost(Some(61))
+                        .accounting(accounting)
+                        .build(),
                 )
                 .await
                 .unwrap();
@@ -3990,11 +3655,10 @@ async fn between_run_compactor_charges_its_goal_after_owner_cancel_and_reopen() 
                 .await
                 .unwrap();
             if replace {
-                store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                    "type":"set_goal","session_id":session,"objective":"replacement","replace":true,
+                store.command(CommandId::generate().unwrap(), goal_command(serde_json::json!({"session_id":session,"objective":"replacement","replace":true,
                     "expected":{"goal_id":id,"revision":goal.revision},
                     "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                })).unwrap()).await.unwrap();
+                }))).await.unwrap();
             }
             store.close().await.unwrap();
             let reopened = Store::open(directory.path().join("sessions.sqlite3"))
@@ -4069,28 +3733,17 @@ async fn real_in_run_compactor_preserves_rejected_prefix_and_uncertain_dispatch(
     impl Provider for Fault {
         fn stream(&self, _: ModelRequest) -> ProviderStream {
             if self.prefix && self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Box::pin(stream::iter([
-                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                        id: "summary_call".to_owned(),
-                        name: "read_file".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                        id: "summary_call".to_owned(),
-                        json: r#"{"path":"note"}"#.to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                        id: "summary_call".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::Completed {
-                        usage: Some(qq_provider::ProviderUsage {
+                return provider_script(
+                    tool_call("summary_call", "read_file", r#"{"path":"note"}"#)
+                        .into_iter()
+                        .chain([completed(Some(qq_provider::ProviderUsage {
                             input_tokens: 11,
                             output_tokens: 3,
                             cache_read_input_tokens: 0,
                             cache_write_input_tokens: 0,
                             reasoning_tokens: None,
-                        }),
-                    }),
-                ]));
+                        }))]),
+                );
             }
             if self.evidence == "eof" {
                 return Box::pin(stream::empty());
@@ -4138,10 +3791,7 @@ async fn real_in_run_compactor_preserves_rejected_prefix_and_uncertain_dispatch(
             let runtime = SessionRuntime::open(options, Arc::new(Loader))
                 .await
                 .unwrap();
-            let permit = Arc::clone(&runtime.inner.permits)
-                .acquire_owned()
-                .await
-                .unwrap();
+            let permit = runtime.hold_scheduling().await;
             let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
             let created =
                 create_session_with_mode(&runtime, workspace, None, ApprovalMode::ReadOnly).await;
@@ -4151,24 +3801,16 @@ async fn real_in_run_compactor_preserves_rejected_prefix_and_uncertain_dispatch(
             else {
                 panic!("session")
             };
-            runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session,"objective":"preserve helper spending",
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
-            runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::SubmitPrompt {
-                        session_id: session,
-                        input: vec![InputPart::text("work")],
-                        limits: RunLimits::default(),
-                        correlation: Correlation::default(),
-                        output: None,
-                    },
-                )
-                .await
-                .unwrap();
-            let store = &runtime.inner.store;
+            set_goal(
+                &runtime,
+                serde_json::json!({"session_id":session,"objective":"preserve helper spending",
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                }),
+            )
+            .await
+            .unwrap();
+            try_submit(&runtime, session, "work").await.unwrap();
+            let store = &runtime.store();
             let owner = store.reserve_next_run(false).await.unwrap().unwrap();
             store
                 .start_reserved_run(&owner, test_prepared_audit(&owner), None)
@@ -4277,20 +3919,16 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
     impl Provider for Seed {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
             self.requests.lock().unwrap().push(request);
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "x".repeat(29 * 1024 * 4),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        reasoning_tokens: None,
-                    }),
-                }),
-            ]))
+            provider_script([
+                text_delta("x".repeat(29 * 1024 * 4)),
+                completed(Some(qq_provider::ProviderUsage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_tokens: None,
+                })),
+            ])
         }
     }
     struct Fault {
@@ -4310,28 +3948,17 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
             );
             self.requests.lock().unwrap().push(request);
             if self.prefix && self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Box::pin(stream::iter([
-                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                        id: "summary_call".to_owned(),
-                        name: "read_file".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                        id: "summary_call".to_owned(),
-                        json: r#"{"path":"note"}"#.to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                        id: "summary_call".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::Completed {
-                        usage: Some(qq_provider::ProviderUsage {
+                return provider_script(
+                    tool_call("summary_call", "read_file", r#"{"path":"note"}"#)
+                        .into_iter()
+                        .chain([completed(Some(qq_provider::ProviderUsage {
                             input_tokens: 11,
                             output_tokens: 3,
                             cache_read_input_tokens: 0,
                             cache_write_input_tokens: 0,
                             reasoning_tokens: None,
-                        }),
-                    }),
-                ]));
+                        }))]),
+                );
             }
             if self.cancel {
                 return Box::pin(stream::pending());
@@ -4424,22 +4051,16 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
         else {
             panic!("session")
         };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: created.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace, created.committed_through);
         let first = queue_prompt(&runtime, session, "grow".to_owned()).await;
         let initial = collect_until_run_finished(&mut events, first).await;
         assert_eq!(
             finished_outcome(&initial, first),
             Some(RunOutcome::Completed)
         );
-        runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session,"objective":"survive automatic compaction outage",
+        set_goal(&runtime, serde_json::json!({"session_id":session,"objective":"survive automatic compaction outage",
             "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000,"max_cost_usd_nanos":(!transport && !cancel && !prefix).then_some(1_000_000_u64)}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         let owner = queue_prompt(&runtime, session, "continue".to_owned()).await;
         let cancelled_helper = if cancel {
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -4449,18 +4070,12 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
             })
             .await
             .expect("owned summary dispatch occurs");
-            let helper:RunId=runtime.inner.store.call(Priority::Control,move|connection| {
+            let helper:RunId=runtime.store().call(Priority::Control,move|connection| {
                 let (id,admitted,usage):(String,bool,Option<String>)=connection.query_row("SELECT id,goal_helper_admitted,usage_json FROM runs WHERE kind='compaction' AND auto_compaction_for_run_id=?1",[owner.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
                 assert!(admitted && usage.is_none(),"paid admission is durable before provider poll");
                 parse_id(&id)
             }).await.unwrap();
-            runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::CancelRun { run_id: owner },
-                )
-                .await
-                .unwrap();
+            cancel_run(&runtime, owner).await.unwrap();
             Some(helper)
         } else {
             None
@@ -4472,8 +4087,7 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
                 Some(RunOutcome::Cancelled)
             );
             let preparing: Option<String> = runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     Ok(connection.query_row(
                         "SELECT preparing_run_id FROM sessions WHERE id=?1",
@@ -4534,8 +4148,7 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
             expected_cost
         );
         let cost_known = runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(connection.query_row(
                     "SELECT cost_known FROM sessions WHERE id=?1",
@@ -4597,22 +4210,11 @@ async fn committed_goal_turn_recovery_charges_session_and_historical_goal_once()
                 store
                     .persist_model_turn(
                         &claim,
-                        ModelTurnCommit {
-                            model_work: crate::runtime::ModelWorkDisposition::Committed,
-                            turn_ordinal: 1,
-                            message: Message::assistant("committed before crash"),
-                            calls: Vec::new(),
-                            turn_message: None,
-                            context_tokens: None,
-                            occupancy_basis: None,
-                            usage: Some(usage),
-                            estimated_cost_usd_nanos: measured.then_some(37),
-                            accounting: Some(accounting),
-                            truncated: false,
-                            notice: None,
-                            goal_notices: Vec::new(),
-                            reserved_goal_notices: 0,
-                        },
+                        TurnCommit::new(1, Message::assistant("committed before crash"))
+                            .usage(Some(usage))
+                            .cost(measured.then_some(37))
+                            .accounting(accounting)
+                            .build(),
                     )
                     .await
                     .unwrap();
@@ -4627,11 +4229,10 @@ async fn committed_goal_turn_recovery_charges_session_and_historical_goal_once()
                         .unwrap();
                 }
                 if replace {
-                    store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                        "type":"set_goal","session_id":session,"objective":"replacement","replace":true,
+                    store.command(CommandId::generate().unwrap(),goal_command(serde_json::json!({"session_id":session,"objective":"replacement","replace":true,
                         "expected":{"goal_id":id,"revision":goal.revision},
                         "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                    })).unwrap()).await.unwrap();
+                    }))).await.unwrap();
                 }
                 store.close().await.unwrap();
                 let reopened = Store::open(directory.path().join("sessions.sqlite3"))
@@ -4825,10 +4426,9 @@ async fn delegated_child_spend_keeps_the_original_goal_after_replacement() {
                 .await
                 .unwrap();
             let own_goal = if child_goal {
-                let receipt=store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":child.session_id,"objective":"independent child objective",
+                let receipt=store.command(CommandId::generate().unwrap(),goal_command(serde_json::json!({"session_id":child.session_id,"objective":"independent child objective",
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
+            }))).await.unwrap();
                 let CommandOutcome::GoalUpdated { goal, .. } = receipt.receipt.outcome else {
                     panic!("child goal")
                 };
@@ -4867,31 +4467,19 @@ async fn delegated_child_spend_keeps_the_original_goal_after_replacement() {
             store
                 .persist_model_turn(
                     &claim,
-                    ModelTurnCommit {
-                        model_work: crate::runtime::ModelWorkDisposition::Committed,
-                        turn_ordinal: 1,
-                        message: Message::assistant("child completed work"),
-                        calls: Vec::new(),
-                        turn_message: None,
-                        context_tokens: None,
-                        occupancy_basis: None,
-                        usage: Some(usage),
-                        estimated_cost_usd_nanos: Some(37),
-                        accounting: Some(accounting.clone()),
-                        truncated: false,
-                        notice: None,
-                        goal_notices: Vec::new(),
-                        reserved_goal_notices: 0,
-                    },
+                    TurnCommit::new(1, Message::assistant("child completed work"))
+                        .usage(Some(usage))
+                        .cost(Some(37))
+                        .accounting(accounting.clone())
+                        .build(),
                 )
                 .await
                 .unwrap();
             if replace {
-                store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session,"objective":"replacement","replace":true,
+                store.command(CommandId::generate().unwrap(),goal_command(serde_json::json!({"session_id":session,"objective":"replacement","replace":true,
                 "expected":{"goal_id":id,"revision":goal.revision},
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
+            }))).await.unwrap();
             }
             store
                 .finish_run(
@@ -4981,17 +4569,7 @@ async fn delegated_child_spend_keeps_the_original_goal_after_replacement() {
                 assert_eq!(own.counters.runs, 1);
                 assert_eq!(own.counters.usage, Some(usage));
                 assert_eq!(own.counters.estimated_cost_usd_nanos, Some(37));
-                store
-                    .command(
-                        CommandId::generate().unwrap(),
-                        SessionCommand::SubmitPrompt {
-                            session_id: child_session,
-                            input: vec![InputPart::text("unrelated later prompt")],
-                            limits: RunLimits::default(),
-                            correlation: Correlation::default(),
-                            output: None,
-                        },
-                    )
+                store_command(&store, child_session, "unrelated later prompt")
                     .await
                     .unwrap();
                 let followup = store.claim_next_run(true).await.unwrap().unwrap();
@@ -5019,22 +4597,11 @@ async fn delegated_child_spend_keeps_the_original_goal_after_replacement() {
                 store
                     .persist_model_turn(
                         &followup,
-                        ModelTurnCommit {
-                            model_work: crate::runtime::ModelWorkDisposition::Committed,
-                            turn_ordinal: 1,
-                            message: Message::assistant("later work"),
-                            calls: Vec::new(),
-                            turn_message: None,
-                            context_tokens: None,
-                            occupancy_basis: None,
-                            usage: Some(usage),
-                            estimated_cost_usd_nanos: Some(37),
-                            accounting: Some(followup_accounting.clone()),
-                            truncated: false,
-                            notice: None,
-                            goal_notices: Vec::new(),
-                            reserved_goal_notices: 0,
-                        },
+                        TurnCommit::new(1, Message::assistant("later work"))
+                            .usage(Some(usage))
+                            .cost(Some(37))
+                            .accounting(followup_accounting.clone())
+                            .build(),
                     )
                     .await
                     .unwrap();
@@ -5280,20 +4847,16 @@ async fn active_idle_goal_dispatches_fresh_work_without_a_user_prompt() {
     impl Provider for Model {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
             self.requests.lock().unwrap().push(request);
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "completed one work slice".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 11,
-                        output_tokens: 3,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        reasoning_tokens: None,
-                    }),
-                }),
-            ]))
+            provider_script([
+                text_delta("completed one work slice"),
+                completed(Some(qq_provider::ProviderUsage {
+                    input_tokens: 11,
+                    output_tokens: 3,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_tokens: None,
+                })),
+            ])
         }
     }
     struct Loader {
@@ -5321,22 +4884,12 @@ async fn active_idle_goal_dispatches_fresh_work_without_a_user_prompt() {
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created =
-        create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::ReadOnly).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("session")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-        "type":"set_goal","session_id":session_id,"objective":"complete a fresh autonomous work slice",
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::ReadOnly).await;
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
+    let receipt=set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"complete a fresh autonomous work slice",
         "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"per_run":{"max_model_turns":1}}
-    })).unwrap()).await.unwrap();
+    })).await.unwrap();
     let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
         panic!("goal")
     };
@@ -5364,8 +4917,7 @@ async fn active_idle_goal_dispatches_fresh_work_without_a_user_prompt() {
     let finished = collect_until_run_finished(&mut events, run_id).await;
     assert!(finished_outcome(&finished, run_id).is_some());
     let run_count: u64 = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             Ok(connection.query_row(
                 "SELECT COUNT(*) FROM runs WHERE session_id=?1",
@@ -5819,17 +5371,7 @@ async fn paused_goal_waits_for_paid_detached_child_after_parent_settlement() {
     let CommandOutcome::GoalUpdated { goal, .. } = resumed.receipt.outcome else {
         panic!("resumed goal")
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: child.session_id,
-                input: vec![InputPart::text("unrelated later child prompt")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, child.session_id, "unrelated later child prompt")
         .await
         .unwrap();
     let unrelated = store.claim_next_run(true).await.unwrap().unwrap();
@@ -5916,8 +5458,10 @@ async fn replayed_goal_controls_restore_only_unsettled_paid_cancellation_signals
             revision: goal.revision,
         };
         let command = if mode == "replace" {
-            serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":session,"objective":"replacement", "replace":true,
-                "expected":expected,"budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}})).unwrap()
+            goal_command(
+                serde_json::json!({"session_id":session,"objective":"replacement", "replace":true,
+                "expected":expected,"budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}}),
+            )
         } else {
             SessionCommand::GoalControl {
                 session_id: session,
@@ -6226,28 +5770,23 @@ async fn driver_loader_failures_pause_or_block_without_unbounded_restart() {
     ] {
         let directory = TempDir::new().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
-        let runtime = SessionRuntime::open(
-            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        let SessionFixture {
+            directory: _directory,
+            runtime,
+            session_id,
+            mut events,
+            ..
+        } = SessionFixture::open_at(
+            directory,
             Arc::new(Loader {
                 kind,
                 calls: Arc::clone(&calls),
             }),
+            ApprovalMode::default(),
         )
-        .await
-        .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace_id, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
-        runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":session_id,
-            "objective":"bounded preparation failures","budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}})).unwrap()).await.unwrap();
+        .await;
+        set_goal(&runtime, serde_json::json!({"session_id":session_id,
+            "objective":"bounded preparation failures","budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}})).await.unwrap();
         let goal = tokio::time::timeout(Duration::from_secs(3), async {
             while let Some(event) = events.next().await {
                 if let SessionEvent::GoalUpdated { goal } = event.unwrap().event
@@ -6364,38 +5903,30 @@ async fn provider_backoff_uses_durable_streak_across_reopen_and_resets_after_com
             store
                 .persist_model_turn(
                     &claim,
-                    ModelTurnCommit {
-                        model_work: crate::runtime::ModelWorkDisposition::Committed,
-                        turn_ordinal: 1,
-                        message: Message::assistant("committed prefix before provider outage"),
-                        calls: Vec::new(),
-                        turn_message: None,
-                        context_tokens: None,
-                        occupancy_basis: None,
+                    TurnCommit::new(
+                        1,
+                        Message::assistant("committed prefix before provider outage"),
+                    )
+                    .usage(Some(usage))
+                    .cost(Some(37))
+                    .accounting(RunAccounting {
+                        goal_request_rejected: false,
                         usage: Some(usage),
                         estimated_cost_usd_nanos: Some(37),
-                        accounting: Some(RunAccounting {
-                            goal_request_rejected: false,
-                            usage: Some(usage),
-                            estimated_cost_usd_nanos: Some(37),
-                            saw_turn: true,
-                            context_tokens: None,
-                            final_output: None,
-                            request_basis: ContextOccupancyBasis {
-                                version: 1,
-                                shape: ContentHash::from_bytes([0; 32]),
-                                static_prefix: PreparedStaticPrefix::new(
-                                    ContentHash::from_bytes([0; 32]),
-                                    None,
-                                ),
-                                request_bytes: 0,
-                            },
-                        }),
-                        truncated: false,
-                        notice: None,
-                        goal_notices: Vec::new(),
-                        reserved_goal_notices: 0,
-                    },
+                        saw_turn: true,
+                        context_tokens: None,
+                        final_output: None,
+                        request_basis: ContextOccupancyBasis {
+                            version: 1,
+                            shape: ContentHash::from_bytes([0; 32]),
+                            static_prefix: PreparedStaticPrefix::new(
+                                ContentHash::from_bytes([0; 32]),
+                                None,
+                            ),
+                            request_bytes: 0,
+                        },
+                    })
+                    .build(),
                 )
                 .await
                 .unwrap();
@@ -6572,26 +6103,14 @@ async fn goal_admission_refuses_expired_or_unknown_budgets_before_loading() {
             )
             .await
             .unwrap();
-            let held = Arc::clone(&runtime.inner.permits)
-                .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-                .await
-                .unwrap();
-            let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-            let created = create_session(&runtime, workspace_id, None).await;
-            let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-                panic!("session")
-            };
-            let mut events = runtime
-                .subscribe(SubscribeRequest {
-                    workspace_id,
-                    after: created.committed_through,
-                })
-                .unwrap();
-            runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal", "session_id":session_id, "objective":"expire while awaiting the permit",
+            let held = runtime.hold_scheduling().await;
+            let (workspace_id, session_id, created) =
+                new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+            let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
+            set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"expire while awaiting the permit",
             "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
-            runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+        })).await.unwrap();
+            runtime.store().drive_goals(now_ms()).await.unwrap();
             if user_prompt {
                 queue_prompt(
                     &runtime,
@@ -6601,8 +6120,7 @@ async fn goal_admission_refuses_expired_or_unknown_budgets_before_loading() {
                 .await;
             }
             runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     let mut goal =
                         crate::sessions::goals::load_live(connection, session_id)?.unwrap();
@@ -6625,7 +6143,7 @@ async fn goal_admission_refuses_expired_or_unknown_budgets_before_loading() {
                 .await
                 .unwrap();
             drop(held);
-            runtime.inner.schedule.send(()).await.unwrap();
+            runtime.request_schedule();
             let outcome = tokio::time::timeout(Duration::from_secs(3), async {
                 let mut finished = None;
                 let mut exhausted = false;
@@ -6733,19 +6251,13 @@ async fn common_goal_reservation_clamps_current_remainders_and_preserves_prompt_
             } else {
                 RunLimits::default()
             };
-            store
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::SubmitPrompt {
-                        session_id,
-                        input: vec![InputPart::text("explicit prompt budget")],
-                        limits,
-                        correlation: Correlation::default(),
-                        output: None,
-                    },
-                )
-                .await
-                .unwrap();
+            store_command(
+                &store,
+                session_id,
+                Prompt::text("explicit prompt budget").limits(limits),
+            )
+            .await
+            .unwrap();
             store
                 .call(Priority::Control, move |connection| {
                     let mut goal =
@@ -6791,15 +6303,13 @@ async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_ori
     impl Provider for Model {
         fn stream(&self, _: ModelRequest) -> ProviderStream {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(qq_provider::ProviderUsage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    reasoning_tokens: None,
-                }),
-            })]))
+            provider_script([completed(Some(qq_provider::ProviderUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_tokens: None,
+            }))])
         }
     }
     struct Loader {
@@ -6838,32 +6348,19 @@ async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_ori
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace_id, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
-        runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"deadline must be revalidated after loading",
+        let held = runtime.hold_scheduling().await;
+        let (workspace_id, session_id, created) =
+            new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+        let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
+        set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"deadline must be revalidated after loading",
             "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
-        runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+        })).await.unwrap();
+        runtime.store().drive_goals(now_ms()).await.unwrap();
         let expected_run = if user_prompt {
             queue_prompt(&runtime, session_id, "explicit bounded work".to_owned()).await
         } else {
             runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     Ok(crate::sessions::goals::load_live(connection, session_id)?
                         .unwrap()
@@ -6874,13 +6371,12 @@ async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_ori
                 .unwrap()
         };
         drop(held);
-        runtime.inner.schedule.send(()).await.unwrap();
+        runtime.request_schedule();
         tokio::time::timeout(Duration::from_secs(3), entered.notified())
             .await
             .unwrap();
         let origin = runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(load_run(connection, expected_run)?.origin)
             })
@@ -6892,8 +6388,7 @@ async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_ori
             matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. }))
         });
         runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let mut goal = crate::sessions::goals::load_live(connection, session_id)?.unwrap();
                 goal.budget.deadline_ms = now_ms().saturating_sub(1);
@@ -6954,20 +6449,16 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
     impl Provider for Model {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
             self.0.lock().unwrap().push(request.max_output_tokens());
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "one bounded work slice".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        reasoning_tokens: None,
-                    }),
-                }),
-            ]))
+            provider_script([
+                text_delta("one bounded work slice"),
+                completed(Some(qq_provider::ProviderUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_tokens: None,
+                })),
+            ])
         }
     }
     struct Loader {
@@ -7012,26 +6503,14 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace_id, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
-        runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"refresh allowance after loading",
+        let held = runtime.hold_scheduling().await;
+        let (workspace_id, session_id, created) =
+            new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+        let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
+        set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"refresh allowance after loading",
             "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":if raised {500} else {200_000}}
-        })).unwrap()).await.unwrap();
-        runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+        })).await.unwrap();
+        runtime.store().drive_goals(now_ms()).await.unwrap();
         let run = if user_prompt {
             let receipt = runtime
                 .command(
@@ -7055,8 +6534,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
             run_id
         } else {
             runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     Ok(crate::sessions::goals::load_live(connection, session_id)?
                         .unwrap()
@@ -7067,13 +6545,12 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
                 .unwrap()
         };
         drop(held);
-        runtime.inner.schedule.send(()).await.unwrap();
+        runtime.request_schedule();
         tokio::time::timeout(Duration::from_secs(3), entered.notified())
             .await
             .unwrap();
         runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let origin = load_run(connection, run)?.origin;
                 assert!(if user_prompt {
@@ -7252,17 +6729,7 @@ async fn paused_goal_fences_preparing_user_prompt_until_cancelled() {
         )
         .await
         .unwrap();
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("next work")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, session_id, "next work")
         .await
         .unwrap();
     let claim = store.reserve_next_run(false).await.unwrap().unwrap();
@@ -7351,16 +6818,14 @@ async fn goal_check_edits_reset_only_the_changed_check_failure_streak() {
         else {
             panic!("session");
         };
-        let receipt = runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal", "session_id":session_id, "objective":"checked work", "check":{"command":"true"},
+        let receipt = set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"checked work", "check":{"command":"true"},
             "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("goal");
         };
         runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let mut goal = crate::sessions::goals::load_live(connection, session_id)?.unwrap();
                 goal.counters.check_failures = 2;
@@ -7368,11 +6833,10 @@ async fn goal_check_edits_reset_only_the_changed_check_failure_streak() {
             })
             .await
             .unwrap();
-        let edited = runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal", "session_id":session_id, "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
+        let edited = set_goal(&runtime, serde_json::json!({"session_id":session_id, "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
             "objective":"edited objective", "check":command.map(|command|serde_json::json!({"command":command})),
             "budget":goal.budget
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         let CommandOutcome::GoalUpdated { goal: edited, .. } = edited.outcome else {
             panic!("edit");
         };
@@ -7412,23 +6876,17 @@ async fn goal_check_edits_preserve_unrelated_stop_states() {
             },
         ] {
             let (directory, runtime) = test_runtime().await;
-            let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-            let created =
-                create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask).await;
-            let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-                panic!("session")
-            };
-            let receipt = runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session_id,"objective":"checked work","check":{"command":"true"},
+            let (_, session_id, _) =
+                new_session(&runtime, directory.path(), ApprovalMode::Ask).await;
+            let receipt = set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"checked work","check":{"command":"true"},
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000}
-            })).unwrap()).await.unwrap();
+            })).await.unwrap();
             let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
                 panic!("goal")
             };
             let setup_status = status.clone();
             runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     let mut goal =
                         crate::sessions::goals::load_live(connection, session_id)?.unwrap();
@@ -7597,11 +7055,7 @@ async fn goal_write_capacity_wait_obeys_cancellation_and_deadline() {
         let mut events = loaded.plan.execute(
             vec![Message::user("work")],
             cancellation.clone(),
-            Arc::new(crate::StaticPolicyGate {
-                mode: ApprovalMode::ReadOnly,
-                tools: Default::default(),
-                network: Arc::default(),
-            }),
+            Arc::new(crate::StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
             Arc::new(crate::workspace::FileState::default()),
             capabilities,
         );
@@ -7661,17 +7115,7 @@ async fn recovered_user_prompt_survives_an_active_goal_edit() {
         )
         .await
         .unwrap();
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: session,
-                input: vec![InputPart::text("accepted user work")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, session, "accepted user work")
         .await
         .unwrap();
     let reserved = store.reserve_next_run(false).await.unwrap().unwrap();
@@ -7684,12 +7128,12 @@ async fn recovered_user_prompt_survives_an_active_goal_edit() {
     reopened
         .command(
             CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session,"objective":"edited objective",
-                "expected":{"goal_id":captured.goal_id,"revision":captured.revision},
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
+            goal_command(
+                serde_json::json!({"session_id":session,"objective":"edited objective",
+                    "expected":{"goal_id":captured.goal_id,"revision":captured.revision},
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                }),
+            ),
         )
         .await
         .unwrap();
@@ -7718,20 +7162,16 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
         impl Provider for Model {
             fn stream(&self, request: ModelRequest) -> ProviderStream {
                 self.0.lock().unwrap().push(request);
-                Box::pin(stream::iter([
-                    Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                        text: "child work".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::Completed {
-                        usage: Some(qq_provider::ProviderUsage {
-                            input_tokens: 1,
-                            output_tokens: 1,
-                            cache_read_input_tokens: 0,
-                            cache_write_input_tokens: 0,
-                            reasoning_tokens: None,
-                        }),
-                    }),
-                ]))
+                provider_script([
+                    text_delta("child work"),
+                    completed(Some(qq_provider::ProviderUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_tokens: None,
+                    })),
+                ])
             }
         }
         struct Loader {
@@ -7769,10 +7209,7 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
         let child_held = Arc::clone(&runtime.inner.child_permits[0])
             .acquire_many_owned(runtime.inner.child_permits[0].available_permits() as u32)
             .await
@@ -7785,19 +7222,16 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
         else {
             panic!("session")
         };
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal","session_id":parent_session,"objective":"original objective",
-                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        set_goal(
+            &runtime,
+            serde_json::json!({"session_id":parent_session,"objective":"original objective",
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            }),
+        )
+        .await
+        .unwrap();
         let parent_run = queue_prompt(&runtime, parent_session, "parent work".to_owned()).await;
-        let store = runtime.inner.store.clone();
+        let store = runtime.store().clone();
         let parent = store.reserve_next_run(false).await.unwrap().unwrap();
         assert_eq!(parent.identity.run_id, parent_run);
         store
@@ -7843,7 +7277,7 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
             .await
             .unwrap();
         drop(child_held);
-        runtime.inner.schedule.send(()).await.unwrap();
+        runtime.request_schedule();
         let mut events = runtime
             .subscribe(SubscribeRequest {
                 workspace_id: parent.identity.workspace_id,
@@ -7858,8 +7292,7 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
             .await
             .unwrap();
         runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let claim: Option<String> = connection.query_row(
                     "SELECT preparing_run_id FROM sessions WHERE id=?1",
@@ -7871,16 +7304,10 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
             })
             .await
             .unwrap();
-        let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":parent_session,"objective":"original objective",
+        let receipt = set_goal(&runtime, serde_json::json!({"session_id":parent_session,"objective":"original objective",
                 "expected":{"goal_id":captured.goal_id,"revision":captured.revision},
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000,"max_total_tokens":budget}
             }))
-            .unwrap(),
-        )
         .await
         .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
@@ -7888,8 +7315,7 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
         };
         assert_eq!(goal.goal_id, captured.goal_id);
         runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let cancelled: bool = connection.query_row(
                 "SELECT cancel_requested FROM runs WHERE id=?1",
@@ -8014,23 +7440,16 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
     let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
         .await
         .unwrap();
-    let _held = Arc::clone(&runtime.inner.permits)
-        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
+    let _held = runtime.hold_scheduling().await;
     for (path, ceiling) in [(directory.path(), 20_u32), (other.as_path(), 100)] {
-        let (workspace, _) = resolve_workspace(&runtime, path).await;
-        let created = create_session(&runtime, workspace, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
+        let (_, session_id, _) = new_session(&runtime, path, ApprovalMode::default()).await;
         let deadline = now_ms() + 60_000;
         let set = |runs| {
-            serde_json::from_value::<SessionCommand>(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"workspace-bound",
-                "budget":{"max_goal_runs":runs,"deadline_ms":deadline}
-            }))
-            .unwrap()
+            goal_command(
+                serde_json::json!({"session_id":session_id, "objective":"workspace-bound",
+                    "budget":{"max_goal_runs":runs,"deadline_ms":deadline}
+                }),
+            )
         };
         assert!(matches!(
             runtime
@@ -8070,17 +7489,14 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
                 GoalPolicyError::Unavailable
             ))
         ));
-        let paused = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::GoalControl {
-                    session_id,
-                    expected: identity,
-                    action: qq_protocol::GoalControl::Pause,
-                },
-            )
-            .await
-            .unwrap();
+        let paused = goal_control(
+            &runtime,
+            session_id,
+            identity,
+            qq_protocol::GoalControl::Pause,
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = paused.outcome else {
             panic!("paused")
         };
@@ -8097,32 +7513,26 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
             .unwrap()
             .max_goal_runs = ceiling - 1;
         assert!(matches!(
-            runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::GoalControl {
-                        session_id,
-                        expected,
-                        action: qq_protocol::GoalControl::Resume
-                    }
-                )
-                .await,
+            goal_control(
+                &runtime,
+                session_id,
+                expected,
+                qq_protocol::GoalControl::Resume
+            )
+            .await,
             Err(SessionRuntimeError::InvalidGoal(
                 GoalValidationError::Budget
             ))
         ));
         authority.unavailable.store(true, Ordering::SeqCst);
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::GoalControl {
-                    session_id,
-                    expected,
-                    action: qq_protocol::GoalControl::Clear,
-                },
-            )
-            .await
-            .unwrap();
+        goal_control(
+            &runtime,
+            session_id,
+            expected,
+            qq_protocol::GoalControl::Clear,
+        )
+        .await
+        .unwrap();
         authority.unavailable.store(false, Ordering::SeqCst);
     }
     drop(_held);
@@ -8245,9 +7655,7 @@ async fn goal_policy_tightening_before_load_or_main_start_prevents_provider_work
     impl Provider for Model {
         fn stream(&self, _: ModelRequest) -> ProviderStream {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: None,
-            })]))
+            provider_script([completed(None)])
         }
     }
     struct Loader {
@@ -8298,26 +7706,15 @@ async fn goal_policy_tightening_before_load_or_main_start_prevents_provider_work
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
-        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: created.committed_through,
-            })
-            .unwrap();
-        let command = serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"honor current policy",
-            "budget":{"max_goal_runs":20,"deadline_ms":now_ms()+60_000}
-        }))
-        .unwrap();
+        let held = runtime.hold_scheduling().await;
+        let (workspace, session_id, created) =
+            new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+        let mut events = subscribe_after(&runtime, workspace, created.committed_through);
+        let command = goal_command(
+            serde_json::json!({"session_id":session_id,"objective":"honor current policy",
+                "budget":{"max_goal_runs":20,"deadline_ms":now_ms()+60_000}
+            }),
+        );
         runtime
             .command(CommandId::generate().unwrap(), command)
             .await
@@ -8491,10 +7888,7 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
         let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
             .await
             .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
         runtimes.push((runtime, held));
     }
     let mut row = 0;
@@ -8520,14 +7914,12 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
                 panic!("session")
             };
             let id = CommandId::generate().unwrap();
-            let command: SessionCommand = serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id,
+            let command: SessionCommand = goal_command(serde_json::json!({"session_id":session_id,
                 "objective":"verify the task without permission prompts",
                 "check":{"command":command,"timeout_ms":1000},
                 "check_approval":scope,
                 "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+60_000}
-            }))
-            .unwrap();
+            }));
             let result = runtime.command(id, command.clone()).await;
             match expected {
                 "denied" => assert!(matches!(
@@ -8565,20 +7957,14 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
                     assert_eq!(goal.revision, 1);
                     assert_eq!(runtime.command(id, command).await.unwrap(), receipt);
                     if authorization != "pending" {
-                        runtime
-                            .command(
-                                CommandId::generate().unwrap(),
-                                SessionCommand::GoalControl {
-                                    session_id,
-                                    expected: qq_protocol::GoalIdentity {
-                                        goal_id: goal.goal_id,
-                                        revision: goal.revision,
-                                    },
-                                    action: qq_protocol::GoalControl::Pause,
-                                },
-                            )
-                            .await
-                            .unwrap();
+                        goal_control(
+                            runtime,
+                            session_id,
+                            identity_of(goal),
+                            qq_protocol::GoalControl::Pause,
+                        )
+                        .await
+                        .unwrap();
                     }
                 }
             }

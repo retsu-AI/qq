@@ -46,43 +46,30 @@ async fn the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runti
     ));
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(path.clone()),
         Arc::new(TextScriptLoader {
             requests: Arc::clone(&requests),
             answers: Arc::clone(&answers),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let hanging = submit_prompt_to(&runtime, session_id, "hang").await;
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("report")],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: Some(Box::new(report_contract(1))),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(
+        &runtime,
+        session_id,
+        Prompt::text("report").output(Some(Box::new(report_contract(1)))),
+    )
+    .await;
     collect_until(
         &mut events,
         |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id == hanging),
@@ -361,13 +348,12 @@ async fn an_unenforceable_contract_is_refused_at_admission_and_creates_no_run() 
     }
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            32,
+        ))
         .await
         .unwrap();
     assert!(snapshot.focused.unwrap().runs.is_empty());

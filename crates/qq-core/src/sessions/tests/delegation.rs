@@ -21,7 +21,7 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
         turn: StdMutex::new(0),
     });
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
-    let skill = harness._directory.path().join(".qq/skills/review");
+    let skill = harness.directory.path().join(".qq/skills/review");
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(skill.join("SKILL.md"), "User-selected guidance only.\n").unwrap();
     let run_id =
@@ -275,7 +275,7 @@ async fn a_child_sessions_summarizer_uses_the_childs_own_prompt_prefix() {
         turn: StdMutex::new(0),
     });
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
-    std::fs::write(harness._directory.path().join("a.txt"), "widgets\n").unwrap();
+    std::fs::write(harness.directory.path().join("a.txt"), "widgets\n").unwrap();
     let run_id =
         submit_prompt_to(&harness.runtime, harness.session_id, "delegate the survey").await;
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
@@ -332,7 +332,7 @@ async fn multi_turn_child_returns_only_its_final_answer() {
         requests: Arc::clone(&child_requests),
     });
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
-    std::fs::write(harness._directory.path().join("note.txt"), "evidence\n").unwrap();
+    std::fs::write(harness.directory.path().join("note.txt"), "evidence\n").unwrap();
     let parent_run = submit_prompt_to(
         &harness.runtime,
         harness.session_id,
@@ -362,13 +362,12 @@ async fn multi_turn_child_returns_only_its_final_answer() {
 
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(child_session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(child_session_id),
+            8,
+            8,
+        ))
         .await
         .unwrap();
     let assistant = snapshot
@@ -425,8 +424,7 @@ async fn failed_child_run_insert_leaves_no_idle_orphan() {
     .await;
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             connection
                 .execute_batch(
@@ -455,13 +453,12 @@ async fn failed_child_run_insert_leaves_no_idle_orphan() {
     );
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 4,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            4,
+        ))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);
@@ -718,12 +715,7 @@ async fn restart_cancels_a_queued_child_owned_by_an_interrupted_parent() {
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: child.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, child.committed_through);
     let recovered = tokio::time::timeout(Duration::from_secs(2), async {
         let mut recovered = Vec::new();
         while recovered
@@ -758,13 +750,12 @@ async fn restart_cancels_a_queued_child_owned_by_an_interrupted_parent() {
     )));
     assert!(requests.lock().unwrap().is_empty());
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
+        .snapshot(SnapshotRequest::new(
             workspace_id,
-            focused_session_id: Some(child.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 4,
-        })
+            Some(child.session_id),
+            8,
+            4,
+        ))
         .await
         .unwrap();
     let child_snapshot = snapshot.focused.unwrap();
@@ -790,12 +781,7 @@ async fn parallel_spawn_accounting_is_ordered_exact_and_survives_restart() {
     else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
 
     let parent_run = submit_prompt_to(&runtime, parent_id, "delegate twice").await;
     let observed = collect_until_run_finished(&mut events, parent_run).await;
@@ -827,13 +813,7 @@ async fn parallel_spawn_accounting_is_ordered_exact_and_survives_restart() {
     }
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(parent_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(parent_id), 8, 8))
         .await
         .unwrap();
     let parent = snapshot
@@ -885,13 +865,7 @@ async fn parallel_spawn_accounting_is_ordered_exact_and_survives_restart() {
     .await
     .unwrap();
     let reloaded = reopened
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(parent_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(parent_id), 8, 8))
         .await
         .unwrap();
     let reloaded_parent = reloaded
@@ -1053,13 +1027,12 @@ async fn worker_resolution_failure_creates_no_child_state_and_parent_continues()
     );
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 32,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            32,
+            32,
+        ))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);
@@ -1146,13 +1119,12 @@ async fn rejected_spawn_validation_creates_no_child_state_and_names_the_check() 
     )));
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 32,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            32,
+            32,
+        ))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);
@@ -1304,13 +1276,11 @@ async fn child_sessions_cannot_spawn_and_dispatch_rejects_the_attempt() {
     else {
         panic!("unexpected receipt")
     };
-    let mut events = harness
-        .runtime
-        .subscribe(SubscribeRequest {
-            workspace_id: harness.workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(
+        &harness.runtime,
+        harness.workspace_id,
+        created.committed_through,
+    );
     let run_id = submit_prompt_to(&harness.runtime, child_id, "try to spawn").await;
     let observed = collect_until_run_finished(&mut events, run_id).await;
 
@@ -1417,14 +1387,7 @@ async fn cancelling_the_parent_run_cancels_its_in_flight_child() {
         Some("test/model"),
         "a child without a model argument inherits the parent's model"
     );
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: parent_run },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, parent_run).await.unwrap();
     tokio::time::timeout(Duration::from_secs(30), async {
         while finished_outcome(&observed, parent_run).is_none()
             || finished_outcome(&observed, child_run).is_none()
@@ -1484,14 +1447,7 @@ async fn cancelling_the_parent_interrupts_an_in_flight_child_tool() {
     })
     .await
     .expect("the child tool never started");
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: parent_run },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, parent_run).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         while finished_outcome(&observed, parent_run).is_none()
             || finished_outcome(&observed, child_run).is_none()
@@ -1552,14 +1508,7 @@ async fn cancelling_the_parent_after_child_completion_preserves_the_child() {
     tokio::time::timeout(Duration::from_secs(2), second_turn_started.notified())
         .await
         .expect("the parent did not consume the child answer");
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: parent_run },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, parent_run).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         while finished_outcome(&observed, parent_run).is_none() {
             observed.push(harness.events.next().await.unwrap().unwrap());
@@ -1582,13 +1531,12 @@ async fn cancelling_the_parent_after_child_completion_preserves_the_child() {
     )));
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(child_session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 4,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(child_session_id),
+            8,
+            4,
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -1661,13 +1609,12 @@ async fn shutdown_settles_a_running_parent_and_its_in_flight_child() {
 
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(child_session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 4,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(child_session_id),
+            8,
+            4,
+        ))
         .await
         .unwrap();
     assert!(
@@ -1712,12 +1659,7 @@ async fn shutdown_waits_for_started_child_loader_work_without_creating_a_child()
                 })
                 .await
                 .unwrap();
-                Runtime::new(StaticTextProvider, "test-model", 256)
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                Ok(ProviderLoader::new(StaticTextProvider).loaded(&request.workspace))
             })
         }
     }
@@ -1751,7 +1693,7 @@ async fn shutdown_waits_for_started_child_loader_work_without_creating_a_child()
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .unwrap();
-    let stopped = execution::observe_execution_stop(run_id);
+    let stopped = PROBE.observe(Checkpoint::ExecutionStop(run_id));
     let runtime = harness.runtime.clone();
     let mut shutdown = tokio::spawn(async move { runtime.shutdown().await });
     tokio::time::timeout(Duration::from_secs(2), stopped)
@@ -1797,12 +1739,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
             let release = Arc::clone(&self.release);
             Box::pin(async move {
                 release.notified().await;
-                Runtime::new(StaticTextProvider, "test-model", 256)
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                Ok(ProviderLoader::new(StaticTextProvider).loaded(&request.workspace))
             })
         }
     }
@@ -1819,11 +1756,8 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let parent_run = RunId::generate().unwrap();
     let parent = ClaimedRun {
         goal_spend_owner: None,
@@ -1924,13 +1858,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
     assert!(outcome.content.contains("shutting down"));
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 1,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 1))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);
@@ -1988,7 +1916,7 @@ async fn an_auto_child_denies_writes_beneath_an_ask_parent_without_prompting() {
     assert!(!observed.iter().any(|event| matches!(&event.event,
         SessionEvent::ToolCallStarted { tool_call } if tool_call.name == "write_file"
     )));
-    assert!(!harness._directory.path().join("child.txt").exists());
+    assert!(!harness.directory.path().join("child.txt").exists());
     harness.runtime.shutdown().await.unwrap();
 }
 
@@ -2068,7 +1996,7 @@ async fn a_write_child_executes_authorized_edits() {
         SessionEvent::ToolApprovalRequested { .. } | SessionEvent::ToolApprovalResolved { .. }
     )));
     assert_eq!(
-        std::fs::read_to_string(harness._directory.path().join("child.txt")).unwrap(),
+        std::fs::read_to_string(harness.directory.path().join("child.txt")).unwrap(),
         "written by the child"
     );
     let child_reqs = child_requests.lock().unwrap().clone();
@@ -2111,26 +2039,22 @@ async fn write_children_require_the_roster_flag() {
     });
     let directory = tempfile::tempdir().unwrap();
     let options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         options,
         Arc::new(QueueLoader {
             routed: vec![("test/child", child)],
             queue: StdMutex::new(vec![parent]),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = submit_prompt_to(&runtime, session_id, "delegate").await;
     let observed = collect_until_run_finished(&mut events, run_id).await;
     assert!(!observed.iter().any(|event| matches!(
@@ -2271,7 +2195,7 @@ async fn steering_charges_a_completed_but_unconsumed_child_exactly_once() {
         turn: AtomicUsize::new(0),
     });
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
-    let (delivered, release) = subagents::hold_child_delivery(harness.session_id);
+    let (delivered, release) = PROBE.hold(Checkpoint::ChildDelivery(harness.session_id));
     let receipt = harness
         .runtime
         .command(
@@ -2367,7 +2291,7 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
             ApprovalMode::Full,
         )
         .await;
-        let workspace = std::fs::canonicalize(harness._directory.path()).unwrap();
+        let workspace = std::fs::canonicalize(harness.directory.path()).unwrap();
 
         let keep_clock = if deadline {
             tokio::time::pause();
@@ -2419,7 +2343,7 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
                 break run;
             }
         };
-        let mut stopping = Some(execution::observe_execution_stop(child_run));
+        let mut stopping = Some(PROBE.observe(Checkpoint::ExecutionStop(child_run)));
         if interruption == 2 {
             steer(&harness.runtime, parent_run, "stop the child", true)
                 .await
@@ -2441,14 +2365,7 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
             submit_prompt_to(&harness.runtime, harness.session_id, "continue").await
         } else if cancel_parent {
             let queued = submit_prompt_to(&harness.runtime, harness.session_id, "continue").await;
-            harness
-                .runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::CancelRun { run_id: parent_run },
-                )
-                .await
-                .unwrap();
+            cancel_run(&harness.runtime, parent_run).await.unwrap();
             queued
         } else {
             steer(
@@ -2535,14 +2452,14 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
             ));
         }
         assert_eq!(
-            std::fs::read_to_string(harness._directory.path().join("child.txt")).unwrap(),
+            std::fs::read_to_string(harness.directory.path().join("child.txt")).unwrap(),
             "child"
         );
         if shutting_down {
-            assert!(!harness._directory.path().join("parent.txt").exists());
+            assert!(!harness.directory.path().join("parent.txt").exists());
         } else {
             assert_eq!(
-                std::fs::read_to_string(harness._directory.path().join("parent.txt")).unwrap(),
+                std::fs::read_to_string(harness.directory.path().join("parent.txt")).unwrap(),
                 "parent"
             );
         }
@@ -2566,7 +2483,8 @@ async fn interrupting_steering_owns_a_child_whose_creation_reply_is_pending() {
         ApprovalMode::Full,
     )
     .await;
-    let (created, release) = store::hold_child_creation(harness.session_id);
+    let (created, release) =
+        PROBE.hold_reporting_run(Checkpoint::ChildCreated(harness.session_id), 0);
     let parent_run = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
     let child_run = tokio::time::timeout(Duration::from_secs(2), created)
         .await
@@ -2603,7 +2521,7 @@ async fn interrupting_steering_owns_a_child_whose_creation_reply_is_pending() {
         Some(RunOutcome::Cancelled)
     );
     assert_eq!(
-        std::fs::read_to_string(harness._directory.path().join("parent.txt")).unwrap(),
+        std::fs::read_to_string(harness.directory.path().join("parent.txt")).unwrap(),
         "resumed"
     );
 }
@@ -2668,14 +2586,14 @@ async fn store_saturation_does_not_release_a_running_write_child() {
             break (run.unwrap(), cursor);
         }
     };
-    let (read_entered, release_read, read_attempted) = store::hold_outcome_read(child_run);
+    let (read_entered, release_read, read_attempted) = hold_outcome_read(child_run);
     harness.runtime.inner.notify(cursor);
     tokio::time::timeout(Duration::from_secs(2), read_entered)
         .await
         .unwrap()
         .unwrap();
 
-    let blocked_store = harness.runtime.inner.store.clone();
+    let blocked_store = harness.runtime.store().clone();
     let (worker_entered, worker_started) = oneshot::channel();
     let (release_worker, worker_release) = std::sync::mpsc::channel();
     let worker = tokio::spawn(async move {
@@ -2691,7 +2609,7 @@ async fn store_saturation_does_not_release_a_running_write_child() {
     worker_started.await.unwrap();
     let mut queued = Vec::new();
     for _ in 0..256 {
-        let store = harness.runtime.inner.store.clone();
+        let store = harness.runtime.store().clone();
         let mut job = Box::pin(async move { store.call(Priority::Control, |_| Ok(())).await });
         assert!(futures_util::poll!(job.as_mut()).is_pending());
         queued.push(job);
@@ -2741,7 +2659,7 @@ async fn store_saturation_does_not_release_a_running_write_child() {
         Some(RunOutcome::Completed)
     ));
     assert_eq!(
-        std::fs::read_to_string(harness._directory.path().join("parent.txt")).unwrap(),
+        std::fs::read_to_string(harness.directory.path().join("parent.txt")).unwrap(),
         "parent resumed"
     );
 }
@@ -2770,7 +2688,10 @@ async fn child_cancellation_persistence_failure_prevents_parent_continuation() {
     })
     .await
     .unwrap();
-    store::fail_child_cancellation(child_run);
+    FAULTS.inject(
+        StoreFault::ChildCancellation(child_run),
+        [SessionRuntimeError::CONSTRAINT],
+    );
     let child_cancel = harness
         .runtime
         .inner
@@ -2825,7 +2746,7 @@ async fn unconfirmed_shell_exit_prevents_session_continuation() {
         ApprovalMode::Full,
     )
     .await;
-    let workspace = std::fs::canonicalize(harness._directory.path()).unwrap();
+    let workspace = std::fs::canonicalize(harness.directory.path()).unwrap();
     let spawned = crate::tools::observe_shell_spawn(&workspace, true);
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "run a command").await;
     let pid = tokio::time::timeout(Duration::from_secs(2), spawned)
@@ -2882,7 +2803,7 @@ async fn unreadable_child_outcome_fails_the_runtime_before_parent_continuation()
             break (event.run_id.unwrap(), event.cursor);
         }
     };
-    let (read_entered, release_read, _read_attempted) = store::hold_outcome_read(child_run);
+    let (read_entered, release_read, _read_attempted) = hold_outcome_read(child_run);
     harness.runtime.inner.notify(cursor);
     tokio::time::timeout(Duration::from_secs(2), read_entered)
         .await
@@ -2890,8 +2811,7 @@ async fn unreadable_child_outcome_fails_the_runtime_before_parent_continuation()
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection.execute(
                 "UPDATE runs SET usage_json = 'invalid-json' WHERE id = ?1",
@@ -2946,13 +2866,7 @@ async fn unreadable_child_outcome_fails_the_runtime_before_parent_continuation()
         "the parent makes no further provider request"
     );
     assert_eq!(
-        harness
-            .runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::CancelRun { run_id: parent_run }
-            )
-            .await,
+        cancel_run(&harness.runtime, parent_run).await,
         Err(SessionRuntimeError::Unavailable)
     );
 }
@@ -2977,7 +2891,14 @@ async fn write_children_serialize_on_the_per_run_write_permit() {
     let directory = tempfile::tempdir().unwrap();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.max_active_runs = 8;
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         options,
         Arc::new(WriteChildLoader {
             inner: QueueLoader {
@@ -2985,20 +2906,9 @@ async fn write_children_serialize_on_the_per_run_write_permit() {
                 queue: StdMutex::new(vec![parent]),
             },
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = submit_prompt_to(&runtime, session_id, "fan out writers").await;
     let observed = collect_until_run_finished(&mut events, run_id).await;
 
@@ -3016,8 +2926,7 @@ async fn write_children_serialize_on_the_per_run_write_permit() {
         "two writers never share the checkout"
     );
     let delivery_rows: u32 = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT COUNT(*) FROM child_deliveries", [], |row| {
@@ -3226,7 +3135,7 @@ async fn nested_spend_reduces_the_next_root_child_allowance() {
 #[tokio::test]
 async fn owned_spend_session_deletion_waits_for_the_root_receipt() {
     let mut harness = nested_spend_harness(Some(usage(60, 0))).await;
-    let (delivered, release) = subagents::hold_child_delivery(harness.session_id);
+    let (delivered, release) = PROBE.hold(Checkpoint::ChildDelivery(harness.session_id));
     let root = submit_nested_budget(&harness, true).await;
     tokio::time::timeout(Duration::from_secs(2), delivered)
         .await
@@ -3336,7 +3245,7 @@ async fn owned_spend_session_deletion_checks_followup_owners_after_the_original_
         )
         .await
         .unwrap();
-    let (delivered, release) = subagents::hold_child_delivery(child);
+    let (delivered, release) = PROBE.hold(Checkpoint::ChildDelivery(child));
     let followup = submit_prompt_to(&harness.runtime, child, "new unrelated task").await;
     tokio::time::timeout(Duration::from_secs(2), delivered)
         .await
@@ -3424,8 +3333,7 @@ async fn nested_spend_receipt_excludes_later_prompts_in_owned_sessions() {
     collect_until_run_finished(&mut harness.events, followup).await;
     let (_, spend) = harness
         .runtime
-        .inner
-        .store
+        .store()
         .run_outcome(delegated_run)
         .await
         .unwrap()
@@ -3451,13 +3359,12 @@ async fn nested_spend_receipt_rejects_incomplete_or_overflowing_descendants() {
             _ => None,
         })
         .unwrap();
-    let accounted = harness.runtime.inner.store.run_outcome(root).await;
+    let accounted = harness.runtime.store().run_outcome(root).await;
     assert!(accounted.is_ok(), "{accounted:?}");
     for corruption in ["missing_identity", "unfinished", "usage_overflow"] {
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let transaction = connection.transaction()?;
                 transaction.execute_batch(
@@ -3497,15 +3404,14 @@ async fn nested_spend_receipt_rejects_incomplete_or_overflowing_descendants() {
             .unwrap();
         assert!(
             matches!(
-                harness.runtime.inner.store.run_outcome(root).await,
+                harness.runtime.store().run_outcome(root).await,
                 Err(SessionRuntimeError::AccountingUnavailable)
             ),
             "{corruption}"
         );
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let transaction = connection.transaction()?;
                 transaction.execute(
@@ -3523,7 +3429,7 @@ async fn nested_spend_receipt_rejects_incomplete_or_overflowing_descendants() {
             })
             .await
             .unwrap();
-        let restored = harness.runtime.inner.store.run_outcome(root).await;
+        let restored = harness.runtime.store().run_outcome(root).await;
         assert!(restored.is_ok(), "{corruption}: {restored:?}");
     }
     harness.runtime.shutdown().await.unwrap();
@@ -3711,20 +3617,11 @@ async fn depth_one_keeps_children_from_spawning_and_the_ceiling_is_enforced() {
         .runtime
         .command(
             CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id: harness.workspace_id,
-                parent_id: Some(parent_id),
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
+            create_session_command(
+                harness.workspace_id,
+                Some(parent_id),
+                ApprovalMode::default(),
+            ),
         )
         .await;
     assert!(matches!(
@@ -3901,14 +3798,7 @@ async fn cancelling_the_root_settles_the_whole_subtree() {
     tokio::time::timeout(Duration::from_secs(5), child_started.notified())
         .await
         .expect("the grandchild must start");
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, run_id).await.unwrap();
     let mut observed = Vec::new();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -4164,23 +4054,12 @@ async fn the_contract_judges_the_audited_revision_and_a_revision_does_not_reset_
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
     let mut harness = audit_harness(parent, auditor, crate::runtime::AuditMode::Heuristic, 1).await;
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("write hello and report")],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: Some(Box::new(report_contract(1))),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(
+        &harness.runtime,
+        harness.session_id,
+        Prompt::text("write hello and report").output(Some(Box::new(report_contract(1)))),
+    )
+    .await;
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
     let (_, completed) = audit_events(&observed, run_id);
     assert_eq!(completed.len(), 1);
@@ -4208,13 +4087,12 @@ async fn the_contract_judges_the_audited_revision_and_a_revision_does_not_reset_
     }
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            32,
+        ))
         .await
         .unwrap()
         .focused
@@ -4637,13 +4515,12 @@ async fn child_compaction_spend_reduces_the_next_child_allowance() {
     );
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(*first_session),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(*first_session),
+            8,
+            8,
+        ))
         .await
         .unwrap();
     let direct = snapshot.focused.unwrap().summary.accounting.unwrap().direct;
@@ -4717,15 +4594,13 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
                 panic!("summary start");
             };
             let child_prompt = session.active_run_id.unwrap();
-            let (entered, release) =
-                crate::sessions::in_run_compaction::hold_drop_settlement(*summary);
+            let (entered, release) = PROBE.hold(Checkpoint::DropSettlement(*summary));
             let summary_id = *summary;
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
                     let sent = harness
                         .runtime
-                        .inner
-                        .store
+                        .store()
                         .call(Priority::AwaitControl, move |connection| {
                             Ok(connection.query_row(
                                 "SELECT estimated_cost_usd_nanos IS NULL FROM runs WHERE id = ?1",
@@ -4792,14 +4667,13 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
         }
         let (_, spend) = harness
             .runtime
-            .inner
-            .store
+            .store()
             .run_outcome(child_prompt)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(spend.cost_usd_nanos, None);
-        assert!(!*harness.runtime.inner.failed.borrow());
+        assert!(!harness.runtime.has_failed());
         release.send(()).unwrap();
         let next = queue_prompt(
             &harness.runtime,
@@ -4985,13 +4859,12 @@ async fn audits_inherit_remaining_limits_and_charge_inclusive_spend_once() {
     );
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            8,
+        ))
         .await
         .unwrap();
     let totals = snapshot
@@ -5213,8 +5086,8 @@ async fn a_text_only_slice_report_is_never_audited_or_treated_as_the_answer() {
         requests: Arc::clone(&auditor_requests),
     });
     let mut harness = audit_harness(parent, auditor, crate::runtime::AuditMode::Always, 1).await;
-    std::fs::write(harness._directory.path().join("note.txt"), "tool result\n").unwrap();
-    std::fs::write(harness._directory.path().join("slice-effects.txt"), "seed").unwrap();
+    std::fs::write(harness.directory.path().join("note.txt"), "tool result\n").unwrap();
+    std::fs::write(harness.directory.path().join("slice-effects.txt"), "seed").unwrap();
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "long task").await;
     let mut observed = Vec::new();
     loop {
@@ -5285,7 +5158,7 @@ async fn an_ask_parent_cannot_widen_its_read_child_to_human_approved_writes() {
             .any(|event| matches!(&event.event, SessionEvent::ToolApprovalRequested { .. })),
         "the child's denied write must never become approvable"
     );
-    assert!(!harness._directory.path().join("read-child.txt").exists());
+    assert!(!harness.directory.path().join("read-child.txt").exists());
     harness.runtime.shutdown().await.unwrap();
 }
 
@@ -5367,7 +5240,7 @@ async fn parent_readonly_revocation_denies_a_late_client_child_approval() {
         }
     ));
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
-    assert!(!harness._directory.path().join("human-revoked.txt").exists());
+    assert!(!harness.directory.path().join("human-revoked.txt").exists());
     assert!(!observed.iter().any(|event| matches!(&event.event,
         SessionEvent::ToolCallStarted { tool_call } if tool_call.id == call.id)));
 
@@ -5404,7 +5277,14 @@ async fn nested_write_requests_preserve_the_root_only_write_boundary() {
     let directory = tempfile::tempdir().unwrap();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.max_active_runs = 8;
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         options,
         Arc::new(DepthLoader {
             inner: QueueLoader {
@@ -5415,20 +5295,9 @@ async fn nested_write_requests_preserve_the_root_only_write_boundary() {
             write_children: true,
             pricing: None,
         }),
+        ApprovalMode::Auto,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("expected session")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run = submit_prompt_to(&runtime, session_id, "delegate twice").await;
     let observed = collect_until_run_finished(&mut events, run).await;
     assert!(!directory.path().join("nested.txt").exists());
@@ -5474,7 +5343,7 @@ async fn a_late_child_approval_runs_once_after_the_parent_switches_to_auto() {
                 ApprovalMode::Full,
             )
             .await;
-            std::fs::create_dir(harness._directory.path().join("approval-scratch")).unwrap();
+            std::fs::create_dir(harness.directory.path().join("approval-scratch")).unwrap();
             let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
             let child_id = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
@@ -5523,7 +5392,7 @@ async fn a_late_child_approval_runs_once_after_the_parent_switches_to_auto() {
                 "a child approval must respect the current parent's mode: {receipt:?}"
             );
             collect_until_run_finished(&mut harness.events, run_id).await;
-            assert!(!harness._directory.path().join("approval-scratch").exists());
+            assert!(!harness.directory.path().join("approval-scratch").exists());
             harness.runtime.shutdown().await.unwrap();
         }
     }

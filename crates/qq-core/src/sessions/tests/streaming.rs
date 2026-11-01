@@ -70,17 +70,7 @@ async fn measured_occupancy_basis_persists_atomically_and_reloads_with_the_reser
         )
         .await
         .unwrap();
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: claimed.identity.session_id,
-                input: vec![InputPart::text("continue".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, claimed.identity.session_id, "continue")
         .await
         .unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
@@ -127,17 +117,7 @@ async fn malformed_context_bases_are_cleared_while_reserving_instead_of_failing_
         )
         .await
         .unwrap();
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: claimed.identity.session_id,
-                input: vec![InputPart::text("continue".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, claimed.identity.session_id, "continue")
         .await
         .unwrap();
     let session_id = claimed.identity.session_id;
@@ -248,22 +228,10 @@ async fn interleaved_turn_framing_accepts_exact_capacity_and_rejects_one_over() 
         let result = store
             .persist_model_turn(
                 &claimed,
-                ModelTurnCommit {
-                    model_work: crate::runtime::ModelWorkDisposition::Committed,
-                    goal_notices: Vec::new(),
-                    reserved_goal_notices: 0,
-                    turn_ordinal: 1,
-                    message,
-                    calls: vec![call],
-                    turn_message: Some(message_id),
-                    context_tokens: None,
-                    occupancy_basis: None,
-                    usage: None,
-                    estimated_cost_usd_nanos: None,
-                    accounting: None,
-                    truncated: false,
-                    notice: None,
-                },
+                TurnCommit::new(1, message)
+                    .calls(vec![call])
+                    .turn_message(message_id)
+                    .build(),
             )
             .await;
         let (increment, turns, calls, state): (u64, u64, u64, String) = store
@@ -381,12 +349,9 @@ async fn turn_and_event_failures_roll_back_message_counter_turn_and_tool_rows() 
             store
                 .persist_model_turn(
                     &claimed,
-                    ModelTurnCommit {
-                        model_work: crate::runtime::ModelWorkDisposition::Committed,
-                        goal_notices: Vec::new(),
-                        reserved_goal_notices: 0,
-                        turn_ordinal: 1,
-                        message: Message::new(
+                    TurnCommit::new(
+                        1,
+                        Message::new(
                             Role::Assistant,
                             vec![ContentBlock::tool_call(
                                 call.provider_call_id.clone(),
@@ -394,17 +359,11 @@ async fn turn_and_event_failures_roll_back_message_counter_turn_and_tool_rows() 
                                 &serde_json::from_str::<serde_json::Value>(&call.arguments)
                                     .unwrap()
                             )],
-                        ),
-                        calls: vec![call],
-                        turn_message: Some(message_id),
-                        context_tokens: None,
-                        occupancy_basis: None,
-                        usage: None,
-                        estimated_cost_usd_nanos: None,
-                        accounting: None,
-                        truncated: false,
-                        notice: None,
-                    },
+                        )
+                    )
+                    .calls(vec![call])
+                    .turn_message(message_id)
+                    .build(),
                 )
                 .await
                 .unwrap_err(),
@@ -488,13 +447,7 @@ async fn concurrent_chunks_replay_in_committed_order_after_restart() {
         .unwrap();
     assert_eq!(replay, committed);
     let snapshot = reopened
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let assistant = snapshot
@@ -514,54 +467,8 @@ async fn overflowing_text_append_persists_no_counter_chunk_or_event() {
     let store = Store::open(directory.path().join("sessions.sqlite3"))
         .await
         .unwrap();
-    let resolved = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::ResolveWorkspace {
-                path: directory.path().to_str().unwrap().to_owned(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let created = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("x".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let (_, session_id) = store_session(&store, directory.path(), ApprovalMode::default()).await;
+    store_command(&store, session_id, "x").await.unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     let message_id = MessageId::generate().unwrap();
     store

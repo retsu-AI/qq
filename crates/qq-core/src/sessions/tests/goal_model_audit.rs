@@ -160,21 +160,12 @@ async fn exercise(scenario: &'static str) {
         SessionRuntime::open(SessionRuntimeOptions::new(database.clone()), loader.clone())
             .await
             .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("missing session")
-    };
-    let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-        "type":"set_goal","session_id":session_id,"objective":"verify the persisted work independently",
+    let (workspace_id, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+    let receipt=set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"verify the persisted work independently",
         "budget":{"max_goal_runs":100,"deadline_ms":now_ms()+3_600_000}
-    })).unwrap()).await.unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: receipt.committed_through,
-        })
-        .unwrap();
+    })).await.unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
     let observed = async {
         let mut deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let mut audits = 0;
@@ -227,20 +218,14 @@ async fn exercise(scenario: &'static str) {
     assert!(!directory.path().join("marker").exists());
     if !matches!(scenario, "confirm" | "allowance") {
         assert_eq!(observed.status, qq_protocol::GoalStatus::Active);
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::GoalControl {
-                    session_id,
-                    expected: qq_protocol::GoalIdentity {
-                        goal_id: observed.goal_id,
-                        revision: observed.revision,
-                    },
-                    action: qq_protocol::GoalControl::Pause,
-                },
-            )
-            .await
-            .unwrap();
+        goal_control(
+            &runtime,
+            session_id,
+            identity_of(&observed),
+            qq_protocol::GoalControl::Pause,
+        )
+        .await
+        .unwrap();
     }
     runtime.shutdown().await.unwrap();
     assert_eq!(
@@ -328,23 +313,15 @@ async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
         else {
             panic!("missing session")
         };
-        let receipt = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal","session_id":session_id,"objective":"original objective",
-                    "budget":{"max_goal_runs":100,"deadline_ms":start+600_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: receipt.committed_through,
-            })
-            .unwrap();
+        let receipt = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id,"objective":"original objective",
+                "budget":{"max_goal_runs":100,"deadline_ms":start+600_000}
+            }),
+        )
+        .await
+        .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
         let (audit, goal) = tokio::time::timeout(Duration::from_secs(10), async {
             let mut latest = None;
             loop {
@@ -377,17 +354,14 @@ async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
                 revision: goal.revision,
             };
             if scenario == "paused_edit" {
-                let receipt = runtime
-                    .command(
-                        CommandId::generate().unwrap(),
-                        SessionCommand::GoalControl {
-                            session_id,
-                            expected: identity,
-                            action: qq_protocol::GoalControl::Pause,
-                        },
-                    )
-                    .await
-                    .unwrap();
+                let receipt = goal_control(
+                    &runtime,
+                    session_id,
+                    identity,
+                    qq_protocol::GoalControl::Pause,
+                )
+                .await
+                .unwrap();
                 let CommandOutcome::GoalUpdated { goal: paused, .. } = receipt.outcome else {
                     panic!("paused goal")
                 };
@@ -395,18 +369,15 @@ async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
                 assert_eq!(paused.audit_revision, Some(paused.revision));
                 identity.revision = paused.revision;
             }
-            let receipt = runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    serde_json::from_value(serde_json::json!({
-                        "type":"set_goal","session_id":session_id,"objective":"edited objective",
-                        "expected":identity,
-                        "budget":{"max_goal_runs":100,"deadline_ms":start+600_000}
-                    }))
-                    .unwrap(),
-                )
-                .await
-                .unwrap();
+            let receipt = set_goal(
+                &runtime,
+                serde_json::json!({"session_id":session_id,"objective":"edited objective",
+                    "expected":identity,
+                    "budget":{"max_goal_runs":100,"deadline_ms":start+600_000}
+                }),
+            )
+            .await
+            .unwrap();
             if scenario == "paused_edit" {
                 let CommandOutcome::GoalUpdated { goal: edited, .. } = receipt.outcome else {
                     panic!("edited goal")
@@ -443,17 +414,14 @@ async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
         .await
         .unwrap();
         if let Some(expected) = edited_identity {
-            let receipt = runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::GoalControl {
-                        session_id,
-                        expected,
-                        action: qq_protocol::GoalControl::Resume,
-                    },
-                )
-                .await
-                .unwrap();
+            let receipt = goal_control(
+                &runtime,
+                session_id,
+                expected,
+                qq_protocol::GoalControl::Resume,
+            )
+            .await
+            .unwrap();
             let CommandOutcome::GoalUpdated { goal: resumed, .. } = receipt.outcome else {
                 panic!("resumed goal")
             };

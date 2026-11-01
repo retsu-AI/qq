@@ -11,14 +11,7 @@ impl RuntimeLoader for ReplayLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
         let script = Arc::clone(&self.script);
-        Box::pin(async move {
-            Runtime::new(ReplayProvider { requests, script }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(ReplayProvider { requests, script }, &request)
     }
 }
 
@@ -105,32 +98,12 @@ async fn check_repeated_call_replay(missing_first_result: bool) {
     let runtime = SessionRuntime::open(options(), loader.clone())
         .await
         .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let mut first_run = None;
     for prompt in ["read first and missing", "read second"] {
-        let receipt = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text(prompt.to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        let receipt = try_submit(&runtime, session_id, prompt).await.unwrap();
         if let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome {
             first_run.get_or_insert(run_id);
         }
@@ -160,25 +133,8 @@ async fn check_repeated_call_replay(missing_first_result: bool) {
         );
     }
     let runtime = SessionRuntime::open(options(), loader).await.unwrap();
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: receipt.committed_through,
-        })
-        .unwrap();
+    let receipt = try_submit(&runtime, session_id, "continue").await.unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
     collect_through_finished(&mut events).await;
     compact_session(&runtime, session_id).await;
     collect_through_compacted(&mut events).await;
@@ -285,14 +241,11 @@ impl RuntimeLoader for FanOutReadsLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
         let count = self.count;
-        Box::pin(async move {
-            Runtime::new(FanOutReadsProvider { requests, count }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        {
+            let loaded = ProviderLoader::new(FanOutReadsProvider { requests, count })
+                .loaded(&request.workspace);
+            Box::pin(async move { Ok(loaded) })
+        }
     }
 }
 
@@ -330,17 +283,9 @@ async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen()
     let runtime = SessionRuntime::open(options(), loader.clone())
         .await
         .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let first = queue_prompt(&runtime, session_id, "read all four".to_owned()).await;
     let observed = collect_until(&mut events, finished_for(first)).await;
     let mut finished: Vec<ToolCallSnapshot> = observed
@@ -405,12 +350,7 @@ async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen()
     assert_assembly_matches_reference(&directory.path().join("sessions.sqlite3"), session_id);
     let runtime = SessionRuntime::open(options(), loader).await.unwrap();
     let third = queue_prompt(&runtime, session_id, "and again".to_owned()).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     collect_until(&mut events, finished_for(third)).await;
     let reopened = {
         let requests = requests.lock().unwrap();
@@ -434,8 +374,7 @@ async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen()
         let handle = crate::runtime::SpillHandle::parse(&marker[start..end])
             .unwrap_or_else(|| panic!("a parsable handle: {marker}"));
         let read = runtime
-            .inner
-            .store
+            .store()
             .read_tool_spill(session_id, handle.call_prefix, handle.digest_prefix)
             .await
             .unwrap();
@@ -454,8 +393,14 @@ async fn repeated_call_ids_keep_pruning_effects_and_arguments_local_to_each_turn
     std::fs::write(directory.path().join("first.txt"), "first".repeat(200)).unwrap();
     std::fs::write(directory.path().join("second.txt"), "second".repeat(200)).unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(ReplayLoader {
             requests: Arc::clone(&requests),
             script: Arc::new(vec![
@@ -468,20 +413,9 @@ async fn repeated_call_ids_keep_pruning_effects_and_arguments_local_to_each_turn
                 Some(("read_file", serde_json::json!({"path": "second.txt"}))),
             ]),
         }),
+        ApprovalMode::Full,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     for prompt in [
         "shell",
         "reads",
@@ -493,19 +427,7 @@ async fn repeated_call_ids_keep_pruning_effects_and_arguments_local_to_each_turn
         if prompt == "inspect" {
             super::mark_prune_seam(&directory.path().join("sessions.sqlite3"), session_id);
         }
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text(prompt.to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        try_submit(&runtime, session_id, prompt).await.unwrap();
         let observed = collect_through_finished(&mut events).await;
         assert!(observed.iter().any(|event| matches!(
             event.event,
@@ -560,10 +482,7 @@ impl RuntimeLoader for AnthropicReplayLoader {
         Box::pin(async move {
             Runtime::new(provider, "claude-opus-5-5", 256)
                 .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -651,17 +570,9 @@ async fn anthropic_signed_tool_turn_survives_runtime_restart() {
     let runtime = SessionRuntime::open(options(), loader.clone())
         .await
         .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!()
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::Full).await;
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let run = queue_prompt(&runtime, session_id, "read note".into()).await;
     let observed = collect_until(&mut events, finished_for(run)).await;
     assert!(
@@ -678,12 +589,7 @@ async fn anthropic_signed_tool_turn_survives_runtime_restart() {
     drop(events);
     drop(runtime);
     let runtime = SessionRuntime::open(options(), loader).await.unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let run = queue_prompt(&runtime, session_id, "continue".into()).await;
     collect_until(&mut events, finished_for(run)).await;
     runtime.shutdown().await.unwrap();

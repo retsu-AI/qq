@@ -1,3 +1,4 @@
+use super::probe::{Checkpoint, PROBE};
 use super::runtime::SessionRuntimeInner;
 use super::*;
 use crate::runtime::{ChildCleanupError, ChildDrainFuture};
@@ -5,75 +6,6 @@ use crate::tools;
 use qq_protocol::ChildAuthority;
 
 type ChildReceipt = Result<SpawnAgentSpend, ChildCleanupError>;
-
-#[cfg(test)]
-struct ChildDeliveryHook {
-    session_id: SessionId,
-    entered: oneshot::Sender<()>,
-    release: oneshot::Receiver<()>,
-}
-
-#[cfg(test)]
-static CHILD_DELIVERY_HOOKS: Mutex<Vec<ChildDeliveryHook>> = Mutex::new(Vec::new());
-
-#[cfg(test)]
-static RECEIPT_HOOKS: Mutex<Vec<ChildDeliveryHook>> = Mutex::new(Vec::new());
-
-#[cfg(test)]
-pub(super) fn hold_child_receipt(
-    session_id: SessionId,
-) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-    let (entered, entered_rx) = oneshot::channel();
-    let (release, release_rx) = oneshot::channel();
-    RECEIPT_HOOKS.lock().unwrap().push(ChildDeliveryHook {
-        session_id,
-        entered,
-        release: release_rx,
-    });
-    (entered_rx, release)
-}
-
-#[cfg(test)]
-static WAIT_HOOKS: Mutex<Vec<(SessionId, oneshot::Sender<()>)>> = Mutex::new(Vec::new());
-
-#[cfg(test)]
-pub(super) fn observe_parent_wait(session_id: SessionId) -> oneshot::Receiver<()> {
-    let (entered, receiver) = oneshot::channel();
-    WAIT_HOOKS.lock().unwrap().push((session_id, entered));
-    receiver
-}
-
-#[cfg(test)]
-pub(super) fn hold_child_delivery(
-    session_id: SessionId,
-) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-    let (entered, entered_rx) = oneshot::channel();
-    let (release, release_rx) = oneshot::channel();
-    CHILD_DELIVERY_HOOKS
-        .lock()
-        .unwrap()
-        .push(ChildDeliveryHook {
-            session_id,
-            entered,
-            release: release_rx,
-        });
-    (entered_rx, release)
-}
-
-#[cfg(test)]
-async fn hold_delivery_for_test(parent_session: SessionId) {
-    let hook = {
-        let mut hooks = CHILD_DELIVERY_HOOKS.lock().unwrap();
-        hooks
-            .iter()
-            .position(|hook| hook.session_id == parent_session)
-            .map(|index| hooks.remove(index))
-    };
-    if let Some(hook) = hook {
-        let _ = hook.entered.send(());
-        let _ = hook.release.await;
-    }
-}
 
 struct ChildTask {
     cancel: watch::Sender<bool>,
@@ -396,14 +328,7 @@ impl SubagentSpawner for SessionSubagentSpawner {
 
     #[cfg(test)]
     fn waiting_for_test(&self) {
-        let mut hooks = WAIT_HOOKS.lock().unwrap();
-        if let Some(index) = hooks
-            .iter()
-            .position(|(session, _)| *session == self.parent.identity.session_id)
-        {
-            let (_, entered) = hooks.remove(index);
-            let _ = entered.send(());
-        }
+        PROBE.passed(Checkpoint::ParentWait(self.parent.identity.session_id));
     }
 
     fn settled_detached(&self) -> bool {
@@ -437,8 +362,9 @@ impl SubagentSpawner for SessionSubagentSpawner {
         let parent = self.parent.clone();
         let tasks = Arc::clone(&self.tasks);
         Box::pin(async move {
-            #[cfg(test)]
-            hold_delivery_for_test(parent.identity.session_id).await;
+            PROBE
+                .reached(Checkpoint::ChildDelivery(parent.identity.session_id))
+                .await;
             let delivered = inner
                 .store
                 .deliver_children(
@@ -583,7 +509,6 @@ pub(super) async fn spawn_child_run(
     let (admitted, admission) = oneshot::channel::<SessionId>();
     let admitted = request.detached.then_some(admitted);
     let settled = budget.tasks.settled.clone();
-    #[cfg(test)]
     let parent_session = parent.identity.session_id;
     let owner_inner = Arc::clone(&inner);
     tokio::spawn(async move {
@@ -663,8 +588,9 @@ pub(super) async fn spawn_child_run(
     };
     match response {
         Ok(outcome) => {
-            #[cfg(test)]
-            hold_delivery_for_test(parent_session).await;
+            PROBE
+                .reached(Checkpoint::ChildDelivery(parent_session))
+                .await;
             outcome
         }
         Err(_) => {
@@ -878,20 +804,9 @@ async fn run_owned_child(
         && child_mode == ApprovalMode::ReadOnly
         && tasks.detach(call_id, run_id, child_session_id)
     {
-        #[cfg(test)]
-        {
-            let hook = {
-                let mut hooks = RECEIPT_HOOKS.lock().unwrap();
-                hooks
-                    .iter()
-                    .position(|hook| hook.session_id == parent.identity.session_id)
-                    .map(|index| hooks.remove(index))
-            };
-            if let Some(hook) = hook {
-                let _ = hook.entered.send(());
-                let _ = hook.release.await;
-            }
-        }
+        PROBE
+            .reached(Checkpoint::ChildReceipt(parent.identity.session_id))
+            .await;
         let _ = admitted.send(child_session_id);
     }
     let mut cancelled = false;

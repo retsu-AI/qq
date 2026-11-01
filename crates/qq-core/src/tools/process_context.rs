@@ -737,10 +737,13 @@ mod tests {
     #[test]
     fn ab1_verified_image_is_bound_and_unverified_effects_count_as_work() {
         if std::env::var_os("QQ_CONTEXT_IMAGE_WORKER").is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "tools::process_context::tests::ab1_verified_image_is_bound_and_unverified_effects_count_as_work", "--nocapture"])
-                .env("QQ_CONTEXT_IMAGE_WORKER", "1").env("LANG", "C").status().unwrap();
-            assert!(status.success());
+            crate::test_support::run_worker(
+                "tools::process_context::tests::ab1_verified_image_is_bound_and_unverified_effects_count_as_work",
+                "QQ_CONTEXT_IMAGE_WORKER",
+                |command| {
+                    command.env("LANG", "C");
+                },
+            );
             return;
         }
         let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();

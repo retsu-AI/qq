@@ -34,8 +34,7 @@ async fn command_receipt_is_durable_before_live_output_and_survives_reopen() {
         .await;
         let live: (String, Option<String>) = harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(connection.query_row(
                     "SELECT state,execution_context_json FROM tool_calls WHERE run_id=?1",
@@ -47,14 +46,7 @@ async fn command_receipt_is_durable_before_live_output_and_survives_reopen() {
             .unwrap();
 
         if cancel {
-            harness
-                .runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::CancelRun { run_id: run },
-                )
-                .await
-                .unwrap();
+            cancel_run(&harness.runtime, run).await.unwrap();
         } else {
             let mut writer = gate.try_clone().unwrap();
             tokio::task::spawn_blocking(move || writer.write_all(b"continue\n").unwrap())
@@ -114,19 +106,12 @@ async fn cancellation_at_spawn_preserves_the_process_receipt() {
     .await;
     let (spawned, release) = crate::tools::hold_shell_receipt(&harness.workspace_path);
     let run = submit_prompt(&harness, "run the command").await;
-    let stopped = execution::observe_execution_stop(run);
+    let stopped = PROBE.observe(Checkpoint::ExecutionStop(run));
     tokio::time::timeout(Duration::from_secs(5), spawned)
         .await
         .unwrap()
         .unwrap();
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: run },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, run).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), stopped)
         .await
         .unwrap()
@@ -135,8 +120,7 @@ async fn cancellation_at_spawn_preserves_the_process_receipt() {
     collect_until(&mut harness.events, finished_for(run)).await;
     let context: Option<String> = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             Ok(connection.query_row(
                 "SELECT execution_context_json FROM tool_calls WHERE run_id=?1",
@@ -289,10 +273,9 @@ pub(super) async fn pending_process_call(
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![ContentBlock::tool_call(
                         "context",
@@ -300,18 +283,9 @@ pub(super) async fn pending_process_call(
                         &serde_json::from_str::<serde_json::Value>(arguments).unwrap(),
                     )],
                 ),
-                calls: vec![call],
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-            },
+            )
+            .calls(vec![call])
+            .build(),
         )
         .await
         .unwrap();

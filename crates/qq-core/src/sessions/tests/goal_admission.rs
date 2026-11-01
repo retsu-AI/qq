@@ -6,9 +6,7 @@ async fn loading_exhaustion_without_work_blocks_after_three_attempts() {
     impl Provider for Model {
         fn stream(&self, _: ModelRequest) -> ProviderStream {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: None,
-            })]))
+            provider_script([completed(None)])
         }
     }
     struct Loader {
@@ -38,30 +36,25 @@ async fn loading_exhaustion_without_work_blocks_after_three_attempts() {
     let directory = TempDir::new().unwrap();
     let loads = Arc::new(AtomicUsize::new(0));
     let requests = Arc::new(AtomicUsize::new(0));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(Loader {
             loads: Arc::clone(&loads),
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("session")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-        "type":"set_goal","session_id":session_id,"objective":"do not loop on unproductive loading",
+    .await;
+    set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"do not loop on unproductive loading",
         "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000,"per_run":{"max_duration_ms":100}}
-    })).unwrap()).await.unwrap();
+    })).await.unwrap();
     let stopped = tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(event) = events.next().await {
             if let SessionEvent::GoalUpdated { goal } = event.unwrap().event
@@ -148,24 +141,14 @@ async fn no_work_exhaustion_streak_reopens_resets_and_respects_goal_deadline() {
                 store
                     .persist_model_turn(
                         &claim,
-                        ModelTurnCommit {
-                            model_work: crate::runtime::ModelWorkDisposition::Committed,
-                            turn_ordinal: 1,
-                            message: Message::assistant(
-                                "committed work before duration exhaustion",
-                            ),
-                            calls: Vec::new(),
-                            turn_message: None,
-                            context_tokens: None,
-                            occupancy_basis: None,
-                            usage: Some(usage),
-                            estimated_cost_usd_nanos: Some(37),
-                            accounting: Some(accounting.clone()),
-                            truncated: false,
-                            notice: None,
-                            goal_notices: Vec::new(),
-                            reserved_goal_notices: 0,
-                        },
+                        TurnCommit::new(
+                            1,
+                            Message::assistant("committed work before duration exhaustion"),
+                        )
+                        .usage(Some(usage))
+                        .cost(Some(37))
+                        .accounting(accounting.clone())
+                        .build(),
                     )
                     .await
                     .unwrap();
@@ -289,35 +272,27 @@ async fn cancelled_pending_main_request_preserves_unknown_session_and_goal_spend
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace_id, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
-        let set=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"pending request certainty",
-            "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
+        let held = runtime.hold_scheduling().await;
+        let (workspace_id, session_id, created) =
+            new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+        let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
+        let set = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id,"objective":"pending request certainty",
+                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+            }),
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = set.outcome else {
             panic!("goal")
         };
-        runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+        runtime.store().drive_goals(now_ms()).await.unwrap();
         let run = if user_prompt {
             queue_prompt(&runtime, session_id, "explicit work".to_owned()).await
         } else {
             runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     Ok(crate::sessions::goals::load_live(connection, session_id)?
                         .unwrap()
@@ -328,31 +303,25 @@ async fn cancelled_pending_main_request_preserves_unknown_session_and_goal_spend
                 .unwrap()
         };
         drop(held);
-        runtime.inner.schedule.send(()).await.unwrap();
+        runtime.request_schedule();
         tokio::time::timeout(Duration::from_secs(3), entered.notified())
             .await
             .unwrap();
-        runtime.inner.store.call(Priority::Control,move |connection| {
+        runtime.store().call(Priority::Control,move |connection| {
             let (pending,origin,turns):(bool,String,u64)=connection.query_row("SELECT goal_request_pending,origin_json,(SELECT COUNT(*) FROM model_turns WHERE run_id=runs.id) FROM runs WHERE id=?1",[run.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
             assert!(pending);
             assert_eq!(turns,0);
             assert!(if user_prompt {matches!(serde_json::from_str::<qq_protocol::RunOrigin>(&origin).unwrap(),qq_protocol::RunOrigin::UserPrompt {})} else {matches!(serde_json::from_str::<qq_protocol::RunOrigin>(&origin).unwrap(),qq_protocol::RunOrigin::Goal {..})});
             Ok(())
         }).await.unwrap();
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::GoalControl {
-                    session_id,
-                    expected: qq_protocol::GoalIdentity {
-                        goal_id: goal.goal_id,
-                        revision: goal.revision,
-                    },
-                    action: qq_protocol::GoalControl::Pause,
-                },
-            )
-            .await
-            .unwrap();
+        goal_control(
+            &runtime,
+            session_id,
+            identity_of(&goal),
+            qq_protocol::GoalControl::Pause,
+        )
+        .await
+        .unwrap();
         let finished = collect_until_run_finished(&mut events, run).await;
         let snapshot = runtime
             .snapshot(SnapshotRequest::new(
@@ -470,23 +439,12 @@ async fn direct_goal_rejections_with_finite_caps_keep_retry_pause_and_known_zero
             let CommandOutcome::SessionCreated { session_id } = created.outcome else {
                 panic!("session")
             };
-            let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session_id,"objective":"survive provider outage",
+            let receipt = set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"survive provider outage",
                 "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+86_400_000,"max_total_tokens":tokens,"max_cost_usd_nanos":cost}
             }))
-            .unwrap(),
-        )
         .await
         .unwrap();
-            let mut events = runtime
-                .subscribe(SubscribeRequest {
-                    workspace_id,
-                    after: receipt.committed_through,
-                })
-                .unwrap();
+            let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
             let (run_id, events) = if goal_origin {
                 let events = collect_until(&mut events, |event| {
                     matches!(event, SessionEvent::RunFinished { .. })
@@ -501,22 +459,7 @@ async fn direct_goal_rejections_with_finite_caps_keep_retry_pause_and_known_zero
                     .unwrap();
                 (run, events)
             } else {
-                let receipt = runtime
-                    .command(
-                        CommandId::generate().unwrap(),
-                        SessionCommand::SubmitPrompt {
-                            session_id,
-                            input: vec![InputPart::text("work")],
-                            limits: RunLimits::default(),
-                            correlation: Correlation::default(),
-                            output: None,
-                        },
-                    )
-                    .await
-                    .unwrap();
-                let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
-                    panic!("prompt")
-                };
+                let run_id = submit(&runtime, session_id, "work").await;
                 let events = collect_until_run_finished(&mut events, run_id).await;
                 (run_id, events)
             };
@@ -611,32 +554,24 @@ async fn goal_failure_after_start_before_provider_poll_preserves_known_zero() {
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace_id, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
-        runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal", "session_id":session_id,"objective":"known zero before dispatch",
-            "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
-        runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+        let held = runtime.hold_scheduling().await;
+        let (workspace_id, session_id, created) =
+            new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+        let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
+        set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id,"objective":"known zero before dispatch",
+                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+            }),
+        )
+        .await
+        .unwrap();
+        runtime.store().drive_goals(now_ms()).await.unwrap();
         let run_id = if user_prompt {
             queue_prompt(&runtime, session_id, "explicit work".to_owned()).await
         } else {
             runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     Ok(crate::sessions::goals::load_live(connection, session_id)?
                         .unwrap()
@@ -646,22 +581,26 @@ async fn goal_failure_after_start_before_provider_poll_preserves_known_zero() {
                 .await
                 .unwrap()
         };
-        let (_initial_read, release_initial) = store::hold_cancellation_read(run_id);
-        let (post_start_read, release_post_start) = store::hold_cancellation_read(run_id);
+        let (_initial_read, release_initial) = PROBE.hold(Checkpoint::CancellationRead(run_id));
+        let (post_start_read, release_post_start) =
+            PROBE.hold(Checkpoint::CancellationRead(run_id));
         release_initial.send(()).unwrap();
         drop(held);
-        runtime.inner.schedule.send(()).await.unwrap();
+        runtime.request_schedule();
         tokio::time::timeout(Duration::from_secs(3), post_start_read)
             .await
             .unwrap()
             .unwrap();
         if activity_failure {
-            runtime.inner.store.call(Priority::Control, |connection| {
+            runtime.store().call(Priority::Control, |connection| {
                 connection.execute_batch("CREATE TEMP TRIGGER refuse_waiting_activity BEFORE INSERT ON events WHEN json_extract(NEW.envelope_json,'$.event.type')='run_activity_changed' AND json_extract(NEW.envelope_json,'$.event.activity')='waiting_for_provider' BEGIN SELECT RAISE(ABORT,'activity event failure'); END;")?;
                 Ok(())
             }).await.unwrap();
         } else {
-            store::fail_cancellation_reads(run_id, [SessionRuntimeError::CONSTRAINT]);
+            FAULTS.inject(
+                StoreFault::CancellationRead(run_id),
+                [SessionRuntimeError::CONSTRAINT],
+            );
         }
         release_post_start.send(()).unwrap();
         let observed = collect_until_run_finished(&mut events, run_id).await;
@@ -711,11 +650,11 @@ async fn replayed_goal_commands_keep_the_scheduler_wakeup() {
     let mut observed = Vec::new();
     for action in ["set", "pause", "resume"] {
         let command = if action == "set" {
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"wake after a lost caller",
-                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-            }))
-            .unwrap()
+            goal_command(
+                serde_json::json!({"session_id":session_id, "objective":"wake after a lost caller",
+                    "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+                }),
+            )
         } else {
             let current = goal.as_ref().unwrap();
             SessionCommand::GoalControl {
@@ -810,22 +749,17 @@ async fn provider_replay_and_empty_reasoning_are_goal_work_before_api_fault() {
         )
         .await
         .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created =
-            create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::ReadOnly).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"retain provider work evidence",
-            "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: receipt.committed_through,
-            })
-            .unwrap();
+        let (workspace_id, session_id, _) =
+            new_session(&runtime, directory.path(), ApprovalMode::ReadOnly).await;
+        let receipt = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id,"objective":"retain provider work evidence",
+                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+            }),
+        )
+        .await
+        .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
         let finished = collect_until(&mut events, |event| {
             matches!(event, SessionEvent::RunFinished { .. })
         })
@@ -1321,9 +1255,7 @@ async fn twenty_minute_permit_wait_reclamps_unbounded_prompts_and_goal_runs() {
     impl Provider for Model {
         fn stream(&self, _: ModelRequest) -> ProviderStream {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(provider_usage_of(usage(1, 1))),
-            })]))
+            provider_script([completed(Some(provider_usage_of(usage(1, 1))))])
         }
     }
     struct Loader(Arc<AtomicUsize>);
@@ -1350,33 +1282,20 @@ async fn twenty_minute_permit_wait_reclamps_unbounded_prompts_and_goal_runs() {
             )
             .await
             .unwrap();
-            let held = Arc::clone(&runtime.inner.permits)
-                .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-                .await
-                .unwrap();
-            let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-            let created = create_session(&runtime, workspace_id, None).await;
-            let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-                panic!("session")
-            };
-            let mut events = runtime
-                .subscribe(SubscribeRequest {
-                    workspace_id,
-                    after: created.committed_through,
-                })
-                .unwrap();
+            let held = runtime.hold_scheduling().await;
+            let (workspace_id, session_id, created) =
+                new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+            let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
             let deadline = began + if expired { 19 } else { 21 } * 60_000;
-            runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"respect the original deadline after queueing",
+            set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"respect the original deadline after queueing",
                 "budget":{"max_goal_runs":1,"deadline_ms":deadline,"per_run":{"max_duration_ms":120_000}}
-            })).unwrap()).await.unwrap();
-            runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+            })).await.unwrap();
+            runtime.store().drive_goals(now_ms()).await.unwrap();
             let run = if user_prompt {
                 queue_prompt(&runtime, session_id, "unbounded prompt".to_owned()).await
             } else {
                 runtime
-                    .inner
-                    .store
+                    .store()
                     .call(Priority::Control, move |connection| {
                         Ok(crate::sessions::goals::load_live(connection, session_id)?
                             .unwrap()
@@ -1393,7 +1312,7 @@ async fn twenty_minute_permit_wait_reclamps_unbounded_prompts_and_goal_runs() {
                 "held permits prevent provider work"
             );
             drop(held);
-            runtime.inner.schedule.send(()).await.unwrap();
+            runtime.request_schedule();
             let observed = collect_until_run_finished(&mut events, run).await;
             let snapshot = runtime
                 .snapshot(SnapshotRequest::new(

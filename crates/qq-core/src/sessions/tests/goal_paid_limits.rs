@@ -11,9 +11,7 @@ async fn goal_paid_dense_first_input_is_refused_before_provider_dispatch() {
                 impl Provider for Model {
                     fn stream(&self, _: ModelRequest) -> ProviderStream {
                         self.0.fetch_add(1, Ordering::SeqCst);
-                        Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                            usage: Some(provider_usage_of(usage(20_000, 1))),
-                        })]))
+                        provider_script([completed(Some(provider_usage_of(usage(20_000, 1))))])
                     }
                 }
                 Ok(loaded_runtime(
@@ -40,55 +38,23 @@ async fn goal_paid_dense_first_input_is_refused_before_provider_dispatch() {
         )
         .await
         .unwrap();
-        let held = runtime
-            .inner
-            .permits
-            .clone()
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
-        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: created.committed_through,
-            })
-            .unwrap();
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session_id, "objective":"bounded spend",
-                    "budget":{"max_goal_runs":1, "deadline_ms":now_ms()+60_000,
-                        "max_total_tokens":if cost {None} else {Some(15_000)},
-                        "max_cost_usd_nanos":if cost {Some(15_000)} else {None}}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        let receipt = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("!x0?".repeat(5_000))],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
-        let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
-            panic!("prompt")
-        };
+        let held = runtime.hold_scheduling().await;
+        let (workspace, session_id, created) =
+            new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+        let mut events = subscribe_after(&runtime, workspace, created.committed_through);
+        set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id, "objective":"bounded spend",
+                "budget":{"max_goal_runs":1, "deadline_ms":now_ms()+60_000,
+                    "max_total_tokens":if cost {None} else {Some(15_000)},
+                    "max_cost_usd_nanos":if cost {Some(15_000)} else {None}}
+            }),
+        )
+        .await
+        .unwrap();
+        let run_id = submit(&runtime, session_id, "!x0?".repeat(5_000)).await;
         drop(held);
-        runtime.inner.schedule.send(()).await.unwrap();
+        runtime.request_schedule();
         let observed = collect_until_run_finished(&mut events, run_id).await;
         runtime.shutdown().await.unwrap();
         assert_eq!(
@@ -194,10 +160,7 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
             )
             .await
             .unwrap();
-            let held = Arc::clone(&runtime.inner.permits)
-                .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-                .await
-                .unwrap();
+            let held = runtime.hold_scheduling().await;
             let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
             let created =
                 create_session_with_mode(&runtime, workspace, None, ApprovalMode::ReadOnly).await;
@@ -207,12 +170,7 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
             else {
                 panic!("session")
             };
-            let mut events = runtime
-                .subscribe(SubscribeRequest {
-                    workspace_id: workspace,
-                    after: created.committed_through,
-                })
-                .unwrap();
+            let mut events = subscribe_after(&runtime, workspace, created.committed_through);
             let limits = RunLimits {
                 max_model_turns: (kind == "turns").then_some(2),
                 max_tool_calls: (kind == "tools").then_some(1),
@@ -222,16 +180,14 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
                 max_cost_usd_nanos: (kind == "cost").then_some(100_000),
                 ..RunLimits::default()
             };
-            runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session,"objective":"respect the stricter per-run allowance",
+            set_goal(&runtime, serde_json::json!({"session_id":session,"objective":"respect the stricter per-run allowance",
                 "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":1_000_000,
                     "per_run":if goal_origin {limits} else {RunLimits::default()}}
-            })).unwrap()).await.unwrap();
+            })).await.unwrap();
             let run = if goal_origin {
-                runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+                runtime.store().drive_goals(now_ms()).await.unwrap();
                 runtime
-                    .inner
-                    .store
+                    .store()
                     .call(Priority::Control, move |connection| {
                         Ok(crate::sessions::goals::load_live(connection, session)?
                             .unwrap()
@@ -241,26 +197,10 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
                     .await
                     .unwrap()
             } else {
-                let receipt = runtime
-                    .command(
-                        CommandId::generate().unwrap(),
-                        SessionCommand::SubmitPrompt {
-                            session_id: session,
-                            input: vec![InputPart::text("work")],
-                            limits,
-                            correlation: Correlation::default(),
-                            output: None,
-                        },
-                    )
-                    .await
-                    .unwrap();
-                let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
-                    panic!("prompt")
-                };
-                run_id
+                submit(&runtime, session, Prompt::text("work").limits(limits)).await
             };
             drop(held);
-            runtime.inner.schedule.send(()).await.unwrap();
+            runtime.request_schedule();
             let observed = collect_until_run_finished(&mut events, run).await;
             runtime.shutdown().await.unwrap();
             let calls = calls.lock().unwrap().clone();
@@ -514,14 +454,10 @@ async fn goal_paid_summary_overflow_releases_admission_before_fold_retry() {
                     },
                 )]));
             }
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: valid_summary("folded"),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(provider_usage_of(usage(10, 5))),
-                }),
-            ]))
+            provider_script([
+                text_delta(valid_summary("folded")),
+                completed(Some(provider_usage_of(usage(10, 5)))),
+            ])
         }
     }
     for cost in [false, true] {
@@ -532,47 +468,28 @@ async fn goal_paid_summary_overflow_releases_admission_before_fold_retry() {
         )
         .await
         .unwrap();
-        let held = runtime
-            .inner
-            .permits
-            .clone()
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
-        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal", "session_id":session_id, "objective":"recover a split summary",
-            "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,
-                "max_total_tokens":if cost {None} else {Some(1_000_000)},
-                "max_cost_usd_nanos":if cost {Some(1_000_000)} else {None}}
-        })).unwrap()).await.unwrap();
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("work")],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
+        let (_, session_id, _) =
+            new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+        set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id, "objective":"recover a split summary",
+                "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,
+                    "max_total_tokens":if cost {None} else {Some(1_000_000)},
+                    "max_cost_usd_nanos":if cost {Some(1_000_000)} else {None}}
+            }),
+        )
+        .await
+        .unwrap();
+        try_submit(&runtime, session_id, "work").await.unwrap();
         let claim = runtime
-            .inner
-            .store
+            .store()
             .reserve_next_run(false)
             .await
             .unwrap()
             .unwrap();
         runtime
-            .inner
-            .store
+            .store()
             .start_reserved_run(&claim, test_prepared_audit(&claim), None)
             .await
             .unwrap()
@@ -618,8 +535,7 @@ async fn goal_paid_summary_overflow_releases_admission_before_fold_retry() {
         assert!(!pending);
         drop(connection);
         runtime
-            .inner
-            .store
+            .store()
             .finish_run(
                 &claim,
                 RunOutcome::Cancelled,
@@ -671,10 +587,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
         let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
         let created = create_session(&runtime, workspace, None).await;
         let CommandOutcome::SessionCreated {
@@ -683,36 +596,21 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
         else {
             panic!("session")
         };
-        let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session,"objective":"preserve admitted uncertainty",
+        let receipt=set_goal(&runtime, serde_json::json!({"session_id":session,"objective":"preserve admitted uncertainty",
             "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":1_000_000}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("goal")
         };
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id: session,
-                    input: vec![InputPart::text("work")],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        try_submit(&runtime, session, "work").await.unwrap();
         let claim = runtime
-            .inner
-            .store
+            .store()
             .reserve_next_run(false)
             .await
             .unwrap()
             .unwrap();
         runtime
-            .inner
-            .store
+            .store()
             .start_reserved_run(&claim, test_prepared_audit(&claim), None)
             .await
             .unwrap()
@@ -737,7 +635,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
             &loaded,
         );
         let hook =
-            (!zero).then(|| crate::sessions::goal_paid::hold_summary_admission_ack(session, 1));
+            (!zero).then(|| PROBE.hold_reporting_run(Checkpoint::SummaryAdmission(session), 1));
         let compact = crate::runtime::InRunCompactor::compact(
             &compactor,
             crate::runtime::InRunCompactionRequest {
@@ -762,13 +660,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
             let helper = entered.await.unwrap();
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             if cancel {
-                runtime
-                    .command(
-                        CommandId::generate().unwrap(),
-                        SessionCommand::CancelRun { run_id: helper },
-                    )
-                    .await
-                    .unwrap();
+                cancel_run(&runtime, helper).await.unwrap();
             } else {
                 tokio::time::advance(Duration::from_secs(2)).await;
             }
@@ -804,7 +696,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
                 "a request refused before admission returns durable known-zero accounting"
             );
             let owner = claim.identity.run_id;
-            runtime.inner.store.call(Priority::Control,move |connection| {
+            runtime.store().call(Priority::Control,move |connection| {
                 let id:String=connection.query_row("SELECT id FROM runs WHERE kind='compaction' AND auto_compaction_for_run_id=?1",[owner.to_string()],|row|row.get(0))?;
                 parse_id(&id)
             }).await.unwrap()
@@ -814,7 +706,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
             usize::from(!zero),
             "no unadmitted provider request"
         );
-        runtime.inner.store.call(Priority::Control,move |connection| {
+        runtime.store().call(Priority::Control,move |connection| {
             let (pending,usage,cost,terminal):(bool,Option<String>,Option<u64>,bool)=connection.query_row(
                 "SELECT goal_request_pending,usage_json,estimated_cost_usd_nanos,outcome_json IS NOT NULL FROM runs WHERE id=?1",
                 [helper.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
@@ -831,8 +723,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
             "type":"goal_control","session_id":session,"expected":{"goal_id":goal.goal_id,"revision":goal.revision},"action":{"type":"pause"}
         })).unwrap()).await.unwrap();
         runtime
-            .inner
-            .store
+            .store()
             .finish_run(
                 &claim,
                 RunOutcome::Cancelled,

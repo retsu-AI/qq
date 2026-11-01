@@ -157,25 +157,20 @@ async fn compatible_occupancy_seeds_the_first_turn_after_restart_and_pricing_ref
                         Box::pin(stream::iter([
                             Ok(qq_provider::ProviderEvent::OutputTextDelta { text }),
                             Ok(qq_provider::ProviderEvent::Completed {
-                                usage: Some(qq_provider::ProviderUsage {
-                                    input_tokens: if call == 0 { 1_000 } else { 191_000 },
-                                    cache_read_input_tokens: 0,
-                                    cache_write_input_tokens: 0,
-                                    output_tokens: 1,
-                                    reasoning_tokens: None,
-                                }),
+                                usage: Some(provider_usage(
+                                    if call == 0 { 1_000 } else { 191_000 },
+                                    1,
+                                )),
                             }),
                         ]))
                     }
                 }
 
-                Runtime::new(OccupancyProvider(calls), "test-model", 1)
-                    .map(|runtime| runtime.with_context_window(Some(200_000)))
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, pricing))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                Ok(ProviderLoader::new(OccupancyProvider(calls))
+                    .max_output_tokens(1)
+                    .context_window(Some(200_000))
+                    .with_pricing(pricing)
+                    .loaded(&request.workspace))
             })
         }
     }
@@ -195,23 +190,20 @@ async fn compatible_occupancy_seeds_the_first_turn_after_restart_and_pricing_ref
         calls: Arc::clone(&calls),
         pricing: Arc::clone(&pricing),
     });
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database_path.clone()),
         loader.clone(),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     submit_prompt_to(&runtime, session_id, "first").await;
     let first = collect_through_finished(&mut events).await;
     let after_first = first.last().unwrap().cursor;
@@ -231,12 +223,7 @@ async fn compatible_occupancy_seeds_the_first_turn_after_restart_and_pricing_ref
     let reopened = SessionRuntime::open(SessionRuntimeOptions::new(database_path), loader)
         .await
         .unwrap();
-    let mut events = reopened
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: after_first,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&reopened, workspace_id, after_first);
     submit_prompt_to(&reopened, session_id, "second").await;
     let second = collect_through_finished(&mut events).await;
 

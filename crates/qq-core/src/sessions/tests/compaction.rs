@@ -75,23 +75,7 @@ async fn a_compaction_run_reports_compacting_and_nothing_else() {
 #[tokio::test]
 async fn compact_session_is_refused_while_active_and_never_runs_a_summarizer_tool_call() {
     let mut harness = session_management_harness().await;
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("do work".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(&harness.runtime, harness.session_id, "do work").await;
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
 
     assert_eq!(
@@ -369,39 +353,13 @@ async fn a_summarizer_that_calls_tools_on_two_turns_fails_closed() {
 #[tokio::test]
 async fn compaction_runs_account_usage_and_cost_but_join_no_transcript() {
     let (directory, runtime) = test_runtime().await;
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("say hello".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
+    try_submit(&runtime, session_id, "say hello").await.unwrap();
     collect_through_finished(&mut events).await;
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 32))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -483,13 +441,7 @@ async fn compaction_runs_account_usage_and_cost_but_join_no_transcript() {
     assert_eq!(context_tokens, None);
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 32))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -1123,30 +1075,19 @@ async fn an_over_budget_prompt_keeps_its_first_attachment_bytes_across_auto_comp
     let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
 
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![
-                    InputPart::text("y".repeat(MAX_PROMPT_BYTES - 64)),
-                    InputPart::WorkspaceFile {
-                        path: "a.txt".to_owned(),
-                        expected_hash: None,
-                        range: None,
-                    },
-                ],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
+    let prompt = submit(
+        &harness.runtime,
+        harness.session_id,
+        Prompt::input(vec![
+            InputPart::text("y".repeat(MAX_PROMPT_BYTES - 64)),
+            InputPart::WorkspaceFile {
+                path: "a.txt".to_owned(),
+                expected_hash: None,
+                range: None,
             },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id: prompt, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+        ]),
+    )
+    .await;
     let observed = collect_until(
         &mut harness.events,
         |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id != prompt),
@@ -1325,13 +1266,12 @@ async fn compaction_sends_and_persists_the_effective_output_cap() {
         )));
         let snapshot = harness
             .runtime
-            .snapshot(SnapshotRequest {
-                workspace_id: harness.workspace_id,
-                focused_session_id: Some(harness.session_id),
-                include_sessions: Vec::new(),
-                session_limit: 1,
-                message_limit: 8,
-            })
+            .snapshot(SnapshotRequest::new(
+                harness.workspace_id,
+                Some(harness.session_id),
+                1,
+                8,
+            ))
             .await
             .unwrap();
         let persisted = snapshot
@@ -1357,22 +1297,13 @@ async fn saturated_reserved_reload_waits_after_auto_compaction() {
     let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
 
-    let queued = harness
-        .runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("y".repeat(MAX_PROMPT_BYTES))],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let queued = store_command(
+        harness.runtime.store(),
+        harness.session_id,
+        "y".repeat(MAX_PROMPT_BYTES),
+    )
+    .await
+    .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
         panic!("unexpected receipt")
     };
@@ -1396,7 +1327,7 @@ async fn saturated_reserved_reload_waits_after_auto_compaction() {
         } if finished == run_id
     )));
     assert_eq!(harness.requests.lock().unwrap().len(), 3);
-    assert!(!*harness.runtime.inner.failed.borrow());
+    assert!(!harness.runtime.has_failed());
 }
 
 #[tokio::test]
@@ -1414,26 +1345,20 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
         harness.session_id,
     );
 
-    let queued = harness
-        .runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("y".repeat(MAX_PROMPT_BYTES))],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let queued = store_command(
+        harness.runtime.store(),
+        harness.session_id,
+        "y".repeat(MAX_PROMPT_BYTES),
+    )
+    .await
+    .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store::fail_reserved_reloads(run_id, [SessionRuntimeError::CONSTRAINT]);
+    FAULTS.inject(
+        StoreFault::ReservedReload(run_id),
+        [SessionRuntimeError::CONSTRAINT],
+    );
     harness.runtime.request_schedule();
     let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
 
@@ -1450,7 +1375,7 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
             ..
         } if *finished == run_id && message.contains("failed to reload the reserved prompt")
     )));
-    assert!(!*harness.runtime.inner.failed.borrow());
+    assert!(!harness.runtime.has_failed());
     let next = queue_prompt(&harness.runtime, harness.session_id, "next".to_owned()).await;
     let observed = collect_until(&mut harness.events, finished_for(next)).await;
     assert!(observed.iter().any(|event| matches!(
@@ -1462,7 +1387,7 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
         } if finished == next
     )));
     assert_eq!(harness.requests.lock().unwrap().len(), 3);
-    assert!(!*harness.runtime.inner.failed.borrow());
+    assert!(!harness.runtime.has_failed());
 }
 
 #[tokio::test]
@@ -2003,20 +1928,7 @@ async fn cancelled_queued_prompt_does_not_mask_provider_overflow_evidence() {
     let first = queue_prompt(&harness.runtime, harness.session_id, "big ask".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
 
-    let queued = harness
-        .runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("cancel this".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let queued = store_command(harness.runtime.store(), harness.session_id, "cancel this")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -2027,8 +1939,7 @@ async fn cancelled_queued_prompt_does_not_mask_provider_overflow_evidence() {
     };
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .command(
             CommandId::generate().unwrap(),
             SessionCommand::CancelRun { run_id: cancelled },
@@ -2205,8 +2116,7 @@ async fn auto_compaction_panic_settles_its_exact_prompt_reservation() {
     assert!(
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .unfinished_run_ids()
             .await
             .unwrap()
@@ -2355,7 +2265,7 @@ async fn oversized_compaction_summary_fails_without_committing_a_marker() {
             .iter()
             .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
     );
-    let connection = Connection::open(harness._directory.path().join("sessions.sqlite3")).unwrap();
+    let connection = Connection::open(harness.directory.path().join("sessions.sqlite3")).unwrap();
     let markers: u64 = connection
         .query_row("SELECT COUNT(*) FROM session_compactions", [], |row| {
             row.get(0)
@@ -2487,14 +2397,7 @@ async fn cancelling_the_queued_prompt_cancels_the_pending_auto_compaction() {
         panic!("expected the auto-compaction to start")
     };
 
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: prompt },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, prompt).await.unwrap();
     let mut observed = collect_until(&mut harness.events, finished_for(compaction)).await;
     if !observed
         .iter()
@@ -2565,28 +2468,14 @@ async fn cancelling_a_queued_prompt_never_cancels_a_manual_compaction() {
     .await;
 
     let prompt = queue_prompt(&harness.runtime, harness.session_id, "later".to_owned()).await;
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: prompt },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, prompt).await.unwrap();
     let observed = collect_until(&mut harness.events, finished_for(prompt)).await;
     assert!(!observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::CancellationRequested { run_id, .. } if *run_id == compaction
     )));
 
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: compaction },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, compaction).await.unwrap();
     let observed = collect_until(&mut harness.events, finished_for(compaction)).await;
     assert!(observed.iter().any(|event| matches!(
         &event.event,
@@ -3033,14 +2922,7 @@ async fn rollback_is_refused_while_the_session_is_not_idle() {
             .await,
         Err(SessionRuntimeError::SessionActive)
     );
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: stalled },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, stalled).await.unwrap();
     collect_until(&mut harness.events, finished_for(stalled)).await;
 }
 
@@ -3056,10 +2938,7 @@ async fn repeated_compactions_keep_every_user_message_verbatim_without_the_model
             Box::pin(async move {
                 Runtime::new(ForgetfulProvider { requests }, "test-model", 4_096)
                     .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                    .map_err(load_error)
             })
         }
     }
@@ -3094,25 +2973,20 @@ async fn repeated_compactions_keep_every_user_message_verbatim_without_the_model
 
     let directory = tempfile::tempdir().unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(ForgetfulLoader {
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
 
     let seeded = [
         "USER constraint: never touch src/legacy/parser.rs",
@@ -3363,8 +3237,7 @@ async fn search_history_recalls_compacted_transcript_with_bounded_citations() {
     let cursor = serde_json::from_str(cursor_json).unwrap();
     let page = harness
         .runtime
-        .inner
-        .store
+        .store()
         .search_history(
             harness.session_id,
             "LEGACY/PARSER".to_owned(),
@@ -4576,27 +4449,19 @@ async fn in_run_compaction_harness(turns: usize, window: u32, summary: &str) -> 
 async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
     for max_runs in [200, 1] {
         let mut harness = in_run_compaction_harness(30, 16 * 1024, "goal progress").await;
-        let held = Arc::clone(&harness.runtime.inner.permits)
-            .acquire_many_owned(harness.runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = harness.runtime.hold_scheduling().await;
         let session = harness.session_id;
+        set_goal(
+            &harness.runtime,
+            serde_json::json!({"session_id":session, "objective":"é".repeat(1024),
+                "budget":{"max_goal_runs":max_runs,"deadline_ms":now_ms()+86_400_000}
+            }),
+        )
+        .await
+        .unwrap();
         harness
             .runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session, "objective":"é".repeat(1024),
-                    "budget":{"max_goal_runs":max_runs,"deadline_ms":now_ms()+86_400_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        harness
-            .runtime
-            .inner
-            .store
+            .store()
             .call_write(Priority::Control, move |connection| {
                 let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
                 goal.check = Some(qq_protocol::GoalCheck {
@@ -4640,8 +4505,7 @@ async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
         );
         let (base, summary): (u64, String) = harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(connection.query_row(
                     "SELECT r.context_base_bytes, c.summary FROM runs r
@@ -4991,7 +4855,7 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
     );
     drop(connection);
 
-    let store = harness.runtime.inner.store.clone();
+    let store = harness.runtime.store().clone();
     let session_id = harness.session_id;
     let context = store
         .call(Priority::Control, move |connection| {
@@ -5344,14 +5208,7 @@ async fn cancelling_during_in_run_compaction_settles_both_runs_once() {
     else {
         panic!("expected the in-run compaction to start")
     };
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: run },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, run).await.unwrap();
     let mut observed = collect_until(&mut harness.events, finished_for(run)).await;
     if !observed.iter().any(|event| {
         matches!(
@@ -5395,8 +5252,7 @@ async fn cancelling_during_in_run_compaction_settles_both_runs_once() {
     assert!(
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .unfinished_run_ids()
             .await
             .unwrap()
@@ -5730,7 +5586,7 @@ async fn an_in_run_marker_survives_restart_and_folds_into_a_later_between_run_co
         )
         .await
         .unwrap();
-    let store = runtime.inner.store.clone();
+    let store = runtime.store().clone();
     let context = store
         .call(Priority::Control, move |connection| {
             let transaction = connection.transaction().unwrap();
@@ -5856,7 +5712,7 @@ async fn an_empty_faulted_attempt_inside_the_replaced_span_keeps_replay_equal_to
         let requests = harness.requests.lock().unwrap();
         requests.last().unwrap().messages().to_vec()
     };
-    let store = harness.runtime.inner.store.clone();
+    let store = harness.runtime.store().clone();
     let session_id = harness.session_id;
     let replayed = store
         .call(Priority::Control, move |connection| {
@@ -6172,15 +6028,11 @@ async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verba
             ApprovalMode::Full,
         )
         .await;
-        let held = Arc::clone(&harness.runtime.inner.permits)
-            .acquire_many_owned(harness.runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = harness.runtime.hold_scheduling().await;
         if with_goal {
-            harness.runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":harness.session_id,"objective":"bounded multi-request summary",
+            set_goal(&harness.runtime, serde_json::json!({"session_id":harness.session_id,"objective":"bounded multi-request summary",
             "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":1_000_000}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         }
         let receipt = harness
             .runtime
@@ -6483,17 +6335,7 @@ async fn a_later_queued_cancellation_cannot_evict_receipts_for_displayed_message
         })
         .await
         .unwrap();
-    let queued = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("queued later")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let queued = store_command(&store, session_id, "queued later")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id: later, .. } = queued.receipt.outcome else {
@@ -6847,7 +6689,7 @@ async fn early_constraints_and_corrections_survive_repeated_automatic_compaction
         before_failure,
         "a failed summary cannot advance the cutoff"
     );
-    assert!(!*harness.runtime.inner.failed.borrow());
+    assert!(!harness.runtime.has_failed());
     harness.runtime.shutdown().await.unwrap();
     let replay = load_model_context(
         &Connection::open(&database).unwrap(),
@@ -7077,7 +6919,7 @@ async fn oversized_legacy_inputs_fail_only_the_affected_run() {
             matches!(finished_outcome(&observed, run), Some(RunOutcome::Failed { failure })
             if failure.kind == RunFailureKind::Policy && failure.message.contains("4 MiB"))
         );
-        assert!(!*runtime.inner.failed.borrow());
+        assert!(!runtime.has_failed());
     }
     let healthy = create_session(&runtime, workspace_id, None).await;
     let CommandOutcome::SessionCreated {

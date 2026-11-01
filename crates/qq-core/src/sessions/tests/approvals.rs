@@ -182,10 +182,7 @@ impl RuntimeLoader for ManagedShellDenyLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -197,25 +194,20 @@ async fn shell_prefix_denial_precedes_auto_and_full_and_allows_continuation() {
         r#"{"command":"unlisted-tool; managed-tool --dangerous && another-tool"}"#;
     for mode in [ApprovalMode::Auto, ApprovalMode::Full] {
         let directory = test_directory();
-        let runtime = SessionRuntime::open(
-            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        let SessionFixture {
+            directory: _directory,
+            runtime,
+            session_id,
+            mut events,
+            ..
+        } = SessionFixture::open_at(
+            directory,
             Arc::new(ManagedShellDenyLoader {
                 script: vec![(TOOL, ARGUMENTS.into()), ("__test_mutate", "{}".into())],
             }),
+            mode,
         )
-        .await
-        .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        .await;
         let run_id =
             submit_prompt_to(&runtime, session_id, "continue with an allowed alternative").await;
         let observed = collect_until_run_finished(&mut events, run_id).await;
@@ -513,13 +505,12 @@ async fn denial_returns_a_tool_error_and_the_run_still_completes() {
     assert_eq!(denied_result, approval::USER_DENIED_RESULT);
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            1,
+            8,
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -566,13 +557,12 @@ async fn responding_twice_returns_the_recorded_outcome_without_side_effects() {
     );
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            1,
+            8,
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -948,7 +938,7 @@ async fn cancelling_with_buffered_tool_output_drops_it_before_terminal_settlemen
     )
     .await;
     let (mut observed, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    let (buffered, release) = execution::hold_buffered_tool_output(tool_call.id);
+    let (buffered, release) = PROBE.hold(Checkpoint::BufferedToolOutput(tool_call.id));
     respond_approval(
         &harness.runtime,
         harness.run_id,
@@ -1103,8 +1093,8 @@ async fn file_state_survives_restart_and_auto_mode_applies_the_edit_without_prom
             if tool_call.name == "read_file" && tool_call.state == ToolCallState::Completed
     )));
     let after = first.last().unwrap().cursor;
-    let ScriptedRunsHarness {
-        _directory,
+    let SessionFixture {
+        directory: _directory,
         runtime,
         workspace_path,
         workspace_id,
@@ -1136,17 +1126,7 @@ async fn file_state_survives_restart_and_auto_mode_applies_the_edit_without_prom
         })
         .unwrap();
 
-    let queued = reopened
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("now edit it".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let queued = try_submit(&reopened, session_id, "now edit it")
         .await
         .unwrap();
     assert!(matches!(
@@ -1224,13 +1204,12 @@ async fn completed_edits_persist_a_display_diff_the_model_context_never_carries(
     let (workspace_id, _) = resolve_workspace(&harness.runtime, &harness.workspace_path).await;
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
+        .snapshot(SnapshotRequest::new(
             workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+            Some(harness.session_id),
+            1,
+            8,
+        ))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -1307,18 +1286,7 @@ async fn auto_mode_executes_mutating_tools_after_a_mode_change() {
                 && session.approval_mode == ApprovalMode::Auto
     ));
 
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("mutate again".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&harness.runtime, harness.session_id, "mutate again")
         .await
         .unwrap();
     let observed = collect_through_finished(&mut harness.events).await;
@@ -1376,54 +1344,9 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
     let store = Store::open(database_path.clone()).await.unwrap();
-    let resolved = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::ResolveWorkspace {
-                path: directory.path().to_str().unwrap().to_owned(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let created = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::Ask,
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("mutate".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let (workspace_id, session_id) =
+        store_session(&store, directory.path(), ApprovalMode::Ask).await;
+    store_command(&store, session_id, "mutate").await.unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     let tool_call_id = ToolCallId::generate().unwrap();
     let call = RuntimeToolCall {
@@ -1439,12 +1362,9 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![ContentBlock::tool_call(
                         call.provider_call_id.clone(),
@@ -1452,16 +1372,9 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
                         &serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
                     )],
                 ),
-                calls: vec![call],
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .calls(vec![call])
+            .build(),
         )
         .await
         .unwrap();
@@ -1478,12 +1391,7 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: awaiting.cursor,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, awaiting.cursor);
     let recovered = collect_through_finished(&mut events).await;
     assert!(matches!(
         &recovered[0].event,
@@ -1722,26 +1630,21 @@ async fn ask_fetch_has_a_preview_while_auto_fetch_needs_no_approval() {
         );
         let url = format!("{}/docs", server.base_url);
         let directory = test_directory();
-        let runtime = SessionRuntime::open(
-            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        let SessionFixture {
+            directory: _directory,
+            runtime,
+            session_id,
+            mut events,
+            ..
+        } = SessionFixture::open_at(
+            directory,
             Arc::new(Loader {
                 arguments: serde_json::json!({"url":url}).to_string(),
                 turns,
             }),
+            mode,
         )
-        .await
-        .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        .await;
         let run_id = submit_prompt_to(&runtime, session_id, "read docs").await;
         if mode == ApprovalMode::Ask {
             let (observed, call) = collect_until_approval_requested(&mut events).await;
@@ -1869,28 +1772,17 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
         )
         .await
         .unwrap();
-        let (workspace, _) = resolve_workspace(&runtime, &root).await;
-        let created = create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: created.committed_through,
-            })
-            .unwrap();
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal","session_id":session_id,"objective":"ask before mutation",
-                    "budget":{"max_goal_runs":2,"deadline_ms":start+60_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        let (workspace, session_id, created) =
+            new_session(&runtime, &root, ApprovalMode::Ask).await;
+        let mut events = subscribe_after(&runtime, workspace, created.committed_through);
+        set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id,"objective":"ask before mutation",
+                "budget":{"max_goal_runs":2,"deadline_ms":start+60_000}
+            }),
+        )
+        .await
+        .unwrap();
         let (_, call) = collect_until_approval_requested(&mut events).await;
         if expire_goal {
             tokio::time::pause();
@@ -1951,12 +1843,7 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
             Some(goal.as_ref())
         );
         assert_eq!(requests.lock().unwrap().len(), 1);
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: cursor,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace, cursor);
         if !expire_goal {
             let unrelated =
                 queue_prompt(&runtime, session_id, "an unrelated question".to_owned()).await;
@@ -2095,19 +1982,15 @@ async fn an_expired_goal_hold_survives_the_gate_winning_cancellation() {
                 .acquire_many(inner.max_active_runs as u32)
                 .await
                 .unwrap();
-            harness
-                .runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    serde_json::from_value(serde_json::json!({
-                        "type":"set_goal", "session_id":harness.session_id,
-                        "objective":"retain the unanswered hold",
-                        "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+7_200_000}
-                    }))
-                    .unwrap(),
-                )
-                .await
-                .unwrap();
+            set_goal(
+                &harness.runtime,
+                serde_json::json!({"session_id":harness.session_id,
+                    "objective":"retain the unanswered hold",
+                    "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+7_200_000}
+                }),
+            )
+            .await
+            .unwrap();
             inner.store.drive_goals(now_ms()).await.unwrap();
             let claimed = inner.store.claim_next_run(false).await.unwrap().unwrap();
             let call = RuntimeToolCall {
@@ -2129,12 +2012,9 @@ async fn an_expired_goal_hold_survives_the_gate_winning_cancellation() {
                 .store
                 .persist_model_turn(
                     &claimed,
-                    ModelTurnCommit {
-                        model_work: crate::runtime::ModelWorkDisposition::Committed,
-                        goal_notices: Vec::new(),
-                        reserved_goal_notices: 0,
-                        turn_ordinal: 1,
-                        message: Message::new(
+                    TurnCommit::new(
+                        1,
+                        Message::new(
                             Role::Assistant,
                             vec![ContentBlock::ToolCall {
                                 id: call.provider_call_id.clone(),
@@ -2142,16 +2022,9 @@ async fn an_expired_goal_hold_survives_the_gate_winning_cancellation() {
                                 arguments: serde_json::from_str(&call.arguments).unwrap(),
                             }],
                         ),
-                        calls: vec![call.clone()],
-                        turn_message: None,
-                        context_tokens: None,
-                        occupancy_basis: None,
-                        usage: None,
-                        estimated_cost_usd_nanos: None,
-                        accounting: None,
-                        truncated: false,
-                        notice: None,
-                    },
+                    )
+                    .calls(vec![call.clone()])
+                    .build(),
                 )
                 .await
                 .unwrap();
@@ -2263,19 +2136,15 @@ async fn a_childs_timed_out_hold_pauses_the_goal_after_its_expired_owner_cancell
         .acquire_many(inner.max_active_runs as u32)
         .await
         .unwrap();
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":harness.session_id,
-                "objective":"keep the child's unanswered hold",
-                "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+7_200_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    set_goal(
+        &harness.runtime,
+        serde_json::json!({"session_id":harness.session_id,
+            "objective":"keep the child's unanswered hold",
+            "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+7_200_000}
+        }),
+    )
+    .await
+    .unwrap();
     inner.store.drive_goals(now_ms()).await.unwrap();
     let parent = inner.store.claim_next_run(false).await.unwrap().unwrap();
     inner
@@ -2312,12 +2181,9 @@ async fn a_childs_timed_out_hold_pauses_the_goal_after_its_expired_owner_cancell
         .store
         .persist_model_turn(
             &child,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![ContentBlock::ToolCall {
                         id: call.provider_call_id.clone(),
@@ -2325,16 +2191,9 @@ async fn a_childs_timed_out_hold_pauses_the_goal_after_its_expired_owner_cancell
                         arguments: serde_json::from_str(&call.arguments).unwrap(),
                     }],
                 ),
-                calls: vec![call.clone()],
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .calls(vec![call.clone()])
+            .build(),
         )
         .await
         .unwrap();
@@ -2491,7 +2350,15 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
         });
         let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
         options.approval_timeout = None;
-        let runtime = SessionRuntime::open(
+        let SessionFixture {
+            directory: _directory,
+            runtime,
+            workspace_id: workspace,
+            session_id,
+            mut events,
+            ..
+        } = SessionFixture::open_in(
+            directory,
             options,
             Arc::new(Loader {
                 inner: DepthLoader {
@@ -2506,32 +2373,15 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
                 root_loads: AtomicUsize::new(0),
                 held: StdMutex::new((preparation_ms > 0).then_some((entered, released))),
             }),
+            ApprovalMode::Ask,
         )
-        .await
-        .unwrap();
-        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: created.committed_through,
-            })
-            .unwrap();
-        runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session_id,
+        .await;
+        set_goal(&runtime, serde_json::json!({"session_id":session_id,
                 "objective":"wait for the sponsored child's explicit answer",
                 "budget":{"max_goal_runs":10,"max_total_tokens":1_000_000,
                     "deadline_ms":start+if run_duration { 7_200_000 } else { 3_600_000 },
                     "per_run": if run_duration { RunLimits { max_duration_ms: Some(3_600_000), ..RunLimits::default() } } else { RunLimits::default() }}
             }))
-            .unwrap(),
-        )
         .await
         .unwrap();
         if preparation_ms > 0 {
@@ -2555,8 +2405,7 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
             .expect("the parent started before the child asked");
         let child = call.run_id;
         let owner: String = runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(connection.query_row(
                     "SELECT goal_paid_owner_run_id FROM runs WHERE id=?1",
@@ -2669,13 +2518,11 @@ async fn readonly_revocation_denies_a_late_human_approval() {
 async fn idle_close_observes_termination_without_a_settlement() {
     for shutdown in [false, true] {
         let (directory, runtime) = test_runtime().await;
-        super::execution_context::process_call_fixture(&runtime.inner.store, directory.path())
-            .await;
+        super::execution_context::process_call_fixture(runtime.store(), directory.path()).await;
         let mut closing = Box::pin(runtime.close_when_idle(std::future::pending()));
         assert!(futures_util::poll!(closing.as_mut()).is_pending());
         runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, |_| Ok(()))
             .await
             .unwrap();

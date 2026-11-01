@@ -4417,22 +4417,38 @@ mod tests {
     #[cfg(unix)]
     async fn run_shell_tool(
         workspace: Workspace,
-        arguments: &'static str,
+        arguments: impl Into<String>,
         cancelled: RunCancellation,
         output: Option<mpsc::Sender<String>>,
     ) -> ToolOutput {
+        shell_tool(
+            workspace,
+            arguments,
+            cancelled,
+            output,
+            ToolTasks::default(),
+        )
+        .await
+    }
+
+    fn shell_tool(
+        workspace: Workspace,
+        arguments: impl Into<String>,
+        cancelled: RunCancellation,
+        output: Option<mpsc::Sender<String>>,
+        tasks: ToolTasks,
+    ) -> impl std::future::Future<Output = ToolOutput> + Send + 'static {
         execute(
             workspace,
             Arc::new(FileState::default()),
             "shell".to_owned(),
-            arguments.to_owned(),
+            arguments.into(),
             cancelled,
             output,
-            ToolTasks::default(),
+            tasks,
             Arc::new(crate::runtime::ShellPolicy::default()),
             Arc::default(),
         )
-        .await
     }
 
     #[tokio::test]
@@ -4486,16 +4502,12 @@ mod tests {
         let tasks = ToolTasks::default();
         let cancelled = RunCancellation::new();
         let (output, mut chunks) = mpsc::channel::<String>(1);
-        let mut execution = Box::pin(execute(
+        let mut execution = Box::pin(shell_tool(
             workspace,
-            Arc::new(FileState::default()),
-            "shell".to_owned(),
-            r#"{"command":"echo pid:$$; while [ ! -e start-output ]; do sleep 0.01; done; while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done"}"#.to_owned(),
+            r#"{"command":"echo pid:$$; while [ ! -e start-output ]; do sleep 0.01; done; while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done"}"#,
             cancelled.clone(),
             Some(output),
             tasks.clone(),
-            Arc::new(crate::runtime::ShellPolicy::default()),
-            Arc::default(),
         ));
         assert!(futures_util::poll!(execution.as_mut()).is_pending());
         let first = tokio::time::timeout(std::time::Duration::from_secs(5), chunks.recv())
@@ -4640,16 +4652,12 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let spawned = shell::observe_shell_spawn(workspace.path(), true);
         let tasks = ToolTasks::default();
-        let result = execute(
+        let result = shell_tool(
             workspace,
-            Arc::new(FileState::default()),
-            "shell".to_owned(),
-            PANIC_SHELL_ARGUMENTS.to_owned(),
+            PANIC_SHELL_ARGUMENTS,
             RunCancellation::new(),
             None,
             tasks.clone(),
-            Arc::new(crate::runtime::ShellPolicy::default()),
-            Arc::default(),
         )
         .await;
         assert!(result.is_error);
@@ -4670,16 +4678,12 @@ mod tests {
         let spawned = shell::observe_shell_spawn(workspace.path(), false);
         let tasks = ToolTasks::default();
         let (output, chunks) = mpsc::channel::<String>(1);
-        let mut execution = Box::pin(execute(
+        let mut execution = Box::pin(shell_tool(
             workspace,
-            Arc::new(FileState::default()),
-            "shell".to_owned(),
-            r#"{"command":"for /L %i in (1,1,2147483647) do @echo waiting"}"#.to_owned(),
+            r#"{"command":"for /L %i in (1,1,2147483647) do @echo waiting"}"#,
             RunCancellation::new(),
             Some(output),
             tasks.clone(),
-            Arc::new(crate::runtime::ShellPolicy::default()),
-            Arc::default(),
         ));
         assert!(futures_util::poll!(execution.as_mut()).is_pending());
         tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
@@ -4713,17 +4717,7 @@ mod tests {
         let tasks = ToolTasks::default();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            execute(
-                workspace,
-                Arc::new(FileState::default()),
-                "shell".to_owned(),
-                r#"{"command":"for /L %i in (1,1,2147483647) do @echo waiting","timeout_seconds":1}"#.to_owned(),
-                RunCancellation::new(),
-                None,
-                tasks.clone(),
-                Arc::new(crate::runtime::ShellPolicy::default()),
-                Arc::default(),
-            ),
+            shell_tool(workspace, r#"{"command":"for /L %i in (1,1,2147483647) do @echo waiting","timeout_seconds":1}"#, RunCancellation::new(), None, tasks.clone()),
         )
         .await
         .unwrap();
@@ -4855,16 +4849,12 @@ mod tests {
                     true => serde_json::json!({"command": command, "timeout_seconds": 3}),
                     false => serde_json::json!({"command": command}),
                 };
-                let execution = tokio::spawn(execute(
+                let execution = tokio::spawn(shell_tool(
                     workspace,
-                    Arc::new(FileState::default()),
-                    "shell".to_owned(),
                     arguments.to_string(),
                     cancelled.clone(),
                     None,
                     ToolTasks::default(),
-                    Arc::new(crate::runtime::ShellPolicy::default()),
-                    Arc::default(),
                 ));
                 let pids = reported_pids(&tree).await;
                 if !timeout {
@@ -4898,16 +4888,12 @@ mod tests {
         let tasks = ToolTasks::default();
         let mut started = Vec::new();
         for tree in escaped_trees(workspace.path()).await {
-            let execution = tokio::spawn(execute(
+            let execution = tokio::spawn(shell_tool(
                 workspace.clone(),
-                Arc::new(FileState::default()),
-                "shell".to_owned(),
                 serde_json::json!({"command": tree.command, "yield_after_seconds": 1}).to_string(),
                 RunCancellation::new(),
                 None,
                 tasks.clone(),
-                Arc::new(crate::runtime::ShellPolicy::default()),
-                Arc::default(),
             ));
             started.push(reported_pids(&tree).await);
             tokio::time::pause();
@@ -4936,19 +4922,16 @@ mod tests {
     #[test]
     fn commands_see_their_working_directory_in_pwd_and_no_oldpwd() {
         if std::env::var_os("QQ_STALE_PWD_WORKER").is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "tools::tests::commands_see_their_working_directory_in_pwd_and_no_oldpwd",
-                    "--nocapture",
-                ])
-                .env("QQ_STALE_PWD_WORKER", "1")
-                .env("PWD", "/stale-pwd")
-                .env("OLDPWD", "/stale-oldpwd")
-                .stdout(std::process::Stdio::null())
-                .status()
-                .unwrap();
-            assert!(status.success());
+            crate::test_support::run_worker(
+                "tools::tests::commands_see_their_working_directory_in_pwd_and_no_oldpwd",
+                "QQ_STALE_PWD_WORKER",
+                |command| {
+                    command
+                        .env("PWD", "/stale-pwd")
+                        .env("OLDPWD", "/stale-oldpwd")
+                        .stdout(std::process::Stdio::null());
+                },
+            );
             return;
         }
         assert_eq!(std::env::var("OLDPWD").unwrap(), "/stale-oldpwd");
@@ -5205,16 +5188,12 @@ mod tests {
         let run = |arguments: &'static str| {
             let workspace = workspace.clone();
             async move {
-                execute(
+                shell_tool(
                     workspace,
-                    Arc::new(FileState::default()),
-                    "shell".to_owned(),
-                    arguments.to_owned(),
+                    arguments,
                     RunCancellation::new(),
                     None,
                     ToolTasks::default(),
-                    Arc::new(crate::runtime::ShellPolicy::default()),
-                    Arc::default(),
                 )
                 .await
             }
@@ -5529,17 +5508,7 @@ mod tests {
         let cancelled = RunCancellation::new();
         let (output, chunks) = mpsc::channel(8);
         let yielded = yield_after_output(
-            execute(
-                workspace,
-                Arc::new(FileState::default()),
-                "shell".to_owned(),
-                r#"{"command":"echo compiling; read token < release; echo finished; exit 3","yield_after_seconds":1}"#.to_owned(),
-                cancelled.clone(),
-                Some(output),
-                tasks.clone(),
-                Arc::new(crate::runtime::ShellPolicy::default()),
-                Arc::default(),
-            ),
+            shell_tool(workspace, r#"{"command":"echo compiling; read token < release; echo finished; exit 3","yield_after_seconds":1}"#, cancelled.clone(), Some(output), tasks.clone()),
             chunks,
         )
         .await;
@@ -5599,16 +5568,12 @@ mod tests {
         let start = |command: &'static str| {
             let (output, chunks) = mpsc::channel(8);
             yield_after_output(
-                execute(
+                shell_tool(
                     workspace.clone(),
-                    Arc::new(FileState::default()),
-                    "shell".to_owned(),
-                    command.to_owned(),
+                    command,
                     cancelled.clone(),
                     Some(output),
                     tasks.clone(),
-                    Arc::new(crate::runtime::ShellPolicy::default()),
-                    Arc::default(),
                 ),
                 chunks,
             )

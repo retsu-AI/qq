@@ -152,46 +152,32 @@ async fn once_check(success: bool) {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("missing session")
     };
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"verify checked completion",
-                "check":{"command":command,"timeout_ms":5000},
-                "budget":{"max_goal_runs":if success { 1 } else { 10 },"deadline_ms":now_ms()+60_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let receipt = set_goal(
+        &runtime,
+        serde_json::json!({"session_id":session_id, "objective":"verify checked completion",
+            "check":{"command":command,"timeout_ms":5000},
+            "budget":{"max_goal_runs":if success { 1 } else { 10 },"deadline_ms":now_ms()+60_000}
+        }),
+    )
+    .await
+    .unwrap();
     let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
         panic!("missing goal")
     };
     assert!(!directory.path().join("goal-check-marker").exists());
     assert_eq!(loads.load(Ordering::SeqCst), 0);
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: receipt.committed_through,
-        })
-        .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::GoalControl {
-                session_id,
-                expected: qq_protocol::GoalIdentity {
-                    goal_id: goal.goal_id,
-                    revision: goal.revision,
-                },
-                action: qq_protocol::GoalControl::ApproveCheck {
-                    scope: qq_protocol::GoalCheckScope::Once,
-                    command: command.to_owned(),
-                },
-            },
-        )
-        .await
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
+    goal_control(
+        &runtime,
+        session_id,
+        identity_of(&goal),
+        qq_protocol::GoalControl::ApproveCheck {
+            scope: qq_protocol::GoalCheckScope::Once,
+            command: command.to_owned(),
+        },
+    )
+    .await
+    .unwrap();
     let work = collect_through_finished_generously(&mut events).await;
     assert!(
         work.iter().any(|event| matches!(&event.event,
@@ -680,20 +666,9 @@ async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
     )
     .await
     .unwrap();
-    let held = runtime
-        .inner
-        .permits
-        .clone()
-        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
+    let held = runtime.hold_scheduling().await;
     let (workspace_id, resolved) = resolve_workspace(&runtime, directory.path()).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: resolved,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, resolved);
     let mut sessions = Vec::new();
     for _ in 0..2 {
         let created = explicit_check_session(&runtime, workspace_id, None).await;
@@ -701,31 +676,29 @@ async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
             panic!("missing session")
         };
         sessions.push(session_id);
-        let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"independent checked work",
-            "check":{"command":"printf checked >> goal-check-marker","timeout_ms":5000},
-            "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
+        let receipt = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id,"objective":"independent checked work",
+                "check":{"command":"printf checked >> goal-check-marker","timeout_ms":5000},
+                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+            }),
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("missing goal")
         };
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::GoalControl {
-                    session_id,
-                    expected: qq_protocol::GoalIdentity {
-                        goal_id: goal.goal_id,
-                        revision: goal.revision,
-                    },
-                    action: qq_protocol::GoalControl::ApproveCheck {
-                        scope: qq_protocol::GoalCheckScope::Once,
-                        command: "printf checked >> goal-check-marker".to_owned(),
-                    },
-                },
-            )
-            .await
-            .unwrap();
+        goal_control(
+            &runtime,
+            session_id,
+            identity_of(&goal),
+            qq_protocol::GoalControl::ApproveCheck {
+                scope: qq_protocol::GoalCheckScope::Once,
+                command: "printf checked >> goal-check-marker".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
     }
     drop(held);
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -823,43 +796,36 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
         .await
         .unwrap();
         let (workspace_id, cursor) = resolve_workspace(&runtime, directory.path()).await;
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: cursor,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, cursor);
         let created = explicit_check_session(&runtime, workspace_id, None).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
             panic!("missing session")
         };
-        let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"verify one absolute deadline",
-            "check":{"command":"printf checked >> goal-check-marker","timeout_ms":60_000},
-            "budget":{"max_goal_runs":10,"deadline_ms":start+600_000}
-        })).unwrap()).await.unwrap();
+        let receipt = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id,"objective":"verify one absolute deadline",
+                "check":{"command":"printf checked >> goal-check-marker","timeout_ms":60_000},
+                "budget":{"max_goal_runs":10,"deadline_ms":start+600_000}
+            }),
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("missing goal")
         };
         let approved_revision = goal.revision + 1;
         let monotonic_start = tokio::time::Instant::now();
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::GoalControl {
-                    session_id,
-                    expected: qq_protocol::GoalIdentity {
-                        goal_id: goal.goal_id,
-                        revision: goal.revision,
-                    },
-                    action: qq_protocol::GoalControl::ApproveCheck {
-                        scope: qq_protocol::GoalCheckScope::Once,
-                        command: "printf checked >> goal-check-marker".to_owned(),
-                    },
-                },
-            )
-            .await
-            .unwrap();
+        goal_control(
+            &runtime,
+            session_id,
+            identity_of(&goal),
+            qq_protocol::GoalControl::ApproveCheck {
+                scope: qq_protocol::GoalCheckScope::Once,
+                command: "printf checked >> goal-check-marker".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
         tokio::time::timeout(Duration::from_secs(3), entered.notified())
             .await
             .expect("check must be reserved before the calendar changes");
@@ -912,20 +878,14 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
                     .unwrap()
                     .contains("timed out")
             );
-            runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::GoalControl {
-                        session_id,
-                        expected: qq_protocol::GoalIdentity {
-                            goal_id: observed.goal_id,
-                            revision: observed.revision,
-                        },
-                        action: qq_protocol::GoalControl::Pause,
-                    },
-                )
-                .await
-                .unwrap();
+            goal_control(
+                &runtime,
+                session_id,
+                identity_of(&observed),
+                qq_protocol::GoalControl::Pause,
+            )
+            .await
+            .unwrap();
         }
         runtime.shutdown().await.unwrap();
         let snapshot = runtime
@@ -976,45 +936,31 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
         else {
             panic!("missing session")
         };
-        let (entered, release) = super::super::goal_check::hold_result(session_id);
-        let receipt = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal","session_id":session_id,"objective":"old objective",
-                    "check":{"command":COMMAND,"timeout_ms":5000},
-                    "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        let (entered, release) = PROBE.hold(Checkpoint::GoalCheckResult(session_id));
+        let receipt = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id,"objective":"old objective",
+                "check":{"command":COMMAND,"timeout_ms":5000},
+                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+            }),
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("missing goal")
         };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: receipt.committed_through,
-            })
-            .unwrap();
-        let approved = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::GoalControl {
-                    session_id,
-                    expected: qq_protocol::GoalIdentity {
-                        goal_id: goal.goal_id,
-                        revision: goal.revision,
-                    },
-                    action: qq_protocol::GoalControl::ApproveCheck {
-                        scope: qq_protocol::GoalCheckScope::Once,
-                        command: COMMAND.to_owned(),
-                    },
-                },
-            )
-            .await
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
+        let approved = goal_control(
+            &runtime,
+            session_id,
+            identity_of(&goal),
+            qq_protocol::GoalControl::ApproveCheck {
+                scope: qq_protocol::GoalCheckScope::Once,
+                command: COMMAND.to_owned(),
+            },
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = approved.outcome else {
             panic!("missing approved goal")
         };
@@ -1080,19 +1026,13 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
                 Some(qq_protocol::GoalCheckAuthorization::Consumed)
             );
             assert!(matches!(
-                runtime
-                    .command(
-                        CommandId::generate().unwrap(),
-                        SessionCommand::GoalControl {
-                            session_id,
-                            expected: qq_protocol::GoalIdentity {
-                                goal_id: paused.goal_id,
-                                revision: paused.revision
-                            },
-                            action: qq_protocol::GoalControl::Resume,
-                        }
-                    )
-                    .await,
+                goal_control(
+                    &runtime,
+                    session_id,
+                    identity_of(paused),
+                    qq_protocol::GoalControl::Resume
+                )
+                .await,
                 Err(SessionRuntimeError::GoalCancellationPending)
             ));
         }
@@ -1119,19 +1059,13 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
             let paused = changed.as_ref().unwrap();
             assert!(
                 matches!(
-                    runtime
-                        .command(
-                            CommandId::generate().unwrap(),
-                            SessionCommand::GoalControl {
-                                session_id,
-                                expected: qq_protocol::GoalIdentity {
-                                    goal_id: paused.goal_id,
-                                    revision: paused.revision
-                                },
-                                action: qq_protocol::GoalControl::Resume,
-                            }
-                        )
-                        .await,
+                    goal_control(
+                        &runtime,
+                        session_id,
+                        identity_of(paused),
+                        qq_protocol::GoalControl::Resume
+                    )
+                    .await,
                     Err(SessionRuntimeError::GoalCheckApprovalRequired)
                 ),
                 "draining a check cannot refund consumed Once consent"
@@ -1222,44 +1156,30 @@ async fn goal_check_for_goal_blocks_after_three_failed_checks_with_durable_evide
     else {
         panic!("session")
     };
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session_id,"objective":"check until verified",
-                "check":{"command":COMMAND,"timeout_ms":5000},
-                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let receipt = set_goal(
+        &runtime,
+        serde_json::json!({"session_id":session_id,"objective":"check until verified",
+            "check":{"command":COMMAND,"timeout_ms":5000},
+            "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+        }),
+    )
+    .await
+    .unwrap();
     let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
         panic!("goal")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: receipt.committed_through,
-        })
-        .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::GoalControl {
-                session_id,
-                expected: qq_protocol::GoalIdentity {
-                    goal_id: goal.goal_id,
-                    revision: goal.revision,
-                },
-                action: qq_protocol::GoalControl::ApproveCheck {
-                    scope: qq_protocol::GoalCheckScope::ForGoal,
-                    command: COMMAND.to_owned(),
-                },
-            },
-        )
-        .await
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
+    goal_control(
+        &runtime,
+        session_id,
+        identity_of(&goal),
+        qq_protocol::GoalControl::ApproveCheck {
+            scope: qq_protocol::GoalCheckScope::ForGoal,
+            command: COMMAND.to_owned(),
+        },
+    )
+    .await
+    .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let SessionEvent::GoalUpdated { goal } = events.next().await.unwrap().unwrap().event
@@ -1433,36 +1353,24 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
         else {
             panic!("session")
         };
-        let receipt = runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"old objective",
+        let receipt = set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"old objective",
             "check":{"command":COMMAND,"timeout_ms":5000},"budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: receipt.committed_through,
-            })
-            .unwrap();
+        })).await.unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("goal")
         };
-        let receipt = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::GoalControl {
-                    session_id,
-                    expected: qq_protocol::GoalIdentity {
-                        goal_id: goal.goal_id,
-                        revision: goal.revision,
-                    },
-                    action: qq_protocol::GoalControl::ApproveCheck {
-                        scope: qq_protocol::GoalCheckScope::Once,
-                        command: COMMAND.to_owned(),
-                    },
-                },
-            )
-            .await
-            .unwrap();
+        let receipt = goal_control(
+            &runtime,
+            session_id,
+            identity_of(&goal),
+            qq_protocol::GoalControl::ApproveCheck {
+                scope: qq_protocol::GoalCheckScope::Once,
+                command: COMMAND.to_owned(),
+            },
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal: approved, .. } = receipt.outcome else {
             panic!("approved goal")
         };
@@ -1661,36 +1569,24 @@ async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions()
     else {
         panic!("session")
     };
-    let receipt = runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-        "type":"set_goal", "session_id":session_id, "objective":"verify work", "check":{"command":COMMAND,"timeout_ms":5000},
+    let receipt = set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"verify work", "check":{"command":COMMAND,"timeout_ms":5000},
         "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+60_000}
-    })).unwrap()).await.unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: receipt.committed_through,
-        })
-        .unwrap();
+    })).await.unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
     let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
         panic!("goal")
     };
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::GoalControl {
-                session_id,
-                expected: qq_protocol::GoalIdentity {
-                    goal_id: goal.goal_id,
-                    revision: goal.revision,
-                },
-                action: qq_protocol::GoalControl::ApproveCheck {
-                    scope: qq_protocol::GoalCheckScope::Once,
-                    command: COMMAND.into(),
-                },
-            },
-        )
-        .await
-        .unwrap();
+    goal_control(
+        &runtime,
+        session_id,
+        identity_of(&goal),
+        qq_protocol::GoalControl::ApproveCheck {
+            scope: qq_protocol::GoalCheckScope::Once,
+            command: COMMAND.into(),
+        },
+    )
+    .await
+    .unwrap();
     tokio::time::timeout(Duration::from_secs(5), entered.notified())
         .await
         .unwrap();
