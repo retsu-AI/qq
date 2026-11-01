@@ -117,6 +117,8 @@ pub(crate) struct FrameRenderer {
     goal_scroll: Option<usize>,
     cursor: Option<CursorPosition>,
     transcript_area: Option<crate::selection::Area>,
+    rail_area: Option<crate::selection::Area>,
+    rail_rows: Vec<(usize, SessionId)>,
     shapes: Vec<crate::selection::RowShape>,
     shapes_ready: bool,
 }
@@ -127,6 +129,8 @@ impl FrameRenderer {
             app.goal_scroll = scroll;
         }
         app.geometry.transcript = self.transcript_area;
+        app.geometry.rail = self.rail_area;
+        app.geometry.rail_rows.clone_from(&self.rail_rows);
         for (index, update) in self.pane_updates.drain(..) {
             if let Some(pane) = app.panes.get_mut(index) {
                 pane.viewport = update.viewport;
@@ -223,6 +227,8 @@ impl FrameRenderer {
         theme::activate(app.theme().palette);
         self.pane_updates.clear();
         self.transcript_area = None;
+        self.rail_area = None;
+        self.rail_rows.clear();
         self.shapes_ready = false;
         if self.theme_generation != app.theme_generation {
             self.theme_generation = app.theme_generation;
@@ -242,7 +248,7 @@ impl FrameRenderer {
         }
 
         self.cursor = None;
-        let rail_width = layout::rail_width(width, app.layout, app.sessions.len());
+        let rail_width = layout::rail_width(width, app.layout, app.sessions.listed_count());
         let pane_width = width - rail_width;
         let dock_width = pane_width.saturating_sub(2 * layout::MARGIN).max(1);
         let max_composer_rows = layout::max_composer_rows(width, height)
@@ -267,7 +273,13 @@ impl FrameRenderer {
             dock_width,
             rail_width == 0 && Tier::of(width) == Tier::Compact,
         ));
-        let layout = compute_layout(width, height, dock.len(), app.layout, app.sessions.len());
+        let layout = compute_layout(
+            width,
+            height,
+            dock.len(),
+            app.layout,
+            app.sessions.listed_count(),
+        );
         let body_height = layout.body.height;
         let inline_detail = layout.inspector.is_none();
         let slots = layout.transcripts.len();
@@ -322,7 +334,15 @@ impl FrameRenderer {
         }
         body.extend(dock);
         if let Some(rail) = layout.rail {
-            columns.push((rail.x, sidebar(app, rail.width, height, layout.tier)));
+            let (rows, hits) = sidebar(app, rail.width, height, layout.tier);
+            self.rail_area = Some(crate::selection::Area {
+                x: rail.x,
+                y: 0,
+                width: rail.width,
+                height,
+            });
+            self.rail_rows = hits;
+            columns.push((rail.x, rows));
         }
         if !columns.is_empty() {
             for (index, slot) in body.iter_mut().enumerate() {

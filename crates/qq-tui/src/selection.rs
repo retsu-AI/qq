@@ -70,6 +70,19 @@ impl RowShape {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct FrameGeometry {
     pub transcript: Option<Area>,
+    pub rail: Option<Area>,
+    pub rail_rows: Vec<(usize, qq_protocol::SessionId)>,
+}
+
+impl FrameGeometry {
+    pub(crate) fn rail_hit(&self, column: usize, row: usize) -> Option<qq_protocol::SessionId> {
+        let area = self.rail.filter(|area| area.contains(column, row))?;
+        let offset = row - area.y;
+        self.rail_rows
+            .iter()
+            .find(|(candidate, _)| *candidate == offset)
+            .map(|(_, id)| *id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

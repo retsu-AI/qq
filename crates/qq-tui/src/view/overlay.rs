@@ -91,11 +91,33 @@ fn finish_row(mut line: Line, selected: bool, width: usize) -> Line {
     line
 }
 
+const SWITCHER_PREVIEW_ROWS: usize = 3;
+
+fn session_age(now_ms: u64, updated_at_ms: u64) -> String {
+    let seconds = now_ms.saturating_sub(updated_at_ms) / 1000;
+    match seconds {
+        0..=9 => "now".to_owned(),
+        10..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m", seconds / 60),
+        3600..=86_399 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+fn last_line(text: &str) -> &str {
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+}
+
 pub(super) fn session_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(Overlay::Sessions {
         picker,
         scope,
         confirm,
+        ..
     }) = &app.overlay
     else {
         return fit_height(Vec::new(), height);
@@ -123,18 +145,20 @@ pub(super) fn session_picker(app: &App, width: usize, height: usize) -> Vec<Line
     } else {
         "  No matching sessions.".to_owned()
     };
+    let title_width = picker
+        .filtered()
+        .map(|(_, row)| text_width(&row.title) + if row.is_agent() { 4 } else { 0 })
+        .max()
+        .unwrap_or(0)
+        .clamp(12, 28);
     picker_frame(
         picker,
         PickerChrome {
-            title: if scope.is_some() {
-                "AGENTS"
-            } else {
-                "SESSIONS"
-            },
+            title: if scope.is_some() { "AGENTS" } else { "SWITCH" },
             hint: if confirm.is_some() {
                 "y confirms, n or Esc cancels"
             } else {
-                "type to search, Enter focuses, Ctrl-D deletes, Esc closes"
+                "type to search, Enter opens, Tab agents, Ctrl-A all agents, Ctrl-D deletes, Esc closes"
             },
             placeholder: "all sessions",
             question,
@@ -143,17 +167,52 @@ pub(super) fn session_picker(app: &App, width: usize, height: usize) -> Vec<Line
         width,
         height,
         |row: &SessionRow, selected, out| {
-            let depth = app.sessions.depth(row.id);
-            let prefix = format!(
-                "  {}{} ",
-                "  ".repeat(depth),
-                if selected { ">" } else { " " }
+            let (glyph, glyph_style) = rail_glyph(app, row.id);
+            let mut line = Line::styled(if selected { "  ▎ " } else { "    " }, accent());
+            line.push(format!("{glyph} "), glyph_style);
+            let title = if row.is_agent() {
+                format!("{} › {}", row.session_title, row.title)
+            } else {
+                row.title.clone()
+            };
+            let used = line.width();
+            line.push(
+                format!("{:<title_width$}", fit_text(&title, title_width + 8)),
+                if selected { normal() } else { muted() },
             );
-            out.push(finish_row(
-                session_line(app, row.id, width, &prefix),
-                selected,
-                width,
-            ));
+            let badge = if row.agents > 0 {
+                format!("  ↳{}", row.agents)
+            } else {
+                String::new()
+            };
+            line.push(format!("{badge:<5}"), faint());
+            line.push(
+                format!("{:>4}   ", session_age(app.now_ms, row.updated_at_ms)),
+                faint(),
+            );
+            let room = width.saturating_sub(line.width());
+            let live = live_status_line(app, row.id).map(|(text, _)| text);
+            let tail = live.unwrap_or_else(|| last_line(&row.answer).to_owned());
+            let _ = used;
+            line.push(fit_text(&tail, room), muted());
+            out.push(finish_row(line, selected, width));
+            if selected && !row.answer.is_empty() {
+                let preview = row
+                    .answer
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .take(SWITCHER_PREVIEW_ROWS);
+                for text in preview {
+                    out.push(truncate_line(
+                        Line::styled(
+                            format!("        {}", fit_text(text, width.saturating_sub(10))),
+                            faint(),
+                        ),
+                        width,
+                    ));
+                }
+            }
         },
     )
 }

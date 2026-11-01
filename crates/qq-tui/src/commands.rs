@@ -17,6 +17,7 @@ pub(crate) enum Command {
     OpenSessions,
     OpenAgents,
     ToggleSessions,
+    PreviousSession,
     NewRootSession,
     NewChildSession,
     CompactSession,
@@ -104,7 +105,7 @@ macro_rules! spec {
     (@action $action:ident) => { Some(Action::$action) };
 }
 
-pub(crate) const COMMANDS: [CommandSpec; 46] = [
+pub(crate) const COMMANDS: [CommandSpec; 47] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -121,25 +122,33 @@ pub(crate) const COMMANDS: [CommandSpec; 46] = [
     ),
     spec!(
         OpenSessions,
-        "open sessions",
+        "switch session",
         Session,
         ["/sessions", "/resume"],
         []
     ),
     spec!(
         OpenAgents,
-        "open the focused session's agent tree",
+        "switch to an agent of the focused session",
         Session,
         ["/agents"],
         []
     ),
     spec!(
         ToggleSessions,
-        "toggle the session navigator",
+        "switch session",
         Session,
         [],
         [],
         ToggleNavigator
+    ),
+    spec!(
+        PreviousSession,
+        "swap to the previous session",
+        Session,
+        [],
+        [],
+        PreviousSession
     ),
     spec!(
         NewRootSession,
@@ -319,7 +328,7 @@ pub(crate) const COMMANDS: [CommandSpec; 46] = [
     ),
     spec!(
         ToggleSidebar,
-        "toggle the session sidebar",
+        "toggle the session rail",
         View,
         [],
         ["Ctrl-\\"]

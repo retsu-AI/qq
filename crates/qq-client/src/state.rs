@@ -358,24 +358,25 @@ impl SessionStore {
 
     #[must_use]
     pub fn rail_order(&self) -> Vec<(SessionId, Group)> {
-        let mut rows: Vec<(Group, std::cmp::Reverse<(u64, SessionId)>, SessionId)> = self
+        let mut rows: Vec<(Group, usize, SessionId)> = self
             .listed_sessions()
             .into_iter()
-            .map(|id| {
+            .enumerate()
+            .map(|(position, id)| {
                 let group = match self.session_group(id) {
                     Group::Idle | Group::Done => Group::Done,
                     group => group,
                 };
-                let summary = &self.sessions[&id].summary;
-                (
-                    group,
-                    std::cmp::Reverse((summary.updated_at_ms, id)),
-                    id,
-                )
+                (group, position, id)
             })
             .collect();
         rows.sort();
         rows.into_iter().map(|(group, _, id)| (id, group)).collect()
+    }
+
+    #[must_use]
+    pub fn listed_count(&self) -> usize {
+        self.index().listed.len()
     }
 
     #[must_use]
@@ -729,11 +730,7 @@ impl SessionStore {
                     index.listed.push(session_id);
                 }
                 if let Some(kids) = index.children.get(&Some(session_id)) {
-                    stack.extend(
-                        kids.iter()
-                            .rev()
-                            .map(|id| (*id, depth + 1, hidden, rooted)),
-                    );
+                    stack.extend(kids.iter().rev().map(|id| (*id, depth + 1, hidden, rooted)));
                 }
             }
             index

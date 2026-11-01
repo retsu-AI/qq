@@ -2,45 +2,6 @@ use super::*;
 use layout::Tier;
 pub(super) use qq_client::state::{Group, Need};
 
-pub(super) fn session_line(app: &App, session_id: SessionId, width: usize, prefix: &str) -> Line {
-    let view = &app.sessions[&session_id];
-    let session = &view.summary;
-    let (marker, style) = match view.need() {
-        Some(Need::Approval) => ("◇", warning()),
-        Some(Need::Failed) => ("✕", failure()),
-        Some(Need::FinishedUnread) => ("●", accent()),
-        None => match session.status {
-            SessionStatus::Idle => match session.last_outcome.as_ref() {
-                Some(qq_protocol::RunOutcome::Completed) => ("●", muted()),
-                Some(
-                    qq_protocol::RunOutcome::Cancelled
-                    | qq_protocol::RunOutcome::Interrupted
-                    | qq_protocol::RunOutcome::BudgetExhausted { .. }
-                    | qq_protocol::RunOutcome::Paused { .. },
-                ) => ("◌", muted()),
-                Some(qq_protocol::RunOutcome::Failed { .. }) => ("✕", failure()),
-                None => ("○", muted()),
-            },
-            SessionStatus::Queued => ("○", warning()),
-            SessionStatus::Running => (spinner(app.animation_tick), info()),
-        },
-    };
-    let mut line = Line::styled(prefix, muted());
-    line.push(format!("{marker} "), style);
-    line.push(
-        &session.title,
-        if app.focused() == Some(session_id) {
-            normal().bold()
-        } else {
-            normal()
-        },
-    );
-    if session.queued_prompts > 0 {
-        line.push(format!("  {} queued", session.queued_prompts), warning());
-    }
-    truncate_line(line, width)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RailEntry {
     pub id: SessionId,
@@ -48,43 +9,35 @@ pub(super) struct RailEntry {
     pub unread: u32,
     pub live: bool,
     pub cost: Option<u64>,
+    pub agents: usize,
+    pub working: usize,
 }
 
 pub(super) fn rail_entries(app: &App) -> (Vec<RailEntry>, [usize; 4]) {
-    let mut buckets: [Vec<RailEntry>; 4] = Default::default();
-    for &id in app.sessions.thread_order() {
-        let session = &app.sessions[&id];
-        let group = session.group();
-        let focused = app.focused() == Some(id);
-        let unread = if focused { 0 } else { session.unread };
-        let live = !session.live.awaiting_approval.is_empty()
-            || session.summary.status == SessionStatus::Running
-            || session.summary.queued_prompts > 0
-            || (!focused && !session.live.tail.is_empty());
-        let cost = session
-            .summary
-            .accounting
-            .map(|accounting| accounting.direct.estimated_cost_usd_nanos)
-            .unwrap_or(session.summary.estimated_cost_usd_nanos)
-            .filter(|nanos| *nanos > 0);
-        buckets[group as usize].push(RailEntry {
-            id,
-            group,
-            unread,
-            live,
-            cost,
-        });
-    }
-    let counts = [
-        buckets[0].len(),
-        buckets[1].len(),
-        buckets[2].len(),
-        buckets[3].len(),
-    ];
-    let mut entries = Vec::with_capacity(counts.iter().sum());
-    for bucket in buckets {
-        entries.extend(bucket);
-    }
+    let order = app.sessions.rail_order();
+    let mut counts = [0; 4];
+    let entries = order
+        .into_iter()
+        .map(|(id, group)| {
+            let session = &app.sessions[&id];
+            let focused = app.focused() == Some(id);
+            let live = group != Group::Done
+                || !session.live.awaiting_approval.is_empty()
+                || session.summary.status == SessionStatus::Running
+                || session.summary.queued_prompts > 0
+                || (!focused && !session.live.tail.is_empty());
+            counts[group as usize] += 1;
+            RailEntry {
+                id,
+                group,
+                unread: if focused { 0 } else { session.unread },
+                live,
+                cost: app.sessions.inclusive_cost(id),
+                agents: app.sessions.agents_of(id).len(),
+                working: app.sessions.working_agents(id),
+            }
+        })
+        .collect();
     (entries, counts)
 }
 
@@ -117,7 +70,14 @@ const fn rail_group_label(group: Group) -> &'static str {
     }
 }
 
-pub(super) fn sidebar(app: &App, width: usize, height: usize, tier: Tier) -> Vec<Line> {
+pub(super) const RAIL_AGENT_ROWS: usize = 6;
+
+pub(super) fn sidebar(
+    app: &App,
+    width: usize,
+    height: usize,
+    tier: Tier,
+) -> (Vec<Line>, Vec<(usize, SessionId)>) {
     let wide = tier >= Tier::Wide;
     let inner = width.saturating_sub(2 * RAIL_PADDING);
     let fill = |line: Line| {
@@ -137,6 +97,8 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, tier: Tier) -> Vec
         Header(&'static str),
         Session(usize),
         Detail(usize),
+        Agent(SessionId),
+        More(usize),
     }
     let mut plan: Vec<Row> = vec![Row::Blank];
     let mut focused_row = 0;
@@ -154,8 +116,26 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, tier: Tier) -> Vec
             focused_row = plan.len();
         }
         plan.push(Row::Session(index));
-        if wide && (entry.live || entry.cost.is_some()) {
+        if wide
+            && (entry.cost.is_some() || (entry.live && live_status_line(app, entry.id).is_some()))
+        {
             plan.push(Row::Detail(index));
+        }
+        let in_focus = app
+            .focused()
+            .and_then(|focused| app.sessions.session_of(focused))
+            == Some(entry.id);
+        let shown: Vec<SessionId> = app
+            .sessions
+            .agents_of(entry.id)
+            .into_iter()
+            .filter(|agent| in_focus || app.sessions[agent].need() == Some(Need::Approval))
+            .collect();
+        for agent in shown.iter().take(RAIL_AGENT_ROWS) {
+            plan.push(Row::Agent(*agent));
+        }
+        if shown.len() > RAIL_AGENT_ROWS {
+            plan.push(Row::More(shown.len() - RAIL_AGENT_ROWS));
         }
     }
     let start = focused_row
@@ -182,16 +162,20 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, tier: Tier) -> Vec
                     },
                     faint(),
                 );
-                let (glyph, glyph_style) = rail_glyph(app, entry.id);
+                let (glyph, glyph_style) = match (entry.group, view.group()) {
+                    (Group::NeedsYou, own) if own != Group::NeedsYou => ("◇", warning()),
+                    (Group::Working, Group::Idle | Group::Done) => {
+                        (spinner(app.animation_tick), info())
+                    }
+                    _ => rail_glyph(app, entry.id),
+                };
                 line.push(format!("{glyph} "), glyph_style);
-                let agents = app
-                    .sessions
-                    .children_of(entry.id)
-                    .iter()
-                    .filter(|child| app.sessions.contains_key(child))
-                    .count();
-                let badge = if agents > 0 {
-                    format!("  ↳{agents}")
+                let badge = if entry.agents > 0 {
+                    if entry.working > 0 && entry.working != entry.agents {
+                        format!("  ↳{} ◐{}", entry.agents, entry.working)
+                    } else {
+                        format!("  ↳{}", entry.agents)
+                    }
                 } else if entry.unread > 0 {
                     format!("  {} new", entry.unread)
                 } else {
@@ -205,6 +189,23 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, tier: Tier) -> Vec
                 line.push(badge, faint());
                 line
             }
+            Row::Agent(agent) => {
+                let focused = app.focused() == Some(agent);
+                let (glyph, glyph_style) = rail_glyph(app, agent);
+                let mut line = if focused {
+                    Line::styled("▎   ", accent())
+                } else {
+                    Line::styled("    ", normal())
+                };
+                line.push(format!("{glyph} "), glyph_style);
+                let room = inner.saturating_sub(line.width());
+                line.push(
+                    fit_text(&app.sessions[&agent].summary.title, room),
+                    if focused { normal() } else { faint() },
+                );
+                line
+            }
+            Row::More(count) => Line::styled(format!("      +{count} more"), faint()),
             Row::Detail(index) => {
                 let entry = &entries[index];
                 let activity = live_status_line(app, entry.id).map(|(text, _)| text);
@@ -224,16 +225,25 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, tier: Tier) -> Vec
             }
         }
     };
+    let mut hits = Vec::new();
     let mut lines: Vec<Line> = plan
         .iter()
         .skip(start)
         .take(height)
-        .map(|row| fill(render(row)))
+        .enumerate()
+        .map(|(offset, row)| {
+            match *row {
+                Row::Session(index) => hits.push((offset, entries[index].id)),
+                Row::Agent(agent) => hits.push((offset, agent)),
+                Row::Blank | Row::Header(_) | Row::Detail(_) | Row::More(_) => {}
+            }
+            fill(render(row))
+        })
         .collect();
     while lines.len() < height {
         lines.push(fill(Line::default()));
     }
-    lines
+    (lines, hits)
 }
 
 pub(super) fn fit_text(text: &str, width: usize) -> String {

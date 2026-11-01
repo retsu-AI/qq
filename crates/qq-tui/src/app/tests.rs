@@ -2590,7 +2590,27 @@ fn agents_picker_lists_only_the_focused_roots_subtree() {
     assert!(!app.filtered_sessions().contains(&other_root.id));
 
     app.execute(Command::OpenSessions);
-    assert_eq!(app.filtered_sessions().len(), 4);
+    let mut sessions = app.filtered_sessions();
+    sessions.sort();
+    let mut expected = vec![root, other_root.id];
+    expected.sort();
+    assert_eq!(
+        sessions, expected,
+        "lists show sessions; agents fold into them"
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let on = app.session_picker_selected().unwrap();
+    if on != root {
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    }
+    assert_eq!(app.session_picker_selected(), Some(root));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.filtered_sessions().len(), 4, "Tab unfolds the agents");
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.filtered_sessions().len(), 2, "Tab folds them again");
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(app.filtered_sessions().len(), 4, "Ctrl-A lists every agent");
 }
 
 fn running_app() -> (
@@ -5800,4 +5820,230 @@ fn goal_form_failure_keeps_draft_refreshes_and_never_rebinds_a_changed_goal() {
             .is_empty(),
         "cannot silently retry on a fresh revision"
     );
+}
+
+fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+    KeyEvent::new(code, modifiers)
+}
+
+fn switcher_app() -> (App, [SessionId; 5]) {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let first = initial.sessions[0].id;
+    let mut beta = summary_named(0x91, "beta build");
+    beta.updated_at_ms = 100;
+    let mut gamma = summary_named(0x92, "gamma docs");
+    gamma.updated_at_ms = 300;
+    let mut agent = summary_named(0x93, "beta lint");
+    agent.parent_id = Some(beta.id);
+    let mut delta = summary_named(0x94, "delta");
+    delta.updated_at_ms = 200;
+    initial
+        .sessions
+        .extend([beta.clone(), gamma.clone(), agent.clone(), delta.clone()]);
+    app.apply_snapshot(initial);
+    (app, [first, beta.id, gamma.id, agent.id, delta.id])
+}
+
+#[test]
+fn alt_digits_focus_the_numbered_rail_rows_and_ignore_missing_ones() {
+    let (mut app, ids) = switcher_app();
+    let order = app.sessions.rail_order();
+    assert_eq!(order.len(), 4, "agents fold into their session");
+    for (index, (expected, _)) in order.iter().enumerate() {
+        let digit = char::from(b'1' + u8::try_from(index).unwrap());
+        app.handle_key(key(KeyCode::Char(digit), KeyModifiers::ALT));
+        assert_eq!(app.focused(), Some(*expected), "Alt-{digit}");
+    }
+    let before = app.focused();
+    let effects = app.handle_key(key(KeyCode::Char('9'), KeyModifiers::ALT));
+    assert!(!effects.requests_anything());
+    assert_eq!(app.focused(), before, "Alt-9 has no row");
+    assert!(!ids.is_empty());
+}
+
+#[test]
+fn ctrl_caret_and_ctrl_six_swap_to_the_previous_session() {
+    let (mut app, [first, beta, ..]) = switcher_app();
+    app.focus_session(first);
+    app.focus_session(beta);
+    app.handle_key(key(KeyCode::Char('6'), KeyModifiers::CONTROL));
+    assert_eq!(app.focused(), Some(first));
+    app.handle_key(key(KeyCode::Char('^'), KeyModifiers::CONTROL));
+    assert_eq!(app.focused(), Some(beta), "it swaps back");
+}
+
+#[test]
+fn the_switcher_opens_on_the_previous_session_so_ctrl_t_enter_goes_back() {
+    let (mut app, [first, beta, ..]) = switcher_app();
+    app.focus_session(first);
+    app.focus_session(beta);
+    app.handle_key(key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    assert_eq!(app.session_picker_selected(), Some(first));
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.focused(), Some(first));
+}
+
+#[test]
+fn switcher_ranks_title_prefix_then_word_prefix_then_subsequence_then_agents_then_answers() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let mut subsequence = summary_named(0xa1, "xxbxxuxxg");
+    subsequence.updated_at_ms = 900;
+    let mut word = summary_named(0xa2, "the bug hunt");
+    word.updated_at_ms = 800;
+    let mut prefix_old = summary_named(0xa3, "bug triage");
+    prefix_old.updated_at_ms = 10;
+    let mut prefix_new = summary_named(0xa4, "bugs everywhere");
+    prefix_new.updated_at_ms = 20;
+    let mut owner = summary_named(0xa5, "release");
+    owner.updated_at_ms = 700;
+    let mut agent = summary_named(0xa6, "bug bisect");
+    agent.parent_id = Some(owner.id);
+    let mut answered = summary_named(0xa7, "notes");
+    answered.updated_at_ms = 600;
+    initial.sessions.extend([
+        subsequence.clone(),
+        word.clone(),
+        prefix_old.clone(),
+        prefix_new.clone(),
+        owner.clone(),
+        agent.clone(),
+        answered.clone(),
+    ]);
+    initial.included.push(body_for(&answered, "found a bug in the parser"));
+    app.apply_snapshot(initial);
+    app.execute(Command::OpenSessions);
+    for character in "bug".chars() {
+        app.handle_key(key(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    assert_eq!(
+        app.filtered_sessions(),
+        vec![
+            prefix_new.id,
+            prefix_old.id,
+            word.id,
+            subsequence.id,
+            agent.id,
+            answered.id
+        ],
+        "ties go to the most recently active; agent matches are listed; answers rank last"
+    );
+}
+
+#[test]
+fn deleting_the_highlighted_agent_falls_back_to_its_session() {
+    let (mut app, [_, beta, _, agent, _]) = switcher_app();
+    app.execute(Command::OpenSessions);
+    app.handle_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    let listed = app.filtered_sessions();
+    assert!(listed.contains(&agent), "Ctrl-A lists every agent: {listed:?}");
+    for _ in 0..listed.len() {
+        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE));
+    }
+    for _ in 0..listed.len() {
+        if app.session_picker_selected() == Some(agent) {
+            break;
+        }
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE));
+    }
+    assert_eq!(app.session_picker_selected(), Some(agent));
+    app.sessions.remove(&agent);
+    app.refresh_session_picker();
+    assert_eq!(app.session_picker_selected(), Some(beta));
+}
+
+#[test]
+fn audits_are_never_listed_attended_numbered_or_navigated_to() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let root = initial.sessions[0].id;
+    let mut audit = summary_named(0xb1, "audit");
+    audit.parent_id = Some(root);
+    audit.purpose = qq_protocol::SessionPurpose::Audit;
+    let mut under = summary_named(0xb2, "audit child");
+    under.parent_id = Some(audit.id);
+    let visible = summary_named(0xb3, "visible");
+    initial
+        .sessions
+        .extend([audit.clone(), under.clone(), visible.clone()]);
+    app.apply_snapshot(initial);
+    app.sessions
+        .get_mut(&under.id)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([9; 16]));
+    app.sessions.get_mut(&audit.id).unwrap().finished_unread = true;
+
+    assert!(app.sessions_needing_attention().is_empty());
+    app.handle_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+    assert_ne!(app.focused(), Some(audit.id));
+    assert_ne!(app.focused(), Some(under.id));
+    app.execute(Command::OpenSessions);
+    app.handle_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert!(!app.filtered_sessions().contains(&audit.id));
+    assert!(!app.filtered_sessions().contains(&under.id));
+    app.overlay = None;
+    app.focus_session(root);
+    app.handle_key(key(KeyCode::Down, KeyModifiers::ALT));
+    assert_eq!(app.focused(), Some(root), "Alt-Down skips audits");
+    for digit in ['1', '2', '3', '4'] {
+        app.handle_key(key(KeyCode::Char(digit), KeyModifiers::ALT));
+        assert_ne!(app.focused(), Some(audit.id));
+        assert_ne!(app.focused(), Some(under.id));
+    }
+}
+
+#[test]
+fn a_forced_focus_move_drops_a_half_typed_answer() {
+    let (mut app, [first, beta, ..]) = switcher_app();
+    app.focus_session(first);
+    app.question_answers.push("half".to_owned());
+    app.approval_amendment = Some(ApprovalChoice::Deny);
+    app.focus_session(beta);
+    assert!(app.question_answers.is_empty());
+    assert!(app.approval_amendment.is_none());
+}
+
+#[test]
+fn clicking_a_rail_row_focuses_that_session_and_a_stale_hit_is_refused() {
+    let (mut app, _) = switcher_app();
+    app.layout.rail = crate::view::PanePref::Shown;
+    let mut renderer = crate::view::FrameRenderer::default();
+    renderer.frame_and_commit(&mut app, 120, 40);
+    let order = app.sessions.rail_order();
+    let target = order.last().unwrap().0;
+    let area = app.geometry.rail.expect("rail geometry is committed");
+    let row = area.y
+        + app
+            .geometry
+            .rail_rows
+            .iter()
+            .find(|(_, id)| *id == target)
+            .unwrap()
+            .0;
+    let click = |column: u16, row: u16| {
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    app.handle_terminal_event(click(
+        u16::try_from(area.x + 4).unwrap(),
+        u16::try_from(row).unwrap(),
+    ));
+    assert_eq!(app.focused(), Some(target));
+
+    let stale = order[0].0;
+    app.sessions.remove(&stale);
+    let before = app.focused();
+    let stale_row = app.geometry.rail_rows.iter().find(|(_, id)| *id == stale).unwrap().0;
+    app.handle_terminal_event(click(
+        u16::try_from(area.x + 4).unwrap(),
+        u16::try_from(area.y + stale_row).unwrap(),
+    ));
+    assert_eq!(app.focused(), before, "a deleted session is not focused");
 }
