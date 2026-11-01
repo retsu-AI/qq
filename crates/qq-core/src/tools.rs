@@ -4845,7 +4845,13 @@ mod tests {
         let text = match tokio::time::timeout(std::time::Duration::from_secs(20), reader).await {
             Ok(text) => text.unwrap().unwrap(),
             Err(_) => {
-                drop(std::fs::OpenOptions::new().write(true).open(&tree.report));
+                drop(
+                    std::os::unix::fs::OpenOptionsExt::custom_flags(
+                        std::fs::OpenOptions::new().write(true),
+                        rustix::fs::OFlags::NONBLOCK.bits() as i32,
+                    )
+                    .open(&tree.report),
+                );
                 panic!("the escaped command never reported its pids");
             }
         };
