@@ -2518,7 +2518,7 @@ async fn readonly_revocation_denies_a_late_human_approval() {
 async fn idle_close_observes_termination_without_a_settlement() {
     for shutdown in [false, true] {
         let (directory, runtime) = test_runtime().await;
-        super::execution_context::process_call_fixture(&runtime.store(), directory.path()).await;
+        super::execution_context::process_call_fixture(runtime.store(), directory.path()).await;
         let mut closing = Box::pin(runtime.close_when_idle(std::future::pending()));
         assert!(futures_util::poll!(closing.as_mut()).is_pending());
         runtime

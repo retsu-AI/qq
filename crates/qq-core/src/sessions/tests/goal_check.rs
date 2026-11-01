@@ -1029,7 +1029,7 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
                 goal_control(
                     &runtime,
                     session_id,
-                    identity_of(&paused),
+                    identity_of(paused),
                     qq_protocol::GoalControl::Resume
                 )
                 .await,
@@ -1062,7 +1062,7 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
                     goal_control(
                         &runtime,
                         session_id,
-                        identity_of(&paused),
+                        identity_of(paused),
                         qq_protocol::GoalControl::Resume
                     )
                     .await,

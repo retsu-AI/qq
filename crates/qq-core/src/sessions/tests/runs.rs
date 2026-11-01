@@ -1409,10 +1409,7 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
     let submit = |prompt: &str| {
         let input = vec![InputPart::text(prompt.to_owned())];
         let runtime = &runtime;
-        async move {
-            let run_id = submit(&runtime, session_id, Prompt::input(input)).await;
-            run_id
-        }
+        async move { submit(runtime, session_id, Prompt::input(input)).await }
     };
 
     let run_id = submit("write a long answer").await;

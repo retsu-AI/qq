@@ -1266,7 +1266,7 @@ async fn spill_one_call(
     text: &str,
     prompt: &str,
 ) -> (ToolCallId, String) {
-    store_command(&store, session_id, prompt).await.unwrap();
+    store_command(store, session_id, prompt).await.unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     let tool_call_id = ToolCallId::generate().unwrap();
     let call = RuntimeToolCall {
@@ -3722,7 +3722,7 @@ async fn create_claimed_parent(
     let CommandOutcome::SessionCreated { session_id } = root.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store_command(&store, session_id, "delegate work")
+    store_command(store, session_id, "delegate work")
         .await
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
@@ -4479,13 +4479,12 @@ async fn child_budget_harness_with_window(
 }
 
 async fn submit_child_budget_prompt(harness: &SpawnHarness, limits: RunLimits) -> RunId {
-    let run_id = submit(
+    submit(
         &harness.runtime,
         harness.session_id,
         Prompt::text("delegate").limits(limits),
     )
-    .await;
-    run_id
+    .await
 }
 
 struct BudgetLoopProvider {
@@ -6134,7 +6133,7 @@ impl RuntimeLoader for SideScriptLoader {
                     }
                 }
             }
-            let pricing = priced.then(|| test_pricing());
+            let pricing = priced.then(test_pricing);
             Ok(loaded_runtime(
                 Runtime::new(ScriptProvider(scripts), "test-model", 256).unwrap(),
                 &request.workspace,

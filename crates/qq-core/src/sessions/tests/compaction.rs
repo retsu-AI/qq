@@ -1298,7 +1298,7 @@ async fn saturated_reserved_reload_waits_after_auto_compaction() {
     collect_until(&mut harness.events, finished_for(first)).await;
 
     let queued = store_command(
-        &harness.runtime.store(),
+        harness.runtime.store(),
         harness.session_id,
         "y".repeat(MAX_PROMPT_BYTES),
     )
@@ -1346,7 +1346,7 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
     );
 
     let queued = store_command(
-        &harness.runtime.store(),
+        harness.runtime.store(),
         harness.session_id,
         "y".repeat(MAX_PROMPT_BYTES),
     )
@@ -1928,7 +1928,7 @@ async fn cancelled_queued_prompt_does_not_mask_provider_overflow_evidence() {
     let first = queue_prompt(&harness.runtime, harness.session_id, "big ask".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
 
-    let queued = store_command(&harness.runtime.store(), harness.session_id, "cancel this")
+    let queued = store_command(harness.runtime.store(), harness.session_id, "cancel this")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {

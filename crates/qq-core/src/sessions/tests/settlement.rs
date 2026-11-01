@@ -858,7 +858,7 @@ async fn scheduler_store_failure_disables_runtime_and_existing_subscribers() {
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
-    store_command(&runtime.store(), session_id, "persist me")
+    store_command(runtime.store(), session_id, "persist me")
         .await
         .unwrap();
     assert!(matches!(
@@ -917,7 +917,7 @@ async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime(
     .unwrap();
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let queued = store_command(&runtime.store(), session_id, "retry the read")
+    let queued = store_command(runtime.store(), session_id, "retry the read")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
@@ -985,7 +985,7 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
     else {
         panic!("unexpected receipt")
     };
-    let first = store_command(&runtime.store(), first_session, "fail initialization")
+    let first = store_command(runtime.store(), first_session, "fail initialization")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -994,7 +994,7 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
     else {
         panic!("unexpected receipt")
     };
-    let second = store_command(&runtime.store(), second_session, "must not load")
+    let second = store_command(runtime.store(), second_session, "must not load")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1107,7 +1107,7 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
     else {
         panic!("unexpected receipt")
     };
-    let retrying = store_command(&runtime.store(), first_session, "wait at start")
+    let retrying = store_command(runtime.store(), first_session, "wait at start")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1117,7 +1117,7 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
     else {
         panic!("unexpected receipt")
     };
-    let failing = store_command(&runtime.store(), second_session, "fail initialization")
+    let failing = store_command(runtime.store(), second_session, "fail initialization")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1231,7 +1231,7 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
     else {
         panic!("unexpected receipt")
     };
-    let started = store_command(&runtime.store(), started_session, "start but do not poll")
+    let started = store_command(runtime.store(), started_session, "start but do not poll")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1241,7 +1241,7 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
     else {
         panic!("unexpected receipt")
     };
-    let failing = store_command(&runtime.store(), failing_session, "fail settlement")
+    let failing = store_command(runtime.store(), failing_session, "fail settlement")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1350,7 +1350,7 @@ async fn poisoned_cancellation_registry_settles_before_start_and_returns_the_per
     .unwrap();
     let (workspace_id, session_id, _) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let queued = store_command(&runtime.store(), session_id, "poisoned registry")
+    let queued = store_command(runtime.store(), session_id, "poisoned registry")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
@@ -1434,7 +1434,7 @@ async fn permanent_prestart_settlement_failure_is_recovered_on_reopen() {
     .unwrap();
     let (workspace_id, session_id, _) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let queued = store_command(&runtime.store(), session_id, "recover me")
+    let queued = store_command(runtime.store(), session_id, "recover me")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
@@ -2084,7 +2084,7 @@ async fn slow_preparation_does_not_serialize_an_independent_permit() {
     else {
         panic!("unexpected receipt")
     };
-    let first = store_command(&runtime.store(), first_session, "first")
+    let first = store_command(runtime.store(), first_session, "first")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -2093,7 +2093,7 @@ async fn slow_preparation_does_not_serialize_an_independent_permit() {
     else {
         panic!("unexpected receipt")
     };
-    let second = store_command(&runtime.store(), second_session, "second")
+    let second = store_command(runtime.store(), second_session, "second")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {

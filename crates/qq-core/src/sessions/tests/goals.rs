@@ -1282,7 +1282,7 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
     goal_control(
         &runtime,
         session_id,
-        identity_of(&stable_goal),
+        identity_of(stable_goal),
         qq_protocol::GoalControl::Pause,
     )
     .await
@@ -7958,9 +7958,9 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
                     assert_eq!(runtime.command(id, command).await.unwrap(), receipt);
                     if authorization != "pending" {
                         goal_control(
-                            &runtime,
+                            runtime,
                             session_id,
-                            identity_of(&goal),
+                            identity_of(goal),
                             qq_protocol::GoalControl::Pause,
                         )
                         .await

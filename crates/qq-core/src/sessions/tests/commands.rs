@@ -9,7 +9,7 @@ async fn unresolvable_slash_prompts_are_refused_at_admission_without_a_run_row()
     let submit = |text: &str| {
         let input = vec![InputPart::text(text)];
         let runtime = &runtime;
-        async move { try_submit(&runtime, session_id, Prompt::input(input)).await }
+        async move { try_submit(runtime, session_id, Prompt::input(input)).await }
     };
     assert_eq!(
         submit("/clear").await,
@@ -1761,7 +1761,7 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
     .unwrap();
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let queued = store_command(&runtime.store(), session_id, "known overflow")
+    let queued = store_command(runtime.store(), session_id, "known overflow")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {

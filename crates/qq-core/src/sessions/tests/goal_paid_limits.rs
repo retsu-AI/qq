@@ -197,8 +197,7 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
                     .await
                     .unwrap()
             } else {
-                let run_id = submit(&runtime, session, Prompt::text("work").limits(limits)).await;
-                run_id
+                submit(&runtime, session, Prompt::text("work").limits(limits)).await
             };
             drop(held);
             runtime.request_schedule();
