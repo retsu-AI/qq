@@ -145,14 +145,18 @@ starts empty and should stay close to empty.
 
 ```toml
 [[quarantine]]
-test = "qq-core sessions::tests::goals::a_flaky_case"   # as `cargo nextest list` prints it
+test = "qq-core sessions::tests::goals::a_flaky_case"
 owner = "github-handle"
 issue = "ENG-1234"
 added = "2026-11-01"
 expires = "2026-11-15"
 ```
 
-- `cargo xtask check` excludes every listed test from its test gates.
+- `test` is the test as `cargo nextest list` prints it: binary ID, a
+  space, then the test path. Values are plain double-quoted strings, and
+  comments go on their own `#` lines.
+- `cargo xtask check` and the `minimal core profile and embedding` and
+  `platform tests` CI jobs exclude every listed test.
   `cargo xtask quarantine` prints the filterset.
 - `cargo xtask lint` fails on an entry with no owner or issue, a test name
   that matches no test, a malformed date, an `expires` more than 14 days

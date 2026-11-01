@@ -36,9 +36,11 @@ pub struct SmokeArgs {
     /// List scenarios and exit.
     #[arg(long)]
     list: bool,
-    /// Build `qq` with the workspace test build's features, so it reuses
-    /// a preceding `cargo nextest run --workspace` instead of relinking.
-    #[arg(long, conflicts_with = "binary")]
+    #[arg(
+        long,
+        conflicts_with = "binary",
+        help = "Build qq with the workspace test build's features so it reuses a preceding `cargo nextest run --workspace`"
+    )]
     reuse_test_build: bool,
 }
 

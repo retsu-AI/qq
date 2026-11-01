@@ -92,7 +92,8 @@ jobs:
         run: cargo run --locked -p qq-core --example embed
       - name: Minimal core profile
         run: |
-          cargo nextest run --locked --profile ci -p qq-core --no-default-features
+          quarantine=$(cargo xtask quarantine)
+          cargo nextest run --locked --profile ci -p qq-core --no-default-features ${quarantine:+-E "not ($quarantine)"}
           cargo clippy --locked -p qq-core --no-default-features --all-targets -- -D warnings
           if cargo tree -p qq-core --no-default-features --edges normal | grep -q 'htmd v'; then
             echo 'minimal core unexpectedly depends on htmd' >&2

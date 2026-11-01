@@ -22,4 +22,9 @@ if ! diff -u "$wanted" "$selected"; then
   exit 1
 fi
 echo "platform profile selects the $(wc -l <"$wanted" | tr -d ' ') tests in $expected"
-cargo nextest run --locked --workspace --profile platform
+quarantine=$(cargo xtask quarantine)
+if [[ -n $quarantine ]]; then
+  cargo nextest run --locked --workspace --profile platform --no-tests=warn -E "not ($quarantine)"
+else
+  cargo nextest run --locked --workspace --profile platform
+fi

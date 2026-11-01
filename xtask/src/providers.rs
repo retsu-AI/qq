@@ -221,7 +221,7 @@ enum Task {
     Check(crate::check::CheckArgs),
     /// Repository rules rustfmt and Clippy cannot see (`AGENTS.md` § Rules → enforcers).
     Lint,
-    /// Print the nextest filterset for `.config/quarantine.toml`; empty when none.
+    #[command(about = "Print the nextest filterset for .config/quarantine.toml; empty when none")]
     Quarantine,
     /// Drive the real `qq` binary end to end against a loopback fake provider.
     Smoke(crate::smoke::SmokeArgs),
