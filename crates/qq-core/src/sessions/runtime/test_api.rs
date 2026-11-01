@@ -24,15 +24,12 @@ impl SessionRuntime {
     }
 
     pub(in crate::sessions) async fn hold_scheduling(&self) -> SchedulingHold {
+        let permit = Arc::clone(&self.inner.permits)
+            .acquire_many_owned(self.inner.max_active_runs as u32)
+            .await
+            .expect("an open runtime keeps its run permits");
         SchedulingHold {
-            _permits: vec![hold_all(&self.inner.permits).await],
+            _permits: vec![permit],
         }
     }
-}
-
-async fn hold_all(permits: &Arc<Semaphore>) -> tokio::sync::OwnedSemaphorePermit {
-    Arc::clone(permits)
-        .acquire_many_owned(permits.available_permits() as u32)
-        .await
-        .expect("an open runtime keeps its run permits")
 }
