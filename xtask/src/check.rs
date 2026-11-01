@@ -1436,7 +1436,7 @@ mod tests {
 
     #[test]
     fn protocol_fixtures_reach_the_client_replay_test() {
-        let changed = vec!["crates/qq-protocol/tests/fixtures/v17/x.json".to_owned()];
+        let changed = vec!["crates/qq-protocol/tests/fixtures/v41/x.json".to_owned()];
         let selection = select(&workspace(), &changed, &[]);
         assert_eq!(
             selection.scope,
