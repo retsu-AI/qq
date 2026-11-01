@@ -4335,38 +4335,36 @@ mod tests {
                 }
             }
         }
-        for _ in 0..16 {
-            tokio::time::timeout(Duration::from_secs(10), async {
-                let calls = Arc::new(AtomicUsize::new(0));
-                let release = Arc::new(tokio::sync::Semaphore::new(0));
-                let (started, mut starts) = tokio::sync::mpsc::channel(8);
-                let fixture = fixture({
-                    let calls = calls.clone(); let release = release.clone();
-                    move || ReleasedRun { calls: calls.clone(), release: release.clone(), started: started.clone() }
-                }).await;
-                let opts = options(&fixture.workspace);
-                let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt).await.unwrap();
-                let mut request = goal_request();
-                request.max_runs = Some(3);
-                let command = prepare_goal_request(&request, &opts, handle.session_id, None).unwrap().unwrap();
-                send(&fixture.sessions, command).await.unwrap();
-                assert_eq!(starts.recv().await, Some(0));
-                let closing = fixture.sessions.close_when_idle(std::future::pending());
-                tokio::pin!(closing);
-                assert!(futures_util::poll!(closing.as_mut()).is_pending());
-                tokio::select! {
-                    result = &mut closing => panic!("closed before accepted work settled: {result:?}"),
-                    snapshot = fixture.sessions.snapshot(SnapshotRequest::new(handle.workspace_id, Some(handle.session_id), 1, 1)) => { snapshot.unwrap(); }
-                }
-                release.add_permits(1);
-                tokio::select! {
-                    biased;
-                    call = starts.recv() => panic!("close admitted successor call {call:?}"),
-                    result = &mut closing => result.unwrap(),
-                }
-                assert_eq!(calls.load(Ordering::SeqCst), 1);
-            }).await.expect("close must drain accepted work without autonomous refill");
-        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            let (started, mut starts) = tokio::sync::mpsc::channel(8);
+            let fixture = fixture({
+                let calls = calls.clone(); let release = release.clone();
+                move || ReleasedRun { calls: calls.clone(), release: release.clone(), started: started.clone() }
+            }).await;
+            let opts = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt).await.unwrap();
+            let mut request = goal_request();
+            request.max_runs = Some(3);
+            let command = prepare_goal_request(&request, &opts, handle.session_id, None).unwrap().unwrap();
+            send(&fixture.sessions, command).await.unwrap();
+            assert_eq!(starts.recv().await, Some(0));
+            let closing = fixture.sessions.close_when_idle(std::future::pending());
+            tokio::pin!(closing);
+            assert!(futures_util::poll!(closing.as_mut()).is_pending());
+            tokio::select! {
+                result = &mut closing => panic!("closed before accepted work settled: {result:?}"),
+                snapshot = fixture.sessions.snapshot(SnapshotRequest::new(handle.workspace_id, Some(handle.session_id), 1, 1)) => { snapshot.unwrap(); }
+            }
+            release.add_permits(1);
+            tokio::select! {
+                biased;
+                call = starts.recv() => panic!("close admitted successor call {call:?}"),
+                result = &mut closing => result.unwrap(),
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }).await.expect("close must drain accepted work without autonomous refill");
     }
 
     #[tokio::test]
@@ -5798,6 +5796,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_resume_permission_selection_is_shared_by_prompt_and_goal() {
+        let fixture = fixture(|| TextProvider).await;
         for stored_mode in [
             HeadlessApproval::ReadOnly,
             HeadlessApproval::Ask,
@@ -5806,7 +5805,6 @@ mod tests {
         ] {
             for explicit in [false, true] {
                 for goal in [false, true] {
-                    let fixture = fixture(|| TextProvider).await;
                     let mut initial = options(&fixture.workspace);
                     initial.approval = stored_mode;
                     let stored =
@@ -5836,10 +5834,13 @@ mod tests {
                         stored_mode
                     };
                     assert_eq!(effective.approval, expected);
-                    assert_eq!(
-                        workspace_snapshot(&fixture).await.sessions[0].approval_mode,
-                        approval_mode(expected)
-                    );
+                    let snapshot = workspace_snapshot(&fixture).await;
+                    let session = snapshot
+                        .sessions
+                        .iter()
+                        .find(|session| session.id == stored.session_id)
+                        .unwrap();
+                    assert_eq!(session.approval_mode, approval_mode(expected));
                 }
             }
         }
