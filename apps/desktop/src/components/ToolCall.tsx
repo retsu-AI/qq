@@ -15,8 +15,8 @@ import { diffStats } from "../lib/changes";
 import { isShell, summarizeTools, toolSubject, toolVerb } from "../lib/tools";
 import type { Tool } from "../lib/types";
 import { ApprovalCard } from "./ApprovalCard";
-import { CopyButton } from "./CodeBlock";
 import { Diff } from "./Diff";
+import { ToolOutput } from "./ToolOutput";
 
 /**
  * A run of consecutive tool calls. Settled calls fold behind one summary
@@ -183,58 +183,17 @@ function ToolRow({ tool, projectId }: { tool: Tool; projectId: string }) {
         <div className="mb-1 ml-6 mt-1.5 space-y-2">
           {tool.diff && <Diff path={tool.diff.path} diff={tool.diff.diff} />}
           {shell ? (
-            <div className="overflow-hidden rounded-lg border border-line bg-raised">
-              <div className="group/command relative">
-                <pre className="whitespace-pre-wrap break-all px-3 py-2 pr-16 font-mono text-small leading-[1.5] text-fg selectable">
-                  <span className="select-none text-faint">$ </span>
-                  {subject}
-                </pre>
-                <CopyButton
-                  text={subject}
-                  label="Copy command"
-                  className="absolute right-1.5 top-1.5 opacity-0 focus-visible:opacity-100 group-hover/command:opacity-100"
-                />
-              </div>
-              {output && (
-                <Output text={output} error={tool.is_error} className="border-t border-line" />
-              )}
-            </div>
+            <ToolOutput text={output} error={tool.is_error} command={subject} />
           ) : (
             // An edit's own output only repeats its diff unless it failed.
             output &&
             (!tool.diff || tool.is_error) && (
-              <Output
-                text={output}
-                error={tool.is_error}
-                className="rounded-lg border border-line bg-raised"
-              />
+              <ToolOutput text={output} error={tool.is_error} />
             )
           )}
         </div>
       )}
     </div>
-  );
-}
-
-function Output({
-  text,
-  error,
-  className,
-}: {
-  text: string;
-  error: boolean;
-  className: string;
-}) {
-  return (
-    <pre
-      className={clsx(
-        "max-h-[320px] overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-small leading-[1.5] selectable",
-        error ? "text-danger" : "text-muted",
-        className,
-      )}
-    >
-      {text}
-    </pre>
   );
 }
 

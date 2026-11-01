@@ -209,16 +209,40 @@ if (new URLSearchParams(location.search).has("demo")) {
       text: "Find the backoff helper, then check the tests.",
       streaming: false,
     },
-    tool("t1", "search", { pattern: "fn backoff" }),
-    tool("t2", "read_file", { path: "src/lib/retry.rs" }),
-    tool("t3", "shell", { command: "cargo test -p retry" }),
+    tool("t1", "search", { pattern: "fn backoff" }, {
+      result:
+        'search "fn backoff" mode=content matches=2/2 files=2 scanned=48\n' +
+        "src/lib/retry.rs\nL10: pub fn backoff(attempt: u32) -> Duration {\n" +
+        "src/client.rs\nL88:     let wait = retry::fn backoff(attempt);\n",
+    }),
+    tool("t2", "read_file", { path: "src/lib/retry.rs" }, {
+      result:
+        "read src/lib/retry.rs L1-14/42 h:f5c79af7291c truncated=bytes\n" +
+        "  1\tuse std::time::Duration;\n  2\t\n" +
+        "  3\t/// How long to wait before retry `attempt`.\n" +
+        ' 10\tpub fn backoff(attempt: u32) -> Duration {\n' +
+        " 11\t    Duration::from_millis(100 * attempt as u64)\n 12\t}\n--\n" +
+        ' 40\t#[cfg(test)]\n…[qq: 2 more lines; continue from offset=41]…\n',
+    }),
+    tool("t3", "shell", { command: "cargo test -p retry" }, {
+      result:
+        "shell exit=0 elapsed=3.4 bytes=212\n" +
+        "   Compiling retry v0.1.0\n    Finished `test` profile in 3.1s\n" +
+        "running 3 tests\ntest backoff_caps ... ok\n" +
+        "test result: ok. 3 passed; 0 failed\n",
+    }),
     tool("t4", "edit_file", { path: "src/lib/retry.rs" }, {
       diff: { path: "src/lib/retry.rs", diff: edit },
     }),
     tool("t5", "shell", { command: "cargo test -p retry" }),
     tool("t6", "shell", { command: "cargo clippy -p retry" }, {
       is_error: true,
-      result: "warning: unused import",
+      result:
+        "shell exit=101 elapsed=1.2 bytes=180\n" +
+        "warning: unused import: `std::cmp`\n" +
+        "error[E0425]: cannot find value `attempts` in this scope\n" +
+        "  --> src/lib/retry.rs:12:5\n" +
+        "error: could not compile `retry` due to 1 previous error\n",
     }),
     {
       kind: "assistant",
