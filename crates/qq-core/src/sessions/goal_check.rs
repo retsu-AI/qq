@@ -889,7 +889,7 @@ pub(super) async fn execute(
         if crate::approval::fixed_stop(&check.command).is_some() {
             break Completion::Forbidden;
         }
-        let policy = match inner.grant_authority.as_ref() {
+        let policy = match inner.policy_authority.as_ref() {
             Some(authority) => {
                 authority.validate_goal_check(Path::new(&claimed.workspace), &check.command)
             }

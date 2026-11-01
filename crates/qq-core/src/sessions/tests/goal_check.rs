@@ -136,7 +136,7 @@ async fn once_check(success: bool) {
     let loads = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let mut options = SessionRuntimeOptions::new(database.clone());
-    options.grant_authority = Some(Arc::new(Authority(command)));
+    options.policy_authority = Some(Arc::new(Authority(command)));
     let runtime = SessionRuntime::open(
         options,
         Arc::new(Loader {
@@ -664,7 +664,7 @@ async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
     }
     let directory = TempDir::new().unwrap();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-    options.grant_authority = Some(Arc::new(CoordinatedAuthority {
+    options.policy_authority = Some(Arc::new(CoordinatedAuthority {
         checks: AtomicUsize::new(0),
         barrier: Arc::new(tokio::sync::Barrier::new(2)),
     }));
@@ -807,7 +807,7 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-        options.grant_authority = Some(Arc::new(HeldAuthority {
+        options.policy_authority = Some(Arc::new(HeldAuthority {
             calls: AtomicUsize::new(0),
             entered: entered.clone(),
             release: release.clone(),
@@ -966,7 +966,7 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
             calls: Arc::new(AtomicUsize::new(0)),
         });
         let mut options = SessionRuntimeOptions::new(database.clone());
-        options.grant_authority = Some(Arc::new(Authority(COMMAND)));
+        options.policy_authority = Some(Arc::new(Authority(COMMAND)));
         let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
         let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
         let CommandOutcome::SessionCreated { session_id } =
@@ -1212,7 +1212,7 @@ async fn goal_check_for_goal_blocks_after_three_failed_checks_with_durable_evide
         calls: calls.clone(),
     });
     let mut options = SessionRuntimeOptions::new(database.clone());
-    options.grant_authority = Some(Arc::new(Authority(COMMAND)));
+    options.policy_authority = Some(Arc::new(Authority(COMMAND)));
     let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
     let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
     let CommandOutcome::SessionCreated { session_id } =
@@ -1408,7 +1408,7 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
         let release = Arc::new(tokio::sync::Notify::new());
         let ceiling = Arc::new(AtomicUsize::new(2000));
         let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-        options.grant_authority = Some(Arc::new(HeldPolicy {
+        options.policy_authority = Some(Arc::new(HeldPolicy {
             calls: AtomicUsize::new(0),
             deny: mode == "managed",
             ceiling: ceiling.clone(),
@@ -1639,13 +1639,12 @@ async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions()
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")).with_grant_authority(
-            Arc::new(HeldPolicy {
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"))
+            .with_policy_authority(Arc::new(HeldPolicy {
                 calls: AtomicUsize::new(0),
                 entered: Arc::clone(&entered),
                 release: Arc::clone(&release),
-            }),
-        ),
+            })),
         Arc::new(Loader {
             failure_tail: false,
             loads: Arc::new(AtomicUsize::new(0)),

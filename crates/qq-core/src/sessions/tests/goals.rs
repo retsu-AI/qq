@@ -1302,7 +1302,7 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
     });
     let directory = TempDir::new().unwrap();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-    options.grant_authority = Some(authority.clone());
+    options.policy_authority = Some(authority.clone());
     let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
         .await
         .unwrap();
@@ -8228,7 +8228,7 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
         pending: AtomicBool::new(false),
     });
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-    options.grant_authority = Some(authority.clone());
+    options.policy_authority = Some(authority.clone());
     let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
         .await
         .unwrap();
@@ -8542,7 +8542,7 @@ async fn goal_policy_tightening_before_load_or_main_start_prevents_provider_work
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-        options.grant_authority = Some(Arc::new(Authority(Arc::clone(&ceiling))));
+        options.policy_authority = Some(Arc::new(Authority(Arc::clone(&ceiling))));
         let runtime = SessionRuntime::open(
             options,
             Arc::new(Loader {
@@ -8755,7 +8755,7 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
             let workspace = root.join("work");
             std::fs::create_dir(&workspace).unwrap();
             let mut options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
-            options.grant_authority = Some(Arc::new(Authority(denied)));
+            options.policy_authority = Some(Arc::new(Authority(denied)));
             let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
                 .await
                 .unwrap();

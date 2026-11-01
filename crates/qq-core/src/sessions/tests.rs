@@ -1251,20 +1251,10 @@ async fn scripted_runs_harness(
     mode: ApprovalMode,
     runs: Vec<Vec<(&'static str, String)>>,
 ) -> ScriptedRunsHarness {
-    scripted_runs_harness_with_authority(mode, runs, None).await
-}
-
-async fn scripted_runs_harness_with_authority(
-    mode: ApprovalMode,
-    runs: Vec<Vec<(&'static str, String)>>,
-    grant_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
-) -> ScriptedRunsHarness {
     let directory = test_directory();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-    options.grant_authority = grant_authority;
     let runtime = SessionRuntime::open(
-        options,
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
         Arc::new(ScriptedRunsLoader {
             requests: Arc::clone(&requests),
             runs,
@@ -1353,17 +1343,6 @@ async fn approval_harness(
     tool_turns: usize,
     approval_timeout: Option<Duration>,
 ) -> ApprovalHarness {
-    approval_harness_with_authority(mode, tool, arguments, tool_turns, approval_timeout, None).await
-}
-
-async fn approval_harness_with_authority(
-    mode: ApprovalMode,
-    tool: &'static str,
-    arguments: &'static str,
-    tool_turns: usize,
-    approval_timeout: Option<Duration>,
-    grant_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
-) -> ApprovalHarness {
     let directory = test_directory();
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
@@ -1374,7 +1353,7 @@ async fn approval_harness_with_authority(
             side_query_limits: SideQueryLimits::default(),
             approval_timeout,
             retention: None,
-            grant_authority,
+            policy_authority: None,
         },
         Arc::new(ApprovalLoader {
             requests: Arc::clone(&requests),

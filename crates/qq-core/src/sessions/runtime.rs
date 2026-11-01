@@ -285,7 +285,7 @@ pub struct SessionRuntimeOptions {
     pub side_query_limits: SideQueryLimits,
     pub approval_timeout: Option<Duration>,
     pub retention: Option<Duration>,
-    pub grant_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
+    pub policy_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
 }
 
 impl std::fmt::Debug for SessionRuntimeOptions {
@@ -298,7 +298,7 @@ impl std::fmt::Debug for SessionRuntimeOptions {
             .field("side_query_limits", &self.side_query_limits)
             .field("approval_timeout", &self.approval_timeout)
             .field("retention", &self.retention)
-            .field("grant_authority", &self.grant_authority.is_some())
+            .field("policy_authority", &self.policy_authority.is_some())
             .finish()
     }
 }
@@ -313,7 +313,7 @@ impl SessionRuntimeOptions {
             side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             retention: None,
-            grant_authority: None,
+            policy_authority: None,
         }
     }
 
@@ -330,8 +330,8 @@ impl SessionRuntimeOptions {
     }
 
     #[must_use]
-    pub fn with_grant_authority(mut self, authority: Arc<dyn WorkspacePolicyAuthority>) -> Self {
-        self.grant_authority = Some(authority);
+    pub fn with_policy_authority(mut self, authority: Arc<dyn WorkspacePolicyAuthority>) -> Self {
+        self.policy_authority = Some(authority);
         self
     }
 }
@@ -344,7 +344,7 @@ pub struct SessionRuntime {
 pub(super) struct SessionRuntimeInner {
     pub(super) store: Store,
     pub(super) loader: Arc<dyn RuntimeLoader>,
-    pub(super) grant_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
+    pub(super) policy_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
     pub(super) permits: Arc<Semaphore>,
     pub(super) side_permits: Arc<Semaphore>,
     pub(super) side_tasks: AtomicUsize,
@@ -426,7 +426,7 @@ impl SessionRuntime {
         let inner = Arc::new(SessionRuntimeInner {
             store,
             loader,
-            grant_authority: options.grant_authority,
+            policy_authority: options.policy_authority,
             permits: Arc::new(Semaphore::new(options.max_active_runs)),
             side_permits: Arc::new(Semaphore::new(side_limit)),
             side_tasks: AtomicUsize::new(0),
@@ -553,7 +553,7 @@ impl SessionRuntime {
             _ => None,
         };
         let replayed_goal = goal_session.is_some()
-            && self.inner.grant_authority.is_some()
+            && self.inner.policy_authority.is_some()
             && self
                 .inner
                 .store
@@ -561,7 +561,7 @@ impl SessionRuntime {
                 .await?;
         let goal_session = if replayed_goal { None } else { goal_session };
         let goal_path = if let Some(session) = goal_session
-            && self.inner.grant_authority.is_some()
+            && self.inner.policy_authority.is_some()
         {
             Some(self.inner.store.call(store::Priority::Control, move |connection| {
                 Ok(connection.query_row(
@@ -602,7 +602,7 @@ impl SessionRuntime {
         let goal_check_policy = if replayed_goal {
             None
         } else {
-            match (check_command, &self.inner.grant_authority) {
+            match (check_command, &self.inner.policy_authority) {
                 (Some(command), Some(authority)) => Some(match &goal_path {
                     Some(Ok(path)) => {
                         match tokio::time::timeout(
@@ -1170,7 +1170,7 @@ impl SessionRuntimeInner {
         &self,
         workspace: &Path,
     ) -> Result<GoalPolicy, GoalPolicyError> {
-        let policy = match &self.grant_authority {
+        let policy = match &self.policy_authority {
             Some(authority) => {
                 let mut shutdown = self.shutdown.subscribe();
                 let mut failed = self.failed.subscribe();

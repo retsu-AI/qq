@@ -2901,7 +2901,7 @@ mod tests {
                 .unwrap()
                 .join("sessions.sqlite3");
             fixture.sessions = SessionRuntime::open(
-                SessionRuntimeOptions::new(path).with_grant_authority(Arc::new(CheckAuthority)),
+                SessionRuntimeOptions::new(path).with_policy_authority(Arc::new(CheckAuthority)),
                 loader,
             )
             .await
@@ -3884,7 +3884,7 @@ mod tests {
                 .unwrap()
                 .join("sessions.sqlite3");
             fixture.sessions = SessionRuntime::open(
-                SessionRuntimeOptions::new(path).with_grant_authority(Arc::new(DeniedCheck)),
+                SessionRuntimeOptions::new(path).with_policy_authority(Arc::new(DeniedCheck)),
                 Arc::new(ProviderLoader(|| HangingProvider)),
             )
             .await
@@ -4037,7 +4037,7 @@ mod tests {
                 .unwrap()
                 .join("sessions.sqlite3");
             fixture.sessions = SessionRuntime::open(
-                SessionRuntimeOptions::new(path).with_grant_authority(Arc::new(CheckAuthority)),
+                SessionRuntimeOptions::new(path).with_policy_authority(Arc::new(CheckAuthority)),
                 Arc::new(ProviderLoader(|| GoalVerdictProvider {
                     blocked: false,
                     turns: Mutex::new(0),

@@ -1870,7 +1870,7 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let mut options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
         options.approval_timeout = ordinary_wait;
-        options.grant_authority = Some(Arc::new(Authority(goal_wait_ms)));
+        options.policy_authority = Some(Arc::new(Authority(goal_wait_ms)));
         let runtime = SessionRuntime::open(
             options.clone(),
             Arc::new(ApprovalLoader {
@@ -1943,7 +1943,7 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
         drop(runtime);
 
         options.approval_timeout = None;
-        options.grant_authority = Some(Arc::new(Authority(300_000)));
+        options.policy_authority = Some(Arc::new(Authority(300_000)));
         let runtime = SessionRuntime::open(
             options,
             Arc::new(ApprovalLoader {
