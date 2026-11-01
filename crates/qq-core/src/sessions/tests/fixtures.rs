@@ -255,8 +255,12 @@ impl ProviderLoader {
         }
     }
 
-    pub(super) fn pricing(mut self, pricing: ModelPricing) -> Self {
-        self.pricing = Some(pricing);
+    pub(super) fn pricing(self, pricing: ModelPricing) -> Self {
+        self.with_pricing(Some(pricing))
+    }
+
+    pub(super) fn with_pricing(mut self, pricing: Option<ModelPricing>) -> Self {
+        self.pricing = pricing;
         self
     }
 

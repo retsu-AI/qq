@@ -1,3 +1,19 @@
+use std::sync::Arc;
+
+use qq_protocol::ApprovalMode;
+
+use crate::StaticPolicyGate;
+
+impl StaticPolicyGate {
+    pub(crate) fn fixed(mode: ApprovalMode) -> Self {
+        Self {
+            mode,
+            tools: Default::default(),
+            network: Arc::default(),
+        }
+    }
+}
+
 pub(crate) fn run_worker(
     test: &str,
     marker: &str,

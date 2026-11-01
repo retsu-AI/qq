@@ -635,11 +635,7 @@ async fn client_revision_is_shown_once_without_refreshing_model_control_authorit
     let mut events = loaded.plan.execute(
         vec![qq_provider::Message::user("work")],
         RunCancellation::new(),
-        Arc::new(crate::StaticPolicyGate {
-            mode: ApprovalMode::ReadOnly,
-            tools: Default::default(),
-            network: Arc::default(),
-        }),
+        Arc::new(crate::StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
         Arc::new(crate::workspace::FileState::default()),
         capabilities,
     );
@@ -1026,11 +1022,7 @@ async fn steering_between_ordered_calls_stops_the_remaining_goal_edits() {
         let mut events = loaded.plan.execute(
             vec![qq_provider::Message::user("work")],
             RunCancellation::new(),
-            Arc::new(crate::StaticPolicyGate {
-                mode: ApprovalMode::ReadOnly,
-                tools: Default::default(),
-                network: Arc::default(),
-            }),
+            Arc::new(crate::StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
             Arc::new(crate::workspace::FileState::default()),
             capabilities,
         );
@@ -1105,11 +1097,7 @@ async fn steering_while_goal_write_waits_for_capacity_prevents_admission() {
     let mut events = loaded.plan.execute(
         vec![qq_provider::Message::user("work")],
         RunCancellation::new(),
-        Arc::new(crate::StaticPolicyGate {
-            mode: ApprovalMode::ReadOnly,
-            tools: Default::default(),
-            network: Arc::default(),
-        }),
+        Arc::new(crate::StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
         Arc::new(crate::workspace::FileState::default()),
         capabilities,
     );
@@ -7176,11 +7164,7 @@ async fn goal_write_capacity_wait_obeys_cancellation_and_deadline() {
         let mut events = loaded.plan.execute(
             vec![Message::user("work")],
             cancellation.clone(),
-            Arc::new(crate::StaticPolicyGate {
-                mode: ApprovalMode::ReadOnly,
-                tools: Default::default(),
-                network: Arc::default(),
-            }),
+            Arc::new(crate::StaticPolicyGate::fixed(ApprovalMode::ReadOnly)),
             Arc::new(crate::workspace::FileState::default()),
             capabilities,
         );

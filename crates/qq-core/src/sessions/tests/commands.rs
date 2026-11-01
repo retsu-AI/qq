@@ -1629,10 +1629,11 @@ async fn resolved_model_persistence_failure_starts_no_provider_work() {
     impl RuntimeLoader for CountingLoader {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
             let provider_calls = Arc::clone(&self.provider_calls);
-            Box::pin(async move {
-                Ok(ProviderLoader::new(CountingProvider { provider_calls })
-                    .loaded(&request.workspace))
-            })
+            {
+                let loaded = ProviderLoader::new(CountingProvider { provider_calls })
+                    .loaded(&request.workspace);
+                Box::pin(async move { Ok(loaded) })
+            }
         }
     }
 
@@ -1722,10 +1723,12 @@ async fn known_first_turn_context_overflow_starts_no_provider_work() {
                     }
                 }
 
-                Runtime::new(PricedTinyContextProvider(provider_calls), "test-model", 1)
-                    .map(|runtime| runtime.with_context_window(Some(1)))
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(load_error)
+                Ok(
+                    ProviderLoader::new(PricedTinyContextProvider(provider_calls))
+                        .max_output_tokens(1)
+                        .context_window(Some(1))
+                        .loaded(&request.workspace),
+                )
             })
         }
     }
@@ -1879,12 +1882,13 @@ async fn known_later_turn_context_overflow_starts_no_second_provider_request() {
     impl RuntimeLoader for LaterTurnLoader {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
             let provider_calls = Arc::clone(&self.provider_calls);
-            Box::pin(async move {
-                Runtime::new(LaterTurnProvider { provider_calls }, "test-model", 1)
-                    .map(|runtime| runtime.with_context_window(Some(100_000)))
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(load_error)
-            })
+            {
+                let loaded = ProviderLoader::new(LaterTurnProvider { provider_calls })
+                    .max_output_tokens(1)
+                    .context_window(Some(100_000))
+                    .loaded(&request.workspace);
+                Box::pin(async move { Ok(loaded) })
+            }
         }
     }
 

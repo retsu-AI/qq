@@ -251,10 +251,11 @@ impl RuntimeLoader for FanOutReadsLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
         let count = self.count;
-        Box::pin(async move {
-            Ok(ProviderLoader::new(FanOutReadsProvider { requests, count })
-                .loaded(&request.workspace))
-        })
+        {
+            let loaded = ProviderLoader::new(FanOutReadsProvider { requests, count })
+                .loaded(&request.workspace);
+            Box::pin(async move { Ok(loaded) })
+        }
     }
 }
 

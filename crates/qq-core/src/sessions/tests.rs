@@ -436,10 +436,11 @@ struct HangingReasoningLoader {
 impl RuntimeLoader for HangingReasoningLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let buffered = Arc::clone(&self.buffered);
-        Box::pin(async move {
-            Ok(ProviderLoader::new(HangingReasoningProvider { buffered })
-                .loaded(&request.workspace))
-        })
+        {
+            let loaded = ProviderLoader::new(HangingReasoningProvider { buffered })
+                .loaded(&request.workspace);
+            Box::pin(async move { Ok(loaded) })
+        }
     }
 }
 
@@ -1222,11 +1223,12 @@ impl RuntimeLoader for RecordingApprovalLoader {
                 reasoning_tokens: None,
             }),
         };
-        Box::pin(async move {
-            Runtime::new(provider, "test-model", 256)
-                .map(|runtime| loaded_runtime_for_route(runtime, &request.workspace, route, None))
-                .map_err(load_error)
-        })
+        {
+            let loaded = ProviderLoader::new(provider)
+                .route(route)
+                .loaded(&request.workspace);
+            Box::pin(async move { Ok(loaded) })
+        }
     }
 }
 
