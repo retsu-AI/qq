@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { emojiValue, parseProjectIcons } from "../src/lib/project-icons.ts";
+import {
+  ICON_EMOJIS,
+  emojiValue,
+  parseProjectIcons,
+} from "../src/lib/project-icons.ts";
 
 test("project icons keep valid entries and drop the rest", () => {
   const png = "data:image/png;base64,iVBORw0KGgo=";
@@ -30,4 +34,7 @@ test("an emoji icon is exactly one emoji", () => {
   assert.equal(emojiValue(" 👩‍💻 "), "👩‍💻");
   assert.equal(emojiValue("🇯🇵"), "🇯🇵");
   for (const bad of ["", "a", "🚀🚀", "🚀a", 7]) assert.equal(emojiValue(bad), null);
+  // Every emoji the picker offers can be saved.
+  for (const emoji of ICON_EMOJIS) assert.equal(emojiValue(emoji), emoji);
+  assert.equal(new Set(ICON_EMOJIS).size, ICON_EMOJIS.length);
 });

@@ -33,6 +33,16 @@ export const ICON_SYMBOLS = [
 ] as const;
 export type IconSymbol = (typeof ICON_SYMBOLS)[number];
 
+/** Emojis offered with one click; any other one can be typed. */
+export const ICON_EMOJIS = [
+  "🚀", "⚡", "🔥", "✨", "⭐", "🌟", "💡", "🎯", "🧠", "🤖",
+  "💻", "🖥️", "📱", "⌨️", "🛠️", "🔧", "⚙️", "🧪", "🔬", "🧩",
+  "📦", "🗂️", "📁", "📝", "📚", "📊", "📈", "🗄️", "🔒", "🔑",
+  "🌐", "☁️", "🌍", "🏠", "🏗️", "🎮", "🕹️", "🎨", "🎵", "🎬",
+  "🐍", "🦀", "🐳", "🐙", "🦊", "🐱", "🐶", "🦄", "🐝", "🌱",
+  "🌲", "🍀", "🌊", "🌙", "☀️", "❄️", "🍕", "☕", "💎", "🏆",
+];
+
 export type ProjectIcon =
   | { kind: "initials"; color: IconColor }
   | { kind: "symbol"; color: IconColor; symbol: IconSymbol }

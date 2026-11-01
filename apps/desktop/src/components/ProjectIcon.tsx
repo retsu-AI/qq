@@ -24,6 +24,7 @@ import {
 import {
   DEFAULT_ICON,
   ICON_COLORS,
+  ICON_EMOJIS,
   ICON_SYMBOLS,
   emojiValue,
   imageIcon,
@@ -262,19 +263,42 @@ export function IconDialog({
             </div>
           )}
           {tab === "emoji" && (
-            <label className="block">
-              <span className="text-muted">
-                One emoji. Press Win + . to open the emoji picker.
-              </span>
-              <input
-                autoFocus
-                value={emoji}
-                onChange={(event) => setEmoji(event.target.value)}
-                aria-invalid={emoji.trim() !== "" && !emojiValue(emoji)}
-                maxLength={16}
-                className="mt-2 h-9 w-24 rounded-lg border border-line-strong bg-raised px-3 text-center text-title outline-none focus:border-accent/60 focus-visible:outline-none"
-              />
-            </label>
+            <div>
+              <div
+                role="radiogroup"
+                aria-label="Emoji"
+                className="grid max-h-[156px] grid-cols-10 gap-1 overflow-y-auto pr-1"
+              >
+                {ICON_EMOJIS.map((value) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={emoji === value}
+                    aria-label={value}
+                    onClick={() => setEmoji(value)}
+                    className={clsx(
+                      "flex h-9 items-center justify-center rounded-md text-title",
+                      emoji === value
+                        ? "bg-active ring-1 ring-accent"
+                        : "hover:bg-hover",
+                    )}
+                  >
+                    {value}
+                  </button>
+                ))}
+              </div>
+              <label className="mt-3 flex items-center gap-2 text-muted">
+                <span>Or any emoji (Win + .)</span>
+                <input
+                  value={ICON_EMOJIS.includes(emoji) ? "" : emoji}
+                  onChange={(event) => setEmoji(event.target.value)}
+                  aria-invalid={emoji.trim() !== "" && !emojiValue(emoji)}
+                  maxLength={16}
+                  className="h-8 w-16 rounded-lg border border-line-strong bg-raised px-2 text-center text-body text-fg outline-none focus:border-accent/60 focus-visible:outline-none"
+                />
+              </label>
+            </div>
           )}
           {tab === "image" && (
             <div>

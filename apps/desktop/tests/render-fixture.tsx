@@ -463,7 +463,11 @@ function Fixture() {
       {extra.length > 0 && new URLSearchParams(location.search).has("icon") && (
         <IconDialog
           project={{ id: extra[0].project_id, path: extra[0].path, name: extra[0].name, worktree: null }}
-          icon={{ kind: "symbol", color: "teal", symbol: "server" }}
+          icon={
+            new URLSearchParams(location.search).get("icon") === "emoji"
+              ? { kind: "emoji", color: "orange", emoji: "🚀" }
+              : { kind: "symbol", color: "teal", symbol: "server" }
+          }
           close={() => undefined}
         />
       )}
