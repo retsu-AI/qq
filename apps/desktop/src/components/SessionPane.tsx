@@ -10,16 +10,20 @@ import clsx from "clsx";
 import {
   ArrowDown,
   Code2,
-  FileDiff,
   KeyRound,
   Loader2,
+  PanelRight,
   Target,
 } from "lucide-react";
 import { openInEditor } from "../lib/editor";
 import { showSettings } from "../lib/store";
 import { api } from "../lib/api";
 import { collectChanges, type FileChange } from "../lib/changes";
-import { updatePreferences, usePreferences } from "../lib/preferences";
+import {
+  getPreferences,
+  updatePreferences,
+  usePreferences,
+} from "../lib/preferences";
 import { activityLabel, modelLabel } from "../lib/format";
 import type {
   GoalSnapshot,
@@ -28,6 +32,7 @@ import type {
   Transcript as TranscriptData,
 } from "../lib/types";
 import { ChangesPanel } from "./ChangesPanel";
+import { DetailsPanel } from "./DetailsPanel";
 import { Composer } from "./Composer";
 import { GitStrip } from "./GitStrip";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -38,6 +43,7 @@ import { budgetSummary, goalStatus } from "../lib/goals";
 import {
   closeGoalDialog,
   closeGoalPanel,
+  goalPanelOpen,
   toggleGoalPanel,
   useGoalUi,
 } from "../lib/goal-ui";
@@ -45,6 +51,20 @@ import { toast } from "../lib/toast";
 import { Starters } from "./Starters";
 import { Transcript } from "./Transcript";
 import { TrustPrompt } from "./TrustPrompt";
+
+/**
+ * Shows or hides the session's side panel (details, or its changes). It
+ * takes the place of an open goal panel.
+ */
+export function toggleSidePanel() {
+  const current = getPreferences().sidePanel;
+  if (goalPanelOpen()) {
+    closeGoalPanel();
+    updatePreferences({ sidePanel: current ?? "details" });
+  } else {
+    updatePreferences({ sidePanel: current ? null : "details" });
+  }
+}
 
 export function SessionPane({
   project,
@@ -97,18 +117,15 @@ function SessionView({
   project: ProjectState;
   transcript: TranscriptData;
 }) {
-  const { changesPanel } = usePreferences();
+  const { sidePanel } = usePreferences();
   const changes = useMemo(
     () => collectChanges(transcript.items),
     [transcript.items],
   );
   const goalUi = useGoalUi();
   const goalOpen = goalUi.panel === transcript.session_id;
-  // One side panel at a time: opening Changes closes the goal panel.
-  const toggleChanges = () => {
-    if (goalOpen) closeGoalPanel();
-    updatePreferences({ changesPanel: goalOpen ? true : !changesPanel });
-  };
+  // One side panel at a time: the goal panel replaces the details panel.
+  const panel = goalOpen ? null : sidePanel;
   const dialog =
     goalUi.dialog?.sessionId === transcript.session_id ? goalUi.dialog : null;
   return (
@@ -128,8 +145,8 @@ function SessionView({
           project={project}
           transcript={transcript}
           changes={changes}
-          changesOpen={changesPanel && !goalOpen}
-          toggleChanges={toggleChanges}
+          panelOpen={panel !== null}
+          togglePanel={toggleSidePanel}
           goalOpen={goalOpen}
         />
         <TranscriptScroller project={project} transcript={transcript} />
@@ -151,12 +168,22 @@ function SessionView({
           close={closeGoalDialog}
         />
       )}
-      {changesPanel && !goalOpen && (
+      {panel === "details" && (
+        <DetailsPanel
+          project={project}
+          transcript={transcript}
+          changes={changes}
+          showChanges={() => updatePreferences({ sidePanel: "changes" })}
+          close={() => updatePreferences({ sidePanel: null })}
+        />
+      )}
+      {panel === "changes" && (
         <ChangesPanel
           key={transcript.session_id}
           projectId={project.project_id}
           changes={changes}
-          close={toggleChanges}
+          back={() => updatePreferences({ sidePanel: "details" })}
+          close={() => updatePreferences({ sidePanel: null })}
         />
       )}
     </div>
@@ -232,15 +259,15 @@ function Header({
   project,
   transcript,
   changes,
-  changesOpen,
-  toggleChanges,
+  panelOpen,
+  togglePanel,
   goalOpen,
 }: {
   project: ProjectState;
   transcript: TranscriptData;
   changes: FileChange[];
-  changesOpen: boolean;
-  toggleChanges: () => void;
+  panelOpen: boolean;
+  togglePanel: () => void;
   goalOpen: boolean;
 }) {
   const running = transcript.status !== "idle";
@@ -291,18 +318,18 @@ function Header({
         <Code2 className="h-3.5 w-3.5" />
       </button>
       <button
-        onClick={toggleChanges}
-        aria-pressed={changesOpen}
-        title={`${changesOpen ? "Hide" : "Show"} changes (Ctrl Shift D)`}
+        onClick={togglePanel}
+        aria-pressed={panelOpen}
+        aria-label="Session details"
+        title={`${panelOpen ? "Hide" : "Show"} session details (Ctrl Shift D)`}
         className={clsx(
           "-mr-2 flex h-7 items-center gap-1.5 rounded-md px-2 text-small",
-          changesOpen
+          panelOpen
             ? "bg-active text-fg"
             : "text-muted hover:bg-hover hover:text-fg",
         )}
       >
-        <FileDiff className="h-3.5 w-3.5" />
-        Changes
+        <PanelRight className="h-3.5 w-3.5" />
         {changes.length > 0 && (
           <span className="rounded-full bg-accent-soft px-1.5 text-caption font-medium text-accent">
             {changes.length}

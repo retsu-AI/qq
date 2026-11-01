@@ -38,7 +38,7 @@ const SHORTCUTS: Array<[string, string]> = [
   ["Settings", "Ctrl ,"],
   ["Toggle sidebar", "Ctrl B"],
   ["Find a session", "Ctrl F"],
-  ["Show or hide changes", "Ctrl Shift D"],
+  ["Show or hide session details", "Ctrl Shift D"],
   ["Open project in editor", "Ctrl Shift E"],
   ["Ask a side question", "/btw in the composer"],
   ["Run a workspace command", "/ in the composer"],

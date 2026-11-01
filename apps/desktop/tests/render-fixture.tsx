@@ -276,9 +276,36 @@ if (new URLSearchParams(location.search).has("demo")) {
     },
   ];
 }
-// `?changes`: open the Changes panel (saved like any preference).
+// `?changes` / `?details`: open that side panel (saved like any preference).
 if (new URLSearchParams(location.search).has("changes"))
-  setPreferences({ ...getPreferences(), changesPanel: true });
+  setPreferences({ ...getPreferences(), sidePanel: "changes" });
+if (new URLSearchParams(location.search).has("details")) {
+  setPreferences({ ...getPreferences(), sidePanel: "details" });
+  const transcript = project.transcript!;
+  transcript.context_tokens = 48_600;
+  transcript.cost_usd_nanos = 184_000_000;
+  transcript.reasoning_effort = "high";
+  for (const item of transcript.items)
+    if (item.kind === "run_end" && item.id === "e1")
+      item.usage = {
+        input_tokens: 41_200,
+        cache_read_input_tokens: 96_400,
+        cache_write_input_tokens: 8_100,
+        output_tokens: 6_900,
+        reasoning_tokens: 2_300,
+      };
+  project.tool_hosts = [
+    { name: "github", generation: 1, tool_count: 26, ready: true },
+    { name: "linear", generation: 1, tool_count: 31, ready: true },
+    {
+      name: "figma",
+      generation: 1,
+      tool_count: 0,
+      ready: false,
+      message: "Server exited: missing FIGMA_TOKEN",
+    },
+  ];
+}
 if (new URLSearchParams(location.search).has("approval"))
   project.transcript!.items.push({
     kind: "tool",

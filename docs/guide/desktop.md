@@ -116,8 +116,9 @@ Code blocks in replies are syntax highlighted and have a Copy button. Hover a
 message to copy it; your own messages can also be put back in the composer to
 edit, and Retry sends a prompt again as a new turn (history is kept, nothing is
 replaced). A failed run offers Retry next to its error. Finished tool calls fold
-into one summary line, such as "Ran 3 commands, read 2 files"; select it to see
-each call. Edits stay visible with their diff.
+into one summary line, such as "Edited 2 files, ran 3 commands +12 −3"; select
+it to see a card with one row per call. Select a row to see its command and
+output, or an edit's diff.
 
 Changes (the header button, or Ctrl Shift D) opens a side panel listing every file
 the session's file tools edited, with added and removed line counts and each
@@ -134,6 +135,13 @@ The same limits as the TUI apply (read-only file tools, 8 model turns, 120 s).
 The header's code button (or Ctrl Shift E) opens the project in VS Code,
 Cursor, Windsurf or Zed, whichever is found first on `PATH`; the Changes panel
 opens single files the same way.
+
+The panel button at the right of the header (or Ctrl Shift D) opens the
+session's details: the project, folder, branch, model and approval mode; how
+full the model's context is, with the session's token use and estimated cost;
+and each MCP server with its tool count, or why it is unavailable. The Changes
+row at the bottom opens the files this session's edits changed, with their
+diffs.
 
 The Git chip in the header shows the branch, how many files changed, commits
 to push or pull, and the branch's pull request when the GitHub CLI (`gh`) finds
@@ -177,7 +185,7 @@ while leaving the displayed transcript intact. Commands are implemented desktop
 actions; Search does not execute arbitrary CLI text.
 
 Ctrl N starts a new session, Ctrl Shift A moves to a session needing attention,
-and Ctrl Shift D shows or hides the Changes panel.
+and Ctrl Shift D shows or hides the session details panel.
 Opening QQ again focuses the existing window and forwards project-folder arguments.
 Closing a project disconnects its client without deleting server history.
 

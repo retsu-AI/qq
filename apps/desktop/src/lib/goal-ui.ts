@@ -25,6 +25,10 @@ export function openGoalPanel(sessionId: string) {
   changed();
 }
 
+export function goalPanelOpen(): boolean {
+  return panel !== null;
+}
+
 export function closeGoalPanel() {
   panel = null;
   changed();

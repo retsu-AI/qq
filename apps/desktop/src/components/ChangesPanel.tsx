@@ -1,6 +1,6 @@
 import { useState } from "react";
 import clsx from "clsx";
-import { ChevronRight, Code2, FileCode2, X } from "lucide-react";
+import { ArrowLeft, ChevronRight, Code2, FileCode2, X } from "lucide-react";
 import { openInEditor } from "../lib/editor";
 import type { FileChange } from "../lib/changes";
 import { CopyButton } from "./CodeBlock";
@@ -10,10 +10,13 @@ import { Diff } from "./Diff";
 export function ChangesPanel({
   projectId,
   changes,
+  back,
   close,
 }: {
   projectId: string;
   changes: FileChange[];
+  /** Returns to the session's details. */
+  back: () => void;
   close: () => void;
 }) {
   const [open, setOpen] = useState<Set<string>>(
@@ -35,7 +38,15 @@ export function ChangesPanel({
       // Beside the conversation on wide windows, over it on narrow ones.
       className="animate-slide-in flex w-[min(460px,42vw)] min-w-[300px] shrink-0 flex-col border-l border-line bg-sidebar max-[1100px]:absolute max-[1100px]:inset-y-0 max-[1100px]:right-0 max-[1100px]:z-20 max-[1100px]:w-[min(460px,85%)] max-[1100px]:shadow-2xl"
     >
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line pl-4 pr-2">
+      <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line pl-2 pr-2">
+        <button
+          onClick={back}
+          aria-label="Back to details"
+          title="Back to details"
+          className="rounded-md p-1.5 text-muted hover:bg-hover hover:text-fg"
+        >
+          <ArrowLeft className="h-4 w-4" />
+        </button>
         <h2 className="text-body font-medium">Changes</h2>
         {changes.length > 0 && (
           <span className="text-small text-faint">

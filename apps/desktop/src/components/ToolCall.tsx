@@ -11,15 +11,18 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { duration, isTerminal } from "../lib/format";
-import { summarizeTools, toolSubject, toolVerb } from "../lib/tools";
+import { diffStats } from "../lib/changes";
+import { isShell, summarizeTools, toolSubject, toolVerb } from "../lib/tools";
 import type { Tool } from "../lib/types";
 import { ApprovalCard } from "./ApprovalCard";
+import { CopyButton } from "./CodeBlock";
 import { Diff } from "./Diff";
 
 /**
- * A run of consecutive tool calls. Settled calls without a diff fold behind
- * one summary line ("Ran 3 commands, read 2 files"); running calls, held
- * approvals and edits with a diff stay visible.
+ * A run of consecutive tool calls. Settled calls fold behind one summary
+ * line ("Edited 2 files, ran 3 commands"), which opens to a card of one row
+ * per call; each row opens to its command, diff or output. Running calls and
+ * held approvals stay visible.
  */
 export function ToolGroup({
   tools,
@@ -31,7 +34,7 @@ export function ToolGroup({
   sessionId: string;
 }) {
   const folded = tools.filter(
-    (tool) => isTerminal(tool.state) && !tool.diff && !tool.approval,
+    (tool) => isTerminal(tool.state) && !tool.approval,
   );
   const foldable = folded.length > 1;
   const [expanded, setExpanded] = useState(false);
@@ -42,64 +45,89 @@ export function ToolGroup({
     (total, tool) => total + (tool.duration_ms ?? 0),
     0,
   );
-  const hidden = new Set(
-    foldable && !expanded ? folded.map((tool) => tool.id) : [],
+  const edits = folded.reduce(
+    (total, tool) => {
+      if (!tool.diff) return total;
+      const stats = diffStats(tool.diff.diff);
+      return {
+        added: total.added + stats.added,
+        removed: total.removed + stats.removed,
+      };
+    },
+    { added: 0, removed: 0 },
   );
+  const rest = tools.filter((tool) => !foldable || !folded.includes(tool));
 
   return (
     <div className="space-y-1">
       {foldable && (
-        <button
-          onClick={() => setExpanded((v) => !v)}
-          aria-expanded={expanded}
-          className="group/summary flex max-w-full items-center gap-2 rounded-md py-0.5 text-left text-ui text-muted hover:text-fg"
-        >
-          {failed > 0 ? (
-            <CircleX className="h-3.5 w-3.5 shrink-0 text-danger" />
-          ) : (
-            <CircleCheck className="h-3.5 w-3.5 shrink-0 text-faint" />
-          )}
-          <span className="truncate">
-            {summarizeTools(folded.map((tool) => tool.name))}
-          </span>
-          {failed > 0 && (
-            <span className="shrink-0 text-small text-danger">
-              · {failed} failed
-            </span>
-          )}
-          {elapsed > 0 && (
-            <span className="shrink-0 text-small text-faint">
-              · {duration(elapsed)}
-            </span>
-          )}
-          <ChevronRight
-            className={clsx(
-              "h-3.5 w-3.5 shrink-0 text-faint transition-transform",
-              expanded && "rotate-90",
+        <div>
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            className="flex max-w-full items-center gap-2 rounded-md py-0.5 text-left text-ui text-muted hover:text-fg"
+          >
+            {failed > 0 ? (
+              <CircleX className="h-3.5 w-3.5 shrink-0 text-danger" />
+            ) : (
+              <CircleCheck className="h-3.5 w-3.5 shrink-0 text-faint" />
             )}
-          />
-        </button>
-      )}
-      {tools
-        .filter((tool) => !hidden.has(tool.id))
-        .map((tool) =>
-          tool.approval ? (
-            <ApprovalCard
-              key={tool.id}
-              tool={tool}
-              projectId={projectId}
-              sessionId={sessionId}
+            <span className="truncate">
+              {summarizeTools(folded.map((tool) => tool.name))}
+            </span>
+            {(edits.added > 0 || edits.removed > 0) && (
+              <LineCounts {...edits} />
+            )}
+            {failed > 0 && (
+              <span className="shrink-0 text-small text-danger">
+                · {failed} failed
+              </span>
+            )}
+            {elapsed > 0 && (
+              <span className="shrink-0 text-small text-faint">
+                · {duration(elapsed)}
+              </span>
+            )}
+            <ChevronRight
+              className={clsx(
+                "h-3.5 w-3.5 shrink-0 text-faint transition-transform",
+                expanded && "rotate-90",
+              )}
             />
-          ) : (
-            <div
-              key={tool.id}
-              className={clsx(foldable && folded.includes(tool) && "pl-5")}
-            >
-              <ToolRow tool={tool} projectId={projectId} />
+          </button>
+          {expanded && (
+            <div className="mt-1.5 divide-y divide-line overflow-hidden rounded-xl border border-line">
+              {folded.map((tool) => (
+                <div key={tool.id} className="px-3 py-1.5">
+                  <ToolRow tool={tool} projectId={projectId} />
+                </div>
+              ))}
             </div>
-          ),
-        )}
+          )}
+        </div>
+      )}
+      {rest.map((tool) =>
+        tool.approval ? (
+          <ApprovalCard
+            key={tool.id}
+            tool={tool}
+            projectId={projectId}
+            sessionId={sessionId}
+          />
+        ) : (
+          <ToolRow key={tool.id} tool={tool} projectId={projectId} />
+        ),
+      )}
     </div>
+  );
+}
+
+function LineCounts({ added, removed }: { added: number; removed: number }) {
+  return (
+    <span className="shrink-0 font-mono text-small">
+      <span className="text-ok">+{added}</span>{" "}
+      <span className="text-danger">−{removed}</span>
+    </span>
   );
 }
 
@@ -108,13 +136,16 @@ function ToolRow({ tool, projectId }: { tool: Tool; projectId: string }) {
   const subject = toolSubject(tool.name, tool.arguments);
   const running = tool.state === "running" || tool.state === "requested";
   const output = tool.result ?? tool.live_output;
-  const expandable = Boolean(output || tool.diff);
+  const shell = isShell(tool.name);
+  const expandable = Boolean(output || tool.diff || (shell && subject));
+  const stats = tool.diff ? diffStats(tool.diff.diff) : null;
 
   return (
     <div className="text-ui">
       <div className="flex min-w-0 items-center gap-2">
         <button
           onClick={() => expandable && setOpen((v) => !v)}
+          aria-expanded={expandable ? open : undefined}
           className={clsx(
             "flex min-w-0 flex-1 items-center gap-2 rounded-md py-0.5 text-left",
             expandable && "hover:text-fg",
@@ -123,6 +154,7 @@ function ToolRow({ tool, projectId }: { tool: Tool; projectId: string }) {
           <StateIcon tool={tool} />
           <span className="shrink-0 font-medium text-fg/90">{toolVerb(tool.name)}</span>
           <span className="min-w-0 truncate font-mono text-small text-muted">{subject}</span>
+          {stats && <LineCounts {...stats} />}
           {tool.settled && <span className="shrink-0 text-small text-faint">· {tool.settled}</span>}
           {expandable && (
             <ChevronRight
@@ -147,28 +179,62 @@ function ToolRow({ tool, projectId }: { tool: Tool; projectId: string }) {
         </pre>
       )}
 
-      {tool.diff && !open && tool.state === "completed" && (
-        <div className="ml-6 mt-1.5">
-          <Diff path={tool.diff.path} diff={tool.diff.diff} maxHeight={220} />
-        </div>
-      )}
-
       {open && (
-        <div className="ml-6 mt-1.5 space-y-2">
+        <div className="mb-1 ml-6 mt-1.5 space-y-2">
           {tool.diff && <Diff path={tool.diff.path} diff={tool.diff.diff} />}
-          {output && (
-            <pre
-              className={clsx(
-                "max-h-[360px] overflow-auto whitespace-pre-wrap rounded-md border border-line bg-raised px-3 py-2 font-mono text-small leading-[1.5] selectable",
-                tool.is_error ? "text-danger" : "text-muted",
+          {shell ? (
+            <div className="overflow-hidden rounded-lg border border-line bg-raised">
+              <div className="group/command relative">
+                <pre className="whitespace-pre-wrap break-all px-3 py-2 pr-16 font-mono text-small leading-[1.5] text-fg selectable">
+                  <span className="select-none text-faint">$ </span>
+                  {subject}
+                </pre>
+                <CopyButton
+                  text={subject}
+                  label="Copy command"
+                  className="absolute right-1.5 top-1.5 opacity-0 focus-visible:opacity-100 group-hover/command:opacity-100"
+                />
+              </div>
+              {output && (
+                <Output text={output} error={tool.is_error} className="border-t border-line" />
               )}
-            >
-              {output}
-            </pre>
+            </div>
+          ) : (
+            // An edit's own output only repeats its diff unless it failed.
+            output &&
+            (!tool.diff || tool.is_error) && (
+              <Output
+                text={output}
+                error={tool.is_error}
+                className="rounded-lg border border-line bg-raised"
+              />
+            )
           )}
         </div>
       )}
     </div>
+  );
+}
+
+function Output({
+  text,
+  error,
+  className,
+}: {
+  text: string;
+  error: boolean;
+  className: string;
+}) {
+  return (
+    <pre
+      className={clsx(
+        "max-h-[320px] overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-small leading-[1.5] selectable",
+        error ? "text-danger" : "text-muted",
+        className,
+      )}
+    >
+      {text}
+    </pre>
   );
 }
 

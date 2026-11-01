@@ -29,14 +29,15 @@ import { Dropdown, type DropdownAction } from "./Dropdown";
 const STATUS_EVERY_MS = 15_000;
 const PR_EVERY_MS = 120_000;
 
-function useGitStatus(projectId: string, refreshKey: unknown) {
+/** Polls the project's Git status; `prs` false never asks `gh`. */
+export function useGitStatus(projectId: string, refreshKey: unknown, prs = true) {
   const [status, setStatus] = useState<GitStatusDto | null>(null);
   const lastPr = useRef(0);
   const sequence = useRef(0);
   const refresh = useCallback(
     async (withPr = false) => {
       const request = ++sequence.current;
-      const pr = withPr || Date.now() - lastPr.current > PR_EVERY_MS;
+      const pr = prs && (withPr || Date.now() - lastPr.current > PR_EVERY_MS);
       try {
         const next = await api.gitStatus(projectId, pr);
         if (request !== sequence.current) return;
@@ -49,7 +50,7 @@ function useGitStatus(projectId: string, refreshKey: unknown) {
         if (request === sequence.current) setStatus(null);
       }
     },
-    [projectId],
+    [projectId, prs],
   );
 
   useEffect(() => {

@@ -4,13 +4,15 @@ export interface Preferences {
   theme: "system" | "light" | "dark";
   fontSize: number;
   notifications: boolean;
-  /** The session's Changes panel is shown. */
-  changesPanel: boolean;
+  /** The session's side panel: its details, its changes, or hidden. */
+  sidePanel: SidePanel | null;
   /** Installed font family for the interface; null uses the default. */
   interfaceFont: string | null;
   /** Installed font family for code; null uses the default. */
   codeFont: string | null;
 }
+
+export type SidePanel = "details" | "changes";
 
 /** Fonts that ship with Windows. The first entry is the default. */
 export const INTERFACE_FONTS = [
@@ -54,7 +56,7 @@ export const MAX_FONT_SIZE = 22;
 const KEY = "qq.preferences";
 
 export function parsePreferences(json: string | null): Preferences {
-  let value: Partial<Preferences> = {};
+  let value: Partial<Preferences> & { changesPanel?: unknown } = {};
   try {
     value = JSON.parse(json ?? "{}") ?? {};
   } catch {
@@ -72,7 +74,13 @@ export function parsePreferences(json: string | null): Preferences {
         ? value.fontSize
         : 14,
     notifications: value.notifications === true,
-    changesPanel: value.changesPanel === true,
+    sidePanel:
+      value.sidePanel === "details" || value.sidePanel === "changes"
+        ? value.sidePanel
+        : // Saved before the details panel existed.
+          value.changesPanel === true
+          ? "changes"
+          : null,
     interfaceFont: fontName(value.interfaceFont),
     codeFont: fontName(value.codeFont),
   };

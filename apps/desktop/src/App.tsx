@@ -22,7 +22,7 @@ import {
   useWorktreeDialog,
 } from "./lib/worktree-dialog";
 import { openInEditor } from "./lib/editor";
-import { SessionPane } from "./components/SessionPane";
+import { SessionPane, toggleSidePanel } from "./components/SessionPane";
 import { Welcome } from "./components/Welcome";
 import {
   activate,
@@ -124,8 +124,6 @@ export function App() {
   const canBack = history.current.index > 0;
   const canForward = history.current.index < history.current.stack.length - 1;
 
-  const toggleChanges = () =>
-    updatePreferences({ changesPanel: !getPreferences().changesPanel });
 
   const newSession = () => {
     if (project) void api.newSession(project.project_id);
@@ -134,7 +132,7 @@ export function App() {
   // Global shortcuts. Ctrl N new session, Ctrl O open project, Ctrl , settings,
   // Ctrl K commands, Ctrl B sidebar, Ctrl F find session, Ctrl +/-/0 zoom,
   // Alt ←/→ history, Ctrl Shift A next session that needs you, Ctrl Shift D
-  // changes panel, Ctrl Shift E open in editor, Ctrl Shift N worktree session.
+  // session details, Ctrl Shift E open in editor, Ctrl Shift N worktree session.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (document.querySelector("dialog[open]")) return;
@@ -185,7 +183,7 @@ export function App() {
         void openInEditor(project.project_id);
       } else if (key === "d" && event.shiftKey) {
         handled();
-        toggleChanges();
+        toggleSidePanel();
       } else if (key === "a" && event.shiftKey && project) {
         handled();
         const next = project.sessions.find(
@@ -288,11 +286,11 @@ export function App() {
           onSelect: toggleSidebar,
         },
         {
-          label: preferences.changesPanel
-            ? "Hide changes panel"
-            : "Show changes panel",
+          label: preferences.sidePanel
+            ? "Hide session details"
+            : "Show session details",
           shortcut: "Ctrl Shift D",
-          onSelect: toggleChanges,
+          onSelect: () => toggleSidePanel(),
         },
         {
           label: "Back",

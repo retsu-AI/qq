@@ -10,7 +10,7 @@ test("preference migration defaults and invalid values remain usable", () => {
     theme: "system",
     fontSize: 14,
     notifications: false,
-    changesPanel: false,
+    sidePanel: null,
     interfaceFont: null,
     codeFont: null,
   };
@@ -26,11 +26,14 @@ test("preference migration defaults and invalid values remain usable", () => {
     theme: "dark",
     fontSize: 18,
     notifications: true,
-    changesPanel: true,
+    sidePanel: "details",
     interfaceFont: "Inter",
     codeFont: "JetBrains Mono",
   };
   assert.deepEqual(parsePreferences(JSON.stringify(saved)), saved);
+  // An open Changes panel from before the details panel stays open.
+  assert.equal(parsePreferences('{"changesPanel":true}').sidePanel, "changes");
+  assert.equal(parsePreferences('{"sidePanel":"other"}').sidePanel, null);
 });
 
 test("font names that could escape a CSS font stack are refused", () => {

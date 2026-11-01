@@ -59,7 +59,7 @@ import { Dropdown, type DropdownOption } from "./Dropdown";
 
 type SendMode = "queue" | "steer" | "interrupt";
 
-const MODES: Array<DropdownOption<ApprovalMode>> = [
+export const MODES: Array<DropdownOption<ApprovalMode>> = [
   { value: "read_only", label: "Read only", hint: "No edits or commands" },
   { value: "ask", label: "Ask", hint: "Ask before every edit and command" },
   { value: "auto", label: "Auto", hint: "Run safe actions, ask for risky ones" },
