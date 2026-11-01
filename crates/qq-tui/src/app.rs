@@ -884,6 +884,7 @@ impl App {
                 self.refresh_session_picker();
             }
         }
+        self.refresh_session_picker();
         effects.extend(self.replay_queued_prompts());
         effects
     }
@@ -1382,13 +1383,13 @@ impl App {
         {
             return self.copy_block();
         }
+        if let Some(command) = commands::command_for_key(&self.settings, key) {
+            return self.execute(command);
+        }
         if let KeyCode::Char(digit @ '1'..='9') = key.code
             && key.modifiers == KeyModifiers::ALT
         {
             return self.focus_numbered(usize::from(digit as u8 - b'0'));
-        }
-        if let Some(command) = commands::command_for_key(&self.settings, key) {
-            return self.execute(command);
         }
         match key.code {
             KeyCode::Esc => {

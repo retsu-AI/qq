@@ -2114,3 +2114,16 @@ fn spend_is_inclusive_of_agents() {
     });
     assert_eq!(store.rail_order()[0].cost, Some(70));
 }
+
+#[test]
+fn orphan_sessions_sort_with_roots_newest_first() {
+    let mut store = SessionStore::default();
+    let old_orphan = put(&mut store, 1, Some(9), 1);
+    let new_root = put(&mut store, 2, None, 100);
+    let mid_orphan = put(&mut store, 3, Some(8), 50);
+    let old_root = put(&mut store, 4, None, 10);
+    assert_eq!(
+        store.listed_sessions(),
+        vec![new_root, mid_orphan, old_root, old_orphan]
+    );
+}

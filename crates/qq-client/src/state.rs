@@ -690,23 +690,26 @@ impl SessionStore {
                         .then_with(|| b.title.cmp(&a.title))
                 });
             }
-            let orphans = index
+            let mut tops: Vec<(SessionId, bool)> = index
                 .children
                 .iter()
-                .filter_map(|(parent, kids)| {
-                    parent.filter(|parent| !self.sessions.contains_key(parent))?;
-                    Some(kids)
+                .filter_map(|(parent, kids)| match parent {
+                    None => Some((kids, true)),
+                    Some(parent) if !self.sessions.contains_key(parent) => Some((kids, false)),
+                    Some(_) => None,
                 })
-                .flatten()
-                .copied()
-                .collect::<Vec<_>>();
-            let mut stack: Vec<(SessionId, usize, bool, bool)> = index
-                .children
-                .get(&None)
+                .flat_map(|(kids, rooted)| kids.iter().map(move |id| (*id, rooted)))
+                .collect();
+            tops.sort_by(|(a, _), (b, _)| {
+                let (a, b) = (&self.sessions[a].summary, &self.sessions[b].summary);
+                a.updated_at_ms
+                    .cmp(&b.updated_at_ms)
+                    .then_with(|| b.title.cmp(&a.title))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            let mut stack: Vec<(SessionId, usize, bool, bool)> = tops
                 .into_iter()
-                .flatten()
-                .map(|id| (*id, 0, false, true))
-                .chain(orphans.into_iter().map(|id| (id, 0, false, false)))
+                .map(|(id, rooted)| (id, 0, false, rooted))
                 .collect();
             index.order.reserve(self.sessions.len());
             while let Some((session_id, depth, under_audit, rooted)) = stack.pop() {

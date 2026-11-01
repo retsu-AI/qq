@@ -141,6 +141,9 @@ pub(super) fn sidebar(
             Vec::new()
         };
         for agent in shown.iter().take(RAIL_AGENT_ROWS) {
+            if app.focused() == Some(*agent) {
+                focused_row = plan.len();
+            }
             plan.push(Row::Agent(*agent));
         }
         if shown.len() > RAIL_AGENT_ROWS {

@@ -6326,3 +6326,55 @@ fn twenty_agents_take_one_rail_row_plus_the_one_that_needs_you() {
         "{rows:#?}"
     );
 }
+
+#[test]
+fn the_rail_scrolls_to_a_focused_agent_below_the_fold() {
+    let mut app = app_with_messages(1);
+    app.layout.rail = PanePref::Shown;
+    let mut last = None;
+    for byte in 2..40_u8 {
+        let id = SessionId::from_bytes([byte; 16]);
+        app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+            occurred_at_ms: u64::from(byte),
+            ..fixtures::envelope(
+                u64::from(byte),
+                id,
+                SessionEvent::SessionCreated {
+                    session: Box::new(SessionSummary {
+                        model_is_fallback: false,
+                        title: format!("root {byte}"),
+                        updated_at_ms: 1000 - u64::from(byte),
+                        ..fixtures::session_summary(id)
+                    }),
+                },
+            )
+        }));
+        last = Some(id);
+    }
+    let owner = last.unwrap();
+    let agent = SessionId::from_bytes([0x77; 16]);
+    app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        occurred_at_ms: 40,
+        ..fixtures::envelope(
+            40,
+            agent,
+            SessionEvent::SessionCreated {
+                session: Box::new(SessionSummary {
+                    model_is_fallback: false,
+                    parent_id: Some(owner),
+                    title: "deep agent".to_owned(),
+                    ..fixtures::session_summary(agent)
+                }),
+            },
+        )
+    }));
+    app.focus_session(agent);
+    assert_eq!(app.focused(), Some(agent));
+    assert_eq!(app.sessions.session_of(agent), Some(owner));
+    let rail = rail_rows(&mut app, 120, 24).join("\n");
+    assert!(rail.contains("deep agent"), "{rail}");
+    assert!(
+        rail.contains("root 39"),
+        "its session stays in view: {rail}"
+    );
+}

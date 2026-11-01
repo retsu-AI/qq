@@ -6095,3 +6095,52 @@ fn a_hidden_agents_stream_does_not_wake_a_frame_but_its_sessions_does() {
         "an agent of the focused session shows in its lane"
     );
 }
+
+#[test]
+fn a_prefetched_body_fills_the_open_switchers_answer_preview() {
+    let (mut app, [first, beta, ..]) = switcher_app();
+    app.focus_session(beta);
+    app.focus_session(first);
+    app.execute(Command::OpenSessions);
+    let answer = |app: &App| match &app.overlay {
+        Some(crate::input::Overlay::Sessions { picker, .. }) => picker
+            .items()
+            .iter()
+            .find(|row| row.id == beta)
+            .map(|row| row.answer.clone()),
+        _ => None,
+    };
+    assert_eq!(
+        answer(&app).as_deref(),
+        Some(""),
+        "the cold body has no answer yet"
+    );
+    let summary = app.sessions[&beta].summary.clone();
+    app.apply_snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        focused: None,
+        included: vec![body_for(&summary, "Shipped the fix.")],
+        ..snapshot()
+    });
+    assert_eq!(answer(&app).as_deref(), Some("Shipped the fix."));
+}
+
+#[test]
+fn a_configured_alt_digit_binding_wins_over_numbered_focus() {
+    let settings = crate::settings::SettingsBuilder::default()
+        .bindings(
+            crate::settings::Action::CreateRootSession,
+            vec!["Alt-1".parse().unwrap()],
+        )
+        .build()
+        .unwrap();
+    let (mut app, _) = switcher_app();
+    app.settings = settings;
+    let before = app.focused();
+    let effects = app.handle_key(key(KeyCode::Char('1'), KeyModifiers::ALT));
+    assert!(
+        effects.requests_anything(),
+        "Alt-1 creates a session as configured"
+    );
+    assert_eq!(app.focused(), before);
+}
