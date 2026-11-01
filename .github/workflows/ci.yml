@@ -101,19 +101,43 @@ jobs:
           fi
 
   quarantine:
-    name: quarantined tests under stress (non-blocking)
-    runs-on: ubuntu-latest
+    name: quarantined tests under stress (${{ matrix.os }}, non-blocking)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     continue-on-error: true
     timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
+      - name: Skip when nothing is quarantined
+        id: list
+        run: |
+          if grep -q '^\[\[quarantine\]\]' .config/quarantine.toml; then
+            echo listed=true >> "$GITHUB_OUTPUT"
+          else
+            echo 'quarantine list is empty' | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: Swatinem/rust-cache@v2
+        if: steps.list.outputs.listed == 'true'
         with:
-          key: quarantine
+          key: quarantine-${{ matrix.os }}
       - uses: taiki-e/install-action@v2
+        if: steps.list.outputs.listed == 'true'
         with:
           tool: cargo-nextest
+      - name: GNU timeout and setsid for the process-group tests
+        if: steps.list.outputs.listed == 'true' && runner.os == 'macOS'
+        run: |
+          brew install coreutils util-linux >/dev/null
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix util-linux)/bin" >> "$GITHUB_PATH"
       - name: Stress the quarantined tests
+        if: steps.list.outputs.listed == 'true'
         run: |
           filter=$(cargo xtask quarantine)
           if [[ -z $filter ]]; then

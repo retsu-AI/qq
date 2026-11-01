@@ -161,11 +161,12 @@ expires = "2026-11-15"
 - `cargo xtask lint` fails on an entry with no owner or issue, a test name
   that matches neither `cargo nextest list` on this host nor
   `.config/platform-tests/<os>.txt` (so a Windows- or macOS-only test can be
-  quarantined from Linux), a malformed date, an `expires` more than 14 days
+  quarantined from Linux), a malformed date, an `added` after today, an `expires` more than 14 days
   after `added`, or any entry past its expiry or more than 14 days past
   `added`. An entry cannot be renewed in place: fix the test or delete it.
-- The non-blocking CI job `quarantined tests under stress` runs the listed
-  tests with `--stress-count 100` on every run, so a fix shows up as a
+- The non-blocking CI jobs `quarantined tests under stress (<os>)` run the
+  listed tests with `--stress-count 100` on Linux, Windows and macOS on
+  every run, so a fix shows up as a
   green job.
 - A test leaves quarantine with a fix whose new test fails first and
   passes after, plus about 100 green stress iterations (the CI job, or the
@@ -217,7 +218,7 @@ it when `/dev/shm` is missing, unwritable, mounted `noexec`, or has under
 | --- | --- | --- |
 | `fmt, lint, clippy, tests, smoke` (`checks`) | every run | pull requests: `cargo xtask check --profile ci --base origin/<base>` (soak tests excluded); merge queue, `main`, nightly and manual runs: `cargo xtask check --profile ci --full` (soak included); then `cargo xtask smoke`. Summary carries the evidence block; failures upload `target/qq-check/`, JUnit and `target/qq-smoke/` |
 | `minimal core profile and embedding` (`core-profiles`) | merge queue, `main`, nightly, manual, `ci:full` | `qq-core --no-default-features` tests and Clippy, the `htmd` dependency check, and the embedding example, in parallel with `checks` |
-| `quarantined tests under stress` (`quarantine`) | every run, non-blocking | stress-runs `.config/quarantine.toml` 100 times; passes at once when the list is empty |
+| `quarantined tests under stress (<os>, non-blocking)` (`quarantine`) | every run, on Linux, Windows and macOS, non-blocking | stress-runs `.config/quarantine.toml` 100 times on each OS, so a platform-only entry still runs where it compiles; skips the build when the list is empty |
 | `devcontainer smoke` | when `.devcontainer/`, `Dockerfile*`, `rust-toolchain.toml` or `Cargo.lock` changed, and on every non-PR run and `ci:full` | builds `.devcontainer/` and runs three smoke scenarios inside it. `devcontainer inputs changed` decides |
 | `qq-client on wasm32` | merge queue, `main`, nightly, manual, `ci:full` | wasm32 build and test build |
 | `platform tests (windows-latest)`, `platform tests (macos-latest)` | merge queue, `main`, nightly, manual, `ci:full` | the nextest `platform` profile, checked against `.config/platform-tests/<os>.txt`, then run-in-place smoke, `qq-core` Clippy and the embedding example ([Windows CI](windows-ci.md)) |

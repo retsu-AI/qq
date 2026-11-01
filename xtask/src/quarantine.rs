@@ -162,6 +162,9 @@ pub fn problems(
         let added = added.and_then(|(_, date)| date);
         let expires = expires.and_then(|(_, date)| date);
         if let Some(added) = added {
+            if added > today {
+                problem(format!("`added` {added} is after today, {today}"));
+            }
             let limit = added + Duration::days(MAX_DAYS);
             if today > limit {
                 problem(format!(
@@ -321,6 +324,18 @@ expires = "2026-11-15"
             details(&early, "2026-11-06", true),
             ["expired on 2026-11-05; fix the test or delete it"]
         );
+    }
+
+    #[test]
+    fn an_entry_added_in_the_future_is_refused() {
+        let future = ENTRY
+            .replace("2026-11-01", "2027-01-01")
+            .replace("2026-11-15", "2027-01-10");
+        assert_eq!(
+            details(&future, "2026-11-01", true),
+            ["`added` 2027-01-01 is after today, 2026-11-01"]
+        );
+        assert_eq!(details(&future, "2027-01-01", true), Vec::<String>::new());
     }
 
     #[test]
