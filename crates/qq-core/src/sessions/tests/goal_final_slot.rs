@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_completion() {
+async fn goal_final_run_reserves_a_durable_tool_free_handoff_after_early_completion() {
     const RUNS: usize = 3;
     struct Model {
         ordinal: usize,
