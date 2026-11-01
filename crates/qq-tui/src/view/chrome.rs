@@ -453,7 +453,8 @@ pub(super) fn dock_footer(app: &App, width: usize, compact: bool) -> Line {
     }
 }
 
-pub(super) fn dock_panel(app: &App, width: usize, limit: usize) -> Vec<Line> {
+pub(super) fn dock_panel(app: &App, width: usize, limit: usize) -> (Vec<Line>, Option<usize>) {
+    let mut goal_scroll = None;
     let rows = match app.mode() {
         Mode::GoalForm => goal_form(app, width, limit),
         Mode::GoalCheck => goal_check_picker(app, width, limit),
@@ -471,6 +472,7 @@ pub(super) fn dock_panel(app: &App, width: usize, limit: usize) -> Vec<Line> {
             View::Goal(session_id) => {
                 let rows = goal_panel(app, session_id, width);
                 let start = app.goal_scroll.min(rows.len().saturating_sub(limit));
+                goal_scroll = Some(start);
                 let hidden_below = rows.len().saturating_sub(start + limit);
                 let mut shown: Vec<Line> = rows.into_iter().skip(start).collect();
                 if hidden_below > 0 {
@@ -496,7 +498,7 @@ pub(super) fn dock_panel(app: &App, width: usize, limit: usize) -> Vec<Line> {
         rows.pop();
     }
     rows.truncate(limit);
-    rows
+    (rows, goal_scroll)
 }
 
 pub(super) fn goal_panel(app: &App, session_id: SessionId, width: usize) -> Vec<Line> {

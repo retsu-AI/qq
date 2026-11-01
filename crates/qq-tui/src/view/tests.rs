@@ -5935,7 +5935,7 @@ fn page_down_reveals_goal_rows_past_the_dock_limit() {
     initial.focused.as_mut().unwrap().goal = Some(goal);
     app.apply_client_update(ClientUpdate::Snapshot(initial));
     app.execute(Command::ShowGoal);
-    let panel = |app: &App| frame_rows(&super::chrome::dock_panel(app, 76, 5)).join("\n");
+    let panel = |app: &App| frame_rows(&super::chrome::dock_panel(app, 76, 5).0).join("\n");
     let first = panel(&app);
     assert!(!first.contains("last-line-marker"), "{first}");
     assert!(first.contains("PgDn"), "{first}");
@@ -6220,7 +6220,7 @@ fn paging_the_goal_panel_reaches_every_row_on_a_short_terminal() {
     let all = frame_rows(&super::chrome::goal_panel(&app, session, 76));
     let mut seen = std::collections::HashSet::new();
     for _ in 0..all.len() + 2 {
-        for row in frame_rows(&super::chrome::dock_panel(&app, 76, 3)) {
+        for row in frame_rows(&super::chrome::dock_panel(&app, 76, 3).0) {
             seen.insert(row);
         }
         app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
@@ -6251,4 +6251,47 @@ fn the_goal_panel_keeps_every_line_of_the_last_check_output() {
     ] {
         assert!(text.contains(line), "{line} missing:\n{text}");
     }
+}
+
+#[test]
+fn page_down_reaches_the_end_of_a_very_long_check_output_and_page_up_returns_at_once() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let session = initial.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session);
+    let lines: Vec<String> = (0..320).map(|line| format!("diag-{line:03}")).collect();
+    goal.check_output = Some(format!("exit 1\n{}\nfinal-summary", lines.join("\n")));
+    initial.focused.as_mut().unwrap().goal = Some(goal);
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    app.execute(Command::ShowGoal);
+    let mut renderer = FrameRenderer::default();
+    let page_down = |app: &mut App| {
+        app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        )))
+    };
+    let mut reached = false;
+    for _ in 0..400 {
+        let text = frame_rows(&renderer.frame_and_commit(&mut app, 80, 24)).join("\n");
+        if text.contains("diag-319") {
+            reached = true;
+            break;
+        }
+        page_down(&mut app);
+    }
+    assert!(reached, "the last diagnostic row was never shown");
+    for _ in 0..50 {
+        page_down(&mut app);
+        renderer.frame_and_commit(&mut app, 80, 24);
+    }
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::PageUp,
+        KeyModifiers::NONE,
+    )));
+    let text = frame_rows(&renderer.frame_and_commit(&mut app, 80, 24)).join("\n");
+    assert!(
+        text.contains("PgDn"),
+        "one PageUp past the end moves back up: {text}"
+    );
 }

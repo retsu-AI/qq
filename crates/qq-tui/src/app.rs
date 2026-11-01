@@ -35,7 +35,6 @@ use crate::{
 mod pickers;
 
 const GOAL_PAGE_ROWS: usize = 1;
-const MAX_GOAL_SCROLL: usize = 256;
 const MAX_EXPANDED_TOOL_CALLS: usize = 256;
 
 const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -1527,7 +1526,7 @@ impl App {
             self.goal_scroll = if up {
                 before.saturating_sub(GOAL_PAGE_ROWS)
             } else {
-                before.saturating_add(GOAL_PAGE_ROWS).min(MAX_GOAL_SCROLL)
+                before.saturating_add(GOAL_PAGE_ROWS)
             };
             return self.goal_scroll != before;
         }
