@@ -286,6 +286,7 @@ pub(crate) struct App {
     pub(crate) panes: Vec<TranscriptPane>,
     pub(crate) focused_pane: usize,
     view_return: Option<SessionId>,
+    previous_focus: Option<SessionId>,
     focus_clock: u64,
     pub overlay: Option<Overlay>,
     pub composer: Composer,
@@ -354,6 +355,7 @@ impl App {
             panes: vec![TranscriptPane::default()],
             focused_pane: 0,
             view_return: None,
+            previous_focus: None,
             focus_clock: 0,
             overlay: None,
             composer: Composer::default(),
@@ -816,7 +818,7 @@ impl App {
                 self.set_focus_clock(focused_id);
             }
         } else if self.focused().is_none()
-            && let Some(first) = self.sessions.roots().first().copied()
+            && let Some(first) = self.sessions.listed_sessions().first().copied()
         {
             self.set_focus(first);
         }
@@ -882,6 +884,7 @@ impl App {
                 self.refresh_session_picker();
             }
         }
+        self.refresh_session_picker();
         effects.extend(self.replay_queued_prompts());
         effects
     }
@@ -1006,6 +1009,21 @@ impl App {
     }
 
     fn set_focus(&mut self, session_id: SessionId) {
+        if let Some(current) = self.focused()
+            && current != session_id
+        {
+            self.previous_focus = Some(current);
+            let answering = self.approval_amendment.is_some()
+                || self
+                    .pending_question()
+                    .and_then(|question| question.questions.get(self.question_answers.len()))
+                    .is_some_and(|question| question.free_text);
+            if answering {
+                self.composer.clear();
+            }
+            self.approval_amendment = None;
+            self.question_answers.clear();
+        }
         self.set_view(View::Transcript(Some(session_id)));
         self.set_focus_clock(session_id);
     }
@@ -1073,16 +1091,19 @@ impl App {
         if self.focused() == Some(event.session_id) {
             return true;
         }
-        if self
-            .sessions
-            .get(&event.session_id)
-            .and_then(|session| session.summary.parent_id)
-            .is_some_and(|parent| self.focused() == Some(parent))
-        {
-            return true;
+        if !self.sessions.is_session(event.session_id) {
+            return self.focused().is_some()
+                && self.sessions.session_of(event.session_id)
+                    == self
+                        .focused()
+                        .and_then(|focused| self.sessions.session_of(focused));
         }
         self.terminal_width == 0
-            || crate::view::rail_visible(self.terminal_width, self.layout, self.sessions.len())
+            || crate::view::rail_visible(
+                self.terminal_width,
+                self.layout,
+                self.sessions.listed_count(),
+            )
     }
 
     fn set_notice_for(&mut self, session_id: Option<SessionId>, text: String, level: NoticeLevel) {
@@ -1250,6 +1271,17 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 let cleared = self.selection.take().is_some();
+                if let Some(session_id) = self.geometry.rail_hit(column, row) {
+                    self.last_click = None;
+                    if self.sessions.contains_key(&session_id)
+                        && !self.sessions.is_hidden(session_id)
+                    {
+                        let mut effects = Effects::redraw(Redraw::Immediate);
+                        effects.extend(self.focus_session(session_id));
+                        return effects;
+                    }
+                    return Effects::changed_now(cleared);
+                }
                 let now = (self.click_clock)();
                 let clicks = match self.last_click {
                     Some((at, cell, count))
@@ -1361,6 +1393,11 @@ impl App {
         }
         if let Some(command) = commands::command_for_key(&self.settings, key) {
             return self.execute(command);
+        }
+        if let KeyCode::Char(digit @ '1'..='9') = key.code
+            && key.modifiers == KeyModifiers::ALT
+        {
+            return self.focus_numbered(usize::from(digit as u8 - b'0'));
         }
         match key.code {
             KeyCode::Esc => {
@@ -1592,7 +1629,7 @@ impl App {
             .view_return
             .take()
             .filter(|id| self.sessions.contains_key(id))
-            .or_else(|| self.sessions.thread_order().first().copied());
+            .or_else(|| self.sessions.listed_sessions().first().copied());
         match target {
             Some(session) => self.focus_session(session),
             None => {
@@ -1688,6 +1725,7 @@ impl App {
                     self.open_sessions()
                 }
             }
+            Command::PreviousSession => self.focus_previous_session(),
             Command::NewRootSession => self.create_session(None),
             Command::NewChildSession => self.create_session(self.focused()),
             Command::CompactSession => self.compact_session(),
@@ -1732,17 +1770,23 @@ impl App {
                 self.layout.inspector = self.layout.inspector.toggled_from_hidden();
                 Effects::redraw(Redraw::Immediate)
             }
-            Command::FocusParent => match self
-                .focused()
-                .and_then(|focused| self.sessions.get(&focused)?.summary.parent_id)
-            {
+            Command::FocusParent => match self.focused().and_then(|focused| {
+                self.sessions
+                    .get(&focused)?
+                    .summary
+                    .parent_id
+                    .filter(|parent| self.sessions.contains_key(parent))
+            }) {
                 Some(parent) => self.focus_session(parent),
                 None => Effects::none(),
             },
-            Command::FocusFirstChild => match self
-                .focused()
-                .and_then(|focused| self.sessions.children_of(focused).first().copied())
-            {
+            Command::FocusFirstChild => match self.focused().and_then(|focused| {
+                self.sessions
+                    .children_of(focused)
+                    .iter()
+                    .copied()
+                    .find(|child| !self.sessions.is_hidden(*child))
+            }) {
                 Some(child) => self.focus_session(child),
                 None => Effects::none(),
             },
@@ -3071,16 +3115,40 @@ impl App {
     fn sibling(&self, offset: isize) -> Option<SessionId> {
         let focused = self.focused()?;
         let parent = self.sessions.get(&focused)?.summary.parent_id;
-        let siblings = match parent {
-            Some(parent) => self.sessions.children_of(parent),
-            None => self.sessions.roots(),
-        };
+        let siblings: Vec<SessionId> = match parent {
+            Some(parent) => self.sessions.children_of(parent).to_vec(),
+            None => self.sessions.roots().to_vec(),
+        }
+        .into_iter()
+        .filter(|id| !self.sessions.is_hidden(*id))
+        .collect();
         if siblings.len() < 2 {
             return None;
         }
         let position = siblings.iter().position(|id| *id == focused)?;
         let next = (position as isize + offset).rem_euclid(siblings.len() as isize) as usize;
         Some(siblings[next])
+    }
+
+    fn focus_previous_session(&mut self) -> Effects {
+        let target = self
+            .previous_focus
+            .filter(|id| self.sessions.contains_key(id) && !self.sessions.is_hidden(*id));
+        match target {
+            Some(session_id) => self.focus_session(session_id),
+            None => {
+                self.set_info("no previous session".to_owned());
+                Effects::redraw(Redraw::Immediate)
+            }
+        }
+    }
+
+    fn focus_numbered(&mut self, number: usize) -> Effects {
+        let rows = self.sessions.rail_order();
+        match number.checked_sub(1).and_then(|index| rows.get(index)) {
+            Some(row) => self.focus_session(row.id),
+            None => Effects::none(),
+        }
     }
 
     pub(crate) fn sessions_needing_attention(&self) -> Vec<SessionId> {

@@ -164,7 +164,7 @@ fn code_panel_fill_is_not_copied_when_the_sessions_column_is_shown() {
     draw(&mut app, &mut renderer);
     let shown = rows(&mut app, &mut renderer);
     assert!(
-        crate::view::rail_visible(usize::from(SIZE.0), app.layout, app.sessions.len()),
+        crate::view::rail_visible(usize::from(SIZE.0), app.layout, app.sessions.listed_count()),
         "the sessions column is on screen"
     );
     let code = find(&shown, "cargo test -p");

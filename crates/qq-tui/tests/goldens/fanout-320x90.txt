@@ -1,0 +1,90 @@
+
+  ┃ split the plan into twenty agents                                                                                                                                                                                                                                                     NEEDS YOU
+                                                                                                                                                                                                                                                                                        ▎ 1 ◇ Session 0  ↳20
+    Spawned the agents.                                                                                                                                                                                                                                                                     ◇ agent 1
+
+  ● Spawned  20 agents   ◐ 19  ◇ 1                                                                                                                                                                                                                                                        RECENT
+  ├ ◇ agent 1   wants to run a command                                                                                                                                                                                                                                                    2 ● release notes
+  ├ ◐ agent 2   waiting for model
+  ├ ◐ agent 3   waiting for model
+  ├ ◐ agent 4   waiting for model
+  ├ ◐ agent 5   waiting for model
+  ├ ◐ agent 6   waiting for model
+  └ +14 more   ^T
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇ 1 needs you  ^G
+  ┃ Ask QQ…
+    Session 0 · gpt-test                                                                                                                                                                                                                                                  /workspace

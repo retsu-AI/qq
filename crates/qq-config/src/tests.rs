@@ -1986,6 +1986,10 @@ fn tui_defaults() -> TuiConfigDefaults {
         (TuiAction::CreateChildSession, vec!["Alt-C".to_owned()]),
         (TuiAction::CancelRun, vec!["Ctrl-X".to_owned()]),
         (TuiAction::InterruptRun, vec!["Alt-S".to_owned()]),
+        (
+            TuiAction::PreviousSession,
+            vec!["Ctrl-6".to_owned(), "Ctrl-^".to_owned()],
+        ),
     ])
     .unwrap()
 }

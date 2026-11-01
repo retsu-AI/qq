@@ -187,20 +187,24 @@ the focused pane and does not scroll.
 
 ## Sessions column
 
-The sessions column (`view/sidebar.rs`) lists every session grouped by what
-the user should do about it: **NEEDS YOU** (an approval waiting, a failure,
-or a finish not yet looked at), then **WORKING**, then **RECENT** (idle and
-done sessions). Within a group sessions keep tree order (roots newest first,
-each followed by its children oldest first). Group labels are `faint`, one
-blank row separates groups, and the column has 2 columns of padding on the
-`surface` fill with no border:
+The sessions column (`view/sidebar.rs`) lists sessions, not agents. A
+**session** is a root conversation, or an agent whose parent is not loaded;
+an **agent** is a sub-agent under a loaded session and folds into its
+session's row as `↳N`. Audit sessions (`SessionPurpose::Audit`) and
+everything under them are in no list. Sessions are grouped by what the user
+should do: **NEEDS YOU** (an approval waiting in the session or any of its
+agents, a failure, or a finish not yet looked at), then **WORKING** (the
+session or any agent runs), then **RECENT** (idle and done). Within a group
+the newest session comes first. Group labels are `faint`, one blank row
+separates groups, and the column has 2 columns of padding on the `surface`
+fill with no border:
 
 ```
   NEEDS YOU
   1 ● Refactor  1 new
                                  $0.12
-  2 ◇ Deploy helper
-      wants to run a command
+▎ 2 ◇ Session 0  ↳1
+      ◇ Deploy helper
 
   WORKING
   3 ◐ Write tests  1 new
@@ -209,17 +213,21 @@ blank row separates groups, and the column has 2 columns of padding on the
       Found twelve call sites across…
 
   RECENT
-  5 ○ Scratch
-  6 ○ Notes
-▎ 7 ○ Session 0  ↳1
-  8 ● Migrate
+  5 ● Migrate
                                  $0.04
+  6 ○ Scratch
 ```
 
 The column and the rule's Compact counts are built from one pass,
-`rail_entries`, which walks the sessions once and yields, per session, its
-group, unread count, whether it has a live status, and its own reported
-spend. The column plans rows from that list and paints only the rows inside
+`rail_entries`, over `SessionStore::rail_order`, which yields, per session,
+its rolled-up group, unread count, whether it has a live status, its agent
+and working-agent counts, and inclusive spend (`accounting.inclusive`).
+`needing_attention` orders approvals, then failures, then unseen finishes,
+newest session first; `Ctrl-G`, `Alt-A`/`Alt-D`, `/attention` and the rule
+all read it. An agent gets its own row only when it waits on you or belongs
+to the focused session, at most 6, then `+N more`. Each frame commits the
+column's hit rows so a click on a row focuses that session; a row for a
+session deleted since the frame is ignored. The column plans rows from that list and paints only the rows inside
 its scrolled window (centered on the focused session); the rule counts from
 the same list. Neither surface re-derives grouping, so `8 sessions  ◐ 2  ◇ 2`
 on the rule and the groups in the column always agree.

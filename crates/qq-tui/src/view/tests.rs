@@ -2466,7 +2466,7 @@ fn session_picker_pins_search_and_keeps_the_selection_visible() {
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 12);
     let text = frame_text(&frame);
 
-    assert!(text.contains("SESSIONS"));
+    assert!(text.contains("SWITCH"));
     assert!(text.contains("search: all sessions"));
     assert!(text.contains("Session 10"));
 }
@@ -2626,7 +2626,6 @@ fn page_up_reaches_the_beginning_of_a_long_completed_message() {
 fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
     let mut app = app_with_messages(1);
     app.connection = crate::ConnectionState::Live;
-    let parent = app.focused().unwrap();
     let child_id = SessionId::from_bytes([7; 16]);
     let run_id = RunId::from_bytes([8; 16]);
     app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
@@ -2638,7 +2637,6 @@ fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
             SessionEvent::SessionCreated {
                 session: Box::new(SessionSummary {
                     model_is_fallback: false,
-                    parent_id: Some(parent),
                     title: "Survey callers".to_owned(),
                     status: SessionStatus::Running,
                     active_run_id: Some(run_id),
@@ -2880,7 +2878,10 @@ fn background_approvals_surface_on_the_rule_and_ctrl_g_jumps_to_them() {
     assert_eq!(app.mode(), Mode::Compose);
     let text = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 24)).join("\n");
     assert!(text.contains("◇ Deploy helper"), "{text}");
-    assert!(text.contains("◇ 1  ^G"), "the rule names the jump: {text}");
+    assert!(
+        text.contains("◇ 1 needs you  ^G"),
+        "the rule names the jump: {text}"
+    );
 
     let (changed, requests) = app
         .handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
@@ -4163,7 +4164,7 @@ fn the_rule_names_a_sibling_needing_approval_below_the_sidebar_width() {
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 90, 24));
     let rule = rows
         .iter()
-        .find(|row| row.contains("2 sessions"))
+        .find(|row| row.contains("needs you"))
         .unwrap_or_else(|| panic!("rule in {rows:#?}"));
     assert!(rule.contains("◇ 1"), "{rule}");
     assert!(rule.contains("^G"), "{rule}");
@@ -4298,12 +4299,12 @@ fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
 
     let text = rail_rows(&mut app, 160, 30).join("\n");
     let needs = text.find("NEEDS YOU").expect("needs-you group");
-    let recent = text
-        .find("RECENT")
-        .expect("recent group for the focused parent");
-    assert!(needs < recent, "needs-you first: {text}");
-    assert!(text.find("Deploy helper").unwrap() < recent, "{text}");
-    assert!(text.find("Refactor").unwrap() < recent, "{text}");
+    assert!(
+        !text.contains("RECENT"),
+        "everything needs you or works: {text}"
+    );
+    assert!(text.find("Deploy helper").unwrap() > needs, "{text}");
+    assert!(text.find("Refactor").unwrap() > needs, "{text}");
     assert!(text.contains("1 new"), "unread count: {text}");
     app.focus_session(done_id);
     let text = rail_rows(&mut app, 160, 30).join("\n");
@@ -4413,7 +4414,7 @@ fn app_with_every_rail_group() -> (App, [SessionId; 5]) {
 }
 
 fn rail_rows(app: &mut App, width: usize, height: usize) -> Vec<String> {
-    let rail = layout::rail_width(width, app.layout, app.sessions.len());
+    let rail = layout::rail_width(width, app.layout, app.sessions.listed_count());
     let frame = FrameRenderer::default().frame_and_commit(app, width, height);
     frame_rows(&frame)
         .iter()
@@ -4437,30 +4438,25 @@ fn the_rail_lists_needs_you_working_and_recent_from_one_pass() {
             Group::NeedsYou,
             Group::NeedsYou,
             Group::Working,
-            Group::Idle,
-            Group::Done
+            Group::Done,
         ],
         "{entries:?}"
     );
-    assert_eq!(counts, [2, 1, 1, 1]);
+    assert_eq!(counts, [2, 1, 0, 1]);
     assert_eq!(
         entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
-        [refactor, child, survey, parent, migrate]
+        [refactor, parent, survey, migrate],
+        "agents fold into their session; the child is not a row"
     );
+    assert_eq!((entries[1].agents, entries[1].working), (1, 1));
     assert_eq!(entries[0].unread, 1, "the unseen finish carries a badge");
     assert_eq!(entries[0].cost, Some(120_000_000));
-    assert!(
-        entries[1].live && entries[2].live,
-        "approval and streaming rows"
-    );
-    assert!(
-        !entries[3].live && entries[3].cost.is_none(),
-        "the idle root is quiet"
-    );
+    assert!(entries[2].live, "the streaming row has live status");
     assert_eq!(
-        entries[3].unread, 0,
+        entries[1].unread, 0,
         "the focused session has seen everything"
     );
+    let _ = child;
 
     let rail = rail_rows(&mut app, 120, 40).join("\n");
     let position = |label: &str| {
@@ -4469,10 +4465,10 @@ fn the_rail_lists_needs_you_working_and_recent_from_one_pass() {
     };
     assert!(position("NEEDS YOU") < position("WORKING"));
     assert!(position("WORKING") < position("RECENT"));
-    assert!(position("1 ● Refactor") < position("2 ◇ Deploy helper"));
-    assert!(position("2 ◇ Deploy helper") < position("3 ◐ Survey callers"));
-    assert!(position("3 ◐ Survey callers") < position("▎ 4 ○ Session"));
-    assert!(position("5 ● Migrate") > position("RECENT"));
+    assert!(position("1 ● Refactor") < position("▎ 2 ◇ Session"));
+    assert!(position("▎ 2 ◇ Session") < position("3 ◐ Survey callers"));
+    assert!(position("◇ Deploy helper") > position("▎ 2 ◇ Session"));
+    assert!(position("4 ● Migrate") > position("RECENT"));
 }
 
 #[test]
@@ -4485,7 +4481,11 @@ fn the_compact_rule_and_the_rail_count_the_same_entries() {
         .find(|row| row.contains("sessions"))
         .unwrap_or_else(|| panic!("rule in {rows:#?}"));
     let (entries, counts) = rail_entries(&app);
-    assert_eq!(entries.len(), ids.len());
+    assert_eq!(
+        entries.len(),
+        ids.len() - 1,
+        "the child folds into its session"
+    );
     assert!(
         strip.contains(&format!("{} sessions", entries.len())),
         "{strip}"
@@ -4519,7 +4519,7 @@ fn unread_badges_are_faint_on_unfocused_rows_only() {
     assert_eq!(style_of(&frame, "1 new"), Some(surface(faint())));
     let focused_row = rows
         .iter()
-        .find(|row| row.contains("○ Session"))
+        .find(|row| row.contains("◇ Session"))
         .unwrap_or_else(|| panic!("{rows:#?}"));
     assert!(!focused_row.contains("new"), "{focused_row:?}");
     app.focus_session(refactor);
@@ -4541,7 +4541,7 @@ fn the_rail_is_one_row_per_session_at_regular_and_adds_activity_and_cost_at_wide
         .position(|row| row.contains("Refactor"))
         .unwrap_or_else(|| panic!("{regular:#?}"));
     assert!(
-        regular[refactor + 1].contains("Deploy helper"),
+        regular[refactor + 1].contains("Session"),
         "Regular: a finished session takes one row: {regular:#?}"
     );
     assert!(
@@ -4571,11 +4571,11 @@ fn the_rail_is_one_row_per_session_at_regular_and_adds_activity_and_cost_at_wide
     assert!(wide[survey + 1].contains("Found twelve"), "{wide:#?}");
     let focused = wide
         .iter()
-        .position(|row| row.contains("○ Session"))
+        .position(|row| row.contains("◇ Session"))
         .unwrap();
     assert!(
-        wide[focused + 1].contains("Migrate"),
-        "a session with no activity and no spend still takes one row: {wide:#?}"
+        wide[focused + 1].contains("Deploy helper"),
+        "a waiting agent sits under its session: {wide:#?}"
     );
 }
 
@@ -4607,7 +4607,7 @@ fn a_pinned_rail_shows_at_compact_when_the_transcript_keeps_its_minimum() {
         "{rows:#?}"
     );
     assert!(
-        rows.iter().any(|row| row.contains("5 sessions")),
+        rows.iter().any(|row| row.contains("4 sessions")),
         "{rows:#?}"
     );
 }
@@ -5048,7 +5048,13 @@ fn app_with_expandable_read() -> (App, ToolCallId) {
 
 fn transcript_and_inspector(app: &App, frame: &[Line]) -> (String, String) {
     let width = frame.iter().map(Line::width).max().unwrap_or_default();
-    let layout = layout::compute_layout(width, frame.len(), 3, app.layout, app.sessions.len());
+    let layout = layout::compute_layout(
+        width,
+        frame.len(),
+        3,
+        app.layout,
+        app.sessions.listed_count(),
+    );
     let split = layout.inspector.map_or(width, |inspector| inspector.x);
     let rows = frame_rows(frame);
     let mut transcript = Vec::new();
@@ -6296,4 +6302,121 @@ fn page_down_reaches_the_end_of_a_very_long_check_output_and_page_up_returns_at_
         text.contains("PgDn"),
         "one PageUp past the end moves back up: {text}"
     );
+}
+
+#[test]
+fn twenty_agents_take_one_rail_row_plus_the_one_that_needs_you() {
+    let mut harness =
+        crate::bench_support::BenchHarness::scene(crate::bench_support::Scene::Fanout, (120, 40));
+    let rows = harness.plain_frame();
+    let rail: Vec<String> = rows
+        .iter()
+        .map(|row| row.chars().skip(90).collect::<String>().trim().to_owned())
+        .filter(|row| !row.is_empty())
+        .collect();
+    assert_eq!(
+        rail,
+        [
+            "NEEDS YOU",
+            "▎ 1 ◇ Session 0  ↳20",
+            "◇ agent 1",
+            "RECENT",
+            "2 ● release notes"
+        ],
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn the_rail_scrolls_to_a_focused_agent_below_the_fold() {
+    let mut app = app_with_messages(1);
+    app.layout.rail = PanePref::Shown;
+    let mut last = None;
+    for byte in 2..40_u8 {
+        let id = SessionId::from_bytes([byte; 16]);
+        app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+            occurred_at_ms: u64::from(byte),
+            ..fixtures::envelope(
+                u64::from(byte),
+                id,
+                SessionEvent::SessionCreated {
+                    session: Box::new(SessionSummary {
+                        model_is_fallback: false,
+                        title: format!("root {byte}"),
+                        updated_at_ms: 1000 - u64::from(byte),
+                        ..fixtures::session_summary(id)
+                    }),
+                },
+            )
+        }));
+        last = Some(id);
+    }
+    let owner = last.unwrap();
+    let agent = SessionId::from_bytes([0x77; 16]);
+    app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        occurred_at_ms: 40,
+        ..fixtures::envelope(
+            40,
+            agent,
+            SessionEvent::SessionCreated {
+                session: Box::new(SessionSummary {
+                    model_is_fallback: false,
+                    parent_id: Some(owner),
+                    title: "deep agent".to_owned(),
+                    ..fixtures::session_summary(agent)
+                }),
+            },
+        )
+    }));
+    app.focus_session(agent);
+    assert_eq!(app.focused(), Some(agent));
+    assert_eq!(app.sessions.session_of(agent), Some(owner));
+    let rail = rail_rows(&mut app, 120, 24).join("\n");
+    assert!(rail.contains("deep agent"), "{rail}");
+    assert!(
+        rail.contains("root 39"),
+        "its session stays in view: {rail}"
+    );
+}
+
+#[test]
+fn the_focused_agent_keeps_a_rail_row_past_the_agent_cap() {
+    let mut harness =
+        crate::bench_support::BenchHarness::scene(crate::bench_support::Scene::Fanout, (120, 40));
+    let app = &mut harness.app;
+    for index in 2..=8_u8 {
+        let agent = SessionId::from_bytes({
+            let mut bytes = [0x10; 16];
+            bytes[15] = index;
+            bytes
+        });
+        app.sessions
+            .get_mut(&agent)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([index; 16]));
+    }
+    let focused = SessionId::from_bytes({
+        let mut bytes = [0x10; 16];
+        bytes[15] = 20;
+        bytes
+    });
+    app.focus_session(focused);
+    let rows = harness.plain_frame();
+    let rail: Vec<String> = rows
+        .iter()
+        .map(|row| row.chars().skip(90).collect::<String>().trim().to_owned())
+        .filter(|row| !row.is_empty())
+        .collect();
+    assert!(
+        rail.iter().any(|row| row == "▎   ◐ agent 20"),
+        "the focused agent is listed: {rail:#?}"
+    );
+    assert_eq!(
+        rail.iter().filter(|row| row.contains("◇ agent")).count(),
+        5,
+        "{rail:#?}"
+    );
+    assert!(rail.iter().any(|row| row == "+3 more"), "{rail:#?}");
 }

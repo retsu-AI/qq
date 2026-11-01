@@ -1984,3 +1984,168 @@ fn cold_and_refreshed_snapshots_replace_pending_approval_details() {
         "a refreshed snapshot must clear a resolved hold's stale preview"
     );
 }
+
+fn rail(store: &SessionStore) -> Vec<(SessionId, Group)> {
+    store
+        .rail_order()
+        .into_iter()
+        .map(|row| (row.id, row.group))
+        .collect()
+}
+
+fn sid(byte: u8) -> SessionId {
+    SessionId::from_bytes([byte; 16])
+}
+
+fn put(store: &mut SessionStore, id: u8, parent: Option<u8>, at: u64) -> SessionId {
+    let mut summary = summary(sid(id));
+    summary.parent_id = parent.map(sid);
+    summary.updated_at_ms = at;
+    summary.title = format!("s{id}");
+    store.upsert_summary(summary, &[], 0);
+    sid(id)
+}
+
+fn hold(store: &mut SessionStore, id: SessionId) {
+    store
+        .get_mut(&id)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([id.as_bytes()[0]; 16]));
+}
+
+#[test]
+fn attention_orders_approvals_then_failures_then_finishes_newest_first() {
+    let mut store = SessionStore::default();
+    let finished_old = put(&mut store, 1, None, 10);
+    let finished_new = put(&mut store, 2, None, 20);
+    let failed = put(&mut store, 3, None, 5);
+    let approval_old = put(&mut store, 4, None, 1);
+    let approval_new = put(&mut store, 5, None, 2);
+    for id in [finished_old, finished_new, failed] {
+        store.get_mut(&id).unwrap().finished_unread = true;
+    }
+    store.get_mut(&failed).unwrap().summary.last_outcome = Some(RunOutcome::Failed {
+        failure: qq_protocol::RunFailure {
+            kind: qq_protocol::RunFailureKind::ProviderUnavailable,
+            message: "x".to_owned(),
+        },
+    });
+    hold(&mut store, approval_old);
+    hold(&mut store, approval_new);
+    assert_eq!(
+        store.needing_attention(),
+        vec![
+            approval_new,
+            approval_old,
+            failed,
+            finished_new,
+            finished_old
+        ]
+    );
+}
+
+#[test]
+fn audits_and_their_descendants_are_never_listed_or_attended() {
+    let mut store = SessionStore::default();
+    let root = put(&mut store, 1, None, 1);
+    let audit = put(&mut store, 2, Some(1), 2);
+    let below = put(&mut store, 3, Some(2), 3);
+    store.get_mut(&audit).unwrap().summary.purpose = qq_protocol::SessionPurpose::Audit;
+    hold(&mut store, audit);
+    hold(&mut store, below);
+    assert!(store.needing_attention().is_empty());
+    assert_eq!(store.listed_sessions(), vec![root]);
+    assert!(store.agents_of(root).is_empty());
+    assert_eq!(rail(&store), vec![(root, Group::Done)]);
+}
+
+#[test]
+fn an_agent_with_an_unloaded_parent_is_a_session() {
+    let mut store = SessionStore::default();
+    let orphan = put(&mut store, 2, Some(9), 1);
+    let root = put(&mut store, 3, None, 2);
+    let agent = put(&mut store, 4, Some(3), 3);
+    assert!(store.is_session(orphan));
+    assert!(store.is_session(root));
+    assert!(!store.is_session(agent));
+    assert_eq!(store.session_of(agent), Some(root));
+    assert_eq!(store.agents_of(root), vec![agent]);
+}
+
+#[test]
+fn a_session_rolls_up_its_agents_into_one_group() {
+    let mut store = SessionStore::default();
+    let quiet = put(&mut store, 1, None, 1);
+    let waiting = put(&mut store, 2, None, 2);
+    let busy = put(&mut store, 3, None, 3);
+    let waiting_agent = put(&mut store, 4, Some(2), 4);
+    let busy_agent = put(&mut store, 5, Some(3), 5);
+    hold(&mut store, waiting_agent);
+    store.get_mut(&busy_agent).unwrap().summary.status = SessionStatus::Running;
+    assert_eq!(
+        rail(&store),
+        vec![
+            (waiting, Group::NeedsYou),
+            (busy, Group::Working),
+            (quiet, Group::Done)
+        ]
+    );
+    let counts: Vec<_> = store
+        .rail_order()
+        .into_iter()
+        .map(|row| (row.agents, row.working))
+        .collect();
+    assert_eq!(counts, vec![(1, 0), (1, 1), (0, 0)]);
+}
+
+#[test]
+fn spend_is_inclusive_of_agents() {
+    let mut store = SessionStore::default();
+    let root = put(&mut store, 1, None, 1);
+    let total = |nanos| qq_protocol::AccountingTotal {
+        usage: None,
+        estimated_cost_usd_nanos: Some(nanos),
+    };
+    store.get_mut(&root).unwrap().summary.accounting = Some(qq_protocol::SessionAccounting {
+        direct: total(10),
+        inclusive: total(70),
+    });
+    assert_eq!(store.rail_order()[0].cost, Some(70));
+}
+
+#[test]
+fn orphan_sessions_sort_with_roots_newest_first() {
+    let mut store = SessionStore::default();
+    let old_orphan = put(&mut store, 1, Some(9), 1);
+    let new_root = put(&mut store, 2, None, 100);
+    let mid_orphan = put(&mut store, 3, Some(8), 50);
+    let old_root = put(&mut store, 4, None, 10);
+    assert_eq!(
+        store.listed_sessions(),
+        vec![new_root, mid_orphan, old_root, old_orphan]
+    );
+}
+
+#[test]
+fn a_failed_or_unread_agent_puts_its_session_in_needs_you() {
+    let mut store = SessionStore::default();
+    let failing = put(&mut store, 1, None, 1);
+    let finished = put(&mut store, 2, None, 2);
+    let failed_agent = put(&mut store, 3, Some(1), 3);
+    let done_agent = put(&mut store, 4, Some(2), 4);
+    store.get_mut(&failed_agent).unwrap().finished_unread = true;
+    store.get_mut(&failed_agent).unwrap().summary.last_outcome = Some(RunOutcome::Failed {
+        failure: qq_protocol::RunFailure {
+            kind: qq_protocol::RunFailureKind::ProviderUnavailable,
+            message: "x".to_owned(),
+        },
+    });
+    store.get_mut(&done_agent).unwrap().finished_unread = true;
+    let mut groups = rail(&store);
+    groups.sort();
+    let mut expected = vec![(failing, Group::NeedsYou), (finished, Group::NeedsYou)];
+    expected.sort();
+    assert_eq!(groups, expected);
+}
