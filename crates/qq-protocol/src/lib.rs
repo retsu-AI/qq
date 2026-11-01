@@ -85,7 +85,7 @@ pub const SNAPSHOT_REQUIRED_SSE_EVENT: &str = "snapshot_required";
 
 pub const MAX_TURN_RETRIES: u16 = 5;
 
-pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 28] = [
+pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 29] = [
     "/goal",
     "/btw",
     "/ask",
@@ -110,6 +110,7 @@ pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 28] = [
     "/prune",
     "/undo",
     "/mouse",
+    "/copy",
     "/attention",
     "/changes",
     "/quit",

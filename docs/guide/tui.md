@@ -332,8 +332,9 @@ searchable palette that runs the highlighted command on `Enter`.
 | list workspace commands and skills | `/skills` |  |
 | choose a theme | `/theme` |  |
 | toggle tool call detail |  | `Ctrl-O` |
-| select the previous tool call |  | `Ctrl-Up` |
-| select the next tool call |  | `Ctrl-Down` |
+| move the block cursor up; y copies the block |  | `Ctrl-Up` |
+| move the block cursor down; y copies the block |  | `Ctrl-Down` |
+| copy the last answer; /copy code copies its last code block | `/copy` |  |
 | toggle reasoning detail |  | `Alt-R` |
 | toggle the session sidebar |  | `Ctrl-\` |
 | toggle the inspector pane |  | `Alt-I` |
@@ -346,7 +347,7 @@ searchable palette that runs the highlighted command on `Enter`.
 | cancel only the side question | `/btw-cancel` |  |
 | edit the draft in $EDITOR | `/editor` | `Alt-E` |
 | search prompt history |  | `Ctrl-R` |
-| exit QQ | `/quit`, `/exit` | `Ctrl-C` |
+| exit QQ | `/quit`, `/exit` | `Ctrl-C`* |
 
 Keys shown beside `?`, `Enter`, `Esc`, and `Esc Esc` apply only in context:
 `?` on an empty composer, `Enter` steers only while a run is active, `Esc`
@@ -358,8 +359,55 @@ Rebind `toggle_navigator`, `create_root_session`, `create_child_session`,
 every hint that mentions a rebound key updates.
 
 Scrolling: mouse wheel, `PageUp` / `PageDown`, `Shift-Up` / `Shift-Down`,
-`Ctrl-Home` / `Ctrl-End` for top and live tail. Hold `Shift` to select text
-with the mouse, or `/mouse` to hand the mouse back to the terminal.
+`Ctrl-Home` / `Ctrl-End` for top and live tail.
+
+\* `Ctrl-C` copies instead of exiting while a mouse selection or the block
+cursor is active.
+
+## Copying
+
+QQ draws in the terminal's alternate screen, so quitting leaves your shell
+as it was. On exit it prints the focused session's last answer, as its Markdown source
+with escape sequences stripped, then the resume line, into the normal
+scrollback, where native copy, search and tmux copy mode reach it.
+
+| Action | How |
+| --- | --- |
+| copy a span of the transcript | drag across it; release copies |
+| copy a word | double-click it |
+| copy a paragraph, code block or tool output | triple-click it |
+| copy one block by keyboard | `Ctrl-Up` / `Ctrl-Down` to the block, then `y` (or `Ctrl-C`) |
+| copy the last answer as Markdown | `/copy` |
+| copy the last code block in the last answer | `/copy code` |
+
+A drag stays inside the pane it started in. The copy comes from the rows
+QQ laid out, not from screen cells: it leaves out the message rail, code
+gutters, list markers, quote rails and panel padding, rejoins lines that
+wrapped only to fit the pane, and keeps real line breaks and wide or
+joined glyphs whole. A click without a drag copies nothing. Any key, a new
+click, a resize, or the selected rows changing clears the selection.
+
+The block cursor visits your prompts, each answer, each code block inside
+an answer, and each tool call. `y` copies an answer as its Markdown
+source, a code block as its raw code, and a tool call as its command and
+output. `Enter` still expands a tool call, and a pending approval or
+question still claims `y`, `n` and `Esc` first.
+
+QQ always sends OSC 52, wrapped for tmux passthrough when needed, and also
+tries a local helper (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or `clip.exe`
+under WSL; none over SSH) and then `tmux load-buffer -w -` inside tmux,
+stopping at the first that succeeds. The notice says `copied 12 lines`
+only when a helper or tmux confirmed the write; otherwise it says `sent 12
+lines to the terminal clipboard`, because QQ can't tell whether the
+terminal accepted OSC 52. Copies are capped at 1 MiB, and the notice says
+when one was cut. Escape and control sequences are stripped from
+everything copied.
+
+Hold `Shift` to use the terminal's own selection instead. `/mouse` turns
+mouse capture off altogether: the sessions column hides and the
+transcript is drawn flush left with no margin, so a native selection of a
+whole row is clean text. The wheel then belongs to the terminal; scroll
+with `PageUp` / `PageDown`. `/mouse` again turns capture back on.
 
 ## Notifications
 

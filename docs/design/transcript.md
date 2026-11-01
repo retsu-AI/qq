@@ -205,9 +205,32 @@ and the rest is **content**:
 | Tool tail or detail | `│ ` faint | output, diff, or error rows |
 | Agent lane | `├ ` / `└ ` faint | glyph, title, activity |
 
-The rail glyphs alone say what kind of row each is. The transcript cursor
-marks the selected call by painting its glyph in `accent` and its verb bold
-rather than shifting the row.
+The rail glyphs alone say what kind of row each is. The block cursor
+(`Ctrl-Up` / `Ctrl-Down`) moves over prompts, answers, code blocks inside
+answers, and tool calls; on a tool call it paints the glyph in `accent` and
+the verb bold rather than shifting the row, and on a message or code block
+it paints the block's rows on the `selection` background.
+
+## Row metadata for copying
+
+Every laid-out `Line` carries what a copy needs, set where the row is
+built rather than recovered from screen cells:
+
+- `chrome`: leading cells that are decoration (message rail, list marker or
+  hang, quote rail, code gutter, tool rail); `indent` cells are chrome too.
+- `pad`: trailing fill cells, such as a code panel's background.
+- `kind`: `Prose`, `Code`, `Tool` or `Output`, which triple-click uses to
+  find the block under the pointer.
+- `join`: how the row continues the one above. `Break` is a hard newline,
+  `Space` a word wrap that rejoins with one space, `Glue` a character wrap
+  that rejoins with nothing, and `Fence` a code panel's top or bottom row,
+  which is never copied.
+
+The transcript body also records each block's row range (message, code
+block, tool call) so the block cursor can reveal and copy it. Mouse
+selection (`selection.rs`) reads these fields from the composed frame and
+paints the selected cells after composition, so no transcript cache ever
+sees a selection and a frame without one does no extra work.
 
 ## Spacing
 

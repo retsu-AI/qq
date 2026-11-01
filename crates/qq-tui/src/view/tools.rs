@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 
 use super::*;
+use crate::render::RowKind;
 use qq_client::state::ToolCallTiming;
 use qq_protocol::ToolErrorKind;
 
@@ -517,6 +518,7 @@ pub(super) type ChildRows<'a> = &'a dyn Fn(ToolCallId, usize) -> Vec<Line>;
 
 pub(super) type RowLookup<'a> = &'a dyn Fn(&ToolCallSnapshot) -> ToolRowContext<'a>;
 
+#[cfg(test)]
 pub(super) fn render_tool_calls(
     calls: &[&ToolCallSnapshot],
     live_output: &HashMap<ToolCallId, String>,
@@ -524,6 +526,28 @@ pub(super) fn render_tool_calls(
     tick: usize,
     width: usize,
     children: ChildRows<'_>,
+) -> Vec<Line> {
+    render_tool_blocks(
+        calls,
+        live_output,
+        lookup,
+        tick,
+        width,
+        children,
+        &mut Vec::new(),
+    )
+}
+
+pub(super) type ToolBlocks = Vec<(Block, Range<usize>)>;
+
+pub(super) fn render_tool_blocks(
+    calls: &[&ToolCallSnapshot],
+    live_output: &HashMap<ToolCallId, String>,
+    lookup: RowLookup<'_>,
+    tick: usize,
+    width: usize,
+    children: ChildRows<'_>,
+    blocks: &mut ToolBlocks,
 ) -> Vec<Line> {
     let shown: Vec<&ToolCallSnapshot>;
     let calls = if calls.iter().any(|call| call.is_error) {
@@ -566,7 +590,13 @@ pub(super) fn render_tool_calls(
             .filter(|call| quiet(call) && !is_edit(call))
             .collect();
         if routine.len() >= TOOL_FOLD_THRESHOLD.min(calls.len()) && !routine.is_empty() {
+            let row = lines.len();
             lines.push(tool_fold_line(&routine, calls, lookup, width));
+            blocks.extend(
+                routine
+                    .iter()
+                    .map(|call| (Block::Tool(call.id), row..row + 1)),
+            );
             folded = routine;
         }
     }
@@ -575,6 +605,7 @@ pub(super) fn render_tool_calls(
             continue;
         }
         let context = lookup(call);
+        let start = lines.len();
         lines.push(tool_summary_line(call, context, tick, width));
         if let Some(result) = call.result.as_deref() {
             let panel = match (call.error_kind(), call.is_error) {
@@ -609,8 +640,62 @@ pub(super) fn render_tool_calls(
             lines.extend(tool_live_output_lines(output, width));
         }
         lines.extend(children(call.id, width));
+        blocks.push((Block::Tool(call.id), start..lines.len()));
     }
     lines
+}
+
+pub(crate) fn tool_copy_text(call: &ToolCallSnapshot, live_output: Option<&str>) -> String {
+    let arguments = serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
+    let field = |key: &str| {
+        arguments
+            .as_ref()
+            .and_then(|value| value.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let command = match call.name.as_str() {
+        "shell" => field("command").map(|command| format!("$ {command}")),
+        "exec" => field("program").map(|program| {
+            let args = arguments
+                .as_ref()
+                .and_then(|value| value.get("args"))
+                .and_then(serde_json::Value::as_array)
+                .map(|args| {
+                    args.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(|arg| format!(" {}", shell_quote(arg)))
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            format!("$ {}{args}", shell_quote(&program))
+        }),
+        _ => None,
+    }
+    .unwrap_or_else(|| format!("{} {}", call.name, call.arguments));
+    let output = call
+        .result
+        .as_deref()
+        .map(|result| strip_header(result, header_word(&call.name)).trim_end())
+        .or_else(|| live_output.map(str::trim_end))
+        .unwrap_or_default();
+    if output.is_empty() {
+        command
+    } else {
+        format!("{command}\n{output}")
+    }
+}
+
+fn shell_quote(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_./=:,+@%".contains(character));
+    if plain {
+        arg.to_owned()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
 }
 
 fn is_edit(call: &ToolCallSnapshot) -> bool {
@@ -680,6 +765,8 @@ pub(super) fn tool_fold_line(
     }
     let mut line = Line::styled("● ", faint());
     line.push(summary, muted());
+    line = line.with_chrome(2);
+    line.kind = RowKind::Tool;
     if !files.is_empty() {
         let mut changed = count_noun(files.len(), "file", "files");
         if added + removed > 0 {
@@ -735,10 +822,16 @@ pub(super) fn tool_summary_line(
 ) -> Line {
     let row = context.row;
     let (glyph, glyph_style) = tool_state_glyph(call, tick);
-    let mut line = Line::styled(format!("{glyph} "), glyph_style);
-    if context.selected {
-        line = Line::styled(format!("{glyph} "), accent());
-    }
+    let mut line = Line::styled(
+        format!("{glyph} "),
+        if context.selected {
+            accent()
+        } else {
+            glyph_style
+        },
+    )
+    .with_chrome(2);
+    line.kind = RowKind::Tool;
     let verb = verb_for(row, call);
     let verb_width = text_width(&verb).max(TOOL_VERB_WIDTH - 1) + 1;
     line.push(
@@ -920,7 +1013,8 @@ pub(super) fn tool_error_lines(
 
 pub(super) fn tail_row(text: &str, style: Style, width: usize) -> Line {
     let safe: String = text.chars().filter_map(terminal_safe_character).collect();
-    let mut line = Line::styled("│ ", faint());
+    let mut line = Line::styled("│ ", faint()).with_chrome(2);
+    line.kind = RowKind::Output;
     line.push(safe, style);
     truncate_line(line, width)
 }
@@ -1042,7 +1136,8 @@ fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line>
     }
     body.into_iter()
         .map(|line| {
-            let mut row = Line::styled("│ ", faint());
+            let mut row = Line::styled("│ ", faint()).with_chrome(2);
+            row.kind = RowKind::Output;
             for span in line.spans {
                 row.push(span.text, span.style);
             }

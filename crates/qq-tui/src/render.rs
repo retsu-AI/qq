@@ -89,21 +89,55 @@ pub(crate) struct Span {
     pub(crate) style: Style,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum RowKind {
+    #[default]
+    Prose,
+    Code,
+    Tool,
+    Output,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Join {
+    #[default]
+    Break,
+    Space,
+    Glue,
+    Fence,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Line {
-    pub(crate) indent: usize,
+    pub(crate) indent: u16,
     pub(crate) spans: Vec<Span>,
+    pub(crate) chrome: u16,
+    pub(crate) pad: u16,
+    pub(crate) kind: RowKind,
+    pub(crate) join: Join,
 }
 
 impl Line {
     pub(crate) fn styled(text: impl Into<String>, style: Style) -> Self {
         Self {
-            indent: 0,
             spans: vec![Span {
                 text: text.into(),
                 style,
             }],
+            ..Self::default()
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_chrome(mut self, chrome: usize) -> Self {
+        self.chrome = u16::try_from(chrome).unwrap_or(u16::MAX);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn joined(mut self, join: Join) -> Self {
+        self.join = join;
+        self
     }
 
     pub(crate) fn push(&mut self, text: impl Into<String>, style: Style) {
@@ -121,7 +155,7 @@ impl Line {
     }
 
     pub(crate) fn width(&self) -> usize {
-        self.indent
+        usize::from(self.indent)
             + self
                 .spans
                 .iter()
@@ -248,10 +282,7 @@ pub(crate) fn diff_line_style(line: &str) -> Style {
 pub(crate) fn write_line(output: &mut impl Write, line: &Line) -> io::Result<()> {
     let mut current = Style::default();
     if line.indent > 0 {
-        queue!(
-            output,
-            crossterm::cursor::MoveRight(u16::try_from(line.indent).unwrap_or(u16::MAX))
-        )?;
+        queue!(output, crossterm::cursor::MoveRight(line.indent))?;
     }
     for span in &line.spans {
         if span.text.is_empty() {

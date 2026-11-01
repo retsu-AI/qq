@@ -193,6 +193,32 @@ Every scene is written at 80×24, 120×40, 200×60, 320×90 and 480×120 under
 every theme: the live renderer under `<theme>/`, the R0 reference under
 `design/<theme>/`. Review `ink` and `terminal`.
 
+## Copy and paste (v0.1.11 section A)
+
+In the fixture, ask for an answer that has a paragraph long enough to wrap
+and a fenced code block. Then, in each terminal, paste each of these into a
+plain editor and compare with the source:
+
+1. `/copy` (the answer as Markdown) and `/copy code` (the raw code).
+2. `Ctrl-Up` to the code block, then `y`.
+3. A drag across the wrapped paragraph; it should paste as one line.
+4. A triple-click on the code block.
+5. After quitting, the answer printed above the resume line.
+
+Record what you saw for each, including failures and which notice
+appeared (`copied …` or `sent … to the terminal clipboard`):
+
+| Terminal | 1 | 2 | 3 | 4 | 5 | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Ghostty | not run | not run | not run | not run | not run | |
+| kitty | not run | not run | not run | not run | not run | |
+| WezTerm | not run | not run | not run | not run | not run | |
+| Alacritty | not run | not run | not run | not run | not run | |
+| GNOME Terminal | not run | not run | not run | not run | not run | |
+| Windows Terminal | not run | not run | not run | not run | not run | |
+| tmux (in any of the above) | not run | not run | not run | not run | not run | |
+| over SSH | not run | not run | not run | not run | not run | |
+
 ## Expected isolated paths
 
 | Purpose | Path |

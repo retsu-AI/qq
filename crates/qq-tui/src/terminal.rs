@@ -12,8 +12,10 @@ use crossterm::{
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    style::{Attribute, Print, ResetColor, SetAttribute},
-    terminal::{self, Clear, ClearType, EndSynchronizedUpdate},
+    style::{Attribute, ResetColor, SetAttribute},
+    terminal::{
+        self, Clear, ClearType, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+    },
 };
 use futures_util::{Stream, StreamExt, stream::FuturesUnordered};
 use qq_protocol::{SessionEvent, SessionEventEnvelope, SessionId};
@@ -74,6 +76,11 @@ enum BackgroundResult {
         id: u64,
         session_id: SessionId,
     },
+    Copied {
+        lines: usize,
+        truncated: bool,
+        confirmed: bool,
+    },
 }
 pub async fn run<P>(client: P, app: App) -> Result<Option<SessionId>, TuiError>
 where
@@ -101,6 +108,7 @@ where
         Hooks {
             editor: external_editor,
             herdr: herdr.as_ref().map(crate::herdr::Reporter::sink),
+            clipboard: crate::clipboard::Clipboard::detect(),
         },
     )
     .await;
@@ -109,7 +117,31 @@ where
     }
     let app = app?;
     drop(terminal);
+    if let Some(answer) = app.last_answer() {
+        let answer = crate::selection::strip_escapes(&answer);
+        let answer = answer.trim_end();
+        if !answer.is_empty() {
+            use std::io::Write as _;
+            let mut output = stdout();
+            let _ = writeln!(output, "{answer}\n");
+            let _ = output.flush();
+        }
+    }
     Ok(app.focused())
+}
+
+fn copy_job(
+    helpers: Vec<crate::clipboard::Helper>,
+    copied: crate::selection::Copied,
+) -> BackgroundFuture {
+    Box::pin(async move {
+        let confirmed = crate::clipboard::run_helpers(helpers, copied.text).await;
+        BackgroundResult::Copied {
+            lines: copied.lines,
+            truncated: copied.truncated,
+            confirmed,
+        }
+    })
 }
 
 fn external_editor(draft: String) -> EditorFuture {
@@ -122,7 +154,7 @@ fn external_editor(draft: String) -> EditorFuture {
         };
         let mut output = stdout();
         let _ = disable_input_modes(&mut output);
-        let _ = execute!(output, Show);
+        let _ = execute!(output, Show, LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
         let result = tokio::task::spawn_blocking(move || {
             let file = tempfile::Builder::new()
@@ -148,6 +180,7 @@ fn external_editor(draft: String) -> EditorFuture {
         .await
         .unwrap_or(Err(EditorError::NotConfigured));
         let _ = terminal::enable_raw_mode();
+        let _ = execute!(output, EnterAlternateScreen);
         let _ = enable_input_modes(&mut output);
         let _ = execute!(output, Clear(ClearType::All), MoveTo(0, 0));
         result
@@ -170,6 +203,7 @@ pub(crate) type EditorFuture =
 pub(crate) struct Hooks<X> {
     pub(crate) editor: X,
     pub(crate) herdr: Option<crate::herdr::ReportSink>,
+    pub(crate) clipboard: crate::clipboard::Clipboard,
 }
 
 pub(crate) async fn run_loop<P, E, W, S, F, X>(
@@ -189,7 +223,11 @@ where
     F: Future<Output = io::Result<()>>,
     X: FnMut(String) -> EditorFuture,
 {
-    let Hooks { mut editor, herdr } = hooks;
+    let Hooks {
+        mut editor,
+        herdr,
+        clipboard,
+    } = hooks;
     tokio::pin!(shutdown);
     let mut renderer = FrameRenderer::default();
     let mut frame_tick = interval(FRAME_INTERVAL);
@@ -202,6 +240,8 @@ where
     let mut state_may_change = false;
 
     let mut jobs = FuturesUnordered::<BackgroundFuture>::new();
+    let mut copying: Option<crate::selection::Copied> = None;
+    let mut next_copy: Option<crate::selection::Copied> = None;
     let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_BACKGROUND_CONCURRENCY));
     let mut pending_completion = PendingCompletion::default();
     loop {
@@ -265,6 +305,17 @@ where
                     BackgroundResult::Prefetch { id, session_id } => {
                         app.apply_prefetch(id, session_id)
                     }
+                    BackgroundResult::Copied { lines, truncated, confirmed } => {
+                        copying = None;
+                        match next_copy.take() {
+                            Some(copied) => {
+                                jobs.push(copy_job(clipboard.helpers.clone(), copied.clone()));
+                                copying = Some(copied);
+                                Effects::none()
+                            }
+                            None => app.apply_copy_result(lines, truncated, confirmed),
+                        }
+                    }
                 }
             }
             _ = animation_tick.tick(), if app.has_activity() => {
@@ -301,6 +352,10 @@ where
                         }
                     }
                     renderer.invalidate();
+                    if !app.mouse_capture {
+                        output.write_all(&mouse_capture_bytes(false)?).await?;
+                        output.flush().await?;
+                    }
                     redraw = Some(Redraw::Immediate);
                 }
                 Effect::ResolveMentions { id, submit } => {
@@ -362,10 +417,46 @@ where
                     output.write_all(&bytes).await?;
                     output.flush().await?;
                 }
+                Effect::CopySelection(selection) => {
+                    let copied = renderer.selection_text(&selection);
+                    if copied.text.is_empty() {
+                        queue.extend(app.apply_empty_copy());
+                    } else {
+                        queue.push_back(Effect::Copy(copied));
+                    }
+                }
+                Effect::Copy(copied) => {
+                    output
+                        .write_all(&crate::clipboard::osc52(&copied.text, clipboard.tmux))
+                        .await?;
+                    output.flush().await?;
+                    if clipboard.helpers.is_empty()
+                        || (copying.is_none() && jobs.len() >= MAX_BACKGROUND_JOBS)
+                    {
+                        queue.extend(app.apply_copy_result(copied.lines, copied.truncated, false));
+                        continue;
+                    }
+                    if copying.is_some() {
+                        next_copy = Some(copied);
+                        continue;
+                    }
+                    jobs.push(copy_job(clipboard.helpers.clone(), copied.clone()));
+                    copying = Some(copied);
+                }
                 Effect::Quit => quit = true,
             }
         }
         if quit {
+            if copying.is_some() {
+                while let Some(result) = jobs.next().await {
+                    if matches!(result, BackgroundResult::Copied { .. }) {
+                        break;
+                    }
+                }
+            }
+            if let Some(latest) = next_copy {
+                crate::clipboard::run_helpers(clipboard.helpers.clone(), latest.text).await;
+            }
             break;
         }
         if let Some(CompletionRequest { id, query, recent }) =
@@ -443,6 +534,7 @@ impl TerminalGuard {
         terminal::enable_raw_mode()?;
         let guard = Self;
         let mut output = stdout();
+        execute!(output, EnterAlternateScreen)?;
         enable_input_modes(&mut output)?;
         execute!(output, Clear(ClearType::All), MoveTo(0, 0))?;
         Ok(guard)
@@ -452,7 +544,6 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
-        let (_, height) = terminal::size().unwrap_or((80, 24));
         let mut output = stdout();
         let _ = execute!(
             output,
@@ -461,13 +552,7 @@ impl Drop for TerminalGuard {
             EndSynchronizedUpdate
         );
         let _ = disable_input_modes(&mut output);
-        let _ = execute!(
-            output,
-            MoveTo(0, height.saturating_sub(1)),
-            Clear(ClearType::CurrentLine),
-            Show,
-            Print("\r\n")
-        );
+        let _ = execute!(output, Show, LeaveAlternateScreen);
     }
 }
 

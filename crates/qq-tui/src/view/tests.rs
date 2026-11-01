@@ -75,7 +75,7 @@ fn frame_rows(frame: &[Line]) -> Vec<String> {
     frame
         .iter()
         .map(|line| {
-            let mut row = " ".repeat(line.indent);
+            let mut row = " ".repeat(usize::from(line.indent));
             row.extend(line.spans.iter().map(|span| span.text.as_str()));
             row
         })
@@ -2732,6 +2732,7 @@ fn the_sidebar_stays_hidden_with_one_session_and_scales_with_width() {
             LayoutPrefs {
                 rail: PanePref::Shown,
                 inspector: PanePref::Auto,
+                flush: false,
             },
             1
         ),
@@ -3739,6 +3740,7 @@ fn the_transcript_cursor_selects_a_call_and_enter_expands_only_that_one() {
         ),
     ]);
     let key = |code| TerminalEvent::Key(KeyEvent::new(code, KeyModifiers::CONTROL));
+    FrameRenderer::default().frame_and_commit(&mut app, 100, 24);
     app.handle_terminal_event(key(KeyCode::Up));
     let selected = selected_tool_row(&mut app);
     assert!(selected.contains("Read b.rs"), "{selected}");
