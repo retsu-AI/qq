@@ -36,13 +36,17 @@ pub struct SmokeArgs {
     /// List scenarios and exit.
     #[arg(long)]
     list: bool,
+    /// Build `qq` with the workspace test build's features, so it reuses
+    /// a preceding `cargo nextest run --workspace` instead of relinking.
+    #[arg(long, conflicts_with = "binary")]
+    reuse_test_build: bool,
 }
 
 #[derive(Debug, Error)]
 pub enum SmokeError {
     #[error("failed to build qq with `{0}`")]
     BuildLaunch(String, #[source] io::Error),
-    #[error("`cargo build --bin qq` failed")]
+    #[error("building qq failed")]
     BuildFailed,
     #[error("failed to prepare {0}")]
     Prepare(PathBuf, #[source] io::Error),
@@ -1725,14 +1729,15 @@ pub async fn run(args: SmokeArgs) -> Result<(), SmokeError> {
         Some(binary) => binary,
         None => {
             let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let build_args = build_args(args.reuse_test_build);
             let status = Command::new(&cargo)
                 .current_dir(&root)
-                .args(["build", "--quiet", "--bin", "qq"])
+                .args(build_args)
                 .status()
                 .await
                 .map_err(|error| {
                     SmokeError::BuildLaunch(
-                        format!("{} build --bin qq", cargo.to_string_lossy()),
+                        format!("{} {}", cargo.to_string_lossy(), build_args.join(" ")),
                         error,
                     )
                 })?;
@@ -1826,6 +1831,14 @@ pub async fn run(args: SmokeArgs) -> Result<(), SmokeError> {
             failed,
             total: selected.len(),
         })
+    }
+}
+
+fn build_args(reuse_test_build: bool) -> &'static [&'static str] {
+    if reuse_test_build {
+        &["build", "--quiet", "--workspace", "--bin", "qq", "--tests"]
+    } else {
+        &["build", "--quiet", "--bin", "qq"]
     }
 }
 

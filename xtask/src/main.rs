@@ -8,6 +8,7 @@ mod homebrew;
 mod lint;
 mod perf;
 mod providers;
+mod quarantine;
 mod release;
 mod smoke;
 

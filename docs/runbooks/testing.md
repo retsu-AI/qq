@@ -12,7 +12,7 @@ merge gate runs. Agents follow the procedure in the `qq-mode` skill
 | Before every push | `cargo xtask check` | 10 s – 2 min warm, by blast radius |
 | User-visible behavior | `cargo xtask smoke` | ~2 s after the build |
 | A feature smoke does not cover | the `verify-qq` skill | minutes |
-| Merge (CI merge queue) | `cargo xtask check --full` plus platform jobs | ~3–5 min |
+| Merge (CI merge queue) | `cargo xtask check --full` (adds the soak tests) plus platform jobs | ~3–5 min |
 
 ### `cargo xtask check`
 
@@ -31,14 +31,19 @@ Runs only what your change can affect:
    1. `cargo fmt --all -- --check`
    2. `cargo xtask lint`
    3. `cargo clippy -p … --all-targets --all-features -D warnings`
-   4. `cargo nextest run -p …`
+   4. `cargo nextest run -p … -E 'not (group(soak) | <quarantine>)'`
    5. the minimal `qq-provider` profile (Clippy and tests), when any
       `qq-provider` file changed
 
 If the merge-base with `--base` cannot be found, the command fails rather
 than checking only the working tree. Fetch the base, or pass `--full`.
 
-`--full` skips merge-base discovery. Evidence binds to HEAD and a SHA-256
+The test gate leaves out the `soak` test group (see [nextest](#nextest))
+unless `--full` is given, and always leaves out tests listed in
+`.config/quarantine.toml` (see [Quarantine](#quarantine)).
+
+`--full` skips merge-base discovery and runs the soak group, so a local
+`cargo xtask check --full` runs the same tests as the CI full gate. Evidence binds to HEAD and a SHA-256
 snapshot of index, working-tree diffs, and untracked file contents, not only
 the dirty flag. A tree change during the gate invalidates the run.
 
@@ -53,7 +58,7 @@ Flags:
 | --- | --- |
 | `--dry-run` | prints the selection and commands |
 | `--crate X` | adds a package and its dependents |
-| `--full` | runs the merge gate |
+| `--full` | runs the merge gate, soak tests included |
 | `--profile quick` | stops at the first failing test |
 | `--no-clippy` | skips Clippy (iteration only) |
 | `--evidence` | prints the last report as Markdown for a PR body; fails if the report is for another commit or tree state |
@@ -78,7 +83,9 @@ jq '.gates[] | select(.passed|not) | .failures' target/qq-check/last.json
 
 ### `cargo xtask smoke`
 
-Builds `target/debug/qq`, copies it to `target/qq-smoke/qq` (so a
+Builds `target/debug/qq` (`--reuse-test-build` builds it with the
+`--workspace --tests` feature set, so it reuses a preceding
+`cargo nextest run --workspace` instead of relinking), copies it to `target/qq-smoke/qq` (so a
 concurrent relink cannot swap it mid-run), and runs each scenario in
 parallel. Each scenario
 gets an isolated home (`HOME` and `XDG_*` under
@@ -116,22 +123,76 @@ function in `xtask/src/smoke.rs` plus a row in `SCENARIOS`.
   Show it failing first.
 - `#[ignore]` needs a reason string that says how to run the test.
 
+### Flaky tests
+
+A test that fails and then passes on retry is a failure: the `ci` profile
+retries once to diagnose, and `flaky-result = "fail"` fails the gate. Fix
+the cause. Reproduce first, under load if the failure is a race:
+
+```sh
+(for i in 1 2 3; do taskset -c 0 timeout 600 sh -c 'while :; do :; done' & done; wait) &
+taskset -c 0 cargo nextest run -p <crate> --profile ci -E 'test(=<name>)' --stress-count 100
+pkill -f 'while :; do :; done'
+```
+
+When the fix cannot land at once, quarantine the test. Never retry it,
+`#[ignore]` it, or loosen its assertions instead.
+
+### Quarantine
+
+`.config/quarantine.toml` lists tests the blocking gate leaves out. It
+starts empty and should stay close to empty.
+
+```toml
+[[quarantine]]
+test = "qq-core sessions::tests::goals::a_flaky_case"   # as `cargo nextest list` prints it
+owner = "github-handle"
+issue = "ENG-1234"
+added = "2026-11-01"
+expires = "2026-11-15"
+```
+
+- `cargo xtask check` excludes every listed test from its test gates.
+  `cargo xtask quarantine` prints the filterset.
+- `cargo xtask lint` fails on an entry with no owner or issue, a test name
+  that matches no test, a malformed date, an `expires` more than 14 days
+  after `added`, or any entry past its expiry or more than 14 days past
+  `added`. An entry cannot be renewed in place: fix the test or delete it.
+- The non-blocking CI job `quarantined tests under stress` runs the listed
+  tests with `--stress-count 100` on every run, so a fix shows up as a
+  green job.
+- A test leaves quarantine with a fix whose new test fails first and
+  passes after, plus about 100 green stress iterations (the CI job, or the
+  command above). Put the before and after numbers in the PR.
+
 Repository work conventions are in
 [qq-mode](../../.qq/skills/qq-mode/SKILL.md).
 
 ## nextest
 
-`.config/nextest.toml` defines three profiles:
+`.config/nextest.toml` defines four profiles:
 
 | Profile | Behavior |
 | --- | --- |
-| `default` | runs everything; reports slow tests (60 s) and kills them at 180 s |
+| `default` | one test thread per CPU; reports slow tests (60 s) and kills them at 180 s |
 | `quick` | stops at the first failure |
 | `ci` | one diagnostic retry; flaky passes fail the gate; writes JUnit to `target/nextest/ci/junit.xml` |
+| `platform` | `ci` plus a per-OS default filter that selects only the Windows or macOS tests (see [Windows CI](windows-ci.md)); selects nothing on Linux |
 
-The long tail (the goal-driver soaks, the deadline and compaction suites,
-the soak binary, and the perf fixtures) is given priority so it starts first
-and overlaps the fast tests.
+Two test groups shape scheduling:
+
+| Group | Members | Effect |
+| --- | --- | --- |
+| `real-process` | tests that spawn, kill and reap real process trees: `tools::process_group`, `tools::windows_job`, the shell kill/timeout/yield tests, goal-check process teardown, the daemon binaries | at most two run at once, so a loaded host does not starve their exit confirmation |
+| `soak` | `sessions::tests::goal_driver_soak::multi_day_*` and the `qq-core::soak` binary | left out of `cargo xtask check` unless `--full`; CI runs them in the merge queue, on `main`, nightly, and on manual runs |
+
+About 15 tests that take over 2.5 s on CI (and the soak group) get
+priority so they start first and overlap the fast tests. Add a test there
+only when it is that slow; a whole module would defeat the ordering.
+
+CI sets `NEXTEST_TEST_THREADS=8` on the 4-vCPU Linux runner: the suite
+waits on real time, processes and fsync more than it computes, and on four
+pinned cores 8 threads finished in 35 s where 4 took 47 s.
 
 On Linux a setup script (`.config/nextest-tmpdir.sh`) points `TMPDIR` at
 `/dev/shm/qq-test-$UID`. The session store commits with
@@ -146,22 +207,26 @@ it when `/dev/shm` is missing, unwritable, mounted `noexec`, or has under
 
 `.github/workflows/ci.yml`:
 
-- **Pull requests:** `cargo xtask check --profile ci --base origin/<base>`
-  plus `cargo xtask smoke`. Superseded runs are cancelled. The job summary
-  carries the evidence block. Failed runs upload `target/qq-check/`, the
-  JUnit file, and `target/qq-smoke/`.
-- **Every run:** the `devcontainer` job builds `.devcontainer/` and runs
-  three smoke scenarios inside it.
-- **Merge queue, `main`, manual runs:** `cargo xtask check --profile ci --full`,
-  smoke, the `qq-core` embedding example and minimal profile, the `qq-client`
-  wasm32 build, the Windows teardown tests, and run-in-place on macOS and
-  Windows ([Windows CI](windows-ci.md)).
-- **Label `ci:full` on a pull request:** also runs the wasm32, Windows and
-  run-in-place jobs.
+| Job | Runs on | What it does |
+| --- | --- | --- |
+| `fmt, lint, clippy, tests, smoke` (`checks`) | every run | pull requests: `cargo xtask check --profile ci --base origin/<base>` (soak tests excluded); merge queue, `main`, nightly and manual runs: `cargo xtask check --profile ci --full` (soak included); then `cargo xtask smoke`. Summary carries the evidence block; failures upload `target/qq-check/`, JUnit and `target/qq-smoke/` |
+| `minimal core profile and embedding` (`core-profiles`) | merge queue, `main`, nightly, manual, `ci:full` | `qq-core --no-default-features` tests and Clippy, the `htmd` dependency check, and the embedding example, in parallel with `checks` |
+| `quarantined tests under stress` (`quarantine`) | every run, non-blocking | stress-runs `.config/quarantine.toml` 100 times; passes at once when the list is empty |
+| `devcontainer smoke` | when `.devcontainer/`, `Dockerfile*`, `rust-toolchain.toml` or `Cargo.lock` changed, and on every non-PR run and `ci:full` | builds `.devcontainer/` and runs three smoke scenarios inside it. `devcontainer inputs changed` decides |
+| `qq-client on wasm32` | merge queue, `main`, nightly, manual, `ci:full` | wasm32 build and test build |
+| `platform tests (windows-latest)`, `platform tests (macos-latest)` | merge queue, `main`, nightly, manual, `ci:full` | the nextest `platform` profile, checked against `.config/platform-tests/<os>.txt`, then run-in-place smoke, `qq-core` Clippy and the embedding example ([Windows CI](windows-ci.md)) |
+| `undo on Git 2.39 (debian:bookworm)` | merge queue, `main`, nightly, manual, `ci:full` | the `undo` core tests and the `run-then-undo` smoke on old Git |
+| `release build size` | `main` | reports the release binary size |
 
-Turn on the merge queue in branch protection and make `checks`,
-`client-wasm`, and `windows-teardown` required. Without a merge queue, the
-full gate runs only after merge on `main`.
+Add the label `ci:full` to a pull request that touches process, shell,
+platform or CI code so the platform jobs run before the merge queue.
+
+Required checks for the merge queue: `fmt, lint, clippy, tests, smoke`,
+`minimal core profile and embedding`, `qq-client on wasm32`,
+`platform tests (windows-latest)`, `platform tests (macos-latest)` and
+`undo on Git 2.39 (debian:bookworm)`. Do not require `devcontainer smoke`
+(it is skipped on most pull requests) or the quarantine job. Without a
+merge queue, the full gate runs only after merge on `main`.
 
 ## Local hook
 

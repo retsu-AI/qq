@@ -1,0 +1,9 @@
+# Tests the blocking test gate leaves out while their fix lands.
+# Procedure and rules: docs/runbooks/testing.md#quarantine
+#
+# [[quarantine]]
+# test = "<binary-id> <test path>"
+# owner = "<github handle>"
+# issue = "ENG-<n>"
+# added = "YYYY-MM-DD"
+# expires = "YYYY-MM-DD"
