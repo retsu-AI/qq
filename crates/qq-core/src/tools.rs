@@ -4805,12 +4805,13 @@ mod tests {
         command: String,
         report: std::path::PathBuf,
         parent_left_the_group: bool,
-        _directory: tempfile::TempDir,
     }
 
     #[cfg(unix)]
-    async fn escaped_trees() -> Vec<EscapedTree> {
-        let prepared = tokio::task::spawn_blocking(|| {
+    async fn escaped_trees(directory: &std::path::Path) -> Vec<EscapedTree> {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let directory = directory.to_owned();
+        let prepared = tokio::task::spawn_blocking(move || {
             let on_path = |program: &str| {
                 std::env::var_os("PATH").is_some_and(|path| {
                     std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
@@ -4829,13 +4830,12 @@ mod tests {
                 format!("perl -MPOSIX -e 'setsid; exec @ARGV' {reporter} {{report}}; true")
             };
             [(piped, has_timeout), (escaped, false)].map(|(template, parent_left_the_group)| {
-                let directory = tempfile::tempdir().unwrap();
-                let report = directory.path().join("pids");
+                let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let report = directory.join(format!("pids-{next}"));
                 EscapedTree {
                     command: template.replace("{report}", &format!("'{}'", report.display())),
                     report,
                     parent_left_the_group,
-                    _directory: directory,
                 }
             })
         })
@@ -4893,7 +4893,7 @@ mod tests {
         let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         for timeout in [false, true] {
-            for tree in escaped_trees().await {
+            for tree in escaped_trees(workspace.path()).await {
                 let command = tree.command.clone();
                 let cancelled = RunCancellation::new();
                 let arguments = match timeout {
@@ -4941,7 +4941,7 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let tasks = ToolTasks::default();
         let mut started = Vec::new();
-        for tree in escaped_trees().await {
+        for tree in escaped_trees(workspace.path()).await {
             let result = execute(
                 workspace.clone(),
                 Arc::new(FileState::default()),
