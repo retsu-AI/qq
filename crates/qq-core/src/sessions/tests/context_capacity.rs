@@ -664,3 +664,213 @@ fn incremental_capacity_accepts_the_exact_limit_and_rolls_back_overflow() {
         3
     );
 }
+
+#[derive(Clone, Copy)]
+enum DenialCapacityPath {
+    Policy,
+    Client,
+    Timeout,
+}
+
+impl DenialCapacityPath {
+    const fn initial_state(self) -> &'static str {
+        match self {
+            Self::Policy => "requested",
+            Self::Client | Self::Timeout => "awaiting_approval",
+        }
+    }
+
+    const fn result(self) -> &'static str {
+        match self {
+            Self::Policy => approval::POLICY_DENIED_RESULT,
+            Self::Client => approval::USER_DENIED_RESULT,
+            Self::Timeout => approval::TIMEOUT_DENIED_RESULT,
+        }
+    }
+}
+
+fn denial_capacity_fixture(
+    path: DenialCapacityPath,
+    context_base_bytes: usize,
+) -> (TempDir, Connection, StoreId, ClaimedRun, ToolCallId, String) {
+    let directory = test_directory();
+    let database_path = directory.path().join("sessions.sqlite3");
+    let (connection, store_id) = open_database(&database_path).unwrap();
+    let workspace_id = WorkspaceId::from_bytes([1; 16]);
+    let session_id = SessionId::from_bytes([2; 16]);
+    let run_id = RunId::from_bytes([3; 16]);
+    let command_id = CommandId::from_bytes([4; 16]);
+    let tool_call_id = ToolCallId::from_bytes([5; 16]);
+    let provider_call_id = "provider-call".to_owned();
+    connection
+        .execute(
+            "INSERT INTO workspaces(id, path, next_sequence) VALUES (?1, '/w', 0)",
+            [workspace_id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO sessions(id, workspace_id, title, status, active_run_id,
+                                  created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, 'S', 'running', ?3, 1, 1)",
+            params![
+                session_id.to_string(),
+                workspace_id.to_string(),
+                run_id.to_string(),
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO runs(id, session_id, command_id, user_message_id,
+                              assistant_message_id, status, context_base_bytes,
+                              context_increment_bytes, created_at_ms, started_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, 0, 1, 1)",
+            params![
+                run_id.to_string(),
+                session_id.to_string(),
+                command_id.to_string(),
+                MessageId::from_bytes([6; 16]).to_string(),
+                MessageId::from_bytes([7; 16]).to_string(),
+                context_base_bytes,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO tool_calls(
+                 id, run_id, turn_ordinal, call_ordinal, provider_call_id, name,
+                 arguments_json, state, requested_at_ms
+             ) VALUES (?1, ?2, 1, 1, ?3, 'shell', '{}', ?4, 1)",
+            params![
+                tool_call_id.to_string(),
+                run_id.to_string(),
+                provider_call_id,
+                path.initial_state(),
+            ],
+        )
+        .unwrap();
+    let claimed = ClaimedRun {
+        goal_spend_owner: None,
+        goal: None,
+        goal_initial_notice: None,
+        goal_admission: None,
+        check_deadline: None,
+        origin: None,
+        identity: RunIdentity {
+            workspace_id,
+            session_id,
+            run_id,
+            command_id,
+            kind: RunKind::Prompt,
+            child: false,
+        },
+        workspace: "/w".to_owned(),
+        user_initiated: true,
+        literal_slash: false,
+        session_model: ModelSelection::default(),
+        model: ModelSelection::default(),
+        messages: Vec::new(),
+        message_effects: Vec::new(),
+        history_admission_failure: None,
+        context_compaction_attempted: 0,
+        context_compaction_failed: false,
+        context_compaction_remaining: false,
+        compaction_cutoff_ordinal: None,
+        context_compaction_oversized_unit_bytes: None,
+        in_run_turn_cutoff: None,
+        context_overflow_basis: None,
+        context_occupancy: None,
+        limits: RunLimits::default(),
+        input: Vec::new(),
+        resolved_input: None,
+        profile: AgentProfileId::default(),
+        reasoning_effort: None,
+        approval_mode: ApprovalMode::default(),
+        depth: 0,
+        root_run_id: run_id,
+        purpose: SessionPurpose::Task,
+        cancel_requested: false,
+        file_state: Vec::new(),
+        pending_steering: Vec::new(),
+        output: None,
+    };
+    (
+        directory,
+        connection,
+        store_id,
+        claimed,
+        tool_call_id,
+        provider_call_id,
+    )
+}
+
+fn apply_denial_capacity_path(
+    connection: &mut Connection,
+    store_id: StoreId,
+    claimed: &ClaimedRun,
+    tool_call_id: ToolCallId,
+    path: DenialCapacityPath,
+) -> Result<(), SessionRuntimeError> {
+    match path {
+        DenialCapacityPath::Policy => deny_tool_call(
+            connection,
+            store_id,
+            claimed.identity,
+            tool_call_id,
+            approval::POLICY_DENIED_RESULT,
+        )
+        .map(|_| ()),
+        DenialCapacityPath::Client => execute_command(
+            connection,
+            store_id,
+            CommandId::from_bytes([8; 16]),
+            SessionCommand::RespondToolApproval {
+                run_id: claimed.identity.run_id,
+                tool_call_id,
+                decision: ApprovalDecision::Deny,
+            },
+            None,
+            &CommandAdmission::default(),
+            CommandOrigin::Client,
+        )
+        .map(|_| ()),
+        DenialCapacityPath::Timeout => conclude_tool_approval(
+            connection,
+            store_id,
+            claimed.identity,
+            tool_call_id,
+            true,
+            &[],
+        )
+        .map(|_| ()),
+    }
+}
+
+fn denial_capacity_state(
+    connection: &Connection,
+    run_id: RunId,
+    tool_call_id: ToolCallId,
+) -> (u64, String, Option<String>, u64, u64) {
+    let increment = connection
+        .query_row(
+            "SELECT context_increment_bytes FROM runs WHERE id = ?1",
+            [run_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let (state, result) = connection
+        .query_row(
+            "SELECT state, result FROM tool_calls WHERE id = ?1",
+            [tool_call_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let events = connection
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    let commands = connection
+        .query_row("SELECT COUNT(*) FROM commands", [], |row| row.get(0))
+        .unwrap();
+    (increment, state, result, events, commands)
+}

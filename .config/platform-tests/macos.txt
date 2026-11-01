@@ -6,9 +6,9 @@ qq-config tests::qq_home_rejects_empty_and_relative_values
 qq-config tests::qq_home_selects_user_paths_without_changing_managed_policy
 qq-core sessions::tests::approvals::goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied_actions
 qq-core tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
-qq-core tools::tests::a_yielded_escaped_tree_dies_when_the_run_ends
-qq-core tools::tests::cancel_and_timeout_kill_descendants_that_left_the_group
-qq-core tools::tests::commands_see_their_working_directory_in_pwd_and_no_oldpwd
+qq-core tools::tests::shell::a_yielded_escaped_tree_dies_when_the_run_ends
+qq-core tools::tests::shell::cancel_and_timeout_kill_descendants_that_left_the_group
+qq-core tools::tests::shell::commands_see_their_working_directory_in_pwd_and_no_oldpwd
 qq-server tests::absent_qq_home_preserves_standard_server_paths
 qq-server tests::distinct_qq_homes_have_separate_server_discovery_and_coordination
 qq-server tests::qq_home_rejects_empty_and_relative_server_roots

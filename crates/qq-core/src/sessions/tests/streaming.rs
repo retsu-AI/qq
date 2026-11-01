@@ -715,3 +715,36 @@ async fn session_files_keep_the_newest_paths_and_updates_never_evict() {
     assert!(newest_present);
     assert_eq!(after_update, u64::from(MAX_SESSION_FILES));
 }
+
+async fn streaming_transaction_state(store: &Store, run_id: RunId) -> (u64, u64, u64, u64, u64) {
+    store
+        .call(Priority::Control, move |connection| {
+            let increment = connection.query_row(
+                "SELECT context_increment_bytes FROM runs WHERE id = ?1",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )?;
+            let assistant_messages = connection.query_row(
+                "SELECT COUNT(*) FROM messages
+                     WHERE run_id = ?1 AND role = 'assistant'",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )?;
+            let chunks = connection.query_row(
+                "SELECT COUNT(*) FROM message_chunks c
+                     JOIN messages m ON m.id = c.message_id WHERE m.run_id = ?1",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )?;
+            let turns = connection.query_row(
+                "SELECT COUNT(*) FROM model_turns WHERE run_id = ?1",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )?;
+            let events =
+                connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+            Ok((increment, assistant_messages, chunks, turns, events))
+        })
+        .await
+        .unwrap()
+}

@@ -2584,3 +2584,596 @@ async fn repaired_read_arguments_execute_once_and_the_note_is_durable() {
     assert_eq!(focused.tool_calls[0].state, ToolCallState::Completed);
     assert_eq!(focused.tool_calls[0].result.as_deref(), Some(result));
 }
+
+struct UsageSequenceLoader {
+    usages: StdMutex<Vec<Option<qq_provider::ProviderUsage>>>,
+}
+
+impl RuntimeLoader for UsageSequenceLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let usage = self.usages.lock().unwrap().remove(0);
+        load_provider(UsageSequenceProvider { usage }, &request)
+    }
+}
+
+struct UsageSequenceProvider {
+    usage: Option<qq_provider::ProviderUsage>,
+}
+
+impl Provider for UsageSequenceProvider {
+    fn stream(&self, _request: ModelRequest) -> ProviderStream {
+        provider_script([text_delta("answer"), completed(self.usage)])
+    }
+}
+
+struct ReasoningLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+}
+
+impl RuntimeLoader for ReasoningLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let requests = Arc::clone(&self.requests);
+        load_provider(ReasoningProvider { requests }, &request)
+    }
+}
+
+struct ReasoningProvider {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+}
+
+impl Provider for ReasoningProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        self.requests.lock().unwrap().push(request);
+        let mut events = vec![Ok(qq_provider::ProviderEvent::ReasoningStarted {
+            kind: qq_provider::ReasoningKind::Summary,
+        })];
+        events.extend((0..64).map(|_| {
+            Ok(qq_provider::ProviderEvent::ReasoningDelta {
+                kind: qq_provider::ReasoningKind::Summary,
+                text: "private rationale ".to_owned(),
+            })
+        }));
+        events.extend([
+            Ok(qq_provider::ProviderEvent::ReasoningCompleted {
+                kind: qq_provider::ReasoningKind::Summary,
+            }),
+            Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                text: "ans".to_owned(),
+            }),
+            Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                text: "wer".to_owned(),
+            }),
+            Ok(qq_provider::ProviderEvent::ReasoningStarted {
+                kind: qq_provider::ReasoningKind::ExposedThinking,
+            }),
+            Ok(qq_provider::ProviderEvent::ReasoningDelta {
+                kind: qq_provider::ReasoningKind::ExposedThinking,
+                text: "late rationale".to_owned(),
+            }),
+            Ok(qq_provider::ProviderEvent::ReasoningCompleted {
+                kind: qq_provider::ReasoningKind::ExposedThinking,
+            }),
+            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+        ]);
+        Box::pin(stream::iter(events))
+    }
+}
+
+struct HangingReasoningLoader {
+    buffered: Arc<tokio::sync::Notify>,
+}
+
+impl RuntimeLoader for HangingReasoningLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let buffered = Arc::clone(&self.buffered);
+        {
+            let loaded = ProviderLoader::new(HangingReasoningProvider { buffered })
+                .loaded(&request.workspace);
+            Box::pin(async move { Ok(loaded) })
+        }
+    }
+}
+
+struct HangingReasoningProvider {
+    buffered: Arc<tokio::sync::Notify>,
+}
+
+impl Provider for HangingReasoningProvider {
+    fn stream(&self, _request: ModelRequest) -> ProviderStream {
+        let buffered = Arc::clone(&self.buffered);
+        Box::pin(async_stream! {
+            yield Ok(qq_provider::ProviderEvent::ReasoningStarted {
+                kind: qq_provider::ReasoningKind::Summary,
+            });
+            yield Ok(qq_provider::ProviderEvent::ReasoningDelta {
+                kind: qq_provider::ReasoningKind::Summary,
+                text: "first".to_owned(),
+            });
+            yield Ok(qq_provider::ProviderEvent::ReasoningDelta {
+                kind: qq_provider::ReasoningKind::Summary,
+                text: "buffered".to_owned(),
+            });
+            buffered.notify_one();
+            std::future::pending::<()>().await;
+        })
+    }
+}
+
+struct ToolLoopLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+}
+
+impl RuntimeLoader for ToolLoopLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let requests = Arc::clone(&self.requests);
+        load_provider(ToolLoopProvider { requests }, &request)
+    }
+}
+
+struct ToolLoopProvider {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+}
+
+impl Provider for ToolLoopProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let mut requests = self.requests.lock().unwrap();
+        let turn = requests.len();
+        requests.push(request);
+        drop(requests);
+        if turn == 0 {
+            provider_script(
+                tool_call("call_0", "read_file", r#"{"path":"note.txt"}"#)
+                    .into_iter()
+                    .chain([completed(Some(provider_usage(4, 2)))]),
+            )
+        } else {
+            provider_script([text_delta("done"), completed(Some(provider_usage(6, 1)))])
+        }
+    }
+}
+
+const SHORT_SLICE_CALLS: usize = 2 * crate::MAX_TOOL_CALLS_PER_TURN;
+
+struct RenewableSliceLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    checkpoint_wait: Option<Arc<tokio::sync::Notify>>,
+    metered_empty_checkpoint: bool,
+    slice_calls: usize,
+}
+
+struct TruncatedReportProvider {
+    inner: RenewableSliceProvider,
+    truncated: StdMutex<bool>,
+    fault: bool,
+}
+
+impl Provider for TruncatedReportProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let continuing_report = request.messages().last()
+            == Some(&Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE))
+            || request.messages().last().is_some_and(|message| {
+                message.role() == Role::User
+                    && message.content().iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text } if text.contains("transient provider error"))
+                    })
+            });
+        let at_report =
+            request.messages().last() == Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE));
+        if !at_report && !continuing_report {
+            return self.inner.stream(request);
+        }
+        self.inner.requests.lock().unwrap().push(request);
+        let mut truncated = self.truncated.lock().unwrap();
+        let first = !*truncated;
+        *truncated = true;
+        Box::pin(stream::iter(if first && self.fault {
+            vec![
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "report part one".to_owned(),
+                }),
+                Err(qq_provider::ProviderError::Transport(
+                    "connection reset mid-report".to_owned(),
+                )),
+            ]
+        } else if first {
+            vec![
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "report part one".to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::Incomplete {
+                    usage: None,
+                    reason: qq_provider::IncompleteReason::OutputTokens,
+                }),
+            ]
+        } else {
+            vec![
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: " and part two".to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+            ]
+        }))
+    }
+}
+
+struct TruncatedReportLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    fault: bool,
+}
+
+impl RuntimeLoader for TruncatedReportLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let requests = Arc::clone(&self.requests);
+        let fault = self.fault;
+        Box::pin(async move {
+            Runtime::new(
+                TruncatedReportProvider {
+                    inner: RenewableSliceProvider {
+                        requests,
+                        checkpoint_wait: None,
+                        metered_empty_checkpoint: false,
+                        slice_calls: SHORT_SLICE_CALLS,
+                    },
+                    truncated: StdMutex::new(false),
+                    fault,
+                },
+                "test-model",
+                256,
+            )
+            .map(|runtime| {
+                loaded_runtime(
+                    runtime.with_tool_calls_per_slice(SHORT_SLICE_CALLS),
+                    &request.workspace,
+                    None,
+                )
+            })
+            .map_err(load_error)
+        })
+    }
+}
+
+#[derive(Clone)]
+struct CheckpointGate {
+    reached: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    reply: &'static str,
+}
+
+struct GatedSliceLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    gate: CheckpointGate,
+}
+
+impl RuntimeLoader for GatedSliceLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let requests = Arc::clone(&self.requests);
+        let gate = self.gate.clone();
+        Box::pin(async move {
+            Runtime::new(
+                GatedSliceProvider {
+                    inner: RenewableSliceProvider {
+                        requests,
+                        checkpoint_wait: None,
+                        metered_empty_checkpoint: false,
+                        slice_calls: SHORT_SLICE_CALLS,
+                    },
+                    gate,
+                },
+                "test-model",
+                256,
+            )
+            .map(|runtime| {
+                loaded_runtime(
+                    runtime.with_tool_calls_per_slice(SHORT_SLICE_CALLS),
+                    &request.workspace,
+                    None,
+                )
+            })
+            .map_err(load_error)
+        })
+    }
+}
+
+struct GatedSliceProvider {
+    inner: RenewableSliceProvider,
+    gate: CheckpointGate,
+}
+
+impl Provider for GatedSliceProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        if request.messages().last() != Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE)) {
+            return self.inner.stream(request);
+        }
+        self.inner.requests.lock().unwrap().push(request);
+        let gate = self.gate.clone();
+        Box::pin(async_stream! {
+            gate.reached.notify_one();
+            gate.release.notified().await;
+            if !gate.reply.is_empty() {
+                yield Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: gate.reply.to_owned(),
+                });
+            }
+            yield Ok(qq_provider::ProviderEvent::Completed {
+                usage: Some(provider_usage(1, 1)),
+            });
+        })
+    }
+}
+
+impl RuntimeLoader for RenewableSliceLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let requests = Arc::clone(&self.requests);
+        let checkpoint_wait = self.checkpoint_wait.clone();
+        let metered_empty_checkpoint = self.metered_empty_checkpoint;
+        let slice_calls = self.slice_calls;
+        Box::pin(async move {
+            Runtime::new(
+                RenewableSliceProvider {
+                    requests,
+                    checkpoint_wait,
+                    metered_empty_checkpoint,
+                    slice_calls,
+                },
+                "test-model",
+                256,
+            )
+            .map(|runtime| {
+                loaded_runtime(
+                    runtime.with_tool_calls_per_slice(slice_calls),
+                    &request.workspace,
+                    metered_empty_checkpoint.then_some(test_pricing()),
+                )
+            })
+            .map_err(load_error)
+        })
+    }
+}
+
+struct TurnTextLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+}
+
+impl RuntimeLoader for TurnTextLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let requests = Arc::clone(&self.requests);
+        load_provider(TurnTextProvider { requests }, &request)
+    }
+}
+
+async fn project_terminal_run_with_tool_boundaries(
+    outcome: RunOutcome,
+) -> (Vec<Message>, Vec<Message>) {
+    let directory = test_directory();
+    let database_path = directory.path().join("sessions.sqlite3");
+    let store = Store::open(database_path.clone()).await.unwrap();
+    let (workspace_id, session_id) =
+        store_session(&store, directory.path(), ApprovalMode::default()).await;
+    store_command(&store, session_id, "inspect the tool boundaries")
+        .await
+        .unwrap();
+    let claimed = store.claim_next_run(false).await.unwrap().unwrap();
+    let completed_call_id = ToolCallId::generate().unwrap();
+    let started_call_id = ToolCallId::generate().unwrap();
+    let awaiting_call_id = ToolCallId::generate().unwrap();
+    let untouched_call_id = ToolCallId::generate().unwrap();
+    let calls = vec![
+        RuntimeToolCall {
+            id: completed_call_id,
+            turn_ordinal: 1,
+            call_ordinal: 1,
+            provider_call_id: "completed-call".to_owned(),
+            name: "read_file".to_owned(),
+            effect: crate::catalog::EffectClass::ReadOnly,
+            arguments: r#"{"path":"completed.txt"}"#.to_owned(),
+            rejection: None,
+        },
+        RuntimeToolCall {
+            id: started_call_id,
+            turn_ordinal: 1,
+            call_ordinal: 2,
+            provider_call_id: "started-call".to_owned(),
+            name: "read_file".to_owned(),
+            effect: crate::catalog::EffectClass::ReadOnly,
+            arguments: r#"{"path":"first.txt"}"#.to_owned(),
+            rejection: None,
+        },
+        RuntimeToolCall {
+            id: awaiting_call_id,
+            turn_ordinal: 1,
+            call_ordinal: 3,
+            provider_call_id: "awaiting-call".to_owned(),
+            name: "shell".to_owned(),
+            effect: crate::catalog::EffectClass::Shell,
+            arguments: r#"{"command":"true"}"#.to_owned(),
+            rejection: None,
+        },
+        RuntimeToolCall {
+            id: untouched_call_id,
+            turn_ordinal: 1,
+            call_ordinal: 4,
+            provider_call_id: "untouched-call".to_owned(),
+            name: "read_file".to_owned(),
+            effect: crate::catalog::EffectClass::ReadOnly,
+            arguments: r#"{"path":"second.txt"}"#.to_owned(),
+            rejection: None,
+        },
+    ];
+    store
+        .persist_model_turn(
+            &claimed,
+            TurnCommit::new(
+                1,
+                Message::new(
+                    Role::Assistant,
+                    calls
+                        .iter()
+                        .map(|call| {
+                            ContentBlock::tool_call(
+                                call.provider_call_id.clone(),
+                                call.name.clone(),
+                                &serde_json::from_str::<serde_json::Value>(&call.arguments)
+                                    .unwrap(),
+                            )
+                        })
+                        .collect(),
+                ),
+            )
+            .calls(calls)
+            .build(),
+        )
+        .await
+        .unwrap();
+    store
+        .start_tool_call(&claimed, completed_call_id)
+        .await
+        .unwrap();
+    store
+        .finish_tool_call(
+            &claimed,
+            completed_call_id,
+            "persisted result".to_owned(),
+            false,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .start_tool_call(&claimed, started_call_id)
+        .await
+        .unwrap();
+    store
+        .request_tool_approval(&claimed, awaiting_call_id, ApprovalPreviews::default())
+        .await
+        .unwrap();
+    let finished = store
+        .finish_run(&claimed, outcome, None, TeardownComplete::nothing_ran())
+        .await
+        .unwrap();
+    let after = finished.last().unwrap().cursor;
+    store.close().await.unwrap();
+    drop(store);
+    let connection = Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    let restarted_database_path = directory.path().join("restarted-sessions.sqlite3");
+    std::fs::copy(&database_path, &restarted_database_path).unwrap();
+
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(database_path),
+        Arc::new(CapturingLoader {
+            requests: Arc::clone(&requests),
+        }),
+    )
+    .await
+    .unwrap();
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after,
+        })
+        .unwrap();
+    try_submit(&runtime, session_id, "continue safely")
+        .await
+        .unwrap();
+    let _ = collect_through_finished(&mut events).await;
+
+    let projected_before_restart = {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        requests[0].messages().to_vec()
+    };
+    drop(runtime);
+
+    let restarted_requests = Arc::new(StdMutex::new(Vec::new()));
+    let restarted = SessionRuntime::open(
+        SessionRuntimeOptions::new(restarted_database_path),
+        Arc::new(CapturingLoader {
+            requests: Arc::clone(&restarted_requests),
+        }),
+    )
+    .await
+    .unwrap();
+    let mut restarted_events = restarted
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after,
+        })
+        .unwrap();
+    try_submit(&restarted, session_id, "continue safely")
+        .await
+        .unwrap();
+    let _ = collect_through_finished(&mut restarted_events).await;
+    let restarted_requests = restarted_requests.lock().unwrap();
+    assert_eq!(restarted_requests.len(), 1);
+    (
+        projected_before_restart,
+        restarted_requests[0].messages().to_vec(),
+    )
+}
+
+struct TruncatingLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    empty: bool,
+    output_ceiling: Option<u32>,
+}
+
+impl RuntimeLoader for TruncatingLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let requests = Arc::clone(&self.requests);
+        let empty = self.empty;
+        let output_ceiling = self.output_ceiling;
+        Box::pin(async move {
+            Runtime::new(TruncatingProvider { requests, empty }, "test-model", 1024)
+                .map(|runtime| {
+                    loaded_runtime(
+                        runtime.with_output_ceiling(output_ceiling.map(|tokens| {
+                            crate::OutputCeiling {
+                                tokens,
+                                policy_bound: false,
+                            }
+                        })),
+                        &request.workspace,
+                        None,
+                    )
+                })
+                .map_err(load_error)
+        })
+    }
+}
+
+struct TruncatingProvider {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    empty: bool,
+}
+
+impl Provider for TruncatingProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let mut requests = self.requests.lock().unwrap();
+        let turn = requests.len();
+        requests.push(request);
+        drop(requests);
+        let usage = Some(provider_usage(4, 2));
+        if turn.is_multiple_of(2) {
+            let mut events = Vec::new();
+            if !self.empty {
+                events.push(Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "first half".to_owned(),
+                }));
+            }
+            events.push(Ok(qq_provider::ProviderEvent::Incomplete {
+                usage,
+                reason: qq_provider::IncompleteReason::OutputTokens,
+            }));
+            Box::pin(stream::iter(events))
+        } else {
+            provider_script([text_delta(" second half"), completed(usage)])
+        }
+    }
+}

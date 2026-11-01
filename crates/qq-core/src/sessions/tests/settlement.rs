@@ -2493,3 +2493,70 @@ async fn schedules_ready_sessions_fairly() {
         Some(&Message::user("first-b"))
     );
 }
+
+struct ChunkingLoader;
+
+impl RuntimeLoader for ChunkingLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        Box::pin(
+            async move { Ok(ProviderLoader::new(ChunkingProvider).loaded(&request.workspace)) },
+        )
+    }
+}
+
+struct ChunkingProvider;
+
+impl Provider for ChunkingProvider {
+    fn stream(&self, _request: ModelRequest) -> ProviderStream {
+        provider_script([
+            text_delta(String::new()),
+            text_delta("é".repeat(MAX_TEXT_CHUNK_BYTES / 2 + 8)),
+            completed(None),
+        ])
+    }
+}
+
+struct EmptyThenTextLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+}
+
+impl RuntimeLoader for EmptyThenTextLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let requests = Arc::clone(&self.requests);
+        load_provider(EmptyThenTextProvider { requests }, &request)
+    }
+}
+
+struct EmptyThenTextProvider {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+}
+
+impl Provider for EmptyThenTextProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let mut requests = self.requests.lock().unwrap();
+        let turn = requests.len();
+        requests.push(request);
+        drop(requests);
+        if turn == 0 {
+            provider_script([completed(None)])
+        } else {
+            text_reply("ok")
+        }
+    }
+}
+
+struct ContextBudgetLoader;
+
+impl RuntimeLoader for ContextBudgetLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        load_provider(ContextBudgetProvider, &request)
+    }
+}
+
+struct ContextBudgetProvider;
+
+impl Provider for ContextBudgetProvider {
+    fn stream(&self, _request: ModelRequest) -> ProviderStream {
+        text_reply("x".repeat(MAX_CONTEXT_BYTES + 1))
+    }
+}
