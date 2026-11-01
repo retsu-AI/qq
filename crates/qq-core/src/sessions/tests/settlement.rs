@@ -23,19 +23,7 @@ async fn settling_a_settled_run_is_a_no_op_on_every_path() {
             ..
         }
     ));
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("second".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    store_command(&store, session_id, "second").await.unwrap();
     let second = store.claim_next_run(false).await.unwrap().unwrap();
     let store_id = store.store_id();
     let events_before = store
@@ -152,19 +140,13 @@ async fn a_committed_compaction_is_not_resettled_by_the_prompts_teardown() {
         )
         .await
         .unwrap();
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("long prompt".repeat(64)); 1],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    store_command(
+        &store,
+        session_id,
+        Prompt::input(vec![InputPart::text("long prompt".repeat(64)); 1]),
+    )
+    .await
+    .unwrap();
     let original = store.reserve_next_run(false).await.unwrap().unwrap();
     let (compaction, _) = store
         .start_auto_compaction(&original, test_prepared_audit(&original), None)
@@ -307,19 +289,7 @@ async fn recovery_interrupts_only_the_current_turns_message() {
     let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("read".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    store_command(&store, session_id, "read").await.unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     let first_message = MessageId::generate().unwrap();
     store
@@ -482,19 +452,7 @@ async fn recovery_interrupts_running_tools_without_reexecuting_them() {
     let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("read".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    store_command(&store, session_id, "read").await.unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     let tool_call_id = ToolCallId::generate().unwrap();
     let call = RuntimeToolCall {
@@ -585,19 +543,7 @@ async fn recovery_interrupts_running_tools_without_reexecuting_them() {
         ToolCallState::Interrupted
     );
 
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    try_submit(&runtime, session_id, "continue").await.unwrap();
     let _ = collect_through_finished(&mut events).await;
 
     let requests = requests.lock().unwrap();
@@ -652,19 +598,7 @@ async fn orphaned_tool_call_blocks_replay_with_synthesized_interrupted_results()
     let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("read".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    store_command(&store, session_id, "read").await.unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     store
         .persist_model_turn(
@@ -714,19 +648,7 @@ async fn orphaned_tool_call_blocks_replay_with_synthesized_interrupted_results()
         })
         .unwrap();
     let _ = collect_through_finished(&mut events).await;
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    try_submit(&runtime, session_id, "continue").await.unwrap();
     let _ = collect_through_finished(&mut events).await;
 
     let requests = requests.lock().unwrap();
@@ -767,17 +689,7 @@ async fn exceeding_the_context_budget_fails_the_run_with_a_policy_outcome() {
             after: created.committed_through,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("fill the context".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "fill the context")
         .await
         .unwrap();
 
@@ -1067,17 +979,7 @@ async fn shutdown_cancels_running_and_queued_prompts_before_returning() {
             .all(|run| run.status == RunStatus::Cancelled)
     );
 
-    let error = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("too late".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let error = try_submit(&runtime, session_id, "too late")
         .await
         .unwrap_err();
     assert_eq!(error, SessionRuntimeError::Unavailable);
@@ -1098,19 +1000,7 @@ async fn subscribers_converge_and_replay_from_an_intermediate_cursor() {
     let mut first = runtime.subscribe(request).unwrap();
     let mut second = runtime.subscribe(request).unwrap();
 
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("converge".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    try_submit(&runtime, session_id, "converge").await.unwrap();
 
     let (first, second) = tokio::join!(
         collect_through_finished(&mut first),
@@ -1153,19 +1043,7 @@ async fn scheduler_store_failure_disables_runtime_and_existing_subscribers() {
             after: created.committed_through,
         })
         .unwrap();
-    runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("persist me".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&runtime.inner.store, session_id, "persist me")
         .await
         .unwrap();
     assert!(matches!(
@@ -1233,19 +1111,7 @@ async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime(
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let queued = runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("retry the read".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let queued = store_command(&runtime.inner.store, session_id, "retry the read")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
@@ -1322,19 +1188,7 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
     else {
         panic!("unexpected receipt")
     };
-    let first = runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: first_session,
-                input: vec![InputPart::text("fail initialization".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let first = store_command(&runtime.inner.store, first_session, "fail initialization")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1343,19 +1197,7 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
     else {
         panic!("unexpected receipt")
     };
-    let second = runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: second_session,
-                input: vec![InputPart::text("must not load".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let second = store_command(&runtime.inner.store, second_session, "must not load")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1476,19 +1318,7 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
     else {
         panic!("unexpected receipt")
     };
-    let retrying = runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: first_session,
-                input: vec![InputPart::text("wait at start".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let retrying = store_command(&runtime.inner.store, first_session, "wait at start")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1498,19 +1328,7 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
     else {
         panic!("unexpected receipt")
     };
-    let failing = runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: second_session,
-                input: vec![InputPart::text("fail initialization".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let failing = store_command(&runtime.inner.store, second_session, "fail initialization")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1627,21 +1445,13 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
     else {
         panic!("unexpected receipt")
     };
-    let started = runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: started_session,
-                input: vec![InputPart::text("start but do not poll".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let started = store_command(
+        &runtime.inner.store,
+        started_session,
+        "start but do not poll",
+    )
+    .await
+    .unwrap();
     let CommandOutcome::PromptQueued {
         run_id: started_run,
         ..
@@ -1649,19 +1459,7 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
     else {
         panic!("unexpected receipt")
     };
-    let failing = runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: failing_session,
-                input: vec![InputPart::text("fail settlement".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let failing = store_command(&runtime.inner.store, failing_session, "fail settlement")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1776,19 +1574,7 @@ async fn poisoned_cancellation_registry_settles_before_start_and_returns_the_per
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let queued = runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("poisoned registry".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let queued = store_command(&runtime.inner.store, session_id, "poisoned registry")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
@@ -1878,19 +1664,7 @@ async fn permanent_prestart_settlement_failure_is_recovered_on_reopen() {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let queued = runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("recover me".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let queued = store_command(&runtime.inner.store, session_id, "recover me")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
@@ -2028,19 +1802,7 @@ async fn queues_follow_ups_without_reordering_conversation_context() {
         .unwrap();
 
     for prompt in ["first", "second"] {
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text(prompt.to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        try_submit(&runtime, session_id, prompt).await.unwrap();
     }
     let mut finished = 0;
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -2184,35 +1946,11 @@ async fn reservation_is_publicly_queued_exclusive_and_cancel_wins_before_start()
     let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    let queued = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("wait".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let queued = store_command(&store, session_id, "wait").await.unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    let second = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("later".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let second = store_command(&store, session_id, "later").await.unwrap();
 
     let claimed = store.reserve_next_run(false).await.unwrap().unwrap();
     assert_eq!(claimed.identity.run_id, run_id);
@@ -2387,19 +2125,7 @@ async fn delayed_old_panic_cannot_settle_a_newer_auto_compaction() {
         panic!("unexpected receipt")
     };
 
-    let old = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("old".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let old = store_command(&store, session_id, "old").await.unwrap();
     let CommandOutcome::PromptQueued { run_id: old_id, .. } = old.receipt.outcome else {
         panic!("unexpected receipt")
     };
@@ -2418,19 +2144,7 @@ async fn delayed_old_panic_cannot_settle_a_newer_auto_compaction() {
         .await
         .unwrap();
 
-    let new = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("new".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let new = store_command(&store, session_id, "new").await.unwrap();
     let CommandOutcome::PromptQueued { run_id: new_id, .. } = new.receipt.outcome else {
         panic!("unexpected receipt")
     };
@@ -2535,17 +2249,7 @@ async fn recovery_ignores_legacy_overflow_evidence_without_spending_a_second_att
     let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    let queued = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("known provider overflow".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let queued = store_command(&store, session_id, "known provider overflow")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
@@ -2730,19 +2434,7 @@ async fn slow_preparation_does_not_serialize_an_independent_permit() {
     else {
         panic!("unexpected receipt")
     };
-    let first = runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: first_session,
-                input: vec![InputPart::text("first".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let first = store_command(&runtime.inner.store, first_session, "first")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -2751,19 +2443,7 @@ async fn slow_preparation_does_not_serialize_an_independent_permit() {
     else {
         panic!("unexpected receipt")
     };
-    let second = runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: second_session,
-                input: vec![InputPart::text("second".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let second = store_command(&runtime.inner.store, second_session, "second")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -2880,17 +2560,7 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("block during load".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let queued = try_submit(&runtime, session_id, "block during load")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
@@ -3041,19 +2711,7 @@ async fn chunks_large_deltas_and_ignores_empty_deltas() {
             after: created.committed_through,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("large".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    try_submit(&runtime, session_id, "large").await.unwrap();
 
     let mut chunks = Vec::new();
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -3209,34 +2867,12 @@ async fn schedules_ready_sessions_fairly() {
             after: second.committed_through,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: first_session,
-                input: vec![InputPart::text("first-a".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, first_session, "first-a")
         .await
         .unwrap();
     entered.notified().await;
     for (session_id, prompt) in [(first_session, "first-b"), (second_session, "second-a")] {
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text(prompt.to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        try_submit(&runtime, session_id, prompt).await.unwrap();
     }
     assert_eq!(requests.lock().unwrap().len(), 1);
     release.notify_one();

@@ -152,18 +152,15 @@ async fn once_check(success: bool) {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("missing session")
     };
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"verify checked completion",
-                "check":{"command":command,"timeout_ms":5000},
-                "budget":{"max_goal_runs":if success { 1 } else { 10 },"deadline_ms":now_ms()+60_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let receipt = set_goal(
+        &runtime,
+        serde_json::json!({"session_id":session_id, "objective":"verify checked completion",
+            "check":{"command":command,"timeout_ms":5000},
+            "budget":{"max_goal_runs":if success { 1 } else { 10 },"deadline_ms":now_ms()+60_000}
+        }),
+    )
+    .await
+    .unwrap();
     let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
         panic!("missing goal")
     };
@@ -695,11 +692,15 @@ async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
             panic!("missing session")
         };
         sessions.push(session_id);
-        let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"independent checked work",
-            "check":{"command":"printf checked >> goal-check-marker","timeout_ms":5000},
-            "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
+        let receipt = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id,"objective":"independent checked work",
+                "check":{"command":"printf checked >> goal-check-marker","timeout_ms":5000},
+                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+            }),
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("missing goal")
         };
@@ -827,11 +828,15 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
             panic!("missing session")
         };
-        let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"verify one absolute deadline",
-            "check":{"command":"printf checked >> goal-check-marker","timeout_ms":60_000},
-            "budget":{"max_goal_runs":10,"deadline_ms":start+600_000}
-        })).unwrap()).await.unwrap();
+        let receipt = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id,"objective":"verify one absolute deadline",
+                "check":{"command":"printf checked >> goal-check-marker","timeout_ms":60_000},
+                "budget":{"max_goal_runs":10,"deadline_ms":start+600_000}
+            }),
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("missing goal")
         };
@@ -971,18 +976,15 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
             panic!("missing session")
         };
         let (entered, release) = PROBE.hold(Checkpoint::GoalCheckResult(session_id));
-        let receipt = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal","session_id":session_id,"objective":"old objective",
-                    "check":{"command":COMMAND,"timeout_ms":5000},
-                    "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        let receipt = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id,"objective":"old objective",
+                "check":{"command":COMMAND,"timeout_ms":5000},
+                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+            }),
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("missing goal")
         };
@@ -1216,18 +1218,15 @@ async fn goal_check_for_goal_blocks_after_three_failed_checks_with_durable_evide
     else {
         panic!("session")
     };
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session_id,"objective":"check until verified",
-                "check":{"command":COMMAND,"timeout_ms":5000},
-                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let receipt = set_goal(
+        &runtime,
+        serde_json::json!({"session_id":session_id,"objective":"check until verified",
+            "check":{"command":COMMAND,"timeout_ms":5000},
+            "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+        }),
+    )
+    .await
+    .unwrap();
     let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
         panic!("goal")
     };
@@ -1427,10 +1426,9 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
         else {
             panic!("session")
         };
-        let receipt = runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"old objective",
+        let receipt = set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"old objective",
             "check":{"command":COMMAND,"timeout_ms":5000},"budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         let mut events = runtime
             .subscribe(SubscribeRequest {
                 workspace_id,
@@ -1655,10 +1653,9 @@ async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions()
     else {
         panic!("session")
     };
-    let receipt = runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-        "type":"set_goal", "session_id":session_id, "objective":"verify work", "check":{"command":COMMAND,"timeout_ms":5000},
+    let receipt = set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"verify work", "check":{"command":COMMAND,"timeout_ms":5000},
         "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+60_000}
-    })).unwrap()).await.unwrap();
+    })).await.unwrap();
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,

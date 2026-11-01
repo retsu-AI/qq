@@ -75,23 +75,7 @@ async fn a_compaction_run_reports_compacting_and_nothing_else() {
 #[tokio::test]
 async fn compact_session_is_refused_while_active_and_never_runs_a_summarizer_tool_call() {
     let mut harness = session_management_harness().await;
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("do work".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(&harness.runtime, harness.session_id, "do work").await;
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
 
     assert_eq!(
@@ -380,19 +364,7 @@ async fn compaction_runs_account_usage_and_cost_but_join_no_transcript() {
             after: created.committed_through,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("say hello".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    try_submit(&runtime, session_id, "say hello").await.unwrap();
     collect_through_finished(&mut events).await;
     let snapshot = runtime
         .snapshot(SnapshotRequest {
@@ -1123,30 +1095,19 @@ async fn an_over_budget_prompt_keeps_its_first_attachment_bytes_across_auto_comp
     let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
 
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![
-                    InputPart::text("y".repeat(MAX_PROMPT_BYTES - 64)),
-                    InputPart::WorkspaceFile {
-                        path: "a.txt".to_owned(),
-                        expected_hash: None,
-                        range: None,
-                    },
-                ],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
+    let prompt = submit(
+        &harness.runtime,
+        harness.session_id,
+        Prompt::input(vec![
+            InputPart::text("y".repeat(MAX_PROMPT_BYTES - 64)),
+            InputPart::WorkspaceFile {
+                path: "a.txt".to_owned(),
+                expected_hash: None,
+                range: None,
             },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id: prompt, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+        ]),
+    )
+    .await;
     let observed = collect_until(
         &mut harness.events,
         |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id != prompt),
@@ -1357,22 +1318,13 @@ async fn saturated_reserved_reload_waits_after_auto_compaction() {
     let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
 
-    let queued = harness
-        .runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("y".repeat(MAX_PROMPT_BYTES))],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let queued = store_command(
+        &harness.runtime.inner.store,
+        harness.session_id,
+        "y".repeat(MAX_PROMPT_BYTES),
+    )
+    .await
+    .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
         panic!("unexpected receipt")
     };
@@ -1414,22 +1366,13 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
         harness.session_id,
     );
 
-    let queued = harness
-        .runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("y".repeat(MAX_PROMPT_BYTES))],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let queued = store_command(
+        &harness.runtime.inner.store,
+        harness.session_id,
+        "y".repeat(MAX_PROMPT_BYTES),
+    )
+    .await
+    .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
         panic!("unexpected receipt")
     };
@@ -2006,22 +1949,13 @@ async fn cancelled_queued_prompt_does_not_mask_provider_overflow_evidence() {
     let first = queue_prompt(&harness.runtime, harness.session_id, "big ask".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
 
-    let queued = harness
-        .runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("cancel this".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let queued = store_command(
+        &harness.runtime.inner.store,
+        harness.session_id,
+        "cancel this",
+    )
+    .await
+    .unwrap();
     let CommandOutcome::PromptQueued {
         run_id: cancelled, ..
     } = queued.receipt.outcome
@@ -4581,18 +4515,14 @@ async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
         let mut harness = in_run_compaction_harness(30, 16 * 1024, "goal progress").await;
         let held = harness.runtime.hold_scheduling().await;
         let session = harness.session_id;
-        harness
-            .runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session, "objective":"é".repeat(1024),
-                    "budget":{"max_goal_runs":max_runs,"deadline_ms":now_ms()+86_400_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        set_goal(
+            &harness.runtime,
+            serde_json::json!({"session_id":session, "objective":"é".repeat(1024),
+                "budget":{"max_goal_runs":max_runs,"deadline_ms":now_ms()+86_400_000}
+            }),
+        )
+        .await
+        .unwrap();
         harness
             .runtime
             .inner
@@ -6174,10 +6104,9 @@ async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verba
         .await;
         let held = harness.runtime.hold_scheduling().await;
         if with_goal {
-            harness.runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":harness.session_id,"objective":"bounded multi-request summary",
+            set_goal(&harness.runtime, serde_json::json!({"session_id":harness.session_id,"objective":"bounded multi-request summary",
             "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":1_000_000}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         }
         let receipt = harness
             .runtime
@@ -6480,17 +6409,7 @@ async fn a_later_queued_cancellation_cannot_evict_receipts_for_displayed_message
         })
         .await
         .unwrap();
-    let queued = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("queued later")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let queued = store_command(&store, session_id, "queued later")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id: later, .. } = queued.receipt.outcome else {

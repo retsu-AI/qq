@@ -165,10 +165,9 @@ async fn exercise(scenario: &'static str) {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("missing session")
     };
-    let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-        "type":"set_goal","session_id":session_id,"objective":"verify the persisted work independently",
+    let receipt=set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"verify the persisted work independently",
         "budget":{"max_goal_runs":100,"deadline_ms":now_ms()+3_600_000}
-    })).unwrap()).await.unwrap();
+    })).await.unwrap();
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
@@ -328,17 +327,14 @@ async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
         else {
             panic!("missing session")
         };
-        let receipt = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal","session_id":session_id,"objective":"original objective",
-                    "budget":{"max_goal_runs":100,"deadline_ms":start+600_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        let receipt = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id,"objective":"original objective",
+                "budget":{"max_goal_runs":100,"deadline_ms":start+600_000}
+            }),
+        )
+        .await
+        .unwrap();
         let mut events = runtime
             .subscribe(SubscribeRequest {
                 workspace_id,
@@ -395,18 +391,15 @@ async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
                 assert_eq!(paused.audit_revision, Some(paused.revision));
                 identity.revision = paused.revision;
             }
-            let receipt = runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    serde_json::from_value(serde_json::json!({
-                        "type":"set_goal","session_id":session_id,"objective":"edited objective",
-                        "expected":identity,
-                        "budget":{"max_goal_runs":100,"deadline_ms":start+600_000}
-                    }))
-                    .unwrap(),
-                )
-                .await
-                .unwrap();
+            let receipt = set_goal(
+                &runtime,
+                serde_json::json!({"session_id":session_id,"objective":"edited objective",
+                    "expected":identity,
+                    "budget":{"max_goal_runs":100,"deadline_ms":start+600_000}
+                }),
+            )
+            .await
+            .unwrap();
             if scenario == "paused_edit" {
                 let CommandOutcome::GoalUpdated { goal: edited, .. } = receipt.outcome else {
                     panic!("edited goal")

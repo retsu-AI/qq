@@ -288,9 +288,7 @@ async fn child(setup: Setup) {
                 }
                 Input::ProbeAdmission => {
                     let permits = tokio::time::timeout(Duration::from_secs(5), Arc::clone(&runtime.inner.permits).acquire_many_owned(runtime.inner.max_active_runs as u32)).await.unwrap().unwrap();
-                    let receipt = runtime.command(CommandId::generate().unwrap(),SessionCommand::SubmitPrompt {
-                        session_id:session, input:vec![InputPart::text("probe-after-check-crash")], limits:RunLimits::default(), correlation:Correlation::default(), output:None,
-                    }).await.unwrap();
+                    let receipt = try_submit(&runtime, session, "probe-after-check-crash").await.unwrap();
                     let CommandOutcome::PromptQueued { run_id:admitted, .. } = receipt.outcome else { panic!("probe prompt") };
                     let claim = runtime.inner.store.reserve_next_run_at_depth(0).await.unwrap();
                     let escaped = claim.is_some();
@@ -557,12 +555,10 @@ async fn multi_day_driver_survives_real_process_kills_waits_and_outages() {
     let receipt: qq_protocol::CommandReceipt = serde_json::from_value(
         driver
             .ask(Input::Command(Box::new(
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal","session_id":driver.session,"objective":"multi-day driver acceptance",
+                goal_command(serde_json::json!({"session_id":driver.session,"objective":"multi-day driver acceptance",
                     "check":{"command":CHECK,"timeout_ms":5000},
                     "budget":{"max_goal_runs":200,"deadline_ms":deadline,"per_run":{"max_model_turns":4}}
-                }))
-                .unwrap(),
+                })),
             )))
             .await,
     )
@@ -765,12 +761,10 @@ async fn multi_day_driver_survives_real_process_kills_waits_and_outages() {
     let deadline = clock + 2 * HOUR;
     driver
         .ask(Input::Command(Box::new(
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":driver.session,"objective":"multi-day deadline acceptance",
+            goal_command(serde_json::json!({"session_id":driver.session,"objective":"multi-day deadline acceptance",
                 "expected":{"goal_id":achieved.goal_id,"revision":achieved.revision},"replace":true,
                 "budget":{"max_goal_runs":200,"deadline_ms":deadline,"per_run":{"max_model_turns":4}}
-            }))
-            .unwrap(),
+            })),
         )))
         .await;
     let (run, texts) = driver.request().await;
@@ -947,11 +941,10 @@ async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_
         };
         let mut driver = Driver::open(&setup).await;
         setup.session = Some(driver.session);
-        let receipt:qq_protocol::CommandReceipt = serde_json::from_value(driver.ask(Input::Command(Box::new(serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":driver.session,"objective":"recover completion check",
+        let receipt:qq_protocol::CommandReceipt = serde_json::from_value(driver.ask(Input::Command(Box::new(goal_command(serde_json::json!({"session_id":driver.session,"objective":"recover completion check",
             "check":{"command":CRASH_CHECK,"timeout_ms":5000},
             "budget":{"max_goal_runs":10,"deadline_ms":setup_epoch+60_000}
-        })).unwrap()))).await).unwrap();
+        }))))).await).unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("goal")
         };
@@ -1114,11 +1107,10 @@ async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_
                     })))
                     .await;
             } else if phase == "running_replace" {
-                recovered.ask(Input::Command(Box::new(serde_json::from_value(serde_json::json!({
-                    "type":"set_goal","session_id":recovered.session,"objective":"replacement remains paused","replace":true,
+                recovered.ask(Input::Command(Box::new(goal_command(serde_json::json!({"session_id":recovered.session,"objective":"replacement remains paused","replace":true,
                     "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
                     "check":{"command":CHECK,"timeout_ms":5000},"budget":{"max_goal_runs":10,"deadline_ms":setup_epoch+60_000}
-                })).unwrap()))).await;
+                }))))).await;
             }
             assert_eq!(
                 recovered
@@ -1431,10 +1423,9 @@ async fn goal_check_queued_prompt_preemption_preserves_audit_and_executes_one_re
 
 #[cfg(target_os = "linux")]
 async fn queue_held_check(driver: &mut Driver, epoch: u64) -> qq_protocol::SessionSnapshot {
-    let receipt: qq_protocol::CommandReceipt = serde_json::from_value(driver.ask(Input::Command(Box::new(serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":driver.session,"objective":"verify after user redirection",
+    let receipt: qq_protocol::CommandReceipt = serde_json::from_value(driver.ask(Input::Command(Box::new(goal_command(serde_json::json!({"session_id":driver.session,"objective":"verify after user redirection",
             "check":{"command":CRASH_CHECK,"timeout_ms":5000},"budget":{"max_goal_runs":10,"deadline_ms":epoch+60_000}
-        })).unwrap()))).await).unwrap();
+        }))))).await).unwrap();
     let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
         panic!("goal")
     };
@@ -1551,11 +1542,10 @@ async fn goal_check_paused_controls_retag_valid_audits_and_specification_edits_i
         );
         let mut current = paused;
         if mode == "edit" {
-            let receipt: qq_protocol::CommandReceipt = serde_json::from_value(driver.ask(Input::Command(Box::new(serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":driver.session,"objective":"new specification requires fresh work",
+            let receipt: qq_protocol::CommandReceipt = serde_json::from_value(driver.ask(Input::Command(Box::new(goal_command(serde_json::json!({"session_id":driver.session,"objective":"new specification requires fresh work",
                 "expected":{"goal_id":current.goal_id,"revision":current.revision},
                 "check":{"command":CRASH_CHECK,"timeout_ms":5000},"budget":{"max_goal_runs":10,"deadline_ms":setup.epoch+60_000}
-            })).unwrap()))).await).unwrap();
+            }))))).await).unwrap();
             let CommandOutcome::GoalUpdated { goal: edited, .. } = receipt.outcome else {
                 panic!("edited goal")
             };

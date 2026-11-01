@@ -52,35 +52,17 @@ async fn goal_paid_dense_first_input_is_refused_before_provider_dispatch() {
                 after: created.committed_through,
             })
             .unwrap();
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session_id, "objective":"bounded spend",
-                    "budget":{"max_goal_runs":1, "deadline_ms":now_ms()+60_000,
-                        "max_total_tokens":if cost {None} else {Some(15_000)},
-                        "max_cost_usd_nanos":if cost {Some(15_000)} else {None}}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        let receipt = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("!x0?".repeat(5_000))],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
-        let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
-            panic!("prompt")
-        };
+        set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id, "objective":"bounded spend",
+                "budget":{"max_goal_runs":1, "deadline_ms":now_ms()+60_000,
+                    "max_total_tokens":if cost {None} else {Some(15_000)},
+                    "max_cost_usd_nanos":if cost {Some(15_000)} else {None}}
+            }),
+        )
+        .await
+        .unwrap();
+        let run_id = submit(&runtime, session_id, "!x0?".repeat(5_000)).await;
         drop(held);
         runtime.inner.schedule.send(()).await.unwrap();
         let observed = collect_until_run_finished(&mut events, run_id).await;
@@ -213,11 +195,10 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
                 max_cost_usd_nanos: (kind == "cost").then_some(100_000),
                 ..RunLimits::default()
             };
-            runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session,"objective":"respect the stricter per-run allowance",
+            set_goal(&runtime, serde_json::json!({"session_id":session,"objective":"respect the stricter per-run allowance",
                 "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":1_000_000,
                     "per_run":if goal_origin {limits} else {RunLimits::default()}}
-            })).unwrap()).await.unwrap();
+            })).await.unwrap();
             let run = if goal_origin {
                 runtime.inner.store.drive_goals(now_ms()).await.unwrap();
                 runtime
@@ -232,22 +213,7 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
                     .await
                     .unwrap()
             } else {
-                let receipt = runtime
-                    .command(
-                        CommandId::generate().unwrap(),
-                        SessionCommand::SubmitPrompt {
-                            session_id: session,
-                            input: vec![InputPart::text("work")],
-                            limits,
-                            correlation: Correlation::default(),
-                            output: None,
-                        },
-                    )
-                    .await
-                    .unwrap();
-                let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
-                    panic!("prompt")
-                };
+                let run_id = submit(&runtime, session, Prompt::text("work").limits(limits)).await;
                 run_id
             };
             drop(held);
@@ -529,25 +495,17 @@ async fn goal_paid_summary_overflow_releases_admission_before_fold_retry() {
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
             panic!("session")
         };
-        runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal", "session_id":session_id, "objective":"recover a split summary",
-            "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,
-                "max_total_tokens":if cost {None} else {Some(1_000_000)},
-                "max_cost_usd_nanos":if cost {Some(1_000_000)} else {None}}
-        })).unwrap()).await.unwrap();
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("work")],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id, "objective":"recover a split summary",
+                "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,
+                    "max_total_tokens":if cost {None} else {Some(1_000_000)},
+                    "max_cost_usd_nanos":if cost {Some(1_000_000)} else {None}}
+            }),
+        )
+        .await
+        .unwrap();
+        try_submit(&runtime, session_id, "work").await.unwrap();
         let claim = runtime
             .inner
             .store
@@ -665,26 +623,13 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
         else {
             panic!("session")
         };
-        let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session,"objective":"preserve admitted uncertainty",
+        let receipt=set_goal(&runtime, serde_json::json!({"session_id":session,"objective":"preserve admitted uncertainty",
             "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":1_000_000}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("goal")
         };
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id: session,
-                    input: vec![InputPart::text("work")],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        try_submit(&runtime, session, "work").await.unwrap();
         let claim = runtime
             .inner
             .store

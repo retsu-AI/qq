@@ -118,19 +118,7 @@ async fn check_repeated_call_replay(missing_first_result: bool) {
         .unwrap();
     let mut first_run = None;
     for prompt in ["read first and missing", "read second"] {
-        let receipt = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text(prompt.to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        let receipt = try_submit(&runtime, session_id, prompt).await.unwrap();
         if let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome {
             first_run.get_or_insert(run_id);
         }
@@ -160,19 +148,7 @@ async fn check_repeated_call_replay(missing_first_result: bool) {
         );
     }
     let runtime = SessionRuntime::open(options(), loader).await.unwrap();
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let receipt = try_submit(&runtime, session_id, "continue").await.unwrap();
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
@@ -493,19 +469,7 @@ async fn repeated_call_ids_keep_pruning_effects_and_arguments_local_to_each_turn
         if prompt == "inspect" {
             super::mark_prune_seam(&directory.path().join("sessions.sqlite3"), session_id);
         }
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text(prompt.to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        try_submit(&runtime, session_id, prompt).await.unwrap();
         let observed = collect_through_finished(&mut events).await;
         assert!(observed.iter().any(|event| matches!(
             event.event,

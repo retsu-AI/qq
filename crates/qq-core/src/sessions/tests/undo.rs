@@ -606,17 +606,7 @@ async fn undo_is_refused_while_a_prompt_is_queued() {
         workspace_id: claimed.identity.workspace_id,
         snapshot: None,
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: claimed.identity.session_id,
-                input: vec![InputPart::text("queued")],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, claimed.identity.session_id, "queued")
         .await
         .unwrap();
     assert!(matches!(
@@ -722,17 +712,7 @@ async fn no_run_starts_in_a_nested_workspace_while_its_parent_restores() {
         })
         .await
         .unwrap();
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: claimed.identity.session_id,
-                input: vec![InputPart::text("queued")],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, claimed.identity.session_id, "queued")
         .await
         .unwrap();
     assert!(store.reserve_next_run(false).await.unwrap().is_none());

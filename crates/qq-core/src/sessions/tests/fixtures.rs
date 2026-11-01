@@ -161,34 +161,34 @@ pub(super) async fn submit(
     run_id
 }
 
-pub(super) async fn store_submit(
+pub(super) async fn store_command(
     store: &Store,
     session_id: SessionId,
     prompt: impl Into<Prompt>,
-) -> AppliedCommand {
+) -> Result<AppliedCommand, SessionRuntimeError> {
     store
         .command(
             CommandId::generate().unwrap(),
             prompt.into().command(session_id),
         )
         .await
-        .unwrap()
+}
+
+pub(super) fn goal_command(goal: serde_json::Value) -> SessionCommand {
+    let mut command = goal;
+    command
+        .as_object_mut()
+        .expect("a goal is a JSON object")
+        .insert("type".to_owned(), serde_json::json!("set_goal"));
+    serde_json::from_value(command).unwrap()
 }
 
 pub(super) async fn set_goal(
     runtime: &SessionRuntime,
     goal: serde_json::Value,
 ) -> Result<CommandReceipt, SessionRuntimeError> {
-    let mut command = goal;
-    command
-        .as_object_mut()
-        .expect("a goal is a JSON object")
-        .insert("type".to_owned(), serde_json::json!("set_goal"));
     runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(command).unwrap(),
-        )
+        .command(CommandId::generate().unwrap(), goal_command(goal))
         .await
 }
 

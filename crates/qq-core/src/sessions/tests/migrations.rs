@@ -17,19 +17,7 @@ async fn prune_deletes_only_idle_sessions_without_messages() {
         };
         empties.push(session_id);
     }
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: kept,
-                input: vec![InputPart::text("keep me".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let queued = try_submit(&runtime, kept, "keep me").await.unwrap();
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
@@ -834,17 +822,7 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
         else {
             panic!("unexpected receipt")
         };
-        let queued = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("written by v0.1.4".to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        let queued = try_submit(&runtime, session_id, "written by v0.1.4")
             .await
             .unwrap();
         let mut events = runtime
@@ -1514,17 +1492,7 @@ async fn retired_supervised_mode_upgrades_from(schema: u32) {
         else {
             panic!("unexpected receipt")
         };
-        let queued = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("written by v0.1.8".to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        let queued = try_submit(&runtime, session_id, "written by v0.1.8")
             .await
             .unwrap();
         let mut events = runtime
@@ -1675,17 +1643,7 @@ async fn a_schema_64_store_with_reviewer_delegate_and_grant_state_opens_and_repl
         else {
             panic!("unexpected receipt")
         };
-        let queued = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("written by v0.1.9".to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        let queued = try_submit(&runtime, session_id, "written by v0.1.9")
             .await
             .unwrap();
         let mut events = runtime

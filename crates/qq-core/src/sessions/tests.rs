@@ -1532,19 +1532,7 @@ async fn spill_one_call(
     text: &str,
     prompt: &str,
 ) -> (ToolCallId, String) {
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text(prompt.to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    store_command(&store, session_id, prompt).await.unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     let tool_call_id = ToolCallId::generate().unwrap();
     let call = RuntimeToolCall {
@@ -1899,19 +1887,7 @@ async fn claimed_store_fixture() -> (TempDir, Store, ClaimedRun) {
     let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("x".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    store_command(&store, session_id, "x").await.unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     (directory, store, claimed)
 }
@@ -3565,17 +3541,7 @@ async fn project_terminal_run_with_tool_boundaries(
     let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("inspect the tool boundaries".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, session_id, "inspect the tool boundaries")
         .await
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
@@ -3715,17 +3681,7 @@ async fn project_terminal_run_with_tool_boundaries(
             after,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue safely".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "continue safely")
         .await
         .unwrap();
     let _ = collect_through_finished(&mut events).await;
@@ -3752,17 +3708,7 @@ async fn project_terminal_run_with_tool_boundaries(
             after,
         })
         .unwrap();
-    restarted
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue safely".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&restarted, session_id, "continue safely")
         .await
         .unwrap();
     let _ = collect_through_finished(&mut restarted_events).await;
@@ -4377,17 +4323,7 @@ async fn create_claimed_parent(
     let CommandOutcome::SessionCreated { session_id } = root.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("delegate work".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, session_id, "delegate work")
         .await
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
@@ -5203,23 +5139,12 @@ async fn child_budget_harness_with_window(
 }
 
 async fn submit_child_budget_prompt(harness: &SpawnHarness, limits: RunLimits) -> RunId {
-    let receipt = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("delegate")],
-                limits,
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
-        panic!("expected run")
-    };
+    let run_id = submit(
+        &harness.runtime,
+        harness.session_id,
+        Prompt::text("delegate").limits(limits),
+    )
+    .await;
     run_id
 }
 
@@ -6152,18 +6077,7 @@ async fn side_answer_finishes_while_main_provider_is_active_without_main_request
         1,
     )
     .await;
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("main task")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&harness.runtime, harness.session_id, "main task")
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {

@@ -688,11 +688,11 @@ async fn startup_goal_cursor_survives_delivery_journal_retention() {
         )
         .await
         .unwrap();
-    let command: SessionCommand = serde_json::from_value(serde_json::json!({
-        "type":"set_goal", "session_id":session, "objective":"retain the startup boundary",
-        "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+86_400_000}
-    }))
-    .unwrap();
+    let command: SessionCommand = goal_command(
+        serde_json::json!({"session_id":session, "objective":"retain the startup boundary",
+            "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+86_400_000}
+        }),
+    );
     store
         .command(CommandId::generate().unwrap(), command)
         .await

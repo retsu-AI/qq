@@ -70,17 +70,7 @@ async fn measured_occupancy_basis_persists_atomically_and_reloads_with_the_reser
         )
         .await
         .unwrap();
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: claimed.identity.session_id,
-                input: vec![InputPart::text("continue".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, claimed.identity.session_id, "continue")
         .await
         .unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
@@ -127,17 +117,7 @@ async fn malformed_context_bases_are_cleared_while_reserving_instead_of_failing_
         )
         .await
         .unwrap();
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: claimed.identity.session_id,
-                input: vec![InputPart::text("continue".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, claimed.identity.session_id, "continue")
         .await
         .unwrap();
     let session_id = claimed.identity.session_id;
@@ -549,19 +529,7 @@ async fn overflowing_text_append_persists_no_counter_chunk_or_event() {
     let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("x".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    store_command(&store, session_id, "x").await.unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     let message_id = MessageId::generate().unwrap();
     store

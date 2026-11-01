@@ -67,22 +67,12 @@ async fn the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runti
         })
         .unwrap();
     let hanging = submit_prompt_to(&runtime, session_id, "hang").await;
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("report")],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: Some(Box::new(report_contract(1))),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(
+        &runtime,
+        session_id,
+        Prompt::text("report").output(Some(Box::new(report_contract(1)))),
+    )
+    .await;
     collect_until(
         &mut events,
         |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id == hanging),

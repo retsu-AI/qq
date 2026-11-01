@@ -4168,23 +4168,12 @@ async fn the_contract_judges_the_audited_revision_and_a_revision_does_not_reset_
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
     let mut harness = audit_harness(parent, auditor, crate::runtime::AuditMode::Heuristic, 1).await;
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("write hello and report")],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: Some(Box::new(report_contract(1))),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(
+        &harness.runtime,
+        harness.session_id,
+        Prompt::text("write hello and report").output(Some(Box::new(report_contract(1)))),
+    )
+    .await;
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
     let (_, completed) = audit_events(&observed, run_id);
     assert_eq!(completed.len(), 1);

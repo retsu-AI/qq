@@ -157,11 +157,10 @@ async fn goal_final_run_reserves_a_durable_tool_free_handoff_after_early_complet
                 after: created.committed_through,
             })
             .unwrap();
-        runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal", "session_id":session_id, "objective":"finish exactly ten charged slices with a handoff",
+        set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"finish exactly ten charged slices with a handoff",
             "budget":{"max_goal_runs":if scenario=="tighten" {RUNS + 1} else {RUNS}, "deadline_ms":now_ms()+60_000,
                 "per_run":{"max_model_turns":if scenario=="one_turn" && !prompt_final {1} else {3}}}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         let mut starts = Vec::new();
         let mut submitted = false;
         let mut tightened = false;

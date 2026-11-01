@@ -17,20 +17,7 @@ async fn unresolvable_slash_prompts_are_refused_at_admission_without_a_run_row()
     let submit = |text: &str| {
         let input = vec![InputPart::text(text)];
         let runtime = &runtime;
-        async move {
-            runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::SubmitPrompt {
-                        session_id,
-                        input,
-                        limits: RunLimits::default(),
-                        correlation: Correlation::default(),
-                        output: None,
-                    },
-                )
-                .await
-        }
+        async move { try_submit(&runtime, session_id, Prompt::input(input)).await }
     };
     assert_eq!(
         submit("/clear").await,
@@ -107,23 +94,17 @@ async fn empty_attachment_range_fails_as_invalid_input_and_session_remains_usabl
             after: created.committed_through,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::WorkspaceFile {
-                    path: "empty.txt".to_owned(),
-                    expected_hash: None,
-                    range: Some(qq_protocol::LineRange { start: 1, end: 1 }),
-                }],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    try_submit(
+        &runtime,
+        session_id,
+        Prompt::input(vec![InputPart::WorkspaceFile {
+            path: "empty.txt".to_owned(),
+            expected_hash: None,
+            range: Some(qq_protocol::LineRange { start: 1, end: 1 }),
+        }]),
+    )
+    .await
+    .unwrap();
     let observed = collect_through_finished(&mut events).await;
     let failed_requests = requests.lock().unwrap().len();
     let follow_up = submit_prompt_to(&runtime, session_id, "still usable").await;
@@ -226,23 +207,17 @@ async fn attachment_ranges_preserve_lines_clip_eof_and_reject_nonexistent_starts
             })
             .unwrap();
         let before = requests.lock().unwrap().len();
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::WorkspaceFile {
-                        path: "case.txt".to_owned(),
-                        expected_hash: None,
-                        range,
-                    }],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        try_submit(
+            &runtime,
+            session_id,
+            Prompt::input(vec![InputPart::WorkspaceFile {
+                path: "case.txt".to_owned(),
+                expected_hash: None,
+                range,
+            }]),
+        )
+        .await
+        .unwrap();
         let observed = collect_through_finished(&mut events).await;
         let outcome = observed
             .iter()
@@ -671,26 +646,7 @@ async fn steering_bounds_and_refusals_are_typed() {
         steer(&harness.runtime, RunId::from_bytes([9; 16]), "x", false).await,
         Err(SessionRuntimeError::RunNotFound)
     );
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("follow-up")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued {
-        run_id: queued_run, ..
-    } = queued.outcome
-    else {
-        panic!("queued")
-    };
+    let queued_run = submit(&harness.runtime, harness.session_id, "follow-up").await;
     assert_eq!(
         steer(&harness.runtime, queued_run, "too early", false).await,
         Err(SessionRuntimeError::RunNotSteerable)
@@ -787,22 +743,12 @@ async fn plan_identity_correlation_and_profile_persist_and_survive_refresh() {
         .unwrap();
     let run_correlation =
         Correlation::new([("job".to_owned(), "j-1".to_owned())].into_iter().collect()).unwrap();
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("work")],
-                limits: RunLimits::default(),
-                correlation: run_correlation.clone(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(
+        &runtime,
+        session_id,
+        Prompt::text("work").correlation(run_correlation.clone()),
+    )
+    .await;
     let observed = collect_through_finished(&mut events).await;
     let started_plan = observed
         .iter()
@@ -1123,26 +1069,20 @@ async fn evicted_attachments_render_an_explicit_stub_not_the_placeholder() {
             after: created.committed_through,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![
-                    InputPart::text("inspect"),
-                    InputPart::WorkspaceFile {
-                        path: "a.txt".to_owned(),
-                        expected_hash: None,
-                        range: None,
-                    },
-                ],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
+    try_submit(
+        &runtime,
+        session_id,
+        Prompt::input(vec![
+            InputPart::text("inspect"),
+            InputPart::WorkspaceFile {
+                path: "a.txt".to_owned(),
+                expected_hash: None,
+                range: None,
             },
-        )
-        .await
-        .unwrap();
+        ]),
+    )
+    .await
+    .unwrap();
     collect_through_finished(&mut events).await;
     runtime
         .inner
@@ -1157,19 +1097,7 @@ async fn evicted_attachments_render_an_explicit_stub_not_the_placeholder() {
         })
         .await
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    try_submit(&runtime, session_id, "continue").await.unwrap();
     collect_through_finished(&mut events).await;
     let first = {
         let captured = requests.lock().unwrap();
@@ -1227,29 +1155,19 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
             after: created.committed_through,
         })
         .unwrap();
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![
-                    InputPart::text("Summarize"),
-                    InputPart::WorkspaceFile {
-                        path: "notes.md".to_owned(),
-                        expected_hash: None,
-                        range: None,
-                    },
-                ],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
+    let run_id = submit(
+        &runtime,
+        session_id,
+        Prompt::input(vec![
+            InputPart::text("Summarize"),
+            InputPart::WorkspaceFile {
+                path: "notes.md".to_owned(),
+                expected_hash: None,
+                range: None,
             },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+        ]),
+    )
+    .await;
     let observed = collect_through_finished(&mut events).await;
     let queued_message = observed
         .iter()
@@ -1300,23 +1218,17 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
         they are not durable session rows until a tool records them"
     );
 
-    let stale = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::WorkspaceFile {
-                    path: "notes.md".to_owned(),
-                    expected_hash: Some(ContentHash::from_bytes([7; 32])),
-                    range: None,
-                }],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let stale = try_submit(
+        &runtime,
+        session_id,
+        Prompt::input(vec![InputPart::WorkspaceFile {
+            path: "notes.md".to_owned(),
+            expected_hash: Some(ContentHash::from_bytes([7; 32])),
+            range: None,
+        }]),
+    )
+    .await
+    .unwrap();
     let CommandOutcome::PromptQueued {
         run_id: stale_run, ..
     } = stale.outcome
@@ -1344,22 +1256,16 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
         "no provider request for the failed run"
     );
 
-    let escaped = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::WorkspaceFile {
-                    path: "/etc/passwd".to_owned(),
-                    expected_hash: None,
-                    range: None,
-                }],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await;
+    let escaped = try_submit(
+        &runtime,
+        session_id,
+        Prompt::input(vec![InputPart::WorkspaceFile {
+            path: "/etc/passwd".to_owned(),
+            expected_hash: None,
+            range: None,
+        }]),
+    )
+    .await;
     assert!(matches!(
         escaped,
         Err(SessionRuntimeError::InvalidInput(
@@ -1391,18 +1297,7 @@ async fn child_limits_are_validated_against_the_runtime_ceilings() {
             ..RunLimits::default()
         },
     ] {
-        let result = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("x")],
-                    limits,
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await;
+        let result = try_submit(&runtime, session_id, Prompt::text("x").limits(limits)).await;
         assert_eq!(result, Err(SessionRuntimeError::InvalidRunLimits));
     }
     runtime.shutdown().await.unwrap();
@@ -1989,19 +1884,7 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let queued = runtime
-        .inner
-        .store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("known overflow".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let queued = store_command(&runtime.inner.store, session_id, "known overflow")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
@@ -2209,18 +2092,7 @@ async fn instruction_hash_tracks_selected_path_and_bytes_deterministically() {
 #[tokio::test]
 async fn set_session_model_applies_to_the_next_run_but_not_the_active_one() {
     let mut harness = session_management_harness().await;
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("first run".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let queued = try_submit(&harness.runtime, harness.session_id, "first run")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
@@ -2307,23 +2179,7 @@ async fn set_session_model_applies_to_the_next_run_but_not_the_active_one() {
         SessionEvent::RunFinished { session, .. } if session.context_tokens.is_none()
     )));
 
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("second run".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(&harness.runtime, harness.session_id, "second run").await;
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
     respond_approval(
         &harness.runtime,
@@ -2392,23 +2248,7 @@ async fn active_run_cannot_restore_occupancy_after_same_route_shape_change() {
         .unwrap();
     let updated = harness.events.next().await.unwrap().unwrap();
     assert!(matches!(updated.event, SessionEvent::SessionUpdated { .. }));
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("first run".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(&harness.runtime, harness.session_id, "first run").await;
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
     let connection = Connection::open(harness.directory.path().join("sessions.sqlite3")).unwrap();
     let stored_basis: Option<String> = connection
@@ -2531,23 +2371,7 @@ async fn set_session_effort_pins_and_clears_on_the_published_summary() {
 #[tokio::test]
 async fn delete_session_is_refused_while_running_then_cascades_completely() {
     let mut harness = session_management_harness().await;
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("do work".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(&harness.runtime, harness.session_id, "do work").await;
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
 
     assert_eq!(
@@ -2709,19 +2533,7 @@ async fn control_and_cleanup_commands_are_admitted_past_the_command_limit() {
         .await
         .unwrap();
 
-    let refused = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("more")],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await;
+    let refused = try_submit(&harness.runtime, harness.session_id, "more").await;
     assert!(
         matches!(refused, Err(SessionRuntimeError::CommandLimitReached)),
         "{refused:?}"
@@ -2872,17 +2684,7 @@ async fn model_fallback_provenance_survives_commands_and_run_reservation() {
             .await
             .unwrap();
         assert!(events.iter().any(|event| matches!(&event.event, SessionEvent::SessionUpdated { session } if session.model_is_fallback == model_is_fallback)));
-        store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("retain choice".to_owned())],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        store_command(&store, session_id, "retain choice")
             .await
             .unwrap();
         let claimed = store.reserve_next_run(false).await.unwrap().unwrap();

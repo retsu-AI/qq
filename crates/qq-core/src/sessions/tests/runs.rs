@@ -140,19 +140,7 @@ async fn only_the_first_prompt_names_a_session() {
     };
 
     for prompt in ["New session", "Do not replace the first title"] {
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text(prompt.to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        try_submit(&runtime, session_id, prompt).await.unwrap();
     }
 
     let snapshot = runtime
@@ -219,17 +207,7 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
         })
         .unwrap();
 
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("first prompt".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "first prompt")
         .await
         .unwrap();
     let observed = collect_through_finished(&mut events).await;
@@ -333,17 +311,7 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
     .unwrap();
     assert_eq!(replayed, observed);
 
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("second prompt".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "second prompt")
         .await
         .unwrap();
     collect_through_finished(&mut events).await;
@@ -382,22 +350,7 @@ async fn cancellation_flushes_the_final_bounded_reasoning_batch_before_settlemen
             after: created.committed_through,
         })
         .unwrap();
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("reason until cancelled".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(&runtime, session_id, "reason until cancelled").await;
     buffered.notified().await;
     runtime.inner.cancel(run_id);
 
@@ -443,19 +396,7 @@ async fn streams_committed_run_events_and_snapshots_the_result() {
         })
         .unwrap();
 
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("Say hello".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    try_submit(&runtime, session_id, "Say hello").await.unwrap();
 
     let mut observed = Vec::new();
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -812,17 +753,7 @@ async fn persists_tool_transitions_and_reconstructs_follow_up_context() {
             after: created.committed_through,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("inspect the note".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "inspect the note")
         .await
         .unwrap();
 
@@ -894,17 +825,7 @@ async fn persists_tool_transitions_and_reconstructs_follow_up_context() {
     assert!(increment > 0);
     assert!(base + increment <= MAX_CONTEXT_BYTES as u64);
 
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("what did you read?".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "what did you read?")
         .await
         .unwrap();
     let _ = collect_through_finished(&mut events).await;
@@ -1366,17 +1287,7 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
         let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
             panic!("unexpected receipt")
         };
-        store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("inspect the note".to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        store_command(&store, session_id, "inspect the note")
             .await
             .unwrap();
         let claimed = store.claim_next_run(false).await.unwrap().unwrap();
@@ -1444,19 +1355,7 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
             .await
             .unwrap();
 
-        store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("continue".to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        store_command(&store, session_id, "continue").await.unwrap();
         let continued = store.claim_next_run(false).await.unwrap().unwrap();
 
         assert!(matches!(
@@ -1641,17 +1540,7 @@ async fn cancelled_unclaimed_prompt_remains_explicit_in_follow_up_context() {
     let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    let queued = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("this prompt never started".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    let queued = store_command(&store, session_id, "this prompt never started")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
@@ -1682,17 +1571,7 @@ async fn cancelled_unclaimed_prompt_remains_explicit_in_follow_up_context() {
             after: cancelled.receipt.committed_through,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue after cancellation".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "continue after cancellation")
         .await
         .unwrap();
     let _ = collect_through_finished(&mut events).await;
@@ -1748,22 +1627,7 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
         let input = vec![InputPart::text(prompt.to_owned())];
         let runtime = &runtime;
         async move {
-            let receipt = runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::SubmitPrompt {
-                        session_id,
-                        input,
-                        limits: qq_protocol::RunLimits::default(),
-                        correlation: Correlation::default(),
-                        output: None,
-                    },
-                )
-                .await
-                .unwrap();
-            let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
-                panic!("unexpected receipt")
-            };
+            let run_id = submit(&runtime, session_id, Prompt::input(input)).await;
             run_id
         }
     };
@@ -1894,17 +1758,7 @@ async fn a_raised_output_cap_is_what_the_retried_turn_records() {
             after: cursor,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("think hard".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "think hard")
         .await
         .unwrap();
     let finished = collect_through_finished(&mut events).await;
@@ -1967,19 +1821,7 @@ async fn an_empty_truncated_turn_continues_and_replays_only_the_reasoning_notice
         .unwrap();
     let mut outcomes = Vec::new();
     for prompt in ["think hard", "and now summarize"] {
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text(prompt.to_owned())],
-                    limits: qq_protocol::RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        try_submit(&runtime, session_id, prompt).await.unwrap();
         let finished = collect_through_finished(&mut events).await;
         outcomes.push(finished.iter().find_map(|envelope| match &envelope.event {
             SessionEvent::RunFinished { outcome, .. } => Some(outcome.clone()),
@@ -2054,17 +1896,7 @@ async fn interrupted_uncommitted_assistant_text_stays_out_of_model_context() {
     let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("begin the task".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, session_id, "begin the task")
         .await
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
@@ -2110,17 +1942,7 @@ async fn interrupted_uncommitted_assistant_text_stays_out_of_model_context() {
             after: recovered.cursor,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue from durable work".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "continue from durable work")
         .await
         .unwrap();
     let _ = collect_through_finished(&mut events).await;
@@ -2187,17 +2009,7 @@ async fn historical_flat_assistant_output_precedes_the_terminal_notice() {
     let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("legacy prompt".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, session_id, "legacy prompt")
         .await
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
@@ -2254,17 +2066,7 @@ async fn historical_flat_assistant_output_precedes_the_terminal_notice() {
             after,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("continue from the legacy store".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "continue from the legacy store")
         .await
         .unwrap();
     let _ = collect_through_finished(&mut events).await;
@@ -2331,17 +2133,7 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
     let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("finish the migration".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, session_id, "finish the migration")
         .await
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
@@ -2359,17 +2151,7 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
         )
         .await
         .unwrap();
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("grow the context".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, session_id, "grow the context")
         .await
         .unwrap();
     let growth_run = store.claim_next_run(false).await.unwrap().unwrap();
@@ -2480,22 +2262,7 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
             after,
         })
         .unwrap();
-    let follow_up = auto_runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("y".repeat(MAX_PROMPT_BYTES))],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = follow_up.outcome else {
-        panic!("unexpected receipt")
-    };
+    let run_id = submit(&auto_runtime, session_id, "y".repeat(MAX_PROMPT_BYTES)).await;
     let _ = collect_until(&mut auto_events, finished_for(run_id)).await;
 
     let auto_requests = auto_requests.lock().unwrap();
@@ -2531,17 +2298,7 @@ async fn multi_turn_runs_emit_one_assistant_message_per_turn() {
             after: created.committed_through,
         })
         .unwrap();
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("inspect the note".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    try_submit(&runtime, session_id, "inspect the note")
         .await
         .unwrap();
 
@@ -2997,10 +2754,9 @@ async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
             })
             .unwrap();
         if with_goal {
-            runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"retain reports through goal notices",
+            set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"retain reports through goal notices",
             "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         }
         let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
         let observed = collect_until(&mut events, finished_for(run_id)).await;

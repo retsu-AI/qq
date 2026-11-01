@@ -169,17 +169,14 @@ async fn revision_notices_across_reactive_checkpoint_overflow_reopen_in_order() 
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("session");
     };
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"original objective",
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let receipt = set_goal(
+        &runtime,
+        serde_json::json!({"session_id":session_id, "objective":"original objective",
+            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+        }),
+    )
+    .await
+    .unwrap();
     let CommandOutcome::GoalUpdated { mut goal, .. } = receipt.outcome else {
         panic!("goal");
     };
@@ -194,18 +191,15 @@ async fn revision_notices_across_reactive_checkpoint_overflow_reopen_in_order() 
         tokio::time::timeout(Duration::from_secs(30), entered.notified())
             .await
             .expect("provider boundary");
-        let receipt = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session_id, "objective":objective,
-                    "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
-                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        let receipt = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id, "objective":objective,
+                "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            }),
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal: revised, .. } = receipt.outcome else {
             panic!("goal revision");
         };
@@ -543,17 +537,14 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
             panic!("session");
         };
-        let receipt = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session_id, "objective":"original objective",
-                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        let receipt = set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id, "objective":"original objective",
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            }),
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("goal");
         };
@@ -563,30 +554,20 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
                 after: receipt.committed_through,
             })
             .unwrap();
-        let submitted = runtime.command(CommandId::generate().unwrap(), SessionCommand::SubmitPrompt {
-        session_id, input: vec![InputPart::text("work")], limits: RunLimits::default(),
-        correlation: Correlation::default(),
-        output: repair.then(|| Box::new(qq_protocol::OutputContract {
+        let run = submit(&runtime, session_id, Prompt::text("work").output(repair.then(|| Box::new(qq_protocol::OutputContract {
             schema: serde_json::json!({"type":"object","properties":{"done":{"type":"boolean"}},"required":["done"],"additionalProperties":false}),
             repair_turns: 1,
-        })),
-    }).await.unwrap();
-        let CommandOutcome::PromptQueued { run_id: run, .. } = submitted.outcome else {
-            panic!("prompt");
-        };
+        })))).await;
         entered.notified().await;
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session_id, "objective":"revised objective",
-                    "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
-                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        set_goal(
+            &runtime,
+            serde_json::json!({"session_id":session_id, "objective":"revised objective",
+                "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            }),
+        )
+        .await
+        .unwrap();
         release.notify_one();
         let finished = collect_until(&mut events, finished_for(run)).await;
         assert_eq!(
@@ -701,11 +682,10 @@ async fn client_revision_is_shown_once_without_refreshing_model_control_authorit
     while let Some(event) = events.next().await {
         if let crate::RuntimeEvent::ToolCallFinished { result, .. } = &event {
             if !edited {
-                store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session, "objective":"client-edited objective",
+                store.command(CommandId::generate().unwrap(), goal_command(serde_json::json!({"session_id":session, "objective":"client-edited objective",
                     "expected":{"goal_id":captured.goal_id,"revision":captured.revision},
                     "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                })).unwrap()).await.unwrap();
+                }))).await.unwrap();
                 edited = true;
             } else {
                 stale_control |= result.contains("stale_revision");
@@ -850,10 +830,14 @@ async fn claimed_goal_exposes_serial_update_tool_without_workspace_approval() {
             panic!("missing session")
         };
         if active {
-            runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"retain this objective",
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
+            set_goal(
+                &runtime,
+                serde_json::json!({"session_id":session_id, "objective":"retain this objective",
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                }),
+            )
+            .await
+            .unwrap();
         }
         let mut events = runtime
             .subscribe(SubscribeRequest {
@@ -861,19 +845,7 @@ async fn claimed_goal_exposes_serial_update_tool_without_workspace_approval() {
                 after: receipt.committed_through,
             })
             .unwrap();
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("work")],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
+        try_submit(&runtime, session_id, "work").await.unwrap();
         let finished = collect_through_finished_generously(&mut events).await;
         assert!(
             !finished
@@ -978,18 +950,14 @@ async fn failed_runtime_goal_event_never_reports_a_successful_tool_write() {
         )]],
     )
     .await;
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":harness.session_id, "objective":"protected goal",
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    set_goal(
+        &harness.runtime,
+        serde_json::json!({"session_id":harness.session_id, "objective":"protected goal",
+            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+        }),
+    )
+    .await
+    .unwrap();
     harness
         .runtime
         .inner
@@ -1312,12 +1280,12 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("missing session")
     };
-    let set = serde_json::from_value(serde_json::json!({
-        "type":"set_goal", "session_id":session_id, "objective":"checked work",
-        "check":{"command":"true"},
-        "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-    }))
-    .unwrap();
+    let set = goal_command(
+        serde_json::json!({"session_id":session_id, "objective":"checked work",
+            "check":{"command":"true"},
+            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+        }),
+    );
     let receipt = runtime
         .command(CommandId::generate().unwrap(), set)
         .await
@@ -1440,12 +1408,12 @@ async fn goal_check_approval_requires_exact_command_and_revision() {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("missing session")
     };
-    let set: SessionCommand = serde_json::from_value(serde_json::json!({
-        "type":"set_goal", "session_id":session_id, "objective":"checked work",
-        "check":{"command":"true"},
-        "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-    }))
-    .unwrap();
+    let set: SessionCommand = goal_command(
+        serde_json::json!({"session_id":session_id, "objective":"checked work",
+            "check":{"command":"true"},
+            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+        }),
+    );
     let receipt = runtime
         .command(CommandId::generate().unwrap(), set)
         .await
@@ -1531,12 +1499,12 @@ async fn goal_resume_refuses_spent_unknown_or_draining_state() {
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
             panic!("missing session")
         };
-        let command: SessionCommand = serde_json::from_value(serde_json::json!({
-            "type":"set_goal", "session_id":session_id, "objective":"bounded task",
-            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000,
-                "max_total_tokens":20,"max_cost_usd_nanos":10}
-        }))
-        .unwrap();
+        let command: SessionCommand = goal_command(
+            serde_json::json!({"session_id":session_id, "objective":"bounded task",
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000,
+                    "max_total_tokens":20,"max_cost_usd_nanos":10}
+            }),
+        );
         runtime
             .command(CommandId::generate().unwrap(), command)
             .await
@@ -1664,11 +1632,9 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
         "deadline_ms": deadline_ms,
         "per_run": RunLimits::default()
     });
-    let create: SessionCommand = serde_json::from_value(serde_json::json!({
-        "type": "set_goal", "session_id": session_id,
+    let create: SessionCommand = goal_command(serde_json::json!({"session_id": session_id,
         "objective": "Implement the durable goal contract", "budget": budget
-    }))
-    .expect("set_goal is a public client command");
+    }));
     let receipt = runtime.command(command_id, create.clone()).await.unwrap();
     assert_eq!(runtime.command(command_id, create).await.unwrap(), receipt);
     runtime.inner.store.drive_goals(now_ms()).await.unwrap();
@@ -1753,12 +1719,10 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
         serde_json::json!({"goal_id": RunId::generate().unwrap(), "revision": 1}),
         serde_json::json!({"goal_id": goal["goal_id"], "revision": 0}),
     ] {
-        let replace: SessionCommand = serde_json::from_value(serde_json::json!({
-            "type": "set_goal", "session_id": session_id,
+        let replace: SessionCommand = goal_command(serde_json::json!({"session_id": session_id,
             "objective": "must not replace", "budget": budget,
             "expected": expected, "replace": true
-        }))
-        .unwrap();
+        }));
         assert!(
             runtime
                 .command(CommandId::generate().unwrap(), replace)
@@ -1776,12 +1740,10 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
         .command(CommandId::generate().unwrap(), pause)
         .await
         .unwrap();
-    let edit: SessionCommand = serde_json::from_value(serde_json::json!({
-        "type": "set_goal", "session_id": session_id,
+    let edit: SessionCommand = goal_command(serde_json::json!({"session_id": session_id,
         "objective": "Edited while paused", "budget": budget,
         "expected": {"goal_id": goal["goal_id"], "revision": 2}
-    }))
-    .unwrap();
+    }));
     runtime
         .command(CommandId::generate().unwrap(), edit)
         .await
@@ -1862,25 +1824,14 @@ async fn queued_prompt_claim_pins_only_the_active_goal_before_start() {
         let CommandOutcome::SessionCreated { session_id } = receipt.receipt.outcome else {
             panic!("session")
         };
-        store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id,
-                    input: vec![InputPart::text("queued before the goal".to_owned())],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        store_command(&store, session_id, "queued before the goal")
             .await
             .unwrap();
         let mut goal = None;
         if state != "absent" {
-            let receipt = store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"original objective",
+            let receipt = store.command(CommandId::generate().unwrap(), goal_command(serde_json::json!({"session_id":session_id, "objective":"original objective",
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
+            }))).await.unwrap();
             let CommandOutcome::GoalUpdated { goal: current, .. } = receipt.receipt.outcome else {
                 panic!("goal")
             };
@@ -1927,12 +1878,12 @@ async fn queued_prompt_claim_pins_only_the_active_goal_before_start() {
             store
                 .command(
                     CommandId::generate().unwrap(),
-                    serde_json::from_value(serde_json::json!({
-                        "type":"set_goal", "session_id":session_id, "objective":"later objective",
-                        "expected":expected, "replace":state == "active",
-                        "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                    }))
-                    .unwrap(),
+                    goal_command(
+                        serde_json::json!({"session_id":session_id, "objective":"later objective",
+                            "expected":expected, "replace":state == "active",
+                            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                        }),
+                    ),
                 )
                 .await
                 .unwrap();
@@ -2136,17 +2087,7 @@ async fn delegated_and_user_followup_origins_survive_reopen() {
             )
             .await
             .unwrap();
-        store
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id: child.session_id,
-                    input: vec![InputPart::text("user followup")],
-                    limits: RunLimits::default(),
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
+        store_command(&store, child.session_id, "user followup")
             .await
             .unwrap();
         let followup = store.claim_next_run(true).await.unwrap().unwrap();
@@ -2241,17 +2182,7 @@ async fn compaction_origins_keep_the_exact_owner_and_foreground_slot() {
                     foreground,
                 )
             } else {
-                store
-                    .command(
-                        CommandId::generate().unwrap(),
-                        SessionCommand::SubmitPrompt {
-                            session_id,
-                            input: vec![InputPart::text("next prompt")],
-                            limits: RunLimits::default(),
-                            correlation: Correlation::default(),
-                            output: None,
-                        },
-                    )
+                store_command(&store, session_id, "next prompt")
                     .await
                     .unwrap();
                 let prompt = store.reserve_next_run(false).await.unwrap().unwrap();
@@ -2359,24 +2290,13 @@ async fn paid_preparation_freezes_the_optional_goal_before_main_start() {
             let CommandOutcome::SessionCreated { session_id } = receipt.receipt.outcome else {
                 panic!("session")
             };
-            store
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::SubmitPrompt {
-                        session_id,
-                        input: vec![InputPart::text("queued before the goal".to_owned())],
-                        limits: RunLimits::default(),
-                        correlation: Correlation::default(),
-                        output: None,
-                    },
-                )
+            store_command(&store, session_id, "queued before the goal")
                 .await
                 .unwrap();
             let goal = if has_goal {
-                let receipt = store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session_id, "objective":"first objective",
+                let receipt = store.command(CommandId::generate().unwrap(), goal_command(serde_json::json!({"session_id":session_id, "objective":"first objective",
                     "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                })).unwrap()).await.unwrap();
+                }))).await.unwrap();
                 let CommandOutcome::GoalUpdated { goal, .. } = receipt.receipt.outcome else {
                     panic!("goal")
                 };
@@ -2427,11 +2347,10 @@ async fn paid_preparation_freezes_the_optional_goal_before_main_start() {
                 goal_id: goal.goal_id,
                 revision: goal.revision,
             });
-            let receipt = store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"replacement objective",
+            let receipt = store.command(CommandId::generate().unwrap(), goal_command(serde_json::json!({"session_id":session_id, "objective":"replacement objective",
                 "expected":expected, "replace":has_goal,
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
+            }))).await.unwrap();
             let CommandOutcome::GoalUpdated {
                 goal: replacement, ..
             } = receipt.receipt.outcome
@@ -2572,19 +2491,7 @@ async fn malformed_run_origin_refuses_without_committing_a_reservation() {
         )
         .await
         .unwrap();
-    let receipt = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("next")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let receipt = store_command(&store, session_id, "next").await.unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = receipt.receipt.outcome else {
         panic!("prompt")
     };
@@ -2631,30 +2538,18 @@ pub(super) async fn model_goal_claim(goal_origin: bool) -> (TempDir, Store, Clai
     let receipt = store
         .command(
             CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session_id,"objective":"original objective",
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
+            goal_command(
+                serde_json::json!({"session_id":session_id,"objective":"original objective",
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                }),
+            ),
         )
         .await
         .unwrap();
     let CommandOutcome::GoalUpdated { goal, .. } = receipt.receipt.outcome else {
         panic!("goal")
     };
-    let receipt = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("work")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
+    let receipt = store_command(&store, session_id, "work").await.unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = receipt.receipt.outcome else {
         panic!("run")
     };
@@ -2746,11 +2641,10 @@ async fn model_goal_data_merges_after_client_edit_but_stale_controls_do_not() {
         assert!(result.notes_applied);
         assert!(result.rejected.is_empty());
     }
-    store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-        "type":"set_goal","session_id":claim.identity.session_id,"objective":"client edited objective",
+    store.command(CommandId::generate().unwrap(),goal_command(serde_json::json!({"session_id":claim.identity.session_id,"objective":"client edited objective",
         "expected":{"goal_id":captured.goal_id,"revision":captured.revision},
         "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-    })).unwrap()).await.unwrap();
+    }))).await.unwrap();
     let args = serde_json::from_value(serde_json::json!({
         "notes":"merged after edit","checklist":[{"type":"set_state","id":1,"state":"done"}],
         "status":{"type":"achieved","evidence":"done"},"wait":{"seconds":60,"reason":"external"}
@@ -2832,10 +2726,9 @@ async fn model_goal_scope_refuses_stopped_replaced_and_terminal_work() {
                     .unwrap();
             }
             "replace" => {
-                store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":claim.identity.session_id,"objective":"replacement","expected":expected,"replace":true,
+                store.command(CommandId::generate().unwrap(),goal_command(serde_json::json!({"session_id":claim.identity.session_id,"objective":"replacement","expected":expected,"replace":true,
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
+            }))).await.unwrap();
             }
             "cancel" => {
                 store
@@ -2922,10 +2815,9 @@ async fn model_achievement_is_a_bounded_proposal_and_client_edits_clear_it() {
     assert_eq!(proposal.run_id, claim.identity.run_id);
     assert_eq!(proposal.revision, captured.revision);
     assert_eq!(proposal.evidence, "tests passed");
-    store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-        "type":"set_goal","session_id":session,"objective":"edited","expected":{"goal_id":captured.goal_id,"revision":captured.revision},
+    store.command(CommandId::generate().unwrap(),goal_command(serde_json::json!({"session_id":session,"objective":"edited","expected":{"goal_id":captured.goal_id,"revision":captured.revision},
         "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-    })).unwrap()).await.unwrap();
+    }))).await.unwrap();
     let current = store
         .call(Priority::Control, move |connection| {
             crate::sessions::goals::load_live(connection, session)
@@ -3242,13 +3134,11 @@ async fn goal_terminal_spend_is_once_and_stays_with_the_captured_historical_goal
                     let result = store
                         .command(
                             CommandId::generate().unwrap(),
-                            serde_json::from_value(serde_json::json!({
-                                "type":"set_goal", "session_id":session_id,
+                            goal_command(serde_json::json!({"session_id":session_id,
                                 "objective":"replacement work", "replace":true,
                                 "expected":{"goal_id":goal_id,"revision":captured.revision},
                                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                            }))
-                            .unwrap(),
+                            })),
                         )
                         .await
                         .unwrap();
@@ -3539,39 +3429,21 @@ async fn rejected_provider_outage_spends_no_goal_run_or_measured_budget() {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("session")
     };
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session_id,"objective":"survive provider outage",
-                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let receipt = set_goal(
+        &runtime,
+        serde_json::json!({"session_id":session_id,"objective":"survive provider outage",
+            "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+86_400_000}
+        }),
+    )
+    .await
+    .unwrap();
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
             after: receipt.committed_through,
         })
         .unwrap();
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("work")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
-        panic!("prompt")
-    };
+    let run_id = submit(&runtime, session_id, "work").await;
     let events = collect_until_run_finished(&mut events, run_id).await;
     assert!(
         matches!(
@@ -3784,11 +3656,10 @@ async fn owned_compaction_spend_survives_owner_settlement_and_goal_replacement()
                     .unwrap();
             }
             if replace {
-                store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                    "type":"set_goal", "session_id":session, "objective":"replacement", "replace":true,
+                store.command(CommandId::generate().unwrap(), goal_command(serde_json::json!({"session_id":session, "objective":"replacement", "replace":true,
                     "expected":{"goal_id":id,"revision":goal.revision},
                     "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                })).unwrap()).await.unwrap();
+                }))).await.unwrap();
             }
             if state == "measured" && !replace {
                 store
@@ -3907,17 +3778,7 @@ async fn between_run_compactor_charges_its_goal_after_owner_cancel_and_reopen() 
                 )
                 .await
                 .unwrap();
-            store
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::SubmitPrompt {
-                        session_id: session,
-                        input: vec![InputPart::text("needs a summary")],
-                        limits: RunLimits::default(),
-                        correlation: Correlation::default(),
-                        output: None,
-                    },
-                )
+            store_command(&store, session, "needs a summary")
                 .await
                 .unwrap();
             let owner = store.reserve_next_run(false).await.unwrap().unwrap();
@@ -3978,11 +3839,10 @@ async fn between_run_compactor_charges_its_goal_after_owner_cancel_and_reopen() 
                 .await
                 .unwrap();
             if replace {
-                store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-                    "type":"set_goal","session_id":session,"objective":"replacement","replace":true,
+                store.command(CommandId::generate().unwrap(), goal_command(serde_json::json!({"session_id":session,"objective":"replacement","replace":true,
                     "expected":{"goal_id":id,"revision":goal.revision},
                     "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                })).unwrap()).await.unwrap();
+                }))).await.unwrap();
             }
             store.close().await.unwrap();
             let reopened = Store::open(directory.path().join("sessions.sqlite3"))
@@ -4136,23 +3996,15 @@ async fn real_in_run_compactor_preserves_rejected_prefix_and_uncertain_dispatch(
             else {
                 panic!("session")
             };
-            runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session,"objective":"preserve helper spending",
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
-            runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::SubmitPrompt {
-                        session_id: session,
-                        input: vec![InputPart::text("work")],
-                        limits: RunLimits::default(),
-                        correlation: Correlation::default(),
-                        output: None,
-                    },
-                )
-                .await
-                .unwrap();
+            set_goal(
+                &runtime,
+                serde_json::json!({"session_id":session,"objective":"preserve helper spending",
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                }),
+            )
+            .await
+            .unwrap();
+            try_submit(&runtime, session, "work").await.unwrap();
             let store = &runtime.inner.store;
             let owner = store.reserve_next_run(false).await.unwrap().unwrap();
             store
@@ -4421,10 +4273,9 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
             finished_outcome(&initial, first),
             Some(RunOutcome::Completed)
         );
-        runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session,"objective":"survive automatic compaction outage",
+        set_goal(&runtime, serde_json::json!({"session_id":session,"objective":"survive automatic compaction outage",
             "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000,"max_cost_usd_nanos":(!transport && !cancel && !prefix).then_some(1_000_000_u64)}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         let owner = queue_prompt(&runtime, session, "continue".to_owned()).await;
         let cancelled_helper = if cancel {
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -4612,11 +4463,10 @@ async fn committed_goal_turn_recovery_charges_session_and_historical_goal_once()
                         .unwrap();
                 }
                 if replace {
-                    store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                        "type":"set_goal","session_id":session,"objective":"replacement","replace":true,
+                    store.command(CommandId::generate().unwrap(),goal_command(serde_json::json!({"session_id":session,"objective":"replacement","replace":true,
                         "expected":{"goal_id":id,"revision":goal.revision},
                         "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                    })).unwrap()).await.unwrap();
+                    }))).await.unwrap();
                 }
                 store.close().await.unwrap();
                 let reopened = Store::open(directory.path().join("sessions.sqlite3"))
@@ -4810,10 +4660,9 @@ async fn delegated_child_spend_keeps_the_original_goal_after_replacement() {
                 .await
                 .unwrap();
             let own_goal = if child_goal {
-                let receipt=store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":child.session_id,"objective":"independent child objective",
+                let receipt=store.command(CommandId::generate().unwrap(),goal_command(serde_json::json!({"session_id":child.session_id,"objective":"independent child objective",
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
+            }))).await.unwrap();
                 let CommandOutcome::GoalUpdated { goal, .. } = receipt.receipt.outcome else {
                     panic!("child goal")
                 };
@@ -4872,11 +4721,10 @@ async fn delegated_child_spend_keeps_the_original_goal_after_replacement() {
                 .await
                 .unwrap();
             if replace {
-                store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session,"objective":"replacement","replace":true,
+                store.command(CommandId::generate().unwrap(),goal_command(serde_json::json!({"session_id":session,"objective":"replacement","replace":true,
                 "expected":{"goal_id":id,"revision":goal.revision},
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            })).unwrap()).await.unwrap();
+            }))).await.unwrap();
             }
             store
                 .finish_run(
@@ -4966,17 +4814,7 @@ async fn delegated_child_spend_keeps_the_original_goal_after_replacement() {
                 assert_eq!(own.counters.runs, 1);
                 assert_eq!(own.counters.usage, Some(usage));
                 assert_eq!(own.counters.estimated_cost_usd_nanos, Some(37));
-                store
-                    .command(
-                        CommandId::generate().unwrap(),
-                        SessionCommand::SubmitPrompt {
-                            session_id: child_session,
-                            input: vec![InputPart::text("unrelated later prompt")],
-                            limits: RunLimits::default(),
-                            correlation: Correlation::default(),
-                            output: None,
-                        },
-                    )
+                store_command(&store, child_session, "unrelated later prompt")
                     .await
                     .unwrap();
                 let followup = store.claim_next_run(true).await.unwrap().unwrap();
@@ -5318,10 +5156,9 @@ async fn active_idle_goal_dispatches_fresh_work_without_a_user_prompt() {
             after: created.committed_through,
         })
         .unwrap();
-    let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-        "type":"set_goal","session_id":session_id,"objective":"complete a fresh autonomous work slice",
+    let receipt=set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"complete a fresh autonomous work slice",
         "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"per_run":{"max_model_turns":1}}
-    })).unwrap()).await.unwrap();
+    })).await.unwrap();
     let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
         panic!("goal")
     };
@@ -5804,17 +5641,7 @@ async fn paused_goal_waits_for_paid_detached_child_after_parent_settlement() {
     let CommandOutcome::GoalUpdated { goal, .. } = resumed.receipt.outcome else {
         panic!("resumed goal")
     };
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: child.session_id,
-                input: vec![InputPart::text("unrelated later child prompt")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, child.session_id, "unrelated later child prompt")
         .await
         .unwrap();
     let unrelated = store.claim_next_run(true).await.unwrap().unwrap();
@@ -5901,8 +5728,10 @@ async fn replayed_goal_controls_restore_only_unsettled_paid_cancellation_signals
             revision: goal.revision,
         };
         let command = if mode == "replace" {
-            serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":session,"objective":"replacement", "replace":true,
-                "expected":expected,"budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}})).unwrap()
+            goal_command(
+                serde_json::json!({"session_id":session,"objective":"replacement", "replace":true,
+                "expected":expected,"budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}}),
+            )
         } else {
             SessionCommand::GoalControl {
                 session_id: session,
@@ -6231,8 +6060,8 @@ async fn driver_loader_failures_pause_or_block_without_unbounded_restart() {
                 after: created.committed_through,
             })
             .unwrap();
-        runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":session_id,
-            "objective":"bounded preparation failures","budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}})).unwrap()).await.unwrap();
+        set_goal(&runtime, serde_json::json!({"session_id":session_id,
+            "objective":"bounded preparation failures","budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}})).await.unwrap();
         let goal = tokio::time::timeout(Duration::from_secs(3), async {
             while let Some(event) = events.next().await {
                 if let SessionEvent::GoalUpdated { goal } = event.unwrap().event
@@ -6569,10 +6398,9 @@ async fn goal_admission_refuses_expired_or_unknown_budgets_before_loading() {
                     after: created.committed_through,
                 })
                 .unwrap();
-            runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal", "session_id":session_id, "objective":"expire while awaiting the permit",
+            set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"expire while awaiting the permit",
             "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
             runtime.inner.store.drive_goals(now_ms()).await.unwrap();
             if user_prompt {
                 queue_prompt(
@@ -6715,19 +6543,13 @@ async fn common_goal_reservation_clamps_current_remainders_and_preserves_prompt_
             } else {
                 RunLimits::default()
             };
-            store
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::SubmitPrompt {
-                        session_id,
-                        input: vec![InputPart::text("explicit prompt budget")],
-                        limits,
-                        correlation: Correlation::default(),
-                        output: None,
-                    },
-                )
-                .await
-                .unwrap();
+            store_command(
+                &store,
+                session_id,
+                Prompt::text("explicit prompt budget").limits(limits),
+            )
+            .await
+            .unwrap();
             store
                 .call(Priority::Control, move |connection| {
                     let mut goal =
@@ -6832,10 +6654,9 @@ async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_ori
                 after: created.committed_through,
             })
             .unwrap();
-        runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"deadline must be revalidated after loading",
+        set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"deadline must be revalidated after loading",
             "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         runtime.inner.store.drive_goals(now_ms()).await.unwrap();
         let expected_run = if user_prompt {
             queue_prompt(&runtime, session_id, "explicit bounded work".to_owned()).await
@@ -7003,10 +6824,9 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
                 after: created.committed_through,
             })
             .unwrap();
-        runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"refresh allowance after loading",
+        set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"refresh allowance after loading",
             "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":if raised {500} else {200_000}}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         runtime.inner.store.drive_goals(now_ms()).await.unwrap();
         let run = if user_prompt {
             let receipt = runtime
@@ -7228,17 +7048,7 @@ async fn paused_goal_fences_preparing_user_prompt_until_cancelled() {
         )
         .await
         .unwrap();
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("next work")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, session_id, "next work")
         .await
         .unwrap();
     let claim = store.reserve_next_run(false).await.unwrap().unwrap();
@@ -7327,10 +7137,9 @@ async fn goal_check_edits_reset_only_the_changed_check_failure_streak() {
         else {
             panic!("session");
         };
-        let receipt = runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal", "session_id":session_id, "objective":"checked work", "check":{"command":"true"},
+        let receipt = set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"checked work", "check":{"command":"true"},
             "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000}
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("goal");
         };
@@ -7344,11 +7153,10 @@ async fn goal_check_edits_reset_only_the_changed_check_failure_streak() {
             })
             .await
             .unwrap();
-        let edited = runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
-            "type":"set_goal", "session_id":session_id, "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
+        let edited = set_goal(&runtime, serde_json::json!({"session_id":session_id, "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
             "objective":"edited objective", "check":command.map(|command|serde_json::json!({"command":command})),
             "budget":goal.budget
-        })).unwrap()).await.unwrap();
+        })).await.unwrap();
         let CommandOutcome::GoalUpdated { goal: edited, .. } = edited.outcome else {
             panic!("edit");
         };
@@ -7394,10 +7202,9 @@ async fn goal_check_edits_preserve_unrelated_stop_states() {
             let CommandOutcome::SessionCreated { session_id } = created.outcome else {
                 panic!("session")
             };
-            let receipt = runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session_id,"objective":"checked work","check":{"command":"true"},
+            let receipt = set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"checked work","check":{"command":"true"},
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000}
-            })).unwrap()).await.unwrap();
+            })).await.unwrap();
             let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
                 panic!("goal")
             };
@@ -7637,17 +7444,7 @@ async fn recovered_user_prompt_survives_an_active_goal_edit() {
         )
         .await
         .unwrap();
-    store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: session,
-                input: vec![InputPart::text("accepted user work")],
-                limits: RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
+    store_command(&store, session, "accepted user work")
         .await
         .unwrap();
     let reserved = store.reserve_next_run(false).await.unwrap().unwrap();
@@ -7660,12 +7457,12 @@ async fn recovered_user_prompt_survives_an_active_goal_edit() {
     reopened
         .command(
             CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":session,"objective":"edited objective",
-                "expected":{"goal_id":captured.goal_id,"revision":captured.revision},
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
+            goal_command(
+                serde_json::json!({"session_id":session,"objective":"edited objective",
+                    "expected":{"goal_id":captured.goal_id,"revision":captured.revision},
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                }),
+            ),
         )
         .await
         .unwrap();
@@ -7758,17 +7555,14 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
         else {
             panic!("session")
         };
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "type":"set_goal","session_id":parent_session,"objective":"original objective",
-                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        set_goal(
+            &runtime,
+            serde_json::json!({"session_id":parent_session,"objective":"original objective",
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            }),
+        )
+        .await
+        .unwrap();
         let parent_run = queue_prompt(&runtime, parent_session, "parent work".to_owned()).await;
         let store = runtime.inner.store.clone();
         let parent = store.reserve_next_run(false).await.unwrap().unwrap();
@@ -7844,16 +7638,10 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
             })
             .await
             .unwrap();
-        let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal","session_id":parent_session,"objective":"original objective",
+        let receipt = set_goal(&runtime, serde_json::json!({"session_id":parent_session,"objective":"original objective",
                 "expected":{"goal_id":captured.goal_id,"revision":captured.revision},
                 "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000,"max_total_tokens":budget}
             }))
-            .unwrap(),
-        )
         .await
         .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
@@ -7996,11 +7784,11 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
         };
         let deadline = now_ms() + 60_000;
         let set = |runs| {
-            serde_json::from_value::<SessionCommand>(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"workspace-bound",
-                "budget":{"max_goal_runs":runs,"deadline_ms":deadline}
-            }))
-            .unwrap()
+            goal_command(
+                serde_json::json!({"session_id":session_id, "objective":"workspace-bound",
+                    "budget":{"max_goal_runs":runs,"deadline_ms":deadline}
+                }),
+            )
         };
         assert!(matches!(
             runtime
@@ -8280,11 +8068,11 @@ async fn goal_policy_tightening_before_load_or_main_start_prevents_provider_work
                 after: created.committed_through,
             })
             .unwrap();
-        let command = serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":session_id,"objective":"honor current policy",
-            "budget":{"max_goal_runs":20,"deadline_ms":now_ms()+60_000}
-        }))
-        .unwrap();
+        let command = goal_command(
+            serde_json::json!({"session_id":session_id,"objective":"honor current policy",
+                "budget":{"max_goal_runs":20,"deadline_ms":now_ms()+60_000}
+            }),
+        );
         runtime
             .command(CommandId::generate().unwrap(), command)
             .await
@@ -8484,14 +8272,12 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
                 panic!("session")
             };
             let id = CommandId::generate().unwrap();
-            let command: SessionCommand = serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id,
+            let command: SessionCommand = goal_command(serde_json::json!({"session_id":session_id,
                 "objective":"verify the task without permission prompts",
                 "check":{"command":command,"timeout_ms":1000},
                 "check_approval":scope,
                 "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+60_000}
-            }))
-            .unwrap();
+            }));
             let result = runtime.command(id, command.clone()).await;
             match expected {
                 "denied" => assert!(matches!(
