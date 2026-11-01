@@ -97,17 +97,14 @@ at least 30 pairs.
 ## Long-run soak
 
 ```sh
-# Deterministic default baseline (500 requested work turns):
-cargo test -p qq-core --test soak -- --ignored --test-threads=1 --nocapture
-QQ_SOAK_TURNS=2000 cargo test -p qq-core --test soak -- --ignored --test-threads=1 --nocapture
+cargo nextest run -p qq-core --test soak
 
 # Immediate local provider, one 256-byte external result per work turn:
 cargo bench -p qq-core --bench turn_overhead
 ```
 
-The ignored soak (`scripted_soak_completes_across_context_windows`) and the
-non-ignored cases beside it in `crates/qq-core/tests/soak.rs` exercise
-compaction across context windows, separated empty-output retries, provider
+The cases in `crates/qq-core/tests/soak.rs` exercise compaction across
+context windows, separated empty-output retries, provider
 outage recovery and kill/reopen without tool re-execution. Scripted `Report`
 receipts record requested vs reached work, observed committed compactions, tool
 execution/settlement counts, RSS samples on Linux, DB/WAL sampled high-water

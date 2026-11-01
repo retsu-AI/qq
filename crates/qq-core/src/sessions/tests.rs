@@ -1251,20 +1251,10 @@ async fn scripted_runs_harness(
     mode: ApprovalMode,
     runs: Vec<Vec<(&'static str, String)>>,
 ) -> ScriptedRunsHarness {
-    scripted_runs_harness_with_authority(mode, runs, None).await
-}
-
-async fn scripted_runs_harness_with_authority(
-    mode: ApprovalMode,
-    runs: Vec<Vec<(&'static str, String)>>,
-    grant_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
-) -> ScriptedRunsHarness {
     let directory = test_directory();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-    options.grant_authority = grant_authority;
     let runtime = SessionRuntime::open(
-        options,
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
         Arc::new(ScriptedRunsLoader {
             requests: Arc::clone(&requests),
             runs,
@@ -1353,17 +1343,6 @@ async fn approval_harness(
     tool_turns: usize,
     approval_timeout: Option<Duration>,
 ) -> ApprovalHarness {
-    approval_harness_with_authority(mode, tool, arguments, tool_turns, approval_timeout, None).await
-}
-
-async fn approval_harness_with_authority(
-    mode: ApprovalMode,
-    tool: &'static str,
-    arguments: &'static str,
-    tool_turns: usize,
-    approval_timeout: Option<Duration>,
-    grant_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
-) -> ApprovalHarness {
     let directory = test_directory();
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
@@ -1374,7 +1353,7 @@ async fn approval_harness_with_authority(
             side_query_limits: SideQueryLimits::default(),
             approval_timeout,
             retention: None,
-            grant_authority,
+            policy_authority: None,
         },
         Arc::new(ApprovalLoader {
             requests: Arc::clone(&requests),
@@ -1758,215 +1737,6 @@ fn rewrite_run_capacity_schema(path: &Path, base_declaration: &str, increment_de
         )
         .unwrap();
     connection.execute_batch(&schema).unwrap();
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug)]
-struct R4StreamMeasurement {
-    bytes: usize,
-    transactions: u64,
-    elapsed_ns: u128,
-    peak_temporary_rss_bytes: u64,
-}
-
-#[cfg(target_os = "linux")]
-struct R4RssSampler {
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    worker: Option<std::thread::JoinHandle<u64>>,
-}
-
-#[cfg(target_os = "linux")]
-impl R4RssSampler {
-    fn start() -> Self {
-        let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let worker_stop = std::sync::Arc::clone(&stop);
-        let worker = std::thread::spawn(move || {
-            let mut peak = r4_current_rss_bytes();
-            while !worker_stop.load(std::sync::atomic::Ordering::Acquire) {
-                peak = peak.max(r4_current_rss_bytes());
-                // lint: allow(sleep) RSS sampling period of the ignored R4 measurement
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            peak.max(r4_current_rss_bytes())
-        });
-        Self {
-            stop,
-            worker: Some(worker),
-        }
-    }
-
-    fn finish(mut self) -> u64 {
-        self.stop.store(true, std::sync::atomic::Ordering::Release);
-        self.worker.take().unwrap().join().unwrap()
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for R4RssSampler {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Release);
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn r4_current_rss_bytes() -> u64 {
-    std::fs::read_to_string("/proc/self/status")
-        .unwrap()
-        .lines()
-        .find_map(|line| {
-            let kib = line.strip_prefix("VmRSS:")?.split_whitespace().next()?;
-            kib.parse::<u64>().ok()
-        })
-        .unwrap()
-        .saturating_mul(1024)
-}
-
-#[cfg(target_os = "linux")]
-fn measure_r4_append_only_stream(bytes: usize) -> R4StreamMeasurement {
-    let directory = test_directory();
-    let path = directory.path().join("sessions.sqlite3");
-    let (mut connection, _) = open_database(&path).unwrap();
-    let workspace_id = WorkspaceId::from_bytes([1; 16]);
-    let session_id = SessionId::from_bytes([2; 16]);
-    let run_id = RunId::from_bytes([3; 16]);
-    let message_id = MessageId::from_bytes([4; 16]);
-    connection
-        .execute(
-            "INSERT INTO workspaces(id, path, next_sequence) VALUES (?1, '/w', 0)",
-            [workspace_id.to_string()],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO sessions(
-                 id, workspace_id, title, status, created_at_ms, updated_at_ms
-             ) VALUES (?1, ?2, 'S', 'idle', 1, 1)",
-            params![session_id.to_string(), workspace_id.to_string()],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO runs(
-                 id, session_id, command_id, user_message_id,
-                 assistant_message_id, status, created_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?4, 'completed', 1)",
-            params![
-                run_id.to_string(),
-                session_id.to_string(),
-                CommandId::from_bytes([5; 16]).to_string(),
-                message_id.to_string(),
-            ],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO messages(
-                 id, session_id, run_id, ordinal, turn_ordinal, role, state,
-                 output, refusal, created_at_ms
-             ) VALUES (?1, ?2, ?3, 1, 1, 'assistant', 'complete', '', '', 1)",
-            params![
-                message_id.to_string(),
-                session_id.to_string(),
-                run_id.to_string(),
-            ],
-        )
-        .unwrap();
-    let baseline_rss = r4_current_rss_bytes();
-    let sampler = R4RssSampler::start();
-    let content = "x".repeat(bytes);
-    let started = std::time::Instant::now();
-    let mut transactions = 0_u64;
-    for chunk in content.as_bytes().chunks(OUTPUT_BATCH_BYTES) {
-        let transaction = connection.transaction().unwrap();
-        insert_message_chunk(
-            &transaction,
-            message_id,
-            TextChannel::Output,
-            std::str::from_utf8(chunk).unwrap(),
-        )
-        .unwrap();
-        transaction.commit().unwrap();
-        transactions += 1;
-    }
-    let message = load_message(&connection, message_id).unwrap();
-    let elapsed_ns = started.elapsed().as_nanos();
-    let peak_temporary_rss_bytes = sampler.finish().saturating_sub(baseline_rss);
-    assert_eq!(message.output, content);
-    assert_eq!(
-        transactions,
-        u64::try_from(bytes.div_ceil(OUTPUT_BATCH_BYTES)).unwrap()
-    );
-    R4StreamMeasurement {
-        bytes,
-        transactions,
-        elapsed_ns,
-        peak_temporary_rss_bytes,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn parse_r4_stream_measurement(output: &[u8]) -> R4StreamMeasurement {
-    let output = String::from_utf8_lossy(output);
-    let line = output
-        .lines()
-        .find(|line| line.starts_with("r4_stream "))
-        .unwrap_or_else(|| panic!("R4 child produced no measurement: {output}"));
-    let mut fields = line.split_whitespace().skip(1).map(|field| {
-        let (name, value) = field.split_once('=').unwrap();
-        (name, value)
-    });
-    let bytes = fields.next().unwrap();
-    let transactions = fields.next().unwrap();
-    let elapsed = fields.next().unwrap();
-    let rss = fields.next().unwrap();
-    assert_eq!(bytes.0, "bytes");
-    assert_eq!(transactions.0, "transactions");
-    assert_eq!(elapsed.0, "elapsed_ns");
-    assert_eq!(rss.0, "peak_temporary_rss_bytes");
-    assert!(fields.next().is_none());
-    R4StreamMeasurement {
-        bytes: bytes.1.parse().unwrap(),
-        transactions: transactions.1.parse().unwrap(),
-        elapsed_ns: elapsed.1.parse().unwrap(),
-        peak_temporary_rss_bytes: rss.1.parse().unwrap(),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn run_r4_stream_diagnostic_child(
-    executable: &Path,
-    bytes: usize,
-    child_bytes: &str,
-) -> std::process::Output {
-    let mut child = std::process::Command::new(executable)
-        .args([
-            "--exact",
-            "sessions::tests::r4_append_only_chunk_scaling_diagnostic",
-            "--ignored",
-            "--nocapture",
-        ])
-        .env(child_bytes, bytes.to_string())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        if child.try_wait().unwrap().is_some() {
-            return child.wait_with_output().unwrap();
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let output = child.wait_with_output().unwrap();
-            panic!(
-                "R4 child timed out: {}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-        }
-        // lint: allow(sleep) polls a real child process of the ignored R4 measurement
-        std::thread::sleep(Duration::from_millis(10));
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -6559,7 +6329,7 @@ fn owned_compaction_index_migration_failure_preserves_previous_version() {
     let directory = test_directory();
     let path = directory.path().join("owner-index-failure.sqlite");
     let (connection, _) = open_database(&path).unwrap();
-    connection.execute_batch("DROP INDEX runs_owned_compaction; UPDATE metadata SET value = '45' WHERE key = 'schema_version'; CREATE TABLE runs_owned_compaction(protected TEXT); INSERT INTO runs_owned_compaction VALUES ('retained');").unwrap();
+    connection.execute_batch("DROP INDEX runs_owned_compaction; UPDATE metadata SET value = '43' WHERE key = 'schema_version'; CREATE TABLE runs_owned_compaction(protected TEXT); INSERT INTO runs_owned_compaction VALUES ('retained');").unwrap();
     drop(connection);
     assert!(open_database(&path).is_err());
     let connection = Connection::open(&path).unwrap();
@@ -6584,7 +6354,7 @@ fn owned_compaction_index_rejects_wrong_existing_predicate() {
     let directory = test_directory();
     let path = directory.path().join("wrong-owner-index.sqlite");
     let (connection, _) = open_database(&path).unwrap();
-    connection.execute_batch("DROP INDEX runs_owned_compaction; CREATE INDEX runs_owned_compaction ON runs(auto_compaction_for_run_id) WHERE kind = 'prompt'; UPDATE metadata SET value = '45' WHERE key = 'schema_version';").unwrap();
+    connection.execute_batch("DROP INDEX runs_owned_compaction; CREATE INDEX runs_owned_compaction ON runs(auto_compaction_for_run_id) WHERE kind = 'prompt'; UPDATE metadata SET value = '43' WHERE key = 'schema_version';").unwrap();
     drop(connection);
     assert!(open_database(&path).is_err());
     let connection = Connection::open(&path).unwrap();
@@ -6598,7 +6368,7 @@ fn owned_compaction_index_rejects_wrong_existing_predicate() {
     assert_eq!(version, "45");
     connection
         .execute(
-            "UPDATE metadata SET value = '46' WHERE key = 'schema_version'",
+            "UPDATE metadata SET value = '43' WHERE key = 'schema_version'",
             [],
         )
         .unwrap();
@@ -8408,54 +8178,4 @@ async fn workspace_catalog_pages_registered_roots_and_preserves_identity_after_r
         expected
     );
     reopened.shutdown().await.unwrap();
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn shared_session_harnesses_accept_an_aliased_temporary_base() {
-    const CHILD: &str = "QQ_TEST_ALIASED_TEMP_HARNESS";
-    if std::env::var_os(CHILD).is_some() {
-        let (_directory, runtime) = test_runtime().await;
-        runtime.close().await.unwrap();
-        let mut harness = scripted_runs_harness(ApprovalMode::Full, vec![vec![]]).await;
-        let run = submit_prompt(&harness, "finish the fixture").await;
-        let events = collect_until(&mut harness.events, finished_for(run)).await;
-        assert!(matches!(
-            events.last().unwrap().event,
-            SessionEvent::RunFinished {
-                outcome: RunOutcome::Completed,
-                ..
-            }
-        ));
-        harness.runtime.close().await.unwrap();
-        let harness = session_management_harness().await;
-        harness.runtime.close().await.unwrap();
-        return;
-    }
-    let directory = test_directory();
-    let root = directory.path().canonicalize().unwrap();
-    let alias = root.join("temporary-base-alias");
-    std::os::unix::fs::symlink(&root, &alias).unwrap();
-    let output = tokio::time::timeout(
-        Duration::from_secs(15),
-        tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "sessions::tests::shared_session_harnesses_accept_an_aliased_temporary_base",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .env("TMPDIR", &alias)
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(
-        output.status.success(),
-        "aliased temporary base broke a shared harness:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
 }

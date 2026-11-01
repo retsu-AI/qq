@@ -2324,7 +2324,7 @@ impl RuntimeHandler {
         let options = SessionRuntimeOptions::new(database_path)
             .with_approval_timeout(approval_timeout)
             .with_retention(retention)
-            .with_grant_authority(Arc::new(factory.clone()));
+            .with_policy_authority(Arc::new(factory.clone()));
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
         Ok(Self { durable, factory })
     }
@@ -2601,6 +2601,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::ShutdownTimedOut
         | SessionRuntimeError::Unavailable
         | SessionRuntimeError::StoreBusy
+        | SessionRuntimeError::UnsupportedStoreSchema { .. }
         | SessionRuntimeError::Persistence(_) => ServerHandlerError::Internal,
     }
 }

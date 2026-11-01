@@ -332,19 +332,25 @@ async fn a_mutation_before_the_threshold_means_no_report() {
 
 #[tokio::test]
 async fn a_failing_command_before_the_threshold_means_no_report() {
-    let mut script = reads(100);
-    script[59] = FAILING_SHELL;
-    let (events, requests) = run(Scripted::new(script), RunCapabilities::user(None)).await;
-    assert_eq!(completed_text(&events).as_deref(), Some("done"));
-    let failed = events.iter().any(|event| {
-        matches!(event, RuntimeEvent::ToolCallFinished { is_error: true, result, .. }
-            if result.starts_with("shell exit=3"))
-    });
-    assert!(failed, "the command ran and failed: {events:?}");
-    assert_eq!(
-        calls_before_reports(&requests, ROOT_STALL_REPORT_NOTICE),
-        Vec::<usize>::new()
-    );
+    for command in [
+        FAILING_SHELL,
+        ("shell", r#"{"command":"cd sub && cargo test -p y"}"#),
+    ] {
+        let mut script = reads(100);
+        script[59] = command;
+        let (events, requests) = run(Scripted::new(script), RunCapabilities::user(None)).await;
+        assert_eq!(completed_text(&events).as_deref(), Some("done"));
+        let failed = events.iter().any(|event| {
+            matches!(event, RuntimeEvent::ToolCallFinished { is_error: true, result, .. }
+                if result.starts_with("shell exit="))
+        });
+        assert!(failed, "{command:?} ran and failed: {events:?}");
+        assert_eq!(
+            calls_before_reports(&requests, ROOT_STALL_REPORT_NOTICE),
+            Vec::<usize>::new(),
+            "{command:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1000,22 +1006,6 @@ async fn ab1_cd_prefixed_reads_without_context_verification_count_as_work() {
     assert_eq!(completed_text(&events).as_deref(), Some("done"));
     assert!(calls_before_reports(&requests, ROOT_STALL_REPORT_NOTICE).is_empty());
     assert!(notices(&events).is_empty());
-}
-
-#[tokio::test]
-async fn ab1_cd_prefixed_failing_cargo_test_restarts_the_stall_count() {
-    let read = ("shell", r#"{"command":"cd sub && grep -n x f.rs"}"#);
-    let mut script = vec![read; 63];
-    script.push(("shell", r#"{"command":"cd sub && cargo test -p y"}"#));
-    script.extend(vec![read; 63]);
-    let mut provider = Scripted::new(script);
-    provider.calls_per_turn = 1;
-    let (events, _requests) = run(provider, RunCapabilities::user(None)).await;
-    assert_eq!(completed_text(&events).as_deref(), Some("done"));
-    assert!(
-        notices(&events).is_empty(),
-        "the executed test restarts the count"
-    );
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

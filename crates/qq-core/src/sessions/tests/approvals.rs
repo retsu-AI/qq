@@ -192,70 +192,57 @@ impl RuntimeLoader for ManagedShellDenyLoader {
 
 #[tokio::test]
 async fn shell_prefix_denial_precedes_auto_and_full_and_allows_continuation() {
+    const TOOL: &str = "shell";
+    const ARGUMENTS: &str =
+        r#"{"command":"unlisted-tool; managed-tool --dangerous && another-tool"}"#;
     for mode in [ApprovalMode::Auto, ApprovalMode::Full] {
-        for (tool, arguments) in [
-            (
-                "shell",
-                r#"{"command":"unlisted-tool; managed-tool --dangerous && another-tool"}"#,
-            ),
-            (
-                "exec",
-                r#"{"program":"managed-tool","args":["--dangerous"]}"#,
-            ),
-            (
-                "shell",
-                r#"{"command":"env A=b timeout 9 sh -c 'cd x && managed-tool --dangerous'"}"#,
-            ),
-        ] {
-            let directory = test_directory();
-            let runtime = SessionRuntime::open(
-                SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-                Arc::new(ManagedShellDenyLoader {
-                    script: vec![(tool, arguments.into()), ("__test_mutate", "{}".into())],
-                }),
-            )
-            .await
+        let directory = test_directory();
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(ManagedShellDenyLoader {
+                script: vec![(TOOL, ARGUMENTS.into()), ("__test_mutate", "{}".into())],
+            }),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
             .unwrap();
-            let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-            let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
-            let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-                panic!("session")
-            };
-            let mut events = runtime
-                .subscribe(SubscribeRequest {
-                    workspace_id,
-                    after: created.committed_through,
-                })
-                .unwrap();
-            let run_id =
-                submit_prompt_to(&runtime, session_id, "continue with an allowed alternative")
-                    .await;
-            let observed = collect_until_run_finished(&mut events, run_id).await;
-            assert_no_human_permission_request(&observed);
-            assert!(
-                !observed
-                    .iter()
-                    .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. }))
-            );
-            assert!(!observed.iter().any(|event| matches!(&event.event,
-                SessionEvent::ToolCallStarted { tool_call } if tool_call.name == tool
-            )));
-            assert!(observed.iter().any(|event| matches!(&event.event,
-                SessionEvent::ToolCallFinished { tool_call } if tool_call.name == tool && tool_call.is_error
-                    && tool_call.result.as_deref().is_some_and(|result| result == approval::SHELL_PREFIX_DENIED_RESULT)
-            )));
-            assert!(observed.iter().any(|event| matches!(&event.event,
-                SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "__test_mutate" && !tool_call.is_error
-            )));
-            assert!(matches!(
-                observed.last().unwrap().event,
-                SessionEvent::RunFinished {
-                    outcome: RunOutcome::Completed,
-                    ..
-                }
-            ));
-            runtime.shutdown().await.unwrap();
-        }
+        let run_id =
+            submit_prompt_to(&runtime, session_id, "continue with an allowed alternative").await;
+        let observed = collect_until_run_finished(&mut events, run_id).await;
+        assert_no_human_permission_request(&observed);
+        assert!(
+            !observed
+                .iter()
+                .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. }))
+        );
+        assert!(!observed.iter().any(|event| matches!(&event.event,
+            SessionEvent::ToolCallStarted { tool_call } if tool_call.name == TOOL
+        )));
+        assert!(observed.iter().any(|event| matches!(&event.event,
+            SessionEvent::ToolCallFinished { tool_call } if tool_call.name == TOOL && tool_call.is_error
+                && tool_call.result.as_deref().is_some_and(|result| result == approval::SHELL_PREFIX_DENIED_RESULT)
+        )));
+        assert!(observed.iter().any(|event| matches!(&event.event,
+            SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "__test_mutate" && !tool_call.is_error
+        )));
+        assert!(matches!(
+            observed.last().unwrap().event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            }
+        ));
+        runtime.shutdown().await.unwrap();
     }
 }
 
@@ -1870,7 +1857,7 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let mut options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
         options.approval_timeout = ordinary_wait;
-        options.grant_authority = Some(Arc::new(Authority(goal_wait_ms)));
+        options.policy_authority = Some(Arc::new(Authority(goal_wait_ms)));
         let runtime = SessionRuntime::open(
             options.clone(),
             Arc::new(ApprovalLoader {
@@ -1943,7 +1930,7 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
         drop(runtime);
 
         options.approval_timeout = None;
-        options.grant_authority = Some(Arc::new(Authority(300_000)));
+        options.policy_authority = Some(Arc::new(Authority(300_000)));
         let runtime = SessionRuntime::open(
             options,
             Arc::new(ApprovalLoader {

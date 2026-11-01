@@ -1983,7 +1983,7 @@ async fn queues_follow_ups_without_reordering_conversation_context() {
             side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             retention: None,
-            grant_authority: None,
+            policy_authority: None,
         },
         Arc::new(CapturingLoader {
             requests: Arc::clone(&requests),
@@ -2056,7 +2056,7 @@ async fn follow_up_after_an_empty_completed_turn_reaches_the_provider() {
             side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             retention: None,
-            grant_authority: None,
+            policy_authority: None,
         },
         Arc::new(EmptyThenTextLoader {
             requests: Arc::clone(&requests),
@@ -2633,167 +2633,6 @@ async fn recovery_ignores_legacy_overflow_evidence_without_spending_a_second_att
 }
 
 #[tokio::test]
-async fn version_sixteen_active_auto_compaction_backfills_exact_attempt_ownership() {
-    let directory = tempfile::tempdir().unwrap();
-    let database_path = directory.path().join("sessions.sqlite3");
-    let store = Store::open(database_path.clone()).await.unwrap();
-    let resolved = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::ResolveWorkspace {
-                path: directory.path().to_str().unwrap().to_owned(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let created = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let queued = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("resume after legacy crash".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let original = store.reserve_next_run(false).await.unwrap().unwrap();
-    let (compaction, started) = store
-        .start_auto_compaction(&original, test_prepared_audit(&original), None)
-        .await
-        .unwrap()
-        .unwrap();
-    store.close().await.unwrap();
-    drop(store);
-    let connection = Connection::open(&database_path).unwrap();
-    connection
-        .execute(
-            "UPDATE metadata SET value = '16' WHERE key = 'schema_version'",
-            [],
-        )
-        .unwrap();
-    connection
-        .execute("ALTER TABLE sessions DROP COLUMN preparing_run_id", [])
-        .unwrap();
-    connection
-        .execute(
-            "ALTER TABLE sessions DROP COLUMN pending_context_overflow_model_json",
-            [],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "ALTER TABLE runs DROP COLUMN context_compaction_attempted",
-            [],
-        )
-        .unwrap();
-    connection
-        .execute("DROP INDEX runs_owned_compaction", [])
-        .unwrap();
-    connection
-        .execute(
-            "ALTER TABLE runs DROP COLUMN auto_compaction_for_run_id",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-
-    let provider_calls = Arc::new(AtomicUsize::new(0));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(database_path),
-        Arc::new(CountingTextLoader {
-            provider_calls: Arc::clone(&provider_calls),
-        }),
-    )
-    .await
-    .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: started.cursor,
-        })
-        .unwrap();
-    let observed = collect_until(&mut events, finished_for(run_id)).await;
-
-    assert!(observed.iter().any(|event| matches!(
-        event.event,
-        SessionEvent::RunFinished {
-            run_id: finished,
-            outcome: RunOutcome::Interrupted,
-            ..
-        } if finished == compaction.identity.run_id
-    )));
-    assert!(observed.iter().any(|event| matches!(
-        event.event,
-        SessionEvent::RunFinished {
-            run_id: finished,
-            outcome: RunOutcome::Completed,
-            ..
-        } if finished == run_id
-    )));
-    assert!(
-        observed
-            .iter()
-            .all(|event| !matches!(event.event, SessionEvent::SessionCompacted { .. }))
-    );
-    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
-    let (attempted, auto_runs, owner): (bool, u32, Option<String>) = runtime
-        .inner
-        .store
-        .call(Priority::Control, move |connection| {
-            connection
-                .query_row(
-                    "SELECT original.context_compaction_attempted,
-                            (SELECT COUNT(*) FROM runs auto
-                             WHERE auto.auto_compaction = 1
-                               AND auto.session_id = original.session_id),
-                            auto.auto_compaction_for_run_id
-                     FROM runs original JOIN runs auto ON auto.id = ?2
-                     WHERE original.id = ?1",
-                    params![run_id.to_string(), compaction.identity.run_id.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .map_err(|_| SessionRuntimeError::CODEC)
-        })
-        .await
-        .unwrap();
-    assert!(attempted);
-    assert_eq!(auto_runs, 1);
-    assert_eq!(owner.as_deref(), Some(run_id.to_string().as_str()));
-}
-
-#[tokio::test]
 async fn slow_preparation_does_not_serialize_an_independent_permit() {
     struct FirstPreparationPausedLoader {
         loads: Arc<AtomicUsize>,
@@ -3315,7 +3154,7 @@ async fn schedules_ready_sessions_fairly() {
             side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             retention: None,
-            grant_authority: None,
+            policy_authority: None,
         },
         Arc::new(FairnessLoader {
             requests: Arc::clone(&requests),

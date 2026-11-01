@@ -1692,69 +1692,6 @@ mod tests {
     }
 
     #[test]
-    fn historical_descriptor_15_digest_is_preserved() {
-        let mut descriptor = golden_descriptor();
-        descriptor.prompt_version = PromptVersion::new(22).unwrap();
-        descriptor.version = 15;
-        descriptor.protected_pack_roots.clear();
-        assert_eq!(
-            descriptor.digest().unwrap().to_string(),
-            "d8006352ea9660e507b3a9846b53772770b4965afccc43f546b9a7c97d589683"
-        );
-    }
-
-    #[test]
-    fn historical_descriptor_13_prompt_20_through_22_digests_are_preserved() {
-        let mut descriptor = golden_descriptor();
-        descriptor.prompt_version = PromptVersion::new(22).unwrap();
-        descriptor.version = 13;
-        descriptor.protected_pack_roots.clear();
-        descriptor.tool_output_projection = None;
-        assert_eq!(
-            descriptor.digest().unwrap().to_string(),
-            "c566dbbfcab50966123a5fec0fd98b70d1c2e6f7bba11ab60cc7c53b571fed92"
-        );
-        let mut prompt21 = descriptor.clone();
-        prompt21.prompt_version = PromptVersion::new(21).unwrap();
-        assert_eq!(
-            prompt21.digest().unwrap().to_string(),
-            "6ac21a27f741953eb66c4e8f4d92c2ff8d32e46ca23058a2b7d4a5835facaded"
-        );
-        let mut prompt20 = descriptor.clone();
-        prompt20.prompt_version = PromptVersion::new(20).unwrap();
-        assert_eq!(
-            prompt20.digest().unwrap().to_string(),
-            "61a6c7e80a481d54c75388bf14827a15f7cddf8ca839d6850b20bad2a47fd3fb"
-        );
-    }
-
-    #[test]
-    fn historical_descriptor_14_prompt_20_digest_is_preserved() {
-        let mut descriptor = golden_descriptor();
-        descriptor.version = 14;
-        descriptor.protected_pack_roots.clear();
-        descriptor.prompt_version = PromptVersion::new(20).unwrap();
-        descriptor.tool_output_projection = None;
-        assert_eq!(
-            descriptor.digest().unwrap().to_string(),
-            "fde8f5629db25addc1aee4d70eecf124aae9fa608e14aa8e791d11c22f5df963"
-        );
-    }
-
-    #[test]
-    fn historical_descriptor_14_prompt_22_digest_is_preserved() {
-        let mut descriptor = golden_descriptor();
-        descriptor.prompt_version = PromptVersion::new(22).unwrap();
-        descriptor.version = 14;
-        descriptor.protected_pack_roots.clear();
-        descriptor.tool_output_projection = None;
-        assert_eq!(
-            descriptor.digest().unwrap().to_string(),
-            "a18de9830c1a00f80c6806e46ca3774f3d410a768787618efd1a257aa617ee9d"
-        );
-    }
-
-    #[test]
     fn every_behavior_affecting_field_changes_the_digest() {
         let base = golden_descriptor();
         let base_digest = base.digest().unwrap();
@@ -1883,10 +1820,6 @@ mod tests {
             (
                 "checkpoint",
                 Box::new(|d| d.checkpoint = Some("typesafe/jev/enforce".to_owned())),
-            ),
-            (
-                "approval_delegate",
-                Box::new(|d| d.approval_delegate = Some("typesafe/jev/approval".to_owned())),
             ),
             (
                 "routing",

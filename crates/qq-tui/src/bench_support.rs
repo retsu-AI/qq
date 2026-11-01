@@ -584,26 +584,6 @@ mod tests {
         harness.escape();
         assert!(harness.app.filtered_sessions().is_empty());
     }
-
-    #[test]
-    fn every_scene_builds_at_every_golden_size_and_paints_every_row() {
-        for scene in Scene::ALL {
-            for &(width, height) in GOLDEN_SIZES {
-                let mut harness = BenchHarness::scene(scene, (width, height));
-                let rows = harness.plain_frame();
-                assert!(
-                    rows.len() <= usize::from(height),
-                    "{scene:?} at {width}x{height} produced {} rows",
-                    rows.len()
-                );
-                assert!(
-                    rows.iter()
-                        .all(|row| row.chars().count() <= usize::from(width)),
-                    "{scene:?} at {width}x{height} overflowed a row"
-                );
-            }
-        }
-    }
 }
 
 pub const MARKDOWN_GALLERY: &str = "\

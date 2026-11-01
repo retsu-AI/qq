@@ -1258,12 +1258,6 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
 
 #[test]
 fn historical_fixtures_still_decode() {
-    const REMOVED_IN_41: [&str; 4] = [
-        "\"approve_for_session\"",
-        "\"approve_for_workspace\"",
-        "\"set_approval_delegate\"",
-        "\"approval_delegate_set\"",
-    ];
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     for version in retained_versions(&root) {
         let directory = fixture_dir(version);
@@ -1280,27 +1274,14 @@ fn historical_fixtures_still_decode() {
         for path in entries {
             let name = path.file_stem().unwrap().to_str().unwrap();
             let stored = fs::read_to_string(&path).unwrap();
-            let removed = (!name.starts_with("event_")
-                && REMOVED_IN_41.iter().any(|removed| stored.contains(removed)))
-                || stored.contains("\"delegated\": true")
-                || stored.contains("\"approval_delegate\":")
-                || stored.contains("\"escalated\":");
-            let decode_error = |error: serde_json::Error| -> ! {
-                panic!(
-                    "{}: does not decode as version {PROTOCOL_VERSION}: {error}",
-                    path.display()
-                )
-            };
-            fn try_decode<T: DeserializeOwned>(stored: &str) -> Result<T, serde_json::Error> {
-                serde_json::from_str(stored)
-            }
             macro_rules! decode {
                 ($type:ty) => {
-                    match try_decode::<$type>(&stored) {
-                        Ok(decoded) => Some(decoded),
-                        Err(_) if removed => None,
-                        Err(error) => decode_error(error),
-                    }
+                    serde_json::from_str::<$type>(&stored).unwrap_or_else(|error| {
+                        panic!(
+                            "{}: does not decode as version {PROTOCOL_VERSION}: {error}",
+                            path.display()
+                        )
+                    })
                 };
             }
             if name.starts_with("workspace_catalog_request") {
@@ -1329,13 +1310,9 @@ fn historical_fixtures_still_decode() {
             } else if name.starts_with("capabilities_request") {
                 decode!(CapabilitiesRequest);
             } else if name == "capabilities" {
-                if let Some(decoded) = decode!(ServerCapabilities) {
-                    assert_eq!(decoded.protocol_version, version);
-                }
+                assert_eq!(decode!(ServerCapabilities).protocol_version, version);
             } else if name == "server_info" {
-                if let Some(decoded) = decode!(ServerInfo) {
-                    assert_eq!(decoded.protocol_version, version);
-                }
+                assert_eq!(decode!(ServerInfo).protocol_version, version);
             } else {
                 panic!(
                     "{}: unrecognized fixture prefix; extend this test",

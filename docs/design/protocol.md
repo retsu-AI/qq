@@ -64,8 +64,8 @@ PROTOCOL_VERSION = 42
 ```
 
 Descriptor 16 adds sorted workspace-relative configured pack roots to the
-compiled authority identity; descriptor 15 and earlier retain their original
-encoding and digest domains.
+compiled authority identity. Only descriptor 16 encodes; process evidence
+from an earlier descriptor is unresolved.
 
 Version 42 adds `undo_workspace` (`POST /v1/workspaces/undo`) and its
 `workspace_undone` outcome, so any client can restore a run's snapshot through
@@ -175,7 +175,7 @@ its path onto the client machine. Listing neither registers a directory nor
 changes permissions.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v42/`; the `v17`–`v41` directories are
+`crates/qq-protocol/tests/fixtures/v42/`; the `v41` directory (N−1) is
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 

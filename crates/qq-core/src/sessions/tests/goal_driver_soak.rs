@@ -157,7 +157,7 @@ async fn child(setup: Setup) {
     let mut options = SessionRuntimeOptions::new(setup.directory.join("sessions.sqlite3"));
     let hold_policy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if setup.checked {
-        options.grant_authority = Some(Arc::new(CheckAuthority(hold_policy.clone())));
+        options.policy_authority = Some(Arc::new(CheckAuthority(hold_policy.clone())));
     }
     let runtime = SessionRuntime::open(options, Arc::new(Loader(provider)))
         .await

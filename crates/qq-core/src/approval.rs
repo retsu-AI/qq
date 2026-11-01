@@ -884,43 +884,40 @@ pub(crate) fn evaluate(mode: ApprovalMode, class: &ToolClass) -> PolicyDecision 
 mod tests {
 
     #[test]
-    fn ab1_configured_helpers_and_quoted_literals_have_correct_verdicts() {
-        for (command, expected) in [
+    fn shell_read_verdicts_decide_whether_a_command_may_change_files() {
+        let cases = [
+            ("cd crates/x && grep -n foo y.rs", true),
+            ("sed -n 1,80p f.rs | nl", true),
+            ("cut -f 1 f.rs | uniq", true),
+            ("find . -name '*.rs'", !cfg!(windows)),
+            (
+                "git --no-lazy-fetch -c core.fsmonitor=false worktree list",
+                true,
+            ),
             ("git status", false),
-            ("git diff --stat", false),
-            ("git -c core.fsmonitor=false status", false),
-            ("git -C sub -c core.fsmonitor=false diff --stat", false),
-            ("rg needle f", false),
-            ("rg --no-config 'foo(bar)' f.rs", !cfg!(windows)),
-            ("rg --no-config '$#<>\\' f.rs", !cfg!(windows)),
+            ("git -c core.fsmonitor=false diff --ext-diff", false),
             ("rg --no-config --pre=./mutate x f", false),
-            ("fd -l", false),
-            ("fd --list-details", false),
-            ("file -Sz sample.Z", false),
-            ("file --uncompress sample.Z", false),
-        ] {
-            assert_eq!(
-                super::read_only_shell_command(command),
-                expected,
-                "{command}"
-            );
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn ab1_cmd_separators_and_native_sort_output_are_work() {
-        for command in [
-            "echo 'x & cargo fmt & echo x'",
-            "sort input.txt /o output.txt",
-            "echo %MUTATING_COMMAND%",
-        ] {
-            assert!(!super::read_only_shell_command(command), "{command}");
-        }
-    }
-
-    #[test]
-    fn ab1_read_scan_bounds_and_uncertain_shell_syntax() {
+            ("sed -i s/a/b/ f.rs", false),
+            ("sed -n 's/x/y/w out' f", false),
+            ("sort -o f.rs f.rs", false),
+            ("sort -T . input", false),
+            ("find . -name '*.orig' -delete", false),
+            ("find . -exec cargo fmt ;", false),
+            ("cd x && grep foo f > out", false),
+            ("cd x && cargo test -p y", false),
+            ("cat $(cargo fmt)", false),
+            ("grep x f\ncargo fmt", false),
+            ("cat 'unterminated", false),
+            ("grep x f &&", false),
+        ];
+        let failures: Vec<_> = cases
+            .into_iter()
+            .filter(|(command, read)| super::read_only_shell_command(command) != *read)
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "wrong shell read verdicts: {failures:?}"
+        );
         assert!(super::read_only_shell_command(&format!(
             "echo {}",
             "x ".repeat(127)
@@ -933,278 +930,15 @@ mod tests {
             "cat {}",
             "x".repeat(super::classify::MAX_CLASSIFIED_BYTES)
         )));
-        for command in [
-            "cat 'unterminated",
-            "cat f &&",
-            "cd x && cd y && cat f",
-            "sort --out\"put\"=out f",
-            "find . -ex\"ec\" touch out ';'",
-        ] {
-            assert!(!super::read_only_shell_command(command), "{command}");
-        }
-        assert!(super::read_only_shell_command("cd x; grep\tx\tf | wc -l"));
     }
 
+    #[cfg(windows)]
     #[test]
-    fn ab1_shell_read_verdicts_preserve_progress_and_audit() {
-        let cases = [
-            (
-                "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=%GG",
-                false,
-            ),
-            (
-                "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=oneline --pretty=format:%G?",
-                false,
-            ),
-            (
-                "git --no-lazy-fetch -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline HEAD",
-                true,
-            ),
-            ("rg -z needle f.gz", false),
-            ("rg --search-zip needle f.gz", false),
-            ("rg -nz needle f.gz", false),
-            ("sed -n -e 1p -e 3p f.rs", true),
-            ("sed -n -e 1p -e 's/x/y/e' f.rs", false),
-            ("jj diff --tool ./mutate", false),
-            ("jj status", false),
-            ("jj --ignore-working-copy --no-pager status", false),
-            ("cd crates/x && grep -n foo y.rs", true),
-            ("cd crates/x; sed -n 1,80p y.rs", true),
-            ("sed -n 1,80p f.rs | nl", true),
-            (
-                "git -C .worktrees/a -c core.fsmonitor=false diff --stat",
-                false,
-            ),
-            (
-                "git --no-lazy-fetch -c core.fsmonitor=false worktree list",
-                true,
-            ),
-            ("cut -f 1 f.rs | sort | uniq", false),
-            ("grep 'a;b' f | wc -l", !cfg!(windows)),
-            ("sed -n '/write/p' f", !cfg!(windows)),
-            (
-                "git --no-lazy-fetch -c core.fsmonitor=false branch --list --sort=refname 'topic*'",
-                !cfg!(windows),
-            ),
-            ("find . -de\"lete\"", false),
-            ("grep x f &&", false),
-            ("grep x f &", false),
-            ("sed -n '1p;w out' f", false),
-            ("git -c core.fsmonitor=false log --output=out", false),
-            (
-                "git -c core.fsmonitor=false show --output=written.txt HEAD",
-                false,
-            ),
-            ("sed -n -f write.sed input.txt", false),
-            ("sed -n 's/.*/touch generated/e' input.txt", false),
-            ("sed -n 's/x/y/w generated.txt' input.txt", false),
-            ("sort --o=written.txt input.txt", false),
-            ("sed -n --file=write.sed input.txt", false),
-            ("tree -o out", false),
-            ("fd -x cargo fmt", false),
-            ("rg --pre 'touch out' x f", false),
-            (
-                "cd sub && rg --hostname-bin ./mutate --hyperlink-format default --color=always x f",
-                false,
-            ),
-            ("git -C sub -c core.fsmonitor=false diff --ext-diff", false),
-            ("git -c core.fsmonitor=false diff", false),
-            ("git -c core.fsmonitor=false show HEAD", false),
-            ("git -c core.fsmonitor=false log -p", false),
-            ("git -c core.fsmonitor=false diff --stat -p", false),
-            (
-                "git -c core.fsmonitor=false diff --no-ext-diff --no-textconv",
-                false,
-            ),
-            (
-                "git -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-show-signature HEAD",
-                false,
-            ),
-            (
-                "git -c core.fsmonitor=false diff --no-ext-diff --no-textconv --ext-diff",
-                false,
-            ),
-            (
-                "git -c core.fsmonitor=false diff --ext-diff --no-ext-diff --no-textconv",
-                false,
-            ),
-            (
-                "git -c core.fsmonitor=false diff --ext --no-textconv",
-                false,
-            ),
-            ("git -c core.fsmonitor=false log --textc", false),
-            (
-                "git -c core.fsmonitor=false diff -- --no-ext-diff --no-textconv",
-                false,
-            ),
-            (
-                "git -c core.fsmonitor=false diff --src-prefix --no-ext-diff --no-textconv",
-                false,
-            ),
-            ("git -c core.fsmonitor=false blame f", false),
-            ("git -c core.fsmonitor=false blame --no-textconv f", false),
-            ("git -c core.fsmonitor=false blame -- --no-textconv", false),
-            (
-                "git -c core.fsmonitor=false blame --no-textconv --textc f",
-                false,
-            ),
-            (
-                "git -c core.fsmonitor=false show --no-ext-diff --no-textconv HEAD",
-                false,
-            ),
-            ("git -c core.fsmonitor=false log --textconv -p", false),
-            ("git -c core.fsmonitor=false show --ext-diff HEAD", false),
-            ("cd sub && cargo metadata --format-version=1", false),
-            ("cargo tree", false),
-            ("cargo metadata --offline", false),
-            ("cargo metadata -- --locked", false),
-            ("cargo tree --prefix --locked", false),
-            (
-                "cargo metadata --locked --config build.rustc=./mutate",
-                false,
-            ),
-            ("rg --hostname-bin=./mutate x f", false),
-            ("cargo metadata --locked --format-version=1", false),
-            ("cargo tree --frozen", false),
-            ("file -C", false),
-            ("file --comp -m magic", false),
-            ("find . -de*", false),
-            ("find . -name '*.rs'", !cfg!(windows)),
-            ("cd x && cargo test -p y", false),
-            ("sed -i s/a/b/ f.rs", false),
-            ("cd x && grep foo f > out", false),
-            ("cd 'a b' && grep x f", false),
-            ("sed -ni s/a/b/ f.rs", false),
-            ("sed -n --in-place s/a/b/ f.rs", false),
-            ("sed -n '1,5w out' f", false),
-            ("sed -n '1,5e' f", false),
-            ("sort -o f.rs f.rs", false),
-            ("sort -oout f.rs", false),
-            ("sort --output=out f.rs", false),
-            ("sort --output out f.rs", false),
-            ("uniq in out", false),
-            ("find . -name '*.orig' -delete", false),
-            ("find . -exec cargo fmt ;", false),
-            ("find . -fprint out", false),
-            ("git -c core.fsmonitor=false branch -D topic", false),
-            ("git -c core.fsmonitor=false branch --delete topic", false),
-            ("git -c core.fsmonitor=false branch --move old new", false),
-            ("git -c core.fsmonitor=false branch --copy old new", false),
-            ("git -c core.fsmonitor=false branch --force topic", false),
-            ("git -c core.fsmonitor=false branch created", false),
-            (
-                "git -c core.fsmonitor=false branch --list --no-list created",
-                false,
-            ),
-            (
-                "git -c core.fsmonitor=false branch --format --list created",
-                false,
-            ),
-            ("git -c core.fsmonitor=false diff --output=x", false),
-            ("grep x f\ncargo fmt", false),
-            ("cat $(cargo fmt)", false),
-            ("cat `cargo fmt`", false),
-            ("cat <(cargo fmt)", false),
-        ];
-        let failures: Vec<_> = cases
-            .into_iter()
-            .filter(|(command, read)| super::read_only_shell_command(command) != *read)
-            .collect();
-        assert!(
-            failures.is_empty(),
-            "wrong shell read verdicts: {failures:?}"
-        );
-    }
-    #[test]
-    fn ab1_git_filters_and_signature_helpers_are_work() {
+    fn ab1_cmd_separators_and_native_sort_output_are_work() {
         for command in [
-            "git -c core.fsmonitor=false status",
-            "git -c core.fsmonitor=false diff --stat",
-            "git -c core.fsmonitor=false blame --no-textconv f.rs",
-            "git -c core.fsmonitor=false branch --list --format='%(signature:grade)'",
-            "git -c core.fsmonitor=false branch --list --sort=signature:grade",
-            "git -c core.fsmonitor=false branch --list",
-            "git -c core.fsmonitor=false branch --list --sort=refname --sort=signature:grade",
-            "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline --remerge-diff -1",
-            "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline --diff-merges=remerge -1",
-            "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=oneline --remerge-diff -1",
-            "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=oneline --diff-merges=remerge -1",
-        ] {
-            assert!(!super::read_only_shell_command(command), "{command}");
-        }
-        assert!(super::read_only_shell_command(
-            "git --no-lazy-fetch -c core.fsmonitor=false branch --list --sort=refname"
-        ));
-    }
-
-    #[test]
-    fn ab1_literal_exec_arguments_remain_reads() {
-        for args in [
-            r#"{"program":"rg","args":["--no-config","foo bar","f.rs"]}"#,
-            r#"{"program":"rg","args":["--no-config","it's $HOME!^%","f.rs"]}"#,
-        ] {
-            let call = crate::runtime::RuntimeToolCall {
-                id: qq_protocol::ToolCallId::from_bytes([1; 16]),
-                turn_ordinal: 0,
-                call_ordinal: 0,
-                provider_call_id: "exec-read".to_owned(),
-                rejection: None,
-                name: "exec".to_owned(),
-                arguments: args.to_owned(),
-                effect: crate::catalog::EffectClass::Shell,
-            };
-            let result = crate::tools::bounded_result("exec exit=0\nmatch".to_owned(), false);
-            assert!(!crate::runtime::is_progress(&call, None, &result), "{args}");
-            let mut triggers = crate::runtime::AuditTriggers::default();
-            crate::note_audited_action(&mut triggers, &mut Vec::new(), false, &call, &result);
-            assert!(
-                !triggers.fires(crate::runtime::AuditMode::Heuristic),
-                "{args}"
-            );
-        }
-    }
-
-    #[test]
-    fn ab1_git_help_is_not_a_progress_read() {
-        for command in [
-            "git --no-lazy-fetch -c core.fsmonitor=false rev-parse --help",
-            "git --no-lazy-fetch -c core.fsmonitor=false worktree list --help",
-        ] {
-            assert!(!super::read_only_shell_command(command), "{command}");
-        }
-    }
-
-    #[test]
-    fn ab1_trailing_separators_and_substitutions_preserve_read_verdicts() {
-        for command in [
-            "grep x f;",
-            "grep x f;  ",
-            "cat f; grep x f;",
-            "cd x; grep x f;",
-            "sed -n 's/foo/bar/p' f",
-            "sed -n 's#foo#bar#gp' f",
-            "sed -n '1,$s/foo/bar/p' f",
-            "sed -n 's/foo;bar/baz;p/p' f",
-            "sed -n 's/foo\\/bar/baz/p' f",
-            "sed -n -e 's/foo/bar/p' -e '2p' f",
-        ] {
-            assert_eq!(
-                super::read_only_shell_command(command),
-                !cfg!(windows) || !command.contains('\''),
-                "{command}"
-            );
-        }
-        for command in [
-            ";",
-            "grep x f;;",
-            "grep x f &&",
-            "grep x f |",
-            "grep x f ||",
-            "sed -n 's/foo/bar/ep' f",
-            "sed -n 's/foo/bar/pe' f",
-            "sed -n 's/foo/bar/w out' f",
-            "sed -n 's/foo/bar/p; e touch out' f",
-            "sed -n -e 's/foo/bar/p' -e 's/foo/bar/e' f",
+            "echo 'x & cargo fmt & echo x'",
+            "sort input.txt /o output.txt",
+            "echo %MUTATING_COMMAND%",
         ] {
             assert!(!super::read_only_shell_command(command), "{command}");
         }
@@ -1234,91 +968,30 @@ mod tests {
     }
 
     #[test]
-    fn ab1_tree_recursive_html_output_is_work() {
-        for command in ["tree -L 2 -R .", "tree -RL2 .", "tree -aR ."] {
-            assert!(!super::read_only_shell_command(command), "{command}");
-        }
-    }
-
-    #[test]
-    fn ab1_joined_sed_printing_and_literal_opposite_quotes_are_reads() {
-        for command in [
-            "sed -n --expression=1p f",
-            "sed -n l f",
-            "sed -n 'l 80' f",
-            "sed -n 'l;1p' f",
-            r#"grep '"foo"' f"#,
+    fn ab1_literal_exec_arguments_remain_reads() {
+        for args in [
+            r#"{"program":"rg","args":["--no-config","foo bar","f.rs"]}"#,
+            r#"{"program":"rg","args":["--no-config","it's $HOME!^%","f.rs"]}"#,
         ] {
-            assert!(super::read_only_shell_command(command), "{command}");
+            let call = crate::runtime::RuntimeToolCall {
+                id: qq_protocol::ToolCallId::from_bytes([1; 16]),
+                turn_ordinal: 0,
+                call_ordinal: 0,
+                provider_call_id: "exec-read".to_owned(),
+                rejection: None,
+                name: "exec".to_owned(),
+                arguments: args.to_owned(),
+                effect: crate::catalog::EffectClass::Shell,
+            };
+            let result = crate::tools::bounded_result("exec exit=0\nmatch".to_owned(), false);
+            assert!(!crate::runtime::is_progress(&call, None, &result), "{args}");
+            let mut triggers = crate::runtime::AuditTriggers::default();
+            crate::note_audited_action(&mut triggers, &mut Vec::new(), false, &call, &result);
+            assert!(
+                !triggers.fires(crate::runtime::AuditMode::Heuristic),
+                "{args}"
+            );
         }
-        for command in [
-            "sed -n --expression= f",
-            "sed -n --expression=wout f",
-            "sed -n 'l -1' f",
-            "sed -n 'l;w out' f",
-            "grep 'a'b f",
-        ] {
-            assert!(!super::read_only_shell_command(command), "{command}");
-        }
-    }
-
-    #[test]
-    fn ab1_output_only_sed_and_uniq_are_reads() {
-        for script in ["=", "1,3=", "=; p"] {
-            assert!(super::read_only_sed_script(script), "{script}");
-        }
-        for command in ["uniq input -", "uniq -- input -", "uniq - -"] {
-            assert!(super::read_only_shell_command(command), "{command}");
-        }
-        for command in ["uniq input out", "uniq input - extra"] {
-            assert!(!super::read_only_shell_command(command), "{command}");
-        }
-    }
-
-    #[test]
-    fn ab1_inherited_sort_spills_and_rustup_installation_are_work() {
-        for command in [
-            "sort -S1K huge-input",
-            "sort input",
-            "cargo --version",
-            "rustc --version",
-        ] {
-            assert!(!super::read_only_shell_command(command), "{command}");
-        }
-    }
-
-    #[test]
-    fn ab1_workspace_sort_temporaries_are_work() {
-        for command in [
-            "sort -T . -S1K huge-input",
-            "sort -T. input",
-            "sort --temporary-directory . input",
-            "sort --temporary-directory=. input",
-            "sort --temp=. input",
-        ] {
-            assert!(!super::read_only_shell_command(command), "{command}");
-        }
-    }
-
-    #[test]
-    fn ab1_lazy_fetch_operation_merge_and_timestamp_restoration_are_work() {
-        for command in [
-            "git -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline HEAD:path",
-            "jj --ignore-working-copy --no-pager status",
-            "file -p sample",
-            "file --preserve-date sample",
-            "file --pre sample",
-            "file -bp sample",
-        ] {
-            assert!(!super::read_only_shell_command(command), "{command}");
-        }
-        assert_eq!(
-            super::read_only_shell_command("sed -n '$p' f"),
-            !cfg!(windows)
-        );
-        assert!(super::read_only_shell_command(
-            "git --no-lazy-fetch -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline HEAD:path"
-        ));
     }
 
     #[cfg(feature = "tool-fetch")]

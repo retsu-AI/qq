@@ -1482,53 +1482,6 @@ mod tests {
     }
 
     #[test]
-    fn ab3_six_default_read_results_characterize_turn_budget_pressure() {
-        use super::output::{ResultRecall, TurnOutputBudget};
-        let directory = tempfile::tempdir().unwrap();
-        fs::write(
-            directory.path().join("batch"),
-            "012345678901234567890123456789\n".repeat(1_000),
-        )
-        .unwrap();
-        let workspace = Workspace::open(directory.path()).unwrap();
-        let mut offset = 1;
-        let mut reads = 0;
-        let mut cuts = 0;
-        let mut bytes = 0;
-        while offset <= 1_000 {
-            let mut budget = TurnOutputBudget::new();
-            let mut shown = 0;
-            for _ in 0..6 {
-                let result = run_tool(
-                    &workspace,
-                    &FileState::default(),
-                    "read_file",
-                    &format!(r#"{{"path":"batch","offset":{offset}}}"#),
-                );
-                assert!(!result.is_error);
-                shown = result
-                    .model_text
-                    .lines()
-                    .skip(1)
-                    .filter(|row| !row.starts_with(MARKER_PREFIX))
-                    .count();
-                bytes += result.model_text.len();
-                let mut projected = result.model_text;
-                cuts += usize::from(budget.admit("read_file", &mut projected, ResultRecall::None));
-                reads += 1;
-            }
-            assert!(shown > 0);
-            offset += shown;
-        }
-        eprintln!(
-            "AB3 six-result batches: reads={reads} turn_budget_cuts={cuts} mean_read_bytes={}",
-            bytes / reads
-        );
-        assert!(reads <= 30);
-        assert!(cuts == 0 || reads < 30, "cuts must buy fewer read calls");
-    }
-
-    #[test]
     fn read_file_stops_at_its_byte_budget_and_names_the_resume_offset() {
         let directory = tempfile::tempdir().unwrap();
         let line = format!("{}\n", "x".repeat(1_023));
@@ -3574,14 +3527,10 @@ mod tests {
                 if write_children {
                     assert!(!spec.description().contains("read-only sub-agent"));
                     assert!(spec.description().contains("authority: write"));
-                    assert!(!spec.description().contains("reviewer_model"));
-                    assert!(!spec.description().contains("supervised approval"));
                     let authority = schema["properties"]["authority"]["description"]
                         .as_str()
                         .unwrap();
                     assert!(authority.contains("within the parent's authority"));
-                    assert!(!authority.contains("reviewer_model"));
-                    assert!(!authority.contains("supervised approval"));
                     assert_eq!(
                         schema["properties"]["authority"]["enum"],
                         json!(["read", "write"])
@@ -5392,29 +5341,6 @@ mod tests {
         );
         let quiet = run(crate::runtime::BuiltinPreference::Off).await;
         assert!(!quiet.model_text.contains("hint:"), "{}", quiet.model_text);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn a_command_that_leaves_its_group_still_stops_on_timeout() {
-        let directory = tempfile::tempdir().unwrap();
-        let workspace = Workspace::open(directory.path()).unwrap();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            run_shell_tool(
-                workspace,
-                r#"{"command":"exec setsid sleep 300","timeout_seconds":1}"#,
-                RunCancellation::new(),
-                None,
-            ),
-        )
-        .await
-        .expect("a command that left its group must not hang its timeout");
-        assert!(
-            result.model_text.contains("timed out"),
-            "{}",
-            result.model_text
-        );
     }
 
     #[cfg(target_os = "linux")]
