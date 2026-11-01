@@ -115,26 +115,23 @@ The TUI orders a run's items by `turn_ordinal`, rendering each turn's
 message followed by that turn's calls (`call_ordinal` order):
 
 ```
-   QQ
-   Sure, I'll look into that...
+  ┃ make the sse reconnect test deterministic
 
- ● Read   crates/qq-core/src/lib.rs                                 212 lines
- ● Search "ToolGate"                                        14 hits · 3 files
+  ● Read     crates/qq-client/src/sse.rs  412 lines
+  ✕ Ran      cargo test -p qq-client reconnect  exit 101
+  │ running 4 tests
+  │ test reconnect_replays ... FAILED
+  │ test result: FAILED. 3 passed; 1 failed
+  ◐ Editing  crates/qq-client/src/sse.rs
 
-   QQ
-   The gate resolves after the turn yields. Checking the store side...
-
- ● Read   crates/qq-core/src/sessions.rs                            488 lines
-
-   QQ
-   Here's what happens: ...
+    The test slept on wall-clock time; pausing the runtime clock removes the
+    race. Applying the edit now. More.▍
 ```
 
-The per-turn `QQ` header repeats only when a turn has text; consecutive
-call-only turns merge into one call group. Group folding (>3 quiet calls)
-applies per contiguous call group, not per run. The header is kept even
-for turns whose text is a single short interim line — consistency beats
-density.
+Answers carry no label, so a turn's text and its calls alternate with one
+blank row between them; consecutive call-only turns merge into one call
+group. Folding into a turn receipt (§ Tool Rows) applies per contiguous
+call group, not per run.
 
 Call groups do not require an assistant message as an anchor. The runtime
 deliberately persists no message row for a call-only turn, so the client renders
@@ -158,62 +155,75 @@ terminal viewport is reconstructed, checkpoints are bounded, and the
 authoritative string remains the source. This trades rich markdown styling on
 exceptionally large output for complete access and predictable frame work.
 
-## Turn Headers
+## Messages
 
-Every turn opens with a role header row, and the rows below it share the
-header's rail (`transcript::message_presentation`):
+No message has a role label; the rail says whose it is
+(`transcript::message_presentation`):
 
-- A user turn is `▌ YOU` in `accent` bold on an `accent` rail, and **every
-  row of the prompt keeps the `▌` rail**: wrapped rows, later paragraphs,
-  list items. The rail is the transcript's structural accent, so a prompt
-  reads as one bar down the left edge however long it is.
-- An assistant turn is `QQ` in `brand` bold — the one warm mark per turn —
-  over a three-cell blank rail. A message that is not complete carries its
-  state to the right of the label in the state's status color (`streaming`
-  in `accent`, `failed` in `error`, `queued`/`cancelled`/`interrupted` in
-  `warning`); `complete` is never written.
-- Steering rows keep the user rail and say what they are (`steering
-  waiting for the next turn`, `steered`, `steering  run finished first`);
-  a pending prompt is `▌ YOU  pending` in `warning` with a `warning` rail.
-  Reasoning rows open with `∴` and expand under a `┆` rail. None of these
-  differ from a turn header in geometry, only in wording and color.
-- The run's completion line (`✓ 42s · 3 tools · 12.3k tok · $0.04`) sits
-  under the run's last message at the prose column.
+- Your prompt is `┃` in `accent` followed by bold `text`, and **every row of
+  the prompt keeps the `┃` rail**: wrapped rows, later paragraphs, list
+  items. The rail is the transcript's structural accent, and the composer
+  uses the same one.
+- An answer is unlabelled markdown indented two columns. While it streams,
+  a `▍` caret in `accent` marks the tail.
+- A message's state, when it is not plain, is one row under it
+  (`transcript::message_note`). Steering prompts read `waiting for the next
+  turn`, `steered`, or `not sent · the run finished first` in `faint`;
+  other messages read `queued` in `faint`, `cancelled` or `interrupted` in
+  `warning`, or `✕ failed` in `error`. A pending prompt keeps a `faint` rail
+  with a `pending` row.
+- Reasoning is one `faint` row, `∴ thought for 12s`, after it finishes;
+  while it streams it shows only on the rule (`◐ thinking · 6s`). `Alt-R`
+  expands it under a `faint` `│` rail.
+- A completed run prints no completion line. Only a run that ends
+  `cancelled`, `interrupted`, `paused`, `budget exhausted` (`◌` in
+  `warning`) or `failed` (`✕` in `error`) gets one row after its last
+  message, with its duration when over one second.
+
+```
+    the model turn
+  ┃ pending steer: also check the tests
+    waiting for the next turn
+  ┃ applied steer: prefer edit_file
+    steered
+  ┃ late steer: never mind
+    not sent · the run finished first
+```
 
 ## Column Model
 
-The transcript has two columns: a **rail** in cells 1–2 and **content**
-from cell 3. Everything that is not prose lives in the rail; everything
-that is prose, or reads like it, starts at the content column:
+Content starts after the pane's 2-column margin and fills the pane width;
+there is no reading measure. Inside it, the first two cells are the **rail**
+and the rest is **content**:
 
 | Row | Rail | Content column |
 | --- | --- | --- |
-| User prompt | `▌ ` accent | `YOU`, then the prompt text |
-| Assistant | two blanks | `QQ`, then the message body |
-| Tool summary | state glyph (`●`, `◐`, `↻`, `!`, `✕`, `◇`, `○`, `◌`) | verb, subject, metric |
-| Folded call group | `▸` accent | `Read ×4  a.rs, b.rs` |
-| Selected tool row | `▶` in cell 0, glyph in cell 1 | unchanged |
+| User prompt | `┃ ` accent | the prompt text, bold |
+| Answer | two blanks | the message body |
+| Tool summary | state glyph (`●`, `◐`, `↻`, `✕`, `◇`, `○`, `◌`) | verb, subject, metric |
+| Turn receipt | `●` faint | `6 calls · read 2 · ran 2 …` |
+| Tool tail or detail | `│ ` faint | output, diff, or error rows |
+| Agent lane | `├ ` / `└ ` faint | glyph, title, activity |
 
-Because tool verbs, prose, and role labels share one column, the eye moves
-straight down the transcript; the rail glyphs alone say what kind of row
-each is (design principle 4). The transcript cursor marks the selected call
-with `▶` in the margin cell rather than shifting the row.
+The rail glyphs alone say what kind of row each is. The transcript cursor
+marks the selected call by painting its glyph in `accent` and its verb bold
+rather than shifting the row.
 
 ## Spacing
 
 Rhythm rules, applied in the transcript assembler:
 
-- One blank row of top padding ahead of the first transcript row, so the
-  body breathes under the top row. It is a body row like any other: it is
-  on screen exactly when the viewport reaches the top (short transcripts,
-  or scrolled all the way up) and is above the window otherwise. Scroll
-  offsets count from the tail, so it never moves the tail anchor.
-- One blank line between every block (message body ↔ call group ↔ next
-  turn's text). Two blank lines before each `YOU` prompt — the
-  prompt/response boundary is the strongest seam in the transcript.
-- Message bodies indent under their role header (a 3-column gutter);
-  call groups keep their own gutter glyphs so text and calls are
-  distinguishable by silhouette alone.
+- One blank row of top padding ahead of the first transcript row. It is a
+  body row like any other: it is on screen exactly when the viewport
+  reaches the top (short transcripts, or scrolled all the way up) and is
+  above the window otherwise. Scroll offsets count from the tail, so it
+  never moves the tail anchor.
+- One blank row between every block (prompt ↔ reasoning ↔ call group ↔
+  answer ↔ next prompt). A steering prompt follows the message before it
+  without a gap. There is no blank row between a tool row and its tail, or
+  between agent lanes.
+- Answers indent two columns; call groups keep their rail glyphs so text
+  and calls are distinguishable by silhouette alone.
 - Inside a message, markdown blocks are separated by exactly one blank
   row: paragraph, heading, list, quote, code panel, table, rule, and
   footnote definition each begin one row below the previous block. Items
@@ -299,39 +309,68 @@ Each tool call is one summary row (`tools::tool_summary_line`), built from
 the call's cached `ToolRow` (verb, subject, metric) plus the live clock:
 
 ```
- ● Read   crates/qq-client/src/sse.rs                          412 lines  0.4s
- ● Run    cargo test -p qq-client reconnect                     exit 101  3.2s
- ◐ Edit   crates/qq-client/src/sse.rs                            running  1.1s
+  ● Read     crates/qq-client/src/sse.rs  412 lines
+  ✕ Ran      cargo test -p qq-client reconnect  exit 101
+  │ running 4 tests
+  │ test reconnect_replays ... FAILED
+  │ test result: FAILED. 3 passed; 1 failed
+  ◐ Editing  crates/qq-client/src/sse.rs
 ```
 
 - The state glyph is in the rail; the verb starts at the content column,
-  padded to six cells so subjects align down a run.
-- **The metric and duration are right-aligned to the content width**, at
-  every width and in every pane, so the numbers form a column down the
-  right edge the way the verbs do down the left. The right side is `metric
-  [· truncated] [· state]  duration`; the state label appears for any call
-  that is not complete, in its status color.
-- The subject takes whatever is left between the verb and the right side.
-  Paths elide from the middle so the file name always survives; other
-  subjects truncate with `...`.
-- When the row cannot hold a six-cell subject plus the right side, the
-  duration is dropped first, then the metric, so the row degrades to verb
-  and subject before anything is cut. A row narrower than that is
-  truncated like any other line.
-- In folded detail a block of more than three quiet completed calls is one
-  row, `▸ Read ×4  Search ×2  a.rs, b.rs, c.rs, +1`, with the `▸` in the
-  rail and the text at the content column.
+  padded to nine cells (`tools::TOOL_VERB_WIDTH`) so subjects align down a
+  run. A settled call reads in the past tense (`Read`, `Listed`,
+  `Searched`, `Edited`, `Wrote`, `Ran`, `Spawned`); a running one in the
+  present (`Reading`, `Editing`, `Running`) with the shared `◐◓◑◒` spinner
+  in `info`.
+- The subject follows in `muted`, then **the metric two columns after it**
+  in `faint` (`412 lines`, `+4 −1`, `exit 101` in `error`), then the
+  duration when it is over one second. Nothing is right-aligned to the pane
+  edge. A call waiting on approval reads `waiting` in `warning`; the
+  approval itself is in the dock.
+- Paths elide from the middle so the file name always survives; other
+  subjects truncate with `…`.
+- When the row cannot hold a six-cell subject plus the tail, the duration
+  is dropped first, then the metric, so the row degrades to verb and
+  subject before anything is cut. Error labels are never dropped.
+- A shell or exec call that exits non-zero is `✕` with `exit N`, and keeps
+  a `faint` `│` tail of at most three rows (`MAX_TOOL_ERROR_ROWS`) under it.
+- **Turn receipt.** In folded detail (`Ctrl-O`), once every call in a group
+  has settled, its routine calls (completed, not failed, not edits, not
+  expanded or selected) collapse into one `faint` row; edits and failures
+  keep their own rows under it:
+
+  ```
+  ● 6 calls · read 2 · edited 2 · ran 2   2 files
+  ● Edited   crates/qq-tui/src/file_1.rs  6 B
+  ● Edited   crates/qq-tui/src/file_4.rs  6 B
+  ```
+
+  The receipt counts every call in the group by verb, then the files
+  edited with `+a −b` when the diffs report them, then the group's
+  duration when over one second.
+- **Agent lanes.** A session's child agents render as one header row and a
+  lane per agent. More than six fold to the six most urgent plus
+  `└ +N more  ^T`:
+
+  ```
+  ● Spawned  1 agent   ◇ 1
+  └ ◇ Deploy helper   wants to run a command
+  ```
+
+  The header tallies lanes by state (`◐ n  ◇ n  ● n  ✕ n`); each lane is
+  its agent's glyph, title, and live activity, or `done · N calls`.
 - **Error rows are graded, not uniform** (`ToolErrorKind`, tool-layer D9).
   The kind comes from the built-in tool name and result's leading error
   code (`ToolErrorKind::of`); external-tool errors remain failures regardless
   of their text. Every stored row grades the same with no wire field, and
   the model's text never changes:
 
-  | Kind | Codes | Glyph | Right side | Under the row |
+  | Kind | Codes | Glyph | Tail | Under the row |
   | --- | --- | --- | --- | --- |
-  | Correction | `invalid_*`, `bad_glob`, `cursor_invalid`, `not executed:`, `not_read:`, … | `↻` `muted` | `corrected` `muted` | nothing; the text is on expand |
-  | Outcome | `path_not_found`, `stale_file`, `not_found`, `range_out_of_bounds`, non-zero `shell`/`exec` exit, … | `!` `warning` | the code, `warning` | one row of the error tail |
-  | Failure | anything else, including unlisted codes | `✕` `error` | `failed` | the error panel |
+  | Correction | `invalid_*`, `bad_glob`, `cursor_invalid`, `not executed:`, `not_read:`, … | `↻` `faint` | `corrected` `muted` | nothing; the text is on expand |
+  | Outcome | `path_not_found`, `stale_file`, `not_found`, `range_out_of_bounds`, non-zero `shell`/`exec` exit, … | `✕` `error` | the code in `warning`, or `exit N` | one row of the error tail |
+  | Failure | anything else, including unlisted codes | `✕` `error` | `failed` | up to three rows of the error tail |
 
   A correction followed later in the block by a successful call to the
   same tool is the routine "model fixed its own argument" case: its row
@@ -341,46 +380,44 @@ the call's cached `ToolRow` (verb, subject, metric) plus the live clock:
 
 ### Tool Detail
 
-Everything a call shows beneath its summary row renders in the code panel
-(§ Code Blocks): the same `┃` rail in `border` on the `surface` tint, one
-padding cell, character-wrapped content with `↪` on continuation rows, and
-a blank surface row above and below. Output is visibly output, and it
-shares one implementation with fenced code (`markdown::panel_rows`); tool
-panels sit at the content column, the margin before the rail on the
-terminal background.
+Everything a call shows beneath its summary row hangs on the same `faint`
+`│` rail as a failed command's tail, at the content column, on the
+terminal background. Fenced code in answers keeps its `surface` panel
+(§ Code Blocks); tool output does not.
 
 ```
- ● Run    cargo test -p qq-client reconnect                     exit 101  3.2s
-   → 12:04:11 → 12:04:14
-   ┃
-   ┃  test result: FAILED. 1 passed; 1 failed
-   ┃
+  ● Read     crates/qq-tui/src/file_0.rs  20 lines
+  │ fn main() {}
+  │ fn main() {}
+  │ fn main() {}
+  │ … 17 more lines
+  ● Edited   crates/qq-tui/src/file_1.rs  6 B
+  │ edited
+  ● Ran      cargo test -p crate_2
+  │ test result: ok. 12 passed
 ```
 
-- The **timing line** (`started 12:04:11 → 12:04:14`, or the live elapsed
-  clock) stays `muted` above the panel, outside it.
 - **Expanded results** (read heads, command tails, MCP `key: value`
-  argument rows, then the result) fill one panel per call; argument rows
-  and result are separated by one blank surface row when both exist.
-- **Error tails** keep the `error` foreground on the surface.
-- **Diffs** keep their line numbers; `+`/`-` rows keep the add/remove
-  background inside the panel (a span's own background wins over the
-  surface, the U3 rule), and the gutter stays surface.
-- **Live output** of a running command renders in the same panel from the
-  first frame, so the panel does not jump when the call completes.
-- Panels carry no label: the summary row above already names the tool and
-  subject, and a language tag would need a grammar lookup per frame.
-- **Row budgets are unchanged**: each detail kind shows the same number of
-  content rows as before; the panel adds exactly its two padding rows
-  (`tools::TOOL_PANEL_PADDING_ROWS`) per expanded call. The approval block
-  is not a tool panel and renders as before.
+  argument rows, then the result) show at most three rows
+  (`MAX_TOOL_RESULT_ROWS`) in `muted`, with a `faint` `… N more lines` or
+  `…` marking what was cut. Argument rows and result are separated by one
+  blank rail row when both exist.
+- **Error tails** keep their `error` or `warning` foreground.
+- **Diffs** show line numbers in `faint` and `+`/`-` signs and text in the
+  diff colors, the same rows the approval panel draws
+  (`overlay::dock_diff_lines`).
+- **Live output** of a running command renders on the same rail from the
+  first frame, so nothing jumps when the call completes.
+- There is no timing line; the summary row carries the duration.
+- Detail carries no label: the summary row above already names the tool
+  and subject.
 
 ## Diffs
 
 Two sources render as unified diffs with per-line coloring:
 
-- `EditPreview.diff` in the approval modal (carried on
-  `ToolApprovalRequested`).
+- `EditPreview.diff` in the dock's approval panel (carried on
+  `ToolApprovalRequested`), at most 8 rows.
 - Completed `edit_file`/`write_file` calls at the expanded tool detail
   level, from the call's `display` payload — an extensible tagged
   snapshot field (first variant: diff) persisted alongside the result,
@@ -392,11 +429,11 @@ Two sources render as unified diffs with per-line coloring:
   truncation marker). Diff-shaped results without a payload (shell
   output, legacy stores) still color via shape detection.
 
-Coloring: `+` lines green, `-` lines red, `@@` hunk headers in the muted
-accent, context lines normal. Diff lines are literal (character wrap, no
-reflow). Expanded tool diffs and fenced blocks tagged ` ```diff ` render
-inside the code panel with the same coloring; the add/remove backgrounds
-win over the panel surface on those rows.
+Coloring: `+` lines green, `-` lines red, context lines normal, line
+numbers `faint`; `@@` hunk headers set the line numbers and are not drawn.
+Diff lines are literal (no reflow). Fenced blocks tagged ` ```diff ` render
+inside the code panel instead, where the add/remove backgrounds win over
+the panel surface.
 
 ## Streamed Tool Output
 
@@ -407,9 +444,8 @@ call completes.
 
 Live output is a tail, not a record: the client buffers at most 4 KiB
 per running call, dropping the head on a character boundary, and shows
-the last few complete lines (up to six rows, muted, character-wrapped,
-control characters stripped, inside the tool detail panel) at every
-detail level — a running command's
+the last few complete lines (up to three rows, muted, control characters
+stripped, on the `│` tail rail) at every detail level — a running command's
 output is the thing the user is waiting for. A trailing partial line
 waits for its newline. The buffer is discarded when the call reaches a
 terminal state or a snapshot reloads; the bounded result persisted on
@@ -417,10 +453,12 @@ the tool call is always authoritative.
 
 ## Run Activity
 
-While a run is working, the composer rule and the session's rail row say
-what it is doing. The words come from the run's latest `RunActivity`
-(`waiting for provider`, `reasoning`, `responding`, `preparing a tool
-call`, `compacting context`), and the composer rule adds the elapsed time.
+While a run is working, the rule and the session's sessions-column row say
+what it is doing. The words come from the running tool (`editing`,
+`running`) or the run's latest `RunActivity` (`waiting for model`,
+`thinking`, `writing`, `preparing a tool call`, `compacting context`), and
+the rule adds the elapsed time once it passes one second (`◐ editing ·
+14s`).
 The activity belongs to the session's active run, and only that run's
 reports change it (`qq-client` `state::reduce`):
 
@@ -434,7 +472,8 @@ reports change it (`qq-client` `state::reduce`):
   cancellation/recovery settles the prompt first: only the prompt raises
   completion attention or unread state. Unfinished step stats survive the
   prompt's transcript cleanup and expire when the step settles.
-- On the rail, a running session shows the first of: an approval wait, the
+- In the sessions column (its Wide second row) and on agent lanes, a
+  running session shows the first of: an approval wait, the
   running tool's verb, the streamed text tail, then the activity. The one
   exception is `compacting context`, which wins over the tail. The text a
   compacting run streamed before compacting is stale until the summary

@@ -1,40 +1,40 @@
- qq  Session 0                                                                                   openai/gpt-test  $0.00
-   1. First numbered item                                                                   │ IDLE  3
-   2. Second numbered item that is deliberately long enough to wrap onto a second row at    │ ○ Session 0
-      this width                                                                            │ ○ Session 1
-   3. Third numbered item                                                                   │ ○ Session 2
-     ◦ nested bullet under three                                                            │
-                                                                                            │
-   • A bullet item that is also deliberately long enough to wrap onto a second physical row │
-     here                                                                                   │
-   • Short bullet                                                                           │
-   ☐ open task                                                                              │
-   ☑ done task                                                                              │
-                                                                                            │
-   ▎ A quote long enough to wrap onto a second row so we can see whether the rail repeats.  │
-                                                                                            │
-   Some emphasis, some strong, some inline code, a link, a footnote[1], and math $x^2$.     │
-                                                                                            │
-   The footnote body.                                                                       │
-                                                                                            │
-   ┃                                                                                   rust │
-   ┃  fn main() {                                                                           │
-   ┃      let x = 1;                                                                        │
-   ┃      if x > 0 {                                                                        │
-   ┃          println!("{x}");                                                              │
-   ┃      }                                                                                 │
-   ┃  }                                                                                     │
-   ┃                                                                                        │
-                                                                                            │
-   Role  │ Default                                                                          │
-   ──────┼──────────                                                                        │
-   text  │ white                                                                            │
-   muted │ dark grey                                                                        │
-                                                                                            │
-   ─────────────────────────────────────────────────────────────────────────────────────────│
-                                                                                            │
-   Tail paragraph.                                                                          │
-   ✓ 0.0s · ttft 0.0s                                                                       │
-──────────────────────────────────────────────────────────────────────────────────────── ? help  ^K commands  ^O detail
- › Ask QQ...
+    1. First numbered item
+    2. Second numbered item that is deliberately long enough to wrap onto a second row      RECENT
+       at this width                                                                      ▎ 1 ○ Session 0
+    3. Third numbered item                                                                  2 ○ Session 1
+      ◦ nested bullet under three                                                           3 ○ Session 2
 
+    • A bullet item that is also deliberately long enough to wrap onto a second
+      physical row here
+    • Short bullet
+    ☐ open task
+    ☑ done task
+
+    ▎ A quote long enough to wrap onto a second row so we can see whether the rail
+    ▎ repeats.
+
+    Some emphasis, some strong, some inline code, a link, a footnote[1], and math
+    $x^2$.
+
+    The footnote body.
+
+    ┃                                                                            rust
+    ┃  fn main() {
+    ┃      let x = 1;
+    ┃      if x > 0 {
+    ┃          println!("{x}");
+    ┃      }
+    ┃  }
+    ┃
+
+    Role  │ Default
+    ──────┼──────────
+    text  │ white
+    muted │ dark grey
+
+    ──────────────────────────────────────────────────────────────────────────────────
+
+    Tail paragraph.
+  ────────────────────────────────────────────────────────────────────────────────────
+  ┃ Ask QQ…
+    Session 0 · gpt-test                                                    /workspace

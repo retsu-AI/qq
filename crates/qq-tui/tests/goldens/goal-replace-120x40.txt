@@ -1,40 +1,40 @@
- qq  Session 0                                                                                   openai/gpt-test  $0.00
- REPLACE GOAL review specification                                                          │ IDLE  3
-Replace this goal? y confirms · n edits · PgUp/PgDn review · Esc cancels                    │ ○ Session 0
-Replaces: Finish the billing migration                                                      │ ○ Session 1
-                                                                                            │ ○ Session 2
-  Objective                                                                                 │
-finish the migration and verify the workspace                                               │
-                                                                                            │
-> Check command (optional; consent is separate)                                             │
-cargo test --workspace                                                                      │
-                                                                                            │
-  Budget: Configured defaults                                                               │
-200 runs; 24h from submission; per-run model turns: 256                                     │
-Check commands require separate /goal check consent. Editing a stopped goal does not resume │
-it.                                                                                         │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
-                                                                                            │
- goal · achieved ───────────────────────────────────────────────────────────────────────────────────────────────────────
- › Ask QQ...
 
+    Ask QQ to begin this session.                                                           RECENT
+                                                                                          ▎ 1 ○ Session 0
+                                                                                            2 ○ Session 1
+                                                                                            3 ○ Session 2
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ○ goal achieved ────────────────────────────────────────────────────────────────────
+    Replace goal
+    replaces  Finish the billing migration
+    Objective
+    finish the migration and verify the workspace
+  ▎ Check command  optional
+    cargo test --workspace
+    Budget
+    configured defaults · 200 runs · 24h · 256 turns per run
+    A check command runs only after /goal check consent.
+  ┃ y replace   n edit   esc back
+    Session 0 · gpt-test                                                    /workspace

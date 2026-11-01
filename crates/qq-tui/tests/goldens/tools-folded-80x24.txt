@@ -1,13 +1,11 @@
- qq  Session 0                                           openai/gpt-test  $0.00
 
- ▌ YOU
- ▌ clean up the renderer
+  ┃ clean up the renderer
 
-   QQ
-   Done. Every file compiles.
+    Done. Every file compiles.
 
- ▸ Read ×2  Edit ×2  Run ×2  file_0.rs, file_1.rs, file_3.rs, +1
-   ✓ 0.0s · 6 tools · ttft 0.0s
+  ● 4 calls · read 2 · ran 2   2 files
+  ● Edited   crates/qq-tui/src/file_1.rs  6 B
+  ● Edited   crates/qq-tui/src/file_4.rs  6 B
 
 
 
@@ -18,7 +16,9 @@
 
 
 
- 3 agents
-──────────────────────────────────────────────── ? help  ^K commands  ^O detail
- › Ask QQ...
 
+
+
+  ───────────────────────────────────────────────────────────────── 3 sessions
+  ┃ Ask QQ…
+    Session 0 · gpt-test

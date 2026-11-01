@@ -1,16 +1,5 @@
- qq  Session 0                                           openai/gpt-test  $0.00
- CREATE GOAL review specification
-Tab / ↑↓ fields · ←→ budget preset · Enter submits · Esc cancels
-  Objective
-finish the migration and verify the workspace
 
-> Check command (optional; consent is separate)
-cargo test --workspace▏
-
-  Budget: Configured defaults
-200 runs; 24h from submission; per-run model turns: 256
-Check commands require separate /goal check consent. Editing a stopped goal does
-not resume it.
+    Ask QQ to begin this session.
 
 
 
@@ -18,7 +7,18 @@ not resume it.
 
 
 
- 3 agents
-────────────────────────────────────────────────────────────────────────────────
- › Ask QQ...
 
+
+
+
+  ───────────────────────────────────────────────────────────────── 3 sessions
+    New goal
+    Objective
+    finish the migration and verify the workspace
+  ▎ Check command  optional
+    cargo test --workspace▏
+    Budget
+    configured defaults · 200 runs · 24h · 256 turns per run
+    A check command runs only after /goal check consent.
+  ┃ tab next field   ←→ budget   enter create   esc back
+    Session 0 · gpt-test

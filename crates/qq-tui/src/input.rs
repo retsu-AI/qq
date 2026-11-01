@@ -168,21 +168,23 @@ impl PickerItem for GoalCheckRow {
     }
 }
 
+pub(crate) const GOAL_CHECK_PAGE_ROWS: usize = 1;
+
 pub(crate) const GOAL_CHECK_ROWS: [GoalCheckRow; 3] = [
     GoalCheckRow {
         scope: None,
-        label: "Deny",
-        description: "withhold check consent; pause an active goal",
+        label: "deny",
+        description: "withhold consent; pause an active goal",
     },
     GoalCheckRow {
         scope: Some(qq_protocol::GoalCheckScope::Once),
-        label: "Allow once",
-        description: "one start only; failure does not refund consent",
+        label: "allow once",
+        description: "one start; a failure does not refund it",
     },
     GoalCheckRow {
         scope: Some(qq_protocol::GoalCheckScope::ForGoal),
-        label: "Allow repeated checks for this goal",
-        description: "only this goal and its exact check command",
+        label: "allow repeated checks",
+        description: "this goal and this exact command only",
     },
 ];
 
@@ -328,11 +330,11 @@ impl Overlay {
                 picker, detail_row, ..
             } => match key.code {
                 KeyCode::PageUp => {
-                    *detail_row = detail_row.saturating_sub(10);
+                    *detail_row = detail_row.saturating_sub(GOAL_CHECK_PAGE_ROWS);
                     PickerOutcome::Changed
                 }
                 KeyCode::PageDown => {
-                    *detail_row = detail_row.saturating_add(10);
+                    *detail_row = detail_row.saturating_add(GOAL_CHECK_PAGE_ROWS);
                     PickerOutcome::Changed
                 }
                 _ => dispatch(picker, key),

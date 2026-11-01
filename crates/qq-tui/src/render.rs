@@ -148,6 +148,10 @@ pub(crate) fn muted() -> Style {
     Style::color(theme::active().muted)
 }
 
+pub(crate) fn faint() -> Style {
+    Style::color(theme::active().faint)
+}
+
 pub(crate) fn accent() -> Style {
     Style::color(theme::active().accent)
 }
