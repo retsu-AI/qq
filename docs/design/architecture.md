@@ -1720,7 +1720,9 @@ The store must preserve at least:
 - Ordered events required for SSE replay.
 - Model/provider metadata needed to explain and resume a session.
 
-Schema migrations are part of the binary. Chat history must survive process
+Schema migrations are part of the binary. They start at schema 25, the store
+v0.0.1 shipped; an older store fails to open with `UnsupportedStoreSchema`
+instead of migrating. Chat history must survive process
 restarts, and a failed write must not be presented to clients as durable. Do
 not introduce an external database until measurements show SQLite is the
 bottleneck.

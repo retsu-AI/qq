@@ -2601,6 +2601,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::ShutdownTimedOut
         | SessionRuntimeError::Unavailable
         | SessionRuntimeError::StoreBusy
+        | SessionRuntimeError::UnsupportedStoreSchema { .. }
         | SessionRuntimeError::Persistence(_) => ServerHandlerError::Internal,
     }
 }

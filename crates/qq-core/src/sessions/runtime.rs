@@ -1458,6 +1458,10 @@ pub enum SessionRuntimeError {
     Unavailable,
     #[error("session store is owned by another running qq process")]
     StoreBusy,
+    #[error(
+        "session store schema {found} predates the oldest supported schema {oldest} (qq v0.0.1); move the store aside to start a new one"
+    )]
+    UnsupportedStoreSchema { found: u16, oldest: u16 },
     #[error("session persistence failed: {0}")]
     Persistence(PersistenceFault),
 }
