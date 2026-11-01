@@ -175,7 +175,7 @@ its path onto the client machine. Listing neither registers a directory nor
 changes permissions.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v42/`; the `v17`–`v41` directories are
+`crates/qq-protocol/tests/fixtures/v42/`; the `v41` directory (N−1) is
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
