@@ -5205,6 +5205,7 @@ async fn a_text_only_slice_report_is_never_audited_or_treated_as_the_answer() {
         requests: Arc::clone(&parent_requests),
         checkpoint_wait: None,
         metered_empty_checkpoint: false,
+        slice_calls: crate::MAX_TOOL_CALLS_PER_SLICE,
     });
     let auditor_requests = Arc::new(StdMutex::new(Vec::new()));
     let auditor: Arc<dyn Provider> = Arc::new(VerdictProvider {

@@ -854,6 +854,7 @@ pub struct Runtime {
     pub(crate) process_producer: Arc<ProcessProducer>,
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
     pub(crate) turn_recovery: TurnRecoveryPolicy,
+    pub(crate) tool_calls_per_slice: usize,
 }
 
 impl Runtime {
@@ -903,12 +904,19 @@ impl Runtime {
             process_producer: Arc::default(),
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
+            tool_calls_per_slice: MAX_TOOL_CALLS_PER_SLICE,
         })
     }
 
     #[must_use]
     pub const fn with_turn_recovery(mut self, policy: TurnRecoveryPolicy) -> Self {
         self.turn_recovery = policy;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn with_tool_calls_per_slice(mut self, calls: usize) -> Self {
+        self.tool_calls_per_slice = calls;
         self
     }
 

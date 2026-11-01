@@ -699,10 +699,13 @@ impl Provider for ToolLoopProvider {
     }
 }
 
+const SHORT_SLICE_CALLS: usize = 2 * crate::MAX_TOOL_CALLS_PER_TURN;
+
 struct RenewableSliceLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
     checkpoint_wait: Option<Arc<tokio::sync::Notify>>,
     metered_empty_checkpoint: bool,
+    slice_calls: usize,
 }
 
 struct TruncatedReportProvider {
@@ -776,6 +779,7 @@ impl RuntimeLoader for TruncatedReportLoader {
                         requests,
                         checkpoint_wait: None,
                         metered_empty_checkpoint: false,
+                        slice_calls: SHORT_SLICE_CALLS,
                     },
                     truncated: StdMutex::new(false),
                     fault,
@@ -783,7 +787,13 @@ impl RuntimeLoader for TruncatedReportLoader {
                 "test-model",
                 256,
             )
-            .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+            .map(|runtime| {
+                loaded_runtime(
+                    runtime.with_tool_calls_per_slice(SHORT_SLICE_CALLS),
+                    &request.workspace,
+                    None,
+                )
+            })
             .map_err(|error| RuntimeLoadError {
                 kind: RunFailureKind::Configuration,
                 message: error.to_string(),
@@ -815,13 +825,20 @@ impl RuntimeLoader for GatedSliceLoader {
                         requests,
                         checkpoint_wait: None,
                         metered_empty_checkpoint: false,
+                        slice_calls: SHORT_SLICE_CALLS,
                     },
                     gate,
                 },
                 "test-model",
                 256,
             )
-            .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+            .map(|runtime| {
+                loaded_runtime(
+                    runtime.with_tool_calls_per_slice(SHORT_SLICE_CALLS),
+                    &request.workspace,
+                    None,
+                )
+            })
             .map_err(|error| RuntimeLoadError {
                 kind: RunFailureKind::Configuration,
                 message: error.to_string(),
@@ -868,19 +885,21 @@ impl RuntimeLoader for RenewableSliceLoader {
         let requests = Arc::clone(&self.requests);
         let checkpoint_wait = self.checkpoint_wait.clone();
         let metered_empty_checkpoint = self.metered_empty_checkpoint;
+        let slice_calls = self.slice_calls;
         Box::pin(async move {
             Runtime::new(
                 RenewableSliceProvider {
                     requests,
                     checkpoint_wait,
                     metered_empty_checkpoint,
+                    slice_calls,
                 },
                 "test-model",
                 256,
             )
             .map(|runtime| {
                 loaded_runtime(
-                    runtime,
+                    runtime.with_tool_calls_per_slice(slice_calls),
                     &request.workspace,
                     metered_empty_checkpoint.then_some(ModelPricing {
                         input_usd_nanos_per_token: 1_000,
@@ -904,6 +923,7 @@ struct RenewableSliceProvider {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
     checkpoint_wait: Option<Arc<tokio::sync::Notify>>,
     metered_empty_checkpoint: bool,
+    slice_calls: usize,
 }
 
 impl Provider for RenewableSliceProvider {
@@ -913,7 +933,7 @@ impl Provider for RenewableSliceProvider {
         requests.push(request.clone());
         drop(requests);
 
-        let tool_turns = crate::MAX_TOOL_CALLS_PER_SLICE / crate::MAX_TOOL_CALLS_PER_TURN;
+        let tool_turns = self.slice_calls / crate::MAX_TOOL_CALLS_PER_TURN;
         let checkpoint_request =
             request.messages().last() == Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE));
         if checkpoint_request {
