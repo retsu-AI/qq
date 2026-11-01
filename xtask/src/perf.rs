@@ -1896,6 +1896,7 @@ enum ProviderMode {
     TextThenHang {
         total_bytes: usize,
         chunk_bytes: usize,
+        chunk_pause: Duration,
         streams: Arc<std::sync::atomic::AtomicUsize>,
     },
     Faulting,
@@ -2104,11 +2105,13 @@ impl Provider for BenchmarkProvider {
             ProviderMode::TextThenHang {
                 total_bytes,
                 chunk_bytes,
+                chunk_pause,
                 streams,
             } => {
                 let first = streams.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
                 let total_bytes = *total_bytes;
                 let chunk_bytes = *chunk_bytes;
+                let chunk_pause = *chunk_pause;
                 let marks = self.marks.clone();
                 Box::pin(async_stream::stream! {
                     if let Err(error) = send_provider_mark(&marks, ProviderMarkKind::FirstDelta) {
@@ -2124,7 +2127,7 @@ impl Provider for BenchmarkProvider {
                         let bytes = remaining.min(chunk_bytes);
                         remaining -= bytes;
                         yield Ok(ProviderEvent::OutputTextDelta { text: "x".repeat(bytes) });
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        tokio::time::sleep(chunk_pause).await;
                     }
                     yield Ok(ProviderEvent::Completed { usage: None });
                 })
@@ -2566,7 +2569,8 @@ async fn run_workloads(
         "[perf +{:?}] busy-workspace acknowledgements",
         started.elapsed()
     );
-    let (busy_metrics, busy_checks) = busy_workspace_ack_workloads(samples).await?;
+    let (busy_metrics, busy_checks) =
+        busy_workspace_ack_workloads(samples, BusyHistory::PACED).await?;
     metrics.extend(busy_metrics);
     checks.extend(busy_checks);
 
@@ -4031,14 +4035,29 @@ async fn subscriber_fan_out_workloads(
     Ok((metrics, checks))
 }
 
+struct BusyHistory {
+    chunks: usize,
+    chunk_bytes: usize,
+    chunk_pause: Duration,
+}
+
+impl BusyHistory {
+    const PACED: Self = Self {
+        chunks: 560,
+        chunk_bytes: 1024,
+        chunk_pause: Duration::from_millis(10),
+    };
+}
+
 async fn busy_workspace_ack_workloads(
     samples: u16,
+    history: BusyHistory,
 ) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>), PerfError> {
-    const HISTORY_BYTES: usize = 560 * 1024;
     let acks = samples.clamp(10, 50);
     let mut fixture = RuntimeFixture::open(ProviderMode::TextThenHang {
-        total_bytes: HISTORY_BYTES,
-        chunk_bytes: 1024,
+        total_bytes: history.chunks * history.chunk_bytes,
+        chunk_bytes: history.chunk_bytes,
+        chunk_pause: history.chunk_pause,
         streams: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     })
     .await?;
@@ -5421,7 +5440,12 @@ mod tests {
 
     #[tokio::test]
     async fn busy_workspace_fixture_seeds_a_long_history() {
-        let (metrics, checks) = busy_workspace_ack_workloads(10).await.unwrap();
+        let history = BusyHistory {
+            chunks: 505,
+            chunk_bytes: 8 * 1024,
+            chunk_pause: Duration::ZERO,
+        };
+        let (metrics, checks) = busy_workspace_ack_workloads(10, history).await.unwrap();
         assert_eq!(metrics.len(), 1);
         assert!(checks[0].passed, "{}", checks[0].detail);
     }
@@ -5776,7 +5800,7 @@ mod tests {
 
         let error = command_bytes_bounded(
             "captured-output timeout regression",
-            Duration::from_secs(1),
+            Duration::from_millis(100),
             &mut command,
         )
         .await
