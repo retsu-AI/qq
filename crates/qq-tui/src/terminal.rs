@@ -447,7 +447,14 @@ where
             }
         }
         if quit {
-            if let Some(latest) = next_copy.or(copying) {
+            if copying.is_some() {
+                while let Some(result) = jobs.next().await {
+                    if matches!(result, BackgroundResult::Copied { .. }) {
+                        break;
+                    }
+                }
+            }
+            if let Some(latest) = next_copy {
                 crate::clipboard::run_helpers(clipboard.helpers.clone(), latest.text).await;
             }
             break;

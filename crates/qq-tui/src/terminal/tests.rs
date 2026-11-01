@@ -949,14 +949,30 @@ async fn a_drag_over_chrome_only_copies_nothing_and_says_so() {
 #[cfg(unix)]
 #[tokio::test]
 async fn quitting_right_after_a_copy_still_finishes_the_helper_write() {
+    for (commands, want) in [
+        (&["/copy"][..], "hello world\n\n```\ncode\n```|"),
+        (
+            &["/copy", "/copy code"][..],
+            "hello world\n\n```\ncode\n```|code|",
+        ),
+    ] {
+        let written = copy_then_quit(commands).await;
+        assert_eq!(written, want, "{commands:?}");
+    }
+}
+
+#[cfg(unix)]
+async fn copy_then_quit(commands: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("clipboard");
     let path: &'static str = Box::leak(target.to_string_lossy().into_owned().into_boxed_str());
-    let args: &'static [&'static str] = Box::leak(vec![path].into_boxed_slice());
     let mut harness = Harness::new(64);
+    let script: &'static str =
+        Box::leak(format!("cat >> '{path}'; printf '|' >> '{path}'").into_boxed_str());
+    let args: &'static [&'static str] = Box::leak(vec!["-c", script].into_boxed_slice());
     harness.clipboard = crate::clipboard::Clipboard {
         helpers: vec![crate::clipboard::Helper {
-            program: "tee",
+            program: "sh",
             args,
         }],
         tmux: false,
@@ -966,17 +982,19 @@ async fn quitting_right_after_a_copy_still_finishes_the_helper_write() {
         1,
         vec![MessageSnapshot {
             state: MessageState::Complete,
-            ..assistant_message(1, "hello world")
+            ..assistant_message(1, "hello world\n\n```\ncode\n```")
         }],
     )));
     let task = harness.spawn(app);
-    for character in "/copy".chars() {
-        harness.key(KeyCode::Char(character), KeyModifiers::NONE);
+    for command in commands {
+        for character in command.chars() {
+            harness.key(KeyCode::Char(character), KeyModifiers::NONE);
+        }
+        harness.key(KeyCode::Enter, KeyModifiers::NONE);
     }
-    harness.key(KeyCode::Enter, KeyModifiers::NONE);
     harness.quit();
     task.await.expect("loop task").expect("loop exits cleanly");
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello world");
+    std::fs::read_to_string(&target).unwrap()
 }
 
 #[tokio::test(start_paused = true)]
