@@ -3834,14 +3834,24 @@ async fn the_proactive_threshold_stubs_stale_reads_before_it_compacts() {
 
 #[tokio::test]
 async fn a_session_without_a_window_still_sheds_stale_reads_before_the_storage_backstop() {
+    const NOTES: usize = 3;
     let note = format!("{}\n", "n".repeat(127)).repeat(720);
-    let runs = (4 * 1024 * 1024 - 512 * 1024) / (26 * 1024) + 4;
+    let runs = (4 * 1024 * 1024 - 512 * 1024) / (NOTES * 26 * 1024) + 4;
     let mut scripts: Vec<AutoCompactScript> = (0..runs)
-        .map(|_| AutoCompactScript::ReadNoteThenText("ok".to_owned()))
+        .map(|_| AutoCompactScript::ReadNotesThenText {
+            notes: NOTES,
+            text: "ok".to_owned(),
+        })
         .collect();
     scripts.push(AutoCompactScript::Text("still fits".to_owned()));
     let mut harness = auto_compact_harness_with_limits(scripts, None, 16_384).await;
-    std::fs::write(harness.workspace_path.join("note.txt"), &note).unwrap();
+    for index in 0..NOTES {
+        std::fs::write(
+            harness.workspace_path.join(format!("note-{index}.txt")),
+            &note,
+        )
+        .unwrap();
+    }
     for index in 0..=runs {
         let run = queue_prompt(
             &harness.runtime,

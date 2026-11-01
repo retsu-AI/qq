@@ -2795,6 +2795,10 @@ enum AutoCompactScript {
     Truncated(String),
     TextThenTransportFault(String),
     ReadNoteThenText(String),
+    ReadNotesThenText {
+        notes: usize,
+        text: String,
+    },
     ReadNoteRepeatedly {
         turns: usize,
         text: String,
@@ -3106,6 +3110,31 @@ impl Provider for AutoCompactProvider {
                         }),
                         Ok(qq_provider::ProviderEvent::Completed { usage: None }),
                     ]))
+                }
+            }
+            AutoCompactScript::ReadNotesThenText { notes, text } => {
+                if already_read {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    let mut events = Vec::new();
+                    for note in 0..*notes {
+                        let id = format!("call_read_{note}");
+                        events.push(Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: "read_file".to_owned(),
+                        }));
+                        events.push(Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            json: serde_json::json!({"path": format!("note-{note}.txt")})
+                                .to_string(),
+                        }));
+                        events.push(Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }));
+                    }
+                    events.push(Ok(qq_provider::ProviderEvent::Completed { usage: None }));
+                    Box::pin(stream::iter(events))
                 }
             }
             AutoCompactScript::ReadNoteThenTextMeasured { text, input_tokens } => {
