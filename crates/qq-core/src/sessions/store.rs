@@ -476,6 +476,8 @@ impl Store {
         if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
             return Err(SessionRuntimeError::SideQuestionTimedOut);
         }
+        #[cfg(test)]
+        let job = worker::hold_paused_clock(job);
         match self.inner.control.try_send(WorkerMessage::Run {
             job,
             joins: worker::Joins::OutputGroup,
@@ -550,6 +552,8 @@ impl Store {
                     .map_err(|_| SessionRuntimeError::Unavailable)?,
             ),
         };
+        #[cfg(test)]
+        let job = worker::hold_paused_clock(job);
         let message = WorkerMessage::Run {
             job,
             joins,

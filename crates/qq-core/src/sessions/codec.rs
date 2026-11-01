@@ -303,8 +303,8 @@ pub(super) fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
     value
 }
 
+#[cfg(test)]
 pub(super) fn now_ms() -> u64 {
-    #[cfg(test)]
     if let Some(now) = TEST_EPOCH.with(|epoch| {
         epoch
             .borrow()
@@ -313,6 +313,25 @@ pub(super) fn now_ms() -> u64 {
     }) {
         return now;
     }
+    static ANCHOR: std::sync::OnceLock<(std::time::Instant, Duration)> = std::sync::OnceLock::new();
+    let (anchor, anchor_wall) = *ANCHOR.get_or_init(|| {
+        (
+            std::time::Instant::now(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default(),
+        )
+    });
+    let now = tokio::time::Instant::now().into_std();
+    let wall = match now.checked_duration_since(anchor) {
+        Some(after) => anchor_wall.saturating_add(after),
+        None => anchor_wall.saturating_sub(anchor.duration_since(now)),
+    };
+    wall.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+#[cfg(not(test))]
+pub(super) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

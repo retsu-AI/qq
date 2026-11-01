@@ -802,7 +802,7 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
     }
     for goal_deadline in [false, true] {
         let start = 1_800_000_000_000;
-        let epoch = super::goal_driver_soak::Epoch::new(start);
+        let epoch = super::PinnedCalendar::new(start);
         let directory = TempDir::new().unwrap();
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());

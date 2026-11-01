@@ -20,6 +20,31 @@ pub(super) struct JobOutcome {
 
 pub(super) type DatabaseJob = Box<dyn FnOnce(&mut Connection) -> JobOutcome + Send + 'static>;
 
+#[cfg(test)]
+pub(super) fn hold_paused_clock(job: DatabaseJob) -> DatabaseJob {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return job;
+    };
+    if runtime.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread {
+        return job;
+    }
+    let (done, finished) = std::sync::mpsc::sync_channel::<()>(1);
+    drop(runtime.spawn_blocking(move || {
+        let _ = finished.recv();
+    }));
+    Box::new(move |connection| {
+        let outcome = job(connection);
+        let settle = outcome.settle;
+        JobOutcome {
+            error: outcome.error,
+            settle: Box::new(move |commit| {
+                settle(commit);
+                let _ = done.send(());
+            }),
+        }
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Joins {
     Never,
@@ -54,12 +79,17 @@ pub(super) fn start(
     let (ready_tx, ready) = oneshot::channel();
     let (closed_tx, closed) = watch::channel(false);
     #[cfg(test)]
-    let epoch = crate::sessions::codec::TEST_EPOCH.with(|epoch| epoch.borrow().clone());
+    let (epoch, clock) = (
+        crate::sessions::codec::TEST_EPOCH.with(|epoch| epoch.borrow().clone()),
+        tokio::runtime::Handle::try_current().ok(),
+    );
     let worker = thread::Builder::new()
         .name("qq-session-store".to_owned())
         .spawn(move || {
             #[cfg(test)]
             crate::sessions::codec::TEST_EPOCH.with(|slot| slot.replace(epoch));
+            #[cfg(test)]
+            let _clock = clock.as_ref().map(tokio::runtime::Handle::enter);
             let ownership = acquire_ownership(&path);
             match ownership.and_then(|ownership| open_database(&path).map(|db| (ownership, db))) {
                 Ok((ownership, (mut connection, store_id))) => {

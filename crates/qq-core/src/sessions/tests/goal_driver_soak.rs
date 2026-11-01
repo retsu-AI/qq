@@ -61,36 +61,6 @@ enum Output {
     Event(Box<SessionEventEnvelope>),
 }
 
-pub(super) struct Epoch {
-    now: Arc<std::sync::atomic::AtomicU64>,
-    previous: Option<Arc<std::sync::atomic::AtomicU64>>,
-    thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
-}
-
-impl Epoch {
-    pub(super) fn new(now: u64) -> Self {
-        let now = Arc::new(std::sync::atomic::AtomicU64::new(now));
-        let previous = codec::TEST_EPOCH.with(|slot| slot.replace(Some(Arc::clone(&now))));
-        Self {
-            now,
-            previous,
-            thread_bound: std::marker::PhantomData,
-        }
-    }
-
-    pub(super) fn advance(&self, next: u64) {
-        let previous = self.now.load(Ordering::Acquire);
-        assert!(next >= previous, "the scripted epoch cannot go backwards");
-        self.now.store(next, Ordering::Release);
-    }
-}
-
-impl Drop for Epoch {
-    fn drop(&mut self) {
-        codec::TEST_EPOCH.with(|slot| slot.replace(self.previous.take()));
-    }
-}
-
 struct Pending {
     texts: Vec<String>,
     reply: tokio::sync::oneshot::Sender<Reply>,
@@ -182,7 +152,7 @@ impl WorkspacePolicyAuthority for CheckAuthority {
 }
 
 async fn child(setup: Setup) {
-    let epoch = Epoch::new(setup.epoch);
+    let calendar = PinnedCalendar::new(setup.epoch);
     let (provider, mut requests) = tokio::sync::mpsc::channel(1);
     let mut options = SessionRuntimeOptions::new(setup.directory.join("sessions.sqlite3"));
     let hold_policy = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -248,7 +218,7 @@ async fn child(setup: Setup) {
             event = events.next() => emit(Output::Event(Box::new(event.unwrap().unwrap()))).await,
             command = commands.recv() => match command.unwrap() {
                 Input::Advance(next) => {
-                    epoch.advance(next);
+                    calendar.advance(next);
                     runtime.request_schedule();
                     emit(Output::Ack(serde_json::json!(next))).await;
                 }

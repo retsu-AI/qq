@@ -35,12 +35,6 @@ async fn loading_exhaustion_without_work_blocks_after_three_attempts() {
             })
         }
     }
-    let keep_clock = tokio::spawn(async {
-        let began = std::time::Instant::now();
-        while began.elapsed() < Duration::from_secs(5) {
-            tokio::task::yield_now().await;
-        }
-    });
     let directory = TempDir::new().unwrap();
     let loads = Arc::new(AtomicUsize::new(0));
     let requests = Arc::new(AtomicUsize::new(0));
@@ -90,7 +84,6 @@ async fn loading_exhaustion_without_work_blocks_after_three_attempts() {
         .await
         .unwrap();
     runtime.shutdown().await.unwrap();
-    keep_clock.abort();
     assert_eq!(requests.load(Ordering::SeqCst), 0);
     assert_eq!(stopped.counters.runs, 0);
     assert_eq!(stopped.counters.usage, Some(TokenUsage::default()));
@@ -1780,7 +1773,7 @@ async fn legacy_dispatch_repair_invalid_required_event_rolls_back_schema_and_fla
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn twenty_minute_permit_wait_reclamps_unbounded_prompts_and_goal_runs() {
     struct Model(Arc<AtomicUsize>);
     impl Provider for Model {
@@ -1807,7 +1800,6 @@ async fn twenty_minute_permit_wait_reclamps_unbounded_prompts_and_goal_runs() {
     for user_prompt in [false, true] {
         for expired in [false, true] {
             let began = now_ms();
-            let epoch = super::goal_driver_soak::Epoch::new(began);
             let directory = TempDir::new().unwrap();
             let calls = Arc::new(AtomicUsize::new(0));
             let runtime = SessionRuntime::open(
@@ -1852,7 +1844,7 @@ async fn twenty_minute_permit_wait_reclamps_unbounded_prompts_and_goal_runs() {
                     .await
                     .unwrap()
             };
-            epoch.advance(began + 20 * 60_000);
+            tokio::time::advance(Duration::from_millis(20 * 60_000)).await;
             assert_eq!(
                 calls.load(Ordering::SeqCst),
                 0,
