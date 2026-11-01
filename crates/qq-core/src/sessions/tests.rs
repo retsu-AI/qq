@@ -2804,7 +2804,7 @@ enum AutoCompactScript {
         arguments: String,
         text: String,
     },
-    ShellRepeatedlyWithSummaries {
+    ToolRepeatedlyWithSummaries {
         turns: usize,
         text: String,
         summary: String,
@@ -2815,14 +2815,14 @@ enum AutoCompactScript {
         text: String,
         summary: String,
     },
-    ShellRepeatedlyWithProviderOverflow {
+    ToolRepeatedlyWithProviderOverflow {
         turns: usize,
         overflow_at: usize,
         text: String,
         summary: String,
         overflows: Arc<AtomicUsize>,
     },
-    ShellRepeatedlyWithEarlyFault {
+    ToolRepeatedlyWithEarlyFault {
         turns: usize,
         fault_at: usize,
         text: String,
@@ -2837,7 +2837,7 @@ enum AutoCompactScript {
         text: String,
         tool: String,
     },
-    ShellRepeatedlyWithTruncatedSummaries {
+    ToolRepeatedlyWithTruncatedSummaries {
         turns: usize,
         text: String,
         summary: String,
@@ -2863,6 +2863,16 @@ enum AutoCompactScript {
         script: Box<AutoCompactScript>,
         bytes_per_token: u64,
     },
+}
+
+const SHELL_STEP_PADDING: usize = 6_000;
+
+fn bulk_step_arguments(step: usize, padding_bytes: usize) -> String {
+    serde_json::json!({
+        "result": format!("shell exit=0 elapsed=0.0 bytes={}\nstep {step}\n", padding_bytes + 7),
+        "padding_bytes": padding_bytes,
+    })
+    .to_string()
 }
 
 struct AutoCompactLoader {
@@ -3128,7 +3138,7 @@ impl Provider for AutoCompactProvider {
                     ]))
                 }
             }
-            AutoCompactScript::ShellRepeatedlyWithTruncatedSummaries {
+            AutoCompactScript::ToolRepeatedlyWithTruncatedSummaries {
                 turns,
                 text,
                 summary,
@@ -3168,20 +3178,18 @@ impl Provider for AutoCompactProvider {
                     Box::pin(stream::iter([
                         Ok(qq_provider::ProviderEvent::ToolCallStarted {
                             id: id.clone(),
-                            name: "shell".to_owned(),
+                            name: "__test_mutate".to_owned(),
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
                             id: id.clone(),
-                            json: format!(
-                                r#"{{"command":"echo step {done}; head -c 6000 /dev/zero | tr '\\0' x"}}"#
-                            ),
+                            json: bulk_step_arguments(done, SHELL_STEP_PADDING),
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
                         Ok(qq_provider::ProviderEvent::Completed { usage: None }),
                     ]))
                 }
             }
-            AutoCompactScript::ShellRepeatedlyWithSummaries {
+            AutoCompactScript::ToolRepeatedlyWithSummaries {
                 turns,
                 text,
                 summary,
@@ -3220,7 +3228,7 @@ impl Provider for AutoCompactProvider {
                             ) {
                                 "write_file".to_owned()
                             } else {
-                                "shell".to_owned()
+                                "__test_mutate".to_owned()
                             },
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
@@ -3231,9 +3239,7 @@ impl Provider for AutoCompactProvider {
                             ) {
                                 serde_json::json!({"path": format!("step-{done}.txt"), "content": "x".repeat(2000)}).to_string()
                             } else {
-                                format!(
-                                    r#"{{"command":"echo step {done}; head -c 6000 /dev/zero | tr '\\0' x"}}"#
-                                )
+                                bulk_step_arguments(done, SHELL_STEP_PADDING)
                             },
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
@@ -3288,7 +3294,7 @@ impl Provider for AutoCompactProvider {
                 events.push(Ok(qq_provider::ProviderEvent::Completed { usage: None }));
                 Box::pin(stream::iter(events))
             }
-            AutoCompactScript::ShellRepeatedlyWithEarlyFault {
+            AutoCompactScript::ToolRepeatedlyWithEarlyFault {
                 turns,
                 fault_at,
                 text,
@@ -3324,20 +3330,18 @@ impl Provider for AutoCompactProvider {
                     Box::pin(stream::iter([
                         Ok(qq_provider::ProviderEvent::ToolCallStarted {
                             id: id.clone(),
-                            name: "shell".to_owned(),
+                            name: "__test_mutate".to_owned(),
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
                             id: id.clone(),
-                            json: format!(
-                                r#"{{"command":"echo step {done}; head -c 6000 /dev/zero | tr '\\0' x"}}"#
-                            ),
+                            json: bulk_step_arguments(done, SHELL_STEP_PADDING),
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
                         Ok(qq_provider::ProviderEvent::Completed { usage: None }),
                     ]))
                 }
             }
-            AutoCompactScript::ShellRepeatedlyWithProviderOverflow {
+            AutoCompactScript::ToolRepeatedlyWithProviderOverflow {
                 turns,
                 overflow_at,
                 text,
@@ -3373,11 +3377,11 @@ impl Provider for AutoCompactProvider {
                     Box::pin(stream::iter([
                         Ok(qq_provider::ProviderEvent::ToolCallStarted {
                             id: id.clone(),
-                            name: "shell".to_owned(),
+                            name: "__test_mutate".to_owned(),
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
                             id: id.clone(),
-                            json: format!(r#"{{"command":"echo step {done}"}}"#),
+                            json: bulk_step_arguments(done, 0),
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
                         Ok(qq_provider::ProviderEvent::Completed { usage: None }),

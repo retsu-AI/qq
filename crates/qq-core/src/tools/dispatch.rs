@@ -678,6 +678,7 @@ struct TestDelayArgs {
 struct TestMutateArgs {
     delay_ms: u64,
     result: Option<String>,
+    padding_bytes: usize,
 }
 
 #[cfg(test)]
@@ -773,7 +774,9 @@ pub(super) fn execute_blocking(
                 // lint: allow(sleep) the test tool's work is its blocking delay
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            ToolOutput::success(arguments.result.unwrap_or_else(|| "mutated".to_owned()))
+            let mut result = arguments.result.unwrap_or_else(|| "mutated".to_owned());
+            result.push_str(&"x".repeat(arguments.padding_bytes));
+            ToolOutput::success(result)
         }
         #[cfg(test)]
         Some(BuiltInTool::TestShell) => ToolOutput::success("shell ran".to_owned()),
