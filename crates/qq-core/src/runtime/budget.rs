@@ -726,6 +726,145 @@ mod tests {
         assert_eq!(free.remaining(now), Ok(RunLimits::default()));
     }
     #[test]
+    fn a_settled_child_spends_each_bound_or_makes_it_unknown() {
+        let now = Instant::now();
+        let child_cost = 30 * 2_000 + 10 * 3_000;
+        for (limits, child_usage, cost, expected) in [
+            (
+                RunLimits {
+                    max_total_tokens: Some(40),
+                    ..RunLimits::default()
+                },
+                Some(usage(30, 10)),
+                Some(child_cost),
+                BudgetLimitKind::TotalTokens,
+            ),
+            (
+                RunLimits {
+                    max_input_tokens: Some(30),
+                    ..RunLimits::default()
+                },
+                Some(usage(30, 10)),
+                Some(child_cost),
+                BudgetLimitKind::InputTokens,
+            ),
+            (
+                RunLimits {
+                    max_output_tokens: Some(10),
+                    ..RunLimits::default()
+                },
+                Some(usage(30, 10)),
+                Some(child_cost),
+                BudgetLimitKind::OutputTokens,
+            ),
+            (
+                RunLimits {
+                    max_cost_usd_nanos: Some(child_cost),
+                    ..RunLimits::default()
+                },
+                Some(usage(30, 10)),
+                Some(child_cost),
+                BudgetLimitKind::Cost,
+            ),
+            (
+                RunLimits {
+                    max_total_tokens: Some(100),
+                    ..RunLimits::default()
+                },
+                None,
+                None,
+                BudgetLimitKind::TokensUnknown,
+            ),
+            (
+                RunLimits {
+                    max_cost_usd_nanos: Some(100_000),
+                    ..RunLimits::default()
+                },
+                None,
+                None,
+                BudgetLimitKind::CostUnknown,
+            ),
+        ] {
+            let mut meter = BudgetMeter::new(limits, Some(pricing()), now);
+            meter.charge_turn(Some(usage(0, 0)));
+            assert!(meter.child_budget(now).is_ok(), "{expected:?}");
+            meter.charge_child(child_usage, cost);
+            assert_eq!(
+                meter.child_budget(now).map(|budget| budget.limits),
+                Err(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn an_overspending_or_unmeasured_child_exceeds_its_parent() {
+        let now = Instant::now();
+        let parent = Some(usage(10, 5));
+        for (limits, child_usage, cost, expected) in [
+            (
+                RunLimits {
+                    max_total_tokens: Some(100),
+                    ..RunLimits::default()
+                },
+                Some(usage(95, 0)),
+                Some(95 * 2_000),
+                BudgetLimitKind::TotalTokens,
+            ),
+            (
+                RunLimits {
+                    max_input_tokens: Some(100),
+                    ..RunLimits::default()
+                },
+                Some(usage(95, 0)),
+                Some(95 * 2_000),
+                BudgetLimitKind::InputTokens,
+            ),
+            (
+                RunLimits {
+                    max_output_tokens: Some(100),
+                    ..RunLimits::default()
+                },
+                Some(usage(0, 96)),
+                Some(96 * 3_000),
+                BudgetLimitKind::OutputTokens,
+            ),
+            (
+                RunLimits {
+                    max_cost_usd_nanos: Some(100_000),
+                    ..RunLimits::default()
+                },
+                Some(usage(45, 0)),
+                Some(45 * 2_000),
+                BudgetLimitKind::Cost,
+            ),
+            (
+                RunLimits {
+                    max_total_tokens: Some(100),
+                    ..RunLimits::default()
+                },
+                None,
+                None,
+                BudgetLimitKind::TokensUnknown,
+            ),
+            (
+                RunLimits {
+                    max_cost_usd_nanos: Some(100_000),
+                    ..RunLimits::default()
+                },
+                None,
+                None,
+                BudgetLimitKind::CostUnknown,
+            ),
+        ] {
+            let mut meter = BudgetMeter::new(limits, Some(pricing()), now);
+            meter.charge_turn(parent);
+            assert_eq!(meter.exceeded(now), None, "{expected:?}");
+            meter.charge_child(child_usage, cost);
+            assert_eq!(meter.exceeded(now), Some(expected));
+        }
+    }
+
+    #[test]
     fn split_token_and_tool_output_bounds_settle_with_their_own_kinds() {
         let now = Instant::now();
         let mut meter = BudgetMeter::new(

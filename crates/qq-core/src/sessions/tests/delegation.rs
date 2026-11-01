@@ -3437,26 +3437,40 @@ async fn nested_spend_receipt_excludes_later_prompts_in_owned_sessions() {
 
 #[tokio::test]
 async fn nested_spend_receipt_rejects_incomplete_or_overflowing_descendants() {
+    let mut harness = nested_spend_harness(Some(usage(60, 0))).await;
+    let root = submit_nested_budget(&harness, true).await;
+    let observed = collect_until_run_finished(&mut harness.events, root).await;
+    let grandchild = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::PromptQueued { session, run, .. }
+                if session.model.as_deref() == Some("test/grandchild") =>
+            {
+                Some(run.id)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let accounted = harness.runtime.inner.store.run_outcome(root).await;
+    assert!(accounted.is_ok(), "{accounted:?}");
     for corruption in ["missing_identity", "unfinished", "usage_overflow"] {
-        let mut harness = nested_spend_harness(Some(usage(60, 0))).await;
-        let root = submit_nested_budget(&harness, true).await;
-        let observed = collect_until_run_finished(&mut harness.events, root).await;
-        let grandchild = observed
-            .iter()
-            .find_map(|event| match &event.event {
-                SessionEvent::PromptQueued { session, run, .. }
-                    if session.model.as_deref() == Some("test/grandchild") =>
-                {
-                    Some(run.id)
-                }
-                _ => None,
-            })
-            .unwrap();
         harness
             .runtime
             .inner
             .store
             .call(Priority::Control, move |connection| {
+                let transaction = connection.transaction()?;
+                transaction.execute_batch(
+                    "DROP TABLE IF EXISTS temp.saved_runs; DROP TABLE IF EXISTS temp.saved_messages;",
+                )?;
+                transaction.execute(
+                    "CREATE TEMP TABLE saved_runs AS SELECT * FROM runs WHERE id = ?1",
+                    [grandchild.to_string()],
+                )?;
+                transaction.execute(
+                    "CREATE TEMP TABLE saved_messages AS SELECT * FROM messages WHERE run_id = ?1 AND ordinal = 1",
+                    [grandchild.to_string()],
+                )?;
                 let sql = match corruption {
                     "missing_identity" => "DELETE FROM messages WHERE run_id = ?1 AND ordinal = 1",
                     "unfinished" => {
@@ -3465,20 +3479,19 @@ async fn nested_spend_receipt_rejects_incomplete_or_overflowing_descendants() {
                     "usage_overflow" => "UPDATE runs SET usage_json = ?2 WHERE id = ?1",
                     _ => unreachable!(),
                 };
-                let changed = if corruption == "usage_overflow" {
-                    connection.execute(
+                if corruption == "usage_overflow" {
+                    transaction.execute(
                         sql,
                         params![
                             grandchild.to_string(),
                             serde_json::to_string(&usage(u64::MAX, 0)).unwrap()
                         ],
-                    )
+                    )?;
                 } else {
-                    connection.execute(sql, [grandchild.to_string()])
-                };
-                changed
-                    .map(|_| ())
-                    .map_err(|_| SessionRuntimeError::CONSTRAINT)
+                    transaction.execute(sql, [grandchild.to_string()])?;
+                }
+                transaction.commit()?;
+                Ok(())
             })
             .await
             .unwrap();
@@ -3489,28 +3502,31 @@ async fn nested_spend_receipt_rejects_incomplete_or_overflowing_descendants() {
             ),
             "{corruption}"
         );
-        if corruption == "unfinished" {
-            harness
-                .runtime
-                .inner
-                .store
-                .call(Priority::Control, move |connection| {
-                    connection
-                        .execute(
-                            "UPDATE runs SET status = 'completed', outcome_json = ?2 WHERE id = ?1",
-                            params![
-                                grandchild.to_string(),
-                                serde_json::to_string(&RunOutcome::Completed).unwrap()
-                            ],
-                        )
-                        .map(|_| ())
-                        .map_err(|_| SessionRuntimeError::CODEC)
-                })
-                .await
-                .unwrap();
-        }
-        harness.runtime.shutdown().await.unwrap();
+        harness
+            .runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                let transaction = connection.transaction()?;
+                transaction.execute(
+                    "UPDATE runs SET (status, outcome_json, usage_json) =
+                         (SELECT status, outcome_json, usage_json FROM temp.saved_runs)
+                     WHERE id = ?1",
+                    [grandchild.to_string()],
+                )?;
+                transaction.execute(
+                    "INSERT OR IGNORE INTO messages SELECT * FROM temp.saved_messages",
+                    [],
+                )?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let restored = harness.runtime.inner.store.run_outcome(root).await;
+        assert!(restored.is_ok(), "{corruption}: {restored:?}");
     }
+    harness.runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -4861,38 +4877,6 @@ async fn budgeted_read_children_refuse_exhausted_or_unknown_remainders() {
         ),
         (
             RunLimits {
-                max_input_tokens: Some(30),
-                ..RunLimits::default()
-            },
-            Some(usage(30, 10)),
-            "input_tokens",
-        ),
-        (
-            RunLimits {
-                max_output_tokens: Some(10),
-                ..RunLimits::default()
-            },
-            Some(usage(30, 10)),
-            "output_tokens",
-        ),
-        (
-            RunLimits {
-                max_cost_usd_nanos: Some(90_000),
-                ..RunLimits::default()
-            },
-            Some(usage(30, 10)),
-            "cost",
-        ),
-        (
-            RunLimits {
-                max_total_tokens: Some(100),
-                ..RunLimits::default()
-            },
-            None,
-            "tokens_unknown",
-        ),
-        (
-            RunLimits {
                 max_cost_usd_nanos: Some(100_000),
                 ..RunLimits::default()
             },
@@ -5037,38 +5021,6 @@ async fn audit_overspend_and_unknown_spend_exhaust_the_parent() {
             },
             Some(usage(95, 0)),
             BudgetLimitKind::TotalTokens,
-        ),
-        (
-            RunLimits {
-                max_input_tokens: Some(100),
-                ..RunLimits::default()
-            },
-            Some(usage(95, 0)),
-            BudgetLimitKind::InputTokens,
-        ),
-        (
-            RunLimits {
-                max_output_tokens: Some(100),
-                ..RunLimits::default()
-            },
-            Some(usage(0, 96)),
-            BudgetLimitKind::OutputTokens,
-        ),
-        (
-            RunLimits {
-                max_cost_usd_nanos: Some(100_000),
-                ..RunLimits::default()
-            },
-            Some(usage(45, 0)),
-            BudgetLimitKind::Cost,
-        ),
-        (
-            RunLimits {
-                max_total_tokens: Some(100),
-                ..RunLimits::default()
-            },
-            None,
-            BudgetLimitKind::TokensUnknown,
         ),
         (
             RunLimits {
