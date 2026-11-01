@@ -480,8 +480,7 @@ async fn run_activity_is_read_from_the_column_and_the_command_counter_tracks_the
     let session_id = harness.session_id;
     let (column, summary, counted, journaled) = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let column: Option<String> = connection.query_row(
                 "SELECT activity FROM runs WHERE id = ?1",

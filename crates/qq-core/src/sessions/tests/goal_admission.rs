@@ -287,13 +287,12 @@ async fn cancelled_pending_main_request_preserves_unknown_session_and_goal_spend
         let CommandOutcome::GoalUpdated { goal, .. } = set.outcome else {
             panic!("goal")
         };
-        runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+        runtime.store().drive_goals(now_ms()).await.unwrap();
         let run = if user_prompt {
             queue_prompt(&runtime, session_id, "explicit work".to_owned()).await
         } else {
             runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     Ok(crate::sessions::goals::load_live(connection, session_id)?
                         .unwrap()
@@ -304,11 +303,11 @@ async fn cancelled_pending_main_request_preserves_unknown_session_and_goal_spend
                 .unwrap()
         };
         drop(held);
-        runtime.inner.schedule.send(()).await.unwrap();
+        runtime.request_schedule();
         tokio::time::timeout(Duration::from_secs(3), entered.notified())
             .await
             .unwrap();
-        runtime.inner.store.call(Priority::Control,move |connection| {
+        runtime.store().call(Priority::Control,move |connection| {
             let (pending,origin,turns):(bool,String,u64)=connection.query_row("SELECT goal_request_pending,origin_json,(SELECT COUNT(*) FROM model_turns WHERE run_id=runs.id) FROM runs WHERE id=?1",[run.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
             assert!(pending);
             assert_eq!(turns,0);
@@ -567,13 +566,12 @@ async fn goal_failure_after_start_before_provider_poll_preserves_known_zero() {
         )
         .await
         .unwrap();
-        runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+        runtime.store().drive_goals(now_ms()).await.unwrap();
         let run_id = if user_prompt {
             queue_prompt(&runtime, session_id, "explicit work".to_owned()).await
         } else {
             runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     Ok(crate::sessions::goals::load_live(connection, session_id)?
                         .unwrap()
@@ -588,13 +586,13 @@ async fn goal_failure_after_start_before_provider_poll_preserves_known_zero() {
             PROBE.hold(Checkpoint::CancellationRead(run_id));
         release_initial.send(()).unwrap();
         drop(held);
-        runtime.inner.schedule.send(()).await.unwrap();
+        runtime.request_schedule();
         tokio::time::timeout(Duration::from_secs(3), post_start_read)
             .await
             .unwrap()
             .unwrap();
         if activity_failure {
-            runtime.inner.store.call(Priority::Control, |connection| {
+            runtime.store().call(Priority::Control, |connection| {
                 connection.execute_batch("CREATE TEMP TRIGGER refuse_waiting_activity BEFORE INSERT ON events WHEN json_extract(NEW.envelope_json,'$.event.type')='run_activity_changed' AND json_extract(NEW.envelope_json,'$.event.activity')='waiting_for_provider' BEGIN SELECT RAISE(ABORT,'activity event failure'); END;")?;
                 Ok(())
             }).await.unwrap();
@@ -1292,13 +1290,12 @@ async fn twenty_minute_permit_wait_reclamps_unbounded_prompts_and_goal_runs() {
             set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"respect the original deadline after queueing",
                 "budget":{"max_goal_runs":1,"deadline_ms":deadline,"per_run":{"max_duration_ms":120_000}}
             })).await.unwrap();
-            runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+            runtime.store().drive_goals(now_ms()).await.unwrap();
             let run = if user_prompt {
                 queue_prompt(&runtime, session_id, "unbounded prompt".to_owned()).await
             } else {
                 runtime
-                    .inner
-                    .store
+                    .store()
                     .call(Priority::Control, move |connection| {
                         Ok(crate::sessions::goals::load_live(connection, session_id)?
                             .unwrap()
@@ -1315,7 +1312,7 @@ async fn twenty_minute_permit_wait_reclamps_unbounded_prompts_and_goal_runs() {
                 "held permits prevent provider work"
             );
             drop(held);
-            runtime.inner.schedule.send(()).await.unwrap();
+            runtime.request_schedule();
             let observed = collect_until_run_finished(&mut events, run).await;
             let snapshot = runtime
                 .snapshot(SnapshotRequest::new(

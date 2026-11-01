@@ -374,8 +374,7 @@ async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen()
         let handle = crate::runtime::SpillHandle::parse(&marker[start..end])
             .unwrap_or_else(|| panic!("a parsable handle: {marker}"));
         let read = runtime
-            .inner
-            .store
+            .store()
             .read_tool_spill(session_id, handle.call_prefix, handle.digest_prefix)
             .await
             .unwrap();

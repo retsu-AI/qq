@@ -510,8 +510,7 @@ async fn no_run_starts_in_the_workspace_until_its_restore_finishes() {
     assert!(
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .reserve_next_run(false)
             .await
             .unwrap()
@@ -520,8 +519,7 @@ async fn no_run_starts_in_the_workspace_until_its_restore_finishes() {
     let session = harness.session_id.to_string();
     let reserved: (Option<String>, Option<String>) = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(store::Priority::Control, move |connection| {
             Ok(connection.query_row(
                 "SELECT preparing_run_id, active_run_id FROM sessions WHERE id = ?1",

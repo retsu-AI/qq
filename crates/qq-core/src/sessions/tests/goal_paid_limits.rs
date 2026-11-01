@@ -54,7 +54,7 @@ async fn goal_paid_dense_first_input_is_refused_before_provider_dispatch() {
         .unwrap();
         let run_id = submit(&runtime, session_id, "!x0?".repeat(5_000)).await;
         drop(held);
-        runtime.inner.schedule.send(()).await.unwrap();
+        runtime.request_schedule();
         let observed = collect_until_run_finished(&mut events, run_id).await;
         runtime.shutdown().await.unwrap();
         assert_eq!(
@@ -185,10 +185,9 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
                     "per_run":if goal_origin {limits} else {RunLimits::default()}}
             })).await.unwrap();
             let run = if goal_origin {
-                runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+                runtime.store().drive_goals(now_ms()).await.unwrap();
                 runtime
-                    .inner
-                    .store
+                    .store()
                     .call(Priority::Control, move |connection| {
                         Ok(crate::sessions::goals::load_live(connection, session)?
                             .unwrap()
@@ -202,7 +201,7 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
                 run_id
             };
             drop(held);
-            runtime.inner.schedule.send(()).await.unwrap();
+            runtime.request_schedule();
             let observed = collect_until_run_finished(&mut events, run).await;
             runtime.shutdown().await.unwrap();
             let calls = calls.lock().unwrap().clone();
@@ -485,15 +484,13 @@ async fn goal_paid_summary_overflow_releases_admission_before_fold_retry() {
         .unwrap();
         try_submit(&runtime, session_id, "work").await.unwrap();
         let claim = runtime
-            .inner
-            .store
+            .store()
             .reserve_next_run(false)
             .await
             .unwrap()
             .unwrap();
         runtime
-            .inner
-            .store
+            .store()
             .start_reserved_run(&claim, test_prepared_audit(&claim), None)
             .await
             .unwrap()
@@ -539,8 +536,7 @@ async fn goal_paid_summary_overflow_releases_admission_before_fold_retry() {
         assert!(!pending);
         drop(connection);
         runtime
-            .inner
-            .store
+            .store()
             .finish_run(
                 &claim,
                 RunOutcome::Cancelled,
@@ -609,15 +605,13 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
         };
         try_submit(&runtime, session, "work").await.unwrap();
         let claim = runtime
-            .inner
-            .store
+            .store()
             .reserve_next_run(false)
             .await
             .unwrap()
             .unwrap();
         runtime
-            .inner
-            .store
+            .store()
             .start_reserved_run(&claim, test_prepared_audit(&claim), None)
             .await
             .unwrap()
@@ -703,7 +697,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
                 "a request refused before admission returns durable known-zero accounting"
             );
             let owner = claim.identity.run_id;
-            runtime.inner.store.call(Priority::Control,move |connection| {
+            runtime.store().call(Priority::Control,move |connection| {
                 let id:String=connection.query_row("SELECT id FROM runs WHERE kind='compaction' AND auto_compaction_for_run_id=?1",[owner.to_string()],|row|row.get(0))?;
                 parse_id(&id)
             }).await.unwrap()
@@ -713,7 +707,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
             usize::from(!zero),
             "no unadmitted provider request"
         );
-        runtime.inner.store.call(Priority::Control,move |connection| {
+        runtime.store().call(Priority::Control,move |connection| {
             let (pending,usage,cost,terminal):(bool,Option<String>,Option<u64>,bool)=connection.query_row(
                 "SELECT goal_request_pending,usage_json,estimated_cost_usd_nanos,outcome_json IS NOT NULL FROM runs WHERE id=?1",
                 [helper.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
@@ -730,8 +724,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
             "type":"goal_control","session_id":session,"expected":{"goal_id":goal.goal_id,"revision":goal.revision},"action":{"type":"pause"}
         })).unwrap()).await.unwrap();
         runtime
-            .inner
-            .store
+            .store()
             .finish_run(
                 &claim,
                 RunOutcome::Cancelled,

@@ -149,7 +149,7 @@ async fn duration_stops_shell_while_output_persistence_is_blocked() {
         .unwrap();
     let (entered, entered_rx) = oneshot::channel();
     let (release, release_rx) = std::sync::mpsc::channel();
-    let store = harness.runtime.inner.store.clone();
+    let store = harness.runtime.store().clone();
     let blocked = tokio::spawn(async move {
         store
             .call(Priority::Control, move |_| {
@@ -741,8 +741,7 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     assert_eq!(runtime.idle_run_permits(), 7);
     assert!(
         runtime
-            .inner
-            .store
+            .store()
             .unfinished_run_ids()
             .await
             .unwrap()
@@ -922,8 +921,7 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
     );
     assert!(!directory.path().join("late.txt").exists());
     let result: String = runtime
-        .inner
-        .store
+        .store()
         .call(store::Priority::Control, move |connection| {
             Ok(connection.query_row(
                 "SELECT result FROM tool_calls WHERE run_id=?1",

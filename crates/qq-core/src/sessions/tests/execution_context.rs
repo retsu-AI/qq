@@ -34,8 +34,7 @@ async fn command_receipt_is_durable_before_live_output_and_survives_reopen() {
         .await;
         let live: (String, Option<String>) = harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(connection.query_row(
                     "SELECT state,execution_context_json FROM tool_calls WHERE run_id=?1",
@@ -121,8 +120,7 @@ async fn cancellation_at_spawn_preserves_the_process_receipt() {
     collect_until(&mut harness.events, finished_for(run)).await;
     let context: Option<String> = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             Ok(connection.query_row(
                 "SELECT execution_context_json FROM tool_calls WHERE run_id=?1",

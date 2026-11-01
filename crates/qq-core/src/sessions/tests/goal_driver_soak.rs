@@ -267,7 +267,7 @@ async fn child(setup: Setup) {
                     emit(Output::Ack(serde_json::Value::Null)).await;
                 }
                 Input::PreemptionFault(enabled) => {
-                    runtime.inner.store.call(super::super::store::Priority::Control, move |connection| {
+                    runtime.store().call(super::super::store::Priority::Control, move |connection| {
                         if enabled {
                             connection.execute_batch("CREATE TEMP TRIGGER refuse_preemption BEFORE INSERT ON events WHEN json_extract(NEW.envelope_json,'$.event.type')='run_finished' BEGIN SELECT RAISE(ABORT,'preemption event fault'); END;")?;
                         } else {
@@ -285,16 +285,16 @@ async fn child(setup: Setup) {
                     let permits = tokio::time::timeout(Duration::from_secs(5), Arc::clone(&runtime.inner.permits).acquire_many_owned(runtime.inner.max_active_runs as u32)).await.unwrap().unwrap();
                     let receipt = try_submit(&runtime, session, "probe-after-check-crash").await.unwrap();
                     let CommandOutcome::PromptQueued { run_id:admitted, .. } = receipt.outcome else { panic!("probe prompt") };
-                    let claim = runtime.inner.store.reserve_next_run_at_depth(0).await.unwrap();
+                    let claim = runtime.store().reserve_next_run_at_depth(0).await.unwrap();
                     let escaped = claim.is_some();
                     if let Some(claim) = claim {
-                        runtime.inner.store.finish_reserved_run(&claim,RunOutcome::Cancelled).await.unwrap();
+                        runtime.store().finish_reserved_run(&claim,RunOutcome::Cancelled).await.unwrap();
                     }
                     drop(permits);
                     emit(Output::Ack(serde_json::json!({"escaped":escaped,"run_id":admitted}))).await;
                 }
                 Input::CheckState => {
-                    let state = runtime.inner.store.call(super::super::store::Priority::AwaitControl, move |connection| {
+                    let state = runtime.store().call(super::super::store::Priority::AwaitControl, move |connection| {
                         let state:Option<(String,bool)> = connection.query_row(
                             "SELECT r.id,COALESCE(s.preparing_run_id=r.id,0) FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.session_id=?1 AND r.kind='goal_check' ORDER BY r.rowid DESC LIMIT 1",
                             [session.to_string()],|row|Ok((row.get(0)?,row.get(1)?)),

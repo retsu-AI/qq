@@ -891,8 +891,7 @@ async fn failed_runtime_goal_event_never_reports_a_successful_tool_write() {
     .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             connection.execute_batch(
                 "CREATE TRIGGER refuse_goal_event BEFORE INSERT ON events
@@ -1231,7 +1230,7 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
     authority.allow.store(true, Ordering::SeqCst);
     let id = CommandId::generate().unwrap();
     let receipt = runtime.command(id, approve.clone()).await.unwrap();
-    runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+    runtime.store().drive_goals(now_ms()).await.unwrap();
     let stable = runtime
         .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
@@ -1364,7 +1363,7 @@ async fn goal_check_approval_requires_exact_command_and_revision() {
                 .is_err()
         );
     }
-    runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+    runtime.store().drive_goals(now_ms()).await.unwrap();
     let snapshot = runtime
         .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
@@ -1413,8 +1412,7 @@ async fn goal_resume_refuses_spent_unknown_or_draining_state() {
             .await
             .unwrap();
         let goal = runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let mut goal = crate::sessions::goals::load_live(connection, session_id)?.unwrap();
                 goal.status = qq_protocol::GoalStatus::Paused {
@@ -1534,7 +1532,7 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
     }));
     let receipt = runtime.command(command_id, create.clone()).await.unwrap();
     assert_eq!(runtime.command(command_id, create).await.unwrap(), receipt);
-    runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+    runtime.store().drive_goals(now_ms()).await.unwrap();
     let snapshot = runtime
         .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
@@ -1587,7 +1585,7 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
     .await
     .unwrap();
     let held = runtime.hold_scheduling().await;
-    runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+    runtime.store().drive_goals(now_ms()).await.unwrap();
     let restored = runtime
         .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
@@ -3812,7 +3810,7 @@ async fn real_in_run_compactor_preserves_rejected_prefix_and_uncertain_dispatch(
             .await
             .unwrap();
             try_submit(&runtime, session, "work").await.unwrap();
-            let store = &runtime.inner.store;
+            let store = &runtime.store();
             let owner = store.reserve_next_run(false).await.unwrap().unwrap();
             store
                 .start_reserved_run(&owner, test_prepared_audit(&owner), None)
@@ -4072,7 +4070,7 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
             })
             .await
             .expect("owned summary dispatch occurs");
-            let helper:RunId=runtime.inner.store.call(Priority::Control,move|connection| {
+            let helper:RunId=runtime.store().call(Priority::Control,move|connection| {
                 let (id,admitted,usage):(String,bool,Option<String>)=connection.query_row("SELECT id,goal_helper_admitted,usage_json FROM runs WHERE kind='compaction' AND auto_compaction_for_run_id=?1",[owner.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
                 assert!(admitted && usage.is_none(),"paid admission is durable before provider poll");
                 parse_id(&id)
@@ -4089,8 +4087,7 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
                 Some(RunOutcome::Cancelled)
             );
             let preparing: Option<String> = runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     Ok(connection.query_row(
                         "SELECT preparing_run_id FROM sessions WHERE id=?1",
@@ -4151,8 +4148,7 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
             expected_cost
         );
         let cost_known = runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(connection.query_row(
                     "SELECT cost_known FROM sessions WHERE id=?1",
@@ -4921,8 +4917,7 @@ async fn active_idle_goal_dispatches_fresh_work_without_a_user_prompt() {
     let finished = collect_until_run_finished(&mut events, run_id).await;
     assert!(finished_outcome(&finished, run_id).is_some());
     let run_count: u64 = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             Ok(connection.query_row(
                 "SELECT COUNT(*) FROM runs WHERE session_id=?1",
@@ -6115,7 +6110,7 @@ async fn goal_admission_refuses_expired_or_unknown_budgets_before_loading() {
             set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"expire while awaiting the permit",
             "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
         })).await.unwrap();
-            runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+            runtime.store().drive_goals(now_ms()).await.unwrap();
             if user_prompt {
                 queue_prompt(
                     &runtime,
@@ -6125,8 +6120,7 @@ async fn goal_admission_refuses_expired_or_unknown_budgets_before_loading() {
                 .await;
             }
             runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     let mut goal =
                         crate::sessions::goals::load_live(connection, session_id)?.unwrap();
@@ -6149,7 +6143,7 @@ async fn goal_admission_refuses_expired_or_unknown_budgets_before_loading() {
                 .await
                 .unwrap();
             drop(held);
-            runtime.inner.schedule.send(()).await.unwrap();
+            runtime.request_schedule();
             let outcome = tokio::time::timeout(Duration::from_secs(3), async {
                 let mut finished = None;
                 let mut exhausted = false;
@@ -6361,13 +6355,12 @@ async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_ori
         set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"deadline must be revalidated after loading",
             "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
         })).await.unwrap();
-        runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+        runtime.store().drive_goals(now_ms()).await.unwrap();
         let expected_run = if user_prompt {
             queue_prompt(&runtime, session_id, "explicit bounded work".to_owned()).await
         } else {
             runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     Ok(crate::sessions::goals::load_live(connection, session_id)?
                         .unwrap()
@@ -6378,13 +6371,12 @@ async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_ori
                 .unwrap()
         };
         drop(held);
-        runtime.inner.schedule.send(()).await.unwrap();
+        runtime.request_schedule();
         tokio::time::timeout(Duration::from_secs(3), entered.notified())
             .await
             .unwrap();
         let origin = runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(load_run(connection, expected_run)?.origin)
             })
@@ -6396,8 +6388,7 @@ async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_ori
             matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. }))
         });
         runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let mut goal = crate::sessions::goals::load_live(connection, session_id)?.unwrap();
                 goal.budget.deadline_ms = now_ms().saturating_sub(1);
@@ -6519,7 +6510,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
         set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"refresh allowance after loading",
             "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":if raised {500} else {200_000}}
         })).await.unwrap();
-        runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+        runtime.store().drive_goals(now_ms()).await.unwrap();
         let run = if user_prompt {
             let receipt = runtime
                 .command(
@@ -6543,8 +6534,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
             run_id
         } else {
             runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     Ok(crate::sessions::goals::load_live(connection, session_id)?
                         .unwrap()
@@ -6555,13 +6545,12 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
                 .unwrap()
         };
         drop(held);
-        runtime.inner.schedule.send(()).await.unwrap();
+        runtime.request_schedule();
         tokio::time::timeout(Duration::from_secs(3), entered.notified())
             .await
             .unwrap();
         runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let origin = load_run(connection, run)?.origin;
                 assert!(if user_prompt {
@@ -6836,8 +6825,7 @@ async fn goal_check_edits_reset_only_the_changed_check_failure_streak() {
             panic!("goal");
         };
         runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let mut goal = crate::sessions::goals::load_live(connection, session_id)?.unwrap();
                 goal.counters.check_failures = 2;
@@ -6898,8 +6886,7 @@ async fn goal_check_edits_preserve_unrelated_stop_states() {
             };
             let setup_status = status.clone();
             runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     let mut goal =
                         crate::sessions::goals::load_live(connection, session_id)?.unwrap();
@@ -7244,7 +7231,7 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
         .await
         .unwrap();
         let parent_run = queue_prompt(&runtime, parent_session, "parent work".to_owned()).await;
-        let store = runtime.inner.store.clone();
+        let store = runtime.store().clone();
         let parent = store.reserve_next_run(false).await.unwrap().unwrap();
         assert_eq!(parent.identity.run_id, parent_run);
         store
@@ -7290,7 +7277,7 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
             .await
             .unwrap();
         drop(child_held);
-        runtime.inner.schedule.send(()).await.unwrap();
+        runtime.request_schedule();
         let mut events = runtime
             .subscribe(SubscribeRequest {
                 workspace_id: parent.identity.workspace_id,
@@ -7305,8 +7292,7 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
             .await
             .unwrap();
         runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let claim: Option<String> = connection.query_row(
                     "SELECT preparing_run_id FROM sessions WHERE id=?1",
@@ -7329,8 +7315,7 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
         };
         assert_eq!(goal.goal_id, captured.goal_id);
         runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let cancelled: bool = connection.query_row(
                 "SELECT cancel_requested FROM runs WHERE id=?1",

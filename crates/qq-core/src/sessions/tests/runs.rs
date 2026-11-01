@@ -602,8 +602,7 @@ async fn unmeasured_new_prompt_clears_stale_session_context() {
     assert_eq!(focused.runs[0].context_tokens, Some(54_400));
     assert_eq!(focused.runs[1].context_tokens, None);
     let stored_basis = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection
                 .query_row(
@@ -1474,7 +1473,7 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
     let run = focused.runs.iter().find(|run| run.id == run_id).unwrap();
     assert_eq!(run.status, RunStatus::Completed);
 
-    let store = runtime.inner.store.clone();
+    let store = runtime.store().clone();
     let continuations: u16 = store
         .call(Priority::Control, move |connection| {
             connection
@@ -2402,8 +2401,7 @@ async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
             "the retried report attempt reuses its notice"
         );
         runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let (typed, ordered):(String,Option<String>)=connection.query_row(
             "SELECT notice,goal_notice FROM model_turns WHERE run_id=?1 AND notice='report'",
@@ -2427,8 +2425,7 @@ async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
             .await
             .unwrap();
         let answer = runtime
-            .inner
-            .store
+            .store()
             .child_answer(run_id, RunOutcome::Cancelled)
             .await
             .unwrap();

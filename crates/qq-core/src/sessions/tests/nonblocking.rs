@@ -399,8 +399,7 @@ async fn an_answer_after_the_parent_settles_reaches_its_next_run() {
     let context = delegation
         .harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             load_model_context(connection, session_id, u64::MAX)
         })
@@ -659,8 +658,7 @@ async fn a_budget_final_turn_cancels_running_children() {
     let delivered: Vec<(Option<u32>, String)> = delegation
         .harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             let mut statement =
                 connection.prepare("SELECT turn_ordinal, text FROM child_deliveries")?;
@@ -690,8 +688,7 @@ async fn a_budget_final_turn_cancels_running_children() {
     let context = delegation
         .harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             load_model_context(connection, session_id, u64::MAX)
         })
@@ -2120,7 +2117,7 @@ async fn an_interim_report_does_not_end_a_tool_free_wait() {
         .unwrap();
     children_started(&delegation, 2).await;
     let session_id = delegation.harness.session_id;
-    let store = &delegation.harness.runtime.inner.store;
+    let store = &delegation.harness.runtime.store();
     let children: Vec<(String, String)> = store
         .call(Priority::Control, move |connection| {
             let mut statement = connection.prepare(
@@ -2285,7 +2282,7 @@ async fn steering_during_a_wait_with_a_pending_report_replays_as_live() {
         .unwrap();
     children_started(&delegation, 1).await;
     let session_id = delegation.harness.session_id;
-    let store = &delegation.harness.runtime.inner.store;
+    let store = &delegation.harness.runtime.store();
     let b: String = store
         .call(Priority::Control, move |connection| {
             Ok(connection.query_row(
@@ -2403,7 +2400,7 @@ async fn cancelling_a_child_that_just_finished_reports_it_finished() {
     .await;
     children_started(&delegation, 1).await;
     let session_id = delegation.harness.session_id;
-    let store = delegation.harness.runtime.inner.store.clone();
+    let store = delegation.harness.runtime.store().clone();
     let child_run: RunId = store
         .call(Priority::Control, move |connection| {
             Ok(connection.query_row(

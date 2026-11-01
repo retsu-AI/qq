@@ -1298,7 +1298,7 @@ async fn saturated_reserved_reload_waits_after_auto_compaction() {
     collect_until(&mut harness.events, finished_for(first)).await;
 
     let queued = store_command(
-        &harness.runtime.inner.store,
+        &harness.runtime.store(),
         harness.session_id,
         "y".repeat(MAX_PROMPT_BYTES),
     )
@@ -1346,7 +1346,7 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
     );
 
     let queued = store_command(
-        &harness.runtime.inner.store,
+        &harness.runtime.store(),
         harness.session_id,
         "y".repeat(MAX_PROMPT_BYTES),
     )
@@ -1928,13 +1928,9 @@ async fn cancelled_queued_prompt_does_not_mask_provider_overflow_evidence() {
     let first = queue_prompt(&harness.runtime, harness.session_id, "big ask".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
 
-    let queued = store_command(
-        &harness.runtime.inner.store,
-        harness.session_id,
-        "cancel this",
-    )
-    .await
-    .unwrap();
+    let queued = store_command(&harness.runtime.store(), harness.session_id, "cancel this")
+        .await
+        .unwrap();
     let CommandOutcome::PromptQueued {
         run_id: cancelled, ..
     } = queued.receipt.outcome
@@ -1943,8 +1939,7 @@ async fn cancelled_queued_prompt_does_not_mask_provider_overflow_evidence() {
     };
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .command(
             CommandId::generate().unwrap(),
             SessionCommand::CancelRun { run_id: cancelled },
@@ -2121,8 +2116,7 @@ async fn auto_compaction_panic_settles_its_exact_prompt_reservation() {
     assert!(
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .unfinished_run_ids()
             .await
             .unwrap()
@@ -3243,8 +3237,7 @@ async fn search_history_recalls_compacted_transcript_with_bounded_citations() {
     let cursor = serde_json::from_str(cursor_json).unwrap();
     let page = harness
         .runtime
-        .inner
-        .store
+        .store()
         .search_history(
             harness.session_id,
             "LEGACY/PARSER".to_owned(),
@@ -4468,8 +4461,7 @@ async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
         .unwrap();
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .call_write(Priority::Control, move |connection| {
                 let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
                 goal.check = Some(qq_protocol::GoalCheck {
@@ -4513,8 +4505,7 @@ async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
         );
         let (base, summary): (u64, String) = harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(connection.query_row(
                     "SELECT r.context_base_bytes, c.summary FROM runs r
@@ -4864,7 +4855,7 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
     );
     drop(connection);
 
-    let store = harness.runtime.inner.store.clone();
+    let store = harness.runtime.store().clone();
     let session_id = harness.session_id;
     let context = store
         .call(Priority::Control, move |connection| {
@@ -5261,8 +5252,7 @@ async fn cancelling_during_in_run_compaction_settles_both_runs_once() {
     assert!(
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .unfinished_run_ids()
             .await
             .unwrap()
@@ -5596,7 +5586,7 @@ async fn an_in_run_marker_survives_restart_and_folds_into_a_later_between_run_co
         )
         .await
         .unwrap();
-    let store = runtime.inner.store.clone();
+    let store = runtime.store().clone();
     let context = store
         .call(Priority::Control, move |connection| {
             let transaction = connection.transaction().unwrap();
@@ -5722,7 +5712,7 @@ async fn an_empty_faulted_attempt_inside_the_replaced_span_keeps_replay_equal_to
         let requests = harness.requests.lock().unwrap();
         requests.last().unwrap().messages().to_vec()
     };
-    let store = harness.runtime.inner.store.clone();
+    let store = harness.runtime.store().clone();
     let session_id = harness.session_id;
     let replayed = store
         .call(Priority::Control, move |connection| {

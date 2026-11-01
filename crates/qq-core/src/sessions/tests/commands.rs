@@ -363,7 +363,7 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
     assert!(row.steering);
     assert_eq!(row.state, MessageState::Complete);
     assert_eq!(row.turn_ordinal, 2);
-    let store = harness.runtime.inner.store.clone();
+    let store = harness.runtime.store().clone();
     let session_id = harness.session_id;
     let context = store
         .call(Priority::Control, move |connection| {
@@ -484,7 +484,7 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
     assert!(!live.contains("@notes.txt"), "{live}");
 
     std::fs::write(workspace.join("notes.txt"), "STEER_MODIFIED\n").unwrap();
-    let store = harness.runtime.inner.store.clone();
+    let store = harness.runtime.store().clone();
     let session_id = harness.session_id;
     let context = store
         .call(Priority::Control, move |connection| {
@@ -787,8 +787,7 @@ async fn plan_identity_correlation_and_profile_persist_and_survive_refresh() {
     let first = runs.iter().find(|run| run.id == run_id).unwrap();
     assert_eq!(first.plan.as_deref(), Some(&*started_plan));
     let stored_descriptor: String = reopened
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection
                 .query_row(
@@ -925,8 +924,7 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
         assert!(prompt_text(last, 3).contains("ALPHA_MODIFIED"));
     }
     let (blobs, references, evicted): (u32, u32, u32) = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             Ok((
                 connection.query_row(
@@ -1044,8 +1042,7 @@ async fn evicted_attachments_render_an_explicit_stub_not_the_placeholder() {
     .unwrap();
     collect_through_finished(&mut events).await;
     runtime
-        .inner
-        .store
+        .store()
         .call_write(Priority::Control, move |connection| {
             connection.execute(
                 "UPDATE attachment_blobs SET content = NULL, evicted_at_ms = 1
@@ -1146,8 +1143,7 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
         assert!(text.contains("remember the tests"));
     }
     let files: Vec<(String, String)> = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let mut statement = connection
                 .prepare("SELECT path, content_hash FROM session_files WHERE session_id = ?1")?;
@@ -1765,7 +1761,7 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
     .unwrap();
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let queued = store_command(&runtime.inner.store, session_id, "known overflow")
+    let queued = store_command(&runtime.store(), session_id, "known overflow")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
@@ -2350,8 +2346,7 @@ async fn control_and_cleanup_commands_are_admitted_past_the_command_limit() {
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection.execute(
                 "UPDATE metadata SET value = ?1 WHERE key = 'command_count'",
@@ -2444,8 +2439,7 @@ async fn control_commands_are_bounded_by_the_headroom() {
     .await;
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection.execute(
                 "UPDATE metadata SET value = ?1 WHERE key = 'command_count'",

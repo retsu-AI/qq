@@ -858,7 +858,7 @@ async fn scheduler_store_failure_disables_runtime_and_existing_subscribers() {
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
-    store_command(&runtime.inner.store, session_id, "persist me")
+    store_command(&runtime.store(), session_id, "persist me")
         .await
         .unwrap();
     assert!(matches!(
@@ -866,7 +866,7 @@ async fn scheduler_store_failure_disables_runtime_and_existing_subscribers() {
         SessionEvent::PromptQueued { .. }
     ));
 
-    let worker = runtime.inner.store.stop_worker_for_test().unwrap();
+    let worker = runtime.store().stop_worker_for_test().unwrap();
     tokio::task::spawn_blocking(move || worker.join().unwrap())
         .await
         .unwrap();
@@ -917,7 +917,7 @@ async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime(
     .unwrap();
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let queued = store_command(&runtime.inner.store, session_id, "retry the read")
+    let queued = store_command(&runtime.store(), session_id, "retry the read")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
@@ -934,11 +934,7 @@ async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime(
     release_read.send(()).unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(matches!(
-        runtime
-            .inner
-            .store
-            .call(Priority::Control, |_| Ok(()))
-            .await,
+        runtime.store().call(Priority::Control, |_| Ok(())).await,
         Err(SessionRuntimeError::Overloaded)
     ));
     saturated.release().await;
@@ -989,7 +985,7 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
     else {
         panic!("unexpected receipt")
     };
-    let first = store_command(&runtime.inner.store, first_session, "fail initialization")
+    let first = store_command(&runtime.store(), first_session, "fail initialization")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -998,7 +994,7 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
     else {
         panic!("unexpected receipt")
     };
-    let second = store_command(&runtime.inner.store, second_session, "must not load")
+    let second = store_command(&runtime.store(), second_session, "must not load")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1021,8 +1017,7 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             let run = runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     load_run(connection, first_run)
                 })
@@ -1057,8 +1052,7 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
         SessionEvent::RunStarted { run_id, .. } if run_id == second_run
     )));
     let first = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             load_run(connection, first_run)
         })
@@ -1074,8 +1068,7 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
         }) if message.contains("failed to read reserved-run cancellation state")
     ));
     let second = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             load_run(connection, second_run)
         })
@@ -1114,7 +1107,7 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
     else {
         panic!("unexpected receipt")
     };
-    let retrying = store_command(&runtime.inner.store, first_session, "wait at start")
+    let retrying = store_command(&runtime.store(), first_session, "wait at start")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1124,7 +1117,7 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
     else {
         panic!("unexpected receipt")
     };
-    let failing = store_command(&runtime.inner.store, second_session, "fail initialization")
+    let failing = store_command(&runtime.store(), second_session, "fail initialization")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1173,8 +1166,7 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
 
     assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
     let events = runtime
-        .inner
-        .store
+        .store()
         .events_after(workspace_id, failing.receipt.committed_through.sequence, 16)
         .await
         .unwrap();
@@ -1184,8 +1176,7 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
             .all(|event| !matches!(event.event, SessionEvent::RunStarted { .. }))
     );
     let retrying = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             load_run(connection, retrying_run)
         })
@@ -1201,8 +1192,7 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
         })
     ));
     let failing = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             load_run(connection, failing_run)
         })
@@ -1241,13 +1231,9 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
     else {
         panic!("unexpected receipt")
     };
-    let started = store_command(
-        &runtime.inner.store,
-        started_session,
-        "start but do not poll",
-    )
-    .await
-    .unwrap();
+    let started = store_command(&runtime.store(), started_session, "start but do not poll")
+        .await
+        .unwrap();
     let CommandOutcome::PromptQueued {
         run_id: started_run,
         ..
@@ -1255,7 +1241,7 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
     else {
         panic!("unexpected receipt")
     };
-    let failing = store_command(&runtime.inner.store, failing_session, "fail settlement")
+    let failing = store_command(&runtime.store(), failing_session, "fail settlement")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -1309,8 +1295,7 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
 
     assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
     let events = runtime
-        .inner
-        .store
+        .store()
         .events_after(workspace_id, failing.receipt.committed_through.sequence, 16)
         .await
         .unwrap();
@@ -1323,8 +1308,7 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
         SessionEvent::RunStarted { run_id, .. } if run_id == failing_run
     )));
     let started = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             load_run(connection, started_run)
         })
@@ -1340,8 +1324,7 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
         })
     ));
     let failing = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             load_run(connection, failing_run)
         })
@@ -1367,7 +1350,7 @@ async fn poisoned_cancellation_registry_settles_before_start_and_returns_the_per
     .unwrap();
     let (workspace_id, session_id, _) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let queued = store_command(&runtime.inner.store, session_id, "poisoned registry")
+    let queued = store_command(&runtime.store(), session_id, "poisoned registry")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
@@ -1393,8 +1376,7 @@ async fn poisoned_cancellation_registry_settles_before_start_and_returns_the_per
 
     assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
     let run = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             load_run(connection, run_id)
         })
@@ -1410,8 +1392,7 @@ async fn poisoned_cancellation_registry_settles_before_start_and_returns_the_per
         })
     ));
     let preparing: Option<String> = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection
                 .query_row(
@@ -1425,8 +1406,7 @@ async fn poisoned_cancellation_registry_settles_before_start_and_returns_the_per
         .unwrap();
     assert_eq!(preparing, None);
     let events = runtime
-        .inner
-        .store
+        .store()
         .events_after(workspace_id, queued.receipt.committed_through.sequence, 8)
         .await
         .unwrap();
@@ -1454,15 +1434,14 @@ async fn permanent_prestart_settlement_failure_is_recovered_on_reopen() {
     .unwrap();
     let (workspace_id, session_id, _) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let queued = store_command(&runtime.inner.store, session_id, "recover me")
+    let queued = store_command(&runtime.store(), session_id, "recover me")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
         panic!("unexpected receipt")
     };
     runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection.execute(
                 "UPDATE runs SET context_compaction_attempted = 1 WHERE id = ?1",
@@ -1493,8 +1472,7 @@ async fn permanent_prestart_settlement_failure_is_recovered_on_reopen() {
     .await
     .expect("the permanent settlement failure must release its permit");
     let (status, preparing): (String, Option<String>) = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection
                 .query_row(
@@ -1511,7 +1489,7 @@ async fn permanent_prestart_settlement_failure_is_recovered_on_reopen() {
     assert_eq!(status, "queued");
     assert_eq!(preparing.as_deref(), Some(run_id.to_string().as_str()));
     assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
-    runtime.inner.store.close().await.unwrap();
+    runtime.store().close().await.unwrap();
     drop(runtime);
 
     let recovered_calls = Arc::new(AtomicUsize::new(0));
@@ -1535,8 +1513,7 @@ async fn permanent_prestart_settlement_failure_is_recovered_on_reopen() {
     )));
     assert_eq!(recovered_calls.load(Ordering::SeqCst), 1);
     let (attempted, preparing): (bool, Option<String>) = recovered
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection
                 .query_row(
@@ -2003,8 +1980,7 @@ async fn recovery_ignores_legacy_overflow_evidence_without_spending_a_second_att
         Option<String>,
         Option<String>,
     ) = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection
                 .query_row(
@@ -2108,7 +2084,7 @@ async fn slow_preparation_does_not_serialize_an_independent_permit() {
     else {
         panic!("unexpected receipt")
     };
-    let first = store_command(&runtime.inner.store, first_session, "first")
+    let first = store_command(&runtime.store(), first_session, "first")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -2117,7 +2093,7 @@ async fn slow_preparation_does_not_serialize_an_independent_permit() {
     else {
         panic!("unexpected receipt")
     };
-    let second = store_command(&runtime.inner.store, second_session, "second")
+    let second = store_command(&runtime.store(), second_session, "second")
         .await
         .unwrap();
     let CommandOutcome::PromptQueued {
@@ -2299,8 +2275,7 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
     assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
     assert!(
         runtime
-            .inner
-            .store
+            .store()
             .unfinished_run_ids()
             .await
             .unwrap()
@@ -2311,8 +2286,7 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
         assert_eq!(pool.available_permits(), 1);
     }
     let preparing: Option<String> = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection
                 .query_row(
@@ -2326,8 +2300,7 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
         .unwrap();
     assert_eq!(preparing, None);
     let second = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             load_run(connection, second)
         })

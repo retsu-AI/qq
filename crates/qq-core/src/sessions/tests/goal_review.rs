@@ -560,7 +560,7 @@ async fn sponsored_child_requests_respect_positive_inherited_token_allowance() {
     )
     .await;
     drop(held);
-    harness.runtime.inner.schedule.send(()).await.unwrap();
+    harness.runtime.request_schedule();
     let events = collect_until_run_finished(&mut harness.events, run).await;
     harness.runtime.shutdown().await.unwrap();
     let child = events

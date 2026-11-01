@@ -332,8 +332,7 @@ async fn goal_final_run_reserves_a_durable_tool_free_handoff_after_early_complet
                     && message.output == "durable final-slot handoff")
         );
         let restored = reopened
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(crate::sessions::goals::load_live(connection, session_id)?.unwrap())
             })

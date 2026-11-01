@@ -7,6 +7,10 @@ pub(in crate::sessions) struct SchedulingHold {
 }
 
 impl SessionRuntime {
+    pub(in crate::sessions) fn store(&self) -> &Store {
+        &self.inner.store
+    }
+
     pub(in crate::sessions) fn stats(&self) -> StoreStats {
         self.inner.store.stats()
     }

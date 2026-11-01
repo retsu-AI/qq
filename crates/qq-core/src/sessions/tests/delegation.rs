@@ -424,8 +424,7 @@ async fn failed_child_run_insert_leaves_no_idle_orphan() {
     .await;
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             connection
                 .execute_batch(
@@ -2594,7 +2593,7 @@ async fn store_saturation_does_not_release_a_running_write_child() {
         .unwrap()
         .unwrap();
 
-    let blocked_store = harness.runtime.inner.store.clone();
+    let blocked_store = harness.runtime.store().clone();
     let (worker_entered, worker_started) = oneshot::channel();
     let (release_worker, worker_release) = std::sync::mpsc::channel();
     let worker = tokio::spawn(async move {
@@ -2610,7 +2609,7 @@ async fn store_saturation_does_not_release_a_running_write_child() {
     worker_started.await.unwrap();
     let mut queued = Vec::new();
     for _ in 0..256 {
-        let store = harness.runtime.inner.store.clone();
+        let store = harness.runtime.store().clone();
         let mut job = Box::pin(async move { store.call(Priority::Control, |_| Ok(())).await });
         assert!(futures_util::poll!(job.as_mut()).is_pending());
         queued.push(job);
@@ -2812,8 +2811,7 @@ async fn unreadable_child_outcome_fails_the_runtime_before_parent_continuation()
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection.execute(
                 "UPDATE runs SET usage_json = 'invalid-json' WHERE id = ?1",
@@ -2928,8 +2926,7 @@ async fn write_children_serialize_on_the_per_run_write_permit() {
         "two writers never share the checkout"
     );
     let delivery_rows: u32 = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT COUNT(*) FROM child_deliveries", [], |row| {
@@ -3336,8 +3333,7 @@ async fn nested_spend_receipt_excludes_later_prompts_in_owned_sessions() {
     collect_until_run_finished(&mut harness.events, followup).await;
     let (_, spend) = harness
         .runtime
-        .inner
-        .store
+        .store()
         .run_outcome(delegated_run)
         .await
         .unwrap()
@@ -3363,13 +3359,12 @@ async fn nested_spend_receipt_rejects_incomplete_or_overflowing_descendants() {
             _ => None,
         })
         .unwrap();
-    let accounted = harness.runtime.inner.store.run_outcome(root).await;
+    let accounted = harness.runtime.store().run_outcome(root).await;
     assert!(accounted.is_ok(), "{accounted:?}");
     for corruption in ["missing_identity", "unfinished", "usage_overflow"] {
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let transaction = connection.transaction()?;
                 transaction.execute_batch(
@@ -3409,15 +3404,14 @@ async fn nested_spend_receipt_rejects_incomplete_or_overflowing_descendants() {
             .unwrap();
         assert!(
             matches!(
-                harness.runtime.inner.store.run_outcome(root).await,
+                harness.runtime.store().run_outcome(root).await,
                 Err(SessionRuntimeError::AccountingUnavailable)
             ),
             "{corruption}"
         );
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 let transaction = connection.transaction()?;
                 transaction.execute(
@@ -3435,7 +3429,7 @@ async fn nested_spend_receipt_rejects_incomplete_or_overflowing_descendants() {
             })
             .await
             .unwrap();
-        let restored = harness.runtime.inner.store.run_outcome(root).await;
+        let restored = harness.runtime.store().run_outcome(root).await;
         assert!(restored.is_ok(), "{corruption}: {restored:?}");
     }
     harness.runtime.shutdown().await.unwrap();
@@ -4606,8 +4600,7 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
                 loop {
                     let sent = harness
                         .runtime
-                        .inner
-                        .store
+                        .store()
                         .call(Priority::AwaitControl, move |connection| {
                             Ok(connection.query_row(
                                 "SELECT estimated_cost_usd_nanos IS NULL FROM runs WHERE id = ?1",
@@ -4674,8 +4667,7 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
         }
         let (_, spend) = harness
             .runtime
-            .inner
-            .store
+            .store()
             .run_outcome(child_prompt)
             .await
             .unwrap()

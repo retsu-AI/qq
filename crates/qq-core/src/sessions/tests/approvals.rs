@@ -2405,8 +2405,7 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
             .expect("the parent started before the child asked");
         let child = call.run_id;
         let owner: String = runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(connection.query_row(
                     "SELECT goal_paid_owner_run_id FROM runs WHERE id=?1",
@@ -2519,13 +2518,11 @@ async fn readonly_revocation_denies_a_late_human_approval() {
 async fn idle_close_observes_termination_without_a_settlement() {
     for shutdown in [false, true] {
         let (directory, runtime) = test_runtime().await;
-        super::execution_context::process_call_fixture(&runtime.inner.store, directory.path())
-            .await;
+        super::execution_context::process_call_fixture(&runtime.store(), directory.path()).await;
         let mut closing = Box::pin(runtime.close_when_idle(std::future::pending()));
         assert!(futures_util::poll!(closing.as_mut()).is_pending());
         runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, |_| Ok(()))
             .await
             .unwrap();

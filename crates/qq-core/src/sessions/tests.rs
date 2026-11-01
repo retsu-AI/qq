@@ -1634,7 +1634,7 @@ impl SaturatedControlLane {
 async fn saturate_control_lane(runtime: &SessionRuntime) -> SaturatedControlLane {
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release, release_rx) = std::sync::mpsc::channel();
-    let blocked_store = runtime.inner.store.clone();
+    let blocked_store = runtime.store().clone();
     let blocked = tokio::spawn(async move {
         blocked_store
             .call(Priority::Control, move |_| {
@@ -1648,7 +1648,7 @@ async fn saturate_control_lane(runtime: &SessionRuntime) -> SaturatedControlLane
     entered_rx.await.unwrap();
     let mut fillers = Vec::new();
     for _ in 0..store::CONTROL_QUEUE_CAPACITY {
-        let store = runtime.inner.store.clone();
+        let store = runtime.store().clone();
         let mut call = Box::pin(async move { store.call(Priority::Control, |_| Ok(())).await });
         match futures_util::poll!(call.as_mut()) {
             std::task::Poll::Pending => fillers.push(tokio::spawn(call)),
@@ -1657,11 +1657,7 @@ async fn saturate_control_lane(runtime: &SessionRuntime) -> SaturatedControlLane
         }
     }
     assert!(matches!(
-        runtime
-            .inner
-            .store
-            .call(Priority::Control, |_| Ok(()))
-            .await,
+        runtime.store().call(Priority::Control, |_| Ok(())).await,
         Err(SessionRuntimeError::Overloaded)
     ));
     SaturatedControlLane {
@@ -4628,8 +4624,7 @@ async fn side_answer_bypasses_the_main_permit_and_leaves_session_rows_unchanged(
     let _main_permit = harness.runtime.hold_scheduling().await;
     let before = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT COUNT(*) FROM messages", [], |row| {
@@ -4655,8 +4650,7 @@ async fn side_answer_bypasses_the_main_permit_and_leaves_session_rows_unchanged(
     assert!(answer.usage.unwrap().output_tokens > 0);
     let after = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT COUNT(*) FROM messages", [], |row| {
@@ -4725,8 +4719,7 @@ async fn side_answer_cancellation_while_waiting_releases_only_side_admission() {
     assert_eq!(harness.runtime.idle_run_permits(), 1);
     let states = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT state FROM side_questions", [], |row| {
@@ -4802,7 +4795,7 @@ async fn side_threads_continue_explicitly_reset_and_persist_before_return() {
                 .any(|text| text.contains("first side"))
         );
     }
-    let rows = harness.runtime.inner.store.call(Priority::Control, |connection| {
+    let rows = harness.runtime.store().call(Priority::Control, |connection| {
         Ok(connection.query_row("SELECT COUNT(*), COUNT(DISTINCT thread_id) FROM side_questions WHERE state = 'completed'", [],
             |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)))?)
     }).await.unwrap();
@@ -5398,7 +5391,7 @@ async fn side_answer_finishes_while_main_provider_is_active_without_main_request
     .await
     .unwrap();
     let session = harness.session_id;
-    let before = harness.runtime.inner.store.call(Priority::Control, move |connection| {
+    let before = harness.runtime.store().call(Priority::Control, move |connection| {
         Ok(connection.query_row("SELECT active_run_id, CAST(estimated_cost_usd_nanos AS TEXT) FROM sessions WHERE id = ?1", [session.to_string()],
             |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)))?)
     }).await.unwrap();
@@ -5409,7 +5402,7 @@ async fn side_answer_finishes_while_main_provider_is_active_without_main_request
         .unwrap();
     assert_eq!(answer.text, "hello");
     assert_eq!(requests.lock().unwrap().len(), 1);
-    let after = harness.runtime.inner.store.call(Priority::Control, move |connection| {
+    let after = harness.runtime.store().call(Priority::Control, move |connection| {
         Ok(connection.query_row("SELECT active_run_id, CAST(estimated_cost_usd_nanos AS TEXT) FROM sessions WHERE id = ?1", [session.to_string()],
             |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)))?)
     }).await.unwrap();
@@ -5440,8 +5433,7 @@ async fn side_recovery_marks_interrupted_without_replaying_provider_work() {
     .await
     .unwrap();
     let state = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT state FROM side_questions", [], |row| {
@@ -5504,8 +5496,7 @@ async fn side_failure_with_a_request_in_flight_reports_unknown_spend_without_cha
     );
     let row = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(connection.query_row(
                 "SELECT state, usage_json, model_turns FROM side_questions",
@@ -5527,8 +5518,7 @@ async fn side_failure_with_a_request_in_flight_reports_unknown_spend_without_cha
     let session = harness.session_id;
     let main_cost = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             Ok(connection.query_row(
                 "SELECT estimated_cost_usd_nanos FROM sessions WHERE id = ?1",
@@ -5574,8 +5564,7 @@ async fn side_command_replay_launches_once_and_snapshot_matches_terminal_event()
         loop {
             let item = harness
                 .runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     side_questions::load_side_snapshot(connection, side_question_id)
                 })
@@ -5592,8 +5581,7 @@ async fn side_command_replay_launches_once_and_snapshot_matches_terminal_event()
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let snapshot = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, side_question_id)
         })
@@ -5601,8 +5589,7 @@ async fn side_command_replay_launches_once_and_snapshot_matches_terminal_event()
         .unwrap();
     let events = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             let json: String = connection.query_row(
                 "SELECT envelope_json FROM events ORDER BY rowid DESC LIMIT 1",
@@ -5646,8 +5633,7 @@ async fn side_wire_cancel_does_not_cancel_main_and_replays_same_receipt() {
     assert_eq!(first, harness.runtime.command(id, command).await.unwrap());
     let state = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, side_question_id)
         })
@@ -5682,8 +5668,7 @@ async fn side_submit_then_immediate_shutdown_settles_accepted_work() {
     harness.runtime.shutdown().await.unwrap();
     let item = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, side_question_id)
         })
@@ -5743,8 +5728,7 @@ async fn side_partial_text_is_durable_before_completion_and_cancel_preserves_it(
         loop {
             let item = harness
                 .runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     side_questions::load_side_snapshot(connection, side_question_id)
                 })
@@ -5770,8 +5754,7 @@ async fn side_partial_text_is_durable_before_completion_and_cancel_preserves_it(
     harness.runtime.shutdown().await.unwrap();
     let item = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, side_question_id)
         })
@@ -5816,8 +5799,7 @@ async fn side_public_provider_panic_settles_interrupted_and_shutdown_drains() {
     harness.runtime.shutdown().await.unwrap();
     let state = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT state FROM side_questions", [], |row| {
@@ -5878,15 +5860,13 @@ async fn side_deadline_from_admission_times_out_before_provider_load() {
     let id = RunId::generate().unwrap();
     let (request, messages) = harness
         .runtime
-        .inner
-        .store
+        .store()
         .side_source(harness.session_id, id, "expired".to_owned(), false)
         .await
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection.execute(
                 "UPDATE side_questions SET created_at_ms = 0 WHERE id = ?1",
@@ -5916,8 +5896,7 @@ async fn side_deadline_from_admission_times_out_before_provider_load() {
         loop {
             let item = harness
                 .runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     side_questions::load_side_snapshot(connection, id)
                 })
@@ -5950,8 +5929,7 @@ async fn side_terminal_settlement_is_idempotent_without_duplicate_events() {
         .unwrap();
     let before = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT COUNT(*) FROM events", [], |row| {
@@ -5963,8 +5941,7 @@ async fn side_terminal_settlement_is_idempotent_without_duplicate_events() {
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .finish_side_question(
             answer.id,
             qq_protocol::SideQuestionState::Failed,
@@ -5975,8 +5952,7 @@ async fn side_terminal_settlement_is_idempotent_without_duplicate_events() {
         .unwrap();
     let after = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT COUNT(*) FROM events", [], |row| {
@@ -5989,8 +5965,7 @@ async fn side_terminal_settlement_is_idempotent_without_duplicate_events() {
     assert_eq!(before, after);
     let item = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, answer.id)
         })
@@ -6005,15 +5980,13 @@ async fn side_late_completion_settlement_is_timed_out_not_completed() {
     let id = RunId::generate().unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .side_source(harness.session_id, id, "late".to_owned(), false)
         .await
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection.execute(
                 "UPDATE side_questions SET created_at_ms = 0 WHERE id = ?1",
@@ -6025,15 +5998,13 @@ async fn side_late_completion_settlement_is_timed_out_not_completed() {
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .finish_side_question(id, qq_protocol::SideQuestionState::Completed, true, 120_000)
         .await
         .unwrap();
     let item = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, id)
         })
@@ -6049,8 +6020,7 @@ async fn side_accepted_admission_receipt_survives_deadline_and_is_settled() {
     let (release, wait) = std::sync::mpsc::channel();
     let worker = harness
         .runtime
-        .inner
-        .store
+        .store()
         .enqueue_side_write(None, move |_| {
             let _ = entered.send(());
             wait.recv().unwrap();
@@ -6063,8 +6033,7 @@ async fn side_accepted_admission_receipt_survives_deadline_and_is_settled() {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(20);
     let mut receipt = harness
         .runtime
-        .inner
-        .store
+        .store()
         .enqueue_side_admission(
             harness.session_id,
             id,
@@ -6084,16 +6053,14 @@ async fn side_accepted_admission_receipt_survives_deadline_and_is_settled() {
     receipt.await.unwrap().unwrap();
     let effective = harness
         .runtime
-        .inner
-        .store
+        .store()
         .finish_side_question(id, qq_protocol::SideQuestionState::TimedOut, true, 120_000)
         .await
         .unwrap();
     assert_eq!(effective, qq_protocol::SideQuestionState::TimedOut);
     let again = harness
         .runtime
-        .inner
-        .store
+        .store()
         .finish_side_question(id, qq_protocol::SideQuestionState::Completed, true, 120_000)
         .await
         .unwrap();
@@ -6106,8 +6073,7 @@ async fn side_expired_admission_does_not_enter_worker_queue() {
     let id = RunId::generate().unwrap();
     let result = harness
         .runtime
-        .inner
-        .store
+        .store()
         .enqueue_side_admission(
             harness.session_id,
             id,
@@ -6122,8 +6088,7 @@ async fn side_expired_admission_does_not_enter_worker_queue() {
     ));
     let count = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             Ok(connection.query_row(
                 "SELECT COUNT(*) FROM side_questions WHERE id = ?1",
@@ -6241,8 +6206,7 @@ async fn submit_side(harness: &SpawnHarness, question: &str) -> RunId {
 async fn side_row(harness: &SpawnHarness, id: RunId) -> qq_protocol::SideQuestionSnapshot {
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             side_questions::load_side_snapshot(connection, id)
         })
@@ -6271,8 +6235,7 @@ async fn wait_side(
 async fn side_events(harness: &SpawnHarness, id: RunId) -> Vec<qq_protocol::SideQuestionSnapshot> {
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let mut statement =
                 connection.prepare("SELECT envelope_json FROM events ORDER BY rowid")?;
@@ -6400,8 +6363,7 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
         .unwrap();
     assert!(!task.is_finished());
     let state = runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             Ok(
                 connection.query_row("SELECT state FROM side_questions", [], |row| {
@@ -6463,15 +6425,13 @@ async fn side_settlement_tolerates_a_session_deleted_after_cancel() {
     let id = RunId::generate().unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .side_source(harness.session_id, id, "x".to_owned(), true)
         .await
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             connection.execute("UPDATE side_questions SET state = 'cancelled'", [])?;
             Ok(())
@@ -6490,15 +6450,13 @@ async fn side_settlement_tolerates_a_session_deleted_after_cancel() {
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .record_side_turn(id, "late".to_owned(), None, None, 1)
         .await
         .unwrap();
     let effective = harness
         .runtime
-        .inner
-        .store
+        .store()
         .finish_side_question(id, qq_protocol::SideQuestionState::Completed, true, 120_000)
         .await
         .unwrap();
@@ -6561,8 +6519,7 @@ async fn side_running_question_survives_a_snapshot_over_the_body_budget() {
     let session = harness.session_id;
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let transaction = connection.transaction()?;
             let big = "m".repeat(24 * 1024);
@@ -6698,8 +6655,7 @@ async fn side_dropped_submit_future_still_settles_and_frees_the_session() {
     let (release, wait) = std::sync::mpsc::channel();
     let worker = harness
         .runtime
-        .inner
-        .store
+        .store()
         .enqueue_side_write(None, move |_| {
             let _ = entered.send(());
             wait.recv().unwrap();
@@ -6727,8 +6683,7 @@ async fn side_dropped_submit_future_still_settles_and_frees_the_session() {
         loop {
             let found = harness
                 .runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, |connection| {
                     Ok(connection
                         .query_row("SELECT id FROM side_questions", [], |row| {

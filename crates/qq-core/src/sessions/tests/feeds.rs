@@ -11,7 +11,7 @@ async fn unknown_workspace_subscription_churn_retains_no_feeds() {
             .subscribe_published(SubscribeRequest {
                 workspace_id,
                 after: EventCursor {
-                    store_id: harness.runtime.inner.store.store_id(),
+                    store_id: harness.runtime.store_id(),
                     workspace_id,
                     sequence: 0,
                 },
@@ -35,7 +35,7 @@ async fn disconnected_subscribers_release_the_feed_and_replay_missed_commits() {
     let request = SubscribeRequest {
         workspace_id: harness.workspace_id,
         after: EventCursor {
-            store_id: harness.runtime.inner.store.store_id(),
+            store_id: harness.runtime.store_id(),
             workspace_id: harness.workspace_id,
             sequence: 0,
         },
@@ -79,7 +79,7 @@ async fn canceled_feed_attachment_releases_queued_and_unreceived_replies() {
         let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
         let (entered, waiting) = oneshot::channel();
         let (release, blocked) = std::sync::mpsc::channel();
-        let store = harness.runtime.inner.store.clone();
+        let store = harness.runtime.store().clone();
         let hold = tokio::spawn(async move {
             store
                 .call(Priority::Control, move |_| {
@@ -97,7 +97,7 @@ async fn canceled_feed_attachment_releases_queued_and_unreceived_replies() {
                 .subscribe_published(SubscribeRequest {
                     workspace_id: harness.workspace_id,
                     after: EventCursor {
-                        store_id: harness.runtime.inner.store.store_id(),
+                        store_id: harness.runtime.store_id(),
                         workspace_id: harness.workspace_id,
                         sequence: 0,
                     },
@@ -113,8 +113,7 @@ async fn canceled_feed_attachment_releases_queued_and_unreceived_replies() {
         hold.await.unwrap().unwrap();
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, |_| Ok(()))
             .await
             .unwrap();
@@ -133,8 +132,7 @@ async fn failed_initial_replay_releases_its_feed() {
     let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             connection.execute("UPDATE events SET envelope_json = 'invalid'", [])?;
             Ok(())
@@ -146,7 +144,7 @@ async fn failed_initial_replay_releases_its_feed() {
         .subscribe_published(SubscribeRequest {
             workspace_id: harness.workspace_id,
             after: EventCursor {
-                store_id: harness.runtime.inner.store.store_id(),
+                store_id: harness.runtime.store_id(),
                 workspace_id: harness.workspace_id,
                 sequence: 0,
             },
@@ -173,8 +171,7 @@ async fn replay_decodes_events_from_removed_jev_features() {
     ];
     let sequences = harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let mut statement =
                 connection.prepare("SELECT sequence FROM events ORDER BY sequence LIMIT 4")?;
@@ -199,7 +196,7 @@ async fn replay_decodes_events_from_removed_jev_features() {
         .subscribe_published(SubscribeRequest {
             workspace_id: harness.workspace_id,
             after: EventCursor {
-                store_id: harness.runtime.inner.store.store_id(),
+                store_id: harness.runtime.store_id(),
                 workspace_id: harness.workspace_id,
                 sequence: 0,
             },
@@ -230,7 +227,7 @@ async fn live_subscribers_read_the_store_once_and_receive_committed_bytes() {
                 .subscribe_published(SubscribeRequest {
                     workspace_id: harness.workspace_id,
                     after: EventCursor {
-                        store_id: harness.runtime.inner.store.store_id(),
+                        store_id: harness.runtime.store_id(),
                         workspace_id: harness.workspace_id,
                         sequence: 0,
                     },
@@ -273,8 +270,7 @@ async fn live_subscribers_read_the_store_once_and_receive_committed_bytes() {
 
     let replay = harness
         .runtime
-        .inner
-        .store
+        .store()
         .published_events_after(
             harness.workspace_id,
             caught_up[0].envelope.cursor.sequence,
@@ -302,7 +298,7 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
     let request = SubscribeRequest {
         workspace_id: harness.workspace_id,
         after: EventCursor {
-            store_id: harness.runtime.inner.store.store_id(),
+            store_id: harness.runtime.store_id(),
             workspace_id: harness.workspace_id,
             sequence: 0,
         },
@@ -401,7 +397,7 @@ async fn a_lagging_subscriber_catches_up_from_the_store_without_gaps_or_duplicat
         .subscribe_published(SubscribeRequest {
             workspace_id: harness.workspace_id,
             after: EventCursor {
-                store_id: harness.runtime.inner.store.store_id(),
+                store_id: harness.runtime.store_id(),
                 workspace_id: harness.workspace_id,
                 sequence: 0,
             },
@@ -504,8 +500,7 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
             .unwrap();
         let stored_previews: String = harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(connection.query_row(
                     "SELECT approval_inputs_json FROM tool_calls WHERE id=?1",
@@ -533,8 +528,7 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
             let backup = path.clone();
             harness
                 .runtime
-                .inner
-                .store
+                .store()
                 .call(Priority::Control, move |connection| {
                     connection.execute("VACUUM INTO ?1", [backup.to_str().unwrap()])?;
                     Ok(())
@@ -592,8 +586,7 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
         }
         let recovered = harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 for (workspace, session, run) in [
                     (WorkspaceId::generate().unwrap(), session_id, run_id),
@@ -628,8 +621,7 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
         collect_through_finished(&mut harness.events).await;
         let retained: Option<String> = harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 Ok(connection.query_row(
                     "SELECT approval_inputs_json FROM tool_calls WHERE id=?1",
@@ -773,8 +765,7 @@ async fn terminal_receipts_remain_scoped_and_recover_from_legacy_delivery_histor
         let backup = path.clone();
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .call(Priority::Control, move |connection| {
                 connection.execute("VACUUM INTO ?1", [backup.to_str().unwrap()])?;
                 Ok(())
@@ -857,8 +848,7 @@ async fn terminal_receipts_remain_scoped_and_recover_from_legacy_delivery_histor
     }
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             connection.execute("DELETE FROM events", [])?;
             Ok(())
@@ -893,8 +883,7 @@ async fn terminal_receipt_pages_bound_rows_and_bytes_without_skipping_runs() {
     };
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let columns = connection
                 .prepare("PRAGMA table_info(runs)")?
@@ -1011,8 +1000,7 @@ async fn a_cold_snapshot_restores_pending_question_details_without_delivery_even
         .unwrap();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, |connection| {
             connection.execute(
                 "UPDATE messages SET output=?1 WHERE role='user'",
@@ -1067,7 +1055,7 @@ async fn a_cold_cursor_before_the_retained_journal_requires_a_snapshot() {
     let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
     create_session(&harness.runtime, harness.workspace_id, None).await;
     let workspace = harness.workspace_id;
-    let replay = harness.runtime.inner.store.call(Priority::Control, move |connection| {
+    let replay = harness.runtime.store().call(Priority::Control, move |connection| {
         connection.execute("DELETE FROM events WHERE workspace_id=?1 AND sequence=(SELECT MIN(sequence) FROM events WHERE workspace_id=?1)", [workspace.to_string()])?;
         read_published_event_page(connection, workspace, 0, MAX_REPLAY_EVENTS)
     }).await;
@@ -1125,11 +1113,10 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
     else {
         panic!("wrong session receipt")
     };
-    let store = harness.runtime.inner.store.store_id();
+    let store = harness.runtime.store_id();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             let tail: u64 = connection.query_row(
                 "SELECT next_sequence FROM workspaces WHERE id=?1",
@@ -1174,8 +1161,7 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
     let backup = legacy_path.clone();
     harness
         .runtime
-        .inner
-        .store
+        .store()
         .call(Priority::Control, move |connection| {
             connection.execute("VACUUM INTO ?1", [backup.to_str().unwrap()])?;
             Ok(())
@@ -1211,7 +1197,7 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
     );
     drop(migrated);
     create_session(&harness.runtime, other, None).await;
-    harness.runtime.inner.store.call(Priority::Control, move |connection| {
+    harness.runtime.store().call(Priority::Control, move |connection| {
         let measure = |connection: &Connection| -> Result<(u64,u64), SessionRuntimeError> {
             let actual: (u64,u64) = connection.query_row("SELECT COALESCE(SUM(length(CAST(envelope_json AS BLOB))),0),COUNT(*) FROM events", [], |row| Ok((row.get(0)?,row.get(1)?)))?;
             let metered = connection.query_row("SELECT bytes,rows FROM event_journal_usage WHERE singleton=1", [], |row| Ok((row.get(0)?,row.get(1)?)))?;
@@ -1238,8 +1224,7 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
     assert_eq!(
         harness
             .runtime
-            .inner
-            .store
+            .store()
             .published_events_after(harness.workspace_id, 0, MAX_REPLAY_EVENTS)
             .await
             .unwrap_err(),
@@ -1291,7 +1276,7 @@ async fn approval_recovery_is_scoped_to_the_root_family() {
         .subscribe(SubscribeRequest {
             workspace_id: workspace,
             after: EventCursor {
-                store_id: runtime.inner.store.store_id(),
+                store_id: runtime.store_id(),
                 workspace_id: workspace,
                 sequence: 0,
             },
