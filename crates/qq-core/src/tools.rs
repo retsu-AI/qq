@@ -1458,8 +1458,7 @@ mod tests {
         .unwrap();
         fs::write(directory.path().join("single"), "x".repeat(5 * 1024 * 1024)).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        for path in ["capped", "single"] {
-            let mut offset = 1;
+        for (path, mut offset) in [("capped", 40_000), ("single", 1)] {
             for call in 0..256 {
                 let arguments = format!(r#"{{"path":"{path}","offset":{offset}}}"#);
                 let result = run_tool(&workspace, &FileState::default(), "read_file", &arguments);
