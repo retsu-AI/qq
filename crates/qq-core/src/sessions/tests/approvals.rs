@@ -1865,7 +1865,6 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
         (None, 300_000, true),
     ] {
         let start = now_ms();
-        let epoch = super::goal_driver_soak::Epoch::new(start);
         let directory = TempDir::new().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let requests = Arc::new(StdMutex::new(Vec::new()));
@@ -1908,7 +1907,6 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
         let (_, call) = collect_until_approval_requested(&mut events).await;
         if expire_goal {
             tokio::time::pause();
-            epoch.advance(start + 60_001);
             tokio::time::advance(Duration::from_millis(60_001)).await;
             tokio::time::resume();
         }
@@ -2274,6 +2272,10 @@ async fn a_childs_timed_out_hold_pauses_the_goal_after_its_expired_owner_cancell
         .acquire_many(inner.max_active_runs as u32)
         .await
         .unwrap();
+    let child_permits = inner.child_permits[0]
+        .acquire_many(inner.max_active_runs as u32)
+        .await
+        .unwrap();
     harness
         .runtime
         .command(
@@ -2426,6 +2428,7 @@ async fn a_childs_timed_out_hold_pauses_the_goal_after_its_expired_owner_cancell
             .await
             .unwrap();
     }
+    drop(child_permits);
     drop(permits);
     harness.runtime.shutdown().await.unwrap();
 }
@@ -2475,7 +2478,7 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
         let (release, released) = tokio::sync::oneshot::channel();
         let directory = TempDir::new().unwrap();
         let start = now_ms();
-        let epoch = super::goal_driver_soak::Epoch::new(start);
+        let _lagging_calendar = wall_clock_lags.then(|| super::PinnedCalendar::new(start));
         let parent_requests = Arc::new(StdMutex::new(Vec::new()));
         let child_requests = Arc::new(StdMutex::new(Vec::new()));
         let parent: Arc<dyn Provider> = Arc::new(MeteredDelegationProvider {
@@ -2547,7 +2550,6 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
         if preparation_ms > 0 {
             entry.await.unwrap();
             tokio::time::pause();
-            epoch.advance(start + preparation_ms);
             tokio::time::advance(Duration::from_millis(preparation_ms)).await;
             tokio::time::resume();
             release.send(()).unwrap();
@@ -2581,9 +2583,6 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
         assert_eq!(parent_requests.lock().unwrap().len(), 1);
         assert_eq!(child_requests.lock().unwrap().len(), 1);
         tokio::time::pause();
-        if !wall_clock_lags {
-            epoch.advance(start + 3_600_001);
-        }
         tokio::time::advance(Duration::from_millis(3_600_001 - preparation_ms)).await;
         tokio::time::resume();
         let completed = collect_until_run_finished(&mut events, parent).await;

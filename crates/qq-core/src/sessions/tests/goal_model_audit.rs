@@ -303,7 +303,7 @@ async fn exercise(scenario: &'static str) {
 async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
     for scenario in ["deadline", "stale", "paused_edit"] {
         let start = now_ms();
-        let epoch = super::goal_driver_soak::Epoch::new(start);
+        let epoch = super::PinnedCalendar::new(start);
         let directory = TempDir::new().unwrap();
         let gate = Arc::new(AuditGate {
             entered: tokio::sync::Notify::new(),

@@ -60,7 +60,7 @@ impl DeadlineSession {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn duration_withdraws_pending_approval_without_executing_the_tool() {
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let mut harness = DeadlineSession::open(
@@ -277,16 +277,9 @@ async fn duration_waits_for_blocking_attachment_guidance_and_skill_cleanup() {
         let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
             panic!("prompt")
         };
-        let keep_clock = tokio::spawn(async {
-            loop {
-                tokio::task::yield_now().await;
-            }
-        });
         entered.await.unwrap();
         tokio::time::advance(Duration::from_secs(31)).await;
-
         tokio::time::resume();
-        keep_clock.abort();
         let premature = tokio::time::timeout(Duration::from_millis(750), async {
             loop {
                 let event = harness.events.next().await.unwrap().unwrap();
@@ -313,7 +306,7 @@ async fn duration_waits_for_blocking_attachment_guidance_and_skill_cleanup() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn duration_does_not_restart_for_output_repair() {
     let mut harness = output_contract_harness(&["not json", "<hang>"]).await;
     let receipt = harness
@@ -379,7 +372,7 @@ impl Provider for CompactionDeadlineProvider {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn completed_compaction_does_not_restart_the_original_duration() {
     let runtime = Runtime::new(
         CompactionDeadlineProvider(AtomicUsize::new(0)),
@@ -447,7 +440,7 @@ impl crate::ContextSource for PendingDeadlineSource {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn duration_cancels_context_preparation_before_any_provider_request() {
     let cancellation = Arc::new(StdMutex::new(None));
     let requests = Arc::new(StdMutex::new(Vec::new()));
@@ -559,7 +552,7 @@ async fn duration_cancels_read_only_and_mutating_external_calls() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn duration_cancels_automatic_compaction_and_settles_the_original_prompt() {
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::Text(over_threshold_output()),
@@ -898,13 +891,15 @@ impl Provider for DeadlineProvider {
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn duration_expires_during_shell_execution_and_drains_before_session_reuse() {
-    let keep_clock = tokio::spawn(async {
-        let began = std::time::Instant::now();
-        while began.elapsed() < Duration::from_secs(5) {
-            tokio::task::yield_now().await;
-        }
-    });
     let directory = tempfile::tempdir().unwrap();
+    let printed = directory.path().join("printed");
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        &printed,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .unwrap();
+    let shell_printed = tokio::task::spawn_blocking(move || std::fs::read(printed));
     let spawned =
         crate::tools::observe_shell_spawn(&std::fs::canonicalize(directory.path()).unwrap(), false);
     let requests = Arc::new(AtomicUsize::new(0));
@@ -951,16 +946,9 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
         .await
         .expect("the process must reach actual spawn")
         .unwrap();
-    let printed = directory.path().join("printed");
-    let waited = std::time::Instant::now();
-    while !printed.exists() {
-        assert!(
-            waited.elapsed() < Duration::from_secs(5),
-            "shell never printed"
-        );
-        tokio::task::yield_now().await;
-    }
+    shell_printed.await.unwrap().unwrap();
     tokio::time::advance(Duration::from_millis(300)).await;
+    tokio::time::resume();
     let mut tool_started = false;
     let terminal = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -1021,5 +1009,4 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
         }
     )));
     runtime.shutdown().await.unwrap();
-    keep_clock.abort();
 }
