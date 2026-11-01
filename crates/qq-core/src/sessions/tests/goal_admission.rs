@@ -646,8 +646,8 @@ async fn goal_failure_after_start_before_provider_poll_preserves_known_zero() {
                 .await
                 .unwrap()
         };
-        let (_initial_read, release_initial) = store::hold_cancellation_read(run_id);
-        let (post_start_read, release_post_start) = store::hold_cancellation_read(run_id);
+        let (_initial_read, release_initial) = PROBE.hold(Checkpoint::CancellationRead(run_id));
+        let (post_start_read, release_post_start) = PROBE.hold(Checkpoint::CancellationRead(run_id));
         release_initial.send(()).unwrap();
         drop(held);
         runtime.inner.schedule.send(()).await.unwrap();
@@ -661,7 +661,7 @@ async fn goal_failure_after_start_before_provider_poll_preserves_known_zero() {
                 Ok(())
             }).await.unwrap();
         } else {
-            store::fail_cancellation_reads(run_id, [SessionRuntimeError::CONSTRAINT]);
+            FAULTS.inject(StoreFault::CancellationRead(run_id), [SessionRuntimeError::CONSTRAINT]);
         }
         release_post_start.send(()).unwrap();
         let observed = collect_until_run_finished(&mut events, run_id).await;

@@ -4,52 +4,11 @@ use super::{
     runtime::SessionRuntimeInner,
     subagents::{ChildTasks, SessionAuditHook, SessionEvidenceReader, SessionSubagentSpawner},
 };
+use super::probe::{Checkpoint, PROBE};
 use crate::runtime::RunDeadline;
 use crate::tools;
 
 struct CompactionRunGate;
-
-#[cfg(all(test, unix))]
-struct BufferedToolOutputHook {
-    tool_call_id: ToolCallId,
-    entered: oneshot::Sender<()>,
-    release: oneshot::Receiver<()>,
-}
-
-#[cfg(all(test, unix))]
-static BUFFERED_TOOL_OUTPUT_HOOKS: Mutex<Vec<BufferedToolOutputHook>> = Mutex::new(Vec::new());
-
-#[cfg(all(test, unix))]
-pub(super) fn hold_buffered_tool_output(
-    tool_call_id: ToolCallId,
-) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-    let (entered, entered_rx) = oneshot::channel();
-    let (release, release_rx) = oneshot::channel();
-    BUFFERED_TOOL_OUTPUT_HOOKS
-        .lock()
-        .unwrap()
-        .push(BufferedToolOutputHook {
-            tool_call_id,
-            entered,
-            release: release_rx,
-        });
-    (entered_rx, release)
-}
-
-#[cfg(all(test, unix))]
-async fn pause_after_buffering_tool_output(tool_call_id: ToolCallId) {
-    let hook = {
-        let mut hooks = BUFFERED_TOOL_OUTPUT_HOOKS.lock().unwrap();
-        hooks
-            .iter()
-            .position(|hook| hook.tool_call_id == tool_call_id)
-            .map(|index| hooks.remove(index))
-    };
-    if let Some(hook) = hook {
-        let _ = hook.entered.send(());
-        let _ = hook.release.await;
-    }
-}
 
 impl ToolGate for CompactionRunGate {
     fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
@@ -119,7 +78,6 @@ struct PreparedExecution {
 pub(super) struct RunResources {
     tools: crate::tools::ToolTasks,
     children: Arc<ChildTasks>,
-    #[cfg(test)]
     run_id: Option<RunId>,
 }
 
@@ -141,26 +99,18 @@ impl TeardownComplete {
     }
 }
 
-#[cfg(test)]
-static STOP_OBSERVERS: Mutex<Vec<(RunId, oneshot::Sender<()>)>> = Mutex::new(Vec::new());
-
-#[cfg(test)]
-pub(super) fn observe_execution_stop(run_id: RunId) -> oneshot::Receiver<()> {
-    let (sender, receiver) = oneshot::channel();
-    STOP_OBSERVERS.lock().unwrap().push((run_id, sender));
-    receiver
-}
-
 impl RunResources {
     pub(super) fn process_lease(&self) -> crate::tools::ToolTaskLease {
         self.tools.enter()
     }
 
-    #[cfg(test)]
-    pub(super) fn for_test_run(mut self, run_id: RunId) -> Self {
-        self.run_id = Some(run_id);
-        self
+    pub(super) fn for_run(run_id: RunId) -> Self {
+        Self {
+            run_id: Some(run_id),
+            ..Self::default()
+        }
     }
+
     pub(super) async fn drain(&self) -> Result<TeardownComplete, ExecutionCleanupError> {
         let (tools, children) = tokio::join!(self.tools.drain(), self.children.drain());
         match (tools, children) {
@@ -175,18 +125,8 @@ impl RunResources {
         events: &mut crate::RuntimeStream,
     ) -> Result<TeardownComplete, ExecutionCleanupError> {
         *events = Box::pin(futures_util::stream::empty());
-        #[cfg(test)]
-        {
-            let hook = {
-                let mut observers = STOP_OBSERVERS.lock().unwrap();
-                observers
-                    .iter()
-                    .position(|(run, _)| Some(*run) == self.run_id)
-                    .map(|index| observers.remove(index))
-            };
-            if let Some((_, entered)) = hook {
-                let _ = entered.send(());
-            }
+        if let Some(run_id) = self.run_id {
+            PROBE.passed(Checkpoint::ExecutionStop(run_id));
         }
         self.drain().await
     }
@@ -2625,8 +2565,7 @@ async fn execute_started_run(
                     }
                 }
                 pending_tool_output.push_str(&chunk);
-                #[cfg(all(test, unix))]
-                pause_after_buffering_tool_output(id).await;
+                PROBE.reached(Checkpoint::BufferedToolOutput(id)).await;
                 if pending_tool_output.len() >= OUTPUT_BATCH_BYTES {
                     if let Err(error) = flush_pending_tool_output(
                         &inner,

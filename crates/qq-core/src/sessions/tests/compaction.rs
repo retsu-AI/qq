@@ -1433,7 +1433,7 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    store::fail_reserved_reloads(run_id, [SessionRuntimeError::CONSTRAINT]);
+    FAULTS.inject(StoreFault::ReservedReload(run_id), [SessionRuntimeError::CONSTRAINT]);
     harness.runtime.request_schedule();
     let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
 

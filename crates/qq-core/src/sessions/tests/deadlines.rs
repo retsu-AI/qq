@@ -168,7 +168,7 @@ async fn duration_stops_shell_while_output_persistence_is_blocked() {
     let spawned = crate::tools::observe_shell_spawn(&workspace, false);
     let run_id = harness.submit("run a command", 1_000).await;
     let (_, call) = collect_until_approval_requested(&mut harness.events).await;
-    let (buffered, release_output) = execution::hold_buffered_tool_output(call.id);
+    let (buffered, release_output) = PROBE.hold(Checkpoint::BufferedToolOutput(call.id));
     respond_approval(
         &harness.runtime,
         run_id,

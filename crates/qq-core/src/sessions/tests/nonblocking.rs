@@ -320,7 +320,7 @@ async fn a_parent_keeps_working_and_receives_each_answer_once() {
         "widgets live in inventory.rs:1",
     )
     .await;
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -403,7 +403,7 @@ async fn an_answer_after_the_parent_settles_reaches_its_next_run() {
         "the answer for later",
     )
     .await;
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -464,7 +464,7 @@ async fn steering_wakes_a_parent_waiting_for_answers() {
         "late answer",
     )
     .await;
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -793,7 +793,7 @@ async fn the_deadline_ends_a_wait_for_answers() {
         "never released",
     )
     .await;
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let receipt = delegation
         .harness
         .runtime
@@ -921,7 +921,7 @@ async fn an_empty_reply_while_waiting_keeps_the_request_valid() {
         "the survey",
     )
     .await;
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -1109,7 +1109,7 @@ async fn a_spawn_call_dropped_while_its_receipt_is_in_flight_keeps_the_child() {
         "answer despite the interrupt",
     )
     .await;
-    let (held, release) = subagents::hold_child_receipt(delegation.harness.session_id);
+    let (held, release) = PROBE.hold(Checkpoint::ChildReceipt(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -1245,7 +1245,7 @@ async fn wait_agents_with_a_timeout_returns_what_settled() {
         "the late answer",
     )
     .await;
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -2157,7 +2157,7 @@ async fn an_interim_report_does_not_end_a_tool_free_wait() {
         children_started: started,
         parent_turn,
     };
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -2322,7 +2322,7 @@ async fn steering_during_a_wait_with_a_pending_report_replays_as_live() {
         children_started: started,
         parent_turn,
     };
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let waiting = PROBE.observe(Checkpoint::ParentWait(delegation.harness.session_id));
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -2467,7 +2467,7 @@ async fn cancelling_a_child_that_just_finished_reports_it_finished() {
         .unwrap()
         .parse()
         .unwrap();
-    let (mut entered, mut release, _) = store::hold_outcome_read(child_run);
+    let (mut entered, mut release, _) = hold_outcome_read(child_run);
     delegation.gate.add_permits(1);
     let release = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -2485,7 +2485,7 @@ async fn cancelling_a_child_that_just_finished_reports_it_finished() {
             if settled {
                 break release;
             }
-            let (next_entered, next_release, _) = store::hold_outcome_read(child_run);
+            let (next_entered, next_release, _) = hold_outcome_read(child_run);
             release.send(()).unwrap();
             entered = next_entered;
             release = next_release;

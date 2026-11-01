@@ -1,3 +1,4 @@
+use super::probe::{Checkpoint, PROBE};
 use super::store::Priority;
 use super::*;
 #[cfg(unix)]
@@ -12,47 +13,6 @@ use std::collections::VecDeque;
 use tokio::io::AsyncReadExt;
 
 const OUTPUT_BYTES: usize = 4096;
-
-#[cfg(all(test, unix))]
-struct ResultHold {
-    session: SessionId,
-    entered: tokio::sync::oneshot::Sender<()>,
-    release: tokio::sync::oneshot::Receiver<()>,
-}
-#[cfg(all(test, unix))]
-static RESULT_HOLDS: Mutex<Vec<ResultHold>> = Mutex::new(Vec::new());
-
-#[cfg(all(test, unix))]
-pub(super) fn hold_result(
-    session: SessionId,
-) -> (
-    tokio::sync::oneshot::Receiver<()>,
-    tokio::sync::oneshot::Sender<()>,
-) {
-    let (entered, entered_rx) = tokio::sync::oneshot::channel();
-    let (release, release_rx) = tokio::sync::oneshot::channel();
-    RESULT_HOLDS.lock().unwrap().push(ResultHold {
-        session,
-        entered,
-        release: release_rx,
-    });
-    (entered_rx, release)
-}
-
-#[cfg(all(test, unix))]
-async fn pause_result(session: SessionId) {
-    let hold = {
-        let mut holds = RESULT_HOLDS.lock().unwrap();
-        holds
-            .iter()
-            .position(|hold| hold.session == session)
-            .map(|index| holds.remove(index))
-    };
-    if let Some(hold) = hold {
-        let _ = hold.entered.send(());
-        let _ = hold.release.await;
-    }
-}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ProcessOutcome {
@@ -1005,8 +965,9 @@ pub(super) async fn execute(
             return;
         }
     };
-    #[cfg(all(test, unix))]
-    pause_result(claimed.identity.session_id).await;
+    PROBE
+        .reached(Checkpoint::GoalCheckResult(claimed.identity.session_id))
+        .await;
     let claim = claimed.clone();
     match inner
         .store

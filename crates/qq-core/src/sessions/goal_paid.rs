@@ -1,3 +1,4 @@
+use super::probe::{Checkpoint, PROBE};
 use super::store::Priority;
 use super::*;
 use crate::runtime::ChildBudget;
@@ -9,39 +10,6 @@ pub(crate) struct GoalPaidInput {
     admitted_identity: Arc<std::sync::OnceLock<RunIdentity>>,
     expected_owner: Option<RunId>,
     pricing: Option<Arc<qq_protocol::ModelPricing>>,
-}
-
-#[cfg(test)]
-struct SummaryAdmissionHook {
-    session: SessionId,
-    skip: usize,
-    entered: tokio::sync::oneshot::Sender<RunId>,
-    release: tokio::sync::oneshot::Receiver<()>,
-}
-#[cfg(test)]
-static SUMMARY_ADMISSION_HOOKS: std::sync::Mutex<Vec<SummaryAdmissionHook>> =
-    std::sync::Mutex::new(Vec::new());
-
-#[cfg(test)]
-pub(super) fn hold_summary_admission_ack(
-    session: SessionId,
-    skip: usize,
-) -> (
-    tokio::sync::oneshot::Receiver<RunId>,
-    tokio::sync::oneshot::Sender<()>,
-) {
-    let (entered, entered_rx) = tokio::sync::oneshot::channel();
-    let (release, release_rx) = tokio::sync::oneshot::channel();
-    SUMMARY_ADMISSION_HOOKS
-        .lock()
-        .unwrap()
-        .push(SummaryAdmissionHook {
-            session,
-            skip,
-            entered,
-            release: release_rx,
-        });
-    (entered_rx, release)
 }
 
 pub(crate) enum PaidRequestAdmission {
@@ -177,29 +145,15 @@ impl GoalPaidInput {
             transaction.commit()?;
             Ok(PaidRequestAdmission::Allowed { cursor })
         }).await;
-        #[cfg(test)]
         if identity.kind == RunKind::Compaction
             && matches!(result, Ok(PaidRequestAdmission::Allowed { .. }))
         {
-            let hook = {
-                let mut hooks = SUMMARY_ADMISSION_HOOKS.lock().unwrap();
-                match hooks
-                    .iter()
-                    .position(|hook| hook.session == identity.session_id)
-                {
-                    Some(index) if hooks[index].skip > 0 => {
-                        hooks[index].skip -= 1;
-                        None
-                    }
-                    Some(index) => Some(hooks.remove(index)),
-                    None => None,
-                }
-            };
-            if let Some(hook) = hook
-                && hook.entered.send(identity.run_id).is_ok()
-            {
-                let _ = hook.release.await;
-            }
+            PROBE
+                .reached_with(
+                    Checkpoint::SummaryAdmission(identity.session_id),
+                    identity.run_id,
+                )
+                .await;
         }
         result
     }

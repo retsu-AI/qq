@@ -114,7 +114,7 @@ async fn cancellation_at_spawn_preserves_the_process_receipt() {
     .await;
     let (spawned, release) = crate::tools::hold_shell_receipt(&harness.workspace_path);
     let run = submit_prompt(&harness, "run the command").await;
-    let stopped = execution::observe_execution_stop(run);
+    let stopped = PROBE.observe(Checkpoint::ExecutionStop(run));
     tokio::time::timeout(Duration::from_secs(5), spawned)
         .await
         .unwrap()

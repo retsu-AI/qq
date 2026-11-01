@@ -976,7 +976,7 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
         else {
             panic!("missing session")
         };
-        let (entered, release) = super::super::goal_check::hold_result(session_id);
+        let (entered, release) = PROBE.hold(Checkpoint::GoalCheckResult(session_id));
         let receipt = runtime
             .command(
                 CommandId::generate().unwrap(),

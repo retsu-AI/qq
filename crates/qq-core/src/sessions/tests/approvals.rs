@@ -948,7 +948,7 @@ async fn cancelling_with_buffered_tool_output_drops_it_before_terminal_settlemen
     )
     .await;
     let (mut observed, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    let (buffered, release) = execution::hold_buffered_tool_output(tool_call.id);
+    let (buffered, release) = PROBE.hold(Checkpoint::BufferedToolOutput(tool_call.id));
     respond_approval(
         &harness.runtime,
         harness.run_id,

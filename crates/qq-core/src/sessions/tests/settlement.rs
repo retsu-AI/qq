@@ -1251,7 +1251,7 @@ async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime(
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    let (read_entered, release_read) = store::hold_cancellation_read(run_id);
+    let (read_entered, release_read) = PROBE.hold(Checkpoint::CancellationRead(run_id));
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
@@ -1364,8 +1364,8 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
     else {
         panic!("unexpected receipt")
     };
-    store::fail_cancellation_reads(first_run, [SessionRuntimeError::CONSTRAINT]);
-    let (second_read, release_second) = store::hold_cancellation_read(second_run);
+    FAULTS.inject(StoreFault::CancellationRead(first_run), [SessionRuntimeError::CONSTRAINT]);
+    let (second_read, release_second) = PROBE.hold(Checkpoint::CancellationRead(second_run));
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
@@ -1517,10 +1517,10 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
     else {
         panic!("unexpected receipt")
     };
-    let (start_entered, release_start) = store::hold_failing_reserved_start(retrying_run);
-    let (read_entered, release_read) = store::hold_cancellation_read(failing_run);
-    store::fail_cancellation_reads(failing_run, [SessionRuntimeError::CONSTRAINT]);
-    store::fail_reserved_settlements(failing_run, [SessionRuntimeError::CONSTRAINT]);
+    let (start_entered, release_start) = PROBE.hold(Checkpoint::ReservedStart(retrying_run));
+    let (read_entered, release_read) = PROBE.hold(Checkpoint::CancellationRead(failing_run));
+    FAULTS.inject(StoreFault::CancellationRead(failing_run), [SessionRuntimeError::CONSTRAINT]);
+    FAULTS.inject(StoreFault::ReservedSettlement(failing_run), [SessionRuntimeError::CONSTRAINT]);
     runtime.request_schedule();
     tokio::time::timeout(Duration::from_secs(1), start_entered)
         .await
@@ -1662,11 +1662,11 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
     else {
         panic!("unexpected receipt")
     };
-    let (_initial_read, release_initial_read) = store::hold_cancellation_read(started_run);
-    let (post_start_read, release_post_start_read) = store::hold_cancellation_read(started_run);
-    let (failing_read, release_failing_read) = store::hold_cancellation_read(failing_run);
-    store::fail_cancellation_reads(failing_run, [SessionRuntimeError::CONSTRAINT]);
-    store::fail_reserved_settlements(failing_run, [SessionRuntimeError::CONSTRAINT]);
+    let (_initial_read, release_initial_read) = PROBE.hold(Checkpoint::CancellationRead(started_run));
+    let (post_start_read, release_post_start_read) = PROBE.hold(Checkpoint::CancellationRead(started_run));
+    let (failing_read, release_failing_read) = PROBE.hold(Checkpoint::CancellationRead(failing_run));
+    FAULTS.inject(StoreFault::CancellationRead(failing_run), [SessionRuntimeError::CONSTRAINT]);
+    FAULTS.inject(StoreFault::ReservedSettlement(failing_run), [SessionRuntimeError::CONSTRAINT]);
     release_initial_read.send(()).unwrap();
     runtime.request_schedule();
     tokio::time::timeout(Duration::from_secs(1), post_start_read)
@@ -1890,8 +1890,8 @@ async fn permanent_prestart_settlement_failure_is_recovered_on_reopen() {
         })
         .await
         .unwrap();
-    store::fail_cancellation_reads(run_id, [SessionRuntimeError::CONSTRAINT]);
-    store::fail_reserved_settlements(run_id, [SessionRuntimeError::CONSTRAINT]);
+    FAULTS.inject(StoreFault::CancellationRead(run_id), [SessionRuntimeError::CONSTRAINT]);
+    FAULTS.inject(StoreFault::ReservedSettlement(run_id), [SessionRuntimeError::CONSTRAINT]);
     runtime.request_schedule();
     let mut failed = runtime.inner.failed.subscribe();
     tokio::time::timeout(Duration::from_secs(1), async {

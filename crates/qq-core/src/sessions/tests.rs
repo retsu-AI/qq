@@ -47,6 +47,23 @@ use qq_provider::{ModelRequest, Provider, ProviderStream};
 
 use tempfile::TempDir;
 
+use super::probe::{Checkpoint, FAULTS, PROBE, StoreFault};
+
+fn hold_outcome_read(
+    run_id: RunId,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    let (entered, release) = PROBE.hold(Checkpoint::OutcomeRead(run_id));
+    (
+        entered,
+        release,
+        PROBE.observe(Checkpoint::OutcomeReadPolled(run_id)),
+    )
+}
+
 pub(super) struct PinnedCalendar {
     now: Arc<std::sync::atomic::AtomicU64>,
     previous: Option<Arc<std::sync::atomic::AtomicU64>>,

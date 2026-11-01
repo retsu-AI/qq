@@ -1751,7 +1751,7 @@ async fn shutdown_waits_for_started_child_loader_work_without_creating_a_child()
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .unwrap();
-    let stopped = execution::observe_execution_stop(run_id);
+    let stopped = PROBE.observe(Checkpoint::ExecutionStop(run_id));
     let runtime = harness.runtime.clone();
     let mut shutdown = tokio::spawn(async move { runtime.shutdown().await });
     tokio::time::timeout(Duration::from_secs(2), stopped)
@@ -2271,7 +2271,7 @@ async fn steering_charges_a_completed_but_unconsumed_child_exactly_once() {
         turn: AtomicUsize::new(0),
     });
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
-    let (delivered, release) = subagents::hold_child_delivery(harness.session_id);
+    let (delivered, release) = PROBE.hold(Checkpoint::ChildDelivery(harness.session_id));
     let receipt = harness
         .runtime
         .command(
@@ -2419,7 +2419,7 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
                 break run;
             }
         };
-        let mut stopping = Some(execution::observe_execution_stop(child_run));
+        let mut stopping = Some(PROBE.observe(Checkpoint::ExecutionStop(child_run)));
         if interruption == 2 {
             steer(&harness.runtime, parent_run, "stop the child", true)
                 .await
@@ -2566,7 +2566,7 @@ async fn interrupting_steering_owns_a_child_whose_creation_reply_is_pending() {
         ApprovalMode::Full,
     )
     .await;
-    let (created, release) = store::hold_child_creation(harness.session_id);
+    let (created, release) = PROBE.hold_reporting_run(Checkpoint::ChildCreated(harness.session_id), 0);
     let parent_run = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
     let child_run = tokio::time::timeout(Duration::from_secs(2), created)
         .await
@@ -2668,7 +2668,7 @@ async fn store_saturation_does_not_release_a_running_write_child() {
             break (run.unwrap(), cursor);
         }
     };
-    let (read_entered, release_read, read_attempted) = store::hold_outcome_read(child_run);
+    let (read_entered, release_read, read_attempted) = hold_outcome_read(child_run);
     harness.runtime.inner.notify(cursor);
     tokio::time::timeout(Duration::from_secs(2), read_entered)
         .await
@@ -2770,7 +2770,7 @@ async fn child_cancellation_persistence_failure_prevents_parent_continuation() {
     })
     .await
     .unwrap();
-    store::fail_child_cancellation(child_run);
+    FAULTS.inject(StoreFault::ChildCancellation(child_run), [SessionRuntimeError::CONSTRAINT]);
     let child_cancel = harness
         .runtime
         .inner
@@ -2882,7 +2882,7 @@ async fn unreadable_child_outcome_fails_the_runtime_before_parent_continuation()
             break (event.run_id.unwrap(), event.cursor);
         }
     };
-    let (read_entered, release_read, _read_attempted) = store::hold_outcome_read(child_run);
+    let (read_entered, release_read, _read_attempted) = hold_outcome_read(child_run);
     harness.runtime.inner.notify(cursor);
     tokio::time::timeout(Duration::from_secs(2), read_entered)
         .await
@@ -3226,7 +3226,7 @@ async fn nested_spend_reduces_the_next_root_child_allowance() {
 #[tokio::test]
 async fn owned_spend_session_deletion_waits_for_the_root_receipt() {
     let mut harness = nested_spend_harness(Some(usage(60, 0))).await;
-    let (delivered, release) = subagents::hold_child_delivery(harness.session_id);
+    let (delivered, release) = PROBE.hold(Checkpoint::ChildDelivery(harness.session_id));
     let root = submit_nested_budget(&harness, true).await;
     tokio::time::timeout(Duration::from_secs(2), delivered)
         .await
@@ -3336,7 +3336,7 @@ async fn owned_spend_session_deletion_checks_followup_owners_after_the_original_
         )
         .await
         .unwrap();
-    let (delivered, release) = subagents::hold_child_delivery(child);
+    let (delivered, release) = PROBE.hold(Checkpoint::ChildDelivery(child));
     let followup = submit_prompt_to(&harness.runtime, child, "new unrelated task").await;
     tokio::time::timeout(Duration::from_secs(2), delivered)
         .await
@@ -4718,7 +4718,7 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
             };
             let child_prompt = session.active_run_id.unwrap();
             let (entered, release) =
-                crate::sessions::in_run_compaction::hold_drop_settlement(*summary);
+                PROBE.hold(Checkpoint::DropSettlement(*summary));
             let summary_id = *summary;
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {

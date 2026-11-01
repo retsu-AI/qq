@@ -737,7 +737,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
             &loaded,
         );
         let hook =
-            (!zero).then(|| crate::sessions::goal_paid::hold_summary_admission_ack(session, 1));
+            (!zero).then(|| PROBE.hold_reporting_run(Checkpoint::SummaryAdmission(session), 1));
         let compact = crate::runtime::InRunCompactor::compact(
             &compactor,
             crate::runtime::InRunCompactionRequest {
