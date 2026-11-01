@@ -4,6 +4,23 @@ pub(crate) const MAX_QUERY_BYTES: usize = 256;
 
 pub(crate) trait PickerItem {
     fn search_text<'a>(&'a self, out: &mut Vec<&'a str>);
+
+    fn rank(&self, query: &str) -> Option<u32> {
+        let mut texts = Vec::new();
+        self.search_text(&mut texts);
+        texts
+            .iter()
+            .any(|text| fuzzy_matches(query, text))
+            .then_some(0)
+    }
+
+    fn recency(&self) -> u64 {
+        0
+    }
+
+    fn shown_when_idle(&self) -> bool {
+        true
+    }
 }
 
 impl PickerItem for usize {
@@ -159,19 +176,29 @@ impl<T: PickerItem> Picker<T> {
 
     fn refilter(&mut self) {
         let query = self.query.to_ascii_lowercase();
-        let mut texts = Vec::new();
         self.filtered.clear();
-        for (index, item) in self.items.iter().enumerate() {
-            if query.is_empty() {
-                self.filtered.push(index);
-                continue;
-            }
-            texts.clear();
-            item.search_text(&mut texts);
-            if texts.iter().any(|text| fuzzy_matches(&query, text)) {
-                self.filtered.push(index);
-            }
+        if query.is_empty() {
+            self.filtered.extend(
+                self.items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| item.shown_when_idle())
+                    .map(|(index, _)| index),
+            );
+            return;
         }
+        let mut ranked: Vec<(u32, std::cmp::Reverse<u64>, usize)> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                item.rank(&query)
+                    .map(|rank| (rank, std::cmp::Reverse(item.recency()), index))
+            })
+            .collect();
+        ranked.sort();
+        self.filtered
+            .extend(ranked.into_iter().map(|(_, _, index)| index));
     }
 }
 

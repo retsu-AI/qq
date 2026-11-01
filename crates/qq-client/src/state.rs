@@ -114,6 +114,8 @@ struct TreeIndex {
     depth: HashMap<SessionId, usize>,
     children: HashMap<Option<SessionId>, Vec<SessionId>>,
     spawned_by_call: HashMap<ToolCallId, SessionId>,
+    hidden: BTreeSet<SessionId>,
+    listed: Vec<SessionId>,
 }
 
 impl SessionStore {
@@ -273,15 +275,134 @@ impl SessionStore {
     }
 
     #[must_use]
+    pub fn is_hidden(&self, id: SessionId) -> bool {
+        self.index().hidden.contains(&id)
+    }
+
+    #[must_use]
     pub fn needing_attention(&self) -> Vec<SessionId> {
-        let mut needing: Vec<(Need, usize, SessionId)> = self
-            .thread_order()
-            .iter()
-            .enumerate()
-            .filter_map(|(position, id)| self.sessions[id].need().map(|need| (need, position, *id)))
+        let mut needing: Vec<_> = self
+            .sessions
+            .values()
+            .filter(|view| !self.is_hidden(view.summary.id))
+            .filter_map(|view| {
+                let newest_first = std::cmp::Reverse((view.summary.updated_at_ms, view.summary.id));
+                view.need()
+                    .map(|need| (need, newest_first, view.summary.id))
+            })
             .collect();
         needing.sort();
         needing.into_iter().map(|(_, _, id)| id).collect()
+    }
+
+    #[must_use]
+    pub fn is_session(&self, id: SessionId) -> bool {
+        self.index().listed.contains(&id)
+    }
+
+    #[must_use]
+    pub fn rail_order(&self) -> Vec<RailRow<'_>> {
+        let mut stack = Vec::new();
+        let mut rows: Vec<(Group, usize, RailRow<'_>)> =
+            Vec::with_capacity(self.index().listed.len());
+        for (position, &id) in self.index().listed.iter().enumerate() {
+            {
+                let view = &self.sessions[&id];
+                let own = view.group();
+                let mut agents = 0;
+                let mut working = 0;
+                let mut waiting = false;
+                self.for_each_agent(id, &mut stack, |agent| {
+                    agents += 1;
+                    working += usize::from(matches!(
+                        agent.summary.status,
+                        SessionStatus::Running | SessionStatus::Queued
+                    ));
+                    waiting |= agent.need().is_some();
+                });
+                let group = if own == Group::NeedsYou || waiting {
+                    Group::NeedsYou
+                } else if own == Group::Working || working > 0 {
+                    Group::Working
+                } else {
+                    Group::Done
+                };
+                rows.push((
+                    group,
+                    position,
+                    RailRow {
+                        id,
+                        view,
+                        group,
+                        agents,
+                        working,
+                        cost: view.inclusive_cost(),
+                    },
+                ));
+            }
+        }
+        rows.sort_by_key(|(group, position, _)| (*group, *position));
+        rows.into_iter().map(|(_, _, row)| row).collect()
+    }
+
+    fn for_each_agent(
+        &self,
+        session: SessionId,
+        stack: &mut Vec<SessionId>,
+        mut visit: impl FnMut(&SessionView),
+    ) {
+        stack.clear();
+        stack.extend(self.children_of(session).iter().copied());
+        while let Some(id) = stack.pop() {
+            let Some(view) = self.sessions.get(&id) else {
+                continue;
+            };
+            if view.is_audit() {
+                continue;
+            }
+            visit(view);
+            stack.extend(self.children_of(id).iter().copied());
+        }
+    }
+
+    #[must_use]
+    pub fn listed_count(&self) -> usize {
+        self.index().listed.len()
+    }
+
+    #[must_use]
+    pub fn listed_sessions(&self) -> Vec<SessionId> {
+        self.index().listed.clone()
+    }
+
+    #[must_use]
+    pub fn session_of(&self, id: SessionId) -> Option<SessionId> {
+        let mut current = id;
+        for _ in 0..=self.sessions.len() {
+            let parent = self.sessions.get(&current)?.summary.parent_id;
+            match parent.filter(|parent| self.sessions.contains_key(parent)) {
+                Some(parent) => current = parent,
+                None => return Some(current),
+            }
+        }
+        None
+    }
+
+    #[must_use]
+    pub fn agents_of(&self, session: SessionId) -> Vec<SessionId> {
+        let mut agents = Vec::new();
+        let mut stack: Vec<SessionId> = self.children_of(session).iter().rev().copied().collect();
+        while let Some(id) = stack.pop() {
+            let Some(view) = self.sessions.get(&id) else {
+                continue;
+            };
+            if view.is_audit() {
+                continue;
+            }
+            agents.push(id);
+            stack.extend(self.children_of(id).iter().rev().copied());
+        }
+        agents
     }
 
     pub fn upsert_summary(
@@ -549,9 +670,10 @@ impl SessionStore {
             self.index_rebuilds.set(self.index_rebuilds.get() + 1);
             let mut index = TreeIndex::default();
             for session in self.sessions.values() {
+                let parent = session.summary.parent_id;
                 index
                     .children
-                    .entry(session.summary.parent_id)
+                    .entry(parent)
                     .or_default()
                     .push(session.summary.id);
                 if let Some(origin) = session.summary.spawned_by
@@ -568,19 +690,41 @@ impl SessionStore {
                         .then_with(|| b.title.cmp(&a.title))
                 });
             }
-            let mut stack: Vec<(SessionId, usize)> = index
+            let mut tops: Vec<(SessionId, bool)> = index
                 .children
-                .get(&None)
+                .iter()
+                .filter_map(|(parent, kids)| match parent {
+                    None => Some((kids, true)),
+                    Some(parent) if !self.sessions.contains_key(parent) => Some((kids, false)),
+                    Some(_) => None,
+                })
+                .flat_map(|(kids, rooted)| kids.iter().map(move |id| (*id, rooted)))
+                .collect();
+            tops.sort_by(|(a, _), (b, _)| {
+                let (a, b) = (&self.sessions[a].summary, &self.sessions[b].summary);
+                a.updated_at_ms
+                    .cmp(&b.updated_at_ms)
+                    .then_with(|| b.title.cmp(&a.title))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            let mut stack: Vec<(SessionId, usize, bool, bool)> = tops
                 .into_iter()
-                .flatten()
-                .map(|id| (*id, 0))
+                .map(|(id, rooted)| (id, 0, false, rooted))
                 .collect();
             index.order.reserve(self.sessions.len());
-            while let Some((session_id, depth)) = stack.pop() {
-                index.order.push(session_id);
-                index.depth.insert(session_id, depth);
+            while let Some((session_id, depth, under_audit, rooted)) = stack.pop() {
+                if rooted {
+                    index.order.push(session_id);
+                    index.depth.insert(session_id, depth);
+                }
+                let hidden = under_audit || self.sessions[&session_id].is_audit();
+                if hidden {
+                    index.hidden.insert(session_id);
+                } else if depth == 0 {
+                    index.listed.push(session_id);
+                }
                 if let Some(kids) = index.children.get(&Some(session_id)) {
-                    stack.extend(kids.iter().rev().map(|id| (*id, depth + 1)));
+                    stack.extend(kids.iter().rev().map(|id| (*id, depth + 1, hidden, rooted)));
                 }
             }
             index
@@ -734,6 +878,16 @@ pub enum Need {
     FinishedUnread,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RailRow<'a> {
+    pub id: SessionId,
+    pub view: &'a SessionView,
+    pub group: Group,
+    pub agents: usize,
+    pub working: usize,
+    pub cost: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Group {
     NeedsYou,
@@ -787,6 +941,20 @@ impl SessionView {
             unread: 0,
             finished_unread: false,
         }
+    }
+
+    #[must_use]
+    pub fn inclusive_cost(&self) -> Option<u64> {
+        self.summary
+            .accounting
+            .and_then(|accounting| accounting.inclusive.estimated_cost_usd_nanos)
+            .or(self.summary.estimated_cost_usd_nanos)
+            .filter(|nanos| *nanos > 0)
+    }
+
+    #[must_use]
+    pub fn is_audit(&self) -> bool {
+        self.summary.purpose == qq_protocol::SessionPurpose::Audit
     }
 
     #[must_use]

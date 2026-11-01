@@ -301,7 +301,7 @@ pub(super) fn rule_attention(app: &App, rail_shown: bool) -> Option<(String, Sty
     let jump = app
         .chord_label(crate::commands::Command::FocusNextApproval)
         .map(|chord| compact_chord(&chord));
-    if !rail_shown && app.sessions.len() > 1 {
+    if !rail_shown && app.sessions.listed_count() > 1 {
         let (entries, counts) = rail_entries(app);
         let mut text = format!("{} sessions", entries.len());
         let working = counts[Group::Working as usize];

@@ -1,0 +1,40 @@
+
+  ┃ plan the release                                                                        NEEDS YOU
+                                                                                            1 ● Refactor  1 new
+    Drafted the checklist.                                                                ▎ 2 ◇ Session 0  ↳1
+                                                                                              ◇ Deploy helper
+  ● Spawned  1 agent   ◇ 1
+  └ ◇ Deploy helper   wants to run a command                                                WORKING
+                                                                                            3 ◐ Write tests  1 new
+                                                                                            4 ◐ Survey callers  1 new
+
+                                                                                            RECENT
+                                                                                            5 ● Migrate
+                                                                                            6 ○ Scratch
+                                                                                            7 ○ Notes
+
+
+
+
+
+
+
+
+
+
+
+
+  ────────────────────────────────────────────────────────────────── ◇ 1 needs you  ^G
+   SWITCH type to search, Enter opens, Tab agents, Ctrl-A all agents, Ctrl-D deletes,…
+    search: all sessions
+
+      ● Refactor            now
+    ▎ ○ Session 0       ↳1  now   Drafted the checklist.
+          Drafted the checklist.
+      ◐ Write tests         now   compacting context
+      ◐ Survey callers      now   Found twelve call sites across three crates
+      ● Migrate             now
+      ○ Scratch             now
+      ○ Notes               now
+  ┃ Ask QQ…
+    enter open   tab agents   ^A all agents   ^D delete   esc back

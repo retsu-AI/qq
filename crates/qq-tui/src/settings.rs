@@ -10,15 +10,17 @@ pub enum Action {
     CreateChildSession,
     CancelRun,
     InterruptRun,
+    PreviousSession,
 }
 
 impl Action {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::ToggleNavigator,
         Self::CreateRootSession,
         Self::CreateChildSession,
         Self::CancelRun,
         Self::InterruptRun,
+        Self::PreviousSession,
     ];
 
     pub fn all() -> impl Iterator<Item = Self> {
@@ -33,6 +35,7 @@ pub(crate) const fn default_chords(action: Action) -> &'static [&'static str] {
         Action::CreateChildSession => &["Alt-C"],
         Action::CancelRun => &["Ctrl-X"],
         Action::InterruptRun => &["Alt-S"],
+        Action::PreviousSession => &["Ctrl-6", "Ctrl-^"],
     }
 }
 
