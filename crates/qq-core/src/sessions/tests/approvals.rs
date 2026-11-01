@@ -1398,12 +1398,9 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![ContentBlock::tool_call(
                         call.provider_call_id.clone(),
@@ -1411,16 +1408,9 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
                         &serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
                     )],
                 ),
-                calls: vec![call],
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .calls(vec![call])
+            .build(),
         )
         .await
         .unwrap();
@@ -2073,12 +2063,9 @@ async fn an_expired_goal_hold_survives_the_gate_winning_cancellation() {
                 .store
                 .persist_model_turn(
                     &claimed,
-                    ModelTurnCommit {
-                        model_work: crate::runtime::ModelWorkDisposition::Committed,
-                        goal_notices: Vec::new(),
-                        reserved_goal_notices: 0,
-                        turn_ordinal: 1,
-                        message: Message::new(
+                    TurnCommit::new(
+                        1,
+                        Message::new(
                             Role::Assistant,
                             vec![ContentBlock::ToolCall {
                                 id: call.provider_call_id.clone(),
@@ -2086,16 +2073,9 @@ async fn an_expired_goal_hold_survives_the_gate_winning_cancellation() {
                                 arguments: serde_json::from_str(&call.arguments).unwrap(),
                             }],
                         ),
-                        calls: vec![call.clone()],
-                        turn_message: None,
-                        context_tokens: None,
-                        occupancy_basis: None,
-                        usage: None,
-                        estimated_cost_usd_nanos: None,
-                        accounting: None,
-                        truncated: false,
-                        notice: None,
-                    },
+                    )
+                    .calls(vec![call.clone()])
+                    .build(),
                 )
                 .await
                 .unwrap();
@@ -2252,12 +2232,9 @@ async fn a_childs_timed_out_hold_pauses_the_goal_after_its_expired_owner_cancell
         .store
         .persist_model_turn(
             &child,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![ContentBlock::ToolCall {
                         id: call.provider_call_id.clone(),
@@ -2265,16 +2242,9 @@ async fn a_childs_timed_out_hold_pauses_the_goal_after_its_expired_owner_cancell
                         arguments: serde_json::from_str(&call.arguments).unwrap(),
                     }],
                 ),
-                calls: vec![call.clone()],
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .calls(vec![call.clone()])
+            .build(),
         )
         .await
         .unwrap();

@@ -1332,12 +1332,9 @@ async fn spill_one_call(
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![ContentBlock::ToolCall {
                         id: call.provider_call_id.clone(),
@@ -1345,16 +1342,9 @@ async fn spill_one_call(
                         arguments: serde_json::from_str(&call.arguments).unwrap(),
                     }],
                 ),
-                calls: vec![call],
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .calls(vec![call])
+            .build(),
         )
         .await
         .unwrap();
@@ -3245,12 +3235,9 @@ async fn project_terminal_run_with_tool_boundaries(
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     calls
                         .iter()
@@ -3264,16 +3251,9 @@ async fn project_terminal_run_with_tool_boundaries(
                         })
                         .collect(),
                 ),
-                calls,
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .calls(calls)
+            .build(),
         )
         .await
         .unwrap();
@@ -5061,27 +5041,19 @@ async fn recovered_internal_summary_settles_durable_session_cost_once() {
             store
                 .persist_in_run_summary_turn(
                     &summary,
-                    ModelTurnCommit {
-                        model_work: crate::runtime::ModelWorkDisposition::Committed,
-                        goal_notices: Vec::new(),
-                        reserved_goal_notices: 0,
-                        turn_ordinal: 1,
-                        message: Message::new(
+                    TurnCommit::new(
+                        1,
+                        Message::new(
                             Role::Assistant,
                             vec![ContentBlock::Text {
                                 text: "measured prefix".to_owned(),
                             }],
                         ),
-                        calls: Vec::new(),
-                        turn_message: None,
-                        context_tokens: None,
-                        occupancy_basis: None,
-                        usage: Some(usage(7, 3)),
-                        estimated_cost_usd_nanos: Some(13_000),
-                        accounting: Some(accounting.snapshot()),
-                        truncated: false,
-                        notice: None,
-                    },
+                    )
+                    .usage(Some(usage(7, 3)))
+                    .cost(Some(13_000))
+                    .accounting(accounting.snapshot())
+                    .build(),
                 )
                 .await
                 .unwrap();
@@ -5274,30 +5246,24 @@ async fn admitted_summary_turn_survives_a_dropped_waiter_before_settlement() {
             .await
     });
     held.await.unwrap();
-    let mut receipt = Box::pin(store.persist_in_run_summary_turn(
-        &summary,
-        ModelTurnCommit {
-            model_work: crate::runtime::ModelWorkDisposition::Committed,
-            goal_notices: Vec::new(),
-            reserved_goal_notices: 0,
-            turn_ordinal: 1,
-            message: Message::new(
-                Role::Assistant,
-                vec![ContentBlock::Text {
-                    text: "measured prefix".to_owned(),
-                }],
-            ),
-            calls: Vec::new(),
-            turn_message: None,
-            context_tokens: None,
-            occupancy_basis: None,
-            usage: Some(usage(7, 3)),
-            estimated_cost_usd_nanos: Some(13_000),
-            accounting: Some(accounting.snapshot()),
-            truncated: false,
-            notice: None,
-        },
-    ));
+    let mut receipt = Box::pin(
+        store.persist_in_run_summary_turn(
+            &summary,
+            TurnCommit::new(
+                1,
+                Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::Text {
+                        text: "measured prefix".to_owned(),
+                    }],
+                ),
+            )
+            .usage(Some(usage(7, 3)))
+            .cost(Some(13_000))
+            .accounting(accounting.snapshot())
+            .build(),
+        ),
+    );
     assert!(futures_util::poll!(receipt.as_mut()).is_pending());
     drop(receipt);
     let mut settlement =
@@ -5378,27 +5344,18 @@ async fn settled_internal_summary_rejects_stale_turns_without_recharging() {
     let stale = store
         .persist_in_run_summary_turn(
             &summary,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![ContentBlock::Text {
                         text: "late summary".to_owned(),
                     }],
                 ),
-                calls: Vec::new(),
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: Some(usage(7, 3)),
-                estimated_cost_usd_nanos: Some(13_000),
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .usage(Some(usage(7, 3)))
+            .cost(Some(13_000))
+            .build(),
         )
         .await;
     assert!(

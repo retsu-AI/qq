@@ -407,25 +407,12 @@ async fn failed_turn_notice_commit_rolls_back_the_atom_events_and_capacity() {
     let result = store
         .persist_model_turn(
             &claim,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                turn_ordinal: 1,
-                message: Message::assistant("done"),
-                calls: Vec::new(),
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-                goal_notices: vec![crate::runtime::OrderedTurnNotice {
+            TurnCommit::new(1, Message::assistant("done"))
+                .goal_notices(vec![crate::runtime::OrderedTurnNotice {
                     text: notice,
                     preceding_deliveries: 0,
-                }],
-                reserved_goal_notices: 0,
-            },
+                }])
+                .build(),
         )
         .await;
     assert!(result.is_err());
@@ -3130,22 +3117,11 @@ async fn goal_terminal_spend_is_once_and_stays_with_the_captured_historical_goal
                 store
                     .persist_model_turn(
                         &claim,
-                        ModelTurnCommit {
-                            model_work: crate::runtime::ModelWorkDisposition::Committed,
-                            turn_ordinal: 1,
-                            message: Message::assistant("observed model work"),
-                            calls: Vec::new(),
-                            turn_message: None,
-                            context_tokens: None,
-                            occupancy_basis: None,
-                            usage,
-                            estimated_cost_usd_nanos: measured.then_some(37),
-                            accounting: Some(accounting.clone()),
-                            truncated: false,
-                            notice: None,
-                            goal_notices: Vec::new(),
-                            reserved_goal_notices: 0,
-                        },
+                        TurnCommit::new(1, Message::assistant("observed model work"))
+                            .usage(usage)
+                            .cost(measured.then_some(37))
+                            .accounting(accounting.clone())
+                            .build(),
                     )
                     .await
                     .unwrap();
@@ -3244,22 +3220,11 @@ async fn failed_terminal_goal_event_rolls_back_spend_and_outcome_then_retries_on
     store
         .persist_model_turn(
             &claim,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                turn_ordinal: 1,
-                message: Message::assistant("observed model work"),
-                calls: Vec::new(),
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: accounting.usage,
-                estimated_cost_usd_nanos: accounting.estimated_cost_usd_nanos,
-                accounting: Some(accounting.clone()),
-                truncated: false,
-                notice: None,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-            },
+            TurnCommit::new(1, Message::assistant("observed model work"))
+                .usage(accounting.usage)
+                .cost(accounting.estimated_cost_usd_nanos)
+                .accounting(accounting.clone())
+                .build(),
         )
         .await
         .unwrap();
@@ -3587,22 +3552,11 @@ async fn owned_compaction_spend_survives_owner_settlement_and_goal_replacement()
                 store
                     .persist_in_run_summary_turn(
                         &helper,
-                        ModelTurnCommit {
-                            model_work: crate::runtime::ModelWorkDisposition::Committed,
-                            turn_ordinal: 1,
-                            message: Message::assistant("observed summary work"),
-                            calls: Vec::new(),
-                            turn_message: None,
-                            context_tokens: None,
-                            occupancy_basis: None,
-                            usage: Some(usage),
-                            estimated_cost_usd_nanos: Some(43),
-                            accounting: Some(accounting),
-                            truncated: false,
-                            notice: None,
-                            goal_notices: Vec::new(),
-                            reserved_goal_notices: 0,
-                        },
+                        TurnCommit::new(1, Message::assistant("observed summary work"))
+                            .usage(Some(usage))
+                            .cost(Some(43))
+                            .accounting(accounting)
+                            .build(),
                     )
                     .await
                     .unwrap();
@@ -3767,22 +3721,11 @@ async fn between_run_compactor_charges_its_goal_after_owner_cancel_and_reopen() 
             store
                 .persist_in_run_summary_turn(
                     &helper,
-                    ModelTurnCommit {
-                        model_work: crate::runtime::ModelWorkDisposition::Committed,
-                        turn_ordinal: 1,
-                        message: Message::assistant("measured summary prefix"),
-                        calls: Vec::new(),
-                        turn_message: None,
-                        context_tokens: None,
-                        occupancy_basis: None,
-                        usage: Some(usage),
-                        estimated_cost_usd_nanos: Some(61),
-                        accounting: Some(accounting),
-                        truncated: false,
-                        notice: None,
-                        goal_notices: Vec::new(),
-                        reserved_goal_notices: 0,
-                    },
+                    TurnCommit::new(1, Message::assistant("measured summary prefix"))
+                        .usage(Some(usage))
+                        .cost(Some(61))
+                        .accounting(accounting)
+                        .build(),
                 )
                 .await
                 .unwrap();
@@ -4359,22 +4302,11 @@ async fn committed_goal_turn_recovery_charges_session_and_historical_goal_once()
                 store
                     .persist_model_turn(
                         &claim,
-                        ModelTurnCommit {
-                            model_work: crate::runtime::ModelWorkDisposition::Committed,
-                            turn_ordinal: 1,
-                            message: Message::assistant("committed before crash"),
-                            calls: Vec::new(),
-                            turn_message: None,
-                            context_tokens: None,
-                            occupancy_basis: None,
-                            usage: Some(usage),
-                            estimated_cost_usd_nanos: measured.then_some(37),
-                            accounting: Some(accounting),
-                            truncated: false,
-                            notice: None,
-                            goal_notices: Vec::new(),
-                            reserved_goal_notices: 0,
-                        },
+                        TurnCommit::new(1, Message::assistant("committed before crash"))
+                            .usage(Some(usage))
+                            .cost(measured.then_some(37))
+                            .accounting(accounting)
+                            .build(),
                     )
                     .await
                     .unwrap();
@@ -4627,22 +4559,11 @@ async fn delegated_child_spend_keeps_the_original_goal_after_replacement() {
             store
                 .persist_model_turn(
                     &claim,
-                    ModelTurnCommit {
-                        model_work: crate::runtime::ModelWorkDisposition::Committed,
-                        turn_ordinal: 1,
-                        message: Message::assistant("child completed work"),
-                        calls: Vec::new(),
-                        turn_message: None,
-                        context_tokens: None,
-                        occupancy_basis: None,
-                        usage: Some(usage),
-                        estimated_cost_usd_nanos: Some(37),
-                        accounting: Some(accounting.clone()),
-                        truncated: false,
-                        notice: None,
-                        goal_notices: Vec::new(),
-                        reserved_goal_notices: 0,
-                    },
+                    TurnCommit::new(1, Message::assistant("child completed work"))
+                        .usage(Some(usage))
+                        .cost(Some(37))
+                        .accounting(accounting.clone())
+                        .build(),
                 )
                 .await
                 .unwrap();
@@ -4768,22 +4689,11 @@ async fn delegated_child_spend_keeps_the_original_goal_after_replacement() {
                 store
                     .persist_model_turn(
                         &followup,
-                        ModelTurnCommit {
-                            model_work: crate::runtime::ModelWorkDisposition::Committed,
-                            turn_ordinal: 1,
-                            message: Message::assistant("later work"),
-                            calls: Vec::new(),
-                            turn_message: None,
-                            context_tokens: None,
-                            occupancy_basis: None,
-                            usage: Some(usage),
-                            estimated_cost_usd_nanos: Some(37),
-                            accounting: Some(followup_accounting.clone()),
-                            truncated: false,
-                            notice: None,
-                            goal_notices: Vec::new(),
-                            reserved_goal_notices: 0,
-                        },
+                        TurnCommit::new(1, Message::assistant("later work"))
+                            .usage(Some(usage))
+                            .cost(Some(37))
+                            .accounting(followup_accounting.clone())
+                            .build(),
                     )
                     .await
                     .unwrap();
@@ -6091,38 +6001,30 @@ async fn provider_backoff_uses_durable_streak_across_reopen_and_resets_after_com
             store
                 .persist_model_turn(
                     &claim,
-                    ModelTurnCommit {
-                        model_work: crate::runtime::ModelWorkDisposition::Committed,
-                        turn_ordinal: 1,
-                        message: Message::assistant("committed prefix before provider outage"),
-                        calls: Vec::new(),
-                        turn_message: None,
-                        context_tokens: None,
-                        occupancy_basis: None,
+                    TurnCommit::new(
+                        1,
+                        Message::assistant("committed prefix before provider outage"),
+                    )
+                    .usage(Some(usage))
+                    .cost(Some(37))
+                    .accounting(RunAccounting {
+                        goal_request_rejected: false,
                         usage: Some(usage),
                         estimated_cost_usd_nanos: Some(37),
-                        accounting: Some(RunAccounting {
-                            goal_request_rejected: false,
-                            usage: Some(usage),
-                            estimated_cost_usd_nanos: Some(37),
-                            saw_turn: true,
-                            context_tokens: None,
-                            final_output: None,
-                            request_basis: ContextOccupancyBasis {
-                                version: 1,
-                                shape: ContentHash::from_bytes([0; 32]),
-                                static_prefix: PreparedStaticPrefix::new(
-                                    ContentHash::from_bytes([0; 32]),
-                                    None,
-                                ),
-                                request_bytes: 0,
-                            },
-                        }),
-                        truncated: false,
-                        notice: None,
-                        goal_notices: Vec::new(),
-                        reserved_goal_notices: 0,
-                    },
+                        saw_turn: true,
+                        context_tokens: None,
+                        final_output: None,
+                        request_basis: ContextOccupancyBasis {
+                            version: 1,
+                            shape: ContentHash::from_bytes([0; 32]),
+                            static_prefix: PreparedStaticPrefix::new(
+                                ContentHash::from_bytes([0; 32]),
+                                None,
+                            ),
+                            request_bytes: 0,
+                        },
+                    })
+                    .build(),
                 )
                 .await
                 .unwrap();

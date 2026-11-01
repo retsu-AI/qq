@@ -289,10 +289,9 @@ pub(super) async fn pending_process_call(
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![ContentBlock::tool_call(
                         "context",
@@ -300,18 +299,9 @@ pub(super) async fn pending_process_call(
                         &serde_json::from_str::<serde_json::Value>(arguments).unwrap(),
                     )],
                 ),
-                calls: vec![call],
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-            },
+            )
+            .calls(vec![call])
+            .build(),
         )
         .await
         .unwrap();

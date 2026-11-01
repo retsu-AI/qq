@@ -70,22 +70,9 @@ async fn historical_projection_fixture(version: u16) {
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                turn_ordinal: 1,
-                message: Message::new(Role::Assistant, blocks),
-                calls: calls.clone(),
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-            },
+            TurnCommit::new(1, Message::new(Role::Assistant, blocks))
+                .calls(calls.clone())
+                .build(),
         )
         .await
         .unwrap();
@@ -190,22 +177,9 @@ async fn projection_fixture(
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                turn_ordinal: 1,
-                message: Message::new(Role::Assistant, blocks),
-                calls,
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-            },
+            TurnCommit::new(1, Message::new(Role::Assistant, blocks))
+                .calls(calls)
+                .build(),
         )
         .await
         .unwrap();

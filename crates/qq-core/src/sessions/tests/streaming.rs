@@ -228,22 +228,10 @@ async fn interleaved_turn_framing_accepts_exact_capacity_and_rejects_one_over() 
         let result = store
             .persist_model_turn(
                 &claimed,
-                ModelTurnCommit {
-                    model_work: crate::runtime::ModelWorkDisposition::Committed,
-                    goal_notices: Vec::new(),
-                    reserved_goal_notices: 0,
-                    turn_ordinal: 1,
-                    message,
-                    calls: vec![call],
-                    turn_message: Some(message_id),
-                    context_tokens: None,
-                    occupancy_basis: None,
-                    usage: None,
-                    estimated_cost_usd_nanos: None,
-                    accounting: None,
-                    truncated: false,
-                    notice: None,
-                },
+                TurnCommit::new(1, message)
+                    .calls(vec![call])
+                    .turn_message(message_id)
+                    .build(),
             )
             .await;
         let (increment, turns, calls, state): (u64, u64, u64, String) = store
@@ -361,12 +349,9 @@ async fn turn_and_event_failures_roll_back_message_counter_turn_and_tool_rows() 
             store
                 .persist_model_turn(
                     &claimed,
-                    ModelTurnCommit {
-                        model_work: crate::runtime::ModelWorkDisposition::Committed,
-                        goal_notices: Vec::new(),
-                        reserved_goal_notices: 0,
-                        turn_ordinal: 1,
-                        message: Message::new(
+                    TurnCommit::new(
+                        1,
+                        Message::new(
                             Role::Assistant,
                             vec![ContentBlock::tool_call(
                                 call.provider_call_id.clone(),
@@ -374,17 +359,11 @@ async fn turn_and_event_failures_roll_back_message_counter_turn_and_tool_rows() 
                                 &serde_json::from_str::<serde_json::Value>(&call.arguments)
                                     .unwrap()
                             )],
-                        ),
-                        calls: vec![call],
-                        turn_message: Some(message_id),
-                        context_tokens: None,
-                        occupancy_basis: None,
-                        usage: None,
-                        estimated_cost_usd_nanos: None,
-                        accounting: None,
-                        truncated: false,
-                        notice: None,
-                    },
+                        )
+                    )
+                    .calls(vec![call])
+                    .turn_message(message_id)
+                    .build(),
                 )
                 .await
                 .unwrap_err(),

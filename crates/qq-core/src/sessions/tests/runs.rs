@@ -1270,12 +1270,9 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
         store
             .persist_model_turn(
                 &claimed,
-                ModelTurnCommit {
-                    model_work: crate::runtime::ModelWorkDisposition::Committed,
-                    goal_notices: Vec::new(),
-                    reserved_goal_notices: 0,
-                    turn_ordinal: 1,
-                    message: Message::new(
+                TurnCommit::new(
+                    1,
+                    Message::new(
                         Role::Assistant,
                         vec![ContentBlock::tool_call(
                             call.provider_call_id.clone(),
@@ -1283,16 +1280,9 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
                             &serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
                         )],
                     ),
-                    calls: vec![call],
-                    turn_message: None,
-                    context_tokens: None,
-                    occupancy_basis: None,
-                    usage: None,
-                    estimated_cost_usd_nanos: None,
-                    accounting: None,
-                    truncated: false,
-                    notice: None,
-                },
+                )
+                .calls(vec![call])
+                .build(),
             )
             .await
             .unwrap();
@@ -2123,22 +2113,7 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
     store
         .persist_model_turn(
             &growth_run,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::assistant(over_threshold_output()),
-                calls: Vec::new(),
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            TurnCommit::new(1, Message::assistant(over_threshold_output())).build(),
         )
         .await
         .unwrap();

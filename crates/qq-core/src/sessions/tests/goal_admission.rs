@@ -141,24 +141,14 @@ async fn no_work_exhaustion_streak_reopens_resets_and_respects_goal_deadline() {
                 store
                     .persist_model_turn(
                         &claim,
-                        ModelTurnCommit {
-                            model_work: crate::runtime::ModelWorkDisposition::Committed,
-                            turn_ordinal: 1,
-                            message: Message::assistant(
-                                "committed work before duration exhaustion",
-                            ),
-                            calls: Vec::new(),
-                            turn_message: None,
-                            context_tokens: None,
-                            occupancy_basis: None,
-                            usage: Some(usage),
-                            estimated_cost_usd_nanos: Some(37),
-                            accounting: Some(accounting.clone()),
-                            truncated: false,
-                            notice: None,
-                            goal_notices: Vec::new(),
-                            reserved_goal_notices: 0,
-                        },
+                        TurnCommit::new(
+                            1,
+                            Message::assistant("committed work before duration exhaustion"),
+                        )
+                        .usage(Some(usage))
+                        .cost(Some(37))
+                        .accounting(accounting.clone())
+                        .build(),
                     )
                     .await
                     .unwrap();

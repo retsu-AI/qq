@@ -316,12 +316,9 @@ async fn recovery_interrupts_only_the_current_turns_message() {
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![
                         ContentBlock::Text {
@@ -334,16 +331,10 @@ async fn recovery_interrupts_only_the_current_turns_message() {
                         ),
                     ],
                 ),
-                calls: vec![call],
-                turn_message: Some(first_message),
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .calls(vec![call])
+            .turn_message(first_message)
+            .build(),
         )
         .await
         .unwrap();
@@ -468,12 +459,9 @@ async fn recovery_interrupts_running_tools_without_reexecuting_them() {
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![ContentBlock::tool_call(
                         call.provider_call_id.clone(),
@@ -481,16 +469,9 @@ async fn recovery_interrupts_running_tools_without_reexecuting_them() {
                         &serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
                     )],
                 ),
-                calls: vec![call],
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .calls(vec![call])
+            .build(),
         )
         .await
         .unwrap();
@@ -603,12 +584,9 @@ async fn orphaned_tool_call_blocks_replay_with_synthesized_interrupted_results()
     store
         .persist_model_turn(
             &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
+            TurnCommit::new(
+                1,
+                Message::new(
                     Role::Assistant,
                     vec![ContentBlock::tool_call(
                         "orphan-call".to_owned(),
@@ -616,16 +594,8 @@ async fn orphaned_tool_call_blocks_replay_with_synthesized_interrupted_results()
                         &serde_json::json!({"path": "note.txt"}),
                     )],
                 ),
-                calls: Vec::new(),
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
+            )
+            .build(),
         )
         .await
         .unwrap();
