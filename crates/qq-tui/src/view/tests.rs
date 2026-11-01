@@ -6231,3 +6231,24 @@ fn paging_the_goal_panel_reaches_every_row_on_a_short_terminal() {
     let missing: Vec<&String> = all.iter().filter(|row| !seen.contains(*row)).collect();
     assert!(missing.is_empty(), "never shown: {missing:#?}");
 }
+
+#[test]
+fn the_goal_panel_keeps_every_line_of_the_last_check_output() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let session = initial.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session);
+    goal.check_output =
+        Some("exit 101\ntest a ... FAILED\nmiddle-diagnostic\ntest result: FAILED".to_owned());
+    initial.focused.as_mut().unwrap().goal = Some(goal);
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    let text = frame_rows(&super::chrome::goal_panel(&app, session, 76)).join("\n");
+    for line in [
+        "exit 101",
+        "test a ... FAILED",
+        "middle-diagnostic",
+        "test result: FAILED",
+    ] {
+        assert!(text.contains(line), "{line} missing:\n{text}");
+    }
+}

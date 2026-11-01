@@ -661,6 +661,20 @@ pub(super) fn goal_panel(app: &App, session_id: SessionId, width: usize) -> Vec<
             line.push(format!("  {shown}"), muted());
         }
         rows.push(truncate_line(line, width));
+        if parts.len() > 2 {
+            for detail in &parts[1..parts.len() - 1] {
+                for wrapped in wrap_line_chars(
+                    Line::styled(safe(detail), muted()),
+                    width.saturating_sub(6).max(1),
+                ) {
+                    let mut row = Line::styled("    │ ", faint());
+                    for span in wrapped.spans {
+                        row.push(span.text, span.style);
+                    }
+                    rows.push(truncate_line(row, width));
+                }
+            }
+        }
     }
     if goal.audit_pending {
         let mut line = Line::styled("  ◇ ", warning());
