@@ -301,73 +301,68 @@ impl SessionStore {
     }
 
     #[must_use]
-    pub fn session_group(&self, id: SessionId) -> Group {
-        let Some(view) = self.sessions.get(&id) else {
-            return Group::Idle;
-        };
-        let own = view.group();
-        if own == Group::NeedsYou {
-            return own;
-        }
-        let agents = self.agents_of(id);
-        if agents
-            .iter()
-            .any(|agent| self.sessions[agent].need() == Some(Need::Approval))
-        {
-            return Group::NeedsYou;
-        }
-        if own == Group::Working
-            || agents.iter().any(|agent| {
-                matches!(
-                    self.sessions[agent].summary.status,
-                    SessionStatus::Running | SessionStatus::Queued
-                )
-            })
-        {
-            return Group::Working;
-        }
-        own
-    }
-
-    #[must_use]
-    pub fn working_agents(&self, session: SessionId) -> usize {
-        self.agents_of(session)
-            .into_iter()
-            .filter(|agent| {
-                matches!(
-                    self.sessions[agent].summary.status,
-                    SessionStatus::Running | SessionStatus::Queued
-                )
-            })
-            .count()
-    }
-
-    #[must_use]
-    pub fn inclusive_cost(&self, session: SessionId) -> Option<u64> {
-        let summary = &self.sessions.get(&session)?.summary;
-        summary
-            .accounting
-            .and_then(|accounting| accounting.inclusive.estimated_cost_usd_nanos)
-            .or(summary.estimated_cost_usd_nanos)
-            .filter(|nanos| *nanos > 0)
-    }
-
-    #[must_use]
-    pub fn rail_order(&self) -> Vec<(SessionId, Group)> {
-        let mut rows: Vec<(Group, usize, SessionId)> = self
-            .listed_sessions()
-            .into_iter()
-            .enumerate()
-            .map(|(position, id)| {
-                let group = match self.session_group(id) {
-                    Group::Idle | Group::Done => Group::Done,
-                    group => group,
+    pub fn rail_order(&self) -> Vec<RailRow<'_>> {
+        let mut stack = Vec::new();
+        let mut rows: Vec<(Group, usize, RailRow<'_>)> =
+            Vec::with_capacity(self.index().listed.len());
+        for (position, &id) in self.index().listed.iter().enumerate() {
+            {
+                let view = &self.sessions[&id];
+                let own = view.group();
+                let mut agents = 0;
+                let mut working = 0;
+                let mut waiting = false;
+                self.for_each_agent(id, &mut stack, |agent| {
+                    agents += 1;
+                    working += usize::from(matches!(
+                        agent.summary.status,
+                        SessionStatus::Running | SessionStatus::Queued
+                    ));
+                    waiting |= agent.need() == Some(Need::Approval);
+                });
+                let group = if own == Group::NeedsYou || waiting {
+                    Group::NeedsYou
+                } else if own == Group::Working || working > 0 {
+                    Group::Working
+                } else {
+                    Group::Done
                 };
-                (group, position, id)
-            })
-            .collect();
-        rows.sort();
-        rows.into_iter().map(|(group, _, id)| (id, group)).collect()
+                rows.push((
+                    group,
+                    position,
+                    RailRow {
+                        id,
+                        view,
+                        group,
+                        agents,
+                        working,
+                        cost: view.inclusive_cost(),
+                    },
+                ));
+            }
+        }
+        rows.sort_by_key(|(group, position, _)| (*group, *position));
+        rows.into_iter().map(|(_, _, row)| row).collect()
+    }
+
+    fn for_each_agent(
+        &self,
+        session: SessionId,
+        stack: &mut Vec<SessionId>,
+        mut visit: impl FnMut(&SessionView),
+    ) {
+        stack.clear();
+        stack.extend(self.children_of(session).iter().copied());
+        while let Some(id) = stack.pop() {
+            let Some(view) = self.sessions.get(&id) else {
+                continue;
+            };
+            if view.is_audit() {
+                continue;
+            }
+            visit(view);
+            stack.extend(self.children_of(id).iter().copied());
+        }
     }
 
     #[must_use]
@@ -880,6 +875,16 @@ pub enum Need {
     FinishedUnread,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RailRow<'a> {
+    pub id: SessionId,
+    pub view: &'a SessionView,
+    pub group: Group,
+    pub agents: usize,
+    pub working: usize,
+    pub cost: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Group {
     NeedsYou,
@@ -933,6 +938,15 @@ impl SessionView {
             unread: 0,
             finished_unread: false,
         }
+    }
+
+    #[must_use]
+    pub fn inclusive_cost(&self) -> Option<u64> {
+        self.summary
+            .accounting
+            .and_then(|accounting| accounting.inclusive.estimated_cost_usd_nanos)
+            .or(self.summary.estimated_cost_usd_nanos)
+            .filter(|nanos| *nanos > 0)
     }
 
     #[must_use]

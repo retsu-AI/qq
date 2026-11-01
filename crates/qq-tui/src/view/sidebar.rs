@@ -14,27 +14,28 @@ pub(super) struct RailEntry {
 }
 
 pub(super) fn rail_entries(app: &App) -> (Vec<RailEntry>, [usize; 4]) {
-    let order = app.sessions.rail_order();
     let mut counts = [0; 4];
-    let entries = order
+    let entries = app
+        .sessions
+        .rail_order()
         .into_iter()
-        .map(|(id, group)| {
-            let session = &app.sessions[&id];
+        .map(|row| {
+            let id = row.id;
+            let session = row.view;
             let focused = app.focused() == Some(id);
-            let live = group != Group::Done
-                || !session.live.awaiting_approval.is_empty()
+            let live = !session.live.awaiting_approval.is_empty()
                 || session.summary.status == SessionStatus::Running
                 || session.summary.queued_prompts > 0
                 || (!focused && !session.live.tail.is_empty());
-            counts[group as usize] += 1;
+            counts[row.group as usize] += 1;
             RailEntry {
                 id,
-                group,
+                group: row.group,
                 unread: if focused { 0 } else { session.unread },
                 live,
-                cost: app.sessions.inclusive_cost(id),
-                agents: app.sessions.agents_of(id).len(),
-                working: app.sessions.working_agents(id),
+                cost: row.cost,
+                agents: row.agents,
+                working: row.working,
             }
         })
         .collect();
@@ -121,14 +122,24 @@ pub(super) fn sidebar(
         {
             plan.push(Row::Detail(index));
         }
-        let shown: Vec<SessionId> = app
-            .sessions
-            .agents_of(entry.id)
-            .into_iter()
-            .filter(|agent| {
-                app.focused() == Some(*agent) || app.sessions[agent].need() == Some(Need::Approval)
-            })
-            .collect();
+        let wanted = entry.agents > 0
+            && (entry.group == Group::NeedsYou
+                || app
+                    .focused()
+                    .and_then(|focused| app.sessions.session_of(focused))
+                    == Some(entry.id));
+        let shown: Vec<SessionId> = if wanted {
+            app.sessions
+                .agents_of(entry.id)
+                .into_iter()
+                .filter(|agent| {
+                    app.focused() == Some(*agent)
+                        || app.sessions[agent].need() == Some(Need::Approval)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         for agent in shown.iter().take(RAIL_AGENT_ROWS) {
             plan.push(Row::Agent(*agent));
         }

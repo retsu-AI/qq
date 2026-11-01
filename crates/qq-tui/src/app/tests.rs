@@ -5848,9 +5848,9 @@ fn switcher_app() -> (App, [SessionId; 5]) {
 #[test]
 fn alt_digits_focus_the_numbered_rail_rows_and_ignore_missing_ones() {
     let (mut app, ids) = switcher_app();
-    let order = app.sessions.rail_order();
+    let order: Vec<SessionId> = app.sessions.rail_order().iter().map(|row| row.id).collect();
     assert_eq!(order.len(), 4, "agents fold into their session");
-    for (index, (expected, _)) in order.iter().enumerate() {
+    for (index, expected) in order.iter().enumerate() {
         let digit = char::from(b'1' + u8::try_from(index).unwrap());
         app.handle_key(key(KeyCode::Char(digit), KeyModifiers::ALT));
         assert_eq!(app.focused(), Some(*expected), "Alt-{digit}");
@@ -6017,8 +6017,8 @@ fn clicking_a_rail_row_focuses_that_session_and_a_stale_hit_is_refused() {
     app.layout.rail = crate::view::PanePref::Shown;
     let mut renderer = crate::view::FrameRenderer::default();
     renderer.frame_and_commit(&mut app, 120, 40);
-    let order = app.sessions.rail_order();
-    let target = order.last().unwrap().0;
+    let order: Vec<SessionId> = app.sessions.rail_order().iter().map(|row| row.id).collect();
+    let target = *order.last().unwrap();
     let area = app.geometry.rail.expect("rail geometry is committed");
     let row = area.y
         + app
@@ -6042,7 +6042,7 @@ fn clicking_a_rail_row_focuses_that_session_and_a_stale_hit_is_refused() {
     ));
     assert_eq!(app.focused(), Some(target));
 
-    let stale = order[0].0;
+    let stale = order[0];
     app.sessions.remove(&stale);
     let before = app.focused();
     let stale_row = app

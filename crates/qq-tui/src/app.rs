@@ -3137,7 +3137,7 @@ impl App {
     fn focus_numbered(&mut self, number: usize) -> Effects {
         let rows = self.sessions.rail_order();
         match number.checked_sub(1).and_then(|index| rows.get(index)) {
-            Some((session_id, _)) => self.focus_session(*session_id),
+            Some(row) => self.focus_session(row.id),
             None => Effects::none(),
         }
     }

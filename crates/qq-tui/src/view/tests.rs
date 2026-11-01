@@ -4451,10 +4451,7 @@ fn the_rail_lists_needs_you_working_and_recent_from_one_pass() {
     assert_eq!((entries[1].agents, entries[1].working), (1, 1));
     assert_eq!(entries[0].unread, 1, "the unseen finish carries a badge");
     assert_eq!(entries[0].cost, Some(120_000_000));
-    assert!(
-        entries[1].live && entries[2].live,
-        "approval and streaming rows"
-    );
+    assert!(entries[2].live, "the streaming row has live status");
     assert_eq!(
         entries[1].unread, 0,
         "the focused session has seen everything"

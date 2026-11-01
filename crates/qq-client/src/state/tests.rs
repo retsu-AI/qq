@@ -1985,6 +1985,14 @@ fn cold_and_refreshed_snapshots_replace_pending_approval_details() {
     );
 }
 
+fn rail(store: &SessionStore) -> Vec<(SessionId, Group)> {
+    store
+        .rail_order()
+        .into_iter()
+        .map(|row| (row.id, row.group))
+        .collect()
+}
+
 fn sid(byte: u8) -> SessionId {
     SessionId::from_bytes([byte; 16])
 }
@@ -2050,7 +2058,7 @@ fn audits_and_their_descendants_are_never_listed_or_attended() {
     assert!(store.needing_attention().is_empty());
     assert_eq!(store.listed_sessions(), vec![root]);
     assert!(store.agents_of(root).is_empty());
-    assert_eq!(store.rail_order(), vec![(root, Group::Done)]);
+    assert_eq!(rail(&store), vec![(root, Group::Done)]);
 }
 
 #[test]
@@ -2077,15 +2085,19 @@ fn a_session_rolls_up_its_agents_into_one_group() {
     hold(&mut store, waiting_agent);
     store.get_mut(&busy_agent).unwrap().summary.status = SessionStatus::Running;
     assert_eq!(
-        store.rail_order(),
+        rail(&store),
         vec![
             (waiting, Group::NeedsYou),
             (busy, Group::Working),
             (quiet, Group::Done)
         ]
     );
-    assert_eq!(store.working_agents(busy), 1);
-    assert_eq!(store.working_agents(waiting), 0);
+    let counts: Vec<_> = store
+        .rail_order()
+        .into_iter()
+        .map(|row| (row.agents, row.working))
+        .collect();
+    assert_eq!(counts, vec![(1, 0), (1, 1), (0, 0)]);
 }
 
 #[test]
@@ -2100,5 +2112,5 @@ fn spend_is_inclusive_of_agents() {
         direct: total(10),
         inclusive: total(70),
     });
-    assert_eq!(store.inclusive_cost(root), Some(70));
+    assert_eq!(store.rail_order()[0].cost, Some(70));
 }

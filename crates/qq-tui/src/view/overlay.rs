@@ -14,6 +14,7 @@ struct PickerChrome<'a> {
     placeholder: &'a str,
     question: Option<Line>,
     empty: &'a str,
+    windowed: bool,
 }
 
 fn picker_frame<T: PickerItem>(
@@ -29,6 +30,7 @@ fn picker_frame<T: PickerItem>(
         placeholder,
         question,
         empty,
+        windowed,
     } = chrome;
     let chrome_rows = 2 + usize::from(question.is_some());
     let mut lines = Vec::with_capacity(height);
@@ -49,7 +51,15 @@ fn picker_frame<T: PickerItem>(
     let cursor = picker.cursor();
     let mut results = Vec::with_capacity(picker.filtered().len());
     let mut selected_row = 0;
+    let (first, last) = if windowed {
+        (cursor.saturating_sub(height), cursor.saturating_add(height))
+    } else {
+        (0, usize::MAX)
+    };
     for (position, (_, item)) in picker.filtered().enumerate() {
+        if position < first || position > last {
+            continue;
+        }
         let selected = position == cursor;
         if selected {
             selected_row = results.len();
@@ -163,6 +173,7 @@ pub(super) fn session_picker(app: &App, width: usize, height: usize) -> Vec<Line
             placeholder: "all sessions",
             question,
             empty: &empty,
+            windowed: true,
         },
         width,
         height,
@@ -171,7 +182,10 @@ pub(super) fn session_picker(app: &App, width: usize, height: usize) -> Vec<Line
             let mut line = Line::styled(if selected { "  ▎ " } else { "    " }, accent());
             line.push(format!("{glyph} "), glyph_style);
             let title = if row.is_agent() {
-                format!("{} › {}", row.session_title, row.title)
+                format!(
+                    "{} › {}",
+                    app.sessions[&row.session].summary.title, row.title
+                )
             } else {
                 row.title.clone()
             };
@@ -237,6 +251,7 @@ pub(super) fn model_picker(app: &App, width: usize, height: usize) -> Vec<Line> 
             placeholder: "all models",
             question: None,
             empty: "  No matching models.",
+            windowed: false,
         },
         width,
         height,
@@ -289,6 +304,7 @@ pub(super) fn profile_picker(app: &App, width: usize, height: usize) -> Vec<Line
             placeholder: "all profiles",
             question: None,
             empty: "  No matching profiles.",
+            windowed: false,
         },
         width,
         height,
@@ -333,6 +349,7 @@ pub(super) fn approval_mode_picker(app: &App, width: usize, height: usize) -> Ve
             placeholder: "all modes",
             question: None,
             empty: "  No matching modes.",
+            windowed: false,
         },
         width,
         height,
@@ -382,6 +399,7 @@ pub(super) fn effort_picker(app: &App, width: usize, height: usize) -> Vec<Line>
             },
             question: None,
             empty: "  No matching effort levels.",
+            windowed: false,
         },
         width,
         height,
@@ -418,6 +436,7 @@ pub(super) fn skill_picker(app: &App, width: usize, height: usize) -> Vec<Line> 
             placeholder: "all commands and skills",
             question: host_warning,
             empty: "  No matching commands or skills.",
+            windowed: false,
         },
         width,
         height,
@@ -463,6 +482,7 @@ pub(super) fn theme_picker(app: &App, width: usize, height: usize) -> Vec<Line> 
             placeholder: "all themes",
             question: None,
             empty: "  No matching themes.",
+            windowed: false,
         },
         width,
         height,
@@ -511,6 +531,7 @@ pub(super) fn command_picker(app: &App, width: usize, height: usize) -> Vec<Line
             placeholder: "all commands",
             question: None,
             empty: "  No matching commands.",
+            windowed: false,
         },
         width,
         height,
@@ -792,6 +813,7 @@ pub(super) fn history_picker(app: &App, width: usize, height: usize) -> Vec<Line
             placeholder: "recent prompts",
             question: None,
             empty: "  No matching prompts.",
+            windowed: false,
         },
         width,
         height,

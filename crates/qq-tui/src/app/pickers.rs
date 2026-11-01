@@ -938,45 +938,58 @@ impl App {
         expanded: &BTreeSet<SessionId>,
         all_agents: bool,
     ) -> Vec<SessionRow> {
-        let order: Vec<SessionId> = match scope {
+        let order: Vec<(SessionId, usize, usize)> = match scope {
             Some(root) => self
                 .sessions
                 .session_of(root)
-                .into_iter()
                 .filter(|session| self.sessions.is_session(*session))
+                .map(|session| {
+                    let agents = self.sessions.agents_of(session);
+                    let working = agents
+                        .iter()
+                        .filter(|agent| {
+                            matches!(
+                                self.sessions[agent].summary.status,
+                                SessionStatus::Running | SessionStatus::Queued
+                            )
+                        })
+                        .count();
+                    (session, agents.len(), working)
+                })
+                .into_iter()
                 .collect(),
             None => self
                 .sessions
                 .rail_order()
                 .into_iter()
-                .map(|(id, _)| id)
+                .map(|row| (row.id, row.agents, row.working))
                 .collect(),
         };
-        let mut rows = Vec::new();
-        for session in order {
-            let agents = self.sessions.agents_of(session);
-            let agent_count = agents.len();
-            let unfolded = all_agents || expanded.contains(&session);
+        let mut rows = Vec::with_capacity(order.len());
+        for (session, agents, working) in order {
             let row = |id: SessionId, listed: bool| {
                 let view = &self.sessions[&id];
                 SessionRow {
                     id,
                     session,
                     title: view.summary.title.clone(),
-                    session_title: self.sessions[&session].summary.title.clone(),
-                    agents: if id == session { agent_count } else { 0 },
-                    working: if id == session {
-                        self.sessions.working_agents(session)
-                    } else {
-                        0
-                    },
+                    agents: if id == session { agents } else { 0 },
+                    working: if id == session { working } else { 0 },
                     updated_at_ms: view.summary.updated_at_ms,
                     answer: latest_answer(view),
                     listed,
                 }
             };
             rows.push(row(session, true));
-            rows.extend(agents.into_iter().map(|agent| row(agent, unfolded)));
+            if agents > 0 {
+                let unfolded = all_agents || expanded.contains(&session);
+                rows.extend(
+                    self.sessions
+                        .agents_of(session)
+                        .into_iter()
+                        .map(|agent| row(agent, unfolded)),
+                );
+            }
         }
         rows
     }

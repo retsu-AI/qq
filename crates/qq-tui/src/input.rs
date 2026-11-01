@@ -117,7 +117,6 @@ pub(crate) struct SessionRow {
     pub id: SessionId,
     pub session: SessionId,
     pub title: String,
-    pub session_title: String,
     pub agents: usize,
     pub working: usize,
     pub updated_at_ms: u64,
@@ -131,6 +130,33 @@ impl SessionRow {
     }
 }
 
+fn starts_with_ignore_case(haystack: &str, lowered_needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .get(..lowered_needle.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(lowered_needle.as_bytes()))
+}
+
+fn word_starts_with(haystack: &str, lowered_needle: &str) -> bool {
+    let mut boundary = true;
+    for (at, character) in haystack.char_indices() {
+        if boundary && starts_with_ignore_case(&haystack[at..], lowered_needle) {
+            return true;
+        }
+        boundary = !character.is_alphanumeric();
+    }
+    false
+}
+
+fn contains_ignore_case(haystack: &str, lowered_needle: &str) -> bool {
+    let needle = lowered_needle.as_bytes();
+    !needle.is_empty()
+        && haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 pub(crate) const SESSION_ANSWER_BYTES: usize = 2048;
 
 impl PickerItem for SessionRow {
@@ -139,24 +165,18 @@ impl PickerItem for SessionRow {
     }
 
     fn rank(&self, query: &str) -> Option<u32> {
-        let title = self.title.to_lowercase();
         let by_title = if self.is_agent() {
-            crate::picker::fuzzy_matches(query, &title).then_some(3)
-        } else if title.starts_with(query) {
+            crate::picker::fuzzy_matches(query, &self.title).then_some(3)
+        } else if starts_with_ignore_case(&self.title, query) {
             Some(0)
-        } else if title.match_indices(query).any(|(at, _)| {
-            title[..at]
-                .chars()
-                .next_back()
-                .is_none_or(|before| !before.is_alphanumeric())
-        }) {
+        } else if word_starts_with(&self.title, query) {
             Some(1)
-        } else if crate::picker::fuzzy_matches(query, &title) {
+        } else if crate::picker::fuzzy_matches(query, &self.title) {
             Some(2)
         } else {
             None
         };
-        by_title.or_else(|| self.answer.to_lowercase().contains(query).then_some(4))
+        by_title.or_else(|| contains_ignore_case(&self.answer, query).then_some(4))
     }
 
     fn recency(&self) -> u64 {
