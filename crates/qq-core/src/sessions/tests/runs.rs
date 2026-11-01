@@ -331,25 +331,20 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
 async fn cancellation_flushes_the_final_bounded_reasoning_batch_before_settlement() {
     let directory = tempfile::tempdir().unwrap();
     let buffered = Arc::new(tokio::sync::Notify::new());
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(HangingReasoningLoader {
             buffered: Arc::clone(&buffered),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = submit(&runtime, session_id, "reason until cancelled").await;
     buffered.notified().await;
     runtime.inner.cancel(run_id);
@@ -589,8 +584,15 @@ async fn streams_committed_run_events_and_snapshots_the_result() {
 #[tokio::test]
 async fn unmeasured_new_prompt_clears_stale_session_context() {
     let directory = tempfile::tempdir().unwrap();
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(UsageSequenceLoader {
             usages: StdMutex::new(vec![
                 Some(qq_provider::ProviderUsage {
@@ -603,20 +605,9 @@ async fn unmeasured_new_prompt_clears_stale_session_context() {
                 None,
             ]),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
 
     let first_run = queue_prompt(&runtime, session_id, "measured".to_owned()).await;
     let first = collect_through_finished(&mut events).await;
@@ -687,23 +678,18 @@ async fn unmeasured_new_prompt_clears_stale_session_context() {
 #[tokio::test]
 async fn cancellation_before_a_model_turn_preserves_known_session_cost() {
     let directory = tempfile::tempdir().unwrap();
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(PricedHangingLoader),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
 
     let run_id = queue_prompt(&runtime, session_id, "cancel".to_owned()).await;
     collect_until(&mut events, |event| {
@@ -734,25 +720,21 @@ async fn persists_tool_transitions_and_reconstructs_follow_up_context() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "tool result\n").unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(ToolLoopLoader {
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     try_submit(&runtime, session_id, "inspect the note")
         .await
         .unwrap();
@@ -851,7 +833,15 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
     std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database_path.clone()),
         Arc::new(RenewableSliceLoader {
             requests: Arc::clone(&requests),
@@ -859,20 +849,9 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
             metered_empty_checkpoint: false,
             slice_calls: crate::MAX_TOOL_CALLS_PER_SLICE,
         }),
+        ApprovalMode::Auto,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
 
     let observed = collect_until(&mut events, finished_for(run_id)).await;
@@ -1051,28 +1030,23 @@ async fn cancellation_at_the_slice_checkpoint_has_one_cancelled_terminal() {
     std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
     let checkpoint_wait = Arc::new(tokio::sync::Notify::new());
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(RenewableSliceLoader {
             requests: Arc::clone(&requests),
             checkpoint_wait: Some(Arc::clone(&checkpoint_wait)),
             metered_empty_checkpoint: false,
             slice_calls: SHORT_SLICE_CALLS,
         }),
+        ApprovalMode::Auto,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
 
     tokio::time::timeout(Duration::from_secs(30), checkpoint_wait.notified())
@@ -1142,7 +1116,15 @@ async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_b
     std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let database = directory.path().join("sessions.sqlite3");
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database.clone()),
         Arc::new(RenewableSliceLoader {
             requests: Arc::clone(&requests),
@@ -1150,20 +1132,9 @@ async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_b
             metered_empty_checkpoint: true,
             slice_calls: SHORT_SLICE_CALLS,
         }),
+        ApprovalMode::Auto,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
 
     let observed = collect_until(&mut events, finished_for(run_id)).await;
@@ -2279,25 +2250,21 @@ async fn multi_turn_runs_emit_one_assistant_message_per_turn() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "noted\n").unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(TurnTextLoader {
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     try_submit(&runtime, session_id, "inspect the note")
         .await
         .unwrap();
@@ -2651,27 +2618,22 @@ async fn steering_during_a_slice_report_lands_before_the_continuation_notice() {
             release: Arc::new(tokio::sync::Notify::new()),
             reply,
         };
-        let runtime = SessionRuntime::open(
+        let SessionFixture {
+            directory: _directory,
+            runtime,
+            session_id,
+            mut events,
+            ..
+        } = SessionFixture::open_in(
+            directory,
             SessionRuntimeOptions::new(database.clone()),
             Arc::new(GatedSliceLoader {
                 requests: Arc::clone(&requests),
                 gate: gate.clone(),
             }),
+            ApprovalMode::Auto,
         )
-        .await
-        .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created =
-            create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("unexpected receipt")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        .await;
         let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
         tokio::time::timeout(Duration::from_secs(30), gate.reached.notified())
             .await
@@ -2732,27 +2694,22 @@ async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
         std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
         let database = directory.path().join("sessions.sqlite3");
         let requests = Arc::new(StdMutex::new(Vec::new()));
-        let runtime = SessionRuntime::open(
+        let SessionFixture {
+            directory: _directory,
+            runtime,
+            session_id,
+            mut events,
+            ..
+        } = SessionFixture::open_in(
+            directory,
             SessionRuntimeOptions::new(database.clone()),
             Arc::new(TruncatedReportLoader {
                 requests: Arc::clone(&requests),
                 fault: false,
             }),
+            ApprovalMode::Auto,
         )
-        .await
-        .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created =
-            create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("unexpected receipt")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        .await;
         if with_goal {
             set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"retain reports through goal notices",
             "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000}
@@ -2845,26 +2802,22 @@ async fn a_faulted_slice_report_is_retried_under_one_notice() {
     std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
     let database = directory.path().join("sessions.sqlite3");
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database.clone()),
         Arc::new(TruncatedReportLoader {
             requests: Arc::clone(&requests),
             fault: true,
         }),
+        ApprovalMode::Auto,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
     let observed = collect_until(&mut events, finished_for(run_id)).await;
     assert!(

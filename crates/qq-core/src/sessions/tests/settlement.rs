@@ -672,23 +672,18 @@ async fn orphaned_tool_call_blocks_replay_with_synthesized_interrupted_results()
 #[tokio::test]
 async fn exceeding_the_context_budget_fails_the_run_with_a_policy_outcome() {
     let directory = tempfile::tempdir().unwrap();
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(ContextBudgetLoader),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     try_submit(&runtime, session_id, "fill the context")
         .await
         .unwrap();
@@ -751,25 +746,20 @@ async fn a_panicking_run_task_fails_durably_and_the_session_keeps_scheduling() {
     }
 
     let directory = tempfile::tempdir().unwrap();
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(PanicOnceLoader {
             calls: Arc::new(AtomicUsize::new(0)),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
 
     let failed_run = queue_prompt(&runtime, session_id, "panic".to_owned()).await;
     let failed = tokio::time::timeout(
@@ -843,26 +833,21 @@ async fn a_panicking_loader_settles_the_reservation_without_run_started() {
 
     let directory = tempfile::tempdir().unwrap();
     let provider_calls = Arc::new(AtomicUsize::new(0));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(PanicBeforeStartLoader {
             loads: Arc::new(AtomicUsize::new(0)),
             provider_calls: Arc::clone(&provider_calls),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
 
     let failed_run = queue_prompt(&runtime, session_id, "panic in load".to_owned()).await;
     let failed = collect_until(&mut events, finished_for(failed_run)).await;
@@ -903,20 +888,20 @@ async fn shutdown_cancels_running_and_queued_prompts_before_returning() {
     let directory = tempfile::tempdir().unwrap();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.max_active_runs = 1;
-    let runtime = SessionRuntime::open(options, Arc::new(PricedHangingLoader))
-        .await
-        .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
+        options,
+        Arc::new(PricedHangingLoader),
+        ApprovalMode::default(),
+    )
+    .await;
 
     let running = queue_prompt(&runtime, session_id, "run".to_owned()).await;
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -2694,23 +2679,13 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
 #[tokio::test]
 async fn chunks_large_deltas_and_ignores_empty_deltas() {
     let directory = tempfile::tempdir().unwrap();
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-        Arc::new(ChunkingLoader),
-    )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(directory, Arc::new(ChunkingLoader), ApprovalMode::default()).await;
     try_submit(&runtime, session_id, "large").await.unwrap();
 
     let mut chunks = Vec::new();

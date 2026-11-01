@@ -6040,26 +6040,21 @@ async fn driver_loader_failures_pause_or_block_without_unbounded_restart() {
     ] {
         let directory = TempDir::new().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
-        let runtime = SessionRuntime::open(
-            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        let SessionFixture {
+            directory: _directory,
+            runtime,
+            session_id,
+            mut events,
+            ..
+        } = SessionFixture::open_at(
+            directory,
             Arc::new(Loader {
                 kind,
                 calls: Arc::clone(&calls),
             }),
+            ApprovalMode::default(),
         )
-        .await
-        .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace_id, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        .await;
         set_goal(&runtime, serde_json::json!({"session_id":session_id,
             "objective":"bounded preparation failures","budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}})).await.unwrap();
         let goal = tokio::time::timeout(Duration::from_secs(3), async {

@@ -29,6 +29,15 @@ impl SessionFixture {
         Self::open_in(directory, options, loader, mode).await
     }
 
+    pub(super) async fn open_at(
+        directory: TempDir,
+        loader: Arc<dyn RuntimeLoader>,
+        mode: ApprovalMode,
+    ) -> Self {
+        let options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+        Self::open_in(directory, options, loader, mode).await
+    }
+
     pub(super) async fn open_in(
         directory: TempDir,
         options: SessionRuntimeOptions,

@@ -38,26 +38,22 @@ async fn loading_exhaustion_without_work_blocks_after_three_attempts() {
     let directory = TempDir::new().unwrap();
     let loads = Arc::new(AtomicUsize::new(0));
     let requests = Arc::new(AtomicUsize::new(0));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(Loader {
             loads: Arc::clone(&loads),
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("session")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"do not loop on unproductive loading",
         "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000,"per_run":{"max_duration_ms":100}}
     })).await.unwrap();

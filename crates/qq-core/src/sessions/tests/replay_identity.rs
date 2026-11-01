@@ -430,8 +430,14 @@ async fn repeated_call_ids_keep_pruning_effects_and_arguments_local_to_each_turn
     std::fs::write(directory.path().join("first.txt"), "first".repeat(200)).unwrap();
     std::fs::write(directory.path().join("second.txt"), "second".repeat(200)).unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(ReplayLoader {
             requests: Arc::clone(&requests),
             script: Arc::new(vec![
@@ -444,20 +450,9 @@ async fn repeated_call_ids_keep_pruning_effects_and_arguments_local_to_each_turn
                 Some(("read_file", serde_json::json!({"path": "second.txt"}))),
             ]),
         }),
+        ApprovalMode::Full,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     for prompt in [
         "shell",
         "reads",

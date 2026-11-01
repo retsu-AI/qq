@@ -197,25 +197,20 @@ async fn shell_prefix_denial_precedes_auto_and_full_and_allows_continuation() {
         r#"{"command":"unlisted-tool; managed-tool --dangerous && another-tool"}"#;
     for mode in [ApprovalMode::Auto, ApprovalMode::Full] {
         let directory = test_directory();
-        let runtime = SessionRuntime::open(
-            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        let SessionFixture {
+            directory: _directory,
+            runtime,
+            session_id,
+            mut events,
+            ..
+        } = SessionFixture::open_at(
+            directory,
             Arc::new(ManagedShellDenyLoader {
                 script: vec![(TOOL, ARGUMENTS.into()), ("__test_mutate", "{}".into())],
             }),
+            mode,
         )
-        .await
-        .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        .await;
         let run_id =
             submit_prompt_to(&runtime, session_id, "continue with an allowed alternative").await;
         let observed = collect_until_run_finished(&mut events, run_id).await;
@@ -1689,26 +1684,21 @@ async fn ask_fetch_has_a_preview_while_auto_fetch_needs_no_approval() {
         );
         let url = format!("{}/docs", server.base_url);
         let directory = test_directory();
-        let runtime = SessionRuntime::open(
-            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        let SessionFixture {
+            directory: _directory,
+            runtime,
+            session_id,
+            mut events,
+            ..
+        } = SessionFixture::open_at(
+            directory,
             Arc::new(Loader {
                 arguments: serde_json::json!({"url":url}).to_string(),
                 turns,
             }),
+            mode,
         )
-        .await
-        .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        .await;
         let run_id = submit_prompt_to(&runtime, session_id, "read docs").await;
         if mode == ApprovalMode::Ask {
             let (observed, call) = collect_until_approval_requested(&mut events).await;
@@ -2447,7 +2437,15 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
         });
         let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
         options.approval_timeout = None;
-        let runtime = SessionRuntime::open(
+        let SessionFixture {
+            directory: _directory,
+            runtime,
+            workspace_id: workspace,
+            session_id,
+            mut events,
+            ..
+        } = SessionFixture::open_in(
+            directory,
             options,
             Arc::new(Loader {
                 inner: DepthLoader {
@@ -2462,20 +2460,9 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
                 root_loads: AtomicUsize::new(0),
                 held: StdMutex::new((preparation_ms > 0).then_some((entered, released))),
             }),
+            ApprovalMode::Ask,
         )
-        .await
-        .unwrap();
-        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: created.committed_through,
-            })
-            .unwrap();
+        .await;
         set_goal(&runtime, serde_json::json!({"session_id":session_id,
                 "objective":"wait for the sponsored child's explicit answer",
                 "budget":{"max_goal_runs":10,"max_total_tokens":1_000_000,

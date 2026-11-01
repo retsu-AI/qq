@@ -69,8 +69,14 @@ async fn empty_attachment_range_fails_as_invalid_input_and_session_remains_usabl
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("empty.txt"), "").unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(MutableResolvedLoader {
             resolved_model: Arc::new(StdMutex::new(test_resolved_model(
                 "test/model",
@@ -80,20 +86,9 @@ async fn empty_attachment_range_fails_as_invalid_input_and_session_remains_usabl
             ))),
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     try_submit(
         &runtime,
         session_id,
@@ -1044,8 +1039,14 @@ async fn evicted_attachments_render_an_explicit_stub_not_the_placeholder() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("a.txt"), "ALPHA\n").unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(MutableResolvedLoader {
             resolved_model: Arc::new(StdMutex::new(test_resolved_model(
                 "test/model",
@@ -1055,20 +1056,9 @@ async fn evicted_attachments_render_an_explicit_stub_not_the_placeholder() {
             ))),
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     try_submit(
         &runtime,
         session_id,
@@ -1138,23 +1128,13 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
         ))),
         requests: Arc::clone(&requests),
     });
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-        loader,
-    )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(directory, loader, ApprovalMode::default()).await;
     let run_id = submit(
         &runtime,
         session_id,
@@ -1315,23 +1295,20 @@ async fn run_snapshot_preserves_prompt_identity_across_restart() {
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(skill.join("SKILL.md"), "Retain exact run provenance.\n").unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database_path.clone()),
         Arc::new(ScriptedLoader),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = submit_prompt_to(&runtime, session_id, "/stable finish the work").await;
     collect_through_finished(&mut events).await;
 
@@ -1439,23 +1416,20 @@ async fn resolved_model_and_request_limits_survive_config_mutation_and_restart()
         resolved_model: Arc::clone(&configured),
         requests: Arc::clone(&requests),
     });
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database_path.clone()),
         loader.clone(),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = submit_prompt_to(&runtime, session_id, "work").await;
     let observed = collect_through_finished(&mut events).await;
 
@@ -1616,25 +1590,21 @@ async fn prompt_identity_persistence_failure_starts_no_provider_work() {
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
     let provider_calls = Arc::new(AtomicUsize::new(0));
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database_path.clone()),
         Arc::new(CountingLoader {
             provider_calls: Arc::clone(&provider_calls),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     Connection::open(&database_path)
         .unwrap()
         .execute_batch(
@@ -1700,25 +1670,21 @@ async fn resolved_model_persistence_failure_starts_no_provider_work() {
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("sessions.sqlite3");
     let provider_calls = Arc::new(AtomicUsize::new(0));
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database_path.clone()),
         Arc::new(CountingLoader {
             provider_calls: Arc::clone(&provider_calls),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     Connection::open(&database_path)
         .unwrap()
         .execute_batch(
@@ -1791,25 +1757,20 @@ async fn known_first_turn_context_overflow_starts_no_provider_work() {
 
     let directory = tempfile::tempdir().unwrap();
     let provider_calls = Arc::new(AtomicUsize::new(0));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(TinyContextLoader {
             provider_calls: Arc::clone(&provider_calls),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     submit_prompt_to(&runtime, session_id, "work").await;
     let observed = collect_through_finished(&mut events).await;
 
@@ -2003,25 +1964,20 @@ async fn known_later_turn_context_overflow_starts_no_second_provider_request() {
 
     let directory = tempfile::tempdir().unwrap();
     let provider_calls = Arc::new(AtomicUsize::new(0));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(LaterTurnLoader {
             provider_calls: Arc::clone(&provider_calls),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     submit_prompt_to(&runtime, session_id, "work").await;
     let observed = collect_through_finished(&mut events).await;
 
@@ -2040,23 +1996,14 @@ async fn known_later_turn_context_overflow_starts_no_second_provider_request() {
 async fn instruction_hash_tracks_selected_path_and_bytes_deterministically() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("AGENTS.md"), "same\n").unwrap();
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-        Arc::new(ScriptedLoader),
-    )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let SessionFixture {
+        directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(directory, Arc::new(ScriptedLoader), ApprovalMode::default()).await;
 
     let first =
         completed_instruction_hash(&runtime, workspace_id, session_id, &mut events, "first").await;

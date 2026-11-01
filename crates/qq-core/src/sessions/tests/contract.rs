@@ -46,26 +46,23 @@ async fn the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runti
     ));
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(path.clone()),
         Arc::new(TextScriptLoader {
             requests: Arc::clone(&requests),
             answers: Arc::clone(&answers),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let hanging = submit_prompt_to(&runtime, session_id, "hang").await;
     let run_id = submit(
         &runtime,

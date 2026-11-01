@@ -195,23 +195,20 @@ async fn compatible_occupancy_seeds_the_first_turn_after_restart_and_pricing_ref
         calls: Arc::clone(&calls),
         pricing: Arc::clone(&pricing),
     });
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        workspace_id,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         SessionRuntimeOptions::new(database_path.clone()),
         loader.clone(),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     submit_prompt_to(&runtime, session_id, "first").await;
     let first = collect_through_finished(&mut events).await;
     let after_first = first.last().unwrap().cursor;

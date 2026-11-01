@@ -709,28 +709,23 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     let release = Arc::new(tokio::sync::Notify::new());
     let requests = Arc::new(AtomicUsize::new(0));
     let progress = Arc::new(StdMutex::new(None));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(HeldDeadlineLoader {
             progress: Arc::clone(&progress),
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::Full,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("session")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let receipt = runtime
         .command(
             CommandId::generate().unwrap(),
@@ -870,25 +865,20 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
     let spawned =
         crate::tools::observe_shell_spawn(&std::fs::canonicalize(directory.path()).unwrap(), false);
     let requests = Arc::new(AtomicUsize::new(0));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let SessionFixture {
+        directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_at(
+        directory,
         Arc::new(DeadlineLoader {
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::Full,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let began = std::time::Instant::now();
     let receipt = runtime
         .command(

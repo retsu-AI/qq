@@ -2111,26 +2111,22 @@ async fn write_children_require_the_roster_flag() {
     });
     let directory = tempfile::tempdir().unwrap();
     let options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         options,
         Arc::new(QueueLoader {
             routed: vec![("test/child", child)],
             queue: StdMutex::new(vec![parent]),
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = submit_prompt_to(&runtime, session_id, "delegate").await;
     let observed = collect_until_run_finished(&mut events, run_id).await;
     assert!(!observed.iter().any(|event| matches!(
@@ -2981,7 +2977,14 @@ async fn write_children_serialize_on_the_per_run_write_permit() {
     let directory = tempfile::tempdir().unwrap();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.max_active_runs = 8;
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         options,
         Arc::new(WriteChildLoader {
             inner: QueueLoader {
@@ -2989,20 +2992,9 @@ async fn write_children_serialize_on_the_per_run_write_permit() {
                 queue: StdMutex::new(vec![parent]),
             },
         }),
+        ApprovalMode::default(),
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run_id = submit_prompt_to(&runtime, session_id, "fan out writers").await;
     let observed = collect_until_run_finished(&mut events, run_id).await;
 
@@ -5396,7 +5388,14 @@ async fn nested_write_requests_preserve_the_root_only_write_boundary() {
     let directory = tempfile::tempdir().unwrap();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.max_active_runs = 8;
-    let runtime = SessionRuntime::open(
+    let SessionFixture {
+        directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
         options,
         Arc::new(DepthLoader {
             inner: QueueLoader {
@@ -5407,20 +5406,9 @@ async fn nested_write_requests_preserve_the_root_only_write_boundary() {
             write_children: true,
             pricing: None,
         }),
+        ApprovalMode::Auto,
     )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("expected session")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    .await;
     let run = submit_prompt_to(&runtime, session_id, "delegate twice").await;
     let observed = collect_until_run_finished(&mut events, run).await;
     assert!(!directory.path().join("nested.txt").exists());
