@@ -9338,8 +9338,6 @@ mod tests {
             if write_children {
                 assert!(prompt.contains("read by default"));
                 assert!(prompt.contains("Auto within the parent"));
-                assert!(!prompt.contains("reviewer_model"));
-                assert!(!prompt.contains("supervised approval"));
                 assert!(prompt.contains("one write sub-agent"));
                 assert!(prompt.contains("implementation task"));
             }

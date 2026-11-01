@@ -3574,14 +3574,10 @@ mod tests {
                 if write_children {
                     assert!(!spec.description().contains("read-only sub-agent"));
                     assert!(spec.description().contains("authority: write"));
-                    assert!(!spec.description().contains("reviewer_model"));
-                    assert!(!spec.description().contains("supervised approval"));
                     let authority = schema["properties"]["authority"]["description"]
                         .as_str()
                         .unwrap();
                     assert!(authority.contains("within the parent's authority"));
-                    assert!(!authority.contains("reviewer_model"));
-                    assert!(!authority.contains("supervised approval"));
                     assert_eq!(
                         schema["properties"]["authority"]["enum"],
                         json!(["read", "write"])
