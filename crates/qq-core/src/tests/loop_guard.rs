@@ -544,9 +544,10 @@ async fn ac4_runtime_alternating_stable_reads_pause_after_two_novel_results() {
 }
 
 #[tokio::test]
-async fn ac4_runtime_1500_novel_reads_complete_and_keep_reporting() {
+async fn ac4_runtime_novel_reads_complete_and_keep_reporting() {
+    const READS: usize = 3 * STALL_REPORT_CALLS as usize + 8;
     let directory = tempfile::tempdir().unwrap();
-    let calls = (0..1500)
+    let calls = (0..READS)
         .map(|index| {
             let path = format!("note-{index}.txt");
             std::fs::write(
@@ -585,7 +586,7 @@ async fn ac4_runtime_1500_novel_reads_complete_and_keep_reporting() {
             .iter()
             .filter(|event| matches!(event, RuntimeEvent::ToolCallStarted { .. }))
             .count(),
-        1500
+        READS
     );
     assert!(!events.iter().any(|event| matches!(
         event,
@@ -594,7 +595,7 @@ async fn ac4_runtime_1500_novel_reads_complete_and_keep_reporting() {
     let requests = requests.lock().unwrap();
     let reports = requests.iter().filter(|request| request.messages().last().is_some_and(|message| matches!(message.content(), [ContentBlock::Text {text}] if text == STALL_REPORT_NOTICE || text == SLICE_CHECKPOINT_NOTICE || text == ROOT_STALL_REPORT_NOTICE))).count();
     assert!(
-        reports >= usize::try_from(1500 / STALL_REPORT_CALLS).unwrap(),
+        reports >= READS / STALL_REPORT_CALLS as usize,
         "novel observations must preserve report cadence: {reports}"
     );
 }

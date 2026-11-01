@@ -584,7 +584,6 @@ mod tests {
         harness.escape();
         assert!(harness.app.filtered_sessions().is_empty());
     }
-
 }
 
 pub const MARKDOWN_GALLERY: &str = "\

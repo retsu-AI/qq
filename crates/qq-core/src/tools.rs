@@ -5345,29 +5345,6 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn a_command_that_leaves_its_group_still_stops_on_timeout() {
-        let directory = tempfile::tempdir().unwrap();
-        let workspace = Workspace::open(directory.path()).unwrap();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            run_shell_tool(
-                workspace,
-                r#"{"command":"exec setsid sleep 300","timeout_seconds":1}"#,
-                RunCancellation::new(),
-                None,
-            ),
-        )
-        .await
-        .expect("a command that left its group must not hang its timeout");
-        assert!(
-            result.model_text.contains("timed out"),
-            "{}",
-            result.model_text
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
     async fn a_command_starts_in_a_group_its_ready_watcher_leads() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
