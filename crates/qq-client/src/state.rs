@@ -318,7 +318,7 @@ impl SessionStore {
                         agent.summary.status,
                         SessionStatus::Running | SessionStatus::Queued
                     ));
-                    waiting |= agent.need() == Some(Need::Approval);
+                    waiting |= agent.need().is_some();
                 });
                 let group = if own == Group::NeedsYou || waiting {
                     Group::NeedsYou

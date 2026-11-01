@@ -1013,6 +1013,14 @@ impl App {
             && current != session_id
         {
             self.previous_focus = Some(current);
+            let answering = self.approval_amendment.is_some()
+                || self
+                    .pending_question()
+                    .and_then(|question| question.questions.get(self.question_answers.len()))
+                    .is_some_and(|question| question.free_text);
+            if answering {
+                self.composer.clear();
+            }
             self.approval_amendment = None;
             self.question_answers.clear();
         }

@@ -2127,3 +2127,25 @@ fn orphan_sessions_sort_with_roots_newest_first() {
         vec![new_root, mid_orphan, old_root, old_orphan]
     );
 }
+
+#[test]
+fn a_failed_or_unread_agent_puts_its_session_in_needs_you() {
+    let mut store = SessionStore::default();
+    let failing = put(&mut store, 1, None, 1);
+    let finished = put(&mut store, 2, None, 2);
+    let failed_agent = put(&mut store, 3, Some(1), 3);
+    let done_agent = put(&mut store, 4, Some(2), 4);
+    store.get_mut(&failed_agent).unwrap().finished_unread = true;
+    store.get_mut(&failed_agent).unwrap().summary.last_outcome = Some(RunOutcome::Failed {
+        failure: qq_protocol::RunFailure {
+            kind: qq_protocol::RunFailureKind::ProviderUnavailable,
+            message: "x".to_owned(),
+        },
+    });
+    store.get_mut(&done_agent).unwrap().finished_unread = true;
+    let mut groups = rail(&store);
+    groups.sort();
+    let mut expected = vec![(failing, Group::NeedsYou), (finished, Group::NeedsYou)];
+    expected.sort();
+    assert_eq!(groups, expected);
+}

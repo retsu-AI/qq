@@ -6144,3 +6144,20 @@ fn a_configured_alt_digit_binding_wins_over_numbered_focus() {
     );
     assert_eq!(app.focused(), before);
 }
+
+#[test]
+fn switching_away_mid_amendment_clears_its_text_but_a_prompt_draft_survives() {
+    let (mut app, [first, beta, ..]) = switcher_app();
+    app.focus_session(first);
+    app.approval_amendment = Some(ApprovalChoice::Deny);
+    app.composer.replace("do something else".to_owned());
+    app.focus_session(beta);
+    assert!(
+        app.composer.text.is_empty(),
+        "the amendment text does not follow"
+    );
+
+    app.composer.replace("ordinary draft".to_owned());
+    app.focus_session(first);
+    assert_eq!(app.composer.text, "ordinary draft");
+}

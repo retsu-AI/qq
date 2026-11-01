@@ -133,8 +133,7 @@ pub(super) fn sidebar(
                 .agents_of(entry.id)
                 .into_iter()
                 .filter(|agent| {
-                    app.focused() == Some(*agent)
-                        || app.sessions[agent].need() == Some(Need::Approval)
+                    app.focused() == Some(*agent) || app.sessions[agent].need().is_some()
                 })
                 .collect()
         } else {
