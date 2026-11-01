@@ -4804,57 +4804,68 @@ mod tests {
     struct EscapedTree {
         command: String,
         report: std::path::PathBuf,
+        parent_left_the_group: bool,
         _directory: tempfile::TempDir,
     }
 
     #[cfg(unix)]
-    fn on_path(program: &str) -> bool {
-        std::env::var_os("PATH").is_some_and(|path| {
-            std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
-        })
-    }
-
-    #[cfg(unix)]
     async fn escaped_trees() -> Vec<EscapedTree> {
-        let reporter = "sh -c 'echo $PPID $$ > \"$0\"; exec sleep 600'";
-        let piped = if on_path("timeout") {
-            format!("timeout 600 {reporter} {{report}} 2>&1 | cat")
-        } else {
-            format!("perl -e 'setpgrp; exec @ARGV' {reporter} {{report}} 2>&1 | cat")
-        };
-        let escaped = if on_path("setsid") {
-            format!("setsid {reporter} {{report}}; true")
-        } else {
-            format!("perl -MPOSIX -e 'setsid; exec @ARGV' {reporter} {{report}}; true")
-        };
-        let mut trees = Vec::new();
-        for template in [piped, escaped] {
-            let directory = tempfile::tempdir().unwrap();
-            let report = directory.path().join("pids");
-            create_test_fifo(&report).await;
-            trees.push(EscapedTree {
-                command: template.replace("{report}", &format!("'{}'", report.display())),
-                report,
-                _directory: directory,
-            });
+        let prepared = tokio::task::spawn_blocking(|| {
+            let on_path = |program: &str| {
+                std::env::var_os("PATH").is_some_and(|path| {
+                    std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
+                })
+            };
+            let reporter = "sh -c 'echo $PPID $$ > \"$0\"; exec sleep 600'";
+            let has_timeout = on_path("timeout");
+            let piped = if has_timeout {
+                format!("timeout 600 {reporter} {{report}} 2>&1 | cat")
+            } else {
+                format!("perl -e 'setpgrp; exec @ARGV' {reporter} {{report}} 2>&1 | cat")
+            };
+            let escaped = if on_path("setsid") {
+                format!("setsid {reporter} {{report}}; true")
+            } else {
+                format!("perl -MPOSIX -e 'setsid; exec @ARGV' {reporter} {{report}}; true")
+            };
+            [(piped, has_timeout), (escaped, false)].map(|(template, parent_left_the_group)| {
+                let directory = tempfile::tempdir().unwrap();
+                let report = directory.path().join("pids");
+                EscapedTree {
+                    command: template.replace("{report}", &format!("'{}'", report.display())),
+                    report,
+                    parent_left_the_group,
+                    _directory: directory,
+                }
+            })
+        })
+        .await
+        .unwrap();
+        for tree in &prepared {
+            create_test_fifo(&tree.report).await;
         }
-        trees
+        prepared.into()
     }
 
     #[cfg(unix)]
-    async fn reported_pids(tree: &EscapedTree, parent_left_the_group: bool) -> Vec<u32> {
+    async fn reported_pids(tree: &EscapedTree) -> Vec<u32> {
         let report = tree.report.clone();
         let reader = tokio::task::spawn_blocking(move || std::fs::read_to_string(report));
         let text = match tokio::time::timeout(std::time::Duration::from_secs(20), reader).await {
             Ok(text) => text.unwrap().unwrap(),
             Err(_) => {
-                drop(
-                    std::os::unix::fs::OpenOptionsExt::custom_flags(
-                        std::fs::OpenOptions::new().write(true),
-                        rustix::fs::OFlags::NONBLOCK.bits() as i32,
-                    )
-                    .open(&tree.report),
-                );
+                let report = tree.report.clone();
+                tokio::task::spawn_blocking(move || {
+                    drop(
+                        std::os::unix::fs::OpenOptionsExt::custom_flags(
+                            std::fs::OpenOptions::new().write(true),
+                            rustix::fs::OFlags::NONBLOCK.bits() as i32,
+                        )
+                        .open(report),
+                    );
+                })
+                .await
+                .unwrap();
                 panic!("the escaped command never reported its pids");
             }
         };
@@ -4863,7 +4874,7 @@ mod tests {
             .map(|pid| pid.parse().unwrap())
             .collect();
         assert_eq!(pids.len(), 2, "{text}");
-        if !parent_left_the_group {
+        if !tree.parent_left_the_group {
             pids.remove(0);
         }
         pids
@@ -4882,7 +4893,7 @@ mod tests {
         let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         for timeout in [false, true] {
-            for (index, tree) in escaped_trees().await.into_iter().enumerate() {
+            for tree in escaped_trees().await {
                 let command = tree.command.clone();
                 let cancelled = RunCancellation::new();
                 let arguments = match timeout {
@@ -4900,7 +4911,7 @@ mod tests {
                     Arc::new(crate::runtime::ShellPolicy::default()),
                     Arc::default(),
                 ));
-                let pids = reported_pids(&tree, index == 0 && on_path("timeout")).await;
+                let pids = reported_pids(&tree).await;
                 if !timeout {
                     cancelled.cancel();
                 }
@@ -4930,7 +4941,7 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let tasks = ToolTasks::default();
         let mut started = Vec::new();
-        for (index, tree) in escaped_trees().await.into_iter().enumerate() {
+        for tree in escaped_trees().await {
             let result = execute(
                 workspace.clone(),
                 Arc::new(FileState::default()),
@@ -4948,7 +4959,7 @@ mod tests {
                 "{}",
                 result.model_text
             );
-            started.push(reported_pids(&tree, index == 0 && on_path("timeout")).await);
+            started.push(reported_pids(&tree).await);
         }
         tokio::time::timeout(std::time::Duration::from_secs(20), tasks.drain())
             .await
