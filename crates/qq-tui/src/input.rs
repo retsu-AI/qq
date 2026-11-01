@@ -1,6 +1,8 @@
 mod goal_form;
 pub(crate) use goal_form::{GoalForm, GoalFormRefresh};
 
+use std::collections::BTreeSet;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use qq_protocol::{AgentProfileId, ApprovalMode, GuidanceKind, ReasoningEffort, SessionId};
 
@@ -113,12 +115,76 @@ impl PickerItem for ThemeRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionRow {
     pub id: SessionId,
+    pub session: SessionId,
     pub title: String,
+    pub agents: usize,
+    pub working: usize,
+    pub updated_at_ms: u64,
+    pub answer: String,
+    pub listed: bool,
 }
+
+impl SessionRow {
+    pub(crate) fn is_agent(&self) -> bool {
+        self.id != self.session
+    }
+}
+
+fn starts_with_ignore_case(haystack: &str, lowered_needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .get(..lowered_needle.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(lowered_needle.as_bytes()))
+}
+
+fn word_starts_with(haystack: &str, lowered_needle: &str) -> bool {
+    let mut boundary = true;
+    for (at, character) in haystack.char_indices() {
+        if boundary && starts_with_ignore_case(&haystack[at..], lowered_needle) {
+            return true;
+        }
+        boundary = !character.is_alphanumeric();
+    }
+    false
+}
+
+fn contains_ignore_case(haystack: &str, lowered_needle: &str) -> bool {
+    let needle = lowered_needle.as_bytes();
+    !needle.is_empty()
+        && haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+pub(crate) const SESSION_ANSWER_BYTES: usize = 2048;
 
 impl PickerItem for SessionRow {
     fn search_text<'a>(&'a self, out: &mut Vec<&'a str>) {
         out.push(&self.title);
+    }
+
+    fn rank(&self, query: &str) -> Option<u32> {
+        let by_title = if self.is_agent() {
+            crate::picker::fuzzy_matches(query, &self.title).then_some(3)
+        } else if starts_with_ignore_case(&self.title, query) {
+            Some(0)
+        } else if word_starts_with(&self.title, query) {
+            Some(1)
+        } else if crate::picker::fuzzy_matches(query, &self.title) {
+            Some(2)
+        } else {
+            None
+        };
+        by_title.or_else(|| contains_ignore_case(&self.answer, query).then_some(4))
+    }
+
+    fn recency(&self) -> u64 {
+        self.updated_at_ms
+    }
+
+    fn shown_when_idle(&self) -> bool {
+        self.listed
     }
 }
 
@@ -209,6 +275,8 @@ pub(crate) enum Overlay {
         picker: Picker<SessionRow>,
         scope: Option<SessionId>,
         confirm: Option<SessionConfirm>,
+        expanded: BTreeSet<SessionId>,
+        all_agents: bool,
     },
     Commands {
         picker: Picker<CommandRow>,
@@ -262,6 +330,8 @@ impl Overlay {
             picker,
             scope: None,
             confirm,
+            expanded: BTreeSet::new(),
+            all_agents: false,
         }
     }
 
@@ -313,7 +383,7 @@ impl Overlay {
                 KeyCode::Char(_) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     PickerOutcome::Chord(key.code)
                 }
-                KeyCode::Delete => PickerOutcome::Chord(key.code),
+                KeyCode::Delete | KeyCode::Tab => PickerOutcome::Chord(key.code),
                 _ => PickerOutcome::Ignored,
             }
         }

@@ -394,6 +394,7 @@ Terminal preferences live in a separate document, loaded from
         create_child_session: ["Alt-C"],
         cancel_run: ["Ctrl-X"],
         interrupt_run: ["Alt-S"],
+        previous_session: ["Ctrl-6", "Ctrl-^"],
     ),
 )
 ```

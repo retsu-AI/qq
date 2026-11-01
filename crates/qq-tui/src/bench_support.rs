@@ -8,7 +8,7 @@ use qq_protocol::{
 use crate::{ClientUpdate, TuiOptions, app::App, fixtures, view::FrameRenderer};
 
 pub struct BenchHarness {
-    app: App,
+    pub(crate) app: App,
     renderer: FrameRenderer,
     size: (u16, u16),
     next_sequence: u64,
@@ -649,10 +649,12 @@ pub enum Scene {
     Reasoning,
     Steering,
     Sessions,
+    Fanout,
+    Switcher,
 }
 
 impl Scene {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::GoalForm,
         Self::GoalReplace,
         Self::Goal,
@@ -665,6 +667,8 @@ impl Scene {
         Self::Reasoning,
         Self::Steering,
         Self::Sessions,
+        Self::Fanout,
+        Self::Switcher,
     ];
 
     #[must_use]
@@ -682,6 +686,8 @@ impl Scene {
             Self::Reasoning => "reasoning",
             Self::Steering => "steering",
             Self::Sessions => "sessions",
+            Self::Fanout => "fanout",
+            Self::Switcher => "switcher",
         }
     }
 }
@@ -787,6 +793,17 @@ impl BenchHarness {
                 harness.completed_turn("plan the release", "Drafted the checklist.");
                 harness.many_agents();
             }
+            Scene::Fanout => {
+                harness.completed_turn("split the plan into twenty agents", "Spawned the agents.");
+                harness.fanout(20);
+            }
+            Scene::Switcher => {
+                harness.completed_turn("plan the release", "Drafted the checklist.");
+                harness.many_agents();
+                harness
+                    .app
+                    .execute(crate::commands::Command::ToggleSessions);
+            }
         }
         harness
     }
@@ -821,6 +838,49 @@ impl BenchHarness {
             }
             None => false,
         }
+    }
+
+    fn fanout(&mut self, agents: u8) {
+        let parent = session_id(0);
+        let mut other = summary(session_id(100), SessionStatus::Idle);
+        other.title = "release notes".to_owned();
+        other.updated_at_ms = 500;
+        other.last_outcome = Some(qq_protocol::RunOutcome::Completed);
+        self.apply(
+            100,
+            SessionEvent::SessionCreated {
+                session: Box::new(other),
+            },
+        );
+        for index in 1..=agents {
+            let mut agent = summary(session_id(index), SessionStatus::Running);
+            agent.title = format!("agent {index}");
+            agent.parent_id = Some(parent);
+            agent.updated_at_ms = u64::from(index);
+            self.apply(
+                index,
+                SessionEvent::SessionCreated {
+                    session: Box::new(agent),
+                },
+            );
+        }
+        let mut call_id = [0x50; 16];
+        call_id[15] = 0x62;
+        self.apply(
+            1,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: ToolCallSnapshot {
+                    run_id: run_id(1),
+                    arguments: r#"{"command":"cargo publish --dry-run"}"#.to_owned(),
+                    state: qq_protocol::ToolCallState::AwaitingApproval,
+                    ..fixtures::tool_call(ToolCallId::from_bytes(call_id), session_id(1), "shell")
+                },
+                shell: None,
+                edit: None,
+                question: None,
+                fetch: None,
+            },
+        );
     }
 
     fn many_agents(&mut self) {

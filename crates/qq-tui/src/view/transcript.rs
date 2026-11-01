@@ -1295,7 +1295,7 @@ pub(super) fn banner(app: &App, width: usize) -> Vec<Line> {
     }
     let mut hints = Line::styled("  ", normal());
     let switch = app
-        .chord_label(crate::commands::Command::OpenSessions)
+        .chord_label(crate::commands::Command::ToggleSessions)
         .map_or_else(|| "/sessions".to_owned(), |chord| compact_chord(&chord));
     for (index, (key, label)) in [
         ("/models".to_owned(), "choose a model"),
@@ -1390,7 +1390,7 @@ pub(super) fn agent_lanes(app: &App, children: &[SessionId], width: usize) -> Ve
     if folded {
         let mut line = Line::styled("└ ", faint());
         line.push(format!("+{} more", children.len() - FOLDED_LANES), muted());
-        if let Some(chord) = app.chord_label(crate::commands::Command::OpenSessions) {
+        if let Some(chord) = app.chord_label(crate::commands::Command::ToggleSessions) {
             line.push(format!("   {}", compact_chord(&chord)), faint());
         }
         rows.push(truncate_line(line, width));

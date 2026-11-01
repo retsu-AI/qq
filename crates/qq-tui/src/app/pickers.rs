@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use qq_protocol::{
     AgentProfileId, ApprovalMode, GuidanceKind, ModelDescriptor, ModelSelection, ReasoningEffort,
@@ -16,6 +18,7 @@ use crate::{
     picker::Picker,
     theme::Theme,
 };
+use qq_client::state::SessionView;
 
 impl App {
     pub(super) fn open_goal_form(&mut self, objective: Option<String>) -> Effects {
@@ -491,6 +494,12 @@ impl App {
                 let selected = picker.current().map(|row| row.id);
                 self.request_delete_confirmation(selected)
             }
+            (PickerOutcome::Chord(KeyCode::Tab), Overlay::Sessions { .. }) => {
+                self.toggle_session_agents()
+            }
+            (PickerOutcome::Chord(KeyCode::Char('a' | 'A')), Overlay::Sessions { .. }) => {
+                self.toggle_all_session_agents()
+            }
             (PickerOutcome::Chord(_), _) => Effects::none(),
         }
     }
@@ -897,9 +906,15 @@ impl App {
 
     fn open_session_picker(&mut self, scope: Option<SessionId>) -> Effects {
         self.cancel_prefetch();
-        let mut picker = Picker::with_items(self.session_rows(scope));
-        if let Some(focused) = self.focused()
-            && let Some(index) = picker.items().iter().position(|row| row.id == focused)
+        let all_agents = scope.is_some();
+        let expanded = BTreeSet::new();
+        let mut picker = Picker::with_items(self.session_rows(scope, &expanded, all_agents));
+        let start = self
+            .previous_focus
+            .filter(|id| scope.is_none() && self.sessions.is_session(*id))
+            .or_else(|| self.focused());
+        if let Some(start) = start
+            && let Some(index) = picker.items().iter().position(|row| row.id == start)
         {
             picker.select_item(index);
         }
@@ -907,6 +922,8 @@ impl App {
             picker,
             scope,
             confirm: None,
+            expanded,
+            all_agents,
         });
         let mut effects = Effects::redraw(Redraw::Immediate);
         if let Some(selected) = self.session_picker_selected() {
@@ -915,44 +932,117 @@ impl App {
         effects
     }
 
-    fn session_rows(&self, scope: Option<SessionId>) -> Vec<SessionRow> {
-        self.sessions
-            .thread_order()
-            .iter()
-            .copied()
-            .filter(|session_id| {
-                scope.is_none_or(|root| self.is_descendant_or_self(*session_id, root))
-            })
-            .map(|id| SessionRow {
-                id,
-                title: self.sessions[&id].summary.title.clone(),
-            })
-            .collect()
+    fn session_rows(
+        &self,
+        scope: Option<SessionId>,
+        expanded: &BTreeSet<SessionId>,
+        all_agents: bool,
+    ) -> Vec<SessionRow> {
+        let order: Vec<(SessionId, usize, usize)> = match scope {
+            Some(root) => self
+                .sessions
+                .session_of(root)
+                .filter(|session| self.sessions.is_session(*session))
+                .map(|session| {
+                    let agents = self.sessions.agents_of(session);
+                    let working = agents
+                        .iter()
+                        .filter(|agent| {
+                            matches!(
+                                self.sessions[agent].summary.status,
+                                SessionStatus::Running | SessionStatus::Queued
+                            )
+                        })
+                        .count();
+                    (session, agents.len(), working)
+                })
+                .into_iter()
+                .collect(),
+            None => self
+                .sessions
+                .rail_order()
+                .into_iter()
+                .map(|row| (row.id, row.agents, row.working))
+                .collect(),
+        };
+        let mut rows = Vec::with_capacity(order.len());
+        for (session, agents, working) in order {
+            let row = |id: SessionId, listed: bool| {
+                let view = &self.sessions[&id];
+                SessionRow {
+                    id,
+                    session,
+                    title: view.summary.title.clone(),
+                    agents: if id == session { agents } else { 0 },
+                    working: if id == session { working } else { 0 },
+                    updated_at_ms: view.summary.updated_at_ms,
+                    answer: latest_answer(view),
+                    listed,
+                }
+            };
+            rows.push(row(session, true));
+            if agents > 0 {
+                let unfolded = all_agents || expanded.contains(&session);
+                rows.extend(
+                    self.sessions
+                        .agents_of(session)
+                        .into_iter()
+                        .map(|agent| row(agent, unfolded)),
+                );
+            }
+        }
+        rows
     }
 
     pub(super) fn refresh_session_picker(&mut self) {
-        let scope = match &self.overlay {
-            Some(Overlay::Sessions { scope, .. }) => *scope,
-            _ => return,
+        let Some(Overlay::Sessions {
+            scope,
+            expanded,
+            all_agents,
+            picker,
+            ..
+        }) = &self.overlay
+        else {
+            return;
         };
-        let rows = self.session_rows(scope);
+        let (scope, expanded, all_agents) = (*scope, expanded.clone(), *all_agents);
+        let before = picker.current().map(|row| (row.id, row.session));
+        let rows = self.session_rows(scope, &expanded, all_agents);
         if let Some(Overlay::Sessions { picker, .. }) = &mut self.overlay {
             picker.replace_items(rows, |row| row.id);
+            if let Some((id, session)) = before
+                && picker.current().map(|row| row.id) != Some(id)
+                && let Some(index) = picker.items().iter().position(|row| row.id == session)
+            {
+                picker.select_item(index);
+            }
         }
     }
 
-    fn is_descendant_or_self(&self, session_id: SessionId, root: SessionId) -> bool {
-        let mut cursor = Some(session_id);
-        while let Some(current) = cursor {
-            if current == root {
-                return true;
-            }
-            cursor = self
-                .sessions
-                .get(&current)
-                .and_then(|session| session.summary.parent_id);
+    fn toggle_session_agents(&mut self) -> Effects {
+        let Some(Overlay::Sessions {
+            picker, expanded, ..
+        }) = &mut self.overlay
+        else {
+            return Effects::none();
+        };
+        let Some(session) = picker.current().map(|row| row.session) else {
+            return Effects::none();
+        };
+        if !expanded.remove(&session) {
+            expanded.insert(session);
         }
-        false
+        self.refresh_session_picker();
+        Effects::redraw(Redraw::Immediate)
+    }
+
+    fn toggle_all_session_agents(&mut self) -> Effects {
+        let Some(Overlay::Sessions { all_agents, .. }) = &mut self.overlay else {
+            return Effects::none();
+        };
+        *all_agents = !*all_agents;
+        self.refresh_session_picker();
+        Effects::redraw(Redraw::Immediate)
     }
 
     pub(crate) fn session_picker_selected(&self) -> Option<SessionId> {
@@ -1138,7 +1228,7 @@ impl App {
         selected: Option<SessionId>,
         confirm: Option<SessionConfirm>,
     ) {
-        let rows = self.session_rows(None);
+        let rows = self.session_rows(None, &BTreeSet::new(), false);
         self.overlay = Some(Overlay::sessions(rows, query, selected, confirm));
     }
 
@@ -1163,4 +1253,24 @@ fn profile_rows(capabilities: &ServerCapabilities) -> Vec<ProfileRow> {
                 .map(|pack| format!("{}@{}", pack.id, pack.version)),
         })
         .collect()
+}
+
+fn latest_answer(view: &SessionView) -> String {
+    let Some(messages) = view.messages.as_ref() else {
+        return String::new();
+    };
+    let Some(text) = messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == qq_protocol::MessageRole::Assistant)
+        .map(super::message_source)
+        .find(|text| !text.trim().is_empty())
+    else {
+        return String::new();
+    };
+    let mut end = text.len().min(crate::input::SESSION_ANSWER_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
 }

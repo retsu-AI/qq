@@ -17,15 +17,17 @@ pub enum TuiAction {
     CreateChildSession,
     CancelRun,
     InterruptRun,
+    PreviousSession,
 }
 
 impl TuiAction {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::ToggleNavigator,
         Self::CreateRootSession,
         Self::CreateChildSession,
         Self::CancelRun,
         Self::InterruptRun,
+        Self::PreviousSession,
     ];
 }
 
@@ -151,10 +153,11 @@ struct BindingsDocument {
     create_child_session: Option<Vec<String>>,
     cancel_run: Option<Vec<String>>,
     interrupt_run: Option<Vec<String>>,
+    previous_session: Option<Vec<String>>,
 }
 
 impl BindingsDocument {
-    fn entries(&self) -> [(TuiAction, Option<&[String]>); 5] {
+    fn entries(&self) -> [(TuiAction, Option<&[String]>); 6] {
         [
             (TuiAction::ToggleNavigator, self.toggle_navigator.as_deref()),
             (
@@ -167,6 +170,7 @@ impl BindingsDocument {
             ),
             (TuiAction::CancelRun, self.cancel_run.as_deref()),
             (TuiAction::InterruptRun, self.interrupt_run.as_deref()),
+            (TuiAction::PreviousSession, self.previous_session.as_deref()),
         ]
     }
 }
