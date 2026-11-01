@@ -893,14 +893,16 @@ impl Provider for DeadlineProvider {
 async fn duration_expires_during_shell_execution_and_drains_before_session_reuse() {
     let directory = tempfile::tempdir().unwrap();
     let printed = directory.path().join("printed");
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&printed)
-            .status()
-            .unwrap()
-            .success()
-    );
-    let shell_printed = tokio::task::spawn_blocking(move || std::fs::read(printed));
+    let shell_printed = tokio::task::spawn_blocking(move || {
+        let waited = std::time::Instant::now();
+        while !printed.exists() {
+            if waited.elapsed() > Duration::from_secs(10) {
+                return false;
+            }
+            std::thread::yield_now();
+        }
+        true
+    });
     let spawned =
         crate::tools::observe_shell_spawn(&std::fs::canonicalize(directory.path()).unwrap(), false);
     let requests = Arc::new(AtomicUsize::new(0));
@@ -947,7 +949,7 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
         .await
         .expect("the process must reach actual spawn")
         .unwrap();
-    shell_printed.await.unwrap().unwrap();
+    assert!(shell_printed.await.unwrap(), "shell never printed");
     tokio::time::advance(Duration::from_millis(300)).await;
     tokio::time::resume();
     let mut tool_started = false;
