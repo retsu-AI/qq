@@ -133,11 +133,8 @@ async fn snapshot_without_focus_selects_and_prewarms_recent_sessions() {
 #[tokio::test]
 async fn only_the_first_prompt_names_a_session() {
     let (directory, runtime) = test_runtime().await;
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
 
     for prompt in ["New session", "Do not replace the first title"] {
         try_submit(&runtime, session_id, prompt).await.unwrap();
@@ -194,11 +191,8 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let after_creation = created.committed_through;
     let mut events = runtime
         .subscribe(SubscribeRequest {

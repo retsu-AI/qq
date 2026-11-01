@@ -285,11 +285,8 @@ async fn cancelled_pending_main_request_preserves_unknown_session_and_goal_spend
         .await
         .unwrap();
         let held = runtime.hold_scheduling().await;
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace_id, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
+        let (workspace_id, session_id, created) =
+            new_session(&runtime, directory.path(), ApprovalMode::default()).await;
         let mut events = runtime
             .subscribe(SubscribeRequest {
                 workspace_id,
@@ -587,11 +584,8 @@ async fn goal_failure_after_start_before_provider_poll_preserves_known_zero() {
         .await
         .unwrap();
         let held = runtime.hold_scheduling().await;
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace_id, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
+        let (workspace_id, session_id, created) =
+            new_session(&runtime, directory.path(), ApprovalMode::default()).await;
         let mut events = runtime
             .subscribe(SubscribeRequest {
                 workspace_id,
@@ -790,12 +784,8 @@ async fn provider_replay_and_empty_reasoning_are_goal_work_before_api_fault() {
         )
         .await
         .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created =
-            create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::ReadOnly).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
+        let (workspace_id, session_id, _) =
+            new_session(&runtime, directory.path(), ApprovalMode::ReadOnly).await;
         let receipt = set_goal(
             &runtime,
             serde_json::json!({"session_id":session_id,"objective":"retain provider work evidence",
@@ -1335,11 +1325,8 @@ async fn twenty_minute_permit_wait_reclamps_unbounded_prompts_and_goal_runs() {
             .await
             .unwrap();
             let held = runtime.hold_scheduling().await;
-            let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-            let created = create_session(&runtime, workspace_id, None).await;
-            let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-                panic!("session")
-            };
+            let (workspace_id, session_id, created) =
+                new_session(&runtime, directory.path(), ApprovalMode::default()).await;
             let mut events = runtime
                 .subscribe(SubscribeRequest {
                     workspace_id,

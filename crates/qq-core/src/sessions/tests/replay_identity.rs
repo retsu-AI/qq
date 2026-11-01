@@ -105,11 +105,8 @@ async fn check_repeated_call_replay(missing_first_result: bool) {
     let runtime = SessionRuntime::open(options(), loader.clone())
         .await
         .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
@@ -306,11 +303,8 @@ async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen()
     let runtime = SessionRuntime::open(options(), loader.clone())
         .await
         .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
@@ -610,11 +604,8 @@ async fn anthropic_signed_tool_turn_survives_runtime_restart() {
     let runtime = SessionRuntime::open(options(), loader.clone())
         .await
         .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!()
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::Full).await;
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,

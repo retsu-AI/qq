@@ -145,12 +145,8 @@ async fn goal_final_run_reserves_a_durable_tool_free_handoff_after_early_complet
             SessionRuntime::open(SessionRuntimeOptions::new(database.clone()), loader.clone())
                 .await
                 .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created =
-            create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::ReadOnly).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
+        let (workspace_id, session_id, created) =
+            new_session(&runtime, directory.path(), ApprovalMode::ReadOnly).await;
         let mut events = runtime
             .subscribe(SubscribeRequest {
                 workspace_id,

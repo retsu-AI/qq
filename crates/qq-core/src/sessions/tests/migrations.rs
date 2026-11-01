@@ -3,11 +3,8 @@ use super::*;
 #[tokio::test]
 async fn prune_deletes_only_idle_sessions_without_messages() {
     let (directory, runtime) = test_runtime().await;
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let kept = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id: kept } = kept.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, kept, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let mut empties = Vec::new();
     for _ in 0..2 {
         let CommandOutcome::SessionCreated { session_id } =

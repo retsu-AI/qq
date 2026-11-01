@@ -1826,11 +1826,8 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
         )
         .await
         .unwrap();
-        let (workspace, _) = resolve_workspace(&runtime, &root).await;
-        let created = create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
+        let (workspace, session_id, created) =
+            new_session(&runtime, &root, ApprovalMode::Ask).await;
         let mut events = runtime
             .subscribe(SubscribeRequest {
                 workspace_id: workspace,

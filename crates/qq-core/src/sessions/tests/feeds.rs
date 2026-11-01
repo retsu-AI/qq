@@ -1286,11 +1286,7 @@ async fn approval_recovery_is_scoped_to_the_root_family() {
     )
     .await
     .unwrap();
-    let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-    let root = create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask).await;
-    let CommandOutcome::SessionCreated { session_id: root } = root.outcome else {
-        panic!("wrong root")
-    };
+    let (workspace, root, _) = new_session(&runtime, directory.path(), ApprovalMode::Ask).await;
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id: workspace,

@@ -83,6 +83,19 @@ impl SessionFixture {
     }
 }
 
+pub(super) async fn new_session(
+    runtime: &SessionRuntime,
+    path: &std::path::Path,
+    mode: ApprovalMode,
+) -> (WorkspaceId, SessionId, CommandReceipt) {
+    let (workspace_id, _) = resolve_workspace(runtime, path).await;
+    let created = create_session_with_mode(runtime, workspace_id, None, mode).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("unexpected receipt")
+    };
+    (workspace_id, session_id, created)
+}
+
 pub(super) struct Prompt {
     input: Vec<InputPart>,
     limits: RunLimits,

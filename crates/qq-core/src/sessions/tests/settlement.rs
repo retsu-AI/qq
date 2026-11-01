@@ -973,11 +973,8 @@ async fn shutdown_cancels_running_and_queued_prompts_before_returning() {
 #[tokio::test]
 async fn subscribers_converge_and_replay_from_an_intermediate_cursor() {
     let (directory, runtime) = test_runtime().await;
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let request = SubscribeRequest {
         workspace_id,
         after: created.committed_through,
@@ -1017,11 +1014,8 @@ async fn subscribers_converge_and_replay_from_an_intermediate_cursor() {
 #[tokio::test]
 async fn scheduler_store_failure_disables_runtime_and_existing_subscribers() {
     let (directory, runtime) = test_runtime().await;
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
@@ -1091,11 +1085,8 @@ async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime(
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let queued = store_command(&runtime.inner.store, session_id, "retry the read")
         .await
         .unwrap();
@@ -1554,11 +1545,8 @@ async fn poisoned_cancellation_registry_settles_before_start_and_returns_the_per
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let queued = store_command(&runtime.inner.store, session_id, "poisoned registry")
         .await
         .unwrap();
@@ -1644,11 +1632,8 @@ async fn permanent_prestart_settlement_failure_is_recovered_on_reopen() {
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let queued = store_command(&runtime.inner.store, session_id, "recover me")
         .await
         .unwrap();
@@ -1774,11 +1759,8 @@ async fn queues_follow_ups_without_reordering_conversation_context() {
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
@@ -1835,11 +1817,8 @@ async fn follow_up_after_an_empty_completed_turn_reaches_the_provider() {
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
@@ -2540,11 +2519,8 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let queued = try_submit(&runtime, session_id, "block during load")
         .await
         .unwrap();
@@ -2716,11 +2692,7 @@ async fn rejects_cross_workspace_focus_and_oversized_pages() {
     let (directory, runtime) = test_runtime().await;
     let second = tempfile::tempdir().unwrap();
     let (first_workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-    let (second_workspace, _) = resolve_workspace(&runtime, second.path()).await;
-    let created = create_session(&runtime, second_workspace, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (_, session_id, _) = new_session(&runtime, second.path(), ApprovalMode::default()).await;
 
     assert_eq!(
         runtime

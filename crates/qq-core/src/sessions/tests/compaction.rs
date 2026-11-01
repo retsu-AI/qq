@@ -353,11 +353,8 @@ async fn a_summarizer_that_calls_tools_on_two_turns_fails_closed() {
 #[tokio::test]
 async fn compaction_runs_account_usage_and_cost_but_join_no_transcript() {
     let (directory, runtime) = test_runtime().await;
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,

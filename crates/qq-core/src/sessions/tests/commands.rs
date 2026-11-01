@@ -3,11 +3,8 @@ use super::*;
 #[tokio::test]
 async fn unresolvable_slash_prompts_are_refused_at_admission_without_a_run_row() {
     let (_directory, runtime) = test_runtime().await;
-    let (workspace_id, _) = resolve_workspace(&runtime, _directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, _directory.path(), ApprovalMode::default()).await;
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
@@ -845,11 +842,8 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
         SessionRuntime::open(SessionRuntimeOptions::new(database.clone()), loader.clone())
             .await
             .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let mut events = runtime
         .subscribe(SubscribeRequest {
             workspace_id,
@@ -1258,11 +1252,8 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
 #[tokio::test]
 async fn child_limits_are_validated_against_the_runtime_ceilings() {
     let (_directory, runtime) = test_runtime().await;
-    let (workspace_id, _) = resolve_workspace(&runtime, _directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (_, session_id, _) =
+        new_session(&runtime, _directory.path(), ApprovalMode::default()).await;
     for limits in [
         RunLimits {
             max_children: Some(MAX_SPAWNED_CHILDREN_PER_RUN + 1),
@@ -1840,11 +1831,8 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, created) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let queued = store_command(&runtime.inner.store, session_id, "known overflow")
         .await
         .unwrap();

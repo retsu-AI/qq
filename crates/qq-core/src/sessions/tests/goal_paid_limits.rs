@@ -41,11 +41,8 @@ async fn goal_paid_dense_first_input_is_refused_before_provider_dispatch() {
         .await
         .unwrap();
         let held = runtime.hold_scheduling().await;
-        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
+        let (workspace, session_id, created) =
+            new_session(&runtime, directory.path(), ApprovalMode::default()).await;
         let mut events = runtime
             .subscribe(SubscribeRequest {
                 workspace_id: workspace,
@@ -490,11 +487,8 @@ async fn goal_paid_summary_overflow_releases_admission_before_fold_retry() {
         .await
         .unwrap();
         let held = runtime.hold_scheduling().await;
-        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
+        let (_, session_id, _) =
+            new_session(&runtime, directory.path(), ApprovalMode::default()).await;
         set_goal(
             &runtime,
             serde_json::json!({"session_id":session_id, "objective":"recover a split summary",

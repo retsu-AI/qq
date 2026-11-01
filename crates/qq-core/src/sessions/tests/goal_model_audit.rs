@@ -160,11 +160,8 @@ async fn exercise(scenario: &'static str) {
         SessionRuntime::open(SessionRuntimeOptions::new(database.clone()), loader.clone())
             .await
             .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("missing session")
-    };
+    let (workspace_id, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let receipt=set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"verify the persisted work independently",
         "budget":{"max_goal_runs":100,"deadline_ms":now_ms()+3_600_000}
     })).await.unwrap();

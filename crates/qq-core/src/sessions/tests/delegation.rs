@@ -1819,11 +1819,8 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
     )
     .await
     .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id, _) =
+        new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let parent_run = RunId::generate().unwrap();
     let parent = ClaimedRun {
         goal_spend_owner: None,
