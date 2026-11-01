@@ -11,14 +11,7 @@ impl RuntimeLoader for ReplayLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
         let script = Arc::clone(&self.script);
-        Box::pin(async move {
-            Runtime::new(ReplayProvider { requests, script }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(ReplayProvider { requests, script }, &request)
     }
 }
 
@@ -259,12 +252,8 @@ impl RuntimeLoader for FanOutReadsLoader {
         let requests = Arc::clone(&self.requests);
         let count = self.count;
         Box::pin(async move {
-            Runtime::new(FanOutReadsProvider { requests, count }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+            Ok(ProviderLoader::new(FanOutReadsProvider { requests, count })
+                .loaded(&request.workspace))
         })
     }
 }
@@ -513,10 +502,7 @@ impl RuntimeLoader for AnthropicReplayLoader {
         Box::pin(async move {
             Runtime::new(provider, "claude-opus-5-5", 256)
                 .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }

@@ -2990,10 +2990,7 @@ async fn repeated_compactions_keep_every_user_message_verbatim_without_the_model
             Box::pin(async move {
                 Runtime::new(ForgetfulProvider { requests }, "test-model", 4_096)
                     .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                    .map_err(load_error)
             })
         }
     }

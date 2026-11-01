@@ -172,10 +172,7 @@ async fn compatible_occupancy_seeds_the_first_turn_after_restart_and_pricing_ref
                 Runtime::new(OccupancyProvider(calls), "test-model", 1)
                     .map(|runtime| runtime.with_context_window(Some(200_000)))
                     .map(|runtime| loaded_runtime(runtime, &request.workspace, pricing))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                    .map_err(load_error)
             })
         }
     }

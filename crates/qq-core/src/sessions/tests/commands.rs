@@ -1556,10 +1556,7 @@ async fn prompt_identity_persistence_failure_starts_no_provider_work() {
             let provider_calls = Arc::clone(&self.provider_calls);
             Box::pin(async move {
                 let runtime = Runtime::new(CountingProvider { provider_calls }, "test-model", 256)
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })?;
+                    .map_err(load_error)?;
                 Ok(loaded_runtime(runtime, &request.workspace, None))
             })
         }
@@ -1635,12 +1632,8 @@ async fn resolved_model_persistence_failure_starts_no_provider_work() {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
             let provider_calls = Arc::clone(&self.provider_calls);
             Box::pin(async move {
-                Runtime::new(CountingProvider { provider_calls }, "test-model", 256)
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                Ok(ProviderLoader::new(CountingProvider { provider_calls })
+                    .loaded(&request.workspace))
             })
         }
     }
@@ -1738,10 +1731,7 @@ async fn known_first_turn_context_overflow_starts_no_provider_work() {
                 Runtime::new(PricedTinyContextProvider(provider_calls), "test-model", 1)
                     .map(|runtime| runtime.with_context_window(Some(1)))
                     .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                    .map_err(load_error)
             })
         }
     }
@@ -1813,10 +1803,7 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
                             }),
                         )
                     })
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                    .map_err(load_error)
             })
         }
     }
@@ -1904,10 +1891,7 @@ async fn known_later_turn_context_overflow_starts_no_second_provider_request() {
                 Runtime::new(LaterTurnProvider { provider_calls }, "test-model", 1)
                     .map(|runtime| runtime.with_context_window(Some(100_000)))
                     .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                    .map_err(load_error)
             })
         }
     }

@@ -1712,12 +1712,7 @@ async fn shutdown_waits_for_started_child_loader_work_without_creating_a_child()
                 })
                 .await
                 .unwrap();
-                Runtime::new(StaticTextProvider, "test-model", 256)
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                Ok(ProviderLoader::new(StaticTextProvider).loaded(&request.workspace))
             })
         }
     }
@@ -1797,12 +1792,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
             let release = Arc::clone(&self.release);
             Box::pin(async move {
                 release.notified().await;
-                Runtime::new(StaticTextProvider, "test-model", 256)
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                Ok(ProviderLoader::new(StaticTextProvider).loaded(&request.workspace))
             })
         }
     }

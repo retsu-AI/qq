@@ -182,10 +182,7 @@ impl RuntimeLoader for ManagedShellDenyLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }

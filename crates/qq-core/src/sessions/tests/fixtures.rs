@@ -214,6 +214,24 @@ pub(super) async fn set_goal(
         .await
 }
 
+pub(super) fn load_error(error: crate::RuntimeConfigError) -> RuntimeLoadError {
+    RuntimeLoadError {
+        kind: RunFailureKind::Configuration,
+        message: error.to_string(),
+    }
+}
+
+pub(super) fn test_pricing() -> ModelPricing {
+    ModelPricing {
+        input_usd_nanos_per_token: 1_000,
+        output_usd_nanos_per_token: 2_000,
+        cache_read_usd_nanos_per_token: Some(100),
+        cache_write_usd_nanos_per_token: Some(300),
+        context_tier: None,
+        provenance: "test".to_owned(),
+    }
+}
+
 pub(super) struct ProviderLoader {
     provider: Arc<dyn Provider>,
     route: String,

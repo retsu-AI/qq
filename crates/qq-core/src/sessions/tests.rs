@@ -237,27 +237,10 @@ struct ScriptedLoader;
 
 impl RuntimeLoader for ScriptedLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-        Box::pin(async move {
-            Runtime::new(ScriptedProvider, "test-model", 256)
-                .map(|runtime| {
-                    loaded_runtime(
-                        runtime,
-                        &request.workspace,
-                        Some(ModelPricing {
-                            input_usd_nanos_per_token: 1_000,
-                            output_usd_nanos_per_token: 2_000,
-                            cache_read_usd_nanos_per_token: Some(100),
-                            cache_write_usd_nanos_per_token: Some(300),
-                            context_tier: None,
-                            provenance: "test".to_owned(),
-                        }),
-                    )
-                })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        let loaded = ProviderLoader::new(ScriptedProvider)
+            .pricing(test_pricing())
+            .loaded(&request.workspace);
+        Box::pin(async move { Ok(loaded) })
     }
 }
 
@@ -332,10 +315,7 @@ impl RuntimeLoader for MutableResolvedLoader {
                 )
                 .expect("test plan compiles")
             })
-            .map_err(|error| RuntimeLoadError {
-                kind: RunFailureKind::Configuration,
-                message: error.to_string(),
-            })
+            .map_err(load_error)
         })
     }
 }
@@ -378,12 +358,10 @@ impl RuntimeLoader for CountingTextLoader {
                 }
             }
 
-            Runtime::new(CountingTextProvider(provider_calls), "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+            Ok(
+                ProviderLoader::new(CountingTextProvider(provider_calls))
+                    .loaded(&request.workspace),
+            )
         })
     }
 }
@@ -392,27 +370,10 @@ struct PricedHangingLoader;
 
 impl RuntimeLoader for PricedHangingLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-        Box::pin(async move {
-            Runtime::new(HangingProvider, "test-model", 256)
-                .map(|runtime| {
-                    loaded_runtime(
-                        runtime,
-                        &request.workspace,
-                        Some(ModelPricing {
-                            input_usd_nanos_per_token: 1_000,
-                            output_usd_nanos_per_token: 2_000,
-                            cache_read_usd_nanos_per_token: Some(100),
-                            cache_write_usd_nanos_per_token: Some(300),
-                            context_tier: None,
-                            provenance: "test".to_owned(),
-                        }),
-                    )
-                })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        let loaded = ProviderLoader::new(HangingProvider)
+            .pricing(test_pricing())
+            .loaded(&request.workspace);
+        Box::pin(async move { Ok(loaded) })
     }
 }
 
@@ -423,14 +384,7 @@ struct UsageSequenceLoader {
 impl RuntimeLoader for UsageSequenceLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let usage = self.usages.lock().unwrap().remove(0);
-        Box::pin(async move {
-            Runtime::new(UsageSequenceProvider { usage }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(UsageSequenceProvider { usage }, &request)
     }
 }
 
@@ -456,14 +410,7 @@ struct ReasoningLoader {
 impl RuntimeLoader for ReasoningLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
-        Box::pin(async move {
-            Runtime::new(ReasoningProvider { requests }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(ReasoningProvider { requests }, &request)
     }
 }
 
@@ -517,12 +464,8 @@ impl RuntimeLoader for HangingReasoningLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let buffered = Arc::clone(&self.buffered);
         Box::pin(async move {
-            Runtime::new(HangingReasoningProvider { buffered }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+            Ok(ProviderLoader::new(HangingReasoningProvider { buffered })
+                .loaded(&request.workspace))
         })
     }
 }
@@ -556,14 +499,9 @@ struct ChunkingLoader;
 
 impl RuntimeLoader for ChunkingLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-        Box::pin(async move {
-            Runtime::new(ChunkingProvider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        Box::pin(
+            async move { Ok(ProviderLoader::new(ChunkingProvider).loaded(&request.workspace)) },
+        )
     }
 }
 
@@ -590,14 +528,7 @@ struct EmptyThenTextLoader {
 impl RuntimeLoader for EmptyThenTextLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
-        Box::pin(async move {
-            Runtime::new(EmptyThenTextProvider { requests }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(EmptyThenTextProvider { requests }, &request)
     }
 }
 
@@ -633,14 +564,7 @@ struct CapturingLoader {
 impl RuntimeLoader for CapturingLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
-        Box::pin(async move {
-            Runtime::new(DelayedProvider { requests }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(DelayedProvider { requests }, &request)
     }
 }
 
@@ -655,14 +579,7 @@ struct ToolLoopLoader {
 impl RuntimeLoader for ToolLoopLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
-        Box::pin(async move {
-            Runtime::new(ToolLoopProvider { requests }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(ToolLoopProvider { requests }, &request)
     }
 }
 
@@ -813,10 +730,7 @@ impl RuntimeLoader for TruncatedReportLoader {
                     None,
                 )
             })
-            .map_err(|error| RuntimeLoadError {
-                kind: RunFailureKind::Configuration,
-                message: error.to_string(),
-            })
+            .map_err(load_error)
         })
     }
 }
@@ -858,10 +772,7 @@ impl RuntimeLoader for GatedSliceLoader {
                     None,
                 )
             })
-            .map_err(|error| RuntimeLoadError {
-                kind: RunFailureKind::Configuration,
-                message: error.to_string(),
-            })
+            .map_err(load_error)
         })
     }
 }
@@ -920,20 +831,10 @@ impl RuntimeLoader for RenewableSliceLoader {
                 loaded_runtime(
                     runtime.with_tool_calls_per_slice(slice_calls),
                     &request.workspace,
-                    metered_empty_checkpoint.then_some(ModelPricing {
-                        input_usd_nanos_per_token: 1_000,
-                        output_usd_nanos_per_token: 2_000,
-                        cache_read_usd_nanos_per_token: Some(100),
-                        cache_write_usd_nanos_per_token: Some(300),
-                        context_tier: None,
-                        provenance: "test".to_owned(),
-                    }),
+                    metered_empty_checkpoint.then_some(test_pricing()),
                 )
             })
-            .map_err(|error| RuntimeLoadError {
-                kind: RunFailureKind::Configuration,
-                message: error.to_string(),
-            })
+            .map_err(load_error)
         })
     }
 }
@@ -1052,14 +953,7 @@ struct TurnTextLoader {
 impl RuntimeLoader for TurnTextLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
-        Box::pin(async move {
-            Runtime::new(TurnTextProvider { requests }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(TurnTextProvider { requests }, &request)
     }
 }
 
@@ -1147,14 +1041,7 @@ impl RuntimeLoader for ApprovalLoader {
             tool_turns: self.tool_turns,
             usage: None,
         };
-        Box::pin(async move {
-            Runtime::new(provider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(provider, &request)
     }
 }
 
@@ -1217,14 +1104,7 @@ impl RuntimeLoader for ScriptedRunsLoader {
             script,
             turn: StdMutex::new(0),
         };
-        Box::pin(async move {
-            Runtime::new(provider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(provider, &request)
     }
 }
 
@@ -1438,10 +1318,7 @@ impl RuntimeLoader for RecordingApprovalLoader {
         Box::pin(async move {
             Runtime::new(provider, "test-model", 256)
                 .map(|runtime| loaded_runtime_for_route(runtime, &request.workspace, route, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -2807,10 +2684,7 @@ impl RuntimeLoader for AutoCompactLoader {
                     }
                     loaded_runtime_with_model(runtime, &request.workspace, resolved)
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -3745,10 +3619,7 @@ impl RuntimeLoader for TruncatingLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -3798,14 +3669,7 @@ struct ContextBudgetLoader;
 
 impl RuntimeLoader for ContextBudgetLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-        Box::pin(async move {
-            Runtime::new(ContextBudgetProvider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(ContextBudgetProvider, &request)
     }
 }
 
@@ -3881,10 +3745,7 @@ impl RuntimeLoader for QueueLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -3928,10 +3789,7 @@ impl RuntimeLoader for ResolvingLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -3957,10 +3815,7 @@ impl RuntimeLoader for RejectingWorkerLoader {
         Box::pin(async move {
             Runtime::with_provider(provider, "test-model", 256)
                 .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -4018,10 +3873,7 @@ impl RuntimeLoader for ValidatingLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -4166,10 +4018,7 @@ impl RuntimeLoader for AccountingSpawnLoader {
                         }),
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -4442,14 +4291,7 @@ impl RuntimeLoader for TextScriptLoader {
             requests: Arc::clone(&self.requests),
             answers: Arc::clone(&self.answers),
         };
-        Box::pin(async move {
-            Runtime::new(provider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(provider, &request)
     }
 }
 
@@ -4572,10 +4414,7 @@ impl RuntimeLoader for WriteChildLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -4642,10 +4481,7 @@ impl RuntimeLoader for DepthLoader {
                         pricing,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -4881,10 +4717,7 @@ impl RuntimeLoader for AuditLoader {
                         None,
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -5019,10 +4852,7 @@ impl RuntimeLoader for BudgetLoopLoader {
         Box::pin(async move {
             Runtime::new(provider, "test-model", 256)
                 .map(|runtime| loaded_runtime(runtime, &request.workspace, pricing))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -5082,10 +4912,7 @@ impl RuntimeLoader for ChildBudgetLoader {
                         Some(pricing),
                     )
                 })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
+                .map_err(load_error)
         })
     }
 }
@@ -6872,14 +6699,7 @@ impl RuntimeLoader for SideScriptLoader {
                     }
                 }
             }
-            let pricing = priced.then(|| ModelPricing {
-                input_usd_nanos_per_token: 1_000,
-                output_usd_nanos_per_token: 2_000,
-                cache_read_usd_nanos_per_token: Some(100),
-                cache_write_usd_nanos_per_token: Some(300),
-                context_tier: None,
-                provenance: "test".to_owned(),
-            });
+            let pricing = priced.then(|| test_pricing());
             Ok(loaded_runtime(
                 Runtime::new(ScriptProvider(scripts), "test-model", 256).unwrap(),
                 &request.workspace,

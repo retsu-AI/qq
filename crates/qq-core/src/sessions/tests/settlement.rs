@@ -735,12 +735,7 @@ async fn a_panicking_run_task_fails_durably_and_the_session_keeps_scheduling() {
                     }
                 }
 
-                Runtime::new(PanicOnceProvider { calls }, "test-model", 256)
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                Ok(ProviderLoader::new(PanicOnceProvider { calls }).loaded(&request.workspace))
             })
         }
     }
@@ -821,12 +816,10 @@ async fn a_panicking_loader_settles_the_reservation_without_run_started() {
                     }
                 }
 
-                Runtime::new(CountingProvider(provider_calls), "test-model", 256)
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                Ok(
+                    ProviderLoader::new(CountingProvider(provider_calls))
+                        .loaded(&request.workspace),
+                )
             })
         }
     }
@@ -2355,12 +2348,10 @@ async fn slow_preparation_does_not_serialize_an_independent_permit() {
                     }
                 }
 
-                Runtime::new(CountingProvider(provider_calls), "test-model", 256)
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                Ok(
+                    ProviderLoader::new(CountingProvider(provider_calls))
+                        .loaded(&request.workspace),
+                )
             })
         }
     }
@@ -2491,12 +2482,10 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
                     }
                 }
 
-                Runtime::new(CountingProvider(provider_calls), "test-model", 256)
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
+                Ok(
+                    ProviderLoader::new(CountingProvider(provider_calls))
+                        .loaded(&request.workspace),
+                )
             })
         }
     }
@@ -2761,14 +2750,7 @@ async fn schedules_ready_sessions_fairly() {
                 entered: Arc::clone(&self.entered),
                 release: Arc::clone(&self.release),
             };
-            Box::pin(async move {
-                Runtime::new(provider, "test-model", 256)
-                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                    .map_err(|error| RuntimeLoadError {
-                        kind: RunFailureKind::Configuration,
-                        message: error.to_string(),
-                    })
-            })
+            load_provider(provider, &request)
         }
     }
     let directory = tempfile::tempdir().unwrap();

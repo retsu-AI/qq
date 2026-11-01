@@ -805,14 +805,7 @@ struct DeadlineLoader {
 impl RuntimeLoader for DeadlineLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
-        Box::pin(async move {
-            Runtime::new(DeadlineProvider { requests }, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
+        load_provider(DeadlineProvider { requests }, &request)
     }
 }
 
