@@ -46,7 +46,17 @@ impl RowShape {
         let end = if line.pad == 0 {
             usize::MAX
         } else {
-            line.width().saturating_sub(usize::from(line.pad))
+            let joins = line.spans.iter().any(|span| {
+                span.text.chars().any(|character| {
+                    continues_grapheme(character) || is_regional_indicator(character)
+                })
+            });
+            let width = if joins {
+                cells(line).last().map_or(0, |cell| cell.1)
+            } else {
+                line.width()
+            };
+            width.saturating_sub(usize::from(line.pad))
         };
         Self {
             start: usize::from(line.indent) + usize::from(line.chrome),
@@ -201,16 +211,18 @@ impl Selection {
             }
             Unit::Word => {
                 let (column, row) = self.anchor;
-                let Some(line) = frame.get(row) else {
-                    return Vec::new();
-                };
-                let row_shape = shape(row);
-                let cells: Vec<Cell> = cells(line)
-                    .into_iter()
-                    .filter(|(start, end, _, _)| {
-                        *start >= row_shape.start && *end <= row_shape.end.min(right)
+                let row_cells = |row: usize| -> Vec<Cell> {
+                    let row_shape = shape(row);
+                    frame.get(row).map_or_else(Vec::new, |line| {
+                        cells(line)
+                            .into_iter()
+                            .filter(|(start, end, _, _)| {
+                                *start >= row_shape.start && *end <= row_shape.end.min(right)
+                            })
+                            .collect()
                     })
-                    .collect();
+                };
+                let cells = row_cells(row);
                 let Some(hit) = cells
                     .iter()
                     .position(|(start, end, _, _)| *start <= column && column < *end)
@@ -221,15 +233,46 @@ impl Selection {
                 if blank(&cells[hit]) {
                     return Vec::new();
                 }
-                let first = cells[..hit]
-                    .iter()
-                    .rposition(blank)
-                    .map_or(0, |index| index + 1);
-                let last = cells[hit..]
-                    .iter()
-                    .position(blank)
-                    .map_or(cells.len(), |index| hit + index);
-                vec![(row, cells[first].0, cells[last - 1].1)]
+                let first = cells[..hit].iter().rposition(blank);
+                let last = cells[hit..].iter().position(blank);
+                let mut ranges = vec![(
+                    row,
+                    cells[first.map_or(0, |index| index + 1)].0,
+                    cells[last.map_or(cells.len(), |index| hit + index) - 1].1,
+                )];
+                let top_row = self.area.y;
+                let bottom_row = self.area.y + self.area.height;
+                let mut above = row;
+                let mut open = first.is_none();
+                while open && above > top_row && shape(above).join == Join::Glue {
+                    above -= 1;
+                    let cells = row_cells(above);
+                    let Some(end) = cells.last().map(|cell| cell.1) else {
+                        break;
+                    };
+                    let start = cells.iter().rposition(blank);
+                    open = start.is_none();
+                    let from = start.map_or(cells[0].0, |index| cells[index].1);
+                    if from < end {
+                        ranges.insert(0, (above, from, end));
+                    }
+                }
+                let mut below = row;
+                let mut open = last.is_none();
+                while open && below + 1 < bottom_row && shape(below + 1).join == Join::Glue {
+                    below += 1;
+                    let cells = row_cells(below);
+                    let Some(first_cell) = cells.first() else {
+                        break;
+                    };
+                    let stop = cells.iter().position(blank);
+                    open = stop.is_none();
+                    let to = stop.map_or(cells[cells.len() - 1].1, |index| cells[index].0);
+                    if first_cell.0 < to {
+                        ranges.push((below, first_cell.0, to));
+                    }
+                }
+                ranges
             }
             Unit::Block => {
                 let row = self.anchor.1;

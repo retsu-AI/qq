@@ -128,6 +128,31 @@ fn wide_and_joined_glyphs_copy_whole_from_any_cell() {
 }
 
 #[test]
+fn double_click_takes_a_long_token_across_its_glued_rows() {
+    let url = "https://example.com/a/very/long/path/that/wraps";
+    let frame = crate::view::wrap_for_test(Line::styled(format!("see {url} ok"), normal()), 16);
+    assert!(frame.len() >= 4, "{frame:?}");
+    let shapes = shapes(&frame);
+    let pane = area(16, frame.len());
+    let middle = Selection::start(pane, 2, 2, Unit::Word).unwrap();
+    assert_eq!(middle.text(&frame, &shapes).text, url);
+    let see = Selection::start(pane, 1, 0, Unit::Word).unwrap();
+    assert_eq!(see.text(&frame, &shapes).text, "see");
+}
+
+#[test]
+fn a_code_row_with_a_joined_emoji_copies_without_panel_fill() {
+    let frame =
+        crate::view::message_rows_for_test("```\n👩\u{200d}💻x\n```", MessageRole::Assistant, 30);
+    let row = frame
+        .iter()
+        .position(|line| line.spans.iter().any(|span| span.text.contains('x')))
+        .unwrap();
+    let block = Selection::start(area(30, frame.len()), 6, row, Unit::Block).unwrap();
+    assert_eq!(block.text(&frame, &shapes(&frame)).text, "👩\u{200d}💻x");
+}
+
+#[test]
 fn a_joined_emoji_takes_its_displayed_two_columns() {
     let frame = vec![Line::styled("👩\u{200d}💻 hello", normal())];
     let word = Selection::start(area(20, 1), 3, 0, Unit::Word).unwrap();
