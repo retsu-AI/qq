@@ -5064,23 +5064,33 @@ mod tests {
             };
         let runtime =
             Runtime::new(ReleaseOnSecondTurn { script, gate }, "test-model", 256).unwrap();
-        let events = tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            runtime
-                .run_loop_with_spawner(
-                    vec![Message::user("build")],
-                    directory.path().to_owned(),
-                    RunCancellation::new(),
-                    Arc::new(StaticPolicyGate {
-                        mode: ApprovalMode::Full,
-                        tools: Default::default(),
-                        network: Arc::default(),
-                    }),
-                    Arc::new(workspace::FileState::default()),
-                    RunCapabilities::user(None).with_tool_tasks(tool_tasks.clone()),
-                )
-                .collect::<Vec<_>>(),
-        )
+        let events = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let mut stream = runtime.run_loop_with_spawner(
+                vec![Message::user("build")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Full,
+                    tools: Default::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_tool_tasks(tool_tasks.clone()),
+            );
+            let mut events = Vec::new();
+            let mut printed = std::collections::HashSet::new();
+            while let Some(event) = stream.next().await {
+                if let RuntimeEvent::ToolCallOutputDelta { id, .. } = &event
+                    && printed.insert(*id)
+                {
+                    tokio::time::pause();
+                    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+                    tokio::time::resume();
+                }
+                events.push(event);
+            }
+            events
+        })
         .await
         .expect("a yielded command must not hold the run");
         tokio::time::timeout(
