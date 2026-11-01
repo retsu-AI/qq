@@ -1,8 +1,0 @@
-{
-  "command_id": "27272727272727272727272727272727",
-  "command": {
-    "type": "set_session_effort",
-    "session_id": "03030303030303030303030303030303",
-    "effort": "xhigh"
-  }
-}

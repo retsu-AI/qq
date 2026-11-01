@@ -1,1 +1,0 @@
-{"type":"outcome","status":"invalid_configuration","exit_code":2,"message":"--output-schema ./schema.json: $ref is not supported in an output schema"}
