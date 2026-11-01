@@ -946,6 +946,39 @@ async fn a_drag_over_chrome_only_copies_nothing_and_says_so() {
     assert_eq!(status, "nothing to copy");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn quitting_right_after_a_copy_still_finishes_the_helper_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clipboard");
+    let path: &'static str = Box::leak(target.to_string_lossy().into_owned().into_boxed_str());
+    let args: &'static [&'static str] = Box::leak(vec![path].into_boxed_slice());
+    let mut harness = Harness::new(64);
+    harness.clipboard = crate::clipboard::Clipboard {
+        helpers: vec![crate::clipboard::Helper {
+            program: "tee",
+            args,
+        }],
+        tmux: false,
+    };
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(snapshot(
+        1,
+        vec![MessageSnapshot {
+            state: MessageState::Complete,
+            ..assistant_message(1, "hello world")
+        }],
+    )));
+    let task = harness.spawn(app);
+    for character in "/copy".chars() {
+        harness.key(KeyCode::Char(character), KeyModifiers::NONE);
+    }
+    harness.key(KeyCode::Enter, KeyModifiers::NONE);
+    harness.quit();
+    task.await.expect("loop task").expect("loop exits cleanly");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello world");
+}
+
 #[tokio::test(start_paused = true)]
 async fn inside_tmux_osc52_uses_dcs_passthrough() {
     let (written, _) = copy_through_the_loop(crate::clipboard::Clipboard {

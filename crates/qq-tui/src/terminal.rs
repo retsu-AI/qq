@@ -240,7 +240,7 @@ where
     let mut state_may_change = false;
 
     let mut jobs = FuturesUnordered::<BackgroundFuture>::new();
-    let mut copying = false;
+    let mut copying: Option<crate::selection::Copied> = None;
     let mut next_copy: Option<crate::selection::Copied> = None;
     let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_BACKGROUND_CONCURRENCY));
     let mut pending_completion = PendingCompletion::default();
@@ -306,11 +306,11 @@ where
                         app.apply_prefetch(id, session_id)
                     }
                     BackgroundResult::Copied { lines, truncated, confirmed } => {
-                        copying = false;
+                        copying = None;
                         match next_copy.take() {
                             Some(copied) => {
-                                copying = true;
-                                jobs.push(copy_job(clipboard.helpers.clone(), copied));
+                                jobs.push(copy_job(clipboard.helpers.clone(), copied.clone()));
+                                copying = Some(copied);
                                 Effects::none()
                             }
                             None => app.apply_copy_result(lines, truncated, confirmed),
@@ -431,22 +431,25 @@ where
                         .await?;
                     output.flush().await?;
                     if clipboard.helpers.is_empty()
-                        || (!copying && jobs.len() >= MAX_BACKGROUND_JOBS)
+                        || (copying.is_none() && jobs.len() >= MAX_BACKGROUND_JOBS)
                     {
                         queue.extend(app.apply_copy_result(copied.lines, copied.truncated, false));
                         continue;
                     }
-                    if copying {
+                    if copying.is_some() {
                         next_copy = Some(copied);
                         continue;
                     }
-                    copying = true;
-                    jobs.push(copy_job(clipboard.helpers.clone(), copied));
+                    jobs.push(copy_job(clipboard.helpers.clone(), copied.clone()));
+                    copying = Some(copied);
                 }
                 Effect::Quit => quit = true,
             }
         }
         if quit {
+            if let Some(latest) = next_copy.or(copying) {
+                crate::clipboard::run_helpers(clipboard.helpers.clone(), latest.text).await;
+            }
             break;
         }
         if let Some(CompletionRequest { id, query, recent }) =
