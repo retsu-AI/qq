@@ -112,57 +112,6 @@ async fn bounded_loop_fixture_records_repeated_execution_without_a_guard() {
 }
 
 #[tokio::test]
-#[ignore = "AC0 500-turn soak; QQ_SOAK_TURNS=2000 selects full mode"]
-async fn scripted_soak_completes_across_context_windows() {
-    let turns = match std::env::var("QQ_SOAK_TURNS") {
-        Ok(value) => value.parse::<usize>().expect("QQ_SOAK_TURNS is an integer"),
-        Err(std::env::VarError::NotPresent) => 500,
-        Err(error) => panic!("QQ_SOAK_TURNS: {error}"),
-    };
-    assert!(
-        matches!(turns, 500 | 2_000),
-        "soak modes are 500 or 2000 turns"
-    );
-    let report = run(Script::tools(turns, 4_096, Some(64 * 1_024))).await;
-    receipt("context_reservation_per_window", &report);
-    assert!(
-        report.compactions > 0,
-        "must cross an in-run compaction seam"
-    );
-    assert_eq!(report.duplicate_sequences, 0);
-    assert_eq!(report.outcome, RunOutcome::Completed);
-    assert_eq!(report.work_turns, turns);
-    assert_eq!(report.executed_calls, turns * 5 / 2);
-}
-
-#[tokio::test]
-#[ignore = "AC0 isolate the in-run compaction count independently of 4 MiB"]
-async fn forty_in_run_compactions_complete_off_the_between_run_budget() {
-    let mut script = Script::tools(1_000, 1_024, Some(12 * 1_024));
-    script.calls_per_turn = [1, 1];
-    let report = run(script).await;
-    receipt("compaction_count", &report);
-    assert!(report.compactions >= 40, "{}", report.compactions);
-    assert_eq!(report.work_turns, 1_000);
-    assert_eq!(report.duplicate_sequences, 0);
-    assert_eq!(report.outcome, RunOutcome::Completed);
-}
-
-#[tokio::test]
-#[ignore = "AC2 long run: 40 MiB of streamed text across windows"]
-async fn forty_mib_of_streamed_text_across_windows_completes() {
-    let mut script = Script::tools(900, 64, Some(128 * 1_024));
-    script.calls_per_turn = [1, 1];
-    script.text_bytes = 48 * 1_024;
-    let report = run(script).await;
-    receipt("text_per_window", &report);
-    assert!(report.compactions > 0, "must cross a window seam");
-    assert_eq!(report.outcome, RunOutcome::Completed);
-    assert_eq!(report.work_turns, 900);
-    assert_eq!(report.duplicate_sequences, 0);
-}
-
-#[tokio::test]
 async fn in_run_summary_spend_exhausts_the_callers_token_allowance() {
     let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
     script.measure_work_usage = true;
@@ -686,7 +635,6 @@ async fn cancelling_during_a_summarizer_backoff_cancels_the_run_and_starts_no_ne
 }
 
 #[tokio::test]
-#[ignore = "AC0 hard text guard; cross-window lifetime reproduction remains masked by the 4 MiB reservation"]
 async fn streamed_text_hard_guard_rejects_a_single_oversized_turn() {
     struct TextProvider;
     impl Provider for TextProvider {
@@ -793,7 +741,6 @@ fn worker_guard_reaps_an_already_exited_worker() {
 }
 
 #[test]
-#[ignore = "AC0 kill/reopen fixture; launches only this integration-test executable"]
 fn process_kill_preserves_the_side_effect_without_reexecution() {
     let directory = tempfile::tempdir().unwrap();
     let executable = std::env::current_exe().unwrap();

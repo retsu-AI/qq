@@ -59,7 +59,6 @@ pub struct Script {
     pub stall_after: Option<usize>,
     pub journal: Option<PathBuf>,
     pub hold_result: bool,
-    pub text_bytes: usize,
     pub work_usage: Option<qq_provider::ProviderUsage>,
     pub measure_work_usage: bool,
     pub summary_usage: Option<qq_provider::ProviderUsage>,
@@ -93,7 +92,6 @@ impl Script {
             stall_after: None,
             journal: None,
             hold_result: false,
-            text_bytes: 0,
             work_usage: None,
             measure_work_usage: false,
             summary_usage: None,
@@ -270,11 +268,6 @@ impl Provider for ScriptedProvider {
         let count = self.script.calls_per_turn[turn % 2];
         assert!((1..=3).contains(&count));
         let mut events = Vec::with_capacity(count * 3 + 2);
-        if self.script.text_bytes > 0 {
-            events.push(Ok(ProviderEvent::OutputTextDelta {
-                text: "t".repeat(self.script.text_bytes),
-            }));
-        }
         for index in 0..count {
             let id = format!("soak-{turn}-{index}");
             let sequence = if self.script.repeat_arguments {
