@@ -159,7 +159,9 @@ expires = "2026-11-15"
   `platform tests` CI jobs exclude every listed test.
   `cargo xtask quarantine` prints the filterset.
 - `cargo xtask lint` fails on an entry with no owner or issue, a test name
-  that matches no test, a malformed date, an `expires` more than 14 days
+  that matches neither `cargo nextest list` on this host nor
+  `.config/platform-tests/<os>.txt` (so a Windows- or macOS-only test can be
+  quarantined from Linux), a malformed date, an `expires` more than 14 days
   after `added`, or any entry past its expiry or more than 14 days past
   `added`. An entry cannot be renewed in place: fix the test or delete it.
 - The non-blocking CI job `quarantined tests under stress` runs the listed

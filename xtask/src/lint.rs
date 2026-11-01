@@ -761,10 +761,16 @@ fn quarantine_findings(root: &Path) -> Result<Vec<Finding>, LintError> {
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         ));
     }
-    let listed = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut listed = String::from_utf8_lossy(&output.stdout).into_owned();
+    for platform in [Platform::Windows, Platform::Macos] {
+        let path = root.join(platform.list());
+        let text = fs::read_to_string(&path).map_err(|source| LintError::Read { path, source })?;
+        listed.push('\n');
+        listed.push_str(&text);
+    }
     let tests = listed
         .lines()
-        .filter_map(|line| line.split_once(' '))
+        .filter_map(|line| line.trim_end().split_once(' '))
         .collect::<std::collections::BTreeSet<_>>();
     Ok(
         crate::quarantine::problems(&entries, crate::quarantine::today(), |binary, name| {
