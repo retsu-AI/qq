@@ -1279,26 +1279,23 @@ async fn storage_overflow_compacts_before_the_queued_prompt() {
 
 #[tokio::test]
 async fn compaction_sends_and_persists_the_effective_output_cap() {
+    const WINDOW: u32 = 128 * 1024;
     for (configured, expected) in [(1_024, 1_024), (16_384, 16_384)] {
-        let prior = MAX_CONTEXT_BYTES - 100 * 1024 - usize::try_from(configured).unwrap() * 32;
+        let prior = usize::try_from(WINDOW - configured).unwrap() * 4 - 8 * 1024;
         let mut harness = auto_compact_harness_with_limits(
             vec![
                 AutoCompactScript::Text("x".repeat(prior)),
                 AutoCompactScript::Text(valid_summary("the summary")),
                 AutoCompactScript::Text("done".to_owned()),
             ],
-            None,
+            Some(WINDOW),
             configured,
         )
         .await;
         let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
         collect_until(&mut harness.events, finished_for(first)).await;
-        let prompt = queue_prompt(
-            &harness.runtime,
-            harness.session_id,
-            "y".repeat(MAX_PROMPT_BYTES),
-        )
-        .await;
+        let prompt =
+            queue_prompt(&harness.runtime, harness.session_id, "y".repeat(16 * 1024)).await;
         let observed = collect_until(&mut harness.events, finished_for(prompt)).await;
         let compaction = observed
             .iter()
