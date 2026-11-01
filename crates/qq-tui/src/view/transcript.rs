@@ -317,12 +317,17 @@ impl<'a> VirtualBody<'a> {
         }
     }
 
-    fn push_code_blocks(&mut self, message_id: MessageId, start: usize, code: &[Range<usize>]) {
-        let last = code.len().saturating_sub(1);
+    fn push_code_blocks(
+        &mut self,
+        message_id: MessageId,
+        start: usize,
+        code: &[Range<usize>],
+        first: usize,
+    ) {
         self.blocks
             .extend(code.iter().enumerate().map(|(index, range)| {
                 (
-                    Block::Code(message_id, last - index),
+                    Block::Code(message_id, first + index),
                     start + range.start..start + range.end,
                 )
             }));
@@ -1088,7 +1093,7 @@ impl TranscriptCache {
                     if lines.is_empty() {
                         body.push_line(message_ellipsis(prefix, prefix_style));
                     } else {
-                        body.push_code_blocks(message.id, content_start, &cached.code);
+                        body.push_code_blocks(message.id, content_start, &cached.code, 0);
                         body.extend_cached(lines);
                     }
                 }
@@ -1101,7 +1106,7 @@ impl TranscriptCache {
                 }
             }
         } else {
-            let mut lines = self.live_lines(message, width);
+            let (mut lines, truncated) = self.live_lines(message, width);
             if lines.is_empty() {
                 lines.push(message_ellipsis(prefix, prefix_style));
             } else if message.state == MessageState::Streaming
@@ -1109,7 +1114,13 @@ impl TranscriptCache {
             {
                 last.push("▍", accent());
             }
-            body.push_code_blocks(message.id, content_start, &code_ranges(&lines));
+            let code = code_ranges(&lines);
+            let first = if truncated && !code.is_empty() {
+                code_block_count(&MessageText::new(message).as_cow()).saturating_sub(code.len())
+            } else {
+                0
+            };
+            body.push_code_blocks(message.id, content_start, &code, first);
             body.extend_owned(lines);
             body.live_message_ranges
                 .push((message.id, content_start..body.rows));
@@ -1121,7 +1132,7 @@ impl TranscriptCache {
         }
     }
 
-    fn live_lines(&self, message: &MessageSnapshot, width: usize) -> Vec<Line> {
+    fn live_lines(&self, message: &MessageSnapshot, width: usize) -> (Vec<Line>, bool) {
         let source = MessageText::new(message);
         let content_width = width.saturating_sub(LANE).max(1);
         let (settled_bytes, settled_rows, cached_tail) = match self.live.get(&message.id) {
@@ -1166,7 +1177,7 @@ impl TranscriptCache {
         let drop_settled = drop.min(settled_rows.len());
         lines.extend_from_slice(&settled_rows[drop_settled..]);
         lines.extend(tail_rows.into_iter().skip(drop - drop_settled));
-        lines
+        (lines, truncated)
     }
 
     #[cfg(test)]
@@ -1197,7 +1208,7 @@ impl TranscriptCache {
                 )),
             }
         } else {
-            lines.extend(self.live_lines(message, width));
+            lines.extend(self.live_lines(message, width).0);
         }
         if lines.is_empty() {
             lines.push(message_ellipsis(prefix, prefix_style));
@@ -1205,6 +1216,17 @@ impl TranscriptCache {
         lines.extend(message_note(message));
         lines
     }
+}
+
+fn code_block_count(source: &str) -> usize {
+    pulldown_cmark::Parser::new_ext(source, pulldown_cmark::Options::all())
+        .filter(|event| {
+            matches!(
+                event,
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_))
+            )
+        })
+        .count()
 }
 
 fn code_ranges(lines: &[Line]) -> Vec<Range<usize>> {

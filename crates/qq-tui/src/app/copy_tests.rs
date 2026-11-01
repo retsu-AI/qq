@@ -404,6 +404,47 @@ fn copies_keep_a_refusal_and_running_tool_output() {
 }
 
 #[test]
+fn the_code_cursor_keeps_its_block_when_another_streams_in() {
+    let mut app = app();
+    let set = |app: &mut App, output: &str| {
+        let session = app.sessions.get_mut(&fixtures::SESSION).unwrap();
+        let message = &mut session.messages.as_mut().unwrap()[1];
+        message.output = output.to_owned();
+        message.state = qq_protocol::MessageState::Streaming;
+    };
+    set(&mut app, "```\nfirst\n```\n\nmore\n");
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    let code = app
+        .pane()
+        .blocks
+        .iter()
+        .map(|(block, _)| *block)
+        .find(|block| matches!(block, Block::Code(..)))
+        .unwrap();
+    app.block_cursor = Some(code);
+    set(&mut app, "```\nfirst\n```\n\nmore\n\n```\nsecond\n```\n");
+    draw(&mut app, &mut renderer);
+    let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+    assert_eq!(copies(app.handle_key(y), &renderer), ["first"]);
+}
+
+#[test]
+fn a_wrapped_prose_word_beside_the_sessions_column_copies_without_margin() {
+    let mut app = app();
+    let session = app.sessions.get_mut(&fixtures::SESSION).unwrap();
+    session.messages.as_mut().unwrap()[1].output = format!("{}b", "a".repeat(80));
+    app.layout.rail = crate::view::PanePref::Shown;
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    let shown = rows(&mut app, &mut renderer);
+    let start = find(&shown, "aaaa");
+    let end = (start.0 + 30, start.1 + 1);
+    let copied = drag(&mut app, &mut renderer, start, end);
+    assert_eq!(copied, [format!("{}b", "a".repeat(80))]);
+}
+
+#[test]
 fn an_exec_copy_quotes_each_argument_as_it_ran() {
     let call = qq_protocol::ToolCallSnapshot {
         arguments: r#"{"program":"cat","args":["file with spaces.txt","","it's","-n"]}"#.to_owned(),

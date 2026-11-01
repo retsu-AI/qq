@@ -3222,10 +3222,10 @@ impl App {
         };
         let text = match cursor {
             Block::Message(id) => message(id).map(|message| message_source(message).into_owned()),
-            Block::Code(id, from_end) => message(id).and_then(|message| {
-                let mut blocks = crate::view::code_blocks(&message_source(message));
-                let index = blocks.len().checked_sub(from_end + 1)?;
-                Some(blocks.swap_remove(index))
+            Block::Code(id, index) => message(id).and_then(|message| {
+                crate::view::code_blocks(&message_source(message))
+                    .into_iter()
+                    .nth(index)
             }),
             Block::Tool(id) => session.and_then(|session| {
                 let call = session
