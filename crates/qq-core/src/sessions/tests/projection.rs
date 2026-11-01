@@ -14,13 +14,14 @@ async fn historical_projection_fixture(version: u16) {
     let (_, session_id, claimed) = create_claimed_parent(&store, directory.path()).await;
     let runtime = Runtime::new(ScriptedProvider, "test-model", 256).unwrap();
     let loaded = loaded_runtime(runtime, directory.path().to_str().unwrap(), None);
-    let mut descriptor = loaded.plan.descriptor().as_ref().clone();
-    descriptor.version = 14;
-    descriptor.tool_output_projection = None;
-    descriptor.prompt_version = qq_protocol::PromptVersion::new(19).unwrap();
-    let (digest, descriptor_json) = descriptor.encode().unwrap();
+    let (digest, descriptor_json) = loaded.plan.descriptor().encode().unwrap();
     let mut stored_descriptor: serde_json::Value = serde_json::from_str(&descriptor_json).unwrap();
     stored_descriptor["version"] = serde_json::json!(version);
+    stored_descriptor["prompt_version"] = serde_json::json!(19);
+    stored_descriptor
+        .as_object_mut()
+        .unwrap()
+        .remove("tool_output_projection");
     let descriptor_json = stored_descriptor.to_string();
     let mut identity = loaded.plan.identity();
     identity.descriptor_version = version;

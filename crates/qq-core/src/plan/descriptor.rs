@@ -9,9 +9,6 @@ use super::PlanCompileError;
 pub const DESCRIPTOR_VERSION: u16 = 16;
 
 const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v16\0";
-const V15_DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v15\0";
-const V14_DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v14\0";
-const LEGACY_DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v13\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "name")]
@@ -213,30 +210,17 @@ impl From<&crate::context_source::RegisteredSource> for ContextSourceDescriptor 
 
 impl AgentPlanDescriptor {
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, PlanCompileError> {
-        let domain = match self.version {
-            13 => LEGACY_DIGEST_DOMAIN,
-            14 => V14_DIGEST_DOMAIN,
-            15 => V15_DIGEST_DOMAIN,
-            16 => DIGEST_DOMAIN,
-            _ => {
-                return Err(PlanCompileError::Encode {
-                    message: format!("unsupported descriptor version {}", self.version),
-                });
-            }
-        };
-        if (self.version >= 15) != self.tool_output_projection.is_some() {
+        if self.version != DESCRIPTOR_VERSION {
             return Err(PlanCompileError::Encode {
-                message:
-                    "tool output projection identity must be present in descriptor 15 and later"
-                        .to_owned(),
+                message: format!("unsupported descriptor version {}", self.version),
             });
         }
-        if self.version < 16 && !self.protected_pack_roots.is_empty() {
+        if self.tool_output_projection.is_none() {
             return Err(PlanCompileError::Encode {
-                message: "protected pack roots require descriptor 16".to_owned(),
+                message: "tool output projection identity must be present".to_owned(),
             });
         }
-        let mut bytes = domain.to_vec();
+        let mut bytes = DIGEST_DOMAIN.to_vec();
         serde_json::to_writer(&mut bytes, self).map_err(|error| PlanCompileError::Encode {
             message: error.to_string(),
         })?;
