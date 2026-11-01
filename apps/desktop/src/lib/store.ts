@@ -7,6 +7,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import { drafts } from "./drafts";
 import type { PendingFile, ProjectInfo, ProjectState } from "./types";
+import type { SearchTab } from "./search";
 
 export type SettingsPage = "general" | "providers" | "shortcuts" | "diagnostics";
 
@@ -18,6 +19,8 @@ interface AppSnapshot {
   error: string | null;
   /** The open Settings page, or null when Settings is closed. */
   settings: SettingsPage | null;
+  /** The open search window's tab, or null when it is closed. */
+  search: SearchTab | null;
   /** Pending trust per project; absent until checked, empty when trusted. */
   trust: Record<string, PendingFile[]>;
 }
@@ -32,6 +35,7 @@ let snapshot: AppSnapshot = {
   activeId: null,
   error: null,
   settings: null,
+  search: null,
   trust: {},
 };
 const listeners = new Set<() => void>();
@@ -177,6 +181,11 @@ export async function refreshRecents() {
 /** Opens Settings at a page, or closes it with null. */
 export function showSettings(page: SettingsPage | null = "general") {
   set({ settings: page });
+}
+
+/** Opens the search window at a tab, or closes it with null. */
+export function showSearch(tab: SearchTab | null = "all") {
+  set({ search: tab });
 }
 
 export function dismissError() {

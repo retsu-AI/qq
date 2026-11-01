@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Settings } from "./components/Settings";
-import { CommandPalette } from "./components/CommandPalette";
+import { Search } from "./components/Search";
 import { TitleBar, type Menu } from "./components/TitleBar";
 import { Logo } from "./components/Logo";
 import {
@@ -30,6 +30,7 @@ import {
   closeProject,
   dismissError,
   pickProject,
+  showSearch,
   showSettings,
   useApp,
 } from "./lib/store";
@@ -72,7 +73,6 @@ export function App() {
   const preferences = usePreferences();
   const worktreeFor = useWorktreeDialog();
   const worktreeProject = app.open.find((p) => p.id === worktreeFor) ?? null;
-  const [paletteOpen, setPaletteOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebar);
 
@@ -81,17 +81,7 @@ export function App() {
     void api.setNotificationsEnabled(getPreferences().notifications);
   }, []);
 
-  /** Shows the sidebar if hidden and focuses its search. */
-  const findSession = () => {
-    if (!sidebarOpen) toggleSidebar();
-    requestAnimationFrame(() => {
-      const search = document.querySelector<HTMLInputElement>(
-        'input[aria-label="Search sessions"]',
-      );
-      search?.focus();
-      search?.select();
-    });
-  };
+  const findSession = () => showSearch("sessions");
   const toggleSidebar = () =>
     setSidebarOpen((open) => {
       try {
@@ -165,11 +155,11 @@ export function App() {
         showSettings();
       } else if (key === "k") {
         handled();
-        setPaletteOpen(true);
+        showSearch("all");
       } else if (key === "b" && !event.shiftKey) {
         handled();
         toggleSidebar();
-      } else if (key === "f" && !event.shiftKey && project) {
+      } else if (key === "f" && !event.shiftKey) {
         handled();
         findSession();
       } else if (key === "=" || key === "+") {
@@ -277,15 +267,14 @@ export function App() {
         },
         "separator",
         {
-          label: "Find session",
+          label: "Find session…",
           shortcut: "Ctrl F",
           onSelect: findSession,
-          disabled: !project,
         },
         {
-          label: "Command palette…",
+          label: "Search…",
           shortcut: "Ctrl K",
-          onSelect: () => setPaletteOpen(true),
+          onSelect: () => showSearch("all"),
         },
       ],
     },
@@ -394,13 +383,7 @@ export function App() {
         </main>
       </div>
       {app.settings && <Settings page={app.settings} project={project} />}
-      {paletteOpen && (
-        <CommandPalette
-          project={project}
-          close={() => setPaletteOpen(false)}
-          settings={() => showSettings()}
-        />
-      )}
+      {app.search && <Search tab={app.search} app={app} project={project} />}
       {aboutOpen && <About close={() => setAboutOpen(false)} />}
       {worktreeProject && (
         <WorktreeDialog project={worktreeProject} close={hideWorktreeDialog} />

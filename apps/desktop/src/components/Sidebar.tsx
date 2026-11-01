@@ -24,6 +24,7 @@ import {
   closeProject,
   pickProject,
   removeWorktree,
+  showSearch,
   showSettings,
 } from "../lib/store";
 import { relativeTime } from "../lib/format";
@@ -34,8 +35,9 @@ import type {
   SessionRow,
 } from "../lib/types";
 import {
-  matchesSession,
   parseSessionPreferences,
+  readSessionPreferences,
+  sessionPreferencesKey,
   updateSessionPreferences,
   type SessionPreferences,
 } from "../lib/session-preferences";
@@ -71,18 +73,7 @@ function readExpanded(): Record<string, boolean> {
   }
 }
 
-const metadataKey = (projectId: string) => `qq.sessions:${projectId}`;
-
-function readMetadata(projectId: string): SessionPreferences {
-  try {
-    return parseSessionPreferences(localStorage.getItem(metadataKey(projectId)));
-  } catch {
-    return parseSessionPreferences(null);
-  }
-}
-
 export function Sidebar({ app, project }: Props) {
-  const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState(readExpanded);
   // Local names and archive flags, per open project.
   const [metadata, setMetadata] = useState<Record<string, SessionPreferences>>({});
@@ -91,7 +82,7 @@ export function Sidebar({ app, project }: Props) {
   const openIds = app.open.map((p) => p.id).join("\n");
   useEffect(() => {
     setMetadata(
-      Object.fromEntries(app.open.map((p) => [p.id, readMetadata(p.id)])),
+      Object.fromEntries(app.open.map((p) => [p.id, readSessionPreferences(p.id)])),
     );
   }, [openIds]);
 
@@ -106,7 +97,7 @@ export function Sidebar({ app, project }: Props) {
         sessionId,
         update,
       );
-      localStorage.setItem(metadataKey(projectId), JSON.stringify(next));
+      localStorage.setItem(sessionPreferencesKey(projectId), JSON.stringify(next));
       setMetadata((current) => ({ ...current, [projectId]: next }));
       setError(null);
     } catch (error) {
@@ -140,7 +131,6 @@ export function Sidebar({ app, project }: Props) {
     );
   }, [app.open]);
 
-  const searching = query.trim() !== "";
   const cards = sorted.map((info) => {
     const state = app.projects[info.id] ?? null;
     const meta = metadata[info.id] ?? parseSessionPreferences(null);
@@ -148,45 +138,21 @@ export function Sidebar({ app, project }: Props) {
       ...row,
       title: meta.aliases[row.id] ?? row.title,
     }));
-    const matches = searching
-      ? rows.filter((row) => matchesSession(query, row.title, row.tail))
-      : rows;
-    return { info, state, meta, rows: matches };
+    return { info, state, meta, rows };
   });
-  const visible = searching ? cards.filter((card) => card.rows.length > 0) : cards;
 
   return (
     <aside className="flex w-[280px] shrink-0 flex-col border-r border-line bg-sidebar">
       <div className="space-y-1 px-2 pb-2 pt-2">
-        <label className="flex h-8 items-center gap-2 rounded-lg border border-line-strong bg-raised px-2.5 focus-within:border-accent/60">
-          <Search className="h-3.5 w-3.5 shrink-0 text-faint" />
-          <input
-            aria-label="Search sessions"
-            placeholder="Search sessions"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape" && query) {
-                event.preventDefault();
-                setQuery("");
-              }
-            }}
-            className="min-w-0 flex-1 bg-transparent text-ui outline-none placeholder:text-faint focus-visible:outline-none"
-          />
-          {query ? (
-            <button
-              type="button"
-              aria-label="Clear search"
-              title="Clear (Esc)"
-              onClick={() => setQuery("")}
-              className="rounded p-0.5 text-faint hover:text-fg"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          ) : (
-            <kbd className="font-mono text-caption text-faint">Ctrl F</kbd>
-          )}
-        </label>
+        <button
+          onClick={() => showSearch("all")}
+          aria-label="Search sessions, projects and commands"
+          className="flex h-8 w-full items-center gap-2 rounded-lg border border-line-strong bg-raised px-2.5 text-left text-ui text-faint hover:border-accent/60 hover:text-muted"
+        >
+          <Search className="h-3.5 w-3.5 shrink-0" />
+          <span className="flex-1">Search</span>
+          <kbd className="font-mono text-caption">Ctrl K</kbd>
+        </button>
         {project && (
           <button
             onClick={() => void api.newSession(project.project_id)}
@@ -223,7 +189,7 @@ export function Sidebar({ app, project }: Props) {
         aria-label="Projects and sessions"
         className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3"
       >
-        {visible.map(({ info, state, meta, rows }) => (
+        {cards.map(({ info, state, meta, rows }) => (
           <ProjectCard
             key={info.id}
             info={info}
@@ -232,15 +198,11 @@ export function Sidebar({ app, project }: Props) {
             icon={icons[info.path]}
             metadata={meta}
             rows={rows}
-            searching={searching}
-            expanded={searching || isExpanded(info.id)}
+            expanded={isExpanded(info.id)}
             setExpanded={(open) => setCardExpanded(info.id, open)}
             onChange={(sessionId, update) => change(info.id, sessionId, update)}
           />
         ))}
-        {searching && visible.length === 0 && (
-          <p className="px-2.5 pt-2 text-ui text-faint">No sessions match.</p>
-        )}
         {app.open.length === 0 && (
           <button
             onClick={() => void pickProject()}
@@ -280,7 +242,6 @@ function ProjectCard({
   icon,
   metadata,
   rows,
-  searching,
   expanded,
   setExpanded,
   onChange,
@@ -291,7 +252,6 @@ function ProjectCard({
   icon: Parameters<typeof ProjectBadge>[0]["icon"];
   metadata: SessionPreferences;
   rows: SessionRow[];
-  searching: boolean;
   expanded: boolean;
   setExpanded: (open: boolean) => void;
   onChange: (
@@ -313,11 +273,11 @@ function ProjectCard({
     const archived = (row: SessionRow) => metadata.archived.includes(row.id);
     // Sessions that are running or need you stay visible even when archived.
     const shown = rows.filter((row) =>
-      showArchived && !searching
+      showArchived
         ? archived(row)
         : !archived(row) || row.status !== "idle" || row.group === "needs_you",
     );
-    if (searching || showArchived) return { rows: shown, hidden: 0 };
+    if (showArchived) return { rows: shown, hidden: 0 };
     // Needs-you sessions surface at any depth; otherwise roots only, and
     // children are reached from their parent's transcript.
     const needsYou = shown.filter((r) => r.group === "needs_you");
@@ -331,7 +291,7 @@ function ProjectCard({
       rows: [...needsYou, ...running, ...recent.slice(0, limit)],
       hidden: Math.max(0, recent.length - limit),
     };
-  }, [rows, metadata.archived, showArchived, showAll, searching]);
+  }, [rows, metadata.archived, showArchived, showAll]);
 
   const open = () => {
     if (!active) {
@@ -462,7 +422,7 @@ function ProjectCard({
 
       {expanded && (
         <div className="pb-1.5">
-          {showArchived && !searching && (
+          {showArchived && (
             <div className="flex items-center gap-2 px-3 pb-1 text-caption text-faint">
               <span className="flex-1">Archived on this desktop</span>
               <button
@@ -493,7 +453,7 @@ function ProjectCard({
               Show {list.hidden} more
             </button>
           )}
-          {showAll && !searching && !showArchived && list.hidden === 0 && sessions.length > RECENT_LIMIT && (
+          {showAll && !showArchived && list.hidden === 0 && sessions.length > RECENT_LIMIT && (
             <button
               onClick={() => setShowAll(false)}
               className="ml-1 mt-0.5 rounded-md px-2.5 py-1 text-small text-muted hover:bg-hover hover:text-fg"

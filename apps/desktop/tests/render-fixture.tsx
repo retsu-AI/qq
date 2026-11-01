@@ -6,9 +6,11 @@ import { Sidebar } from "../src/components/Sidebar";
 import { SessionPane } from "../src/components/SessionPane";
 import { Settings } from "../src/components/Settings";
 import { IconDialog } from "../src/components/ProjectIcon";
+import { Search } from "../src/components/Search";
 import type { Item, ProjectState } from "../src/lib/types";
 import { getPreferences, setPreferences } from "../src/lib/preferences";
-import { showSettings, useApp, type SettingsPage } from "../src/lib/store";
+import { showSearch, showSettings, useApp, type SettingsPage } from "../src/lib/store";
+import type { SearchTab } from "../src/lib/search";
 import { setProjectIcon } from "../src/lib/project-icons";
 import "../src/styles.css";
 
@@ -305,10 +307,12 @@ if (new URLSearchParams(location.search).has("approval"))
 function Fixture() {
   const [commands, setCommands] = useState<string[]>([]);
   const [measurement, setMeasurement] = useState("");
-  const settings = useApp().settings;
+  const { settings, search } = useApp();
   useEffect(() => {
     const page = new URLSearchParams(location.search).get("settings");
     if (page) showSettings(page as SettingsPage);
+    const tab = new URLSearchParams(location.search).get("search");
+    if (tab) showSearch(tab as SearchTab);
   }, []);
   const [focusResult, setFocusResult] = useState("");
   useEffect(() => {
@@ -439,6 +443,23 @@ function Fixture() {
         </button>
       )}
       {settings && <Settings page={settings} project={project} />}
+      {search && (
+        <Search
+          tab={search}
+          project={project}
+          app={{
+            open: [
+              { id: project.project_id, path: project.path, name: project.name, worktree: null },
+              ...extra.map((other) => ({ id: other.project_id, path: other.path, name: other.name, worktree: null })),
+            ],
+            recents: [{ id: "recent", path: "C:/temporary/old-prototype", name: "old-prototype", worktree: null }],
+            projects: {
+              [project.project_id]: project,
+              ...Object.fromEntries(extra.map((other) => [other.project_id, other])),
+            },
+          }}
+        />
+      )}
       {extra.length > 0 && new URLSearchParams(location.search).has("icon") && (
         <IconDialog
           project={{ id: extra[0].project_id, path: extra[0].path, name: extra[0].name, worktree: null }}

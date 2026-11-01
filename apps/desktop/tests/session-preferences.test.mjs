@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   parseSessionPreferences,
-  matchesSession,
   updateSessionPreferences,
 } from "../src/lib/session-preferences.ts";
 
@@ -22,17 +21,6 @@ test("aliases and archive survive reload and restore without changing history", 
   assert.equal(restored.aliases.session, undefined);
   assert.deepEqual(restored.archived, []);
   assert.deepEqual(empty.archived, []);
-});
-test("search matches all words regardless of case across title and recent output", () => {
-  assert.equal(
-    matchesSession("RELEASE tests", "Release fix", "Tests passed"),
-    true,
-  );
-  assert.equal(
-    matchesSession("release missing", "Release fix", "Tests passed"),
-    false,
-  );
-  assert.equal(matchesSession("  ", "Anything", ""), true);
 });
 test("malformed metadata recovers and long names are refused", () => {
   assert.deepEqual(parseSessionPreferences("bad json"), {

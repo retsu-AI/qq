@@ -53,8 +53,13 @@ acknowledging does not resume the goal.
 
 The sidebar lists each open project as a card that expands to show its
 sessions; click a card to switch to it, and the + beside Projects opens another.
-A collapsed card shows how many of its sessions need you. Search at the top of
-the sidebar (Ctrl F; Esc clears) finds sessions across all open projects.
+A collapsed card shows how many of its sessions need you.
+
+Search (Ctrl K, or Ctrl F to start on Sessions, or the box at the top of the
+sidebar) finds sessions across all open projects, open and recent projects, and
+desktop commands. With nothing typed it lists recent sessions. Arrow keys move,
+← and → at the ends of the text change tabs, Enter opens, Esc closes. Closed
+projects' sessions aren't searched; reopen the project from the Projects tab.
 
 Each session's ⋯ menu renames it, archives it, or deletes it; double-click a
 name to rename it in place. Names and archive flags marked **locally** are
@@ -99,7 +104,7 @@ Drag files from Explorer onto the window to mention them at the cursor. Only
 files inside the project can be mentioned, and mention paths cannot contain
 spaces; skipped files are listed under the composer. The ring beside Send shows
 how much of the model's context the session uses (hover for tokens and cost);
-compact the session from Ctrl K when it fills up.
+compact the session from Search (Ctrl K) when it fills up.
 
 History follows streamed output until you scroll upward. Latest resumes following.
 Focus the history region and use Ctrl Home/Ctrl End for its beginning/end.
@@ -165,10 +170,11 @@ Notifications appear for approval/completion while the app is unfocused; Windows
 requires an installed app. Notification text includes session names. MCP/runtime
 configuration stays in QQ config.ron and uses the normal project trust workflow.
 
-Ctrl K opens desktop commands: new/root/child sessions, context compaction,
-rollback, pruning empty idle sessions, provider setup and settings. Compaction
-changes model context while leaving the displayed transcript intact. The desktop
-palette exposes implemented desktop actions; it does not execute arbitrary CLI text.
+Search's Commands tab (Ctrl K) runs desktop commands: new, worktree and child
+sessions, context compaction, rollback, pruning empty idle sessions, opening the
+project in an editor, and each Settings page. Compaction changes model context
+while leaving the displayed transcript intact. Commands are implemented desktop
+actions; Search does not execute arbitrary CLI text.
 
 Ctrl N starts a new session, Ctrl Shift A moves to a session needing attention,
 and Ctrl Shift D shows or hides the Changes panel.

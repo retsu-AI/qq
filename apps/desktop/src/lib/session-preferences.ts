@@ -27,10 +27,18 @@ export function parseSessionPreferences(
   }
 }
 
-export function matchesSession(query: string, title: string, tail: string) {
-  const terms = query.toLocaleLowerCase().trim().split(/\s+/);
-  const text = `${title}\n${tail}`.toLocaleLowerCase();
-  return terms.every((term) => text.includes(term));
+/** Where a project's local session names and archive flags are kept. */
+export const sessionPreferencesKey = (projectId: string) =>
+  `qq.sessions:${projectId}`;
+
+export function readSessionPreferences(projectId: string): SessionPreferences {
+  try {
+    return parseSessionPreferences(
+      localStorage.getItem(sessionPreferencesKey(projectId)),
+    );
+  } catch {
+    return parseSessionPreferences(null);
+  }
 }
 
 export function updateSessionPreferences(
