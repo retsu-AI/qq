@@ -1569,9 +1569,7 @@ async fn prompt_identity_persistence_failure_starts_no_provider_work() {
     impl Provider for CountingProvider {
         fn stream(&self, _request: ModelRequest) -> ProviderStream {
             self.provider_calls.fetch_add(1, Ordering::AcqRel);
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: None,
-            })]))
+            provider_script([completed(None)])
         }
     }
 
@@ -1645,9 +1643,7 @@ async fn resolved_model_persistence_failure_starts_no_provider_work() {
     impl Provider for CountingProvider {
         fn stream(&self, _request: ModelRequest) -> ProviderStream {
             self.provider_calls.fetch_add(1, Ordering::AcqRel);
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: None,
-            })]))
+            provider_script([completed(None)])
         }
     }
 
@@ -1722,9 +1718,7 @@ async fn known_first_turn_context_overflow_starts_no_provider_work() {
                 impl Provider for PricedTinyContextProvider {
                     fn stream(&self, _request: ModelRequest) -> ProviderStream {
                         self.0.fetch_add(1, Ordering::SeqCst);
-                        Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                            usage: None,
-                        })]))
+                        provider_script([completed(None)])
                     }
                 }
 
@@ -1781,9 +1775,7 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
                 impl Provider for PricedTinyContextProvider {
                     fn stream(&self, _request: ModelRequest) -> ProviderStream {
                         self.0.fetch_add(1, Ordering::SeqCst);
-                        Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                            usage: None,
-                        })]))
+                        provider_script([completed(None)])
                     }
                 }
 

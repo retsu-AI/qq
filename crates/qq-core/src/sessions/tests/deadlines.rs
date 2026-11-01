@@ -312,12 +312,7 @@ impl Provider for CompactionDeadlineProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
         let index = self.0.fetch_add(1, Ordering::SeqCst);
         if index == 0 {
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: over_threshold_output(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]));
+            return text_reply(over_threshold_output());
         }
         if request_texts(&request)
             .last()

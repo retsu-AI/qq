@@ -726,12 +726,7 @@ async fn a_panicking_run_task_fails_durably_and_the_session_keeps_scheduling() {
                         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                             panic!("injected run-task panic");
                         }
-                        Box::pin(stream::iter([
-                            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                                text: "recovered".to_owned(),
-                            }),
-                            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                        ]))
+                        text_reply("recovered")
                     }
                 }
 
@@ -807,12 +802,7 @@ async fn a_panicking_loader_settles_the_reservation_without_run_started() {
                 impl Provider for CountingProvider {
                     fn stream(&self, _request: ModelRequest) -> ProviderStream {
                         self.0.fetch_add(1, Ordering::SeqCst);
-                        Box::pin(stream::iter([
-                            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                                text: "recovered".to_owned(),
-                            }),
-                            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                        ]))
+                        text_reply("recovered")
                     }
                 }
 
@@ -2342,9 +2332,7 @@ async fn slow_preparation_does_not_serialize_an_independent_permit() {
                 impl Provider for CountingProvider {
                     fn stream(&self, _request: ModelRequest) -> ProviderStream {
                         self.0.fetch_add(1, Ordering::SeqCst);
-                        Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                            usage: None,
-                        })]))
+                        provider_script([completed(None)])
                     }
                 }
 
@@ -2476,9 +2464,7 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
                 impl Provider for CountingProvider {
                     fn stream(&self, _request: ModelRequest) -> ProviderStream {
                         self.0.fetch_add(1, Ordering::SeqCst);
-                        Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                            usage: None,
-                        })]))
+                        provider_script([completed(None)])
                     }
                 }
 

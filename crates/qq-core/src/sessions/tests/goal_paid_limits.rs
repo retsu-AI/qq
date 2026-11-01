@@ -11,9 +11,7 @@ async fn goal_paid_dense_first_input_is_refused_before_provider_dispatch() {
                 impl Provider for Model {
                     fn stream(&self, _: ModelRequest) -> ProviderStream {
                         self.0.fetch_add(1, Ordering::SeqCst);
-                        Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                            usage: Some(provider_usage_of(usage(20_000, 1))),
-                        })]))
+                        provider_script([completed(Some(provider_usage_of(usage(20_000, 1))))])
                     }
                 }
                 Ok(loaded_runtime(
@@ -468,14 +466,10 @@ async fn goal_paid_summary_overflow_releases_admission_before_fold_retry() {
                     },
                 )]));
             }
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: valid_summary("folded"),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(provider_usage_of(usage(10, 5))),
-                }),
-            ]))
+            provider_script([
+                text_delta(valid_summary("folded")),
+                completed(Some(provider_usage_of(usage(10, 5)))),
+            ])
         }
     }
     for cost in [false, true] {

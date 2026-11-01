@@ -6,9 +6,7 @@ async fn loading_exhaustion_without_work_blocks_after_three_attempts() {
     impl Provider for Model {
         fn stream(&self, _: ModelRequest) -> ProviderStream {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: None,
-            })]))
+            provider_script([completed(None)])
         }
     }
     struct Loader {
@@ -1295,9 +1293,7 @@ async fn twenty_minute_permit_wait_reclamps_unbounded_prompts_and_goal_runs() {
     impl Provider for Model {
         fn stream(&self, _: ModelRequest) -> ProviderStream {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(provider_usage_of(usage(1, 1))),
-            })]))
+            provider_script([completed(Some(provider_usage_of(usage(1, 1))))])
         }
     }
     struct Loader(Arc<AtomicUsize>);

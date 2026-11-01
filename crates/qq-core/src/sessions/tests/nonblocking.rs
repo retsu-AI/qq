@@ -92,17 +92,8 @@ impl Provider for ScriptedParent {
                 events.push(Ok(qq_provider::ProviderEvent::Completed { usage }));
                 Box::pin(stream::iter(events))
             }
-            Some(ParentTurn::Empty) => {
-                Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                    usage,
-                })]))
-            }
-            None => Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "all done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage }),
-            ])),
+            Some(ParentTurn::Empty) => provider_script([completed(usage)]),
+            None => provider_script([text_delta("all done"), completed(usage)]),
         }
     }
 }
@@ -1735,12 +1726,7 @@ impl Provider for ReadsUntil {
                 ),
             );
         }
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "done".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage }),
-        ]))
+        provider_script([text_delta("done"), completed(usage)])
     }
 }
 

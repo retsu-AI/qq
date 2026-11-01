@@ -317,10 +317,10 @@ pub(super) fn load_provider(
 }
 
 pub(super) fn text_reply(text: impl Into<String>) -> ProviderStream {
-    script([text_delta(text), completed(None)])
+    provider_script([text_delta(text), completed(None)])
 }
 
-pub(super) fn script(
+pub(super) fn provider_script(
     events: impl IntoIterator<Item = Result<qq_provider::ProviderEvent, qq_provider::ProviderError>>,
 ) -> ProviderStream {
     Box::pin(stream::iter(events.into_iter().collect::<Vec<_>>()))

@@ -612,12 +612,7 @@ async fn client_revision_is_shown_once_without_refreshing_model_control_authorit
             self.requests.lock().unwrap().push(request);
             let turn = self.turn.fetch_add(1, Ordering::SeqCst);
             if turn >= 3 {
-                return Box::pin(stream::iter([
-                    Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                        text: "done".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                ]));
+                return text_reply("done");
             }
             let (name, args) = if turn == 1 {
                 (
@@ -763,12 +758,7 @@ async fn claimed_goal_exposes_serial_update_tool_without_workspace_approval() {
                 events.push(Ok(qq_provider::ProviderEvent::Completed { usage: None }));
                 Box::pin(stream::iter(events))
             } else {
-                Box::pin(stream::iter([
-                    Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                        text: "done".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                ]))
+                text_reply("done")
             }
         }
     }
@@ -996,12 +986,7 @@ struct GoalSteeringCalls {
 impl Provider for GoalSteeringCalls {
     fn stream(&self, _: ModelRequest) -> ProviderStream {
         if self.turn.fetch_add(1, Ordering::SeqCst) != 0 {
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "steer received".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]));
+            return text_reply("steer received");
         }
         let first = if self.first_goal {
             (
@@ -4088,20 +4073,16 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
     impl Provider for Seed {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
             self.requests.lock().unwrap().push(request);
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "x".repeat(29 * 1024 * 4),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        reasoning_tokens: None,
-                    }),
-                }),
-            ]))
+            provider_script([
+                text_delta("x".repeat(29 * 1024 * 4)),
+                completed(Some(qq_provider::ProviderUsage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_tokens: None,
+                })),
+            ])
         }
     }
     struct Fault {
@@ -5077,20 +5058,16 @@ async fn active_idle_goal_dispatches_fresh_work_without_a_user_prompt() {
     impl Provider for Model {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
             self.requests.lock().unwrap().push(request);
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "completed one work slice".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 11,
-                        output_tokens: 3,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        reasoning_tokens: None,
-                    }),
-                }),
-            ]))
+            provider_script([
+                text_delta("completed one work slice"),
+                completed(Some(qq_provider::ProviderUsage {
+                    input_tokens: 11,
+                    output_tokens: 3,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_tokens: None,
+                })),
+            ])
         }
     }
     struct Loader {
@@ -6557,15 +6534,13 @@ async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_ori
     impl Provider for Model {
         fn stream(&self, _: ModelRequest) -> ProviderStream {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(qq_provider::ProviderUsage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    reasoning_tokens: None,
-                }),
-            })]))
+            provider_script([completed(Some(qq_provider::ProviderUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_tokens: None,
+            }))])
         }
     }
     struct Loader {
@@ -6713,20 +6688,16 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
     impl Provider for Model {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
             self.0.lock().unwrap().push(request.max_output_tokens());
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "one bounded work slice".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        reasoning_tokens: None,
-                    }),
-                }),
-            ]))
+            provider_script([
+                text_delta("one bounded work slice"),
+                completed(Some(qq_provider::ProviderUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_tokens: None,
+                })),
+            ])
         }
     }
     struct Loader {
@@ -7443,20 +7414,16 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
         impl Provider for Model {
             fn stream(&self, request: ModelRequest) -> ProviderStream {
                 self.0.lock().unwrap().push(request);
-                Box::pin(stream::iter([
-                    Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                        text: "child work".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::Completed {
-                        usage: Some(qq_provider::ProviderUsage {
-                            input_tokens: 1,
-                            output_tokens: 1,
-                            cache_read_input_tokens: 0,
-                            cache_write_input_tokens: 0,
-                            reasoning_tokens: None,
-                        }),
-                    }),
-                ]))
+                provider_script([
+                    text_delta("child work"),
+                    completed(Some(qq_provider::ProviderUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_tokens: None,
+                    })),
+                ])
             }
         }
         struct Loader {
@@ -7951,9 +7918,7 @@ async fn goal_policy_tightening_before_load_or_main_start_prevents_provider_work
     impl Provider for Model {
         fn stream(&self, _: ModelRequest) -> ProviderStream {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: None,
-            })]))
+            provider_script([completed(None)])
         }
     }
     struct Loader {

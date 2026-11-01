@@ -528,9 +528,7 @@ async fn sponsored_child_requests_respect_positive_inherited_token_allowance() {
     impl Provider for Child {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
             self.0.lock().unwrap().push(request.max_output_tokens());
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(provider_usage_of(usage(1, 1))),
-            })]))
+            provider_script([completed(Some(provider_usage_of(usage(1, 1))))])
         }
     }
     let requests = Arc::new(StdMutex::new(Vec::new()));

@@ -252,41 +252,29 @@ impl Provider for ScriptedProvider {
             .last()
             .is_some_and(|text| text.starts_with("Summarize this conversation"));
         if summarizing {
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: valid_summary("hello"),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 10,
-                        cache_read_input_tokens: 2,
-                        cache_write_input_tokens: 1,
-                        output_tokens: 5,
-                        reasoning_tokens: None,
-                    }),
-                }),
-            ]));
-        }
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "hel".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "l".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "o".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(qq_provider::ProviderUsage {
+            return provider_script([
+                text_delta(valid_summary("hello")),
+                completed(Some(qq_provider::ProviderUsage {
                     input_tokens: 10,
                     cache_read_input_tokens: 2,
                     cache_write_input_tokens: 1,
                     output_tokens: 5,
                     reasoning_tokens: None,
-                }),
-            }),
-        ]))
+                })),
+            ]);
+        }
+        provider_script([
+            text_delta("hel"),
+            text_delta("l"),
+            text_delta("o"),
+            completed(Some(qq_provider::ProviderUsage {
+                input_tokens: 10,
+                cache_read_input_tokens: 2,
+                cache_write_input_tokens: 1,
+                output_tokens: 5,
+                reasoning_tokens: None,
+            })),
+        ])
     }
 }
 
@@ -327,12 +315,7 @@ struct CapturedResolvedProvider {
 impl Provider for CapturedResolvedProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
         self.requests.lock().unwrap().push(request);
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "done".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-        ]))
+        text_reply("done")
     }
 }
 
@@ -349,12 +332,7 @@ impl RuntimeLoader for CountingTextLoader {
             impl Provider for CountingTextProvider {
                 fn stream(&self, _request: ModelRequest) -> ProviderStream {
                     self.0.fetch_add(1, Ordering::SeqCst);
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: "done".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply("done")
                 }
             }
 
@@ -394,12 +372,7 @@ struct UsageSequenceProvider {
 
 impl Provider for UsageSequenceProvider {
     fn stream(&self, _request: ModelRequest) -> ProviderStream {
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "answer".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: self.usage }),
-        ]))
+        provider_script([text_delta("answer"), completed(self.usage)])
     }
 }
 
@@ -509,15 +482,11 @@ struct ChunkingProvider;
 
 impl Provider for ChunkingProvider {
     fn stream(&self, _request: ModelRequest) -> ProviderStream {
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: String::new(),
-            }),
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "é".repeat(MAX_TEXT_CHUNK_BYTES / 2 + 8),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-        ]))
+        provider_script([
+            text_delta(String::new()),
+            text_delta("é".repeat(MAX_TEXT_CHUNK_BYTES / 2 + 8)),
+            completed(None),
+        ])
     }
 }
 
@@ -543,16 +512,9 @@ impl Provider for EmptyThenTextProvider {
         requests.push(request);
         drop(requests);
         if turn == 0 {
-            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                usage: None,
-            })]))
+            provider_script([completed(None)])
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "ok".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]))
+            text_reply("ok")
         }
     }
 }
@@ -617,20 +579,16 @@ impl Provider for ToolLoopProvider {
                 }),
             ]))
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 6,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        output_tokens: 1,
-                        reasoning_tokens: None,
-                    }),
-                }),
-            ]))
+            provider_script([
+                text_delta("done"),
+                completed(Some(qq_provider::ProviderUsage {
+                    input_tokens: 6,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 1,
+                    reasoning_tokens: None,
+                })),
+            ])
         }
     }
 }
@@ -866,31 +824,21 @@ impl Provider for RenewableSliceProvider {
                 return Box::pin(stream::pending());
             }
             if self.metered_empty_checkpoint {
-                return Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 3,
-                        cache_read_input_tokens: 1,
-                        cache_write_input_tokens: 2,
-                        output_tokens: 5,
-                        reasoning_tokens: None,
-                    }),
-                })]));
+                return provider_script([completed(Some(qq_provider::ProviderUsage {
+                    input_tokens: 3,
+                    cache_read_input_tokens: 1,
+                    cache_write_input_tokens: 2,
+                    output_tokens: 5,
+                    reasoning_tokens: None,
+                }))]);
             }
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "slice checkpoint".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]));
+            return text_reply("slice checkpoint");
         }
         if current > tool_turns {
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "task complete".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: self
-                        .metered_empty_checkpoint
+            return provider_script([
+                text_delta("task complete"),
+                completed(
+                    self.metered_empty_checkpoint
                         .then_some(qq_provider::ProviderUsage {
                             input_tokens: 7,
                             cache_read_input_tokens: 0,
@@ -898,8 +846,8 @@ impl Provider for RenewableSliceProvider {
                             output_tokens: 3,
                             reasoning_tokens: None,
                         }),
-                }),
-            ]));
+                ),
+            ]);
         }
 
         let mut events = Vec::with_capacity(crate::MAX_TOOL_CALLS_PER_TURN * 3 + 1);
@@ -986,12 +934,7 @@ impl Provider for TurnTextProvider {
                 Ok(qq_provider::ProviderEvent::Completed { usage: None }),
             ]))
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]))
+            text_reply("done")
         }
     }
 }
@@ -1077,12 +1020,7 @@ impl Provider for ApprovalProvider {
                 Ok(qq_provider::ProviderEvent::Completed { usage: self.usage }),
             ]))
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: self.usage }),
-            ]))
+            provider_script([text_delta("done"), completed(self.usage)])
         }
     }
 }
@@ -1121,12 +1059,7 @@ impl Provider for ScriptedRunProvider {
             .is_some_and(|text| text.starts_with("Summarize this conversation"));
         self.requests.lock().unwrap().push(request);
         if summarizing {
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: valid_summary("done"),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]));
+            return text_reply(valid_summary("done"));
         }
         let mut turn = self.turn.lock().unwrap();
         let current = *turn;
@@ -1147,12 +1080,7 @@ impl Provider for ScriptedRunProvider {
                 }),
                 Ok(qq_provider::ProviderEvent::Completed { usage: None }),
             ])),
-            None => Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ])),
+            None => text_reply("done"),
         }
     }
 }
@@ -2782,10 +2710,7 @@ impl Provider for AutoCompactProvider {
             .unwrap_or_default();
         self.requests.lock().unwrap().push(request);
         match &self.script {
-            AutoCompactScript::Text(text) => Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ])),
+            AutoCompactScript::Text(text) => text_reply(text.clone()),
             AutoCompactScript::TextThenTransportFault(text) => Box::pin(stream::iter([
                 Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
                 Err(qq_provider::ProviderError::Transport(
@@ -2827,10 +2752,7 @@ impl Provider for AutoCompactProvider {
                 text,
             } => {
                 if already_read {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     Box::pin(stream::iter([
                         Ok(qq_provider::ProviderEvent::ToolCallStarted {
@@ -2850,10 +2772,7 @@ impl Provider for AutoCompactProvider {
             }
             AutoCompactScript::ReadNoteThenText(text) => {
                 if already_read {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     Box::pin(stream::iter([
                         Ok(qq_provider::ProviderEvent::ToolCallStarted {
@@ -2873,10 +2792,7 @@ impl Provider for AutoCompactProvider {
             }
             AutoCompactScript::ReadNotesThenText { notes, text } => {
                 if already_read {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     let mut events = Vec::new();
                     for note in 0..*notes {
@@ -2905,10 +2821,7 @@ impl Provider for AutoCompactProvider {
                     reasoning_tokens: None,
                 });
                 if already_read {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage }),
-                    ]))
+                    provider_script([text_delta(text.clone()), completed(usage)])
                 } else {
                     Box::pin(stream::iter([
                         Ok(qq_provider::ProviderEvent::ToolCallStarted {
@@ -2935,12 +2848,7 @@ impl Provider for AutoCompactProvider {
                 if last_text.contains("cut off at the output token limit") {
                     let summarized = prior_results.len() + summarized_before;
                     let full = format!("{summary}\nturns_done={summarized}");
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: full[*cut..].to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply(full[*cut..].to_owned());
                 }
                 if last_text.contains("Summarize this conversation") {
                     let summarized = prior_results.len() + summarized_before;
@@ -2957,10 +2865,7 @@ impl Provider for AutoCompactProvider {
                 }
                 let done = prior_results.len() + summarized_before;
                 if done >= *turns {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     let id = format!("call_shell_{done}");
                     Box::pin(stream::iter([
@@ -2992,19 +2897,11 @@ impl Provider for AutoCompactProvider {
                         return Box::pin(stream::pending());
                     }
                     let summarized = prior_results.len() + summarized_before;
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: format!("{summary}\nturns_done={summarized}"),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply(format!("{summary}\nturns_done={summarized}"));
                 }
                 let done = prior_results.len() + summarized_before;
                 if done >= *turns {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     let id = format!("call_shell_{done}");
                     Box::pin(stream::iter([
@@ -3038,30 +2935,17 @@ impl Provider for AutoCompactProvider {
             AutoCompactScript::ShellBatchesAcrossACheckpoint { calls, text } => {
                 if last_text.contains("Summarize this conversation") {
                     let summarized = prior_results.len() + summarized_before;
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: format!(
-                                "{}\nturns_done={summarized}",
-                                valid_summary("batched shell work")
-                            ),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply(format!(
+                        "{}\nturns_done={summarized}",
+                        valid_summary("batched shell work")
+                    ));
                 }
                 if last_text == crate::SLICE_CHECKPOINT_NOTICE {
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: "report: batches so far are done".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply("report: batches so far are done");
                 }
                 let done = prior_results.len() + summarized_before;
                 if done >= *calls {
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply(text.clone());
                 }
                 let mut events = Vec::new();
                 for index in done..done + crate::MAX_TOOL_CALLS_PER_TURN {
@@ -3091,12 +2975,7 @@ impl Provider for AutoCompactProvider {
             } => {
                 if last_text.contains("Summarize this conversation") {
                     let summarized = prior_results.len() + summarized_before;
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: format!("{summary}\nturns_done={summarized}"),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply(format!("{summary}\nturns_done={summarized}"));
                 }
                 if prior_results.len() == *fault_at
                     && summarized_before == 0
@@ -3109,10 +2988,7 @@ impl Provider for AutoCompactProvider {
                 }
                 let done = prior_results.len() + summarized_before;
                 if done >= *turns {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     let id = format!("call_shell_{done}");
                     Box::pin(stream::iter([
@@ -3138,12 +3014,7 @@ impl Provider for AutoCompactProvider {
             } => {
                 if last_text.contains("Summarize this conversation") {
                     let summarized = prior_results.len() + summarized_before;
-                    return Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                            text: format!("{summary}\nturns_done={summarized}"),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]));
+                    return text_reply(format!("{summary}\nturns_done={summarized}"));
                 }
                 if prior_results.len() >= *overflow_at && summarized_before == 0 {
                     overflows.fetch_add(1, Ordering::SeqCst);
@@ -3156,10 +3027,7 @@ impl Provider for AutoCompactProvider {
                 }
                 let done = prior_results.len() + summarized_before;
                 if done >= *turns {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     let id = format!("call_shell_{done}");
                     Box::pin(stream::iter([
@@ -3178,10 +3046,7 @@ impl Provider for AutoCompactProvider {
             }
             AutoCompactScript::ReadNoteRepeatedly { turns, text } => {
                 if prior_results.len() >= *turns {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     let id = format!("call_read_{}", prior_results.len());
                     Box::pin(stream::iter([
@@ -3200,10 +3065,7 @@ impl Provider for AutoCompactProvider {
             }
             AutoCompactScript::SearchHistoryThenText(query, text) => {
                 if already_read {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    text_reply(text.clone())
                 } else {
                     Box::pin(stream::iter([
                         Ok(qq_provider::ProviderEvent::ToolCallStarted {
@@ -3267,10 +3129,7 @@ impl Provider for AutoCompactProvider {
                             Ok(qq_provider::ProviderEvent::Completed { usage: None }),
                         ]))
                     }
-                    _ => Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ])),
+                    _ => text_reply(text.clone()),
                 }
             }
             AutoCompactScript::Fail => Box::pin(stream::iter([Err(
@@ -3655,12 +3514,7 @@ impl Provider for TruncatingProvider {
             }));
             Box::pin(stream::iter(events))
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: " second half".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage }),
-            ]))
+            provider_script([text_delta(" second half"), completed(usage)])
         }
     }
 }
@@ -3677,12 +3531,7 @@ struct ContextBudgetProvider;
 
 impl Provider for ContextBudgetProvider {
     fn stream(&self, _request: ModelRequest) -> ProviderStream {
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "x".repeat(MAX_CONTEXT_BYTES + 1),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-        ]))
+        text_reply("x".repeat(MAX_CONTEXT_BYTES + 1))
     }
 }
 
@@ -3882,12 +3731,7 @@ struct StaticTextProvider;
 
 impl Provider for StaticTextProvider {
     fn stream(&self, _request: ModelRequest) -> ProviderStream {
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "done".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-        ]))
+        text_reply("done")
     }
 }
 
@@ -3897,14 +3741,7 @@ struct AccountingTextProvider {
 
 impl Provider for AccountingTextProvider {
     fn stream(&self, _request: ModelRequest) -> ProviderStream {
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: "done".to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(self.usage),
-            }),
-        ]))
+        provider_script([text_delta("done"), completed(Some(self.usage))])
     }
 }
 
@@ -3953,20 +3790,16 @@ impl Provider for AccountingSpawnProvider {
                 }),
             ]))
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 5,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        output_tokens: 7,
-                        reasoning_tokens: None,
-                    }),
-                }),
-            ]))
+            provider_script([
+                text_delta("done"),
+                completed(Some(qq_provider::ProviderUsage {
+                    input_tokens: 5,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 7,
+                    reasoning_tokens: None,
+                })),
+            ])
         }
     }
 }
@@ -4123,12 +3956,7 @@ impl Provider for MultiSpawnProvider {
             events.push(Ok(qq_provider::ProviderEvent::Completed { usage: None }));
             Box::pin(stream::iter(events))
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]))
+            text_reply("done")
         }
     }
 }
@@ -4307,12 +4135,7 @@ impl Provider for TextScriptProvider {
         if text == "<hang>" {
             return Box::pin(stream::pending());
         }
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: text.to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-        ]))
+        text_reply(text.to_owned())
     }
 }
 
@@ -4637,12 +4460,7 @@ impl Provider for StatelessFanOut {
                 .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
         });
         if has_results {
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "done".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]));
+            return text_reply("done");
         }
         let route = self.route;
         let mut events = Vec::new();
@@ -4730,20 +4548,16 @@ struct VerdictProvider {
 impl Provider for VerdictProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
         self.requests.lock().unwrap().push(request);
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: self.reply.to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(qq_provider::ProviderUsage {
-                    input_tokens: 50,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 5,
-                    reasoning_tokens: None,
-                }),
-            }),
-        ]))
+        provider_script([
+            text_delta(self.reply.to_owned()),
+            completed(Some(qq_provider::ProviderUsage {
+                input_tokens: 50,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: 5,
+                reasoning_tokens: None,
+            })),
+        ])
     }
 }
 
@@ -4822,12 +4636,7 @@ impl Provider for MutateThenScriptProvider {
             .unwrap()
             .pop_front()
             .unwrap_or("out of script");
-        Box::pin(stream::iter([
-            Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                text: text.to_owned(),
-            }),
-            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-        ]))
+        text_reply(text.to_owned())
     }
 }
 
@@ -5012,14 +4821,10 @@ impl Provider for BudgetLoopProvider {
                 }),
             ]))
         } else {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "final status".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: self.usage.map(provider_usage_of),
-                }),
-            ]))
+            provider_script([
+                text_delta("final status"),
+                completed(self.usage.map(provider_usage_of)),
+            ])
         }
     }
 }
