@@ -50,6 +50,7 @@ pub(crate) enum Command {
     SearchHistory,
     PruneSessions,
     UndoWorkspace,
+    CopyAnswer,
     Quit,
 }
 
@@ -103,7 +104,7 @@ macro_rules! spec {
     (@action $action:ident) => { Some(Action::$action) };
 }
 
-pub(crate) const COMMANDS: [CommandSpec; 45] = [
+pub(crate) const COMMANDS: [CommandSpec; 46] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -290,17 +291,24 @@ pub(crate) const COMMANDS: [CommandSpec; 45] = [
     ),
     spec!(
         CursorUp,
-        "select the previous tool call",
+        "move the block cursor up; y copies the block",
         View,
         [],
         ["Ctrl-Up"]
     ),
     spec!(
         CursorDown,
-        "select the next tool call",
+        "move the block cursor down; y copies the block",
         View,
         [],
         ["Ctrl-Down"]
+    ),
+    spec!(
+        CopyAnswer,
+        "copy the last answer; /copy code copies its last code block",
+        View,
+        ["/copy"],
+        []
     ),
     spec!(
         ToggleReasoning,

@@ -46,6 +46,22 @@ fn main() {
     switcher_open_and_filter(iterations);
     agents_200_rail(iterations);
     keystroke_with_8_streams(iterations);
+    selection_paint(iterations);
+}
+
+fn selection_paint(iterations: u32) {
+    let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
+    harness.hide_sidebar();
+    harness.hide_inspector();
+    harness.settle_highlights();
+    black_box(harness.draw());
+    let mut end = 30;
+    let samples = collect(iterations, || {
+        end = if end == 30 { 31 } else { 30 };
+        harness.drag((4, 4), (120, end));
+        harness.draw().len()
+    });
+    report_samples("selection_drag_27_rows_to_frame", &samples);
 }
 
 fn switcher_open_and_filter(iterations: u32) {

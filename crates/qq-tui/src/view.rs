@@ -32,7 +32,7 @@ use crate::{
         success, surface, text_width, warning, write_line,
     },
     theme,
-    viewport::{MAX_PANES, TranscriptPane, View, Viewport},
+    viewport::{Block, MAX_PANES, TranscriptPane, View, Viewport},
 };
 use chrome::*;
 pub(crate) use chrome::{ComposerMode, CursorPosition};
@@ -45,6 +45,7 @@ use layout::{Tier, TranscriptSlot, compute_layout};
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
 use overlay::*;
 use sidebar::*;
+pub(crate) use tools::tool_copy_text;
 use tools::*;
 use transcript::*;
 use workspace::*;
@@ -74,6 +75,33 @@ pub(crate) fn render_size(actual_size: (u16, u16)) -> (usize, usize) {
     )
 }
 
+pub(crate) fn code_blocks(source: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current: Option<String> = None;
+    for event in pulldown_cmark::Parser::new_ext(source, pulldown_cmark::Options::all()) {
+        match event {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => {
+                current = Some(String::new());
+            }
+            pulldown_cmark::Event::Text(text) => {
+                if let Some(code) = current.as_mut() {
+                    code.push_str(&text);
+                }
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::CodeBlock) => {
+                if let Some(mut code) = current.take() {
+                    if code.ends_with('\n') {
+                        code.pop();
+                    }
+                    blocks.push(code);
+                }
+            }
+            _ => {}
+        }
+    }
+    blocks
+}
+
 pub(crate) fn rail_visible(width: usize, prefs: LayoutPrefs, sessions: usize) -> bool {
     layout::rail_width(width, prefs, sessions) > 0
 }
@@ -88,6 +116,9 @@ pub(crate) struct FrameRenderer {
     pane_updates: Vec<(usize, PaneUpdate)>,
     goal_scroll: Option<usize>,
     cursor: Option<CursorPosition>,
+    transcript_area: Option<crate::selection::Area>,
+    shapes: Vec<crate::selection::RowShape>,
+    shapes_ready: bool,
 }
 
 impl FrameRenderer {
@@ -95,10 +126,13 @@ impl FrameRenderer {
         if let Some(scroll) = self.goal_scroll.take() {
             app.goal_scroll = scroll;
         }
+        app.geometry.transcript = self.transcript_area;
         for (index, update) in self.pane_updates.drain(..) {
             if let Some(pane) = app.panes.get_mut(index) {
                 pane.viewport = update.viewport;
                 pane.live_message_ranges = update.live_message_ranges;
+                let previous = std::mem::replace(&mut pane.blocks, update.blocks);
+                self.cache.recycle_blocks(previous);
             }
         }
     }
@@ -110,8 +144,9 @@ impl FrameRenderer {
 
     pub fn draw(&mut self, app: &mut App, actual_size: (u16, u16)) -> io::Result<Vec<u8>> {
         let (width, height) = render_size(actual_size);
-        let frame = self.frame(app, width, height);
+        let mut frame = self.frame(app, width, height);
         self.commit(app);
+        self.paint_selection(app, &mut frame);
         let resized = self.size != Some(actual_size);
         let mut output = Vec::with_capacity(4096);
         queue!(&mut output, BeginSynchronizedUpdate)?;
@@ -146,9 +181,49 @@ impl FrameRenderer {
         Ok(output)
     }
 
+    fn paint_selection(&mut self, app: &mut App, frame: &mut [Line]) {
+        let Some(selection) = app.selection.as_mut() else {
+            return;
+        };
+        self.shapes = Self::shapes_of(frame, self.transcript_area);
+        self.shapes_ready = true;
+        if selection.still_shows(frame, &self.shapes, self.transcript_area) {
+            selection.paint(frame, &self.shapes);
+        } else {
+            app.selection = None;
+        }
+    }
+
+    pub(crate) fn selection_text(
+        &self,
+        selection: &crate::selection::Selection,
+    ) -> crate::selection::Copied {
+        if self.shapes_ready {
+            return selection.text(&self.previous, &self.shapes);
+        }
+        selection.text(
+            &self.previous,
+            &Self::shapes_of(&self.previous, self.transcript_area),
+        )
+    }
+
+    fn shapes_of(
+        frame: &[Line],
+        area: Option<crate::selection::Area>,
+    ) -> Vec<crate::selection::RowShape> {
+        let rows = area.map_or(0, |area| area.y + area.height);
+        frame
+            .iter()
+            .take(rows)
+            .map(crate::selection::RowShape::of)
+            .collect()
+    }
+
     fn frame(&mut self, app: &App, width: usize, height: usize) -> Vec<Line> {
         theme::activate(app.theme().palette);
         self.pane_updates.clear();
+        self.transcript_area = None;
+        self.shapes_ready = false;
         if self.theme_generation != app.theme_generation {
             self.theme_generation = app.theme_generation;
             self.cache = TranscriptCache::default();
@@ -219,6 +294,17 @@ impl FrameRenderer {
                 };
                 overlay_slash_autocomplete(&mut rows, menu);
             }
+            if index == app.focused_pane
+                && shown_view(app, pane, inline_detail).transcript().is_some()
+            {
+                self.transcript_area = Some(crate::selection::Area {
+                    x: slot.area.x,
+                    y: 0,
+                    width: slot.area.width,
+                    height: body_height,
+                });
+                self.shapes_ready = false;
+            }
             if slot.area.x == 0 {
                 body = fit_height(rows, body_height);
             } else {
@@ -232,7 +318,7 @@ impl FrameRenderer {
             ));
         }
         for line in &mut dock {
-            line.indent = layout::MARGIN;
+            line.indent = layout::MARGIN as u16;
         }
         body.extend(dock);
         if let Some(rail) = layout.rail {
@@ -244,6 +330,10 @@ impl FrameRenderer {
                 let first = std::mem::take(slot);
                 let mut row = Line {
                     indent: first.indent,
+                    chrome: first.chrome,
+                    pad: first.pad,
+                    kind: first.kind,
+                    join: first.join,
                     spans: first.spans,
                 };
                 for (x, column) in &mut columns {
@@ -252,11 +342,14 @@ impl FrameRenderer {
                     };
                     if used > *x {
                         let indent = row.indent;
-                        row = truncate_line(std::mem::take(&mut row), x.saturating_sub(indent));
+                        row = truncate_line(
+                            std::mem::take(&mut row),
+                            x.saturating_sub(usize::from(indent)),
+                        );
                         row.indent = indent;
                         used = row.width();
                     }
-                    let start = *x + cells.indent;
+                    let start = *x + usize::from(cells.indent);
                     if used < start {
                         row.push(" ".repeat(start - used), normal());
                         used = start;
@@ -302,10 +395,30 @@ impl FrameRenderer {
             height,
             inline_detail,
         );
+        if index == app.focused_pane
+            && let Some(cursor @ (Block::Message(_) | Block::Code(..))) = app.block_cursor
+            && let Some((_, range)) = update.blocks.iter().find(|(block, _)| *block == cursor)
+        {
+            let window = update.viewport.window();
+            let first = range.start.max(window.start) - window.start;
+            let last = range.end.min(window.end).saturating_sub(window.start);
+            for line in lines.iter_mut().take(last).skip(first) {
+                line.spans.insert(
+                    0,
+                    crate::render::Span {
+                        text: String::new(),
+                        style: normal(),
+                    },
+                );
+                for span in &mut line.spans {
+                    span.style = selection(span.style);
+                }
+            }
+        }
         self.pane_updates.push((index, update));
         if slot.inset > 0 {
             for line in &mut lines {
-                line.indent = slot.inset;
+                line.indent = u16::try_from(slot.inset).unwrap_or(u16::MAX);
             }
         }
         lines
@@ -343,6 +456,33 @@ impl FrameRenderer {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) fn message_rows_for_test(source: &str, role: MessageRole, width: usize) -> Vec<Line> {
+    transcript::message_rows(
+        markdown_lines(source, width.saturating_sub(2), false),
+        role,
+        width,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn tool_row_for_test(output: &str, width: usize) -> Vec<Line> {
+    let mut rows = vec![Line::styled("● ", faint()).with_chrome(2)];
+    rows[0].push("Ran  cargo test", normal());
+    rows[0].kind = crate::render::RowKind::Tool;
+    rows.extend(
+        output
+            .lines()
+            .map(|line| tools::tail_row(line, muted(), width)),
+    );
+    rows
+}
+
+#[cfg(test)]
+pub(crate) fn wrap_for_test(line: Line, width: usize) -> Vec<Line> {
+    wrap_line(line, width)
+}
 
 #[cfg(any(test, feature = "bench-support"))]
 impl FrameRenderer {

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ops::Range};
 
-use qq_protocol::{MessageId, SessionId};
+use qq_protocol::{MessageId, SessionId, ToolCallId};
 
 pub(crate) const MAX_PANES: usize = 3;
 
@@ -36,11 +36,19 @@ impl View {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Block {
+    Message(MessageId),
+    Code(MessageId, usize),
+    Tool(ToolCallId),
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct TranscriptPane {
     pub view: View,
     pub viewport: Viewport,
     pub live_message_ranges: HashMap<MessageId, Range<usize>>,
+    pub blocks: Vec<(Block, Range<usize>)>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -95,6 +103,28 @@ impl Viewport {
         self.height
     }
 
+    pub(crate) fn window(&self) -> Range<usize> {
+        let end = self.body_rows.saturating_sub(self.offset);
+        end.saturating_sub(self.height)..end
+    }
+
+    pub(crate) fn reveal(&mut self, rows: &Range<usize>) -> bool {
+        let before = self.offset;
+        let window = self.window();
+        let top = if rows.start < window.start || rows.len() > self.height {
+            rows.start
+        } else if rows.end > window.end {
+            rows.end.saturating_sub(self.height)
+        } else {
+            window.start
+        };
+        self.offset = self
+            .body_rows
+            .saturating_sub(top.saturating_add(self.height))
+            .min(self.body_rows.saturating_sub(self.height));
+        self.offset != before
+    }
+
     pub(crate) fn intersects_or_follows(&self, rows: &Range<usize>) -> bool {
         self.height > 0 && self.body_rows.saturating_sub(self.offset) > rows.start
     }
@@ -140,6 +170,21 @@ mod tests {
         assert_eq!(viewport.offset(), 0);
         viewport.update(View::Attention, 50, 10, false);
         assert_eq!(viewport.offset(), 0);
+    }
+
+    #[test]
+    fn revealing_a_block_scrolls_just_enough_to_show_its_top() {
+        let mut viewport = Viewport::default();
+        let context = View::Transcript(Some(session(1)));
+        viewport.update(context, 100, 10, false);
+        assert_eq!(viewport.window(), 90..100);
+        assert!(viewport.reveal(&(40..44)));
+        assert_eq!(viewport.window(), 40..50);
+        assert!(!viewport.reveal(&(42..45)));
+        assert!(viewport.reveal(&(95..99)));
+        assert_eq!(viewport.window(), 89..99);
+        assert!(viewport.reveal(&(10..40)));
+        assert_eq!(viewport.window(), 10..20);
     }
 
     #[test]

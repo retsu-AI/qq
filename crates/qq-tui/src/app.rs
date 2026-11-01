@@ -3,7 +3,9 @@ use std::{
     sync::Arc,
 };
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 pub use qq_client::state::ModelOption;
 pub(crate) use qq_client::state::{
     ApprovalPreview, Attention, NoticeLevel, SessionStore, SessionView,
@@ -28,9 +30,10 @@ use crate::{
     effect::{Effect, Effects, PendingSubmit, Redraw, SubmitTarget},
     input::{Mode, Overlay, SessionConfirm, approval_mode_label, effort_label},
     picker::Picker,
+    selection::{Copied, FrameGeometry, MULTI_CLICK_MS, Selection, Unit},
     terminal,
     theme::Theme,
-    viewport::{TranscriptPane, View, Viewport},
+    viewport::{Block, TranscriptPane, View, Viewport},
 };
 mod pickers;
 
@@ -310,7 +313,10 @@ pub(crate) struct App {
     pub(crate) goal_defaults: GoalDefaults,
     pub tool_detail: ToolDetail,
     pub(crate) expanded_tool_calls: std::collections::HashSet<qq_protocol::ToolCallId>,
-    pub(crate) transcript_cursor: Option<qq_protocol::ToolCallId>,
+    pub(crate) block_cursor: Option<Block>,
+    pub(crate) selection: Option<Selection>,
+    pub(crate) geometry: FrameGeometry,
+    last_click: Option<(std::time::Instant, (u16, u16), u8)>,
     pub reasoning_detail: ReasoningDetail,
     pub(crate) goal_scroll: usize,
     pub layout: crate::view::LayoutPrefs,
@@ -374,7 +380,10 @@ impl App {
             goal_defaults: options.goals,
             tool_detail: ToolDetail::default(),
             expanded_tool_calls: std::collections::HashSet::new(),
-            transcript_cursor: None,
+            block_cursor: None,
+            selection: None,
+            geometry: FrameGeometry::default(),
+            last_click: None,
             reasoning_detail: ReasoningDetail::default(),
             goal_scroll: 0,
             layout: crate::view::LayoutPrefs::default(),
@@ -1204,15 +1213,7 @@ impl App {
                 };
                 Effects::changed_now(changed)
             }
-            Event::Mouse(mouse) if self.overlay.is_none() => {
-                let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(isize::MAX);
-                let changed = match mouse.kind {
-                    MouseEventKind::ScrollUp => self.viewport_mut().scroll(rows),
-                    MouseEventKind::ScrollDown => self.viewport_mut().scroll(-rows),
-                    _ => false,
-                };
-                Effects::changed_now(changed)
-            }
+            Event::Mouse(mouse) if self.overlay.is_none() => self.handle_mouse(mouse),
             Event::FocusGained => {
                 self.terminal_focused = true;
                 Effects::redraw(Redraw::Immediate)
@@ -1223,16 +1224,98 @@ impl App {
             }
             Event::Resize(columns, _) => {
                 self.terminal_width = usize::from(columns);
+                self.selection = None;
                 Effects::redraw(Redraw::Immediate)
             }
             Event::Key(_) | Event::Mouse(_) => Effects::none(),
         }
     }
 
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> Effects {
+        if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+            return Effects::none();
+        }
+        let (column, row) = (usize::from(mouse.column), usize::from(mouse.row));
+        match mouse.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(isize::MAX);
+                let rows = if mouse.kind == MouseEventKind::ScrollUp {
+                    rows
+                } else {
+                    -rows
+                };
+                Effects::changed_now(self.viewport_mut().scroll(rows))
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let cleared = self.selection.take().is_some();
+                let now = std::time::Instant::now();
+                let clicks = match self.last_click {
+                    Some((at, cell, count))
+                        if cell == (mouse.column, mouse.row)
+                            && now.duration_since(at).as_millis() <= MULTI_CLICK_MS =>
+                    {
+                        count.saturating_add(1).min(3)
+                    }
+                    Some(_) | None => 1,
+                };
+                self.last_click = Some((now, (mouse.column, mouse.row), clicks));
+                self.selection = self
+                    .geometry
+                    .transcript
+                    .and_then(|area| Selection::start(area, column, row, Unit::for_clicks(clicks)));
+                let painted = self
+                    .selection
+                    .is_some_and(|selection| !selection.is_click());
+                Effects::changed_now(cleared || painted)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let changed = self.selection.as_mut().is_some_and(|selection| {
+                    selection.unit == Unit::Cell && selection.extend(column, row)
+                });
+                Effects::changed_now(changed)
+            }
+            MouseEventKind::Up(MouseButton::Left) => match self.selection {
+                Some(selection) if selection.is_click() => {
+                    self.selection = None;
+                    Effects::none()
+                }
+                Some(selection) => {
+                    let mut effects = Effects::redraw(Redraw::Immediate);
+                    effects.push(Effect::CopySelection(selection));
+                    effects
+                }
+                None => Effects::none(),
+            },
+            _ => Effects::none(),
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> Effects {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            if let Some(selection) = self.selection.take()
+                && !selection.is_click()
+            {
+                let mut effects = Effects::redraw(Redraw::Immediate);
+                effects.push(Effect::CopySelection(selection));
+                return effects;
+            }
+            if self.block_cursor.is_some() {
+                return self.copy_block();
+            }
             return self.execute(Command::Quit);
         }
+        if self.selection.take().is_some() {
+            if key.code == KeyCode::Esc {
+                return Effects::redraw(Redraw::Immediate);
+            }
+            let mut effects = Effects::redraw(Redraw::Immediate);
+            effects.extend(self.dispatch_key(key));
+            return effects;
+        }
+        self.dispatch_key(key)
+    }
+
+    fn dispatch_key(&mut self, key: KeyEvent) -> Effects {
         match self.mode() {
             Mode::GoalForm
             | Mode::GoalCheck
@@ -1267,12 +1350,19 @@ impl App {
         if key.code == KeyCode::Char('?') && self.composer.text.is_empty() {
             return self.execute(Command::OpenHelp);
         }
+        if key.code == KeyCode::Char('y')
+            && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+            && self.composer.text.is_empty()
+            && self.block_cursor.is_some()
+        {
+            return self.copy_block();
+        }
         if let Some(command) = commands::command_for_key(&self.settings, key) {
             return self.execute(command);
         }
         match key.code {
             KeyCode::Esc => {
-                if self.transcript_cursor.take().is_some() {
+                if self.block_cursor.take().is_some() {
                     return Effects::redraw(Redraw::Immediate);
                 }
                 if matches!(
@@ -1313,12 +1403,15 @@ impl App {
                 }
                 Effects::none()
             }
-            KeyCode::Enter if self.transcript_cursor.is_some() && self.composer.text.is_empty() => {
-                let Some(call) = self.transcript_cursor else {
+            KeyCode::Enter
+                if matches!(self.block_cursor, Some(Block::Tool(_)))
+                    && self.composer.text.is_empty() =>
+            {
+                let Some(Block::Tool(call)) = self.block_cursor else {
                     return Effects::none();
                 };
                 if let Some(child) = self.sessions.child_spawned_by(call) {
-                    self.transcript_cursor = None;
+                    self.block_cursor = None;
                     return self.focus_session(child);
                 }
                 if !self.expanded_tool_calls.remove(&call) {
@@ -1460,6 +1553,10 @@ impl App {
 
     pub(crate) fn set_view(&mut self, view: View) {
         self.goal_scroll = 0;
+        if self.pane().view != view {
+            self.block_cursor = None;
+            self.selection = None;
+        }
         self.pane_mut().view = view;
     }
 
@@ -1596,10 +1693,12 @@ impl App {
             Command::CancelRun => self.cancel_run(),
             Command::ToggleMouse => {
                 self.mouse_capture = !self.mouse_capture;
+                self.layout.flush = !self.mouse_capture;
+                self.selection = None;
                 self.set_info(if self.mouse_capture {
-                    "mouse on: wheel scrolls, click focuses; hold Shift to select text".to_owned()
+                    "mouse on: drag copies, double-click a word, triple-click a block, wheel scrolls; Shift-drag uses the terminal's selection".to_owned()
                 } else {
-                    "mouse off: terminal selection works; PageUp/PageDown scroll".to_owned()
+                    "mouse off: the terminal selects and copies; the rail hides and the transcript is flush left; PageUp/PageDown scroll".to_owned()
                 });
                 let mut effects = Effects::redraw(Redraw::Immediate);
                 effects.push(Effect::MouseCapture(self.mouse_capture));
@@ -1609,8 +1708,9 @@ impl App {
             Command::UndoWorkspace => self.undo_workspace(),
             Command::ShowAttention => self.show_workspace_view(View::Attention),
             Command::ShowChanges => self.show_workspace_view(View::Changes),
-            Command::CursorUp => Effects::changed_now(self.move_transcript_cursor(false)),
-            Command::CursorDown => Effects::changed_now(self.move_transcript_cursor(true)),
+            Command::CursorUp => Effects::changed_now(self.move_block_cursor(false)),
+            Command::CursorDown => Effects::changed_now(self.move_block_cursor(true)),
+            Command::CopyAnswer => self.copy_last_answer(false),
             Command::ToggleToolDetail => {
                 self.tool_detail = self.tool_detail.next();
                 Effects::redraw(Redraw::Immediate)
@@ -1859,6 +1959,18 @@ impl App {
                 "check" => self.open_goal_check(),
                 "edit" => self.open_goal_form(None),
                 objective => self.open_goal_form(Some(objective.to_owned())),
+            };
+        }
+        if name == "/copy" {
+            self.composer.clear();
+            self.slash.select(0);
+            return match question.trim() {
+                "" => self.copy_last_answer(false),
+                "code" => self.copy_last_answer(true),
+                _ => {
+                    self.set_warning("use /copy or /copy code".to_owned());
+                    Effects::redraw(Redraw::Immediate)
+                }
             };
         }
         if matches!(name, "/btw" | "/ask" | "/btw-new") {
@@ -3011,6 +3123,14 @@ fn valid_model_route(route: &str) -> bool {
         .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
 }
 
+fn message_source(message: &qq_protocol::MessageSnapshot) -> &str {
+    if message.output.is_empty() {
+        &message.refusal
+    } else {
+        &message.output
+    }
+}
+
 pub(crate) fn terminal_safe_character(character: char) -> Option<char> {
     if character.is_control() {
         return character.is_whitespace().then_some(' ');
@@ -3044,38 +3164,133 @@ fn is_composer_newline_key(key: KeyEvent) -> bool {
 }
 
 #[cfg(test)]
+mod copy_tests;
+#[cfg(test)]
 mod tests;
 
 impl App {
-    fn move_transcript_cursor(&mut self, down: bool) -> bool {
-        let Some(session) = self
-            .view()
-            .transcript()
-            .and_then(|id| self.sessions.get(&id))
-        else {
-            return false;
-        };
-        let Some(calls) = session.tool_calls.as_ref() else {
-            return false;
-        };
-        if calls.is_empty() {
+    fn move_block_cursor(&mut self, down: bool) -> bool {
+        if self.view().transcript().is_none() {
             return false;
         }
+        let mut blocks: Vec<(Block, std::ops::Range<usize>)> = self.pane().blocks.clone();
+        if blocks.is_empty() {
+            return false;
+        }
+        blocks.sort_by_key(|(block, range)| (range.start, matches!(block, Block::Code(..))));
         let position = self
-            .transcript_cursor
-            .and_then(|id| calls.iter().position(|call| call.id == id));
+            .block_cursor
+            .and_then(|cursor| blocks.iter().position(|(block, _)| *block == cursor));
+        let last = blocks.len() - 1;
         let next = match (position, down) {
-            (None, true) => 0,
-            (None, false) => calls.len() - 1,
-            (Some(index), true) => (index + 1).min(calls.len() - 1),
+            (None, true) => {
+                let top = self.viewport().window().start;
+                blocks
+                    .iter()
+                    .position(|(_, range)| range.start >= top)
+                    .unwrap_or(last)
+            }
+            (None, false) => last,
+            (Some(index), true) => (index + 1).min(last),
             (Some(index), false) => index.saturating_sub(1),
         };
-        let target = calls[next].id;
-        if self.transcript_cursor == Some(target) {
+        let (target, range) = blocks.swap_remove(next);
+        let revealed = self.viewport_mut().reveal(&range);
+        if self.block_cursor == Some(target) && !revealed {
             return false;
         }
-        self.transcript_cursor = Some(target);
+        self.block_cursor = Some(target);
         true
+    }
+
+    fn copy_block(&mut self) -> Effects {
+        let Some(cursor) = self.block_cursor else {
+            return Effects::none();
+        };
+        let session = self
+            .view()
+            .transcript()
+            .and_then(|id| self.sessions.get(&id));
+        let message = |id: qq_protocol::MessageId| {
+            session
+                .and_then(|session| session.messages.as_ref())
+                .and_then(|messages| messages.iter().find(|message| message.id == id))
+        };
+        let text = match cursor {
+            Block::Message(id) => message(id).map(|message| message_source(message).to_owned()),
+            Block::Code(id, index) => message(id).and_then(|message| {
+                crate::view::code_blocks(message_source(message))
+                    .into_iter()
+                    .nth(index)
+            }),
+            Block::Tool(id) => session
+                .and_then(|session| session.tool_calls.as_ref())
+                .and_then(|calls| calls.iter().find(|call| call.id == id))
+                .map(crate::view::tool_copy_text),
+        };
+        self.copy_text(text.as_deref())
+    }
+
+    fn copy_last_answer(&mut self, code: bool) -> Effects {
+        let Some(answer) = self.last_answer() else {
+            self.set_warning("no answer to copy yet".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        if !code {
+            let answer = answer.to_owned();
+            return self.copy_text(Some(&answer));
+        }
+        let Some(block) = crate::view::code_blocks(answer).pop() else {
+            self.set_warning("the last answer has no code block".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        self.copy_text(Some(&block))
+    }
+
+    fn copy_text(&mut self, text: Option<&str>) -> Effects {
+        let copied = Copied::new(text.unwrap_or_default());
+        if copied.text.is_empty() {
+            self.set_warning("nothing to copy".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        }
+        let mut effects = Effects::none();
+        effects.push(Effect::Copy(copied));
+        effects
+    }
+
+    pub(crate) fn apply_copy_result(
+        &mut self,
+        lines: usize,
+        truncated: bool,
+        confirmed: bool,
+    ) -> Effects {
+        let lines = if lines == 1 {
+            "1 line".to_owned()
+        } else {
+            format!("{lines} lines")
+        };
+        let mut text = if confirmed {
+            format!("copied {lines}")
+        } else {
+            format!("sent {lines} to the terminal clipboard")
+        };
+        if truncated {
+            text.push_str(", cut at 1 MiB");
+        }
+        self.set_info(text);
+        Effects::redraw(Redraw::Immediate)
+    }
+
+    pub(crate) fn last_answer(&self) -> Option<&str> {
+        let session = self.sessions.get(&self.focused()?)?;
+        session
+            .messages
+            .as_ref()?
+            .iter()
+            .rev()
+            .filter(|message| message.role == qq_protocol::MessageRole::Assistant)
+            .map(message_source)
+            .find(|text| !text.trim().is_empty())
     }
 
     pub(crate) fn composer_mode(&self) -> crate::view::ComposerMode {

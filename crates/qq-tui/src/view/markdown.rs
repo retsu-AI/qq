@@ -3,9 +3,9 @@ use std::sync::OnceLock;
 use crate::{
     app::terminal_safe_character,
     render::{
-        Line, Span, Style, accent, border, code_comment, code_constant, code_function,
-        code_keyword, code_property, code_punctuation, code_string, code_type, diff_line_style,
-        inline_code, link, muted, normal, text_width,
+        Join, Line, RowKind, Span, Style, accent, border, code_comment, code_constant,
+        code_function, code_keyword, code_property, code_punctuation, code_string, code_type,
+        diff_line_style, inline_code, link, muted, normal, text_width,
     },
     theme,
     view::wrap::{truncate_line, wrap_line, wrap_line_chars},
@@ -431,6 +431,7 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                 };
                 for (index, mut row) in wrapped.into_iter().enumerate() {
                     trim_trailing_whitespace(&mut row);
+                    let join = row.join;
                     let mut assembled = if index == 0 {
                         prefix.clone()
                     } else {
@@ -442,6 +443,8 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                         );
                         continuation
                     };
+                    assembled.chrome = u16::try_from(hang.width).unwrap_or(u16::MAX);
+                    assembled.join = join;
                     for span in row.spans {
                         assembled.push(span.text, span.style);
                     }
@@ -990,7 +993,7 @@ pub(crate) fn panel_rows_at(
             top.push(format!(" {label} "), muted());
         }
     }
-    let mut output = vec![styles.row(top, width, false, indent)];
+    let mut output = vec![styles.row(top, width, false, indent).joined(Join::Fence)];
     for line in body {
         if line.width() <= content_width {
             output.push(styles.row(line, width, false, indent));
@@ -1000,7 +1003,11 @@ pub(crate) fn panel_rows_at(
             output.push(styles.row(wrapped, width, index > 0, indent));
         }
     }
-    output.push(styles.row(Line::default(), width, false, indent));
+    output.push(
+        styles
+            .row(Line::default(), width, false, indent)
+            .joined(Join::Fence),
+    );
     output
 }
 
@@ -1028,8 +1035,16 @@ impl PanelStyles {
             CODE_PANEL_GUTTER
         };
         let mut row = Line {
-            indent,
+            indent: u16::try_from(indent).unwrap_or(u16::MAX),
+            chrome: CODE_PANEL_INSET as u16,
+            kind: RowKind::Code,
+            join: if continuation {
+                Join::Glue
+            } else {
+                Join::Break
+            },
             spans: Vec::with_capacity(content.spans.len() + 2),
+            ..Line::default()
         };
         row.spans.push(Span {
             text: rail.to_owned(),
@@ -1044,6 +1059,7 @@ impl PanelStyles {
             row.spans.push(span);
         }
         if used < width {
+            row.pad = u16::try_from(width - used).unwrap_or(u16::MAX);
             row.spans.push(Span {
                 text: " ".repeat(width - used),
                 style: self.fill,

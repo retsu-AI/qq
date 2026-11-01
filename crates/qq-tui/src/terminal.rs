@@ -12,8 +12,10 @@ use crossterm::{
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    style::{Attribute, Print, ResetColor, SetAttribute},
-    terminal::{self, Clear, ClearType, EndSynchronizedUpdate},
+    style::{Attribute, ResetColor, SetAttribute},
+    terminal::{
+        self, Clear, ClearType, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+    },
 };
 use futures_util::{Stream, StreamExt, stream::FuturesUnordered};
 use qq_protocol::{SessionEvent, SessionEventEnvelope, SessionId};
@@ -74,6 +76,11 @@ enum BackgroundResult {
         id: u64,
         session_id: SessionId,
     },
+    Copied {
+        lines: usize,
+        truncated: bool,
+        confirmed: bool,
+    },
 }
 pub async fn run<P>(client: P, app: App) -> Result<Option<SessionId>, TuiError>
 where
@@ -101,6 +108,7 @@ where
         Hooks {
             editor: external_editor,
             herdr: herdr.as_ref().map(crate::herdr::Reporter::sink),
+            clipboard: crate::clipboard::Clipboard::detect(),
         },
     )
     .await;
@@ -109,6 +117,16 @@ where
     }
     let app = app?;
     drop(terminal);
+    if let Some(answer) = app.last_answer() {
+        let answer = crate::selection::strip_escapes(answer);
+        let answer = answer.trim_end();
+        if !answer.is_empty() {
+            use std::io::Write as _;
+            let mut output = stdout();
+            let _ = writeln!(output, "{answer}\n");
+            let _ = output.flush();
+        }
+    }
     Ok(app.focused())
 }
 
@@ -170,6 +188,7 @@ pub(crate) type EditorFuture =
 pub(crate) struct Hooks<X> {
     pub(crate) editor: X,
     pub(crate) herdr: Option<crate::herdr::ReportSink>,
+    pub(crate) clipboard: crate::clipboard::Clipboard,
 }
 
 pub(crate) async fn run_loop<P, E, W, S, F, X>(
@@ -189,7 +208,11 @@ where
     F: Future<Output = io::Result<()>>,
     X: FnMut(String) -> EditorFuture,
 {
-    let Hooks { mut editor, herdr } = hooks;
+    let Hooks {
+        mut editor,
+        herdr,
+        clipboard,
+    } = hooks;
     tokio::pin!(shutdown);
     let mut renderer = FrameRenderer::default();
     let mut frame_tick = interval(FRAME_INTERVAL);
@@ -264,6 +287,9 @@ where
                     }
                     BackgroundResult::Prefetch { id, session_id } => {
                         app.apply_prefetch(id, session_id)
+                    }
+                    BackgroundResult::Copied { lines, truncated, confirmed } => {
+                        app.apply_copy_result(lines, truncated, confirmed)
                     }
                 }
             }
@@ -362,6 +388,33 @@ where
                     output.write_all(&bytes).await?;
                     output.flush().await?;
                 }
+                Effect::CopySelection(selection) => {
+                    queue.push_back(Effect::Copy(renderer.selection_text(&selection)));
+                }
+                Effect::Copy(copied) => {
+                    output
+                        .write_all(&crate::clipboard::osc52(&copied.text, clipboard.tmux))
+                        .await?;
+                    output.flush().await?;
+                    let crate::selection::Copied {
+                        text,
+                        lines,
+                        truncated,
+                    } = copied;
+                    if clipboard.helpers.is_empty() || jobs.len() >= MAX_BACKGROUND_JOBS {
+                        queue.extend(app.apply_copy_result(lines, truncated, false));
+                        continue;
+                    }
+                    let helpers = clipboard.helpers.clone();
+                    jobs.push(Box::pin(async move {
+                        let confirmed = crate::clipboard::run_helpers(helpers, text).await;
+                        BackgroundResult::Copied {
+                            lines,
+                            truncated,
+                            confirmed,
+                        }
+                    }));
+                }
                 Effect::Quit => quit = true,
             }
         }
@@ -443,6 +496,7 @@ impl TerminalGuard {
         terminal::enable_raw_mode()?;
         let guard = Self;
         let mut output = stdout();
+        execute!(output, EnterAlternateScreen)?;
         enable_input_modes(&mut output)?;
         execute!(output, Clear(ClearType::All), MoveTo(0, 0))?;
         Ok(guard)
@@ -452,7 +506,6 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
-        let (_, height) = terminal::size().unwrap_or((80, 24));
         let mut output = stdout();
         let _ = execute!(
             output,
@@ -461,13 +514,7 @@ impl Drop for TerminalGuard {
             EndSynchronizedUpdate
         );
         let _ = disable_input_modes(&mut output);
-        let _ = execute!(
-            output,
-            MoveTo(0, height.saturating_sub(1)),
-            Clear(ClearType::CurrentLine),
-            Show,
-            Print("\r\n")
-        );
+        let _ = execute!(output, Show, LeaveAlternateScreen);
     }
 }
 

@@ -22,6 +22,8 @@ pub(crate) enum Effect {
     },
     Attention(Attention),
     MouseCapture(bool),
+    CopySelection(crate::selection::Selection),
+    Copy(crate::selection::Copied),
     Quit,
 }
 

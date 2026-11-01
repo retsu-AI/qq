@@ -1,6 +1,6 @@
 use unicode_width::UnicodeWidthChar;
 
-use crate::render::{Line, Style, muted};
+use crate::render::{Join, Line, Style, muted, text_width};
 
 struct WrapToken {
     span: usize,
@@ -13,6 +13,7 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
     if line.width() <= width {
         return vec![line];
     }
+    let first_join = line.join;
     let spans = line.spans;
     let mut tokens: Vec<WrapToken> = Vec::new();
     for (span_index, span) in spans.iter().enumerate() {
@@ -51,7 +52,7 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
         }
     }
 
-    let mut output = vec![Line::default()];
+    let mut output = vec![Line::default().joined(first_join)];
     let mut used = 0_usize;
     let mut index = 0;
     while index < tokens.len() {
@@ -73,11 +74,11 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
             used += group_width;
         } else if whitespace {
             if used > 0 {
-                output.push(Line::default());
+                output.push(Line::default().joined(Join::Space));
                 used = 0;
             }
         } else if group_width <= width {
-            output.push(Line::default());
+            output.push(Line::default().joined(Join::Space));
             let line = output.last_mut().expect("output starts populated");
             for token in group {
                 let span = &spans[token.span];
@@ -90,7 +91,7 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
                 for character in span.text[token.range.clone()].chars() {
                     let character_width = UnicodeWidthChar::width(character).unwrap_or_default();
                     if used > 0 && used + character_width > width {
-                        output.push(Line::default());
+                        output.push(Line::default().joined(Join::Glue));
                         used = 0;
                     }
                     let mut encoded = [0; 4];
@@ -110,7 +111,10 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
 }
 
 pub(crate) fn wrap_line_chars(line: Line, width: usize) -> Vec<Line> {
-    let mut output = vec![Line::default()];
+    if line.width() <= width {
+        return vec![line];
+    }
+    let mut output = vec![Line::default().joined(line.join)];
     let mut current_width = 0;
     for span in line.spans {
         let mut start = 0;
@@ -121,7 +125,7 @@ pub(crate) fn wrap_line_chars(line: Line, width: usize) -> Vec<Line> {
                     .last_mut()
                     .expect("output starts populated")
                     .push(&span.text[start..offset], span.style);
-                output.push(Line::default());
+                output.push(Line::default().joined(Join::Glue));
                 current_width = 0;
                 start = offset;
             }
@@ -144,9 +148,15 @@ pub(crate) fn indent_lines(
     lines
         .into_iter()
         .map(|line| {
-            let mut indented = Line::styled(prefix, prefix_style);
+            let mut indented = Line::styled(prefix, prefix_style)
+                .with_chrome(
+                    text_width(prefix) + usize::from(line.indent) + usize::from(line.chrome),
+                )
+                .joined(line.join);
+            indented.pad = line.pad;
+            indented.kind = line.kind;
             if line.indent > 0 {
-                indented.push(" ".repeat(line.indent), prefix_style);
+                indented.push(" ".repeat(usize::from(line.indent)), prefix_style);
             }
             for span in line.spans {
                 indented.push(span.text, span.style);
@@ -165,9 +175,12 @@ pub(crate) fn truncate_line(line: Line, width: usize) -> Line {
     }
     let mut output = Line {
         indent: line.indent,
-        spans: Vec::new(),
+        chrome: line.chrome,
+        kind: line.kind,
+        join: line.join,
+        ..Line::default()
     };
-    let mut used = line.indent;
+    let mut used = usize::from(line.indent);
     let content_width = width - 1;
     for span in line.spans {
         let mut text = String::new();
@@ -270,6 +283,7 @@ mod tests {
                 text: "┃ body".to_owned(),
                 style: normal(),
             }],
+            ..Line::default()
         };
         let [out] = <[Line; 1]>::try_from(indent_lines(vec![row], "│ ", muted(), 40))
             .expect("one row in, one out");

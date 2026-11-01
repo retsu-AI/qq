@@ -70,6 +70,7 @@ impl PanePref {
 pub(crate) struct LayoutPrefs {
     pub rail: PanePref,
     pub inspector: PanePref,
+    pub flush: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -129,6 +130,9 @@ pub(crate) const fn max_composer_rows(width: usize, height: usize) -> usize {
 #[must_use]
 pub(crate) const fn rail_width(width: usize, prefs: LayoutPrefs, sessions: usize) -> usize {
     let tier = Tier::of(width);
+    if prefs.flush {
+        return 0;
+    }
     let wanted = match prefs.rail {
         PanePref::Auto => (tier as u8) >= (Tier::Regular as u8) && sessions > 1,
         PanePref::Shown => true,
@@ -186,13 +190,17 @@ pub(crate) fn compute_layout(
         pane_width,
         rail,
         inspector,
-        transcripts: vec![transcript_slot(transcript_area)],
+        transcripts: vec![transcript_slot(transcript_area, prefs.flush)],
         max_composer_rows: max_composer_rows(width, height),
     }
 }
 
-fn transcript_slot(area: Rect) -> TranscriptSlot {
-    let inset = if area.width > 4 * MARGIN { MARGIN } else { 0 };
+fn transcript_slot(area: Rect, flush: bool) -> TranscriptSlot {
+    let inset = if area.width > 4 * MARGIN && !flush {
+        MARGIN
+    } else {
+        0
+    };
     TranscriptSlot {
         area,
         inset,
@@ -256,6 +264,7 @@ mod tests {
         let prefs = LayoutPrefs {
             rail: PanePref::Shown,
             inspector: PanePref::Auto,
+            flush: false,
         };
         let tight = compute_layout(70, 24, 2, prefs, 3);
         assert_eq!(tight.rail, Some(Rect::new(38, 0, 32, 24)));
@@ -268,6 +277,7 @@ mod tests {
         let prefs = LayoutPrefs {
             rail: PanePref::Auto,
             inspector: PanePref::Shown,
+            flush: false,
         };
         let wide = compute_layout(200, 60, 2, prefs, 3);
         let inspector = wide.inspector.expect("inspector");
@@ -291,6 +301,7 @@ mod tests {
             LayoutPrefs {
                 rail: PanePref::Hidden,
                 inspector: PanePref::Hidden,
+                flush: false,
             },
             3,
         );
@@ -304,10 +315,24 @@ mod tests {
             LayoutPrefs {
                 rail: PanePref::Shown,
                 inspector: PanePref::Auto,
+                flush: false,
             },
             1,
         );
         assert_eq!(shown.rail, Some(Rect::new(48, 0, 32, 24)));
+    }
+
+    #[test]
+    fn a_flush_layout_drops_the_rail_and_the_inset() {
+        let prefs = LayoutPrefs {
+            rail: PanePref::Shown,
+            inspector: PanePref::Auto,
+            flush: true,
+        };
+        let flush = compute_layout(120, 40, 2, prefs, 3);
+        assert!(flush.rail.is_none());
+        assert_eq!(flush.transcripts[0].inset, 0);
+        assert_eq!(flush.transcripts[0].content_width, 120);
     }
 
     #[test]

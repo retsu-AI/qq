@@ -83,6 +83,7 @@ struct Harness {
     editor_script: EditorScript,
     port: Option<FakePort>,
     event_stream: Option<EventQueue>,
+    clipboard: crate::clipboard::Clipboard,
 }
 
 impl Harness {
@@ -102,6 +103,7 @@ impl Harness {
                 capacity,
             }),
             event_stream: Some(EventQueue(event_rx)),
+            clipboard: crate::clipboard::Clipboard::default(),
         }
     }
 
@@ -128,6 +130,7 @@ impl Harness {
         let events = self.event_stream.take().expect("harness runs once");
         let frames = self.frames.clone();
         let scripted = std::sync::Arc::clone(&self.editor_script);
+        let clipboard = self.clipboard.clone();
         tokio::spawn(run_loop(
             port,
             app,
@@ -145,6 +148,7 @@ impl Harness {
                     })
                 },
                 herdr,
+                clipboard,
             },
         ))
     }
@@ -679,6 +683,7 @@ async fn the_first_frame_paints_before_the_client_port_connects() {
         Hooks {
             editor: |_| -> EditorFuture { Box::pin(async { Err(EditorError::NotConfigured) }) },
             herdr: None,
+            clipboard: crate::clipboard::Clipboard::default(),
         },
     ));
     tokio::task::yield_now().await;
@@ -748,6 +753,7 @@ async fn prompt_submitted_before_delayed_startup_is_sent_after_the_snapshot() {
         Hooks {
             editor: |_| -> EditorFuture { Box::pin(async { Err(EditorError::NotConfigured) }) },
             herdr: None,
+            clipboard: crate::clipboard::Clipboard::default(),
         },
     ));
     events
@@ -807,8 +813,106 @@ async fn a_failed_connection_is_reported_once_and_then_the_client_stops() {
         Hooks {
             editor: |_| -> EditorFuture { Box::pin(async { Err(EditorError::NotConfigured) }) },
             herdr: None,
+            clipboard: crate::clipboard::Clipboard::default(),
         },
     ));
     let result = task.await.expect("loop task");
     assert!(matches!(result, Err(TuiError::ClientStopped(_))));
+}
+
+fn mouse(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> Event {
+    Event::Mouse(crossterm::event::MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+async fn copy_through_the_loop(clipboard: crate::clipboard::Clipboard) -> (Vec<u8>, String) {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut harness = Harness::new(64);
+    harness.clipboard = clipboard;
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(snapshot(
+        1,
+        vec![MessageSnapshot {
+            state: MessageState::Complete,
+            ..assistant_message(1, "hello world")
+        }],
+    )));
+    let task = harness.spawn(app);
+    harness.settle().await;
+    let screen = frame_text(&harness.frames.frames().concat());
+    assert!(screen.contains("hello world"), "{screen:?}");
+    let row = {
+        let mut probe = App::new(TuiOptions::default());
+        probe.apply_client_update(ClientUpdate::Snapshot(snapshot(
+            1,
+            vec![MessageSnapshot {
+                state: MessageState::Complete,
+                ..assistant_message(1, "hello world")
+            }],
+        )));
+        let frame = crate::view::FrameRenderer::default().frame_and_commit(&mut probe, 100, 30);
+        let index = frame
+            .iter()
+            .position(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.text.contains("hello world"))
+            })
+            .expect("the answer row");
+        u16::try_from(index).expect("row fits")
+    };
+    let before = harness.frames.frames().len();
+    for event in [
+        mouse(MouseEventKind::Down(MouseButton::Left), 4, row),
+        mouse(MouseEventKind::Drag(MouseButton::Left), 14, row),
+        mouse(MouseEventKind::Up(MouseButton::Left), 14, row),
+    ] {
+        harness.events.send(Ok(event)).expect("event channel open");
+    }
+    harness.settle().await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+        tokio::time::advance(FRAME_INTERVAL).await;
+    }
+    let written = harness.frames.frames()[before..].concat();
+    harness.key(KeyCode::Esc, KeyModifiers::NONE);
+    harness.quit();
+    let app = task.await.expect("loop task").expect("loop exits cleanly");
+    (written, app.status.unwrap_or_default())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_drag_sends_exact_osc52_bytes_and_an_unconfirmed_notice() {
+    let (written, status) = copy_through_the_loop(crate::clipboard::Clipboard::default()).await;
+    let osc = crate::clipboard::osc52("hello world", false);
+    assert!(
+        written
+            .windows(osc.len())
+            .any(|window| window == osc.as_slice()),
+        "{:?}",
+        frame_text(&written)
+    );
+    assert_eq!(osc, b"\x1b]52;c;aGVsbG8gd29ybGQ=\x07".to_vec());
+    assert_eq!(status, "sent 1 line to the terminal clipboard");
+}
+
+#[tokio::test(start_paused = true)]
+async fn inside_tmux_osc52_uses_dcs_passthrough() {
+    let (written, _) = copy_through_the_loop(crate::clipboard::Clipboard {
+        helpers: Vec::new(),
+        tmux: true,
+    })
+    .await;
+    let osc = b"\x1bPtmux;\x1b\x1b]52;c;aGVsbG8gd29ybGQ=\x07\x1b\\".to_vec();
+    assert!(
+        written
+            .windows(osc.len())
+            .any(|window| window == osc.as_slice()),
+        "{:?}",
+        frame_text(&written)
+    );
 }

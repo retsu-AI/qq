@@ -3,6 +3,7 @@
 mod app;
 #[cfg(feature = "bench-support")]
 pub mod bench_support;
+mod clipboard;
 mod commands;
 mod composer;
 #[cfg(feature = "bench-support")]
@@ -15,6 +16,7 @@ mod input;
 mod lazy_port;
 mod picker;
 mod render;
+mod selection;
 mod settings;
 mod startup;
 mod terminal;

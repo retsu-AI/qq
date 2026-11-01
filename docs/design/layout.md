@@ -134,14 +134,18 @@ on screen.
 
 ## Preferences
 
-`LayoutPrefs { rail, inspector }`, each a `PanePref::{Auto, Shown, Hidden}`.
+`LayoutPrefs { rail, inspector, flush }`, the first two each a
+`PanePref::{Auto, Shown, Hidden}`.
 For the sessions column, `Auto` follows the tier and session count; its
 toggle (`Ctrl-\` by default) moves `Auto` or `Shown` to `Hidden` and `Hidden`
 to `Shown`, so the first press hides the column the user is reaching to
 dismiss. The inspector's `Auto` keeps it off; its toggle (`Alt-I`) moves
 `Auto` or `Hidden` to `Shown` and `Shown` to `Hidden`, so the first press
-shows it. The preferences are runtime state, not configuration; they reset
-per launch.
+shows it. `flush` is set while mouse capture is off (`/mouse`): it removes
+the sessions column and the transcript slot's margin inset whatever the
+other preferences say, so the terminal's native selection of a full row
+copies clean text. The preferences are runtime state, not configuration;
+they reset per launch.
 
 ## Inspector
 

@@ -483,6 +483,23 @@ impl BenchHarness {
             .redraws()
     }
 
+    pub fn drag(&mut self, from: (u16, u16), to: (u16, u16)) -> bool {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let event = |kind, (column, row): (u16, u16)| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        self.app
+            .handle_terminal_event(event(MouseEventKind::Down(MouseButton::Left), from));
+        self.app
+            .handle_terminal_event(event(MouseEventKind::Drag(MouseButton::Left), to))
+            .redraws()
+    }
+
     pub fn wheel_up(&mut self) -> bool {
         self.app
             .handle_terminal_event(Event::Mouse(crossterm::event::MouseEvent {
@@ -800,7 +817,7 @@ impl BenchHarness {
         frame
             .iter()
             .map(|line| {
-                let mut row = " ".repeat(line.indent);
+                let mut row = " ".repeat(usize::from(line.indent));
                 row.extend(line.spans.iter().map(|span| span.text.as_str()));
                 let trimmed = row.trim_end().len();
                 row.truncate(trimmed);

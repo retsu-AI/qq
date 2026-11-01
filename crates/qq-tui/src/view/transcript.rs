@@ -8,11 +8,13 @@ pub(crate) struct TranscriptCache {
     cached_bytes: usize,
     clock: u64,
     live: HashMap<MessageId, LiveMarkdown>,
+    spare_blocks: Vec<(Block, Range<usize>)>,
 }
 
 pub(crate) struct PaneUpdate {
     pub viewport: Viewport,
     pub live_message_ranges: HashMap<MessageId, Range<usize>>,
+    pub blocks: Vec<(Block, Range<usize>)>,
 }
 
 pub(super) struct LiveMarkdown {
@@ -29,6 +31,7 @@ pub(super) struct CachedMarkdown {
     refusal_bytes: usize,
     loaded_through: u64,
     body: CachedMessageBody,
+    code: Vec<Range<usize>>,
     highlight_requested: bool,
     last_used: u64,
     bytes: usize,
@@ -238,8 +241,20 @@ impl PlainTextIndex {
                 break;
             }
             if current_row >= rows.start {
+                let after_newline = range.start == 0
+                    || (source.is_char_boundary(range.start - 1)
+                        && source
+                            .next_char(range.start - 1)
+                            .is_some_and(|(character, _)| character == '\n'));
+                let join = if after_newline {
+                    crate::render::Join::Break
+                } else {
+                    crate::render::Join::Glue
+                };
                 let safe = source.collect_range(range, true);
-                let mut line = Line::styled(prefix, prefix_style);
+                let mut line = Line::styled(prefix, prefix_style)
+                    .with_chrome(text_width(prefix))
+                    .joined(join);
                 line.push(safe, normal());
                 rendered.push(truncate_line(line, width));
             }
@@ -278,6 +293,7 @@ pub(super) struct VirtualBody<'a> {
     pub(super) rows: usize,
     preserve_tail_anchor: bool,
     live_message_ranges: Vec<(MessageId, Range<usize>)>,
+    blocks: Vec<(Block, Range<usize>)>,
 }
 
 impl<'a> VirtualBody<'a> {
@@ -299,6 +315,16 @@ impl<'a> VirtualBody<'a> {
         } else {
             self.segments.push(BodySegment::Owned(lines));
         }
+    }
+
+    fn push_code_blocks(&mut self, message_id: MessageId, start: usize, code: &[Range<usize>]) {
+        self.blocks
+            .extend(code.iter().enumerate().map(|(index, range)| {
+                (
+                    Block::Code(message_id, index),
+                    start + range.start..start + range.end,
+                )
+            }));
     }
 
     fn extend_cached(&mut self, lines: &'a [Line]) {
@@ -332,10 +358,21 @@ impl<'a> VirtualBody<'a> {
 
     fn extend_virtual(&mut self, mut other: VirtualBody<'a>) {
         let row_offset = self.rows;
-        for (_, range) in &mut other.live_message_ranges {
-            range.start += row_offset;
-            range.end += row_offset;
+        if row_offset > 0 {
+            for range in other
+                .live_message_ranges
+                .iter_mut()
+                .map(|(_, range)| range)
+                .chain(other.blocks.iter_mut().map(|(_, range)| range))
+            {
+                range.start += row_offset;
+                range.end += row_offset;
+            }
         }
+        if self.blocks.is_empty() {
+            std::mem::swap(&mut self.blocks, &mut other.blocks);
+        }
+        self.blocks.append(&mut other.blocks);
         self.rows += other.rows;
         self.preserve_tail_anchor |= other.preserve_tail_anchor;
         self.live_message_ranges
@@ -345,7 +382,12 @@ impl<'a> VirtualBody<'a> {
 
     #[inline(never)]
     fn pad_top(&mut self) {
-        for (_, range) in &mut self.live_message_ranges {
+        for range in self
+            .live_message_ranges
+            .iter_mut()
+            .map(|(_, range)| range)
+            .chain(self.blocks.iter_mut().map(|(_, range)| range))
+        {
             range.start += 1;
             range.end += 1;
         }
@@ -483,6 +525,7 @@ impl TranscriptCache {
                 PaneUpdate {
                     viewport,
                     live_message_ranges: HashMap::new(),
+                    blocks: Vec::new(),
                 },
             );
         }
@@ -500,6 +543,7 @@ impl TranscriptCache {
         let offset = viewport.offset();
         let live_message_ranges = body.live_message_ranges.iter().cloned().collect();
         let mut rows = body.viewport(app, height, offset);
+        let blocks = std::mem::take(&mut body.blocks);
         drop(body);
         let running = session_id
             .and_then(|id| app.sessions.get(&id))
@@ -522,6 +566,7 @@ impl TranscriptCache {
             PaneUpdate {
                 viewport,
                 live_message_ranges,
+                blocks,
             },
         )
     }
@@ -531,6 +576,12 @@ impl TranscriptCache {
             .get(&call.id)
             .filter(|(key, _)| *key == ToolRowKey::of(call))
             .map(|(_, row)| row)
+    }
+
+    pub(super) fn recycle_blocks(&mut self, blocks: Vec<(Block, Range<usize>)>) {
+        if blocks.capacity() > self.spare_blocks.capacity() {
+            self.spare_blocks = blocks;
+        }
     }
 
     pub(super) fn prune_all(&mut self) {
@@ -708,6 +759,10 @@ impl TranscriptCache {
             CachedMessageBody::Plain(PlainTextIndex::new(source, content_width))
         };
         let bytes = body.bytes();
+        let code = match &body {
+            CachedMessageBody::Markdown(lines) => code_ranges(lines),
+            CachedMessageBody::Plain(_) => Vec::new(),
+        };
         if let Some(previous) = self.markdown.remove(&message.id) {
             self.cached_bytes = self.cached_bytes.saturating_sub(previous.bytes);
         }
@@ -734,6 +789,7 @@ impl TranscriptCache {
             refusal_bytes: message.refusal.len(),
             loaded_through,
             body,
+            code,
             highlight_requested: !needs_highlight,
             last_used: self.clock,
             bytes,
@@ -771,6 +827,7 @@ impl TranscriptCache {
         match &mut cached.body {
             CachedMessageBody::Markdown(lines) => {
                 lines.clone_from(&result.lines);
+                cached.code = code_ranges(lines);
                 true
             }
             CachedMessageBody::Plain(_) => false,
@@ -821,8 +878,11 @@ impl TranscriptCache {
         inline_detail: bool,
     ) -> VirtualBody<'a> {
         let preserve_tail_anchor = self.prepare_markdown(highlighter, app, session_id, pane, width);
+        let mut blocks = std::mem::take(&mut self.spare_blocks);
+        blocks.clear();
         let mut body = VirtualBody {
             preserve_tail_anchor,
+            blocks,
             ..VirtualBody::default()
         };
         let Some(session_id) = session_id else {
@@ -925,10 +985,28 @@ impl TranscriptCache {
                 expanded: app.expanded_tool_calls.contains(&call.id),
                 inline_detail,
                 fold: app.tool_detail == ToolDetail::Folded,
-                selected: app.transcript_cursor == Some(call.id),
+                selected: app.block_cursor == Some(Block::Tool(call.id)),
             }
         };
         let turns = TurnIndex::build(messages, tool_calls);
+        let render_tools = |body: &mut VirtualBody<'a>, calls: &[&ToolCallSnapshot]| {
+            let start = body.rows;
+            let first = body.blocks.len();
+            let lines = render_tool_blocks(
+                calls,
+                &session.live_tool_output,
+                &lookup,
+                app.animation_tick,
+                width,
+                &|call_id, width| child_rows(app, call_id, width),
+                &mut body.blocks,
+            );
+            for (_, range) in &mut body.blocks[first..] {
+                range.start += start;
+                range.end += start;
+            }
+            body.extend_owned(lines);
+        };
         for index in indices {
             let message = &messages[index];
             if message.steering && message.state == MessageState::Queued {
@@ -958,14 +1036,7 @@ impl TranscriptCache {
                     0
                 };
                 if head > 0 {
-                    body.extend_owned(render_tool_calls(
-                        &run_calls[..head],
-                        &session.live_tool_output,
-                        &lookup,
-                        app.animation_tick,
-                        width,
-                        &|call_id, width| child_rows(app, call_id, width),
-                    ));
+                    render_tools(body, &run_calls[..head]);
                     body.push_line(Line::default());
                 }
                 if first_of_run {
@@ -978,14 +1049,7 @@ impl TranscriptCache {
                 self.append_message(body, message, width);
                 if run_calls.len() > head {
                     body.push_line(Line::default());
-                    body.extend_owned(render_tool_calls(
-                        &run_calls[head..],
-                        &session.live_tool_output,
-                        &lookup,
-                        app.animation_tick,
-                        width,
-                        &|call_id, width| child_rows(app, call_id, width),
-                    ));
+                    render_tools(body, &run_calls[head..]);
                 }
                 if next_turn == u32::MAX
                     && let Some(line) = run_completion_line(session, message.run_id, width)
@@ -998,14 +1062,7 @@ impl TranscriptCache {
                     let orphan_calls = turns.calls_of(message.run_id);
                     if !orphan_calls.is_empty() {
                         body.push_line(Line::default());
-                        body.extend_owned(render_tool_calls(
-                            orphan_calls,
-                            &session.live_tool_output,
-                            &lookup,
-                            app.animation_tick,
-                            width,
-                            &|call_id, width| child_rows(app, call_id, width),
-                        ));
+                        render_tools(body, orphan_calls);
                     }
                 }
             }
@@ -1030,6 +1087,7 @@ impl TranscriptCache {
                     if lines.is_empty() {
                         body.push_line(message_ellipsis(prefix, prefix_style));
                     } else {
+                        body.push_code_blocks(message.id, content_start, &cached.code);
                         body.extend_cached(lines);
                     }
                 }
@@ -1050,10 +1108,13 @@ impl TranscriptCache {
             {
                 last.push("▍", accent());
             }
+            body.push_code_blocks(message.id, content_start, &code_ranges(&lines));
             body.extend_owned(lines);
             body.live_message_ranges
                 .push((message.id, content_start..body.rows));
         }
+        body.blocks
+            .push((Block::Message(message.id), content_start..body.rows));
         if let Some(note) = message_note(message) {
             body.push_line(truncate_line(note, width));
         }
@@ -1143,6 +1204,23 @@ impl TranscriptCache {
         lines.extend(message_note(message));
         lines
     }
+}
+
+fn code_ranges(lines: &[Line]) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut row = 0;
+    while row < lines.len() {
+        if lines[row].kind != crate::render::RowKind::Code {
+            row += 1;
+            continue;
+        }
+        let first = row;
+        while row < lines.len() && lines[row].kind == crate::render::RowKind::Code {
+            row += 1;
+        }
+        ranges.push(first..row);
+    }
+    ranges
 }
 
 fn push_environment(body: &mut VirtualBody<'_>, app: &App, width: usize) {

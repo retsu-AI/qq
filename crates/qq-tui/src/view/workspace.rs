@@ -241,7 +241,7 @@ pub(super) fn inspector_pane(
                         expanded: true,
                         inline_detail: true,
                         fold: false,
-                        selected: app.transcript_cursor == Some(call.id),
+                        selected: app.block_cursor == Some(Block::Tool(call.id)),
                     };
                     if !rows.is_empty() {
                         rows.push(Line::default());
