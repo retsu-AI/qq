@@ -182,12 +182,7 @@ async fn child(setup: Setup) {
         .snapshot(SnapshotRequest::new(workspace, Some(session), 256, 256))
         .await
         .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id: workspace,
-            after: snapshot.cursor,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace, snapshot.cursor);
     let (input, mut commands) = tokio::sync::mpsc::channel(1);
     std::thread::spawn(move || {
         use std::io::BufRead;

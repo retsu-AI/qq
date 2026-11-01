@@ -314,14 +314,7 @@ async fn cancelling_a_run_does_not_wait_for_its_snapshot() {
 
     let run_id = submit_prompt(&harness, "change things").await;
     held.entered().await;
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, run_id).await.unwrap();
     let observed = tokio::time::timeout(Duration::from_secs(10), async {
         collect_until(&mut harness.events, finished_for(run_id)).await
     })

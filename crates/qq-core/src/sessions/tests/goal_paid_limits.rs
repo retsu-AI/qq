@@ -41,12 +41,7 @@ async fn goal_paid_dense_first_input_is_refused_before_provider_dispatch() {
         let held = runtime.hold_scheduling().await;
         let (workspace, session_id, created) =
             new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: created.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace, created.committed_through);
         set_goal(
             &runtime,
             serde_json::json!({"session_id":session_id, "objective":"bounded spend",
@@ -175,12 +170,7 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
             else {
                 panic!("session")
             };
-            let mut events = runtime
-                .subscribe(SubscribeRequest {
-                    workspace_id: workspace,
-                    after: created.committed_through,
-                })
-                .unwrap();
+            let mut events = subscribe_after(&runtime, workspace, created.committed_through);
             let limits = RunLimits {
                 max_model_turns: (kind == "turns").then_some(2),
                 max_tool_calls: (kind == "tools").then_some(1),
@@ -677,13 +667,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
             let helper = entered.await.unwrap();
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             if cancel {
-                runtime
-                    .command(
-                        CommandId::generate().unwrap(),
-                        SessionCommand::CancelRun { run_id: helper },
-                    )
-                    .await
-                    .unwrap();
+                cancel_run(&runtime, helper).await.unwrap();
             } else {
                 tokio::time::advance(Duration::from_secs(2)).await;
             }

@@ -126,6 +126,31 @@ pub(super) async fn store_session(
     (workspace_id, session_id)
 }
 
+pub(super) fn subscribe_after(
+    runtime: &SessionRuntime,
+    workspace_id: WorkspaceId,
+    after: EventCursor,
+) -> SessionEventStream {
+    runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after,
+        })
+        .unwrap()
+}
+
+pub(super) async fn cancel_run(
+    runtime: &SessionRuntime,
+    run_id: RunId,
+) -> Result<CommandReceipt, SessionRuntimeError> {
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelRun { run_id },
+        )
+        .await
+}
+
 pub(super) struct Prompt {
     input: Vec<InputPart>,
     limits: RunLimits,

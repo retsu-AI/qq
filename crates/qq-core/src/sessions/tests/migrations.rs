@@ -15,12 +15,7 @@ async fn prune_deletes_only_idle_sessions_without_messages() {
         empties.push(session_id);
     }
     let queued = try_submit(&runtime, kept, "keep me").await.unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: queued.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, queued.committed_through);
     collect_through_finished(&mut events).await;
 
     let receipt = runtime
@@ -822,12 +817,7 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
         let queued = try_submit(&runtime, session_id, "written by v0.1.4")
             .await
             .unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: queued.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, queued.committed_through);
         collect_through_finished(&mut events).await;
         runtime.shutdown().await.unwrap();
         (workspace_id, session_id)
@@ -1492,12 +1482,7 @@ async fn retired_supervised_mode_upgrades_from(schema: u32) {
         let queued = try_submit(&runtime, session_id, "written by v0.1.8")
             .await
             .unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: queued.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, queued.committed_through);
         collect_through_finished(&mut events).await;
         let store_id = runtime.store_id();
         runtime.close().await.unwrap();
@@ -1563,12 +1548,7 @@ async fn retired_supervised_mode_upgrades_from(schema: u32) {
         workspace_id,
         sequence: 0,
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: start,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, start);
     let replayed = tokio::time::timeout(Duration::from_secs(10), async {
         let mut replayed = Vec::new();
         while let Some(event) = events.next().await {
@@ -1643,12 +1623,7 @@ async fn a_schema_64_store_with_reviewer_delegate_and_grant_state_opens_and_repl
         let queued = try_submit(&runtime, session_id, "written by v0.1.9")
             .await
             .unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: queued.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, queued.committed_through);
         collect_through_finished(&mut events).await;
         let store_id = runtime.store_id();
         runtime.close().await.unwrap();
@@ -1804,12 +1779,7 @@ async fn a_schema_64_store_with_reviewer_delegate_and_grant_state_opens_and_repl
         workspace_id,
         sequence: 0,
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: start,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, start);
     let replayed = tokio::time::timeout(Duration::from_secs(10), async {
         let mut replayed = Vec::new();
         while let Some(event) = events.next().await {

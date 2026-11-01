@@ -631,14 +631,7 @@ async fn preparation_cooperates_with_deadline_and_explicit_cancel() {
             tokio::time::pause();
         }
         if cancel {
-            harness
-                .runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::CancelRun { run_id },
-                )
-                .await
-                .unwrap();
+            cancel_run(&harness.runtime, run_id).await.unwrap();
         } else {
             tokio::time::advance(Duration::from_millis(duration_ms)).await;
         }

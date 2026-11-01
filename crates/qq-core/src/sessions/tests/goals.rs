@@ -177,12 +177,7 @@ async fn revision_notices_across_reactive_checkpoint_overflow_reopen_in_order() 
     let CommandOutcome::GoalUpdated { mut goal, .. } = receipt.outcome else {
         panic!("goal");
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id: workspace,
-            after: receipt.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace, receipt.committed_through);
     let run = queue_prompt(&runtime, session_id, "work".to_owned()).await;
     for objective in ["revision A", "revision B"] {
         tokio::time::timeout(Duration::from_secs(30), entered.notified())
@@ -528,12 +523,7 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("goal");
         };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: receipt.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace, receipt.committed_through);
         let run = submit(&runtime, session_id, Prompt::text("work").output(repair.then(|| Box::new(qq_protocol::OutputContract {
             schema: serde_json::json!({"type":"object","properties":{"done":{"type":"boolean"}},"required":["done"],"additionalProperties":false}),
             repair_turns: 1,
@@ -785,12 +775,7 @@ async fn claimed_goal_exposes_serial_update_tool_without_workspace_approval() {
             .await
             .unwrap();
         }
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: receipt.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
         try_submit(&runtime, session_id, "work").await.unwrap();
         let finished = collect_through_finished_generously(&mut events).await;
         assert!(
@@ -3303,12 +3288,7 @@ async fn rejected_provider_outage_spends_no_goal_run_or_measured_budget() {
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: receipt.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
     let run_id = submit(&runtime, session_id, "work").await;
     let events = collect_until_run_finished(&mut events, run_id).await;
     assert!(
@@ -4079,12 +4059,7 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
         else {
             panic!("session")
         };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: created.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace, created.committed_through);
         let first = queue_prompt(&runtime, session, "grow".to_owned()).await;
         let initial = collect_until_run_finished(&mut events, first).await;
         assert_eq!(
@@ -4108,13 +4083,7 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
                 assert!(admitted && usage.is_none(),"paid admission is durable before provider poll");
                 parse_id(&id)
             }).await.unwrap();
-            runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::CancelRun { run_id: owner },
-                )
-                .await
-                .unwrap();
+            cancel_run(&runtime, owner).await.unwrap();
             Some(helper)
         } else {
             None
@@ -4927,12 +4896,7 @@ async fn active_idle_goal_dispatches_fresh_work_without_a_user_prompt() {
     .unwrap();
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::ReadOnly).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let receipt=set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"complete a fresh autonomous work slice",
         "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"per_run":{"max_model_turns":1}}
     })).await.unwrap();
@@ -6153,12 +6117,7 @@ async fn goal_admission_refuses_expired_or_unknown_budgets_before_loading() {
             let held = runtime.hold_scheduling().await;
             let (workspace_id, session_id, created) =
                 new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-            let mut events = runtime
-                .subscribe(SubscribeRequest {
-                    workspace_id,
-                    after: created.committed_through,
-                })
-                .unwrap();
+            let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
             set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"expire while awaiting the permit",
             "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
         })).await.unwrap();
@@ -6404,12 +6363,7 @@ async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_ori
         let held = runtime.hold_scheduling().await;
         let (workspace_id, session_id, created) =
             new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
         set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"deadline must be revalidated after loading",
             "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
         })).await.unwrap();
@@ -6567,12 +6521,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
         let held = runtime.hold_scheduling().await;
         let (workspace_id, session_id, created) =
             new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
         set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"refresh allowance after loading",
             "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":if raised {500} else {200_000}}
         })).await.unwrap();
@@ -7790,12 +7739,7 @@ async fn goal_policy_tightening_before_load_or_main_start_prevents_provider_work
         let held = runtime.hold_scheduling().await;
         let (workspace, session_id, created) =
             new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: created.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace, created.committed_through);
         let command = goal_command(
             serde_json::json!({"session_id":session_id,"objective":"honor current policy",
                 "budget":{"max_goal_runs":20,"deadline_ms":now_ms()+60_000}

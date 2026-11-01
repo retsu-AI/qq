@@ -165,12 +165,7 @@ async fn exercise(scenario: &'static str) {
     let receipt=set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"verify the persisted work independently",
         "budget":{"max_goal_runs":100,"deadline_ms":now_ms()+3_600_000}
     })).await.unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: receipt.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
     let observed = async {
         let mut deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let mut audits = 0;
@@ -332,12 +327,7 @@ async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
         )
         .await
         .unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: receipt.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
         let (audit, goal) = tokio::time::timeout(Duration::from_secs(10), async {
             let mut latest = None;
             loop {

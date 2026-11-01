@@ -5,12 +5,7 @@ async fn unresolvable_slash_prompts_are_refused_at_admission_without_a_run_row()
     let (_directory, runtime) = test_runtime().await;
     let (workspace_id, session_id, created) =
         new_session(&runtime, _directory.path(), ApprovalMode::default()).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let submit = |text: &str| {
         let input = vec![InputPart::text(text)];
         let runtime = &runtime;
@@ -192,12 +187,7 @@ async fn attachment_ranges_preserve_lines_clip_eof_and_reject_nonexistent_starts
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
             panic!("unexpected receipt")
         };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
         let before = requests.lock().unwrap().len();
         try_submit(
             &runtime,
@@ -727,12 +717,7 @@ async fn plan_identity_correlation_and_profile_persist_and_survive_refresh() {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let run_correlation =
         Correlation::new([("job".to_owned(), "j-1".to_owned())].into_iter().collect()).unwrap();
     let run_id = submit(
@@ -844,12 +829,7 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
             .unwrap();
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let attach = |text: &str, files: Vec<InputPart>| {
         let mut input = vec![InputPart::text(text)];
         input.extend(files);
@@ -988,12 +968,7 @@ async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
         )
         .await
         .unwrap();
-    let mut events = reopened
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: queued.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&reopened, workspace_id, queued.committed_through);
     collect_through_finished(&mut events).await;
     {
         let captured = requests.lock().unwrap();
@@ -1822,12 +1797,7 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
         panic!("unexpected receipt")
     };
     let saturated = saturate_control_lane(&runtime).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     runtime.request_schedule();
     tokio::time::sleep(Duration::from_millis(50)).await;
     saturated.release().await;
@@ -2633,12 +2603,7 @@ async fn retention_deletes_idle_sessions_older_than_the_cutoff_when_the_runtime_
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let deleted = events.next().await.unwrap().unwrap();
     assert!(
         matches!(deleted.event, SessionEvent::SessionDeleted { session_id } if session_id == stale),

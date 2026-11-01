@@ -147,12 +147,7 @@ async fn goal_final_run_reserves_a_durable_tool_free_handoff_after_early_complet
                 .unwrap();
         let (workspace_id, session_id, created) =
             new_session(&runtime, directory.path(), ApprovalMode::ReadOnly).await;
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
         set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"finish exactly ten charged slices with a handoff",
             "budget":{"max_goal_runs":if scenario=="tighten" {RUNS + 1} else {RUNS}, "deadline_ms":now_ms()+60_000,
                 "per_run":{"max_model_turns":if scenario=="one_turn" && !prompt_final {1} else {3}}}

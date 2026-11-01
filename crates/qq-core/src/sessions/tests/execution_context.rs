@@ -47,14 +47,7 @@ async fn command_receipt_is_durable_before_live_output_and_survives_reopen() {
             .unwrap();
 
         if cancel {
-            harness
-                .runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::CancelRun { run_id: run },
-                )
-                .await
-                .unwrap();
+            cancel_run(&harness.runtime, run).await.unwrap();
         } else {
             let mut writer = gate.try_clone().unwrap();
             tokio::task::spawn_blocking(move || writer.write_all(b"continue\n").unwrap())
@@ -119,14 +112,7 @@ async fn cancellation_at_spawn_preserves_the_process_receipt() {
         .await
         .unwrap()
         .unwrap();
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: run },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, run).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), stopped)
         .await
         .unwrap()

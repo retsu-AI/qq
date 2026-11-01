@@ -422,12 +422,7 @@ async fn recovery_interrupts_running_tools_without_reexecuting_them() {
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: started.cursor,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, started.cursor);
     let recovered = collect_through_finished(&mut events).await;
     assert!(matches!(
         &recovered[0].event,
@@ -532,12 +527,7 @@ async fn orphaned_tool_call_blocks_replay_with_synthesized_interrupted_results()
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.receipt.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.receipt.committed_through);
     let _ = collect_through_finished(&mut events).await;
     try_submit(&runtime, session_id, "continue").await.unwrap();
     let _ = collect_through_finished(&mut events).await;
@@ -866,12 +856,7 @@ async fn subscribers_converge_and_replay_from_an_intermediate_cursor() {
     assert!(first.len() > 2);
 
     let split = first.len() / 2;
-    let mut replay = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: first[split - 1].cursor,
-        })
-        .unwrap();
+    let mut replay = subscribe_after(&runtime, workspace_id, first[split - 1].cursor);
     let replayed = tokio::time::timeout(Duration::from_secs(2), async {
         let mut replayed = Vec::new();
         for _ in split..first.len() {
@@ -890,12 +875,7 @@ async fn scheduler_store_failure_disables_runtime_and_existing_subscribers() {
     let (directory, runtime) = test_runtime().await;
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     store_command(&runtime.inner.store, session_id, "persist me")
         .await
         .unwrap();
@@ -968,12 +948,7 @@ async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime(
         panic!("unexpected receipt")
     };
     let (read_entered, release_read) = PROBE.hold(Checkpoint::CancellationRead(run_id));
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     runtime.request_schedule();
     tokio::time::timeout(Duration::from_secs(2), read_entered)
         .await
@@ -1061,12 +1036,7 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
         [SessionRuntimeError::CONSTRAINT],
     );
     let (second_read, release_second) = PROBE.hold(Checkpoint::CancellationRead(second_run));
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: second.receipt.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, second.receipt.committed_through);
     runtime.request_schedule();
     tokio::time::timeout(Duration::from_secs(1), second_read)
         .await
@@ -1577,12 +1547,7 @@ async fn permanent_prestart_settlement_failure_is_recovered_on_reopen() {
     )
     .await
     .unwrap();
-    let mut events = recovered
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: queued.receipt.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&recovered, workspace_id, queued.receipt.committed_through);
     let observed = collect_until(&mut events, finished_for(run_id)).await;
     assert!(observed.iter().any(|event| matches!(
         event.event,
@@ -1635,12 +1600,7 @@ async fn queues_follow_ups_without_reordering_conversation_context() {
     .unwrap();
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
 
     for prompt in ["first", "second"] {
         try_submit(&runtime, session_id, prompt).await.unwrap();
@@ -1693,12 +1653,7 @@ async fn follow_up_after_an_empty_completed_turn_reaches_the_provider() {
     .unwrap();
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
 
     submit_prompt_to(&runtime, session_id, "hello").await;
     let first = collect_through_finished(&mut events).await;
@@ -2048,12 +2003,7 @@ async fn recovery_ignores_legacy_overflow_evidence_without_spending_a_second_att
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: started.cursor,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, started.cursor);
     let observed = collect_until(&mut events, finished_for(run_id)).await;
 
     assert!(observed.iter().any(|event| matches!(
@@ -2206,12 +2156,7 @@ async fn slow_preparation_does_not_serialize_an_independent_permit() {
     else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: second.receipt.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, second.receipt.committed_through);
     runtime.request_schedule();
     tokio::time::timeout(Duration::from_secs(1), entered.notified())
         .await
@@ -2316,12 +2261,7 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
     tokio::time::timeout(Duration::from_secs(1), entered.notified())
         .await
         .expect("the reserved run must enter preparation");
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: queued.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, queued.committed_through);
 
     let second = queue_prompt(&runtime, session_id, "same session".to_owned()).await;
     assert!(matches!(
@@ -2367,13 +2307,7 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
         Some(SessionRuntimeError::SessionActive)
     );
 
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id },
-        )
-        .await
-        .unwrap();
+    cancel_run(&runtime, run_id).await.unwrap();
     let mut observed=collect_until(&mut events,|event|matches!(event,SessionEvent::CancellationRequested {run_id:cancelled,..} if *cancelled==run_id)).await;
     assert!(observed.iter().all(|event|!matches!(event.event,SessionEvent::RunFinished {run_id:finished,..} if finished==run_id)));
     assert!(
@@ -2587,12 +2521,7 @@ async fn schedules_ready_sessions_fairly() {
     else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: second.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, second.committed_through);
     try_submit(&runtime, first_session, "first-a")
         .await
         .unwrap();

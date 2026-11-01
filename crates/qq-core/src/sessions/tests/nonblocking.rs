@@ -389,15 +389,7 @@ async fn an_answer_after_the_parent_settles_reaches_its_next_run() {
         .await
         .unwrap()
         .unwrap();
-    delegation
-        .harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: run },
-        )
-        .await
-        .unwrap();
+    cancel_run(&delegation.harness.runtime, run).await.unwrap();
     let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
     assert!(matches!(
         finished_outcome(&observed, run),

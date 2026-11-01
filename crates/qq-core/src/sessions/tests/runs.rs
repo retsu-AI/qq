@@ -194,12 +194,7 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let after_creation = created.committed_through;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: after_creation,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, after_creation);
 
     try_submit(&runtime, session_id, "first prompt")
         .await
@@ -288,12 +283,7 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
             .all(|message| !message.output.contains("private rationale"))
     );
 
-    let mut replay = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: after_creation,
-        })
-        .unwrap();
+    let mut replay = subscribe_after(&runtime, workspace_id, after_creation);
     let replayed = tokio::time::timeout(Duration::from_secs(2), async {
         let mut replayed = Vec::new();
         for _ in 0..observed.len() {
@@ -378,12 +368,7 @@ async fn streams_committed_run_events_and_snapshots_the_result() {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
 
     try_submit(&runtime, session_id, "Say hello").await.unwrap();
 
@@ -690,13 +675,7 @@ async fn cancellation_before_a_model_turn_preserves_known_session_cost() {
         matches!(event, SessionEvent::RunStarted { run_id: started, .. } if *started == run_id)
     })
     .await;
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id },
-        )
-        .await
-        .unwrap();
+    cancel_run(&runtime, run_id).await.unwrap();
     let observed = collect_until(&mut events, finished_for(run_id)).await;
 
     assert!(observed.iter().any(|event| matches!(
@@ -970,12 +949,7 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: replay_after,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, replay_after);
     let follow_up = queue_prompt(&runtime, session_id, "confirm completion".to_owned()).await;
     let replayed = collect_until(&mut events, finished_for(follow_up)).await;
     assert!(matches!(
@@ -1037,13 +1011,7 @@ async fn cancellation_at_the_slice_checkpoint_has_one_cancelled_terminal() {
     tokio::time::timeout(Duration::from_secs(30), checkpoint_wait.notified())
         .await
         .expect("the run must reach its tool-free checkpoint request");
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id },
-        )
-        .await
-        .unwrap();
+    cancel_run(&runtime, run_id).await.unwrap();
     let observed = collect_until(&mut events, finished_for(run_id)).await;
 
     assert_eq!(
@@ -1445,12 +1413,7 @@ async fn cancelled_unclaimed_prompt_remains_explicit_in_follow_up_context() {
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: cancelled.receipt.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, cancelled.receipt.committed_through);
     try_submit(&runtime, session_id, "continue after cancellation")
         .await
         .unwrap();
@@ -1497,12 +1460,7 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: cursor,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, cursor);
     let submit = |prompt: &str| {
         let input = vec![InputPart::text(prompt.to_owned())];
         let runtime = &runtime;
@@ -1632,12 +1590,7 @@ async fn a_raised_output_cap_is_what_the_retried_turn_records() {
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: cursor,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, cursor);
     try_submit(&runtime, session_id, "think hard")
         .await
         .unwrap();
@@ -1693,12 +1646,7 @@ async fn an_empty_truncated_turn_continues_and_replays_only_the_reasoning_notice
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: cursor,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, cursor);
     let mut outcomes = Vec::new();
     for prompt in ["think hard", "and now summarize"] {
         try_submit(&runtime, session_id, prompt).await.unwrap();
@@ -1783,12 +1731,7 @@ async fn interrupted_uncommitted_assistant_text_stays_out_of_model_context() {
         message.state == MessageState::Interrupted
             && message.output == "partial text from an uncommitted turn"
     }));
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: recovered.cursor,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, recovered.cursor);
     try_submit(&runtime, session_id, "continue from durable work")
         .await
         .unwrap();

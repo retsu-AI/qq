@@ -355,12 +355,7 @@ async fn compaction_runs_account_usage_and_cost_but_join_no_transcript() {
     let (directory, runtime) = test_runtime().await;
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     try_submit(&runtime, session_id, "say hello").await.unwrap();
     collect_through_finished(&mut events).await;
     let snapshot = runtime
@@ -2421,14 +2416,7 @@ async fn cancelling_the_queued_prompt_cancels_the_pending_auto_compaction() {
         panic!("expected the auto-compaction to start")
     };
 
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: prompt },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, prompt).await.unwrap();
     let mut observed = collect_until(&mut harness.events, finished_for(compaction)).await;
     if !observed
         .iter()
@@ -2499,28 +2487,14 @@ async fn cancelling_a_queued_prompt_never_cancels_a_manual_compaction() {
     .await;
 
     let prompt = queue_prompt(&harness.runtime, harness.session_id, "later".to_owned()).await;
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: prompt },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, prompt).await.unwrap();
     let observed = collect_until(&mut harness.events, finished_for(prompt)).await;
     assert!(!observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::CancellationRequested { run_id, .. } if *run_id == compaction
     )));
 
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: compaction },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, compaction).await.unwrap();
     let observed = collect_until(&mut harness.events, finished_for(compaction)).await;
     assert!(observed.iter().any(|event| matches!(
         &event.event,
@@ -2967,14 +2941,7 @@ async fn rollback_is_refused_while_the_session_is_not_idle() {
             .await,
         Err(SessionRuntimeError::SessionActive)
     );
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: stalled },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, stalled).await.unwrap();
     collect_until(&mut harness.events, finished_for(stalled)).await;
 }
 
@@ -5263,14 +5230,7 @@ async fn cancelling_during_in_run_compaction_settles_both_runs_once() {
     else {
         panic!("expected the in-run compaction to start")
     };
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: run },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, run).await.unwrap();
     let mut observed = collect_until(&mut harness.events, finished_for(run)).await;
     if !observed.iter().any(|event| {
         matches!(

@@ -718,12 +718,7 @@ async fn restart_cancels_a_queued_child_owned_by_an_interrupted_parent() {
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: child.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, child.committed_through);
     let recovered = tokio::time::timeout(Duration::from_secs(2), async {
         let mut recovered = Vec::new();
         while recovered
@@ -790,12 +785,7 @@ async fn parallel_spawn_accounting_is_ordered_exact_and_survives_restart() {
     else {
         panic!("unexpected receipt")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
 
     let parent_run = submit_prompt_to(&runtime, parent_id, "delegate twice").await;
     let observed = collect_until_run_finished(&mut events, parent_run).await;
@@ -1304,13 +1294,11 @@ async fn child_sessions_cannot_spawn_and_dispatch_rejects_the_attempt() {
     else {
         panic!("unexpected receipt")
     };
-    let mut events = harness
-        .runtime
-        .subscribe(SubscribeRequest {
-            workspace_id: harness.workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(
+        &harness.runtime,
+        harness.workspace_id,
+        created.committed_through,
+    );
     let run_id = submit_prompt_to(&harness.runtime, child_id, "try to spawn").await;
     let observed = collect_until_run_finished(&mut events, run_id).await;
 
@@ -1417,14 +1405,7 @@ async fn cancelling_the_parent_run_cancels_its_in_flight_child() {
         Some("test/model"),
         "a child without a model argument inherits the parent's model"
     );
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: parent_run },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, parent_run).await.unwrap();
     tokio::time::timeout(Duration::from_secs(30), async {
         while finished_outcome(&observed, parent_run).is_none()
             || finished_outcome(&observed, child_run).is_none()
@@ -1484,14 +1465,7 @@ async fn cancelling_the_parent_interrupts_an_in_flight_child_tool() {
     })
     .await
     .expect("the child tool never started");
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: parent_run },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, parent_run).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         while finished_outcome(&observed, parent_run).is_none()
             || finished_outcome(&observed, child_run).is_none()
@@ -1552,14 +1526,7 @@ async fn cancelling_the_parent_after_child_completion_preserves_the_child() {
     tokio::time::timeout(Duration::from_secs(2), second_turn_started.notified())
         .await
         .expect("the parent did not consume the child answer");
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id: parent_run },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, parent_run).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         while finished_outcome(&observed, parent_run).is_none() {
             observed.push(harness.events.next().await.unwrap().unwrap());
@@ -2424,14 +2391,7 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
             submit_prompt_to(&harness.runtime, harness.session_id, "continue").await
         } else if cancel_parent {
             let queued = submit_prompt_to(&harness.runtime, harness.session_id, "continue").await;
-            harness
-                .runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::CancelRun { run_id: parent_run },
-                )
-                .await
-                .unwrap();
+            cancel_run(&harness.runtime, parent_run).await.unwrap();
             queued
         } else {
             steer(
@@ -2933,13 +2893,7 @@ async fn unreadable_child_outcome_fails_the_runtime_before_parent_continuation()
         "the parent makes no further provider request"
     );
     assert_eq!(
-        harness
-            .runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::CancelRun { run_id: parent_run }
-            )
-            .await,
+        cancel_run(&harness.runtime, parent_run).await,
         Err(SessionRuntimeError::Unavailable)
     );
 }
@@ -3875,14 +3829,7 @@ async fn cancelling_the_root_settles_the_whole_subtree() {
     tokio::time::timeout(Duration::from_secs(5), child_started.notified())
         .await
         .expect("the grandchild must start");
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CancelRun { run_id },
-        )
-        .await
-        .unwrap();
+    cancel_run(&harness.runtime, run_id).await.unwrap();
     let mut observed = Vec::new();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {

@@ -100,12 +100,7 @@ async fn check_repeated_call_replay(missing_first_result: bool) {
         .unwrap();
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let mut first_run = None;
     for prompt in ["read first and missing", "read second"] {
         let receipt = try_submit(&runtime, session_id, prompt).await.unwrap();
@@ -139,12 +134,7 @@ async fn check_repeated_call_replay(missing_first_result: bool) {
     }
     let runtime = SessionRuntime::open(options(), loader).await.unwrap();
     let receipt = try_submit(&runtime, session_id, "continue").await.unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: receipt.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
     collect_through_finished(&mut events).await;
     compact_session(&runtime, session_id).await;
     collect_through_compacted(&mut events).await;
@@ -295,12 +285,7 @@ async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen()
         .unwrap();
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let first = queue_prompt(&runtime, session_id, "read all four".to_owned()).await;
     let observed = collect_until(&mut events, finished_for(first)).await;
     let mut finished: Vec<ToolCallSnapshot> = observed
@@ -365,12 +350,7 @@ async fn turn_budget_projection_replays_identically_after_follow_up_and_reopen()
     assert_assembly_matches_reference(&directory.path().join("sessions.sqlite3"), session_id);
     let runtime = SessionRuntime::open(options(), loader).await.unwrap();
     let third = queue_prompt(&runtime, session_id, "and again".to_owned()).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     collect_until(&mut events, finished_for(third)).await;
     let reopened = {
         let requests = requests.lock().unwrap();
@@ -593,12 +573,7 @@ async fn anthropic_signed_tool_turn_survives_runtime_restart() {
         .unwrap();
     let (workspace_id, session_id, created) =
         new_session(&runtime, directory.path(), ApprovalMode::Full).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let run = queue_prompt(&runtime, session_id, "read note".into()).await;
     let observed = collect_until(&mut events, finished_for(run)).await;
     assert!(
@@ -615,12 +590,7 @@ async fn anthropic_signed_tool_turn_survives_runtime_restart() {
     drop(events);
     drop(runtime);
     let runtime = SessionRuntime::open(options(), loader).await.unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     let run = queue_prompt(&runtime, session_id, "continue".into()).await;
     collect_until(&mut events, finished_for(run)).await;
     runtime.shutdown().await.unwrap();

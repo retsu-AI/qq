@@ -223,12 +223,7 @@ async fn compatible_occupancy_seeds_the_first_turn_after_restart_and_pricing_ref
     let reopened = SessionRuntime::open(SessionRuntimeOptions::new(database_path), loader)
         .await
         .unwrap();
-    let mut events = reopened
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: after_first,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&reopened, workspace_id, after_first);
     submit_prompt_to(&reopened, session_id, "second").await;
     let second = collect_through_finished(&mut events).await;
 

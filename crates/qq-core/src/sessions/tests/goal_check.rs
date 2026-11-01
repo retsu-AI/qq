@@ -166,12 +166,7 @@ async fn once_check(success: bool) {
     };
     assert!(!directory.path().join("goal-check-marker").exists());
     assert_eq!(loads.load(Ordering::SeqCst), 0);
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: receipt.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
     runtime
         .command(
             CommandId::generate().unwrap(),
@@ -679,12 +674,7 @@ async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
     .unwrap();
     let held = runtime.hold_scheduling().await;
     let (workspace_id, resolved) = resolve_workspace(&runtime, directory.path()).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: resolved,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, resolved);
     let mut sessions = Vec::new();
     for _ in 0..2 {
         let created = explicit_check_session(&runtime, workspace_id, None).await;
@@ -818,12 +808,7 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
         .await
         .unwrap();
         let (workspace_id, cursor) = resolve_workspace(&runtime, directory.path()).await;
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: cursor,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, cursor);
         let created = explicit_check_session(&runtime, workspace_id, None).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
             panic!("missing session")
@@ -988,12 +973,7 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("missing goal")
         };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: receipt.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
         let approved = runtime
             .command(
                 CommandId::generate().unwrap(),
@@ -1230,12 +1210,7 @@ async fn goal_check_for_goal_blocks_after_three_failed_checks_with_durable_evide
     let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
         panic!("goal")
     };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: receipt.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
     runtime
         .command(
             CommandId::generate().unwrap(),
@@ -1429,12 +1404,7 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
         let receipt = set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"old objective",
             "check":{"command":COMMAND,"timeout_ms":5000},"budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
         })).await.unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: receipt.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
         let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
             panic!("goal")
         };
@@ -1656,12 +1626,7 @@ async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions()
     let receipt = set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"verify work", "check":{"command":COMMAND,"timeout_ms":5000},
         "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+60_000}
     })).await.unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: receipt.committed_through,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
     let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
         panic!("goal")
     };

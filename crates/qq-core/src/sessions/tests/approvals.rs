@@ -1394,12 +1394,7 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
     )
     .await
     .unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: awaiting.cursor,
-        })
-        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, awaiting.cursor);
     let recovered = collect_through_finished(&mut events).await;
     assert!(matches!(
         &recovered[0].event,
@@ -1782,12 +1777,7 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
         .unwrap();
         let (workspace, session_id, created) =
             new_session(&runtime, &root, ApprovalMode::Ask).await;
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: created.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace, created.committed_through);
         set_goal(
             &runtime,
             serde_json::json!({"session_id":session_id,"objective":"ask before mutation",
@@ -1856,12 +1846,7 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
             Some(goal.as_ref())
         );
         assert_eq!(requests.lock().unwrap().len(), 1);
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: workspace,
-                after: cursor,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace, cursor);
         if !expire_goal {
             let unrelated =
                 queue_prompt(&runtime, session_id, "an unrelated question".to_owned()).await;

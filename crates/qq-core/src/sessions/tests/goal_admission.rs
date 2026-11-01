@@ -275,12 +275,7 @@ async fn cancelled_pending_main_request_preserves_unknown_session_and_goal_spend
         let held = runtime.hold_scheduling().await;
         let (workspace_id, session_id, created) =
             new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
         let set = set_goal(
             &runtime,
             serde_json::json!({"session_id":session_id,"objective":"pending request certainty",
@@ -456,12 +451,7 @@ async fn direct_goal_rejections_with_finite_caps_keep_retry_pause_and_known_zero
             }))
         .await
         .unwrap();
-            let mut events = runtime
-                .subscribe(SubscribeRequest {
-                    workspace_id,
-                    after: receipt.committed_through,
-                })
-                .unwrap();
+            let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
             let (run_id, events) = if goal_origin {
                 let events = collect_until(&mut events, |event| {
                     matches!(event, SessionEvent::RunFinished { .. })
@@ -574,12 +564,7 @@ async fn goal_failure_after_start_before_provider_poll_preserves_known_zero() {
         let held = runtime.hold_scheduling().await;
         let (workspace_id, session_id, created) =
             new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
         set_goal(
             &runtime,
             serde_json::json!({"session_id":session_id,"objective":"known zero before dispatch",
@@ -782,12 +767,7 @@ async fn provider_replay_and_empty_reasoning_are_goal_work_before_api_fault() {
         )
         .await
         .unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: receipt.committed_through,
-            })
-            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, receipt.committed_through);
         let finished = collect_until(&mut events, |event| {
             matches!(event, SessionEvent::RunFinished { .. })
         })
@@ -1313,12 +1293,7 @@ async fn twenty_minute_permit_wait_reclamps_unbounded_prompts_and_goal_runs() {
             let held = runtime.hold_scheduling().await;
             let (workspace_id, session_id, created) =
                 new_session(&runtime, directory.path(), ApprovalMode::default()).await;
-            let mut events = runtime
-                .subscribe(SubscribeRequest {
-                    workspace_id,
-                    after: created.committed_through,
-                })
-                .unwrap();
+            let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
             let deadline = began + if expired { 19 } else { 21 } * 60_000;
             set_goal(&runtime, serde_json::json!({"session_id":session_id, "objective":"respect the original deadline after queueing",
                 "budget":{"max_goal_runs":1,"deadline_ms":deadline,"per_run":{"max_duration_ms":120_000}}
