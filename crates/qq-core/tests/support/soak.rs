@@ -532,7 +532,7 @@ impl Fixture {
             let command = serde_json::from_value(serde_json::json!({
                 "type":"set_goal", "session_id":session_id,
                 "objective":GOAL_OBJECTIVE,
-                "budget":{"max_goal_runs":200,"deadline_ms":deadline}
+                "budget":{"max_goal_runs":200,"deadline_ms":deadline,"per_run":{"max_model_turns":2_100}}
             }))
             .expect("public goal command");
             runtime
@@ -555,6 +555,22 @@ impl Fixture {
             database,
             requested_turns,
             initial_resources,
+        }
+    }
+
+    pub async fn goal_run(&mut self) -> RunId {
+        loop {
+            let envelope = self
+                .events
+                .next()
+                .await
+                .expect("event stream")
+                .expect("durable event");
+            if let SessionEvent::PromptQueued { run, .. } = envelope.event
+                && matches!(run.origin, Some(qq_protocol::RunOrigin::Goal { .. }))
+            {
+                return run.id;
+            }
         }
     }
 
@@ -751,7 +767,12 @@ pub struct Report {
 
 pub async fn run(script: Script) -> Report {
     let directory = tempfile::tempdir().expect("isolated soak workspace");
+    let goal_enabled = script.goal_enabled;
     let mut fixture = Fixture::open(directory.path(), script).await;
-    let run_id = fixture.submit().await;
+    let run_id = if goal_enabled {
+        fixture.goal_run().await
+    } else {
+        fixture.submit().await
+    };
     fixture.finish(run_id).await
 }

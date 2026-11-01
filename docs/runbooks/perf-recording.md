@@ -117,8 +117,9 @@ and real provider latency, and is a standalone diagnostic, not an H0 budget.
 `QQ_BENCH_ITERATIONS` accepts 1–100 (default 3). Comparing tails still needs the
 normal A/B and A/A discipline; three medians do not qualify flatness or a tail.
 
-`QQ_BENCH_GOAL=1` creates an active durable goal before submitting the scripted
-prompt; `0` is the default goal-less mode. Both use the same compiled plan and
+`QQ_BENCH_GOAL=1` creates an active durable goal and measures the goal run the
+scheduler queues for it; `0` is the default goal-less mode, which submits the
+scripted prompt. Both use the same compiled plan and
 workload. Each receipt records the mode, work requests containing a real goal
 notice, and committed compactions. A bounded observer checks the first block
 of the first two messages in both modes; its cost is included in the gaps.
