@@ -1,4 +1,5 @@
 experimental = ["setup-scripts"]
+nextest-version = { required = "0.9.133" }
 
 [store]
 dir = "target/nextest"
@@ -6,8 +7,12 @@ dir = "target/nextest"
 [scripts.setup.tmpfs-tmpdir]
 command = { command-line = ".config/nextest-tmpdir.sh", relative-to = "workspace-root" }
 
+[test-groups]
+real-process = { max-threads = 2 }
+soak = { max-threads = "num-cpus" }
+
 [profile.default]
-test-threads = 8
+test-threads = "num-cpus"
 fail-fast = false
 status-level = "fail"
 final-status-level = "slow"
@@ -20,7 +25,46 @@ filter = 'all()'
 setup = 'tmpfs-tmpdir'
 
 [[profile.default.overrides]]
-filter = '(package(qq-core) & test(/^sessions::tests::(goal_driver_soak|deadlines|compaction|goals|delegation|runs|goal_check|feeds)::/)) | binary_id(qq-core::soak) | (package(xtask) & test(/^perf::tests::/))'
+filter = '(package(qq-core) & test(/^sessions::tests::goal_driver_soak::multi_day_/)) | binary_id(qq-core::soak)'
+test-group = 'soak'
+priority = 100
+
+[[profile.default.overrides]]
+filter = '''
+(package(qq-core) & (
+    test(/^tools::(process_group|windows_job)::/)
+    | test(/^tools::shell::(orphan_tests|child_exit|exit_tests|descendants|watcher_tests)::/)
+    | test(/^tools::tests::.*(kill|escaped_tree|yield|left_the_group|shell_timeout|shell_cancellation|stops_on_timeout|reaped)/)
+    | test(/^sessions::tests::goal_check::goal_check_process_(cancellation|kills|timeout)/)
+    | test(/^sessions::tests::goal_driver_soak::.*real_process/)
+    | test(=tests::a_run_follows_a_yielded_command_and_stops_the_rest_when_it_ends)
+))
+| binary_id(qq::daemon_lifecycle)
+| binary_id(qq::daemon_windows)
+| (package(xtask) & test(=perf::tests::captured_output_timeout_kills_and_reaps_the_process_group))
+'''
+test-group = 'real-process'
+
+[[profile.default.overrides]]
+filter = '''
+(package(qq-core) & (
+    test(=sessions::tests::compaction::a_session_without_a_window_still_sheds_stale_reads_before_the_storage_backstop)
+    | test(=tools::tests::ab3_scan_cap_offsets_remain_readable_until_a_terminal_marker)
+    | test(=sessions::tests::compaction::maximum_goal_is_verbatim_immediately_after_three_in_run_summaries)
+    | test(=tools::tests::cancel_and_timeout_kill_descendants_that_left_the_group)
+    | test(=sessions::tests::compaction::an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verbatim)
+    | test(=sessions::tests::goal_final_slot::goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_completion)
+    | test(=sessions::tests::goal_upgrade::goal_upgrade_preserves_owned_helper_prefix_and_dispatch_uncertainty)
+    | test(=sessions::tests::feeds::a_lagging_subscriber_catches_up_from_the_store_without_gaps_or_duplicates)
+    | test(=sessions::tests::compaction::history_search_is_scan_bounded_and_newest_first)
+    | test(=sessions::tests::goal_paid_limits::goal_paid_requests_intersect_the_callers_cumulative_remainder)
+    | test(=sessions::tests::runs::steering_during_a_slice_report_lands_before_the_continuation_notice)
+    | test(=sessions::tests::runs::a_truncated_slice_report_keeps_its_notice_on_replay)
+))
+| (package(xtask) & test(=perf::tests::busy_workspace_fixture_seeds_a_long_history))
+| (binary_id(qq-provider::interface) & test(=reasoning_effort::every_effort_reaches_responses_standard_codex_and_chat_transport))
+| (package(qq-server) & test(=tests::command_routes_match_the_protocol_table))
+'''
 priority = 100
 
 [profile.quick]
@@ -40,3 +84,48 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 
 [profile.ci.junit]
 path = "junit.xml"
+
+[profile.platform]
+inherits = "ci"
+default-filter = 'none()'
+
+[profile.platform.junit]
+path = "junit.xml"
+
+[[profile.platform.overrides]]
+platform = 'cfg(windows)'
+default-filter = '''
+(package(qq-config) | package(qq-auth) | package(qq-server)) & test(/^tests::.*qq_home/)
+| binary_id(qq::daemon_windows)
+| package(qq-auth) & test(=tests::windows_dpapi_round_trip_replaces_and_removes_oversized_secret)
+| package(qq-core) & (
+    test(/^tools::windows_job::tests::/)
+    | test(=tools::shell::cmd_text_tests::quoted_redirection_reaches_cmd_unchanged)
+    | test(=approval::tests::ab1_cmd_separators_and_native_sort_output_are_work)
+    | test(=sessions::tests::approvals::goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied_actions)
+    | test(=tools::tests::ab3_native_zero_row_window_returns_a_budget_error)
+    | test(=tools::tests::ab3_native_unicode_header_preserves_repaired_read_windows)
+    | test(=tools::tests::dropped_windows_shell_waiter_kills_the_owned_process_before_drain)
+    | test(=tools::tests::windows_shell_timeout_kills_the_owned_process)
+    | test(=tools::tests::panicked_shell_task_never_reports_confirmed_quiescence)
+    | test(=tools::tests::dropped_write_waiter_drains_the_actual_atomic_apply)
+    | test(=sessions::tests::delegation::unconfirmed_shell_exit_prevents_session_continuation)
+    | test(=sessions::tests::delegation::child_mutation_drains_before_steering_or_a_replacement_run_can_write)
+    | test(=sessions::tests::delegation::interrupting_steering_owns_a_child_whose_creation_reply_is_pending)
+    | test(=sessions::tests::delegation::shutdown_waits_for_started_child_loader_work_without_creating_a_child)
+    | test(=sessions::tests::delegation::child_cancellation_persistence_failure_prevents_parent_continuation)
+)
+'''
+
+[[profile.platform.overrides]]
+platform = 'cfg(target_os = "macos")'
+default-filter = '''
+(package(qq-config) | package(qq-auth) | package(qq-server)) & test(/^tests::.*qq_home/)
+| package(qq-core) & (
+    test(=sessions::tests::approvals::goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied_actions)
+    | test(=tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait)
+    | test(=tools::tests::cancel_and_timeout_kill_descendants_that_left_the_group)
+    | test(=tools::tests::a_yielded_escaped_tree_dies_when_the_run_ends)
+    | test(=tools::tests::commands_see_their_working_directory_in_pwd_and_no_oldpwd)
+)
+'''

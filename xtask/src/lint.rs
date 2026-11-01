@@ -20,6 +20,10 @@ pub enum LintError {
         #[source]
         source: io::Error,
     },
+    #[error(transparent)]
+    Quarantine(#[from] crate::quarantine::QuarantineError),
+    #[error("failed to list tests with `cargo nextest list`: {0}")]
+    TestList(String),
     #[error("{0} lint finding(s); see above")]
     Findings(usize),
 }
@@ -33,6 +37,8 @@ pub enum Rule {
     SleepInTests,
     AdrIndexed,
     SkillCopies,
+    Quarantine,
+    PlatformTests,
 }
 
 impl Rule {
@@ -45,6 +51,8 @@ impl Rule {
             Self::SleepInTests => "sleep-in-tests",
             Self::AdrIndexed => "adr-indexed",
             Self::SkillCopies => "skill-copies",
+            Self::Quarantine => "quarantine",
+            Self::PlatformTests => "platform-tests",
         }
     }
 
@@ -64,6 +72,12 @@ impl Rule {
             Self::AdrIndexed => "add a row for the ADR to `docs/adr/README.md`",
             Self::SkillCopies => {
                 "synchronize .qq/skills and .agents/skills, including executable permissions"
+            }
+            Self::PlatformTests => {
+                "add the test to .config/platform-tests/<os>.txt and to the matching `[[profile.platform.overrides]]` filter in .config/nextest.toml"
+            }
+            Self::Quarantine => {
+                "fix or delete the quarantined test and remove its entry; see docs/runbooks/testing.md#quarantine"
             }
         }
     }
@@ -470,6 +484,138 @@ fn inline_test_lines(text: &str) -> Vec<bool> {
     marks
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Windows,
+    Macos,
+}
+
+impl Platform {
+    pub const fn list(self) -> &'static str {
+        match self {
+            Self::Windows => ".config/platform-tests/windows.txt",
+            Self::Macos => ".config/platform-tests/macos.txt",
+        }
+    }
+
+    fn of(attribute: &str) -> Option<Self> {
+        match attribute {
+            "#[cfg(windows)]" | "#![cfg(windows)]" | "#[cfg(target_os=\"windows\")]" => {
+                Some(Self::Windows)
+            }
+            "#[cfg(target_os=\"macos\")]" | "#![cfg(target_os=\"macos\")]" => Some(Self::Macos),
+            _ => None,
+        }
+    }
+}
+
+fn scoped_module_path(path: &str, module: &str) -> String {
+    let (dir, file) = path.rsplit_once('/').unwrap_or(("", path));
+    let stem = file.trim_end_matches(".rs");
+    let base = if matches!(stem, "lib" | "main") {
+        dir.to_owned()
+    } else {
+        format!("{dir}/{stem}")
+    };
+    format!("{base}/{module}.rs")
+}
+
+pub fn platform_tests(files: &[Source<'_>]) -> Vec<(Platform, String, usize, String)> {
+    let mut scoped = Vec::new();
+    for file in files {
+        let Some(text) = file.text else { continue };
+        let mut pending = None;
+        for line in text.lines() {
+            let code = line
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>();
+            if let Some(platform) = Platform::of(&code) {
+                pending = Some(platform);
+                continue;
+            }
+            if code.starts_with("#[") {
+                continue;
+            }
+            if let (Some(platform), Some(module)) = (
+                pending,
+                code.strip_prefix("pub(crate)mod")
+                    .or_else(|| code.strip_prefix("mod"))
+                    .and_then(|rest| rest.strip_suffix(';')),
+            ) {
+                scoped.push((scoped_module_path(file.path, module), platform));
+            }
+            pending = None;
+        }
+    }
+    let mut found = Vec::new();
+    for file in files {
+        let Some(text) = file.text else { continue };
+        let mut whole = scoped
+            .iter()
+            .find(|(path, _)| path == file.path)
+            .map(|(_, platform)| *platform);
+        let mut pending = None;
+        let mut test = false;
+        for (index, line) in text.lines().enumerate() {
+            let code = line
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>();
+            if code.starts_with("#![") {
+                whole = Platform::of(&code).or(whole);
+                continue;
+            }
+            if let Some(platform) = Platform::of(&code) {
+                pending = Some(platform);
+                continue;
+            }
+            if code.starts_with("#[") {
+                test |= code == "#[test]" || code.starts_with("#[tokio::test");
+                continue;
+            }
+            if test && let Some(platform) = pending.or(whole) {
+                let name = line
+                    .split_once("fn ")
+                    .map(|(_, rest)| rest)
+                    .and_then(|rest| rest.split(['(', '<']).next())
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty());
+                if let Some(name) = name {
+                    found.push((platform, file.path.to_owned(), index + 1, name.to_owned()));
+                }
+            }
+            pending = None;
+            test = false;
+        }
+    }
+    found
+}
+
+fn platform_findings(files: &[Source<'_>], lists: &[(Platform, &str)]) -> Vec<Finding> {
+    platform_tests(files)
+        .into_iter()
+        .filter(|(platform, _, _, name)| {
+            !lists
+                .iter()
+                .filter(|(listed, _)| listed == platform)
+                .flat_map(|(_, text)| text.lines())
+                .any(|entry| {
+                    entry.ends_with(&format!("::{name}")) || entry.ends_with(&format!(" {name}"))
+                })
+        })
+        .map(|(platform, path, line, name)| Finding {
+            rule: Rule::PlatformTests,
+            path,
+            line,
+            detail: format!(
+                "`{name}` runs only on this platform but is missing from {}",
+                platform.list()
+            ),
+        })
+        .collect()
+}
+
 pub fn tracked_files(root: &Path) -> Result<Vec<String>, LintError> {
     let output = ProcessCommand::new("git")
         .args([
@@ -592,6 +738,55 @@ fn skill_copies(root: &Path, paths: &[String]) -> Result<Vec<Finding>, LintError
     Ok(findings)
 }
 
+fn quarantine_findings(root: &Path) -> Result<Vec<Finding>, LintError> {
+    let entries = crate::quarantine::load(root)?;
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let output = ProcessCommand::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args([
+            "nextest",
+            "list",
+            "--workspace",
+            "--color",
+            "never",
+            "--message-format",
+            "oneline",
+        ])
+        .current_dir(root)
+        .output()
+        .map_err(|error| LintError::TestList(error.to_string()))?;
+    if !output.status.success() {
+        return Err(LintError::TestList(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    let mut listed = String::from_utf8_lossy(&output.stdout).into_owned();
+    for platform in [Platform::Windows, Platform::Macos] {
+        let path = root.join(platform.list());
+        let text = fs::read_to_string(&path).map_err(|source| LintError::Read { path, source })?;
+        listed.push('\n');
+        listed.push_str(&text);
+    }
+    let tests = listed
+        .lines()
+        .filter_map(|line| line.trim_end().split_once(' '))
+        .collect::<std::collections::BTreeSet<_>>();
+    Ok(
+        crate::quarantine::problems(&entries, crate::quarantine::today(), |binary, name| {
+            tests.contains(&(binary, name))
+        })
+        .into_iter()
+        .map(|problem| Finding {
+            rule: Rule::Quarantine,
+            path: crate::quarantine::PATH.to_owned(),
+            line: problem.line,
+            detail: problem.detail,
+        })
+        .collect(),
+    )
+}
+
 pub fn run(root: &Path) -> Result<usize, LintError> {
     let paths = tracked_files(root)?;
     let mut texts = Vec::with_capacity(paths.len());
@@ -623,6 +818,18 @@ pub fn run(root: &Path) -> Result<usize, LintError> {
         .collect::<Vec<_>>();
     let (mut findings, sleeps) = evaluate(&sources, SLEEP_CEILING);
     findings.extend(skill_copies(root, &paths)?);
+    findings.extend(quarantine_findings(root)?);
+    let mut lists = Vec::new();
+    for platform in [Platform::Windows, Platform::Macos] {
+        let path = root.join(platform.list());
+        let text = fs::read_to_string(&path).map_err(|source| LintError::Read { path, source })?;
+        lists.push((platform, text));
+    }
+    let lists = lists
+        .iter()
+        .map(|(platform, text)| (*platform, text.as_str()))
+        .collect::<Vec<_>>();
+    findings.extend(platform_findings(&sources, &lists));
 
     findings.extend(legacy_sleep_findings(
         &sources,
@@ -1057,6 +1264,64 @@ mod tests {
         assert_eq!(
             rules(&files, 0),
             [(Rule::AdrIndexed, "docs/adr/0002-two.md".to_owned(), 0)]
+        );
+    }
+
+    #[test]
+    fn platform_only_tests_must_be_listed_for_their_platform() {
+        use super::{Platform, platform_findings};
+        let tools = "#[cfg(windows)]\npub(crate) mod windows_job;\n#[cfg(test)]\nmod tests {\n    #[cfg(windows)]\n    #[tokio::test]\n    async fn cmd_quotes() {}\n    #[test]\n    fn everywhere() {}\n    #[cfg(target_os = \"macos\")]\n    #[test]\n    fn mac_only() {}\n}\n";
+        let job = "mod tests {\n    #[tokio::test]\n    async fn owned_job() {}\n}\n";
+        let daemon = "#![forbid(unsafe_code)]\n#![cfg(windows)]\n#[test]\nfn detached() {}\n";
+        let files = [
+            Source {
+                path: "crates/c/src/tools.rs",
+                text: Some(tools),
+            },
+            Source {
+                path: "crates/c/src/tools/windows_job.rs",
+                text: Some(job),
+            },
+            Source {
+                path: "tests/daemon_windows.rs",
+                text: Some(daemon),
+            },
+        ];
+        let missing = |windows: &str, macos: &str| {
+            platform_findings(
+                &files,
+                &[(Platform::Windows, windows), (Platform::Macos, macos)],
+            )
+            .into_iter()
+            .map(|finding| (finding.rule, finding.path, finding.line))
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            missing("", ""),
+            [
+                (Rule::PlatformTests, "crates/c/src/tools.rs".to_owned(), 7),
+                (Rule::PlatformTests, "crates/c/src/tools.rs".to_owned(), 12),
+                (
+                    Rule::PlatformTests,
+                    "crates/c/src/tools/windows_job.rs".to_owned(),
+                    3
+                ),
+                (Rule::PlatformTests, "tests/daemon_windows.rs".to_owned(), 4),
+            ]
+        );
+        assert_eq!(
+            missing(
+                "c tools::tests::cmd_quotes\nc tools::windows_job::tests::owned_job\nqq::daemon_windows detached\n",
+                "c tools::tests::mac_only\n"
+            ),
+            []
+        );
+        assert_eq!(
+            missing(
+                "c tools::tests::cmd_quotes\nc tools::windows_job::tests::owned_job\nqq::daemon_windows detached\nc tools::tests::mac_only\n",
+                ""
+            ),
+            [(Rule::PlatformTests, "crates/c/src/tools.rs".to_owned(), 12)]
         );
     }
 }

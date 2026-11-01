@@ -7,6 +7,8 @@ on:
 
     types: [opened, synchronize, reopened, labeled]
   merge_group:
+  schedule:
+    - cron: '17 6 * * *'
   workflow_dispatch:
     inputs:
       perf_h0:
@@ -36,6 +38,8 @@ jobs:
   checks:
     name: fmt, lint, clippy, tests, smoke
     runs-on: ubuntu-latest
+    env:
+      NEXTEST_TEST_THREADS: '8'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,8 +48,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: Exact-test coverage guard
-        run: bash .github/scripts/test-exact-test.sh
       - name: Turn recorder CLI regressions
         run: |
           python3 .github/scripts/test-record-turn-overhead.py
@@ -55,11 +57,11 @@ jobs:
       - name: Affected gate (pull request)
         if: github.event_name == 'pull_request'
         run: cargo xtask check --profile ci --base "origin/${{ github.base_ref }}"
-      - name: Full gate (merge queue, main, manual)
+      - name: Full gate with soak tests (merge queue, main, nightly, manual)
         if: github.event_name != 'pull_request'
         run: cargo xtask check --profile ci --full
       - name: Smoke the real binary
-        run: cargo xtask smoke
+        run: cargo xtask smoke ${{ github.event_name != 'pull_request' && '--reuse-test-build' || '' }}
       - name: Evidence
         if: always()
         run: cargo xtask check --evidence >> "$GITHUB_STEP_SUMMARY" || true
@@ -72,21 +74,107 @@ jobs:
             target/nextest/ci/junit.xml
             target/qq-smoke/
           retention-days: 7
+
+  core-profiles:
+    name: minimal core profile and embedding
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: core-profiles
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Public core embedding lifecycle
-        if: github.event_name != 'pull_request'
         run: cargo run --locked -p qq-core --example embed
       - name: Minimal core profile
-        if: github.event_name != 'pull_request'
         run: |
-          cargo nextest run --locked --profile ci -p qq-core --no-default-features
+          quarantine=$(cargo xtask quarantine)
+          cargo nextest run --locked --profile ci -p qq-core --no-default-features ${quarantine:+-E "not ($quarantine)"}
           cargo clippy --locked -p qq-core --no-default-features --all-targets -- -D warnings
           if cargo tree -p qq-core --no-default-features --edges normal | grep -q 'htmd v'; then
             echo 'minimal core unexpectedly depends on htmd' >&2
             exit 1
           fi
 
+  quarantine:
+    name: quarantined tests under stress (${{ matrix.os }}, non-blocking)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip when nothing is quarantined
+        id: list
+        run: |
+          if grep -q '^\[\[quarantine\]\]' .config/quarantine.toml; then
+            echo listed=true >> "$GITHUB_OUTPUT"
+          else
+            echo 'quarantine list is empty' | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: Swatinem/rust-cache@v2
+        if: steps.list.outputs.listed == 'true'
+        with:
+          key: quarantine-${{ matrix.os }}
+      - uses: taiki-e/install-action@v2
+        if: steps.list.outputs.listed == 'true'
+        with:
+          tool: cargo-nextest
+      - name: GNU timeout and setsid for the process-group tests
+        if: steps.list.outputs.listed == 'true' && runner.os == 'macOS'
+        run: |
+          brew install coreutils util-linux >/dev/null
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix util-linux)/bin" >> "$GITHUB_PATH"
+      - name: Stress the quarantined tests
+        if: steps.list.outputs.listed == 'true'
+        run: |
+          filter=$(cargo xtask quarantine)
+          if [[ -z $filter ]]; then
+            echo 'quarantine list is empty' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          cargo nextest run --locked --workspace --profile ci --no-tests=warn -E "$filter" --stress-count 100
+
+  devcontainer-changes:
+    name: devcontainer inputs changed
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        name: Compare devcontainer inputs with the base
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [[ $EVENT != pull_request ]]; then
+            echo changed=true >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --quiet "$(git merge-base "$BASE" HEAD)" HEAD -- .devcontainer/ 'Dockerfile*' rust-toolchain.toml Cargo.lock; then
+            echo changed=false >> "$GITHUB_OUTPUT"
+          else
+            echo changed=true >> "$GITHUB_OUTPUT"
+          fi
+
   devcontainer:
     name: devcontainer smoke
+    needs: devcontainer-changes
+    if: needs.devcontainer-changes.outputs.changed == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -113,11 +201,19 @@ jobs:
       - name: Test build
         run: cargo check --locked -p qq-client --target wasm32-unknown-unknown --no-default-features --features wasm --tests
 
-  windows-teardown:
-    name: native Windows shell teardown
+  platform:
+    name: platform tests (${{ matrix.os }})
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
-    runs-on: windows-latest
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+          - os: macos-latest
+            platform: macos
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     defaults:
       run:
         shell: bash
@@ -129,90 +225,39 @@ jobs:
           cargo --version
       - uses: Swatinem/rust-cache@v2
         with:
-          key: windows-teardown
-      - name: Oversized first rows return a read budget error
-        run: bash .github/scripts/test-exact.sh tools::tests::ab3_native_zero_row_window_returns_a_budget_error
-      - name: Unicode read headers preserve repaired contiguous windows
-        run: bash .github/scripts/test-exact.sh tools::tests::ab3_native_unicode_header_preserves_repaired_read_windows
-      - name: Dropped waiter drains its owned process
-        run: bash .github/scripts/test-exact.sh tools::tests::dropped_windows_shell_waiter_kills_the_owned_process_before_drain
-      - name: Timeout confirms owned process exit
-        run: bash .github/scripts/test-exact.sh tools::tests::windows_shell_timeout_kills_the_owned_process
-      - name: Panicked process leaves cleanup unconfirmed
-        run: bash .github/scripts/test-exact.sh tools::tests::panicked_shell_task_never_reports_confirmed_quiescence
-      - name: Unconfirmed process blocks session continuation
-        run: bash .github/scripts/test-exact.sh sessions::tests::delegation::unconfirmed_shell_exit_prevents_session_continuation
-      - name: Dropped write drains the atomic apply
-        run: bash .github/scripts/test-exact.sh tools::tests::dropped_write_waiter_drains_the_actual_atomic_apply
-      - name: Child mutation drains before replacement work
-        run: bash .github/scripts/test-exact.sh sessions::tests::delegation::child_mutation_drains_before_steering_or_a_replacement_run_can_write
-      - name: Steering retains pending child admission
-        run: bash .github/scripts/test-exact.sh sessions::tests::delegation::interrupting_steering_owns_a_child_whose_creation_reply_is_pending
-      - name: Shutdown drains started child preparation
-        run: bash .github/scripts/test-exact.sh sessions::tests::delegation::shutdown_waits_for_started_child_loader_work_without_creating_a_child
-      - name: Failed child cancellation blocks continuation
-        run: bash .github/scripts/test-exact.sh sessions::tests::delegation::child_cancellation_persistence_failure_prevents_parent_continuation
-
-  native-run-in-place:
-    name: run in place (${{ matrix.os }})
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: run-in-place-${{ matrix.os }}
+          key: platform-${{ matrix.os }}
           cache-on-failure: true
-      - name: Commands run in the checkout as the user
-        shell: bash
-        run: cargo xtask smoke --only run-in-place --only run-then-undo --only run-command-deadlines --only permission-dispatch
-      - name: Isolated application paths
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          bash .github/scripts/test-exact.sh tests::qq_home_selects_user_paths_without_changing_managed_policy qq-config
-          bash .github/scripts/test-exact.sh tests::qq_home_rejects_empty_and_relative_values qq-config
-          bash .github/scripts/test-exact.sh tests::absent_qq_home_preserves_standard_config_paths qq-config
-          bash .github/scripts/test-exact.sh tests::qq_home_selects_auth_metadata_in_the_shared_data_directory qq-auth
-          bash .github/scripts/test-exact.sh tests::qq_home_rejects_empty_and_relative_auth_roots qq-auth
-          bash .github/scripts/test-exact.sh tests::absent_qq_home_preserves_standard_auth_metadata_paths qq-auth
-          bash .github/scripts/test-exact.sh tests::qq_home_rejects_empty_and_relative_server_roots qq-server
-          bash .github/scripts/test-exact.sh tests::absent_qq_home_preserves_standard_server_paths qq-server
-          bash .github/scripts/test-exact.sh tests::distinct_qq_homes_have_separate_server_discovery_and_coordination qq-server
-      - name: Native core Clippy
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: cargo clippy --locked -p qq-core --all-targets -- -D warnings
-      - name: Unix process-group exit
-        if: ${{ !cancelled() && runner.os == 'macOS' }}
-        shell: bash
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: GNU timeout and setsid for the process-group tests
+        if: runner.os == 'macOS'
         run: |
           brew install coreutils util-linux >/dev/null
-          export PATH="$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix util-linux)/bin:$PATH"
-          command -v timeout setsid || true
-          bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
-          bash .github/scripts/test-exact.sh tools::tests::cancel_and_timeout_kill_descendants_that_left_the_group
-          bash .github/scripts/test-exact.sh tools::tests::a_yielded_escaped_tree_dies_when_the_run_ends
-          bash .github/scripts/test-exact.sh tools::tests::commands_see_their_working_directory_in_pwd_and_no_oldpwd
-      - name: Windows command jobs
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        shell: bash
-        run: |
-          cargo test --locked -p qq --no-default-features --test daemon_windows -- --exact a_detached_daemon_leaves_a_job_that_permits_it_and_starts_in_one_that_does_not
-          bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_children_are_owned_before_command_job_assignment
-          bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_startup_rechecks_cancellation_and_deadline_before_resume
-      - name: Goal approval recovery
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix util-linux)/bin" >> "$GITHUB_PATH"
+      - name: Confirm timeout and setsid
+        if: runner.os == 'macOS'
+        run: command -v timeout setsid
+      - name: Platform tests (selection must equal .config/platform-tests/${{ matrix.platform }}.txt)
+        run: bash .github/scripts/platform-tests.sh ${{ matrix.platform }}
+      - name: Commands run in the checkout as the user
         if: ${{ !cancelled() }}
-        shell: bash
-        run: bash .github/scripts/test-exact.sh sessions::tests::approvals::goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied_actions
+        run: cargo xtask smoke --reuse-test-build --only run-in-place --only run-then-undo --only run-command-deadlines --only permission-dispatch
+      - name: Native core Clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked -p qq-core --all-targets -- -D warnings
       - name: Exercise the embedding caller
         if: ${{ !cancelled() }}
         run: cargo run --locked -p qq-core --example embed
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: platform-${{ matrix.platform }}-${{ github.run_id }}
+          path: |
+            target/nextest/platform/junit.xml
+            target/qq-smoke/
+          retention-days: 7
 
   old-git:
     name: undo on Git 2.39 (debian:bookworm)

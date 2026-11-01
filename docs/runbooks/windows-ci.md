@@ -3,36 +3,33 @@
 QQ's default development and qualification host is Linux. Windows-specific
 behavior is process teardown and job objects in the shell tool, child
 ownership in the session runtime, and the daemon's job; it is qualified by
-two targeted CI jobs, not a full workspace run.
+one targeted CI job per platform, not a full workspace run.
 
-## The `windows-teardown` job
+## The `platform` jobs
 
-`.github/workflows/ci.yml` runs eleven exact tests on `windows-latest` with
-`bash .github/scripts/test-exact.sh <path>`. The helper invokes
-`cargo test --locked -p qq-core --lib <path> -- --exact --color never`, preserves
-command failures, and requires the named test plus exactly one passing,
-non-ignored result. A stale selector, ignored case, or missing result fails
-the step instead of silently qualifying zero tests. Git Bash supplies the
-shell on the Windows runner. They cover: an oversized
-first read row returns a budget error; Unicode read headers keep repaired
-windows; dropped shell waiter kills the owned process; timeout confirms exit; a panicked
-process leaves cleanup unconfirmed; unconfirmed exit blocks session
-continuation; dropped write drains the atomic apply; child mutation drains
-before replacement work; steering retains pending child admission; shutdown
-drains started child preparation; failed child cancellation blocks
-continuation.
+`.github/workflows/ci.yml` runs one `platform (windows-latest)` and one
+`platform (macos-latest)` job. Each job runs
+`bash .github/scripts/platform-tests.sh <os>`, which lists the tests the
+nextest `platform` profile selects on that OS
+(`cargo nextest list --profile platform`). If that list differs from
+`.config/platform-tests/<os>.txt`, the job fails with a diff. Otherwise it
+runs them with `cargo nextest run --profile platform`, which brings the `ci`
+profile's timeouts, one retry, and JUnit output at
+`target/nextest/platform/junit.xml`. A stale or misspelled test path makes
+the selection differ, so the job cannot silently qualify zero tests.
 
-The job records `rustc --version --verbose` so the qualified compiler is in
-the run log.
+The Windows list covers read budget errors and Unicode headers, owned-process
+teardown on drop, timeout and panic, the atomic write drain, child mutation,
+steering, shutdown and cancellation in delegation, command jobs, the
+detached daemon's job, DPAPI credentials, `cmd` quoting, the `QQ_HOME` path
+tests, and goal approval recovery. The macOS list covers the process-group
+exit tests (with GNU `timeout` and `setsid` from Homebrew), the `QQ_HOME`
+path tests, and goal approval recovery.
 
-## The `native-run-in-place` job
-
-The same workflow runs on `macos-latest` and `windows-latest`: the
-`run-in-place`, `run-then-undo`, `run-command-deadlines` and
-`permission-dispatch` smoke scenarios, the `QQ_HOME` path tests, Clippy on
-`qq-core`, the goal approval recovery test and the embedding example. On
-Windows it adds the command-job tests (`tools::windows_job::tests::…`) and
-the detached-daemon job test; on macOS, the process-group exit test.
+After the tests, each job runs the `run-in-place`, `run-then-undo`,
+`run-command-deadlines` and `permission-dispatch` smoke scenarios, Clippy
+on `qq-core`, and the embedding example. It records
+`rustc --version --verbose` so the qualified compiler is in the log.
 
 ## Adding a Windows-sensitive test
 
@@ -42,10 +39,12 @@ the detached-daemon job test; on macOS, the process-group exit test.
    once (`893e582` history).
 2. Register session hooks with the canonical workspace path the runtime uses;
    Windows path canonicalization differs and has caused missing-hook failures.
-3. Add the exact test path using `bash .github/scripts/test-exact.sh <path>`
-   as a new step in the `windows-teardown` job. Include the defining module
-   (`sessions::tests::delegation::` for delegation tests). Keep steps one test
-   each so a failure names the test; do not bypass the coverage assertion.
+3. Add the test to `.config/platform-tests/<os>.txt` (sorted, as
+   `cargo nextest list` prints it: `<binary-id> <test path>`) and to the
+   matching `[[profile.platform.overrides]]` filter in `.config/nextest.toml`.
+   `cargo xtask lint` fails on a test gated by `#[cfg(windows)]` or
+   `#[cfg(target_os = "macos")]` that is missing from its list, and the
+   platform job fails when the filter and the list disagree.
 4. For a change to Windows teardown behavior, run the job through
    `workflow_dispatch` on the branch and cite the run URL in the PR.
 

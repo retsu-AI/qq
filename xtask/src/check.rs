@@ -66,6 +66,8 @@ pub enum CheckError {
     },
     #[error("failed to read {0}")]
     Read(PathBuf, #[source] io::Error),
+    #[error(transparent)]
+    Quarantine(#[from] crate::quarantine::QuarantineError),
     #[error(
         "this branch restores a historical version of files {base} changed, undoing merged work:\n  {files}\nre-apply only your own diff onto {base} (`git diff <old-base> HEAD | git apply --3way` on a fresh branch), or acknowledge each intentional rollback with a committed `QQ-Allow-Revert: <exact path>` trailer"
     )]
@@ -641,7 +643,19 @@ fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_owned()).collect()
 }
 
-fn plan(selection: &Selection, args: &CheckArgs) -> Vec<Gate> {
+pub const SOAK_GROUP: &str = "soak";
+
+pub fn blocking_filter(full: bool, quarantine: Option<&str>) -> Option<String> {
+    let soak = format!("group({SOAK_GROUP})");
+    match (full, quarantine) {
+        (true, None) => None,
+        (true, Some(quarantine)) => Some(format!("not ({quarantine})")),
+        (false, None) => Some(format!("not {soak}")),
+        (false, Some(quarantine)) => Some(format!("not ({soak} | {quarantine})")),
+    }
+}
+
+fn plan(selection: &Selection, args: &CheckArgs, quarantine: Option<&str>) -> Vec<Gate> {
     let mut gates = vec![
         Gate::cargo("fmt", strings(&["fmt", "--all", "--", "--check"])),
         Gate {
@@ -675,6 +689,9 @@ fn plan(selection: &Selection, args: &CheckArgs) -> Vec<Gate> {
         &args.profile,
     ]);
     test.extend(packages);
+    if let Some(filter) = blocking_filter(args.full, quarantine) {
+        test.extend(["-E".to_owned(), filter]);
+    }
     gates.push(Gate::cargo("test", test));
     if selection.minimal_provider {
         let minimal = [
@@ -699,6 +716,9 @@ fn plan(selection: &Selection, args: &CheckArgs) -> Vec<Gate> {
             &args.profile,
         ]);
         test.extend(strings(&minimal));
+        if let Some(filter) = blocking_filter(args.full, quarantine) {
+            test.extend(["-E".to_owned(), filter]);
+        }
         gates.push(Gate {
             rerun_flags: " --no-default-features --features test-support",
             ..Gate::cargo("minimal-test", test)
@@ -1014,7 +1034,15 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
             }
         }
     }
-    let gates = plan(&selection, &args);
+    let quarantined = crate::quarantine::load(&root)?;
+    let quarantine = crate::quarantine::filterset(&quarantined);
+    if let Some(filter) = &quarantine {
+        println!(
+            "check: {} quarantined test(s) excluded: {filter}",
+            quarantined.len()
+        );
+    }
+    let gates = plan(&selection, &args, quarantine.as_deref());
     if args.dry_run {
         for gate in &gates {
             println!("  would run {:<16} {}", gate.name, gate.display());
@@ -1140,6 +1168,24 @@ mod tests {
             "stdout: {}\nstderr: {}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn the_pull_request_gate_leaves_out_soak_and_quarantine_and_full_keeps_soak() {
+        use super::blocking_filter;
+        assert_eq!(
+            blocking_filter(false, None).as_deref(),
+            Some("not group(soak)")
+        );
+        assert_eq!(blocking_filter(true, None), None);
+        assert_eq!(
+            blocking_filter(false, Some("test(=a)")).as_deref(),
+            Some("not (group(soak) | test(=a))")
+        );
+        assert_eq!(
+            blocking_filter(true, Some("test(=a)")).as_deref(),
+            Some("not (test(=a))")
         );
     }
 

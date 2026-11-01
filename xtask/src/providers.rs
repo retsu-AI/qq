@@ -221,6 +221,8 @@ enum Task {
     Check(crate::check::CheckArgs),
     /// Repository rules rustfmt and Clippy cannot see (`AGENTS.md` § Rules → enforcers).
     Lint,
+    #[command(about = "Print the nextest filterset for .config/quarantine.toml; empty when none")]
+    Quarantine,
     /// Drive the real `qq` binary end to end against a loopback fake provider.
     Smoke(crate::smoke::SmokeArgs),
     /// Run provider validation tasks.
@@ -443,6 +445,8 @@ enum XtaskError {
     Lint(#[from] crate::lint::LintError),
     #[error(transparent)]
     Smoke(#[from] crate::smoke::SmokeError),
+    #[error(transparent)]
+    Quarantine(#[from] crate::quarantine::QuarantineError),
     #[error("choose one or more --provider values or --all, but not both")]
     InvalidSelection,
     #[error("live provider checks require {LIVE_OPT_IN}=1")]
@@ -482,6 +486,14 @@ async fn try_run(cli: Cli) -> Result<(), XtaskError> {
             .map_err(XtaskError::CheckTask)?
             .map(|_| ())
             .map_err(Into::into),
+        Task::Quarantine => {
+            let entries = crate::quarantine::load(&crate::smoke::root())?;
+            println!(
+                "{}",
+                crate::quarantine::filterset(&entries).unwrap_or_default()
+            );
+            Ok(())
+        }
         Task::Smoke(args) => crate::smoke::run(args).await.map_err(Into::into),
         Task::Providers(args) => match args.command {
             ProvidersCommand::Check(args) => match args.mode {
