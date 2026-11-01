@@ -20,13 +20,7 @@ async fn creates_root_and_child_sessions_in_one_workspace_snapshot() {
     };
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(child_id),
-            include_sessions: Vec::new(),
-            session_limit: 32,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(child_id), 32, 32))
         .await
         .unwrap();
 
@@ -109,13 +103,7 @@ async fn snapshot_without_focus_selects_and_prewarms_recent_sessions() {
     }
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: None,
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, None, 8, 8))
         .await
         .unwrap();
 
@@ -141,13 +129,7 @@ async fn only_the_first_prompt_names_a_session() {
     }
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 4,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 4))
         .await
         .unwrap();
     assert_eq!(snapshot.focused.unwrap().summary.title, "New session");
@@ -262,13 +244,7 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
     assert!(buffered_text < later_reasoning);
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let messages = snapshot.focused.unwrap().messages;
@@ -453,13 +429,7 @@ async fn streams_committed_run_events_and_snapshots_the_result() {
         } if model == "test/model"
     )));
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 32,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 32, 32))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -623,13 +593,7 @@ async fn unmeasured_new_prompt_clears_stale_session_context() {
     )));
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -739,13 +703,7 @@ async fn persists_tool_transitions_and_reconstructs_follow_up_context() {
     assert!(requested < started && started < finished);
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -863,13 +821,7 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
     );
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 16,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 16))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -1111,13 +1063,7 @@ async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_b
     let expected_cost =
         expected_usage.input_tokens * 1_000 + expected_usage.output_tokens * 2_000 + 100 + 2 * 300;
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 16,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 16))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -1718,13 +1664,7 @@ async fn interrupted_uncommitted_assistant_text_stays_out_of_model_context() {
     .await
     .unwrap();
     let recovered = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     assert!(recovered.focused.unwrap().messages.iter().any(|message| {
@@ -1916,13 +1856,7 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
     .await
     .unwrap();
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     assert!(snapshot.focused.unwrap().messages.iter().all(|message| {
@@ -2046,13 +1980,7 @@ async fn multi_turn_runs_emit_one_assistant_message_per_turn() {
     assert!(call_finished < second_started);
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -2098,13 +2026,12 @@ async fn call_only_turns_persist_no_message_row() {
     let (workspace_id, _) = resolve_workspace(&harness.runtime, &harness.workspace_path).await;
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
+        .snapshot(SnapshotRequest::new(
             workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+            Some(harness.session_id),
+            1,
+            8,
+        ))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -2198,13 +2125,7 @@ fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
     let snapshot = load_snapshot(
         &mut small,
         StoreId::from_bytes([7; 16]),
-        SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(small_session),
-            include_sessions: Vec::new(),
-            session_limit: 512,
-            message_limit: 256,
-        },
+        SnapshotRequest::new(workspace_id, Some(small_session), 512, 256),
     )
     .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -2656,13 +2577,12 @@ async fn repaired_read_arguments_execute_once_and_the_note_is_durable() {
     assert!(result.contains("note=ranges_array_coerced,include_ignored_ignored"));
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            1,
+            8,
+        ))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();

@@ -60,13 +60,12 @@ async fn turn_budget_grants_one_final_response_then_settles_as_budget_exhausted(
     }
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 16,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            1,
+            16,
+        ))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();

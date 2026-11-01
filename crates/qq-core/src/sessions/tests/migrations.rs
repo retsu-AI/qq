@@ -43,13 +43,7 @@ async fn prune_deletes_only_idle_sessions_without_messages() {
     }
     assert_eq!(deleted, empties);
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: None,
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, None, 8, 8))
         .await
         .unwrap();
     assert_eq!(
@@ -854,13 +848,7 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
             .collect::<Vec<_>>()
     };
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);
@@ -884,13 +872,7 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
         assert_eq!(version(&connection), STORE_SCHEMA_VERSION.to_string());
     }
     let reopened = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
         .unwrap();
     assert_eq!(focused_transcript(&reopened), migrated);
@@ -1533,13 +1515,7 @@ async fn retired_supervised_mode_upgrades_from(schema: u32) {
     .await
     .unwrap();
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions[0].approval_mode, ApprovalMode::Auto);
@@ -1764,13 +1740,7 @@ async fn a_schema_64_store_with_reviewer_delegate_and_grant_state_opens_and_repl
     .await
     .unwrap();
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);

@@ -447,13 +447,7 @@ async fn concurrent_chunks_replay_in_committed_order_after_restart() {
         .unwrap();
     assert_eq!(replay, committed);
     let snapshot = reopened
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let assistant = snapshot

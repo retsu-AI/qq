@@ -505,13 +505,12 @@ async fn denial_returns_a_tool_error_and_the_run_still_completes() {
     assert_eq!(denied_result, approval::USER_DENIED_RESULT);
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            1,
+            8,
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -558,13 +557,12 @@ async fn responding_twice_returns_the_recorded_outcome_without_side_effects() {
     );
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            1,
+            8,
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -1206,13 +1204,12 @@ async fn completed_edits_persist_a_display_diff_the_model_context_never_carries(
     let (workspace_id, _) = resolve_workspace(&harness.runtime, &harness.workspace_path).await;
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
+        .snapshot(SnapshotRequest::new(
             workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+            Some(harness.session_id),
+            1,
+            8,
+        ))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();

@@ -1279,13 +1279,7 @@ async fn run_snapshot_preserves_prompt_identity_across_restart() {
     collect_through_finished(&mut events).await;
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 32))
         .await
         .unwrap();
     let run = snapshot
@@ -1335,13 +1329,7 @@ async fn run_snapshot_preserves_prompt_identity_across_restart() {
     .await
     .unwrap();
     let snapshot = reopened
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 32))
         .await
         .unwrap();
     let run = snapshot
@@ -1414,13 +1402,7 @@ async fn resolved_model_and_request_limits_survive_config_mutation_and_restart()
     }
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let persisted = snapshot
@@ -1444,13 +1426,7 @@ async fn resolved_model_and_request_limits_survive_config_mutation_and_restart()
         .await
         .unwrap();
     let snapshot = reopened
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let persisted_after_restart = snapshot
@@ -1501,13 +1477,12 @@ async fn escaped_slash_is_persisted_as_the_provider_visible_prompt() {
 
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            32,
+        ))
         .await
         .unwrap()
         .focused
@@ -1822,13 +1797,7 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
         } if *finished == run_id
     )));
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 2,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 2))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -2068,13 +2037,12 @@ async fn set_session_model_applies_to_the_next_run_but_not_the_active_one() {
     );
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            1,
+            8,
+        ))
         .await
         .unwrap();
     assert_eq!(snapshot.focused.unwrap().summary.context_tokens, Some(7));
@@ -2204,13 +2172,12 @@ async fn set_session_effort_pins_and_clears_on_the_published_summary() {
     ));
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 1,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            1,
+            1,
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -2311,13 +2278,7 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
 
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: None,
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(harness.workspace_id, None, 8, 8))
         .await
         .unwrap();
     assert!(snapshot.sessions.is_empty());

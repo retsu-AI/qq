@@ -362,13 +362,12 @@ async fn multi_turn_child_returns_only_its_final_answer() {
 
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(child_session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(child_session_id),
+            8,
+            8,
+        ))
         .await
         .unwrap();
     let assistant = snapshot
@@ -455,13 +454,12 @@ async fn failed_child_run_insert_leaves_no_idle_orphan() {
     );
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 4,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            4,
+        ))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);
@@ -753,13 +751,12 @@ async fn restart_cancels_a_queued_child_owned_by_an_interrupted_parent() {
     )));
     assert!(requests.lock().unwrap().is_empty());
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
+        .snapshot(SnapshotRequest::new(
             workspace_id,
-            focused_session_id: Some(child.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 4,
-        })
+            Some(child.session_id),
+            8,
+            4,
+        ))
         .await
         .unwrap();
     let child_snapshot = snapshot.focused.unwrap();
@@ -817,13 +814,7 @@ async fn parallel_spawn_accounting_is_ordered_exact_and_survives_restart() {
     }
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(parent_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(parent_id), 8, 8))
         .await
         .unwrap();
     let parent = snapshot
@@ -875,13 +866,7 @@ async fn parallel_spawn_accounting_is_ordered_exact_and_survives_restart() {
     .await
     .unwrap();
     let reloaded = reopened
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(parent_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(parent_id), 8, 8))
         .await
         .unwrap();
     let reloaded_parent = reloaded
@@ -1043,13 +1028,12 @@ async fn worker_resolution_failure_creates_no_child_state_and_parent_continues()
     );
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 32,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            32,
+            32,
+        ))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);
@@ -1136,13 +1120,12 @@ async fn rejected_spawn_validation_creates_no_child_state_and_names_the_check() 
     )));
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 32,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            32,
+            32,
+        ))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);
@@ -1549,13 +1532,12 @@ async fn cancelling_the_parent_after_child_completion_preserves_the_child() {
     )));
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(child_session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 4,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(child_session_id),
+            8,
+            4,
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -1628,13 +1610,12 @@ async fn shutdown_settles_a_running_parent_and_its_in_flight_child() {
 
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(child_session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 4,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(child_session_id),
+            8,
+            4,
+        ))
         .await
         .unwrap();
     assert!(
@@ -1878,13 +1859,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
     assert!(outcome.content.contains("shutting down"));
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 1,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 1))
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);
@@ -4118,13 +4093,12 @@ async fn the_contract_judges_the_audited_revision_and_a_revision_does_not_reset_
     }
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            32,
+        ))
         .await
         .unwrap()
         .focused
@@ -4547,13 +4521,12 @@ async fn child_compaction_spend_reduces_the_next_child_allowance() {
     );
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(*first_session),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(*first_session),
+            8,
+            8,
+        ))
         .await
         .unwrap();
     let direct = snapshot.focused.unwrap().summary.accounting.unwrap().direct;
@@ -4894,13 +4867,12 @@ async fn audits_inherit_remaining_limits_and_charge_inclusive_spend_once() {
     );
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            8,
+        ))
         .await
         .unwrap();
     let totals = snapshot

@@ -340,13 +340,7 @@ async fn recovery_interrupts_only_the_current_turns_message() {
     .await
     .unwrap();
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 8,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 8))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -439,13 +433,7 @@ async fn recovery_interrupts_running_tools_without_reexecuting_them() {
         }
     ));
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 4,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 4))
         .await
         .unwrap();
     assert_eq!(
@@ -809,13 +797,7 @@ async fn shutdown_cancels_running_and_queued_prompts_before_returning() {
     assert_eq!(finished.get(&queued), Some(&RunOutcome::Cancelled));
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 4,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 4))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -905,13 +887,7 @@ async fn scheduler_store_failure_disables_runtime_and_existing_subscribers() {
     );
     assert_eq!(
         runtime
-            .snapshot(SnapshotRequest {
-                workspace_id,
-                focused_session_id: Some(session_id),
-                include_sessions: Vec::new(),
-                session_limit: 1,
-                message_limit: 1,
-            })
+            .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 1))
             .await
             .unwrap_err(),
         SessionRuntimeError::Unavailable
@@ -1755,13 +1731,7 @@ async fn reservation_is_publicly_queued_exclusive_and_cancel_wins_before_start()
             .is_empty()
     );
     let snapshot = store
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 4,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 4))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -2272,13 +2242,7 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
     assert_eq!(loads.load(Ordering::SeqCst), 1);
     assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 4,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 4))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -2416,26 +2380,24 @@ async fn rejects_cross_workspace_focus_and_oversized_pages() {
 
     assert_eq!(
         runtime
-            .snapshot(SnapshotRequest {
-                workspace_id: first_workspace,
-                focused_session_id: Some(session_id),
-                include_sessions: Vec::new(),
-                session_limit: 32,
-                message_limit: 32,
-            })
+            .snapshot(SnapshotRequest::new(
+                first_workspace,
+                Some(session_id),
+                32,
+                32
+            ))
             .await
             .unwrap_err(),
         SessionRuntimeError::SessionNotFound
     );
     assert_eq!(
         runtime
-            .snapshot(SnapshotRequest {
-                workspace_id: first_workspace,
-                focused_session_id: None,
-                include_sessions: Vec::new(),
-                session_limit: MAX_SNAPSHOT_SESSIONS + 1,
-                message_limit: 1,
-            })
+            .snapshot(SnapshotRequest::new(
+                first_workspace,
+                None,
+                MAX_SNAPSHOT_SESSIONS + 1,
+                1
+            ))
             .await
             .unwrap_err(),
         SessionRuntimeError::InvalidPageLimit

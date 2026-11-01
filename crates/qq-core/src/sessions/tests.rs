@@ -3774,13 +3774,7 @@ async fn completed_instruction_hash(
     let run_id = submit_prompt_to(runtime, session_id, prompt).await;
     collect_through_finished(events).await;
     runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 32))
         .await
         .unwrap()
         .focused
@@ -3925,13 +3919,12 @@ fn finished_final_output(
 async fn run_snapshot(harness: &OutputContractHarness, run_id: RunId) -> RunSnapshot {
     harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            32,
+        ))
         .await
         .unwrap()
         .focused
@@ -6616,13 +6609,12 @@ async fn side_running_question_survives_a_snapshot_over_the_body_budget() {
         .unwrap();
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(session),
-            include_sessions: Vec::new(),
-            session_limit: 16,
-            message_limit: 256,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(session),
+            16,
+            256,
+        ))
         .await
         .unwrap();
     assert!(serde_json::to_vec(&snapshot).unwrap().len() <= qq_protocol::MAX_SNAPSHOT_BYTES);

@@ -13,13 +13,7 @@ async fn ac4_runtime_guard_refusal_is_durable_and_reopens_identically() {
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "inspect").await;
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
     assert_eq!(observed.iter().filter(|envelope| matches!(&envelope.event, SessionEvent::ToolCallStarted { tool_call } if tool_call.run_id == run_id)).count(), 2);
-    let request = SnapshotRequest {
-        workspace_id: harness.workspace_id,
-        focused_session_id: Some(harness.session_id),
-        include_sessions: Vec::new(),
-        session_limit: 1,
-        message_limit: 32,
-    };
+    let request = SnapshotRequest::new(harness.workspace_id, Some(harness.session_id), 1, 32);
     let live = harness
         .runtime
         .snapshot(request.clone())

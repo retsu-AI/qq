@@ -359,13 +359,7 @@ async fn compaction_runs_account_usage_and_cost_but_join_no_transcript() {
     try_submit(&runtime, session_id, "say hello").await.unwrap();
     collect_through_finished(&mut events).await;
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 32))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -447,13 +441,7 @@ async fn compaction_runs_account_usage_and_cost_but_join_no_transcript() {
     assert_eq!(context_tokens, None);
 
     let snapshot = runtime
-        .snapshot(SnapshotRequest {
-            workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 32))
         .await
         .unwrap();
     let focused = snapshot.focused.unwrap();
@@ -1278,13 +1266,12 @@ async fn compaction_sends_and_persists_the_effective_output_cap() {
         )));
         let snapshot = harness
             .runtime
-            .snapshot(SnapshotRequest {
-                workspace_id: harness.workspace_id,
-                focused_session_id: Some(harness.session_id),
-                include_sessions: Vec::new(),
-                session_limit: 1,
-                message_limit: 8,
-            })
+            .snapshot(SnapshotRequest::new(
+                harness.workspace_id,
+                Some(harness.session_id),
+                1,
+                8,
+            ))
             .await
             .unwrap();
         let persisted = snapshot

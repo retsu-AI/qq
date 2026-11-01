@@ -348,13 +348,12 @@ async fn an_unenforceable_contract_is_refused_at_admission_and_creates_no_run() 
     }
     let snapshot = harness
         .runtime
-        .snapshot(SnapshotRequest {
-            workspace_id: harness.workspace_id,
-            focused_session_id: Some(harness.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 8,
-            message_limit: 32,
-        })
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            32,
+        ))
         .await
         .unwrap();
     assert!(snapshot.focused.unwrap().runs.is_empty());
