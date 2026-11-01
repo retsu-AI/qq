@@ -4788,7 +4788,10 @@ mod tests {
     async fn assert_process_exits(pid: u32) {
         let pid = i32::try_from(pid).unwrap();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !shell::process_has_exited(pid) {
+        while !tokio::task::spawn_blocking(move || shell::process_has_exited(pid))
+            .await
+            .unwrap()
+        {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "process {pid} is still alive after the kill deadline"
