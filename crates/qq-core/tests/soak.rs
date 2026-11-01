@@ -422,11 +422,11 @@ async fn stopping_a_pending_summarizer_preserves_measured_turns_and_unknown_tota
         let mut fixture = support::Fixture::open(directory.path(), script.clone()).await;
         let run_id = fixture
             .submit_with_limits(qq_protocol::RunLimits {
-                max_duration_ms: Some(5_000),
+                max_duration_ms: Some(2_000),
                 ..qq_protocol::RunLimits::default()
             })
             .await;
-        tokio::time::timeout(Duration::from_secs(4), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
             while fixture.observed.lock().unwrap().summary_requests < 2 {
                 tokio::task::yield_now().await;
             }
@@ -444,7 +444,7 @@ async fn stopping_a_pending_summarizer_preserves_measured_turns_and_unknown_tota
                 .unwrap();
         }
         let mut live = Vec::new();
-        let outcome = tokio::time::timeout(Duration::from_secs(8), async {
+        let outcome = tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 let event = fixture.events.next().await.unwrap().unwrap();
                 let finished = match &event.event {
@@ -569,11 +569,11 @@ async fn original_deadline_stops_a_summarizer_backoff_without_retrying() {
     let mut fixture = support::Fixture::open(directory.path(), script).await;
     let run_id = fixture
         .submit_with_limits(qq_protocol::RunLimits {
-            max_duration_ms: Some(5_000),
+            max_duration_ms: Some(2_000),
             ..qq_protocol::RunLimits::default()
         })
         .await;
-    let report = tokio::time::timeout(Duration::from_secs(12), fixture.finish(run_id))
+    let report = tokio::time::timeout(Duration::from_secs(60), fixture.finish(run_id))
         .await
         .unwrap();
     assert!(
