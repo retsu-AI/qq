@@ -1263,10 +1263,8 @@ async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_b
         output_tokens: tool_turns + 5 + 3,
         reasoning_tokens: None,
     };
-    let expected_cost = expected_usage.input_tokens * 1_000
-        + expected_usage.output_tokens * 2_000
-        + 100
-        + 2 * 300;
+    let expected_cost =
+        expected_usage.input_tokens * 1_000 + expected_usage.output_tokens * 2_000 + 100 + 2 * 300;
     let snapshot = runtime
         .snapshot(SnapshotRequest {
             workspace_id,
