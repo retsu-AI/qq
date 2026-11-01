@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
-import { pickProject, showProviders } from "../lib/store";
+import { pickProject, showSettings } from "../lib/store";
 import type { ProjectState } from "../lib/types";
 
 export function CommandPalette({
@@ -26,7 +26,7 @@ export function CommandPalette({
     {
       name: "Connect model provider",
       enabled: true,
-      run: () => showProviders(true),
+      run: () => showSettings("providers"),
     },
     {
       name: "New session",
@@ -65,7 +65,7 @@ export function CommandPalette({
       ref={dialog}
       onCancel={close}
       aria-label="Command palette"
-      className="m-auto w-[520px] max-w-[90vw] rounded-xl border border-line-strong bg-bg p-4 text-fg backdrop:bg-black/50"
+      className="m-auto w-[520px] max-w-[90vw] rounded-2xl border border-line-strong bg-bg p-4 text-fg backdrop:bg-black/50"
     >
       <div className="flex gap-2">
         <input
@@ -103,7 +103,7 @@ export function CommandPalette({
           </li>
         ))}
       </ul>
-      <p className="mt-3 text-[12px] text-muted">
+      <p className="mt-3 text-small text-muted">
         Use Tab and Enter to choose a command. Escape closes. Compaction affects
         model context; the transcript stays available.
       </p>

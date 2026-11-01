@@ -11,7 +11,7 @@
   --border-strong: #2f343d;
   --text: #e8eaed;
   --text-muted: #9aa0a6;
-  --text-faint: #6b7079;
+  --text-faint: #80868f;
   --accent: #7aa2ff;
   --accent-strong: #5b8cff;
   --accent-soft: rgb(122 162 255 / 0.12);
@@ -36,6 +36,8 @@
   --syn-function: #82aaff;
   --syn-type: #ffcb6b;
   --syn-attr: #89ddff;
+  --ui-font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --code-font: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
   color-scheme: dark;
 }
 
@@ -48,8 +50,8 @@
   --border: #e4e6ea;
   --border-strong: #d3d7de;
   --text: #1b1d21;
-  --text-muted: #5f6570;
-  --text-faint: #8b919b;
+  --text-muted: #535963;
+  --text-faint: #696f79;
   --accent: #3d6df2;
   --accent-strong: #2c5be0;
   --accent-soft: rgb(61 109 242 / 0.1);
@@ -107,8 +109,19 @@
   --color-danger-soft: var(--danger-soft);
   --color-danger-solid: var(--danger-solid);
   --shadow-popover: var(--popover-shadow);
-  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  /* Type scale: caption, secondary, UI, reading, titles, page headings. */
+  --text-caption: 11px;
+  --text-small: 12px;
+  --text-ui: 13px;
+  --text-body: 14px;
+  --text-title: 16px;
+  --text-display: 22px;
+  /* Content widths: the transcript column, and centered single panels. */
+  --container-reading: 860px;
+  --container-narrow: 680px;
+  /* Settings can replace either family; see applyPreferences. */
+  --font-sans: var(--ui-font);
+  --font-mono: var(--code-font);
 }
 
 html,

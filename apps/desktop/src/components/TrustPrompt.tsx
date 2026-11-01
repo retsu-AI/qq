@@ -33,9 +33,9 @@ export function TrustPrompt({ project, pending }: { project: ProjectState; pendi
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <div className="mx-auto w-full max-w-[680px] px-6 py-[10vh]">
+      <div className="mx-auto w-full max-w-narrow px-6 py-[10vh]">
         <ShieldAlert className="mb-4 h-7 w-7 text-warn" />
-        <h1 className="text-[20px] font-semibold tracking-tight">
+        <h1 className="text-display font-semibold tracking-tight">
           Trust the QQ settings in {project.name}?
         </h1>
         <p className="mt-2 text-muted">
@@ -49,25 +49,25 @@ export function TrustPrompt({ project, pending }: { project: ProjectState; pendi
             <section key={file.path} className="overflow-hidden rounded-xl border border-line-strong bg-raised">
               <header className="flex items-center gap-2 border-b border-line px-4 py-2.5">
                 <FileCog className="h-4 w-4 shrink-0 text-muted" />
-                <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] selectable" title={file.path}>
+                <span className="min-w-0 flex-1 truncate font-mono text-ui selectable" title={file.path}>
                   {relativeTo(project.path, file.path)}
                 </span>
                 <button
                   onClick={() => void revealItemInDir(file.path)}
-                  className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[12px] text-muted hover:bg-hover hover:text-fg"
+                  className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-small text-muted hover:bg-hover hover:text-fg"
                 >
                   <FolderSearch className="h-3.5 w-3.5" /> Show in Explorer
                 </button>
               </header>
               <ul className="space-y-1 px-4 py-3">
                 {file.declarations.map((line, index) => (
-                  <li key={index} className="flex gap-2 font-mono text-[12.5px] selectable">
+                  <li key={index} className="flex gap-2 font-mono text-ui selectable">
                     <span className="text-faint">•</span>
                     <span className="min-w-0 break-words">{line}</span>
                   </li>
                 ))}
                 {file.declarations.length === 0 && (
-                  <li className="text-[12.5px] text-muted">Sets {file.sections.join(", ")}</li>
+                  <li className="text-ui text-muted">Sets {file.sections.join(", ")}</li>
                 )}
               </ul>
             </section>
@@ -75,14 +75,14 @@ export function TrustPrompt({ project, pending }: { project: ProjectState; pendi
         </div>
 
         {error && (
-          <p className="mt-4 rounded-md bg-danger-soft px-3 py-2 text-[12.5px] text-danger selectable">{error}</p>
+          <p className="mt-4 rounded-md bg-danger-soft px-3 py-2 text-ui text-danger selectable">{error}</p>
         )}
 
         <div className="mt-6 flex items-center gap-2">
           <button
             onClick={() => void trust()}
             disabled={busy}
-            className="flex h-9 items-center gap-2 rounded-lg bg-solid px-4 text-[13px] font-medium text-white hover:bg-solid-hover disabled:opacity-60"
+            className="flex h-9 items-center gap-2 rounded-lg bg-solid px-4 text-ui font-medium text-white hover:bg-solid-hover disabled:opacity-60"
           >
             {busy && <Loader2 className="h-4 w-4 animate-spin" />}
             Trust and continue
@@ -90,12 +90,12 @@ export function TrustPrompt({ project, pending }: { project: ProjectState; pendi
           <button
             onClick={() => void closeProject(project.project_id)}
             disabled={busy}
-            className="h-9 rounded-lg border border-line-strong px-4 text-[13px] text-muted hover:bg-hover hover:text-fg"
+            className="h-9 rounded-lg border border-line-strong px-4 text-ui text-muted hover:bg-hover hover:text-fg"
           >
             Close project
           </button>
         </div>
-        <p className="mt-3 text-[12px] text-faint">
+        <p className="mt-3 text-small text-faint">
           Trust is remembered until a file changes, then QQ asks again. This is the same as running
           <code className="mx-1 font-mono">qq trust</code>in the project folder.
         </p>

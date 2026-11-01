@@ -6,6 +6,47 @@ export interface Preferences {
   notifications: boolean;
   /** The session's Changes panel is shown. */
   changesPanel: boolean;
+  /** Installed font family for the interface; null uses the default. */
+  interfaceFont: string | null;
+  /** Installed font family for code; null uses the default. */
+  codeFont: string | null;
+}
+
+/** Fonts that ship with Windows. The first entry is the default. */
+export const INTERFACE_FONTS = [
+  "Segoe UI Variable Text",
+  "Segoe UI",
+  "Arial",
+  "Verdana",
+  "Tahoma",
+  "Georgia",
+  "Calibri",
+];
+export const CODE_FONTS = [
+  "Cascadia Code",
+  "Cascadia Mono",
+  "Consolas",
+  "Lucida Console",
+  "Courier New",
+];
+const DEFAULT_SANS = '"Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif';
+const DEFAULT_MONO =
+  '"Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace';
+
+/**
+ * A font family name safe to place in CSS, or null. Names are letters,
+ * digits, spaces, dots and hyphens, as installed font names are.
+ */
+export function fontName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const name = value.trim().replace(/\s+/g, " ");
+  return /^[\p{L}\p{N} .-]{1,64}$/u.test(name) ? name : null;
+}
+
+/** A CSS font stack: the chosen font, then the default when it is missing. */
+export function fontStack(name: string | null, code: boolean): string {
+  const fallback = code ? DEFAULT_MONO : DEFAULT_SANS;
+  return name ? `"${name}", ${fallback}` : fallback;
 }
 
 export const MIN_FONT_SIZE = 12;
@@ -32,6 +73,8 @@ export function parsePreferences(json: string | null): Preferences {
         : 14,
     notifications: value.notifications === true,
     changesPanel: value.changesPanel === true,
+    interfaceFont: fontName(value.interfaceFont),
+    codeFont: fontName(value.codeFont),
   };
 }
 
@@ -40,6 +83,14 @@ export function applyPreferences(value: Preferences) {
   document.documentElement.style.setProperty(
     "--desktop-font-size",
     `${value.fontSize}px`,
+  );
+  document.documentElement.style.setProperty(
+    "--ui-font",
+    fontStack(value.interfaceFont, false),
+  );
+  document.documentElement.style.setProperty(
+    "--code-font",
+    fontStack(value.codeFont, true),
   );
 }
 

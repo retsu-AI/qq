@@ -177,16 +177,16 @@ export function GitStrip({
         side="bottom"
         align="end"
         bare
-        className="flex h-7 max-w-[260px] items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-fg aria-expanded:bg-hover aria-expanded:text-fg"
+        className="flex h-7 max-w-[260px] items-center gap-1.5 rounded-md px-2 text-small text-muted hover:bg-hover hover:text-fg aria-expanded:bg-hover aria-expanded:text-fg"
       >
         <GitBranch className="h-3.5 w-3.5 shrink-0" />
-        <span className="min-w-0 truncate font-mono text-[11.5px]">
+        <span className="min-w-0 truncate font-mono text-small">
           {status.branch ?? "detached"}
         </span>
         {status.changed > 0 && (
           <span
             className={clsx(
-              "shrink-0 rounded-full px-1.5 text-[10.5px] font-medium",
+              "shrink-0 rounded-full px-1.5 text-caption font-medium",
               status.conflicted
                 ? "bg-danger-soft text-danger"
                 : "bg-warn-soft text-warn",
@@ -196,13 +196,13 @@ export function GitStrip({
           </span>
         )}
         {status.ahead > 0 && (
-          <span className="flex shrink-0 items-center text-[11px]">
+          <span className="flex shrink-0 items-center text-caption">
             <ArrowUp className="h-3 w-3" />
             {status.ahead}
           </span>
         )}
         {status.behind > 0 && (
-          <span className="flex shrink-0 items-center text-[11px]">
+          <span className="flex shrink-0 items-center text-caption">
             <ArrowDown className="h-3 w-3" />
             {status.behind}
           </span>
@@ -210,7 +210,7 @@ export function GitStrip({
         {pr && (
           <span
             className={clsx(
-              "flex shrink-0 items-center gap-0.5 rounded-full px-1.5 text-[10.5px] font-medium",
+              "flex shrink-0 items-center gap-0.5 rounded-full px-1.5 text-caption font-medium",
               pr.state === "MERGED"
                 ? "bg-accent-soft text-accent"
                 : openPr
@@ -328,7 +328,7 @@ function CommitDialog({
         }}
         className={clsx(fieldClass, "resize-y font-mono")}
       />
-      <p className="text-[12px] text-faint">Ctrl Enter to commit.</p>
+      <p className="text-small text-faint">Ctrl Enter to commit.</p>
     </FormDialog>
   );
 }

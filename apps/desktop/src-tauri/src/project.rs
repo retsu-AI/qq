@@ -972,7 +972,7 @@ impl Project {
                 .finish(Err("no model is available; connect a provider".to_owned()));
             self.set_notice(
                 NoticeLevel::Error,
-                "no model is available; connect a provider from Providers in the sidebar",
+                "no model is available; connect a provider in Settings, Providers",
             );
             return;
         }

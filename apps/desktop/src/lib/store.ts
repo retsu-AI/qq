@@ -8,13 +8,16 @@ import { api } from "./api";
 import { drafts } from "./drafts";
 import type { PendingFile, ProjectInfo, ProjectState } from "./types";
 
+export type SettingsPage = "general" | "providers" | "shortcuts" | "diagnostics";
+
 interface AppSnapshot {
   projects: Record<string, ProjectState>;
   open: ProjectInfo[];
   recents: ProjectInfo[];
   activeId: string | null;
   error: string | null;
-  providersOpen: boolean;
+  /** The open Settings page, or null when Settings is closed. */
+  settings: SettingsPage | null;
   /** Pending trust per project; absent until checked, empty when trusted. */
   trust: Record<string, PendingFile[]>;
 }
@@ -28,7 +31,7 @@ let snapshot: AppSnapshot = {
   recents: [],
   activeId: null,
   error: null,
-  providersOpen: false,
+  settings: null,
   trust: {},
 };
 const listeners = new Set<() => void>();
@@ -171,8 +174,9 @@ export async function refreshRecents() {
   }
 }
 
-export function showProviders(open: boolean) {
-  set({ providersOpen: open });
+/** Opens Settings at a page, or closes it with null. */
+export function showSettings(page: SettingsPage | null = "general") {
+  set({ settings: page });
 }
 
 export function dismissError() {

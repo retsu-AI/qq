@@ -14,7 +14,7 @@ export function CodeBlock({
   const html = useMemo(() => highlight(code, language), [code, language]);
   return (
     <div className="code-block group/code">
-      <div className="flex h-8 items-center gap-2 border-b border-line pl-3 pr-1.5 text-[11.5px] text-faint">
+      <div className="flex h-8 items-center gap-2 border-b border-line pl-3 pr-1.5 text-small text-faint">
         <span className="font-mono">{language ?? "text"}</span>
         <CopyButton
           text={code}
@@ -68,7 +68,7 @@ export function CopyButton({
       aria-label={copied ? "Copied" : label}
       title={copied ? "Copied" : label}
       className={clsx(
-        "flex h-6 items-center gap-1 rounded-md px-1.5 text-[11.5px] text-muted hover:bg-hover hover:text-fg",
+        "flex h-6 items-center gap-1 rounded-md px-1.5 text-small text-muted hover:bg-hover hover:text-fg",
         className,
       )}
     >

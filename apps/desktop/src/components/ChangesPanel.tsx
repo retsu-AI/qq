@@ -36,9 +36,9 @@ export function ChangesPanel({
       className="animate-slide-in flex w-[min(460px,42vw)] min-w-[300px] shrink-0 flex-col border-l border-line bg-sidebar max-[1100px]:absolute max-[1100px]:inset-y-0 max-[1100px]:right-0 max-[1100px]:z-20 max-[1100px]:w-[min(460px,85%)] max-[1100px]:shadow-2xl"
     >
       <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line pl-4 pr-2">
-        <h2 className="text-[13.5px] font-medium">Changes</h2>
+        <h2 className="text-body font-medium">Changes</h2>
         {changes.length > 0 && (
-          <span className="text-[12px] text-faint">
+          <span className="text-small text-faint">
             {changes.length} file{changes.length === 1 ? "" : "s"}{" "}
             <span className="font-mono text-ok">+{added}</span>{" "}
             <span className="font-mono text-danger">−{removed}</span>
@@ -49,7 +49,7 @@ export function ChangesPanel({
             onClick={() =>
               setOpen(new Set(allOpen ? [] : changes.map((f) => f.path)))
             }
-            className="ml-auto rounded-md px-2 py-1 text-[12px] text-muted hover:bg-hover hover:text-fg"
+            className="ml-auto rounded-md px-2 py-1 text-small text-muted hover:bg-hover hover:text-fg"
           >
             {allOpen ? "Collapse all" : "Expand all"}
           </button>
@@ -68,7 +68,7 @@ export function ChangesPanel({
       </header>
 
       {changes.length === 0 ? (
-        <div className="px-5 py-8 text-center text-[12.5px] text-muted">
+        <div className="px-5 py-8 text-center text-ui text-muted">
           <FileCode2 className="mx-auto mb-2 h-5 w-5 text-faint" />
           No file edits in this session yet.
           <p className="mt-1 text-faint">
@@ -93,7 +93,7 @@ export function ChangesPanel({
                     onClick={() => toggle(file.path)}
                     aria-expanded={expanded}
                     title={file.path}
-                    className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left text-[13px]"
+                    className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left text-ui"
                   >
                     <ChevronRight
                       className={clsx(
@@ -102,13 +102,13 @@ export function ChangesPanel({
                       )}
                     />
                     <span className="shrink-0 font-medium">{name}</span>
-                    <span className="min-w-0 truncate text-[12px] text-faint">
+                    <span className="min-w-0 truncate text-small text-faint">
                       {folder}
                     </span>
-                    <span className="ml-auto shrink-0 pl-2 font-mono text-[11.5px] text-ok">
+                    <span className="ml-auto shrink-0 pl-2 font-mono text-small text-ok">
                       +{file.added}
                     </span>
-                    <span className="shrink-0 font-mono text-[11.5px] text-danger">
+                    <span className="shrink-0 font-mono text-small text-danger">
                       −{file.removed}
                     </span>
                   </button>

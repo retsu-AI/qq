@@ -55,7 +55,7 @@ export function TitleBar({
   return (
     <header
       data-tauri-drag-region
-      className="flex h-9 shrink-0 select-none items-center border-b border-line bg-sidebar text-[12.5px]"
+      className="flex h-9 shrink-0 select-none items-center border-b border-line bg-sidebar text-ui"
     >
       <div data-tauri-drag-region className="flex h-full items-center gap-0.5 pl-2.5">
         <Logo className="mr-1.5 h-[18px] w-[18px]" />
@@ -144,7 +144,7 @@ function Caption({
       onClick={onClick}
       className={clsx(
         "flex h-full w-[46px] items-center justify-center text-muted",
-        danger ? "hover:bg-[#c42b1c] hover:text-white" : "hover:bg-hover hover:text-fg",
+        danger ? "hover:bg-danger-solid hover:text-white" : "hover:bg-hover hover:text-fg",
       )}
     >
       {children}
@@ -263,7 +263,7 @@ function MenuBar({ menus }: { menus: Menu[] }) {
                 event.preventDefault();
                 event.stopPropagation();
               }}
-              className="animate-pop-down absolute left-0 top-full z-50 mt-1 min-w-[248px] rounded-xl border border-line-strong bg-raised p-1 text-[13px] text-fg shadow-popover outline-none"
+              className="animate-pop-down absolute left-0 top-full z-50 mt-1 min-w-[248px] rounded-xl border border-line-strong bg-raised p-1 text-ui text-fg shadow-popover outline-none"
             >
               {menu.items.map((item, itemIndex) =>
                 item === "separator" ? (
@@ -285,7 +285,7 @@ function MenuBar({ menus }: { menus: Menu[] }) {
                     <span className="w-3 text-accent">{item.checked ? "•" : ""}</span>
                     <span className="flex-1">{item.label}</span>
                     {item.shortcut && (
-                      <span className="font-mono text-[11px] text-faint">{item.shortcut}</span>
+                      <span className="font-mono text-caption text-faint">{item.shortcut}</span>
                     )}
                   </div>
                 ),

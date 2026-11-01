@@ -47,12 +47,12 @@ export function FormDialog({
           }
         }}
       >
-        <h2 className="text-[15px] font-semibold">{title}</h2>
-        <div className="mt-3 space-y-3 text-[13px]">{children}</div>
+        <h2 className="text-title font-semibold">{title}</h2>
+        <div className="mt-3 space-y-3 text-ui">{children}</div>
         {error && (
           <p
             role="alert"
-            className="mt-3 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md bg-danger-soft px-3 py-2 text-[12.5px] text-danger selectable"
+            className="mt-3 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md bg-danger-soft px-3 py-2 text-ui text-danger selectable"
           >
             {error}
           </p>
@@ -62,14 +62,14 @@ export function FormDialog({
             type="button"
             onClick={close}
             disabled={busy}
-            className="h-8 rounded-lg border border-line-strong px-3 text-[13px] hover:bg-hover disabled:opacity-50"
+            className="h-8 rounded-lg border border-line-strong px-3 text-ui hover:bg-hover disabled:opacity-50"
           >
             Cancel
           </button>
           <button
             type="submit"
             disabled={busy}
-            className="flex h-8 items-center gap-2 rounded-lg bg-solid px-3 text-[13px] font-medium text-white hover:bg-solid-hover disabled:opacity-60"
+            className="flex h-8 items-center gap-2 rounded-lg bg-solid px-3 text-ui font-medium text-white hover:bg-solid-hover disabled:opacity-60"
           >
             {busy && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
             {submitLabel}
@@ -81,4 +81,4 @@ export function FormDialog({
 }
 
 export const fieldClass =
-  "w-full rounded-lg border border-line-strong bg-raised px-3 py-2 text-[13px] outline-none focus:border-accent/60 focus-visible:outline-none";
+  "w-full rounded-lg border border-line-strong bg-raised px-3 py-2 text-ui outline-none focus:border-accent/60 focus-visible:outline-none";

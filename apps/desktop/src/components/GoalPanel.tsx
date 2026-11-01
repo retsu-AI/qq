@@ -79,7 +79,7 @@ export function GoalPanel({
     >
       <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line pl-4 pr-2">
         <Target className="h-4 w-4 text-accent" />
-        <h2 className="text-[13.5px] font-medium">Goal</h2>
+        <h2 className="text-body font-medium">Goal</h2>
         {goal && <StatusBadge goal={goal} />}
         <button
           onClick={closeGoalPanel}
@@ -91,28 +91,28 @@ export function GoalPanel({
       </header>
 
       {!goal ? (
-        <div className="px-5 py-8 text-center text-[13px] text-muted">
+        <div className="px-5 py-8 text-center text-ui text-muted">
           <Target className="mx-auto mb-2 h-5 w-5 text-faint" />
           <p>No goal in this session.</p>
-          <p className="mt-1 text-[12.5px] text-faint">
+          <p className="mt-1 text-ui text-faint">
             A goal keeps QQ working across runs until it is achieved, checked by
             an optional command you approve, within a deadline and run budget.
           </p>
           {project.can_goal ? (
             <button
               onClick={() => edit(true)}
-              className="mt-4 h-8 rounded-lg bg-solid px-3 text-[13px] font-medium text-white hover:bg-solid-hover"
+              className="mt-4 h-8 rounded-lg bg-solid px-3 text-ui font-medium text-white hover:bg-solid-hover"
             >
               Set a goal
             </button>
           ) : (
-            <p className="mt-3 text-[12px] text-warn">
+            <p className="mt-3 text-small text-warn">
               This engine does not support goals.
             </p>
           )}
         </div>
       ) : (
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 text-[13px]">
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 text-ui">
           <p className="whitespace-pre-wrap font-medium leading-relaxed selectable">
             {goal.objective}
           </p>
@@ -120,7 +120,7 @@ export function GoalPanel({
           {goalReason(goal.status) && (
             <p
               className={clsx(
-                "rounded-lg px-3 py-2 text-[12.5px] selectable",
+                "rounded-lg px-3 py-2 text-ui selectable",
                 goalStatus(goal).tone === "attention"
                   ? "bg-warn-soft text-warn"
                   : "bg-hover text-muted",
@@ -217,10 +217,10 @@ export function GoalPanel({
           <Section title="Completion check">
             {goal.check ? (
               <>
-                <code className="block rounded-md bg-raised px-2 py-1 font-mono text-[12px] selectable">
+                <code className="block rounded-md bg-raised px-2 py-1 font-mono text-small selectable">
                   {goal.check.command}
                 </code>
-                <p className="mt-1 text-[12px] text-faint">
+                <p className="mt-1 text-small text-faint">
                   {
                     {
                       pending: "Not approved yet.",
@@ -233,23 +233,23 @@ export function GoalPanel({
                     ` Failed ${goal.counters.check_failures} time${goal.counters.check_failures === 1 ? "" : "s"}.`}
                 </p>
                 {goal.check_output && (
-                  <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-line bg-raised px-2 py-1.5 font-mono text-[11.5px] text-muted selectable">
+                  <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-line bg-raised px-2 py-1.5 font-mono text-small text-muted selectable">
                     {goal.check_output}
                   </pre>
                 )}
               </>
             ) : (
-              <p className="text-[12.5px] text-faint">
+              <p className="text-ui text-faint">
                 None. The goal is judged by an independent audit of the agent's
                 claim instead.
               </p>
             )}
             {goal.audit_pending && (
-              <p className="mt-1 text-[12px] text-accent">Auditing the achievement claim…</p>
+              <p className="mt-1 text-small text-accent">Auditing the achievement claim…</p>
             )}
           </Section>
 
-          <p className="text-[11.5px] text-faint">
+          <p className="text-small text-faint">
             {budgetSummary(goal, now)} · revision {goal.revision}
           </p>
         </div>
@@ -286,11 +286,11 @@ function CheckConsent({
   const command = goal.check!.command;
   return (
     <div className="rounded-lg border border-warn/40 bg-warn-soft/50 px-3 py-3">
-      <p className="text-[12.5px] font-medium text-warn">Allow this completion check to run?</p>
-      <code className="mt-2 block rounded-md bg-raised px-2 py-1 font-mono text-[12px] text-fg selectable">
+      <p className="text-ui font-medium text-warn">Allow this completion check to run?</p>
+      <code className="mt-2 block rounded-md bg-raised px-2 py-1 font-mono text-small text-fg selectable">
         {command}
       </code>
-      <p className="mt-1.5 text-[11.5px] text-muted">
+      <p className="mt-1.5 text-small text-muted">
         It runs in this workspace with your permissions. Changing the goal or
         command needs consent again.
       </p>
@@ -320,7 +320,7 @@ function CheckConsent({
 export function StatusBadge({ goal }: { goal: GoalSnapshot }) {
   const { label, tone } = goalStatus(goal);
   return (
-    <span className={clsx("rounded-full px-2 py-0.5 text-[11px] font-medium", TONE_CLASSES[tone])}>
+    <span className={clsx("rounded-full px-2 py-0.5 text-caption font-medium", TONE_CLASSES[tone])}>
       {label}
     </span>
   );
@@ -337,7 +337,7 @@ function ChecklistIcon({ state }: { state: string }) {
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section>
-      <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-faint">
+      <h3 className="mb-1.5 text-caption font-semibold uppercase tracking-wider text-faint">
         {title}
       </h3>
       {children}
@@ -347,7 +347,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 
 function Fact({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex gap-3 py-0.5 text-[12.5px]">
+    <div className="flex gap-3 py-0.5 text-ui">
       <span className="w-20 shrink-0 text-muted">{label}</span>
       <span className="min-w-0 selectable">{children}</span>
     </div>
@@ -370,7 +370,7 @@ function Action({
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="flex h-7 items-center gap-1.5 rounded-md border border-line-strong px-2.5 text-[12.5px] text-fg hover:bg-hover disabled:opacity-50"
+      className="flex h-7 items-center gap-1.5 rounded-md border border-line-strong px-2.5 text-ui text-fg hover:bg-hover disabled:opacity-50"
     >
       {icon}
       {children}

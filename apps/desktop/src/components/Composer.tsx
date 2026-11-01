@@ -32,7 +32,7 @@ import {
   providerName,
   tokens,
 } from "../lib/format";
-import { showProviders } from "../lib/store";
+import { showSettings } from "../lib/store";
 import { drafts } from "../lib/drafts";
 import {
   findMention,
@@ -300,7 +300,7 @@ export function Composer({
         )}
       >
         {dragging && (
-          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-2xl bg-raised/90 text-[13px] text-accent">
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-2xl bg-raised/90 text-ui text-accent">
             <FileText className="h-4 w-4" /> Drop to mention files from this
             project
           </div>
@@ -385,12 +385,12 @@ export function Composer({
               stop();
             }
           }}
-          className="block max-h-[280px] w-full resize-none bg-transparent px-4 pb-1.5 pt-3.5 text-[14px] leading-6 outline-none focus-visible:outline-none placeholder:text-faint selectable"
+          className="block max-h-[280px] w-full resize-none bg-transparent px-4 pb-1.5 pt-3.5 text-body leading-6 outline-none focus-visible:outline-none placeholder:text-faint selectable"
         />
         {error && (
           <p
             role="alert"
-            className="mx-3 mb-1 rounded-md bg-danger-soft px-3 py-1.5 text-[12.5px] text-danger selectable"
+            className="mx-3 mb-1 rounded-md bg-danger-soft px-3 py-1.5 text-ui text-danger selectable"
           >
             {error}
           </p>
@@ -398,7 +398,7 @@ export function Composer({
         {note && (
           <p
             role="status"
-            className="mx-3 mb-1 flex items-start gap-2 rounded-md bg-hover px-3 py-1.5 text-[12.5px] text-muted"
+            className="mx-3 mb-1 flex items-start gap-2 rounded-md bg-hover px-3 py-1.5 text-ui text-muted"
           >
             <span className="flex-1">{note}</span>
             <button
@@ -504,7 +504,7 @@ export function Composer({
             <button
               onClick={stop}
               title="Stop (Esc)"
-              className="ml-1 flex h-8 items-center gap-1.5 rounded-lg border border-line-strong px-2.5 text-[12.5px] text-muted hover:bg-hover hover:text-fg"
+              className="ml-1 flex h-8 items-center gap-1.5 rounded-lg border border-line-strong px-2.5 text-ui text-muted hover:bg-hover hover:text-fg"
             >
               <Square className="h-3 w-3 fill-current" /> Stop
             </button>
@@ -592,7 +592,7 @@ function ContextMeter({ transcript }: { transcript: Transcript }) {
       role="img"
       aria-label={label}
       title={`${label}${percent > 65 ? ". Compact the session from Ctrl K to free space." : ""}`}
-      className="mr-1 flex h-8 items-center gap-1.5 px-1 text-[11.5px] text-faint"
+      className="mr-1 flex h-8 items-center gap-1.5 px-1 text-small text-faint"
     >
       <svg viewBox="0 0 16 16" className="h-4 w-4 -rotate-90">
         <circle
@@ -765,11 +765,11 @@ function MentionMenu({
       role="listbox"
       aria-label={slash ? "Command suggestions" : "Mention suggestions"}
       className={clsx(
-        "absolute left-0 right-0 z-40 max-h-[300px] overflow-y-auto rounded-xl border border-line-strong bg-raised p-1 text-[13px] shadow-popover",
+        "absolute left-0 right-0 z-40 max-h-[300px] overflow-y-auto rounded-xl border border-line-strong bg-raised p-1 text-ui shadow-popover",
         below ? "animate-pop-down top-full mt-2" : "animate-pop-up bottom-full mb-2",
       )}
     >
-      <div className="flex items-center justify-between px-2.5 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-faint">
+      <div className="flex items-center justify-between px-2.5 pb-1 pt-1.5 text-caption font-semibold uppercase tracking-wider text-faint">
         <span>{slash ? "Commands" : "Mention"}</span>
         <span className="font-normal normal-case tracking-normal">
           ↑↓ choose · Enter insert · Esc close
@@ -824,12 +824,12 @@ function MentionMenu({
             ) : (
               <FileText className="h-3.5 w-3.5 shrink-0 text-muted" />
             )}
-            <span className="min-w-0 truncate font-mono text-[12.5px]">
+            <span className="min-w-0 truncate font-mono text-ui">
               <span className="text-fg">{name}</span>
               {directory && <span className="ml-2 text-faint">{directory}</span>}
             </span>
             {suggestion.hint && (
-              <span className="ml-auto min-w-0 shrink truncate pl-3 text-[12px] text-muted">
+              <span className="ml-auto min-w-0 shrink truncate pl-3 text-small text-muted">
                 {suggestion.hint}
               </span>
             )}
@@ -851,8 +851,8 @@ function ModelPicker({
   if (project.models.length === 0) {
     return (
       <button
-        onClick={() => showProviders(true)}
-        className="flex h-8 items-center rounded-lg px-2 text-[12.5px] text-accent hover:bg-hover"
+        onClick={() => showSettings("providers")}
+        className="flex h-8 items-center rounded-lg px-2 text-ui text-accent hover:bg-hover"
       >
         Connect a provider…
       </button>
@@ -872,7 +872,7 @@ function ModelPicker({
       value={current}
       options={options}
       onChange={(model) => void api.selectModel(project.project_id, model)}
-      actions={[{ label: "Manage providers…", onSelect: () => showProviders(true) }]}
+      actions={[{ label: "Manage providers…", onSelect: () => showSettings("providers") }]}
     >
       <span className="max-w-[180px] truncate">
         {modelLabel(current, project.models)}

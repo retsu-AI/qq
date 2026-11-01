@@ -57,7 +57,7 @@ export function SideQuestions({
       aria-label="Side questions"
       className="animate-pop-up mb-2 overflow-hidden rounded-2xl border border-line-strong bg-sidebar"
     >
-      <header className="flex items-center gap-2 border-b border-line py-1.5 pl-3.5 pr-1.5 text-[12.5px]">
+      <header className="flex items-center gap-2 border-b border-line py-1.5 pl-3.5 pr-1.5 text-ui">
         <MessagesSquare className="h-3.5 w-3.5 text-accent" />
         <span className="font-medium">Side question</span>
         <span className="text-faint">· not added to the run</span>
@@ -90,7 +90,7 @@ export function SideQuestions({
       </header>
       <div ref={list} className="max-h-[38vh] space-y-3 overflow-y-auto px-3.5 py-3">
         {thread.length === 0 && (
-          <p className="text-[12.5px] text-muted">
+          <p className="text-ui text-muted">
             Ask with <kbd className="font-mono">/btw your question</kbd>. The
             agent keeps working; answers use the session so far and read-only
             file tools.
@@ -98,22 +98,22 @@ export function SideQuestions({
         )}
         {thread.map((side) => (
           <div key={side.id} className="space-y-1.5">
-            <p className="whitespace-pre-wrap text-[13px] font-medium selectable">
+            <p className="whitespace-pre-wrap text-ui font-medium selectable">
               {side.question}
             </p>
             {side.answer ? (
-              <div className="text-[13px]">
+              <div className="text-ui">
                 <Markdown text={side.answer} streaming={side.state === "running"} />
               </div>
             ) : side.state === "running" ? (
-              <p className="flex items-center gap-1.5 text-[12.5px] text-muted">
+              <p className="flex items-center gap-1.5 text-ui text-muted">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" /> Thinking…
               </p>
             ) : null}
             {STATE_LABELS[side.state] && (
               <p
                 className={clsx(
-                  "text-[12px]",
+                  "text-small",
                   side.state === "failed" ? "text-danger" : "text-faint",
                 )}
               >

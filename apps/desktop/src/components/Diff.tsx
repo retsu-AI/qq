@@ -38,7 +38,7 @@ export const Diff = memo(function Diff({
   return (
     <div className="overflow-hidden rounded-lg border border-line">
       {header && (
-        <div className="flex items-center gap-2 border-b border-line bg-raised px-3 py-1.5 text-[12px]">
+        <div className="flex items-center gap-2 border-b border-line bg-raised px-3 py-1.5 text-small">
           <FileDiff className="h-3.5 w-3.5 shrink-0 text-muted" />
           <span className="truncate font-mono" title={path}>
             {path}
@@ -48,7 +48,7 @@ export const Diff = memo(function Diff({
         </div>
       )}
       <div
-        className="overflow-auto py-1 font-mono text-[12px] leading-[1.55] selectable"
+        className="overflow-auto py-1 font-mono text-small leading-[1.55] selectable"
         style={maxHeight === null ? undefined : { maxHeight }}
       >
         <div className="min-w-max">

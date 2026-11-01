@@ -88,7 +88,7 @@ export function ApprovalCard({
       data-approval-shortcuts
       className="overflow-hidden rounded-xl border border-warn/40 bg-warn-soft"
     >
-      <div className="flex items-center gap-2 px-4 pt-3 text-[13px]">
+      <div className="flex items-center gap-2 px-4 pt-3 text-ui">
         <CircleAlert className="h-4 w-4 text-warn" />
         <span className="font-medium">
           {shell
@@ -106,12 +106,12 @@ export function ApprovalCard({
           <div className="overflow-hidden rounded-lg border border-line bg-bg">
             <div className="flex items-start gap-2 px-3 py-2">
               <TerminalSquare className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted" />
-              <code className="min-w-0 flex-1 whitespace-pre-wrap break-all font-mono text-[12.5px] selectable">
+              <code className="min-w-0 flex-1 whitespace-pre-wrap break-all font-mono text-ui selectable">
                 {shell.command}
               </code>
             </div>
             {(shell.cwd || (shell.reasons && shell.reasons.length > 0)) && (
-              <div className="border-t border-line px-3 py-1.5 text-[11.5px] text-faint">
+              <div className="border-t border-line px-3 py-1.5 text-small text-faint">
                 {shell.cwd && <span>in {shell.cwd}</span>}
                 {shell.reasons && shell.reasons.length > 0 && (
                   <span>
@@ -127,7 +127,7 @@ export function ApprovalCard({
           <Diff path={approval.edit.path} diff={approval.edit.diff} />
         )}
         {approval.fetch && (
-          <div className="flex items-center gap-2 rounded-lg border border-line bg-bg px-3 py-2 text-[12.5px]">
+          <div className="flex items-center gap-2 rounded-lg border border-line bg-bg px-3 py-2 text-ui">
             <Globe className="h-3.5 w-3.5 text-muted" />
             <span className="font-mono text-muted">
               {approval.fetch.method ?? "GET"}
@@ -138,12 +138,12 @@ export function ApprovalCard({
           </div>
         )}
         {!shell && !approval.edit && !approval.fetch && (
-          <div className="rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12.5px] selectable">
+          <div className="rounded-lg border border-line bg-bg px-3 py-2 font-mono text-ui selectable">
             {tool.name} {toolSubject(tool.name, tool.arguments)}
           </div>
         )}
         {approval.escalation && (
-          <p className="text-[12px] text-muted">
+          <p className="text-small text-muted">
             Reviewer: {approval.escalation}
           </p>
         )}
@@ -187,7 +187,7 @@ export function ApprovalCard({
         </ActionButton>
       </div>
       {approval.grantable && !forbidden && (
-        <p className="px-4 pb-2.5 text-[11.5px] text-faint">
+        <p className="px-4 pb-2.5 text-small text-faint">
           "Always" allows {approval.grant_label}.
         </p>
       )}
@@ -215,7 +215,7 @@ function ActionButton({
       onClick={onClick}
       disabled={disabled}
       className={clsx(
-        "flex h-8 items-center gap-2 rounded-lg px-3 text-[12.5px] font-medium disabled:opacity-50",
+        "flex h-8 items-center gap-2 rounded-lg px-3 text-ui font-medium disabled:opacity-50",
         primary && "bg-solid text-white hover:bg-solid-hover",
         danger && "border border-line-strong text-danger hover:bg-danger-soft",
         !primary && !danger && "border border-line-strong bg-bg hover:bg-hover",
@@ -225,7 +225,7 @@ function ActionButton({
       {hint && (
         <kbd
           className={clsx(
-            "font-mono text-[10.5px]",
+            "font-mono text-caption",
             primary ? "text-white/70" : "text-faint",
           )}
         >
@@ -254,7 +254,7 @@ function QuestionCard({
 
   return (
     <div className="overflow-hidden rounded-xl border border-accent/40 bg-accent-soft">
-      <div className="flex items-center gap-2 px-4 pt-3 text-[13px] font-medium">
+      <div className="flex items-center gap-2 px-4 pt-3 text-ui font-medium">
         <MessageCircleQuestion className="h-4 w-4 text-accent" />
         The agent has a question
       </div>
@@ -269,7 +269,7 @@ function QuestionCard({
                   disabled={disabled}
                   onClick={() => setAnswer(index, option)}
                   className={clsx(
-                    "rounded-lg border px-3 py-1.5 text-[12.5px]",
+                    "rounded-lg border px-3 py-1.5 text-ui",
                     answers[index] === option
                       ? "border-[var(--solid)] bg-solid text-white"
                       : "border-line-strong bg-bg hover:bg-hover",
@@ -289,7 +289,7 @@ function QuestionCard({
                 }
                 onChange={(event) => setAnswer(index, event.target.value)}
                 placeholder="Type an answer…"
-                className="mt-2 w-full rounded-lg border border-line-strong bg-bg px-3 py-1.5 text-[13px] outline-none focus:border-accent"
+                className="mt-2 w-full rounded-lg border border-line-strong bg-bg px-3 py-1.5 text-ui outline-none focus:border-accent"
               />
             )}
           </div>

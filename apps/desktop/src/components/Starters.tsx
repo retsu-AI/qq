@@ -59,10 +59,10 @@ export function Starters({ draftKey }: { draftKey: string }) {
           >
             <span className="mt-0.5 text-accent">{starter.icon}</span>
             <span className="min-w-0">
-              <span className="block text-[13px] font-medium">
+              <span className="block text-ui font-medium">
                 {starter.title}
               </span>
-              <span className="mt-0.5 line-clamp-2 block text-[12px] text-muted">
+              <span className="mt-0.5 line-clamp-2 block text-small text-muted">
                 {starter.prompt}
               </span>
             </span>

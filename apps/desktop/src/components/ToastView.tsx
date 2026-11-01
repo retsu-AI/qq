@@ -12,7 +12,7 @@ export function ToastView() {
         key={toast.id}
         role={toast.tone === "error" ? "alert" : "status"}
         className={clsx(
-          "animate-pop-up pointer-events-auto flex max-w-[560px] items-center gap-3 rounded-xl border bg-raised px-4 py-2.5 text-[13px] shadow-popover",
+          "animate-pop-up pointer-events-auto flex max-w-[560px] items-center gap-3 rounded-xl border bg-raised px-4 py-2.5 text-ui shadow-popover",
           toast.tone === "error"
             ? "border-danger/40 text-danger"
             : "border-line-strong text-fg",

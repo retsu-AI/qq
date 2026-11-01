@@ -110,7 +110,7 @@ export function Transcript({
   });
   if (transcript.items.length === 0) {
     return (
-      <div className="mx-auto max-w-[640px] pt-[12vh]">
+      <div className="mx-auto max-w-narrow pt-[12vh]">
         <p className="mb-4 text-center text-muted">
           Send a message to start, or pick a starting point.
         </p>
@@ -185,13 +185,13 @@ function ItemView({
             )}
           >
             {item.steering && (
-              <div className="mb-1 flex items-center gap-1 text-[11px] text-muted">
+              <div className="mb-1 flex items-center gap-1 text-caption text-muted">
                 <CornerDownRight className="h-3 w-3" /> steering
               </div>
             )}
             {item.text}
             {item.state === "queued" && (
-              <div className="mt-1 text-[11px] text-muted">Queued</div>
+              <div className="mt-1 text-caption text-muted">Queued</div>
             )}
           </div>
           <MessageActions>
@@ -211,12 +211,12 @@ function ItemView({
         <div className="group/message">
           <Markdown text={item.text} streaming={item.state === "streaming"} />
           {item.refusal && (
-            <p className="mt-2 rounded-md bg-warn-soft px-3 py-2 text-[13px] text-warn">
+            <p className="mt-2 rounded-md bg-warn-soft px-3 py-2 text-ui text-warn">
               {item.refusal}
             </p>
           )}
           {item.truncated && (
-            <p className="mt-1 text-[12px] text-faint">
+            <p className="mt-1 text-small text-faint">
               Output reached the model's length limit.
             </p>
           )}
@@ -276,7 +276,7 @@ function ActionButton({
       disabled={disabled}
       aria-label={label}
       title={label}
-      className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[11.5px] text-muted hover:bg-hover hover:text-fg disabled:pointer-events-none disabled:opacity-40"
+      className="flex h-6 items-center gap-1 rounded-md px-1.5 text-small text-muted hover:bg-hover hover:text-fg disabled:pointer-events-none disabled:opacity-40"
     >
       {children}
     </button>
@@ -319,7 +319,7 @@ function RetryButton({
         {children}
       </ActionButton>
       {error && (
-        <span role="alert" className="text-[11.5px] text-danger">
+        <span role="alert" className="text-small text-danger">
           {error}
         </span>
       )}
@@ -378,7 +378,7 @@ export const Markdown = memo(function Markdown({
 function Reasoning({ text, streaming }: { text: string; streaming: boolean }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="text-[13px]">
+    <div className="text-ui">
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex items-center gap-1.5 text-muted hover:text-fg"
@@ -439,7 +439,7 @@ function RunEnd({
 
   return (
     <div>
-      <div className="flex items-center gap-2 text-[12px] text-faint">
+      <div className="flex items-center gap-2 text-small text-faint">
         {ok ? (
           <CircleCheck className="h-3.5 w-3.5 text-ok" />
         ) : failed ? (
@@ -456,7 +456,7 @@ function RunEnd({
         )}
       </div>
       {detail && (
-        <p className="mt-1.5 rounded-md bg-danger-soft px-3 py-2 text-[12.5px] text-danger selectable">
+        <p className="mt-1.5 rounded-md bg-danger-soft px-3 py-2 text-ui text-danger selectable">
           {detail}
         </p>
       )}

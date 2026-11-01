@@ -3,16 +3,15 @@ import clsx from "clsx";
 import {
   Archive,
   ArchiveRestore,
-  ChevronsUpDown,
+  ChevronRight,
   CircleAlert,
-  FolderOpen,
   FolderPlus,
-  GitBranch,
   GitBranchPlus,
-  KeyRound,
   Loader2,
   MoreHorizontal,
+  Palette,
   Pencil,
+  Plus,
   Search,
   Settings as SettingsIcon,
   SquarePen,
@@ -25,7 +24,7 @@ import {
   closeProject,
   pickProject,
   removeWorktree,
-  showProviders,
+  showSettings,
 } from "../lib/store";
 import { relativeTime } from "../lib/format";
 import type {
@@ -40,8 +39,10 @@ import {
   updateSessionPreferences,
   type SessionPreferences,
 } from "../lib/session-preferences";
+import { useProjectIcons } from "../lib/project-icons";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Dropdown } from "./Dropdown";
+import { IconDialog, ProjectBadge } from "./ProjectIcon";
 import { toast } from "../lib/toast";
 import { showWorktreeDialog } from "../lib/worktree-dialog";
 
@@ -52,197 +53,206 @@ interface Props {
     activeId: string | null;
   };
   project: ProjectState | null;
-  openSettings: () => void;
 }
 
-export function Sidebar({ app, project, openSettings }: Props) {
+const EXPANDED_KEY = "qq.sidebar.expanded";
+/** Recent sessions a card lists before "Show all". */
+const RECENT_LIMIT = 8;
+
+function readExpanded(): Record<string, boolean> {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(EXPANDED_KEY) ?? "{}");
+    if (typeof value !== "object" || value === null) return {};
+    return Object.fromEntries(
+      Object.entries(value).filter(([, open]) => typeof open === "boolean"),
+    );
+  } catch {
+    return {};
+  }
+}
+
+const metadataKey = (projectId: string) => `qq.sessions:${projectId}`;
+
+function readMetadata(projectId: string): SessionPreferences {
+  try {
+    return parseSessionPreferences(localStorage.getItem(metadataKey(projectId)));
+  } catch {
+    return parseSessionPreferences(null);
+  }
+}
+
+export function Sidebar({ app, project }: Props) {
   const [query, setQuery] = useState("");
-  const [showArchived, setShowArchived] = useState(false);
-  const [metadata, setMetadata] = useState<SessionPreferences>(() =>
-    parseSessionPreferences(null),
-  );
+  const [expanded, setExpanded] = useState(readExpanded);
+  // Local names and archive flags, per open project.
+  const [metadata, setMetadata] = useState<Record<string, SessionPreferences>>({});
   const [error, setError] = useState<string | null>(null);
-  const storageKey = `qq.sessions:${project?.project_id ?? ""}`;
+  const icons = useProjectIcons();
+  const openIds = app.open.map((p) => p.id).join("\n");
   useEffect(() => {
-    try {
-      setMetadata(parseSessionPreferences(localStorage.getItem(storageKey)));
-    } catch {
-      setMetadata(parseSessionPreferences(null));
-    }
-    setQuery("");
-    setShowArchived(false);
-    setError(null);
-  }, [storageKey]);
+    setMetadata(
+      Object.fromEntries(app.open.map((p) => [p.id, readMetadata(p.id)])),
+    );
+  }, [openIds]);
+
   const change = (
-    id: string,
+    projectId: string,
+    sessionId: string,
     update: { title?: string; archived?: boolean },
   ) => {
     try {
-      const next = updateSessionPreferences(metadata, id, update);
-      localStorage.setItem(storageKey, JSON.stringify(next));
-      setMetadata(next);
+      const next = updateSessionPreferences(
+        metadata[projectId] ?? parseSessionPreferences(null),
+        sessionId,
+        update,
+      );
+      localStorage.setItem(metadataKey(projectId), JSON.stringify(next));
+      setMetadata((current) => ({ ...current, [projectId]: next }));
       setError(null);
     } catch (error) {
       setError(String(error));
     }
   };
-  const groups = useMemo(() => {
-    const rows = (project?.sessions ?? []).map((row) => ({
-      ...row,
-      title: metadata.aliases[row.id] ?? row.title,
-    }));
-    const visible = rows.filter(
-      (row) =>
-        matchesSession(query, row.title, row.tail) &&
-        (showArchived
-          ? metadata.archived.includes(row.id)
-          : !metadata.archived.includes(row.id) ||
-            row.status !== "idle" ||
-            row.group === "needs_you"),
+
+  // The active project starts expanded and the others collapsed until the
+  // user chooses; their choices are remembered.
+  const isExpanded = (id: string) => expanded[id] ?? id === app.activeId;
+  const setCardExpanded = (id: string, open: boolean) =>
+    setExpanded((current) => {
+      const next = { ...current, [id]: open };
+      try {
+        localStorage.setItem(EXPANDED_KEY, JSON.stringify(next));
+      } catch {
+        /* Preference only. */
+      }
+      return next;
+    });
+
+  // Worktrees list right after their repository.
+  const sorted = useMemo(() => {
+    const repoOf = (p: ProjectInfo) =>
+      (p.worktree?.main_name ?? p.name).toLowerCase();
+    return [...app.open].sort(
+      (a, b) =>
+        repoOf(a).localeCompare(repoOf(b)) ||
+        Number(Boolean(a.worktree)) - Number(Boolean(b.worktree)) ||
+        a.name.localeCompare(b.name),
     );
-    return query.trim() || showArchived
-      ? [
-          [showArchived ? "Archived locally" : "Search results", visible] as [
-            string,
-            SessionRow[],
-          ],
-        ]
-      : groupSessions(visible);
-  }, [project?.sessions, metadata, query, showArchived]);
+  }, [app.open]);
+
+  const searching = query.trim() !== "";
+  const cards = sorted.map((info) => {
+    const state = app.projects[info.id] ?? null;
+    const meta = metadata[info.id] ?? parseSessionPreferences(null);
+    const rows = (state?.sessions ?? []).map((row) => ({
+      ...row,
+      title: meta.aliases[row.id] ?? row.title,
+    }));
+    const matches = searching
+      ? rows.filter((row) => matchesSession(query, row.title, row.tail))
+      : rows;
+    return { info, state, meta, rows: matches };
+  });
+  const visible = searching ? cards.filter((card) => card.rows.length > 0) : cards;
 
   return (
-    <aside className="flex w-[272px] shrink-0 flex-col border-r border-line bg-sidebar pt-2">
-
-      <ProjectSwitcher
-        open={app.open}
-        projects={app.projects}
-        activeId={app.activeId}
-      />
-
-      {project && (
-        <div className="px-2 pb-2">
+    <aside className="flex w-[280px] shrink-0 flex-col border-r border-line bg-sidebar">
+      <div className="space-y-1 px-2 pb-2 pt-2">
+        <label className="flex h-8 items-center gap-2 rounded-lg border border-line-strong bg-raised px-2.5 focus-within:border-accent/60">
+          <Search className="h-3.5 w-3.5 shrink-0 text-faint" />
+          <input
+            aria-label="Search sessions"
+            placeholder="Search sessions"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && query) {
+                event.preventDefault();
+                setQuery("");
+              }
+            }}
+            className="min-w-0 flex-1 bg-transparent text-ui outline-none placeholder:text-faint focus-visible:outline-none"
+          />
+          {query ? (
+            <button
+              type="button"
+              aria-label="Clear search"
+              title="Clear (Esc)"
+              onClick={() => setQuery("")}
+              className="rounded p-0.5 text-faint hover:text-fg"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          ) : (
+            <kbd className="font-mono text-caption text-faint">Ctrl F</kbd>
+          )}
+        </label>
+        {project && (
           <button
             onClick={() => void api.newSession(project.project_id)}
             className={clsx(
-              "flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[13px] hover:bg-hover",
+              "flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-ui hover:bg-hover",
               project.focused === null && "bg-active",
             )}
           >
             <SquarePen className="h-4 w-4 text-muted" />
             <span className="flex-1">New session</span>
-            <kbd className="font-mono text-[10.5px] text-faint">Ctrl N</kbd>
+            <kbd className="font-mono text-caption text-faint">Ctrl N</kbd>
           </button>
-        </div>
-      )}
+        )}
+        {error && (
+          <p role="alert" className="px-1 text-small text-danger">
+            {error}
+          </p>
+        )}
+      </div>
 
-      {project && (
-        <div className="px-2 pb-1">
-          <div className="flex items-center gap-1">
-            <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg border border-line bg-raised px-2.5 focus-within:border-line-strong">
-              <Search className="h-3.5 w-3.5 shrink-0 text-faint" />
-              <input
-                aria-label="Search sessions"
-                placeholder="Search sessions"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape" && query) {
-                    event.preventDefault();
-                    setQuery("");
-                  }
-                }}
-                className="min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-faint focus-visible:outline-none"
-              />
-              {query ? (
-                <button
-                  type="button"
-                  aria-label="Clear search"
-                  title="Clear (Esc)"
-                  onClick={() => setQuery("")}
-                  className="rounded p-0.5 text-faint hover:text-fg"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              ) : (
-                <kbd className="font-mono text-[10.5px] text-faint">Ctrl F</kbd>
-              )}
-            </label>
-            <button
-              aria-pressed={showArchived}
-              aria-label={
-                showArchived
-                  ? "Show current sessions"
-                  : `Show archived sessions (${metadata.archived.length})`
-              }
-              title={
-                showArchived
-                  ? "Show current sessions"
-                  : `Archived on this desktop (${metadata.archived.length})`
-              }
-              onClick={() => setShowArchived((value) => !value)}
-              className={clsx(
-                "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
-                showArchived
-                  ? "bg-active text-fg"
-                  : "text-faint hover:bg-hover hover:text-fg",
-              )}
-            >
-              <Archive className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          {error && (
-            <p role="alert" className="text-[12px] text-danger">
-              {error}
-            </p>
-          )}
-        </div>
-      )}
+      <div className="flex items-center gap-2 px-4 pb-1 pt-1 text-caption font-semibold uppercase tracking-wider text-faint">
+        <span className="flex-1">Projects</span>
+        <button
+          onClick={() => void pickProject()}
+          aria-label="Open project"
+          title="Open project (Ctrl O)"
+          className="flex h-5 w-5 items-center justify-center rounded text-faint hover:bg-hover hover:text-fg"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
       <nav
-        aria-label="Sessions"
-        className="min-h-0 flex-1 overflow-y-auto px-2 pb-3"
+        aria-label="Projects and sessions"
+        className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3"
       >
-        {project &&
-          groups.map(([label, rows]) =>
-            rows.length === 0 ? null : (
-              <section key={label} className="mt-3 first:mt-1">
-                <div className="mb-1 flex items-center gap-2 px-2.5 text-[11px] font-semibold uppercase tracking-wider text-faint">
-                  {label}
-                  <span className="font-normal">{rows.length}</span>
-                </div>
-                <ul className="space-y-px">
-                  {rows.map((row) => (
-                    <SessionItem
-                      key={row.id}
-                      row={row}
-                      projectId={project.project_id}
-                      active={row.id === project.focused}
-                      archived={metadata.archived.includes(row.id)}
-                      onChange={(update) => change(row.id, update)}
-                    />
-                  ))}
-                </ul>
-              </section>
-            ),
-          )}
-        {project &&
-          (query.trim() || showArchived) &&
-          groups.every(([, rows]) => rows.length === 0) && (
-            <p className="px-2.5 pt-3 text-[12.5px] text-faint">
-              {query.trim()
-                ? "No sessions match."
-                : "Nothing archived. Archive keeps a session out of this list on this desktop only."}
-            </p>
-          )}
-        {project &&
-          project.sessions.length === 0 &&
-          project.connection === "live" && (
-            <p className="px-2.5 pt-2 text-[12.5px] text-faint">
-              No sessions yet.
-            </p>
-          )}
+        {visible.map(({ info, state, meta, rows }) => (
+          <ProjectCard
+            key={info.id}
+            info={info}
+            state={state}
+            active={info.id === app.activeId}
+            icon={icons[info.path]}
+            metadata={meta}
+            rows={rows}
+            searching={searching}
+            expanded={searching || isExpanded(info.id)}
+            setExpanded={(open) => setCardExpanded(info.id, open)}
+            onChange={(sessionId, update) => change(info.id, sessionId, update)}
+          />
+        ))}
+        {searching && visible.length === 0 && (
+          <p className="px-2.5 pt-2 text-ui text-faint">No sessions match.</p>
+        )}
+        {app.open.length === 0 && (
+          <button
+            onClick={() => void pickProject()}
+            className="flex w-full items-center gap-2.5 rounded-xl border border-dashed border-line-strong px-3 py-3 text-left text-ui text-muted hover:bg-hover hover:text-fg"
+          >
+            <FolderPlus className="h-4 w-4" />
+            Open a project folder
+          </button>
+        )}
       </nav>
 
-      <footer className="flex items-center gap-2 border-t border-line px-3 py-2 text-[12px] text-muted">
+      <footer className="flex items-center gap-2 border-t border-line px-3 py-2 text-small text-muted">
         <ConnectionDot connection={project?.connection ?? null} />
         <span className="flex-1 truncate">
           {connectionLabel(project?.connection ?? null)}
@@ -251,154 +261,268 @@ export function Sidebar({ app, project, openSettings }: Props) {
           )}
         </span>
         <button
-          onClick={() => showProviders(true)}
-          title="Model providers"
-          className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-muted hover:bg-hover hover:text-fg"
-        >
-          <KeyRound className="h-3.5 w-3.5" />
-          Providers
-        </button>
-        <button
-          onClick={openSettings}
+          onClick={() => showSettings()}
           title="Settings (Ctrl ,)"
           aria-label="Settings"
-          className="flex h-6 w-6 items-center justify-center rounded-md text-muted hover:bg-hover hover:text-fg"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-hover hover:text-fg"
         >
-          <SettingsIcon className="h-3.5 w-3.5" />
+          <SettingsIcon className="h-4 w-4" />
         </button>
       </footer>
     </aside>
   );
 }
 
-function ProjectSwitcher({
-  open,
-  projects,
-  activeId,
+function ProjectCard({
+  info,
+  state,
+  active,
+  icon,
+  metadata,
+  rows,
+  searching,
+  expanded,
+  setExpanded,
+  onChange,
 }: {
-  open: ProjectInfo[];
-  projects: Record<string, ProjectState>;
-  activeId: string | null;
+  info: ProjectInfo;
+  state: ProjectState | null;
+  active: boolean;
+  icon: Parameters<typeof ProjectBadge>[0]["icon"];
+  metadata: SessionPreferences;
+  rows: SessionRow[];
+  searching: boolean;
+  expanded: boolean;
+  setExpanded: (open: boolean) => void;
+  onChange: (
+    sessionId: string,
+    update: { title?: string; archived?: boolean },
+  ) => void;
 }) {
-  const active = open.find((p) => p.id === activeId) ?? null;
-  const needsYou = (id: string) =>
-    projects[id]?.sessions.filter((s) => s.group === "needs_you").length ?? 0;
-  const waiting = open
-    .filter((p) => p.id !== activeId)
-    .reduce((total, p) => total + needsYou(p.id), 0);
+  const [showArchived, setShowArchived] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const [customizing, setCustomizing] = useState(false);
   const [removing, setRemoving] = useState(false);
-  // Worktrees list right after their repository, under its name.
-  const repoOf = (p: ProjectInfo) => (p.worktree?.main_name ?? p.name).toLowerCase();
-  const sorted = [...open].sort(
-    (a, b) =>
-      repoOf(a).localeCompare(repoOf(b)) ||
-      Number(Boolean(a.worktree)) - Number(Boolean(b.worktree)) ||
-      a.name.localeCompare(b.name),
-  );
-  const repoCounts = new Map<string, number>();
-  for (const p of open) repoCounts.set(repoOf(p), (repoCounts.get(repoOf(p)) ?? 0) + 1);
-  const running = active
-    ? (projects[active.id]?.sessions.some((s) => s.status !== "idle") ?? false)
-    : false;
+  const menu = useRef<HTMLSpanElement>(null);
+  const sessions = state?.sessions ?? [];
+  const needs = sessions.filter((s) => s.group === "needs_you").length;
+  const working = sessions.some((s) => s.status !== "idle");
+  const archivedCount = metadata.archived.length;
+
+  const list = useMemo(() => {
+    const archived = (row: SessionRow) => metadata.archived.includes(row.id);
+    // Sessions that are running or need you stay visible even when archived.
+    const shown = rows.filter((row) =>
+      showArchived && !searching
+        ? archived(row)
+        : !archived(row) || row.status !== "idle" || row.group === "needs_you",
+    );
+    if (searching || showArchived) return { rows: shown, hidden: 0 };
+    // Needs-you sessions surface at any depth; otherwise roots only, and
+    // children are reached from their parent's transcript.
+    const needsYou = shown.filter((r) => r.group === "needs_you");
+    const roots = shown.filter((r) => r.depth === 0 && r.group !== "needs_you");
+    const running = roots.filter((r) => r.group === "working");
+    const recent = roots
+      .filter((r) => r.group === "idle" || r.group === "done")
+      .sort((a, b) => b.updated_at_ms - a.updated_at_ms);
+    const limit = showAll ? recent.length : RECENT_LIMIT;
+    return {
+      rows: [...needsYou, ...running, ...recent.slice(0, limit)],
+      hidden: Math.max(0, recent.length - limit),
+    };
+  }, [rows, metadata.archived, showArchived, showAll, searching]);
+
+  const open = () => {
+    if (!active) {
+      activate(info.id);
+      setExpanded(true);
+    } else setExpanded(!expanded);
+  };
 
   return (
-    <div className="px-2 pb-2">
-      <Dropdown
-        label="Switch project"
-        title={active?.path}
-        value={activeId}
-        side="bottom"
-        bare
-        rootClassName="w-full"
-        className="group/project flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left hover:bg-hover aria-expanded:bg-hover"
-        options={sorted.map((p) => {
-          const needs = needsYou(p.id);
-          return {
-            value: p.id,
-            label: p.worktree ? (p.worktree.branch ?? p.name) : p.name,
-            hint:
-              needs > 0
-                ? `${needs} need${needs === 1 ? "s" : ""} you`
-                : p.worktree
-                  ? `Worktree · ${p.path}`
-                  : p.path,
-            group:
-              (repoCounts.get(repoOf(p)) ?? 0) > 1
-                ? (p.worktree?.main_name ?? p.name)
-                : undefined,
-          };
-        })}
-        onChange={activate}
-        actions={[
-          {
-            label: "Open project…",
-            icon: <FolderPlus className="h-3.5 w-3.5" />,
-            onSelect: () => void pickProject(),
-          },
-          ...(active
-            ? [
+    <section
+      className={clsx(
+        "rounded-xl border",
+        active ? "border-line bg-raised/70" : "border-transparent",
+      )}
+    >
+      <div
+        className="group/card relative flex items-center"
+        onContextMenu={(event) => {
+          event.preventDefault();
+          menu.current?.querySelector("button")?.click();
+        }}
+      >
+        <button
+          onClick={open}
+          aria-expanded={expanded}
+          title={info.path}
+          className={clsx(
+            "flex min-w-0 flex-1 items-center gap-2.5 rounded-xl py-2 pl-2 pr-9 text-left group-focus-within/card:pr-[84px] group-hover/card:pr-[84px]",
+            !active && "hover:bg-hover",
+          )}
+        >
+          <ProjectBadge project={info} icon={icon} />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-ui font-medium">
+              {info.worktree?.branch ?? info.name}
+            </span>
+            <span className="block truncate text-caption text-faint">
+              {info.worktree
+                ? `worktree of ${info.worktree.main_name}`
+                : displayPath(info.path)}
+            </span>
+          </span>
+        </button>
+        <div className="absolute right-1.5 flex items-center gap-0.5">
+          {needs > 0 && !expanded && (
+            <span
+              title={`${needs} session${needs === 1 ? "" : "s"} need you`}
+              className="mr-1 rounded-full bg-warn-soft px-1.5 text-caption font-semibold text-warn group-hover/card:hidden"
+            >
+              {needs}
+            </span>
+          )}
+          <button
+            onClick={() => {
+              if (!active) activate(info.id);
+              setExpanded(true);
+              void api.newSession(info.id);
+            }}
+            aria-label={`New session in ${info.name}`}
+            title="New session"
+            className="flex h-6 w-6 items-center justify-center rounded-md text-muted opacity-0 hover:bg-active hover:text-fg focus-visible:opacity-100 group-hover/card:opacity-100"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </button>
+          <span ref={menu}>
+            <Dropdown
+              label={`Actions for ${info.name}`}
+              title="More actions"
+              value={null}
+              options={[]}
+              onChange={() => undefined}
+              side="bottom"
+              align="end"
+              bare
+              className="flex h-6 w-6 items-center justify-center rounded-md text-muted opacity-0 hover:bg-active hover:text-fg focus-visible:opacity-100 group-hover/card:opacity-100 aria-expanded:bg-active aria-expanded:opacity-100"
+              actions={[
+                {
+                  label: "Customize icon…",
+                  icon: <Palette className="h-3.5 w-3.5" />,
+                  onSelect: () => setCustomizing(true),
+                },
                 {
                   label: "New worktree session…",
                   icon: <GitBranchPlus className="h-3.5 w-3.5" />,
-                  onSelect: () => showWorktreeDialog(active.id),
+                  onSelect: () => showWorktreeDialog(info.id),
                 },
-              ]
-            : []),
-          ...(active?.worktree
-            ? [
                 {
-                  label: "Remove this worktree…",
-                  icon: <Trash2 className="h-3.5 w-3.5" />,
-                  danger: true,
-                  onSelect: () => setRemoving(true),
+                  label: showArchived
+                    ? "Hide archived sessions"
+                    : `Show archived sessions (${archivedCount})`,
+                  icon: <Archive className="h-3.5 w-3.5" />,
+                  onSelect: () => {
+                    setShowArchived((value) => !value);
+                    setExpanded(true);
+                  },
                 },
-              ]
-            : []),
-          ...(active
-            ? [
+                ...(info.worktree
+                  ? [
+                      {
+                        label: "Remove this worktree…",
+                        icon: <Trash2 className="h-3.5 w-3.5" />,
+                        danger: true,
+                        onSelect: () => setRemoving(true),
+                      },
+                    ]
+                  : []),
                 {
-                  label: `Close ${active.name}`,
+                  label: `Close ${info.name}`,
                   icon: <X className="h-3.5 w-3.5" />,
-                  onSelect: () => void closeProject(active.id),
+                  onSelect: () => void closeProject(info.id),
                 },
-              ]
-            : []),
-        ]}
-      >
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-soft text-[13px] font-semibold uppercase text-accent">
-          {active?.worktree ? (
-            <GitBranch className="h-4 w-4" />
-          ) : (
-            (active?.name.slice(0, 1) ?? <FolderOpen className="h-4 w-4" />)
-          )}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-[13px] font-medium">
-            {active?.worktree?.branch ?? active?.name ?? "No project"}
+              ]}
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </Dropdown>
           </span>
-          {active && (
-            <span className="block truncate text-[11px] text-faint">
-              {active.worktree
-                ? `worktree of ${active.worktree.main_name}`
-                : displayPath(active.path)}
-            </span>
+          <button
+            onClick={() => setExpanded(!expanded)}
+            aria-label={expanded ? `Collapse ${info.name}` : `Expand ${info.name}`}
+            className="flex h-6 w-6 items-center justify-center rounded-md text-faint hover:bg-active hover:text-fg"
+          >
+            <ChevronRight
+              className={clsx("h-3.5 w-3.5 transition-transform", expanded && "rotate-90")}
+            />
+          </button>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="pb-1.5">
+          {showArchived && !searching && (
+            <div className="flex items-center gap-2 px-3 pb-1 text-caption text-faint">
+              <span className="flex-1">Archived on this desktop</span>
+              <button
+                onClick={() => setShowArchived(false)}
+                className="rounded px-1 hover:bg-hover hover:text-fg"
+              >
+                Done
+              </button>
+            </div>
           )}
-        </span>
-        {waiting > 0 && (
-          <span title="Sessions in other projects need you">
-            <Badge tone="warn">{waiting}</Badge>
-          </span>
-        )}
-        <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 text-faint group-hover/project:text-muted" />
-      </Dropdown>
-      {removing && active?.worktree && (
+          <ul className="space-y-px px-1">
+            {list.rows.map((row) => (
+              <SessionItem
+                key={row.id}
+                row={row}
+                projectId={info.id}
+                active={active && row.id === state?.focused}
+                archived={metadata.archived.includes(row.id)}
+                onChange={(update) => onChange(row.id, update)}
+              />
+            ))}
+          </ul>
+          {list.hidden > 0 && (
+            <button
+              onClick={() => setShowAll(true)}
+              className="ml-1 mt-0.5 rounded-md px-2.5 py-1 text-small text-muted hover:bg-hover hover:text-fg"
+            >
+              Show {list.hidden} more
+            </button>
+          )}
+          {showAll && !searching && !showArchived && list.hidden === 0 && sessions.length > RECENT_LIMIT && (
+            <button
+              onClick={() => setShowAll(false)}
+              className="ml-1 mt-0.5 rounded-md px-2.5 py-1 text-small text-muted hover:bg-hover hover:text-fg"
+            >
+              Show fewer
+            </button>
+          )}
+          {list.rows.length === 0 && (
+            <p className="px-3 py-1 text-small text-faint">
+              {showArchived
+                ? "Nothing archived. Archive keeps a session out of this list on this desktop only."
+                : state?.connection === "live"
+                  ? "No sessions yet."
+                  : connectionLabel(state?.connection ?? null)}
+            </p>
+          )}
+        </div>
+      )}
+      {customizing && (
+        <IconDialog project={info} icon={icon} close={() => setCustomizing(false)} />
+      )}
+      {removing && info.worktree && (
         <RemoveWorktreeDialog
-          project={active}
-          running={running}
+          project={info}
+          running={working}
           close={() => setRemoving(false)}
         />
       )}
-    </div>
+    </section>
   );
 }
 
@@ -494,7 +618,10 @@ function SessionItem({
         />
       ) : (
         <button
-          onClick={() => void api.focusSession(projectId, row.id)}
+          onClick={() => {
+            activate(projectId);
+            void api.focusSession(projectId, row.id);
+          }}
           onDoubleClick={() => setRenaming(true)}
           aria-current={active ? "page" : undefined}
           className={clsx(
@@ -509,7 +636,7 @@ function SessionItem({
           <span className="min-w-0 flex-1">
             <span
               className={clsx(
-                "block truncate text-[13px]",
+                "block truncate text-ui",
                 row.unread > 0 || row.group === "needs_you"
                   ? "font-medium text-fg"
                   : "text-fg/90",
@@ -518,7 +645,7 @@ function SessionItem({
               {row.title}
             </span>
             {status && (
-              <span className="mt-0.5 block truncate text-[11.5px] text-muted">
+              <span className="mt-0.5 block truncate text-small text-muted">
                 {status}
               </span>
             )}
@@ -528,7 +655,7 @@ function SessionItem({
       {!renaming && (
         <div className="absolute right-1 top-1 flex items-center">
           {!working && (
-            <span className="pointer-events-none absolute right-1.5 top-[5px] whitespace-nowrap text-[11px] text-faint group-focus-within/row:invisible group-hover/row:invisible">
+            <span className="pointer-events-none absolute right-1.5 top-[5px] whitespace-nowrap text-caption text-faint group-focus-within/row:invisible group-hover/row:invisible">
               {relativeTime(row.updated_at_ms)}
             </span>
           )}
@@ -628,7 +755,7 @@ function RenameField({
           }
         }}
         onBlur={() => finish(true)}
-        className="min-w-0 flex-1 rounded border border-accent/60 bg-bg px-1.5 py-0.5 text-[13px] outline-none focus-visible:outline-none"
+        className="min-w-0 flex-1 rounded border border-accent/60 bg-bg px-1.5 py-0.5 text-ui outline-none focus-visible:outline-none"
       />
     </div>
   );
@@ -644,25 +771,6 @@ function StatusGlyph({ row }: { row: SessionRow }) {
   if (row.unread > 0 || row.group === "needs_you")
     return <span className="h-2 w-2 rounded-full bg-accent" />;
   return <span className="h-1.5 w-1.5 rounded-full bg-line-strong" />;
-}
-
-function Badge({
-  tone,
-  children,
-}: {
-  tone: "warn";
-  children: React.ReactNode;
-}) {
-  return (
-    <span
-      className={clsx(
-        "rounded-full px-1.5 text-[10.5px] font-semibold",
-        tone === "warn" && "bg-warn-soft text-warn",
-      )}
-    >
-      {children}
-    </span>
-  );
 }
 
 function ConnectionDot({ connection }: { connection: Connection | null }) {
@@ -701,20 +809,3 @@ function connectionLabel(connection: Connection | null): string {
   }
 }
 
-/**
- * Needs-you sessions surface at any depth; otherwise roots only, children
- * are reached from their parent's transcript.
- */
-function groupSessions(rows: SessionRow[]): Array<[string, SessionRow[]]> {
-  const needs = rows.filter((r) => r.group === "needs_you");
-  const roots = rows.filter((r) => r.depth === 0 && r.group !== "needs_you");
-  const working = roots.filter((r) => r.group === "working");
-  const recent = roots
-    .filter((r) => r.group === "idle" || r.group === "done")
-    .sort((a, b) => b.updated_at_ms - a.updated_at_ms);
-  return [
-    ["Needs you", needs],
-    ["Working", working],
-    ["Recent", recent],
-  ];
-}

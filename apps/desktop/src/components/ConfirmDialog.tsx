@@ -44,14 +44,14 @@ export function ConfirmDialog({
       className="m-auto w-[400px] max-w-[92vw] rounded-2xl border border-line-strong bg-bg p-0 text-fg shadow-2xl backdrop:bg-black/50"
     >
       <div className="px-6 pb-5 pt-5">
-        <h2 id="confirm-title" className="text-[15px] font-semibold">
+        <h2 id="confirm-title" className="text-title font-semibold">
           {title}
         </h2>
-        <div className="mt-2 text-[13px] text-muted">{children}</div>
+        <div className="mt-2 text-ui text-muted">{children}</div>
         {error && (
           <p
             role="alert"
-            className="mt-3 rounded-md bg-danger-soft px-3 py-2 text-[12.5px] text-danger selectable"
+            className="mt-3 rounded-md bg-danger-soft px-3 py-2 text-ui text-danger selectable"
           >
             {error}
           </p>
@@ -60,7 +60,7 @@ export function ConfirmDialog({
           <button
             autoFocus
             onClick={close}
-            className="h-8 rounded-lg border border-line-strong px-3 text-[13px] hover:bg-hover"
+            className="h-8 rounded-lg border border-line-strong px-3 text-ui hover:bg-hover"
           >
             Cancel
           </button>
@@ -68,7 +68,7 @@ export function ConfirmDialog({
             onClick={() => void confirm()}
             disabled={busy}
             className={clsx(
-              "h-8 rounded-lg px-3 text-[13px] font-medium text-white hover:opacity-90 disabled:opacity-60",
+              "h-8 rounded-lg px-3 text-ui font-medium text-white hover:opacity-90 disabled:opacity-60",
               tone === "danger" ? "bg-danger-solid" : "bg-solid",
             )}
           >

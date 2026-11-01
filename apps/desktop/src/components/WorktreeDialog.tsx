@@ -52,7 +52,7 @@ export function WorktreeDialog({
         main checkout or other sessions' files.
       </p>
       <label className="block">
-        <span className="mb-1 block text-[12px] text-muted">Task (optional)</span>
+        <span className="mb-1 block text-small text-muted">Task (optional)</span>
         <textarea
           autoFocus
           rows={3}
@@ -64,7 +64,7 @@ export function WorktreeDialog({
       </label>
       <div className="grid grid-cols-[1fr_auto] gap-3">
         <label className="block">
-          <span className="mb-1 block text-[12px] text-muted">Branch</span>
+          <span className="mb-1 block text-small text-muted">Branch</span>
           <input
             required
             value={name}
@@ -76,7 +76,7 @@ export function WorktreeDialog({
           />
         </label>
         <label className="block w-[170px]">
-          <span className="mb-1 block text-[12px] text-muted">Starting from</span>
+          <span className="mb-1 block text-small text-muted">Starting from</span>
           <input
             value={base}
             onChange={(event) => setBase(event.target.value)}
@@ -85,7 +85,7 @@ export function WorktreeDialog({
           />
         </label>
       </div>
-      <p className="text-[12px] text-faint">
+      <p className="text-small text-faint">
         An existing branch is checked out as it is. Uncommitted changes in the
         current checkout are not copied. The project's QQ configuration may ask
         for trust again in the new folder.

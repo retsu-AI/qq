@@ -52,7 +52,7 @@ export function ToolGroup({
         <button
           onClick={() => setExpanded((v) => !v)}
           aria-expanded={expanded}
-          className="group/summary flex max-w-full items-center gap-2 rounded-md py-0.5 text-left text-[13px] text-muted hover:text-fg"
+          className="group/summary flex max-w-full items-center gap-2 rounded-md py-0.5 text-left text-ui text-muted hover:text-fg"
         >
           {failed > 0 ? (
             <CircleX className="h-3.5 w-3.5 shrink-0 text-danger" />
@@ -63,12 +63,12 @@ export function ToolGroup({
             {summarizeTools(folded.map((tool) => tool.name))}
           </span>
           {failed > 0 && (
-            <span className="shrink-0 text-[11.5px] text-danger">
+            <span className="shrink-0 text-small text-danger">
               · {failed} failed
             </span>
           )}
           {elapsed > 0 && (
-            <span className="shrink-0 text-[11.5px] text-faint">
+            <span className="shrink-0 text-small text-faint">
               · {duration(elapsed)}
             </span>
           )}
@@ -111,7 +111,7 @@ function ToolRow({ tool, projectId }: { tool: Tool; projectId: string }) {
   const expandable = Boolean(output || tool.diff);
 
   return (
-    <div className="text-[13px]">
+    <div className="text-ui">
       <div className="flex min-w-0 items-center gap-2">
         <button
           onClick={() => expandable && setOpen((v) => !v)}
@@ -122,8 +122,8 @@ function ToolRow({ tool, projectId }: { tool: Tool; projectId: string }) {
         >
           <StateIcon tool={tool} />
           <span className="shrink-0 font-medium text-fg/90">{toolVerb(tool.name)}</span>
-          <span className="min-w-0 truncate font-mono text-[12px] text-muted">{subject}</span>
-          {tool.settled && <span className="shrink-0 text-[11.5px] text-faint">· {tool.settled}</span>}
+          <span className="min-w-0 truncate font-mono text-small text-muted">{subject}</span>
+          {tool.settled && <span className="shrink-0 text-small text-faint">· {tool.settled}</span>}
           {expandable && (
             <ChevronRight
               className={clsx("h-3.5 w-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")}
@@ -133,16 +133,16 @@ function ToolRow({ tool, projectId }: { tool: Tool; projectId: string }) {
         {tool.child_session && (
           <button
             onClick={() => void api.focusSession(projectId, tool.child_session!)}
-            className="flex shrink-0 items-center gap-1 text-[12px] text-accent hover:underline"
+            className="flex shrink-0 items-center gap-1 text-small text-accent hover:underline"
           >
             Open <ExternalLink className="h-3 w-3" />
           </button>
         )}
-        <span className="shrink-0 text-[11.5px] text-faint">{duration(tool.duration_ms)}</span>
+        <span className="shrink-0 text-small text-faint">{duration(tool.duration_ms)}</span>
       </div>
 
       {running && tool.live_output && !open && (
-        <pre className="ml-6 mt-1 max-h-28 overflow-hidden whitespace-pre-wrap rounded-md bg-raised px-3 py-2 font-mono text-[11.5px] leading-[1.5] text-muted [mask-image:linear-gradient(to_bottom,transparent,black_40%)]">
+        <pre className="ml-6 mt-1 max-h-28 overflow-hidden whitespace-pre-wrap rounded-md bg-raised px-3 py-2 font-mono text-small leading-[1.5] text-muted [mask-image:linear-gradient(to_bottom,transparent,black_40%)]">
           {tailLines(tool.live_output, 6)}
         </pre>
       )}
@@ -159,7 +159,7 @@ function ToolRow({ tool, projectId }: { tool: Tool; projectId: string }) {
           {output && (
             <pre
               className={clsx(
-                "max-h-[360px] overflow-auto whitespace-pre-wrap rounded-md border border-line bg-raised px-3 py-2 font-mono text-[11.5px] leading-[1.5] selectable",
+                "max-h-[360px] overflow-auto whitespace-pre-wrap rounded-md border border-line bg-raised px-3 py-2 font-mono text-small leading-[1.5] selectable",
                 tool.is_error ? "text-danger" : "text-muted",
               )}
             >

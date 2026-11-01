@@ -18,6 +18,8 @@ export interface DropdownOption<T extends string> {
   group?: string;
   /** Overrides `value` matching, for menus with one choice per group. */
   selected?: boolean;
+  /** Draws the label in a given font, as a font picker previews it. */
+  fontFamily?: string;
 }
 
 export interface DropdownAction {
@@ -175,7 +177,7 @@ export function Dropdown<T extends string>({
         }}
         className={clsx(
           !bare &&
-            "flex h-8 items-center gap-1 rounded-lg px-2 text-[12.5px] text-muted hover:bg-hover hover:text-fg disabled:opacity-50",
+            "flex h-8 items-center gap-1 rounded-lg px-2 text-ui text-muted hover:bg-hover hover:text-fg disabled:opacity-50",
           !bare && open && "bg-hover text-fg",
           className,
         )}
@@ -230,7 +232,7 @@ export function Dropdown<T extends string>({
           }}
           style={position}
           className={clsx(
-            "animate-pop fixed z-50 overflow-y-auto rounded-xl border border-line-strong bg-raised p-1 text-[13px] text-fg shadow-popover outline-none",
+            "animate-pop fixed z-50 overflow-y-auto rounded-xl border border-line-strong bg-raised p-1 text-ui text-fg shadow-popover outline-none",
             menu ? "min-w-[180px]" : "min-w-[220px]",
           )}
         >
@@ -238,7 +240,7 @@ export function Dropdown<T extends string>({
             <div key={option.value}>
               {option.group &&
                 option.group !== options[index - 1]?.group && (
-                  <div className="px-2.5 pb-1 pt-2 text-[10.5px] font-semibold uppercase tracking-wider text-faint first:pt-1">
+                  <div className="px-2.5 pb-0.5 pt-2 text-caption font-medium text-faint first:pt-1">
                     {option.group}
                   </div>
                 )}
@@ -251,7 +253,7 @@ export function Dropdown<T extends string>({
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => choose(index)}
                 className={clsx(
-                  "flex cursor-default items-start gap-2 rounded-lg px-2.5 py-1.5",
+                  "flex cursor-default items-start gap-2 rounded-md px-2.5 py-1",
                   index === active && "bg-hover",
                 )}
               >
@@ -262,9 +264,18 @@ export function Dropdown<T extends string>({
                   )}
                 />
                 <span className="min-w-0">
-                  <span className="block truncate">{option.label}</span>
+                  <span
+                    className="block truncate"
+                    style={
+                      option.fontFamily
+                        ? { fontFamily: option.fontFamily }
+                        : undefined
+                    }
+                  >
+                    {option.label}
+                  </span>
                   {option.hint && (
-                    <span className="block text-[11.5px] leading-snug text-muted">
+                    <span className="block text-small leading-snug text-muted">
                       {option.hint}
                     </span>
                   )}
@@ -288,7 +299,7 @@ export function Dropdown<T extends string>({
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => choose(index)}
                 className={clsx(
-                  "flex cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5",
+                  "flex cursor-default items-center gap-2 rounded-md px-2.5 py-1",
                   !menu && !action.icon && "pl-8",
                   action.danger
                     ? "text-danger"

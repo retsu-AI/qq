@@ -24,14 +24,13 @@ import {
 import { openInEditor } from "./lib/editor";
 import { SessionPane } from "./components/SessionPane";
 import { Welcome } from "./components/Welcome";
-import { Providers } from "./components/Providers";
 import {
   activate,
   activeProject,
   closeProject,
   dismissError,
   pickProject,
-  showProviders,
+  showSettings,
   useApp,
 } from "./lib/store";
 import { api } from "./lib/api";
@@ -73,7 +72,6 @@ export function App() {
   const preferences = usePreferences();
   const worktreeFor = useWorktreeDialog();
   const worktreeProject = app.open.find((p) => p.id === worktreeFor) ?? null;
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebar);
@@ -164,7 +162,7 @@ export function App() {
       const handled = () => event.preventDefault();
       if (key === ",") {
         handled();
-        setSettingsOpen(true);
+        showSettings();
       } else if (key === "k") {
         handled();
         setPaletteOpen(true);
@@ -248,11 +246,11 @@ export function App() {
           disabled: !project,
         },
         "separator",
-        { label: "Model providers…", onSelect: () => showProviders(true) },
+        { label: "Model providers…", onSelect: () => showSettings("providers") },
         {
           label: "Settings…",
           shortcut: "Ctrl ,",
-          onSelect: () => setSettingsOpen(true),
+          onSelect: () => showSettings(),
         },
         "separator",
         {
@@ -348,7 +346,7 @@ export function App() {
         { label: "Documentation", onSelect: () => void openUrl(DOCS_URL) },
         {
           label: "Keyboard shortcuts",
-          onSelect: () => setSettingsOpen(true),
+          onSelect: () => showSettings("shortcuts"),
         },
         { label: "Report an issue", onSelect: () => void openUrl(ISSUES_URL) },
         "separator",
@@ -371,12 +369,11 @@ export function App() {
           <Sidebar
             app={app}
             project={project}
-            openSettings={() => setSettingsOpen(true)}
           />
         )}
         <main className="relative flex min-w-0 flex-1 flex-col">
           {app.error && (
-            <div className="absolute inset-x-0 top-0 z-20 flex items-center gap-3 border-b border-line bg-danger-soft px-4 py-2 text-[13px] text-danger">
+            <div className="absolute inset-x-0 top-0 z-20 flex items-center gap-3 border-b border-line bg-danger-soft px-4 py-2 text-ui text-danger">
               <span className="flex-1 truncate">{app.error}</span>
               <button
                 className="text-muted hover:text-fg"
@@ -396,15 +393,12 @@ export function App() {
           )}
         </main>
       </div>
-      {app.providersOpen && <Providers />}
-      {settingsOpen && (
-        <Settings project={project} close={() => setSettingsOpen(false)} />
-      )}
+      {app.settings && <Settings page={app.settings} project={project} />}
       {paletteOpen && (
         <CommandPalette
           project={project}
           close={() => setPaletteOpen(false)}
-          settings={() => setSettingsOpen(true)}
+          settings={() => showSettings()}
         />
       )}
       {aboutOpen && <About close={() => setAboutOpen(false)} />}
@@ -433,19 +427,19 @@ function About({ close }: { close: () => void }) {
       className="m-auto w-[360px] rounded-2xl border border-line-strong bg-bg p-6 text-center text-fg shadow-2xl backdrop:bg-black/50"
     >
       <Logo className="mx-auto h-12 w-12" />
-      <h2 id="about-title" className="mt-3 text-[16px] font-semibold">
+      <h2 id="about-title" className="mt-3 text-title font-semibold">
         QQ
       </h2>
-      <p className="mt-0.5 text-[12.5px] text-muted">
+      <p className="mt-0.5 text-ui text-muted">
         {version ? `Version ${version}` : "Desktop app"}
       </p>
-      <p className="mt-3 text-[12.5px] text-muted">
+      <p className="mt-3 text-ui text-muted">
         AI coding agents on your machine. Open source under the MIT license.
       </p>
       <button
         autoFocus
         onClick={close}
-        className="mt-5 h-9 rounded-lg border border-line-strong px-5 text-[13px] hover:bg-hover"
+        className="mt-5 h-8 rounded-lg border border-line-strong px-5 text-ui hover:bg-hover"
       >
         Close
       </button>

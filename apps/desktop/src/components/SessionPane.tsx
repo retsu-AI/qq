@@ -16,7 +16,7 @@ import {
   Target,
 } from "lucide-react";
 import { openInEditor } from "../lib/editor";
-import { showProviders } from "../lib/store";
+import { showSettings } from "../lib/store";
 import { api } from "../lib/api";
 import { collectChanges, type FileChange } from "../lib/changes";
 import { updatePreferences, usePreferences } from "../lib/preferences";
@@ -63,7 +63,7 @@ export function SessionPane({
     return (
       <div className="flex flex-1 items-center justify-center p-10">
         <div className="max-w-md text-center">
-          <h2 className="text-[16px] font-semibold">
+          <h2 className="text-title font-semibold">
             QQ could not load this project
           </h2>
           <p className="mt-2 text-muted selectable">{project.error}</p>
@@ -73,7 +73,7 @@ export function SessionPane({
           >
             Retry connection
           </button>
-          <p className="mt-4 text-[12.5px] text-faint">
+          <p className="mt-4 text-ui text-faint">
             Check the error above and connection details in Settings, then
             retry. If the engine was updated, restart its local server before
             reconnecting.
@@ -133,7 +133,7 @@ function SessionView({
           goalOpen={goalOpen}
         />
         <TranscriptScroller project={project} transcript={transcript} />
-        <div className="mx-auto w-full max-w-[860px] px-6 pb-5">
+        <div className="mx-auto w-full max-w-reading px-6 pb-5">
           <SideQuestions project={project} transcript={transcript} />
           <CheckInterruptionBanner project={project} />
           <NoticeLine project={project} />
@@ -172,8 +172,8 @@ function Landing({ project }: { project: ProjectState }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="h-12 shrink-0" />
       <div className="flex flex-1 flex-col items-center justify-center px-6 pb-[12vh]">
-        <div className="w-full max-w-[760px]">
-          <h1 className="mb-1 text-center text-[24px] font-semibold tracking-tight">
+        <div className="w-full max-w-narrow">
+          <h1 className="mb-1 text-center text-display font-semibold tracking-tight">
             What should we work on?
           </h1>
           <p className="mb-6 text-center text-muted">
@@ -214,13 +214,13 @@ function ConnectProvider() {
     <div className="mx-auto max-w-[460px] rounded-xl border border-line-strong bg-raised px-6 py-5 text-center">
       <KeyRound className="mx-auto mb-3 h-5 w-5 text-accent" />
       <p className="font-medium">Connect a model provider to start</p>
-      <p className="mt-1 text-[12.5px] text-muted">
+      <p className="mt-1 text-ui text-muted">
         Sign in with ChatGPT, or paste an Anthropic, OpenAI, Google, or xAI API
         key.
       </p>
       <button
-        onClick={() => showProviders(true)}
-        className="mt-4 h-9 rounded-lg bg-solid px-4 text-[13px] font-medium text-white hover:bg-solid-hover"
+        onClick={() => showSettings("providers")}
+        className="mt-4 h-9 rounded-lg bg-solid px-4 text-ui font-medium text-white hover:bg-solid-hover"
       >
         Connect a provider
       </button>
@@ -250,22 +250,22 @@ function Header({
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line px-5">
-      <h2 className="min-w-0 flex-1 truncate text-[14px] font-medium">
+      <h2 className="min-w-0 flex-1 truncate text-body font-medium">
         {transcript.title}
       </h2>
       {running && (
-        <span className="flex items-center gap-1.5 text-[12px] text-accent">
+        <span className="flex items-center gap-1.5 text-small text-accent">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           {activityLabel(transcript.activity, runningTool)}
         </span>
       )}
       {transcript.queued_prompts > 0 && (
-        <span className="text-[12px] text-muted">
+        <span className="text-small text-muted">
           {transcript.queued_prompts} queued
         </span>
       )}
       <span
-        className="text-[12px] text-faint"
+        className="text-small text-faint"
         title={transcript.model ?? undefined}
       >
         {modelLabel(transcript.model, project.models)}
@@ -295,7 +295,7 @@ function Header({
         aria-pressed={changesOpen}
         title={`${changesOpen ? "Hide" : "Show"} changes (Ctrl Shift D)`}
         className={clsx(
-          "-mr-2 flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]",
+          "-mr-2 flex h-7 items-center gap-1.5 rounded-md px-2 text-small",
           changesOpen
             ? "bg-active text-fg"
             : "text-muted hover:bg-hover hover:text-fg",
@@ -304,7 +304,7 @@ function Header({
         <FileDiff className="h-3.5 w-3.5" />
         Changes
         {changes.length > 0 && (
-          <span className="rounded-full bg-accent-soft px-1.5 text-[11px] font-medium text-accent">
+          <span className="rounded-full bg-accent-soft px-1.5 text-caption font-medium text-accent">
             {changes.length}
           </span>
         )}
@@ -386,7 +386,7 @@ function TranscriptScroller({
         onScroll={onScroll}
         className="h-full overflow-y-auto"
       >
-        <div className="mx-auto w-full max-w-[860px] px-6 pb-6 pt-6">
+        <div className="mx-auto w-full max-w-reading px-6 pb-6 pt-6">
           {transcript.loading ? (
             <div className="flex items-center gap-2 text-muted">
               <Loader2 className="h-4 w-4 animate-spin" /> Loading session…
@@ -410,7 +410,7 @@ function TranscriptScroller({
               behavior: "smooth",
             });
           }}
-          className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full border border-line-strong bg-raised px-3 py-1 text-[12px] text-muted shadow-lg hover:text-fg"
+          className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full border border-line-strong bg-raised px-3 py-1 text-small text-muted shadow-lg hover:text-fg"
         >
           <ArrowDown className="h-3.5 w-3.5" /> Latest
         </button>
@@ -436,7 +436,7 @@ function GoalChip({
       aria-pressed={open}
       title={goal ? `${goal.objective}\n${budgetSummary(goal)}` : "Set a goal (/goal)"}
       className={clsx(
-        "flex h-7 max-w-[220px] items-center gap-1.5 rounded-md px-2 text-[12px]",
+        "flex h-7 max-w-[220px] items-center gap-1.5 rounded-md px-2 text-small",
         open ? "bg-active text-fg" : "text-muted hover:bg-hover hover:text-fg",
       )}
     >
@@ -444,7 +444,7 @@ function GoalChip({
       {status ? (
         <span
           className={clsx(
-            "shrink-0 rounded-full px-1.5 text-[10.5px] font-medium",
+            "shrink-0 rounded-full px-1.5 text-caption font-medium",
             TONE_CLASSES[status.tone],
           )}
         >
@@ -465,7 +465,7 @@ function CheckInterruptionBanner({ project }: { project: ProjectState }) {
   return (
     <div
       role="alert"
-      className="mb-2 flex items-start gap-3 rounded-md bg-warn-soft px-3 py-2 text-[12.5px] text-warn"
+      className="mb-2 flex items-start gap-3 rounded-md bg-warn-soft px-3 py-2 text-ui text-warn"
     >
       <span className="flex-1">
         A goal's completion check was interrupted and may have left changes
@@ -505,7 +505,7 @@ function NoticeLine({ project }: { project: ProjectState }) {
     <div
       role={notice.level === "error" ? "alert" : "status"}
       className={clsx(
-        "mb-2 rounded-md px-3 py-1.5 text-[12.5px] selectable",
+        "mb-2 rounded-md px-3 py-1.5 text-ui selectable",
         notice.level === "error" && "bg-danger-soft text-danger",
         notice.level === "warning" && "bg-warn-soft text-warn",
         notice.level === "info" && "bg-raised text-muted",

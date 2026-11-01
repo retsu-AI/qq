@@ -77,7 +77,7 @@ export function GoalDialog({
         it.
       </p>
       <label className="block">
-        <span className="mb-1 block text-[12px] text-muted">Objective</span>
+        <span className="mb-1 block text-small text-muted">Objective</span>
         <textarea
           autoFocus
           required
@@ -90,7 +90,7 @@ export function GoalDialog({
         />
       </label>
       <label className="block">
-        <span className="mb-1 block text-[12px] text-muted">
+        <span className="mb-1 block text-small text-muted">
           Completion check (optional)
         </span>
         <input
@@ -100,13 +100,13 @@ export function GoalDialog({
           placeholder="A command that succeeds when the goal is met, e.g. cargo test"
           className={clsx(fieldClass, "font-mono")}
         />
-        <span className="mt-1 block text-[11.5px] text-faint">
+        <span className="mt-1 block text-small text-faint">
           It runs only after you consent to this exact command; ordinary
           approvals never cover it.
         </span>
       </label>
       <fieldset>
-        <legend className="mb-1 text-[12px] text-muted">Budget</legend>
+        <legend className="mb-1 text-small text-muted">Budget</legend>
         <div className="space-y-1">
           {presets.map((value) => (
             <label
@@ -128,7 +128,7 @@ export function GoalDialog({
           ))}
         </div>
         {defaultsError && (
-          <p className="mt-1 text-[12px] text-warn selectable">
+          <p className="mt-1 text-small text-warn selectable">
             Could not read this workspace's goal settings: {defaultsError}
           </p>
         )}

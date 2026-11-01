@@ -7,8 +7,8 @@ An engine already running independently remains independent.
 
 ## Start working
 
-Open a project folder with Open project or Ctrl O. Connect a provider using
-Providers, select a model, and review any project-configuration trust prompt.
+Open a project folder with Open project or Ctrl O. Connect a provider in
+Settings → Providers, select a model, and review any project-configuration trust prompt.
 Trust grants use the same host configuration path as `qq trust`; never trust a
 project whose declared commands or services you do not accept.
 
@@ -51,15 +51,20 @@ acknowledging does not resume the goal.
 
 ## Sessions and run controls
 
-Search sessions in the sidebar (Ctrl F; Esc clears). Each session's ⋯ menu
-renames it, archives it, or deletes it; double-click a name to rename it in
-place. Names and archive flags marked **locally** are desktop preferences; other
-QQ clients still see canonical session names/history. The archive button beside
-search lists archived sessions, where Restore reverses it. Working sessions and
-sessions that need you continue to surface. Delete permanently removes an idle
-server session after confirmation; cancel an active run first. The project name
-at the top of the sidebar switches, opens and closes projects, and shows how many
-sessions in other projects need you.
+The sidebar lists each open project as a card that expands to show its
+sessions; click a card to switch to it, and the + beside Projects opens another.
+A collapsed card shows how many of its sessions need you. Search at the top of
+the sidebar (Ctrl F; Esc clears) finds sessions across all open projects.
+
+Each session's ⋯ menu renames it, archives it, or deletes it; double-click a
+name to rename it in place. Names and archive flags marked **locally** are
+desktop preferences; other QQ clients still see canonical session names/history.
+A project card's ⋯ menu (or right-click) shows its archived sessions, where
+Restore reverses archiving, and also starts a worktree session, closes the
+project, and sets the card's icon: initials, a symbol or an emoji in a chosen
+color, or an uploaded image (a small copy is kept on this desktop). Working
+sessions and sessions that need you continue to surface. Delete permanently
+removes an idle server session after confirmation; cancel an active run first.
 
 While an agent works, choose how the next message is delivered:
 
@@ -133,13 +138,13 @@ refreshes every 15 seconds, on window focus and when a run settles; Git hooks
 and credential helpers run as usual, and prompts are disabled so nothing hangs.
 
 New worktree session (Ctrl Shift N, the File menu, the Git menu or the project
-switcher) gives a task its own checkout and branch so several agents can work
+card's ⋯ menu) gives a task its own checkout and branch so several agents can work
 on one repository at once. It runs `git worktree add` into
 `<repo>.worktrees/<branch>` beside the repository (never inside it, where the
 main checkout's agent would see it) and opens that folder as a project with
 the task waiting in its composer. The branch name is derived from the task and
 can be changed; an existing branch is checked out as it is. Worktrees appear
-under their repository in the project switcher. "Remove this worktree" deletes
+under their repository in the sidebar. "Remove this worktree" deletes
 the folder and keeps the branch; Git refuses while it has uncommitted changes
 unless you choose to discard them. The new folder may ask for trust again
 because QQ trusts configuration per folder.
@@ -152,8 +157,10 @@ View switches theme and zooms text (Ctrl +, Ctrl -, Ctrl 0). Drag the empty part
 of the bar to move the window; double-click it to maximize. The window reopens
 at the size and position it closed with, maximized if it was.
 
-Ctrl , opens theme, transcript/composer text size, optional notifications,
-keyboard shortcuts, connection diagnostics and reported external-tool status.
+Ctrl , opens Settings: theme, transcript/composer text size, interface and code
+fonts (any installed font can be named), optional notifications, model
+providers, keyboard shortcuts, connection diagnostics and reported
+external-tool status.
 Notifications appear for approval/completion while the app is unfocused; Windows
 requires an installed app. Notification text includes session names. MCP/runtime
 configuration stays in QQ config.ron and uses the normal project trust workflow.

@@ -5,8 +5,11 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { Sidebar } from "../src/components/Sidebar";
 import { SessionPane } from "../src/components/SessionPane";
 import { Settings } from "../src/components/Settings";
+import { IconDialog } from "../src/components/ProjectIcon";
 import type { Item, ProjectState } from "../src/lib/types";
 import { getPreferences, setPreferences } from "../src/lib/preferences";
+import { showSettings, useApp, type SettingsPage } from "../src/lib/store";
+import { setProjectIcon } from "../src/lib/project-icons";
 import "../src/styles.css";
 
 const count = Math.min(
@@ -302,7 +305,11 @@ if (new URLSearchParams(location.search).has("approval"))
 function Fixture() {
   const [commands, setCommands] = useState<string[]>([]);
   const [measurement, setMeasurement] = useState("");
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settings = useApp().settings;
+  useEffect(() => {
+    const page = new URLSearchParams(location.search).get("settings");
+    if (page) showSettings(page as SettingsPage);
+  }, []);
   const [focusResult, setFocusResult] = useState("");
   useEffect(() => {
     let recorded = false;
@@ -341,6 +348,15 @@ function Fixture() {
       ...values.slice(-9),
       JSON.stringify({ command, args }),
     ]);
+    if (command === "auth_providers")
+      return ["anthropic", "openai-codex", "openai"].map((id, index) => ({
+        id,
+        stored: index === 1 ? "keyring" : null,
+        environment: null,
+        accepts_key: id !== "openai-codex",
+        browser_sign_in: id === "openai-codex",
+        recommended_model: "fixture/model",
+      }));
     if (
       new URLSearchParams(location.search).has("reject") &&
       command === "submit_prompt"
@@ -379,7 +395,6 @@ function Fixture() {
     <>
       <div className="flex h-full">
         <Sidebar
-          openSettings={() => undefined}
           app={{
             open: [
               {
@@ -388,8 +403,17 @@ function Fixture() {
                 name: project.name,
                 worktree: null,
               },
+              ...extra.map((other) => ({
+                id: other.project_id,
+                path: other.path,
+                name: other.name,
+                worktree: null,
+              })),
             ],
-            projects: { [project.project_id]: project },
+            projects: {
+              [project.project_id]: project,
+              ...Object.fromEntries(extra.map((other) => [other.project_id, other])),
+            },
             activeId: project.project_id,
           }}
           project={project}
@@ -409,13 +433,18 @@ function Fixture() {
       {new URLSearchParams(location.search).has("approval") && (
         <button
           className="fixed left-2 top-2 bg-raised p-2"
-          onClick={() => setSettingsOpen(true)}
+          onClick={() => showSettings()}
         >
           Fixture settings
         </button>
       )}
-      {settingsOpen && (
-        <Settings project={project} close={() => setSettingsOpen(false)} />
+      {settings && <Settings page={settings} project={project} />}
+      {extra.length > 0 && new URLSearchParams(location.search).has("icon") && (
+        <IconDialog
+          project={{ id: extra[0].project_id, path: extra[0].path, name: extra[0].name, worktree: null }}
+          icon={{ kind: "symbol", color: "teal", symbol: "server" }}
+          close={() => undefined}
+        />
       )}
       <output
         aria-label="Fixture commands"
@@ -437,5 +466,27 @@ function Fixture() {
       </output>
     </>
   );
+}
+// `?projects` opens more projects, with custom icons, beside the fixture.
+const extra: ProjectState[] = new URLSearchParams(location.search).has("projects")
+  ? (["api-gateway", "design-system", "notes-app"] as const).map((name, index) => ({
+      ...project,
+      project_id: `fixture-${name}`,
+      name,
+      path: `C:/temporary/${name}`,
+      focused: null,
+      transcript: null,
+      sessions: project.sessions.slice(0, 3 + index).map((row, offset) => ({
+        ...row,
+        id: `${name}-${offset}`,
+        title: ["Fix flaky retry test", "Review the auth flow", "Tidy the README", "Add dark mode", "Profile startup"][offset],
+        group: index === 0 && offset === 0 ? "needs_you" : row.group,
+      })),
+    }))
+  : [];
+if (extra.length) {
+  setProjectIcon(extra[0].path, { kind: "symbol", color: "teal", symbol: "server" });
+  setProjectIcon(extra[1].path, { kind: "initials", color: "violet" });
+  setProjectIcon(extra[2].path, { kind: "emoji", color: "orange", emoji: "📝" });
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);
