@@ -768,20 +768,7 @@ async fn claimed_goal_exposes_serial_update_tool_without_workspace_approval() {
         let receipt = runtime
             .command(
                 CommandId::generate().unwrap(),
-                SessionCommand::CreateSession {
-                    workspace_id,
-                    parent_id: None,
-                    model: ModelSelection {
-                        model: Some("test/model".to_owned()),
-                        max_output_tokens: Some(256),
-                        organization: None,
-                        model_is_fallback: false,
-                    },
-                    approval_mode: ApprovalMode::ReadOnly,
-                    profile: AgentProfileId::default(),
-                    reasoning_effort: None,
-                    correlation: Correlation::default(),
-                },
+                create_session_command(workspace_id, None, ApprovalMode::ReadOnly),
             )
             .await
             .unwrap();
@@ -1735,20 +1722,7 @@ async fn queued_prompt_claim_pins_only_the_active_goal_before_start() {
         let receipt = store
             .command(
                 CommandId::generate().unwrap(),
-                SessionCommand::CreateSession {
-                    workspace_id,
-                    parent_id: None,
-                    model: ModelSelection {
-                        model_is_fallback: false,
-                        model: Some("test/model".to_owned()),
-                        max_output_tokens: Some(256),
-                        organization: None,
-                    },
-                    approval_mode: ApprovalMode::default(),
-                    profile: AgentProfileId::default(),
-                    reasoning_effort: None,
-                    correlation: Correlation::default(),
-                },
+                create_session_command(workspace_id, None, ApprovalMode::default()),
             )
             .await
             .unwrap();
@@ -2201,20 +2175,7 @@ async fn paid_preparation_freezes_the_optional_goal_before_main_start() {
             let receipt = store
                 .command(
                     CommandId::generate().unwrap(),
-                    SessionCommand::CreateSession {
-                        workspace_id,
-                        parent_id: None,
-                        model: ModelSelection {
-                            model_is_fallback: false,
-                            model: Some("test/model".to_owned()),
-                            max_output_tokens: Some(256),
-                            organization: None,
-                        },
-                        approval_mode: ApprovalMode::default(),
-                        profile: AgentProfileId::default(),
-                        reasoning_effort: None,
-                        correlation: Correlation::default(),
-                    },
+                    create_session_command(workspace_id, None, ApprovalMode::default()),
                 )
                 .await
                 .unwrap();

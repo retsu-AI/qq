@@ -96,6 +96,36 @@ pub(super) async fn new_session(
     (workspace_id, session_id, created)
 }
 
+pub(super) async fn store_session(
+    store: &Store,
+    path: &std::path::Path,
+    mode: ApprovalMode,
+) -> (WorkspaceId, SessionId) {
+    let resolved = store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::ResolveWorkspace {
+                path: path.to_str().unwrap().to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
+        panic!("unexpected receipt")
+    };
+    let created = store
+        .command(
+            CommandId::generate().unwrap(),
+            create_session_command(workspace_id, None, mode),
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
+        panic!("unexpected receipt")
+    };
+    (workspace_id, session_id)
+}
+
 pub(super) struct Prompt {
     input: Vec<InputPart>,
     limits: RunLimits,

@@ -3694,20 +3694,11 @@ async fn depth_one_keeps_children_from_spawning_and_the_ceiling_is_enforced() {
         .runtime
         .command(
             CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id: harness.workspace_id,
-                parent_id: Some(parent_id),
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
+            create_session_command(
+                harness.workspace_id,
+                Some(parent_id),
+                ApprovalMode::default(),
+            ),
         )
         .await;
     assert!(matches!(

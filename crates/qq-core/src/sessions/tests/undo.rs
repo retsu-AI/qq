@@ -842,20 +842,7 @@ async fn a_restoring_command_id_is_reserved_against_every_other_request() {
             .runtime
             .command(
                 command_id,
-                SessionCommand::CreateSession {
-                    workspace_id: other_id,
-                    parent_id: None,
-                    model: ModelSelection {
-                        model_is_fallback: false,
-                        model: Some("test/model".to_owned()),
-                        max_output_tokens: Some(256),
-                        organization: None,
-                    },
-                    approval_mode: ApprovalMode::Full,
-                    profile: AgentProfileId::default(),
-                    reasoning_effort: None,
-                    correlation: Correlation::default(),
-                },
+                create_session_command(other_id, None, ApprovalMode::Full),
             )
             .await,
         Err(SessionRuntimeError::IdempotencyConflict)

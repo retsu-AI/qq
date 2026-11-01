@@ -1288,20 +1288,7 @@ async fn store_with_one_spill(
     let created = store
         .command(
             CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
+            create_session_command(workspace_id, None, ApprovalMode::default()),
         )
         .await
         .unwrap();
@@ -1628,41 +1615,7 @@ async fn claimed_store_fixture() -> (TempDir, Store, ClaimedRun) {
     let store = Store::open(directory.path().join("sessions.sqlite3"))
         .await
         .unwrap();
-    let resolved = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::ResolveWorkspace {
-                path: directory.path().to_str().unwrap().to_owned(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let created = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (_, session_id) = store_session(&store, directory.path(), ApprovalMode::default()).await;
     store_command(&store, session_id, "x").await.unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     (directory, store, claimed)
@@ -1793,23 +1746,31 @@ async fn create_session_with_mode(
     runtime
         .command(
             CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode,
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
+            create_session_command(workspace_id, parent_id, approval_mode),
         )
         .await
         .unwrap()
+}
+
+fn create_session_command(
+    workspace_id: WorkspaceId,
+    parent_id: Option<SessionId>,
+    approval_mode: ApprovalMode,
+) -> SessionCommand {
+    SessionCommand::CreateSession {
+        workspace_id,
+        parent_id,
+        model: ModelSelection {
+            model_is_fallback: false,
+            model: Some("test/model".to_owned()),
+            max_output_tokens: Some(256),
+            organization: None,
+        },
+        approval_mode,
+        profile: AgentProfileId::default(),
+        reasoning_effort: None,
+        correlation: Correlation::default(),
+    }
 }
 
 mod reference_assembly {
@@ -3149,41 +3110,8 @@ async fn project_terminal_run_with_tool_boundaries(
     let directory = test_directory();
     let database_path = directory.path().join("sessions.sqlite3");
     let store = Store::open(database_path.clone()).await.unwrap();
-    let resolved = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::ResolveWorkspace {
-                path: directory.path().to_str().unwrap().to_owned(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
-    let created = store
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
-        panic!("unexpected receipt")
-    };
+    let (workspace_id, session_id) =
+        store_session(&store, directory.path(), ApprovalMode::default()).await;
     store_command(&store, session_id, "inspect the tool boundaries")
         .await
         .unwrap();
@@ -3875,20 +3803,7 @@ async fn create_claimed_parent(
     let root = store
         .command(
             CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::default(),
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
+            create_session_command(workspace_id, None, ApprovalMode::default()),
         )
         .await
         .unwrap();
