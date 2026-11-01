@@ -14,6 +14,7 @@ impl StaticPolicyGate {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn run_worker(
     test: &str,
     marker: &str,
