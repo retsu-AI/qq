@@ -136,14 +136,15 @@ export function IconDialog({
   const dialog = useRef<HTMLDialogElement>(null);
   const file = useRef<HTMLInputElement>(null);
   const start = icon ?? DEFAULT_ICON;
+  // The tabs only offer choices; `selected` is the one icon chosen, shown in
+  // the preview on every tab and saved by Save.
+  const [selected, setSelected] = useState<Icon>(start);
   const [tab, setTab] = useState<Tab>(start.kind);
+  // Kept while an image is selected, for the next symbol, emoji or initials.
   const [color, setColor] = useState<IconColor>(
     start.kind === "image" ? "blue" : start.color,
   );
-  const [symbol, setSymbol] = useState<IconSymbol>(
-    start.kind === "symbol" ? start.symbol : "folder",
-  );
-  const [emoji, setEmoji] = useState(start.kind === "emoji" ? start.emoji : "");
+  const [typed, setTyped] = useState("");
   const [image, setImage] = useState(start.kind === "image" ? start.image : "");
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -154,18 +155,12 @@ export function IconDialog({
       ?.focus();
   }, []);
 
-  const draft: Icon | null =
-    tab === "initials"
-      ? { kind: "initials", color }
-      : tab === "symbol"
-        ? { kind: "symbol", color, symbol }
-        : tab === "emoji"
-          ? emojiValue(emoji)
-            ? { kind: "emoji", color, emoji: emojiValue(emoji)! }
-            : null
-          : image
-            ? { kind: "image", image }
-            : null;
+  const pickColor = (value: IconColor) => {
+    setColor(value);
+    if (selected.kind !== "image") setSelected({ ...selected, color: value });
+  };
+  const chosenSymbol = selected.kind === "symbol" ? selected.symbol : null;
+  const chosenEmoji = selected.kind === "emoji" ? selected.emoji : null;
 
   const save = (value: Icon | null) => {
     try {
@@ -194,11 +189,11 @@ export function IconDialog({
         className="px-6 pb-5 pt-5"
         onSubmit={(event) => {
           event.preventDefault();
-          if (draft) save(draft);
+          save(selected);
         }}
       >
         <div className="flex items-center gap-3">
-          <ProjectBadge project={project} icon={draft ?? undefined} />
+          <ProjectBadge project={project} icon={selected} />
           <div className="min-w-0">
             <h2 id="icon-title" className="text-title font-semibold">
               Project icon
@@ -245,13 +240,15 @@ export function IconDialog({
                     key={value}
                     type="button"
                     role="radio"
-                    aria-checked={symbol === value}
+                    aria-checked={chosenSymbol === value}
                     aria-label={value}
                     title={value}
-                    onClick={() => setSymbol(value)}
+                    onClick={() =>
+                      setSelected({ kind: "symbol", color, symbol: value })
+                    }
                     className={clsx(
                       "flex h-9 items-center justify-center rounded-md",
-                      symbol === value
+                      chosenSymbol === value
                         ? "bg-active text-fg ring-1 ring-accent"
                         : "text-muted hover:bg-hover hover:text-fg",
                     )}
@@ -274,12 +271,15 @@ export function IconDialog({
                     key={value}
                     type="button"
                     role="radio"
-                    aria-checked={emoji === value}
+                    aria-checked={chosenEmoji === value}
                     aria-label={value}
-                    onClick={() => setEmoji(value)}
+                    onClick={() => {
+                      setTyped("");
+                      setSelected({ kind: "emoji", color, emoji: value });
+                    }}
                     className={clsx(
                       "flex h-9 items-center justify-center rounded-md text-title",
-                      emoji === value
+                      chosenEmoji === value
                         ? "bg-active ring-1 ring-accent"
                         : "hover:bg-hover",
                     )}
@@ -291,9 +291,13 @@ export function IconDialog({
               <label className="mt-3 flex items-center gap-2 text-muted">
                 <span>Or any emoji (Win + .)</span>
                 <input
-                  value={ICON_EMOJIS.includes(emoji) ? "" : emoji}
-                  onChange={(event) => setEmoji(event.target.value)}
-                  aria-invalid={emoji.trim() !== "" && !emojiValue(emoji)}
+                  value={typed}
+                  onChange={(event) => {
+                    setTyped(event.target.value);
+                    const value = emojiValue(event.target.value);
+                    if (value) setSelected({ kind: "emoji", color, emoji: value });
+                  }}
+                  aria-invalid={typed.trim() !== "" && !emojiValue(typed)}
                   maxLength={16}
                   className="h-8 w-16 rounded-lg border border-line-strong bg-raised px-2 text-center text-body text-fg outline-none focus:border-accent/60 focus-visible:outline-none"
                 />
@@ -316,27 +320,68 @@ export function IconDialog({
                   event.target.value = "";
                   if (!chosen) return;
                   try {
-                    setImage(await imageIcon(chosen));
+                    const uploaded = await imageIcon(chosen);
+                    setImage(uploaded);
+                    setSelected({ kind: "image", image: uploaded });
                     setError(null);
                   } catch (failure) {
                     setError(String((failure as Error).message ?? failure));
                   }
                 }}
               />
-              <button
-                type="button"
-                onClick={() => file.current?.click()}
-                className="mt-3 flex h-8 items-center gap-2 rounded-lg border border-line-strong px-3 hover:bg-hover"
-              >
-                <ImageUp className="h-4 w-4" />
-                {image ? "Choose another image…" : "Choose image…"}
-              </button>
+              <div className="mt-3 flex items-center gap-3">
+                {image && (
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={selected.kind === "image"}
+                    aria-label="Uploaded image"
+                    onClick={() => setSelected({ kind: "image", image })}
+                    className={clsx(
+                      "rounded-lg p-1",
+                      selected.kind === "image"
+                        ? "bg-active ring-1 ring-accent"
+                        : "hover:bg-hover",
+                    )}
+                  >
+                    <img src={image} alt="" className="h-8 w-8 rounded-md object-cover" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => file.current?.click()}
+                  className="flex h-8 items-center gap-2 rounded-lg border border-line-strong px-3 hover:bg-hover"
+                >
+                  <ImageUp className="h-4 w-4" />
+                  {image ? "Choose another image…" : "Choose image…"}
+                </button>
+              </div>
             </div>
           )}
           {tab === "initials" && (
-            <p className="text-muted">
-              The first letter of the project's name, in the color below.
-            </p>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={selected.kind === "initials"}
+                aria-label="Use initials"
+                onClick={() => setSelected({ kind: "initials", color })}
+                className={clsx(
+                  "rounded-lg p-1",
+                  selected.kind === "initials"
+                    ? "bg-active ring-1 ring-accent"
+                    : "hover:bg-hover",
+                )}
+              >
+                <ProjectBadge
+                  project={{ name: project.name, worktree: null }}
+                  icon={{ kind: "initials", color }}
+                />
+              </button>
+              <p className="text-muted">
+                The first letter of the project's name, in the color below.
+              </p>
+            </div>
           )}
           {tab !== "image" && (
             <div
@@ -352,7 +397,7 @@ export function IconDialog({
                   aria-checked={color === value}
                   aria-label={value}
                   title={value}
-                  onClick={() => setColor(value)}
+                  onClick={() => pickColor(value)}
                   style={{ backgroundColor: HUES[value] }}
                   className={clsx(
                     "h-6 w-6 rounded-full",
@@ -393,7 +438,6 @@ export function IconDialog({
           </button>
           <button
             type="submit"
-            disabled={!draft}
             className="h-8 rounded-lg bg-solid px-3 text-ui font-medium text-white hover:bg-solid-hover disabled:opacity-50"
           >
             Save
