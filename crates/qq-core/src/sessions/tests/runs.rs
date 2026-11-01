@@ -775,16 +775,7 @@ async fn persists_tool_transitions_and_reconstructs_follow_up_context() {
     let result = focused.tool_calls[0].result.as_deref().unwrap();
     assert!(result.starts_with("read note.txt L1/1 h:"), "{result}");
     assert!(result.ends_with("\n1\ttool result\n"), "{result}");
-    assert_eq!(
-        focused.runs[0].usage,
-        Some(TokenUsage {
-            input_tokens: 10,
-            cache_read_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 3,
-            reasoning_tokens: None,
-        })
-    );
+    assert_eq!(focused.runs[0].usage, Some(usage(10, 3)));
     assert_eq!(focused.runs[0].context_tokens, Some(6));
     assert_eq!(focused.summary.context_tokens, Some(6));
     let completed_run = focused.runs[0].id;

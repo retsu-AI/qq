@@ -244,6 +244,19 @@ pub(super) async fn set_goal(
         .await
 }
 
+pub(super) const fn provider_usage(
+    input_tokens: u64,
+    output_tokens: u64,
+) -> qq_provider::ProviderUsage {
+    qq_provider::ProviderUsage {
+        input_tokens,
+        cache_read_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens,
+        reasoning_tokens: None,
+    }
+}
+
 pub(super) fn load_error(error: crate::RuntimeConfigError) -> RuntimeLoadError {
     RuntimeLoadError {
         kind: RunFailureKind::Configuration,

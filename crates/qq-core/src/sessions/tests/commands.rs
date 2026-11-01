@@ -1903,13 +1903,7 @@ async fn known_later_turn_context_overflow_starts_no_second_provider_request() {
                 provider_script(
                     tool_call("list", "tree", r#"{"path":".","depth":1}"#)
                         .into_iter()
-                        .chain([completed(Some(qq_provider::ProviderUsage {
-                            input_tokens: 99_998,
-                            cache_read_input_tokens: 0,
-                            cache_write_input_tokens: 0,
-                            output_tokens: 1,
-                            reasoning_tokens: None,
-                        }))]),
+                        .chain([completed(Some(provider_usage(99_998, 1)))]),
                 )
             } else {
                 Box::pin(stream::iter(vec![Ok(

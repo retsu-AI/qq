@@ -26,13 +26,7 @@ fn metered(
     mut events: Vec<Result<qq_provider::ProviderEvent, qq_provider::ProviderError>>,
 ) -> ProviderStream {
     events.push(Ok(qq_provider::ProviderEvent::Completed {
-        usage: Some(qq_provider::ProviderUsage {
-            input_tokens: 1,
-            cache_read_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 1,
-            reasoning_tokens: None,
-        }),
+        usage: Some(provider_usage(1, 1)),
     }));
     Box::pin(stream::iter(events))
 }

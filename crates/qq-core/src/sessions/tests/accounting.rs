@@ -157,13 +157,10 @@ async fn compatible_occupancy_seeds_the_first_turn_after_restart_and_pricing_ref
                         Box::pin(stream::iter([
                             Ok(qq_provider::ProviderEvent::OutputTextDelta { text }),
                             Ok(qq_provider::ProviderEvent::Completed {
-                                usage: Some(qq_provider::ProviderUsage {
-                                    input_tokens: if call == 0 { 1_000 } else { 191_000 },
-                                    cache_read_input_tokens: 0,
-                                    cache_write_input_tokens: 0,
-                                    output_tokens: 1,
-                                    reasoning_tokens: None,
-                                }),
+                                usage: Some(provider_usage(
+                                    if call == 0 { 1_000 } else { 191_000 },
+                                    1,
+                                )),
                             }),
                         ]))
                     }

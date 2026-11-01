@@ -16,13 +16,7 @@ impl Provider for GatedChild {
             permit.forget();
             yield Ok(qq_provider::ProviderEvent::OutputTextDelta { text: answer.to_owned() });
             yield Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(qq_provider::ProviderUsage {
-                    input_tokens: 10,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 5,
-                    reasoning_tokens: None,
-                }),
+                usage: Some(provider_usage(10, 5)),
             });
         })
     }
@@ -60,13 +54,7 @@ impl Provider for ScriptedParent {
         self.requests.lock().unwrap().push(request);
         let current = self.turn.fetch_add(1, Ordering::AcqRel);
         self.turn_started.notify_waiters();
-        let usage = Some(qq_provider::ProviderUsage {
-            input_tokens: 1,
-            cache_read_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 1,
-            reasoning_tokens: None,
-        });
+        let usage = Some(provider_usage(1, 1));
         let script = match self.script.get(current).cloned() {
             Some(ParentTurn::WithChildren(name, arguments)) => {
                 Some(ParentTurn::Calls(vec![(name, arguments(&children))]))
@@ -1690,13 +1678,7 @@ impl Provider for ReadsUntil {
             requests.push(request);
             requests.len()
         };
-        let usage = Some(qq_provider::ProviderUsage {
-            input_tokens: 1,
-            cache_read_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 1,
-            reasoning_tokens: None,
-        });
+        let usage = Some(provider_usage(1, 1));
         let call = |name: &str, arguments: String| {
             let id = format!("call_{turn}");
             [
@@ -1736,13 +1718,7 @@ struct ReportingChild {
 
 impl Provider for ReportingChild {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
-        let usage = Some(qq_provider::ProviderUsage {
-            input_tokens: 2,
-            cache_read_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 2,
-            reasoning_tokens: None,
-        });
+        let usage = Some(provider_usage(2, 2));
         let last = request
             .messages()
             .last()

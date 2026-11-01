@@ -560,25 +560,10 @@ impl Provider for ToolLoopProvider {
             provider_script(
                 tool_call("call_0", "read_file", r#"{"path":"note.txt"}"#)
                     .into_iter()
-                    .chain([completed(Some(qq_provider::ProviderUsage {
-                        input_tokens: 4,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        output_tokens: 2,
-                        reasoning_tokens: None,
-                    }))]),
+                    .chain([completed(Some(provider_usage(4, 2)))]),
             )
         } else {
-            provider_script([
-                text_delta("done"),
-                completed(Some(qq_provider::ProviderUsage {
-                    input_tokens: 6,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 1,
-                    reasoning_tokens: None,
-                })),
-            ])
+            provider_script([text_delta("done"), completed(Some(provider_usage(6, 1)))])
         }
     }
 }
@@ -746,13 +731,7 @@ impl Provider for GatedSliceProvider {
                 });
             }
             yield Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(qq_provider::ProviderUsage {
-                    input_tokens: 1,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 1,
-                    reasoning_tokens: None,
-                }),
+                usage: Some(provider_usage(1, 1)),
             });
         })
     }
@@ -829,13 +808,7 @@ impl Provider for RenewableSliceProvider {
                 text_delta("task complete"),
                 completed(
                     self.metered_empty_checkpoint
-                        .then_some(qq_provider::ProviderUsage {
-                            input_tokens: 7,
-                            cache_read_input_tokens: 0,
-                            cache_write_input_tokens: 0,
-                            output_tokens: 3,
-                            reasoning_tokens: None,
-                        }),
+                        .then_some(provider_usage(7, 3)),
                 ),
             ]);
         }
@@ -872,13 +845,7 @@ impl Provider for RenewableSliceProvider {
         events.push(Ok(qq_provider::ProviderEvent::Completed {
             usage: self
                 .metered_empty_checkpoint
-                .then_some(qq_provider::ProviderUsage {
-                    input_tokens: 1,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 1,
-                    reasoning_tokens: None,
-                }),
+                .then_some(provider_usage(1, 1)),
         }));
         Box::pin(stream::iter(events))
     }
@@ -1215,13 +1182,7 @@ impl RuntimeLoader for RecordingApprovalLoader {
             tool: "__test_mutate",
             arguments: "{}",
             tool_turns: 1,
-            usage: Some(qq_provider::ProviderUsage {
-                input_tokens: 7,
-                cache_read_input_tokens: 0,
-                cache_write_input_tokens: 0,
-                output_tokens: 1,
-                reasoning_tokens: None,
-            }),
+            usage: Some(provider_usage(7, 1)),
         };
         {
             let loaded = ProviderLoader::new(provider)
@@ -2573,13 +2534,7 @@ impl Provider for AutoCompactProvider {
                             + tool.input_schema().get().len()) as u64
                     })
                     .sum::<u64>();
-            let usage = qq_provider::ProviderUsage {
-                input_tokens: bytes.div_ceil(*bytes_per_token),
-                cache_read_input_tokens: 0,
-                cache_write_input_tokens: 0,
-                output_tokens: 1,
-                reasoning_tokens: None,
-            };
+            let usage = provider_usage(bytes.div_ceil(*bytes_per_token), 1);
             let inner = AutoCompactProvider {
                 requests: Arc::clone(&self.requests),
                 script: (**script).clone(),
@@ -2727,13 +2682,7 @@ impl Provider for AutoCompactProvider {
                 }
             }
             AutoCompactScript::ReadNoteThenTextMeasured { text, input_tokens } => {
-                let usage = Some(qq_provider::ProviderUsage {
-                    input_tokens: *input_tokens,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 1,
-                    reasoning_tokens: None,
-                });
+                let usage = Some(provider_usage(*input_tokens, 1));
                 if already_read {
                     provider_script([text_delta(text.clone()), completed(usage)])
                 } else {
@@ -3322,13 +3271,7 @@ impl Provider for TruncatingProvider {
         let turn = requests.len();
         requests.push(request);
         drop(requests);
-        let usage = Some(qq_provider::ProviderUsage {
-            input_tokens: 4,
-            cache_read_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 2,
-            reasoning_tokens: None,
-        });
+        let usage = Some(provider_usage(4, 2));
         if turn.is_multiple_of(2) {
             let mut events = Vec::new();
             if !self.empty {
@@ -3608,26 +3551,11 @@ impl Provider for AccountingSpawnProvider {
                     id: "second".to_owned(),
                 }),
                 Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
-                        input_tokens: 2,
-                        cache_read_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        output_tokens: 3,
-                        reasoning_tokens: None,
-                    }),
+                    usage: Some(provider_usage(2, 3)),
                 }),
             ]))
         } else {
-            provider_script([
-                text_delta("done"),
-                completed(Some(qq_provider::ProviderUsage {
-                    input_tokens: 5,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 7,
-                    reasoning_tokens: None,
-                })),
-            ])
+            provider_script([text_delta("done"), completed(Some(provider_usage(5, 7)))])
         }
     }
 }
@@ -3641,22 +3569,10 @@ impl RuntimeLoader for AccountingSpawnLoader {
                 turn: StdMutex::new(0),
             }),
             Some("test/child-first") => Arc::new(AccountingTextProvider {
-                usage: qq_provider::ProviderUsage {
-                    input_tokens: 11,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 13,
-                    reasoning_tokens: None,
-                },
+                usage: provider_usage(11, 13),
             }),
             Some("test/child-second") => Arc::new(AccountingTextProvider {
-                usage: qq_provider::ProviderUsage {
-                    input_tokens: 17,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 19,
-                    reasoning_tokens: None,
-                },
+                usage: provider_usage(17, 19),
             }),
             other => panic!("unexpected accounting test model: {other:?}"),
         };
@@ -4360,13 +4276,7 @@ impl Provider for VerdictProvider {
         self.requests.lock().unwrap().push(request);
         provider_script([
             text_delta(self.reply.to_owned()),
-            completed(Some(qq_provider::ProviderUsage {
-                input_tokens: 50,
-                cache_read_input_tokens: 0,
-                cache_write_input_tokens: 0,
-                output_tokens: 5,
-                reasoning_tokens: None,
-            })),
+            completed(Some(provider_usage(50, 5))),
         ])
     }
 }
