@@ -664,11 +664,11 @@ pub(crate) fn tool_copy_text(call: &ToolCallSnapshot, live_output: Option<&str>)
                 .map(|args| {
                     args.iter()
                         .filter_map(serde_json::Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(" ")
+                        .map(|arg| format!(" {}", shell_quote(arg)))
+                        .collect::<String>()
                 })
                 .unwrap_or_default();
-            format!("$ {program} {args}").trim_end().to_owned()
+            format!("$ {}{args}", shell_quote(&program))
         }),
         _ => None,
     }
@@ -683,6 +683,18 @@ pub(crate) fn tool_copy_text(call: &ToolCallSnapshot, live_output: Option<&str>)
         command
     } else {
         format!("{command}\n{output}")
+    }
+}
+
+fn shell_quote(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_./=:,+@%".contains(character));
+    if plain {
+        arg.to_owned()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
     }
 }
 

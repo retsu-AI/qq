@@ -404,6 +404,35 @@ fn copies_keep_a_refusal_and_running_tool_output() {
 }
 
 #[test]
+fn an_exec_copy_quotes_each_argument_as_it_ran() {
+    let call = qq_protocol::ToolCallSnapshot {
+        arguments: r#"{"program":"cat","args":["file with spaces.txt","","it's","-n"]}"#.to_owned(),
+        ..fixtures::tool_call(ToolCallId::from_bytes([9; 16]), fixtures::SESSION, "exec")
+    };
+    assert_eq!(
+        crate::view::tool_copy_text(&call, None),
+        r"$ cat 'file with spaces.txt' '' 'it'\''s' -n"
+    );
+}
+
+#[test]
+fn a_full_width_code_row_beside_the_sessions_column_copies_without_margin() {
+    let code = format!("{}b", "a".repeat(80));
+    let mut app = app();
+    let session = app.sessions.get_mut(&fixtures::SESSION).unwrap();
+    session.messages.as_mut().unwrap()[1].output = format!("```\n{code}\n```");
+    app.layout.rail = crate::view::PanePref::Shown;
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    let shown = rows(&mut app, &mut renderer);
+    let start = find(&shown, "aaaa");
+    let end = (start.0 + 10, start.1 + 1);
+    let copied = drag(&mut app, &mut renderer, start, end);
+    assert!(copied[0].starts_with("aaaa"), "{copied:?}");
+    assert!(!copied[0].contains(' '), "{copied:?}");
+}
+
+#[test]
 fn folded_tool_calls_stay_reachable_by_the_block_cursor() {
     let mut app = app();
     let session = app.sessions.get_mut(&fixtures::SESSION).unwrap();

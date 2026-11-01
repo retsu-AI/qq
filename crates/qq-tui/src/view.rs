@@ -329,6 +329,7 @@ impl FrameRenderer {
                 let mut used = slot.width();
                 let first_width = used;
                 let first_pad = slot.pad;
+                let first_code = slot.kind == crate::render::RowKind::Code;
                 let first = std::mem::take(slot);
                 let mut row = Line {
                     indent: first.indent,
@@ -365,7 +366,7 @@ impl FrameRenderer {
                     row.push(" ".repeat(width - used), normal());
                     used = width;
                 }
-                if first_pad > 0 {
+                if first_pad > 0 || first_code {
                     let added = used.saturating_sub(first_width);
                     row.pad = first_pad.saturating_add(u16::try_from(added).unwrap_or(u16::MAX));
                 }
