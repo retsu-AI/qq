@@ -4578,7 +4578,7 @@ fn the_rail_is_one_row_per_session_at_regular_and_adds_activity_and_cost_at_wide
         .unwrap();
     assert!(
         wide[focused + 1].contains("Deploy helper"),
-        "the focused session's waiting agent sits under it: {wide:#?}"
+        "a waiting agent sits under its session: {wide:#?}"
     );
 }
 
@@ -6304,5 +6304,28 @@ fn page_down_reaches_the_end_of_a_very_long_check_output_and_page_up_returns_at_
     assert!(
         text.contains("PgDn"),
         "one PageUp past the end moves back up: {text}"
+    );
+}
+
+#[test]
+fn twenty_agents_take_one_rail_row_plus_the_one_that_needs_you() {
+    let mut harness =
+        crate::bench_support::BenchHarness::scene(crate::bench_support::Scene::Fanout, (120, 40));
+    let rows = harness.plain_frame();
+    let rail: Vec<String> = rows
+        .iter()
+        .map(|row| row.chars().skip(90).collect::<String>().trim().to_owned())
+        .filter(|row| !row.is_empty())
+        .collect();
+    assert_eq!(
+        rail,
+        [
+            "NEEDS YOU",
+            "▎ 1 ◇ Session 0  ↳20",
+            "◇ agent 1",
+            "RECENT",
+            "2 ● release notes"
+        ],
+        "{rows:#?}"
     );
 }

@@ -6058,3 +6058,40 @@ fn clicking_a_rail_row_focuses_that_session_and_a_stale_hit_is_refused() {
     ));
     assert_eq!(app.focused(), before, "a deleted session is not focused");
 }
+
+#[test]
+fn a_hidden_agents_stream_does_not_wake_a_frame_but_its_sessions_does() {
+    let (mut app, [first, beta, _, agent, _]) = switcher_app();
+    app.terminal_width = 120;
+    app.layout.rail = crate::view::PanePref::Shown;
+    let message = id(0xc1, MessageId::from_bytes);
+    let delta = |session_id: SessionId, sequence: u64| {
+        ClientUpdate::Event(SessionEventEnvelope {
+            occurred_at_ms: sequence,
+            ..fixtures::envelope(
+                sequence,
+                session_id,
+                SessionEvent::TextAppended {
+                    message_id: message,
+                    channel: TextChannel::Output,
+                    text: "x".to_owned(),
+                },
+            )
+        })
+    };
+    app.focus_session(first);
+    let base = app.last_sequence + 1;
+    assert!(
+        !app.apply_client_update(delta(agent, base)).split().0,
+        "an agent of another session draws nowhere"
+    );
+    assert!(
+        app.apply_client_update(delta(beta, base + 1)).split().0,
+        "its session's rail row can show the tail"
+    );
+    app.focus_session(beta);
+    assert!(
+        app.apply_client_update(delta(agent, base + 2)).split().0,
+        "an agent of the focused session shows in its lane"
+    );
+}

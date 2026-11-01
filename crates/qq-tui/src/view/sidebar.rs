@@ -121,15 +121,13 @@ pub(super) fn sidebar(
         {
             plan.push(Row::Detail(index));
         }
-        let in_focus = app
-            .focused()
-            .and_then(|focused| app.sessions.session_of(focused))
-            == Some(entry.id);
         let shown: Vec<SessionId> = app
             .sessions
             .agents_of(entry.id)
             .into_iter()
-            .filter(|agent| in_focus || app.sessions[agent].need() == Some(Need::Approval))
+            .filter(|agent| {
+                app.focused() == Some(*agent) || app.sessions[agent].need() == Some(Need::Approval)
+            })
             .collect();
         for agent in shown.iter().take(RAIL_AGENT_ROWS) {
             plan.push(Row::Agent(*agent));

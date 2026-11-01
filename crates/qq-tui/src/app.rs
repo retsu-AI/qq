@@ -1082,13 +1082,12 @@ impl App {
         if self.focused() == Some(event.session_id) {
             return true;
         }
-        if self
-            .sessions
-            .get(&event.session_id)
-            .and_then(|session| session.summary.parent_id)
-            .is_some_and(|parent| self.focused() == Some(parent))
-        {
-            return true;
+        if !self.sessions.is_session(event.session_id) {
+            return self.focused().is_some()
+                && self.sessions.session_of(event.session_id)
+                    == self
+                        .focused()
+                        .and_then(|focused| self.sessions.session_of(focused));
         }
         self.terminal_width == 0
             || crate::view::rail_visible(
