@@ -317,6 +317,7 @@ pub(crate) struct App {
     pub(crate) selection: Option<Selection>,
     pub(crate) geometry: FrameGeometry,
     last_click: Option<(std::time::Instant, (u16, u16), u8)>,
+    click_clock: fn() -> std::time::Instant,
     pub reasoning_detail: ReasoningDetail,
     pub(crate) goal_scroll: usize,
     pub layout: crate::view::LayoutPrefs,
@@ -384,6 +385,7 @@ impl App {
             selection: None,
             geometry: FrameGeometry::default(),
             last_click: None,
+            click_clock: std::time::Instant::now,
             reasoning_detail: ReasoningDetail::default(),
             goal_scroll: 0,
             layout: crate::view::LayoutPrefs::default(),
@@ -1248,7 +1250,7 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 let cleared = self.selection.take().is_some();
-                let now = std::time::Instant::now();
+                let now = (self.click_clock)();
                 let clicks = match self.last_click {
                     Some((at, cell, count))
                         if cell == (mouse.column, mouse.row)
@@ -3218,10 +3220,10 @@ impl App {
         };
         let text = match cursor {
             Block::Message(id) => message(id).map(|message| message_source(message).to_owned()),
-            Block::Code(id, index) => message(id).and_then(|message| {
-                crate::view::code_blocks(message_source(message))
-                    .into_iter()
-                    .nth(index)
+            Block::Code(id, from_end) => message(id).and_then(|message| {
+                let mut blocks = crate::view::code_blocks(message_source(message));
+                let index = blocks.len().checked_sub(from_end + 1)?;
+                Some(blocks.swap_remove(index))
             }),
             Block::Tool(id) => session
                 .and_then(|session| session.tool_calls.as_ref())
@@ -3250,12 +3252,16 @@ impl App {
     fn copy_text(&mut self, text: Option<&str>) -> Effects {
         let copied = Copied::new(text.unwrap_or_default());
         if copied.text.is_empty() {
-            self.set_warning("nothing to copy".to_owned());
-            return Effects::redraw(Redraw::Immediate);
+            return self.apply_empty_copy();
         }
         let mut effects = Effects::none();
         effects.push(Effect::Copy(copied));
         effects
+    }
+
+    pub(crate) fn apply_empty_copy(&mut self) -> Effects {
+        self.set_warning("nothing to copy".to_owned());
+        Effects::redraw(Redraw::Immediate)
     }
 
     pub(crate) fn apply_copy_result(

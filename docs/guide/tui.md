@@ -367,9 +367,9 @@ cursor is active.
 ## Copying
 
 QQ draws in the terminal's alternate screen, so quitting leaves your shell
-as it was. On exit it prints the focused session's last answer as plain
-text, then the resume line, into the normal scrollback, where native copy,
-search and tmux copy mode reach it.
+as it was. On exit it prints the focused session's last answer, as its Markdown source
+with escape sequences stripped, then the resume line, into the normal
+scrollback, where native copy, search and tmux copy mode reach it.
 
 | Action | How |
 | --- | --- |
@@ -393,15 +393,15 @@ source, a code block as its raw code, and a tool call as its command and
 output. `Enter` still expands a tool call, and a pending approval or
 question still claims `y`, `n` and `Esc` first.
 
-QQ writes the clipboard three ways at once: a local helper (`pbcopy`,
-`wl-copy`, `xclip`, `xsel`, or `clip.exe` under WSL; none over SSH), `tmux
-load-buffer -w -` inside tmux, and always OSC 52, wrapped for tmux
-passthrough when needed. The notice says `copied 12 lines` only when a
-helper or tmux confirmed the write; otherwise it says `sent 12 lines to
-the terminal clipboard`, because QQ can't tell whether the terminal
-accepted OSC 52. Copies are capped at 1 MiB, and the notice says when one
-was cut. Escape and control sequences are stripped from everything
-copied.
+QQ always sends OSC 52, wrapped for tmux passthrough when needed, and also
+tries a local helper (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or `clip.exe`
+under WSL; none over SSH) and then `tmux load-buffer -w -` inside tmux,
+stopping at the first that succeeds. The notice says `copied 12 lines`
+only when a helper or tmux confirmed the write; otherwise it says `sent 12
+lines to the terminal clipboard`, because QQ can't tell whether the
+terminal accepted OSC 52. Copies are capped at 1 MiB, and the notice says
+when one was cut. Escape and control sequences are stripped from
+everything copied.
 
 Hold `Shift` to use the terminal's own selection instead. `/mouse` turns
 mouse capture off altogether: the sessions column hides and the

@@ -327,6 +327,8 @@ impl FrameRenderer {
         if !columns.is_empty() {
             for (index, slot) in body.iter_mut().enumerate() {
                 let mut used = slot.width();
+                let first_width = used;
+                let first_pad = slot.pad;
                 let first = std::mem::take(slot);
                 let mut row = Line {
                     indent: first.indent,
@@ -361,6 +363,11 @@ impl FrameRenderer {
                 }
                 if used < width {
                     row.push(" ".repeat(width - used), normal());
+                    used = width;
+                }
+                if first_pad > 0 {
+                    let added = used.saturating_sub(first_width);
+                    row.pad = first_pad.saturating_add(u16::try_from(added).unwrap_or(u16::MAX));
                 }
                 *slot = row;
             }
@@ -403,13 +410,6 @@ impl FrameRenderer {
             let first = range.start.max(window.start) - window.start;
             let last = range.end.min(window.end).saturating_sub(window.start);
             for line in lines.iter_mut().take(last).skip(first) {
-                line.spans.insert(
-                    0,
-                    crate::render::Span {
-                        text: String::new(),
-                        style: normal(),
-                    },
-                );
                 for span in &mut line.spans {
                     span.style = selection(span.style);
                 }

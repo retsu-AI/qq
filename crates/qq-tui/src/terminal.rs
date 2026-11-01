@@ -140,7 +140,7 @@ fn external_editor(draft: String) -> EditorFuture {
         };
         let mut output = stdout();
         let _ = disable_input_modes(&mut output);
-        let _ = execute!(output, Show);
+        let _ = execute!(output, Show, LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
         let result = tokio::task::spawn_blocking(move || {
             let file = tempfile::Builder::new()
@@ -166,6 +166,7 @@ fn external_editor(draft: String) -> EditorFuture {
         .await
         .unwrap_or(Err(EditorError::NotConfigured));
         let _ = terminal::enable_raw_mode();
+        let _ = execute!(output, EnterAlternateScreen);
         let _ = enable_input_modes(&mut output);
         let _ = execute!(output, Clear(ClearType::All), MoveTo(0, 0));
         result
@@ -327,6 +328,10 @@ where
                         }
                     }
                     renderer.invalidate();
+                    if !app.mouse_capture {
+                        output.write_all(&mouse_capture_bytes(false)?).await?;
+                        output.flush().await?;
+                    }
                     redraw = Some(Redraw::Immediate);
                 }
                 Effect::ResolveMentions { id, submit } => {
@@ -389,7 +394,12 @@ where
                     output.flush().await?;
                 }
                 Effect::CopySelection(selection) => {
-                    queue.push_back(Effect::Copy(renderer.selection_text(&selection)));
+                    let copied = renderer.selection_text(&selection);
+                    if copied.text.is_empty() {
+                        queue.extend(app.apply_empty_copy());
+                    } else {
+                        queue.push_back(Effect::Copy(copied));
+                    }
                 }
                 Effect::Copy(copied) => {
                     output

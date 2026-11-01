@@ -318,10 +318,11 @@ impl<'a> VirtualBody<'a> {
     }
 
     fn push_code_blocks(&mut self, message_id: MessageId, start: usize, code: &[Range<usize>]) {
+        let last = code.len().saturating_sub(1);
         self.blocks
             .extend(code.iter().enumerate().map(|(index, range)| {
                 (
-                    Block::Code(message_id, index),
+                    Block::Code(message_id, last - index),
                     start + range.start..start + range.end,
                 )
             }));

@@ -197,6 +197,21 @@ fn double_click_takes_a_word_and_triple_click_takes_the_block() {
 }
 
 #[test]
+fn triple_click_takes_a_code_block_across_its_blank_lines() {
+    let source = "```\nfn main() {\n\n    run();\n}\n```";
+    let frame = crate::view::message_rows_for_test(source, MessageRole::Assistant, 30);
+    let row = frame
+        .iter()
+        .position(|line| line.spans.iter().any(|span| span.text.contains("run")))
+        .unwrap();
+    let block = Selection::start(area(30, frame.len()), 6, row, Unit::Block).unwrap();
+    assert_eq!(
+        block.text(&frame, &shapes(&frame)).text,
+        "fn main() {\n\n    run();\n}"
+    );
+}
+
+#[test]
 fn a_selection_clears_when_its_rows_change_or_the_pane_moves() {
     let frame = vec![
         Line::styled("alpha", normal()),

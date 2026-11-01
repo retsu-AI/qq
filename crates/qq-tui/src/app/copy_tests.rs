@@ -10,9 +10,15 @@ fn answer() -> &'static str {
     "Run this:\n\n```sh\ncargo test -p qq-tui\n```\n\nThen push."
 }
 
+fn fixed_instant() -> std::time::Instant {
+    static AT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *AT.get_or_init(|| std::time::Instant::now() + std::time::Duration::from_secs(60))
+}
+
 fn app() -> App {
     let summary = fixtures::session_summary(fixtures::SESSION);
     let mut app = App::new(TuiOptions::default());
+    app.click_clock = fixed_instant;
     let user = qq_protocol::MessageSnapshot {
         role: MessageRole::User,
         turn_ordinal: 0,
@@ -151,6 +157,33 @@ fn a_drag_copies_what_it_covers_in_either_direction() {
 }
 
 #[test]
+fn code_panel_fill_is_not_copied_when_the_sessions_column_is_shown() {
+    let mut app = app();
+    app.layout.rail = crate::view::PanePref::Shown;
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    let shown = rows(&mut app, &mut renderer);
+    assert!(
+        crate::view::rail_visible(usize::from(SIZE.0), app.layout, app.sessions.len()),
+        "the sessions column is on screen"
+    );
+    let code = find(&shown, "cargo test -p");
+    let triple = {
+        app.last_click = None;
+        let mut clicked = Vec::new();
+        for _ in 0..3 {
+            app.handle_terminal_event(mouse(MouseEventKind::Down(MouseButton::Left), code));
+            clicked = copies(
+                app.handle_terminal_event(mouse(MouseEventKind::Up(MouseButton::Left), code)),
+                &renderer,
+            );
+        }
+        clicked
+    };
+    assert_eq!(triple, ["cargo test -p qq-tui"]);
+}
+
+#[test]
 fn a_click_copies_nothing_and_shift_is_left_to_the_terminal() {
     let mut app = app();
     let mut renderer = FrameRenderer::default();
@@ -196,6 +229,11 @@ fn double_click_copies_a_word_and_triple_click_the_code_block() {
         );
     }
     assert_eq!(clicked, ["cargo test -p qq-tui"]);
+    let stale = fixed_instant()
+        - std::time::Duration::from_millis(u64::try_from(MULTI_CLICK_MS).unwrap() + 1);
+    app.last_click = Some((stale, word, 1));
+    app.handle_terminal_event(mouse(MouseEventKind::Down(MouseButton::Left), word));
+    assert_eq!(app.last_click.map(|(_, _, clicks)| clicks), Some(1));
 }
 
 #[test]
@@ -259,6 +297,34 @@ fn the_block_cursor_walks_every_block_and_y_copies_each_kind() {
     assert!(app.block_cursor.is_none());
     app.handle_key(y);
     assert_eq!(app.composer.text, "y", "without a cursor y types");
+}
+
+#[test]
+fn y_on_a_code_block_in_a_long_streaming_answer_copies_that_block() {
+    let mut app = app();
+    let filler: String = (0..200).map(|line| format!("line {line}\n\n")).collect();
+    let source = format!("```\nfirst\n```\n\n{filler}```\nsecond\n```\n");
+    let session = app.sessions.get_mut(&fixtures::SESSION).unwrap();
+    let message = &mut session.messages.as_mut().unwrap()[1];
+    message.output = source;
+    message.state = qq_protocol::MessageState::Streaming;
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    let code: Vec<Block> = app
+        .pane()
+        .blocks
+        .iter()
+        .map(|(block, _)| *block)
+        .filter(|block| matches!(block, Block::Code(..)))
+        .collect();
+    assert_eq!(
+        code.len(),
+        1,
+        "the first block scrolled out of the live window"
+    );
+    app.block_cursor = Some(code[0]);
+    let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+    assert_eq!(copies(app.handle_key(y), &renderer), ["second"]);
 }
 
 #[test]

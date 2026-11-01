@@ -85,7 +85,7 @@ pub(crate) struct Selection {
     anchor: (usize, usize),
     head: (usize, usize),
     pub(crate) unit: Unit,
-    pub(crate) seen: Option<u64>,
+    seen: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,6 +238,7 @@ impl Selection {
                 let filled = |row: usize| {
                     let shape = shape(row);
                     shape.join == Join::Fence
+                        || shape.kind == RowKind::Code
                         || frame.get(row).is_some_and(|line| {
                             !row_text(line, left, right, shape).trim().is_empty()
                         })

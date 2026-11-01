@@ -569,6 +569,32 @@ async fn loop_upgrades_completed_code_to_highlighted_off_the_render_path() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn returning_from_the_editor_keeps_mouse_capture_off_after_slash_mouse() {
+    let mut harness = Harness::new(64);
+    harness.editor_script.lock().unwrap().0 = Some(Ok(None));
+    let mut app = App::new(TuiOptions::default());
+    app.mouse_capture = false;
+    app.layout.flush = true;
+    let task = harness.spawn(app);
+    harness.update(ClientUpdate::Snapshot(snapshot(1, Vec::new())));
+    harness.settle().await;
+    let before = harness.frames.frames().len();
+    harness.key(KeyCode::Char('e'), KeyModifiers::ALT);
+    harness.settle().await;
+    harness.quit();
+    task.await.expect("loop task").expect("loop exits cleanly");
+    let written = harness.frames.frames()[before..].concat();
+    let disable = mouse_capture_bytes(false).unwrap();
+    assert!(
+        written
+            .windows(disable.len())
+            .any(|window| window == disable.as_slice()),
+        "{:?}",
+        frame_text(&written)
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn loop_hands_the_draft_to_the_external_editor_and_installs_the_result() {
     let mut harness = Harness::new(64);
     harness.editor_script.lock().unwrap().0 = Some(Ok(Some("edited\nprompt\n".to_owned())));
@@ -830,6 +856,14 @@ fn mouse(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> Event
 }
 
 async fn copy_through_the_loop(clipboard: crate::clipboard::Clipboard) -> (Vec<u8>, String) {
+    drag_through_the_loop(clipboard, 4, 14).await
+}
+
+async fn drag_through_the_loop(
+    clipboard: crate::clipboard::Clipboard,
+    from: u16,
+    to: u16,
+) -> (Vec<u8>, String) {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut harness = Harness::new(64);
     harness.clipboard = clipboard;
@@ -867,9 +901,9 @@ async fn copy_through_the_loop(clipboard: crate::clipboard::Clipboard) -> (Vec<u
     };
     let before = harness.frames.frames().len();
     for event in [
-        mouse(MouseEventKind::Down(MouseButton::Left), 4, row),
-        mouse(MouseEventKind::Drag(MouseButton::Left), 14, row),
-        mouse(MouseEventKind::Up(MouseButton::Left), 14, row),
+        mouse(MouseEventKind::Down(MouseButton::Left), from, row),
+        mouse(MouseEventKind::Drag(MouseButton::Left), to, row),
+        mouse(MouseEventKind::Up(MouseButton::Left), to, row),
     ] {
         harness.events.send(Ok(event)).expect("event channel open");
     }
@@ -898,6 +932,18 @@ async fn a_drag_sends_exact_osc52_bytes_and_an_unconfirmed_notice() {
     );
     assert_eq!(osc, b"\x1b]52;c;aGVsbG8gd29ybGQ=\x07".to_vec());
     assert_eq!(status, "sent 1 line to the terminal clipboard");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_drag_over_chrome_only_copies_nothing_and_says_so() {
+    let (written, status) =
+        drag_through_the_loop(crate::clipboard::Clipboard::default(), 0, 1).await;
+    assert!(
+        !frame_text(&written).contains("\x1b]52"),
+        "{:?}",
+        frame_text(&written)
+    );
+    assert_eq!(status, "nothing to copy");
 }
 
 #[tokio::test(start_paused = true)]

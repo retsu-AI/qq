@@ -3,7 +3,7 @@ use std::{process::Stdio, time::Duration};
 use base64::Engine as _;
 use tokio::io::AsyncWriteExt;
 
-pub(crate) const HELPER_TIMEOUT: Duration = Duration::from_millis(1500);
+const HELPER_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Helper {
