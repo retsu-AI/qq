@@ -218,20 +218,14 @@ async fn exercise(scenario: &'static str) {
     assert!(!directory.path().join("marker").exists());
     if !matches!(scenario, "confirm" | "allowance") {
         assert_eq!(observed.status, qq_protocol::GoalStatus::Active);
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::GoalControl {
-                    session_id,
-                    expected: qq_protocol::GoalIdentity {
-                        goal_id: observed.goal_id,
-                        revision: observed.revision,
-                    },
-                    action: qq_protocol::GoalControl::Pause,
-                },
-            )
-            .await
-            .unwrap();
+        goal_control(
+            &runtime,
+            session_id,
+            identity_of(&observed),
+            qq_protocol::GoalControl::Pause,
+        )
+        .await
+        .unwrap();
     }
     runtime.shutdown().await.unwrap();
     assert_eq!(
@@ -360,17 +354,14 @@ async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
                 revision: goal.revision,
             };
             if scenario == "paused_edit" {
-                let receipt = runtime
-                    .command(
-                        CommandId::generate().unwrap(),
-                        SessionCommand::GoalControl {
-                            session_id,
-                            expected: identity,
-                            action: qq_protocol::GoalControl::Pause,
-                        },
-                    )
-                    .await
-                    .unwrap();
+                let receipt = goal_control(
+                    &runtime,
+                    session_id,
+                    identity,
+                    qq_protocol::GoalControl::Pause,
+                )
+                .await
+                .unwrap();
                 let CommandOutcome::GoalUpdated { goal: paused, .. } = receipt.outcome else {
                     panic!("paused goal")
                 };
@@ -423,17 +414,14 @@ async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
         .await
         .unwrap();
         if let Some(expected) = edited_identity {
-            let receipt = runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::GoalControl {
-                        session_id,
-                        expected,
-                        action: qq_protocol::GoalControl::Resume,
-                    },
-                )
-                .await
-                .unwrap();
+            let receipt = goal_control(
+                &runtime,
+                session_id,
+                expected,
+                qq_protocol::GoalControl::Resume,
+            )
+            .await
+            .unwrap();
             let CommandOutcome::GoalUpdated { goal: resumed, .. } = receipt.outcome else {
                 panic!("resumed goal")
             };

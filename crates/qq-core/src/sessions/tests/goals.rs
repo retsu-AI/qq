@@ -1280,20 +1280,14 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
             .await,
         Err(SessionRuntimeError::IdempotencyConflict)
     ));
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::GoalControl {
-                session_id,
-                expected: qq_protocol::GoalIdentity {
-                    goal_id: stable_goal.goal_id,
-                    revision: stable_goal.revision,
-                },
-                action: qq_protocol::GoalControl::Pause,
-            },
-        )
-        .await
-        .unwrap();
+    goal_control(
+        &runtime,
+        session_id,
+        identity_of(&stable_goal),
+        qq_protocol::GoalControl::Pause,
+    )
+    .await
+    .unwrap();
     runtime
         .command(
             CommandId::generate().unwrap(),
@@ -7510,17 +7504,14 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
                 GoalPolicyError::Unavailable
             ))
         ));
-        let paused = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::GoalControl {
-                    session_id,
-                    expected: identity,
-                    action: qq_protocol::GoalControl::Pause,
-                },
-            )
-            .await
-            .unwrap();
+        let paused = goal_control(
+            &runtime,
+            session_id,
+            identity,
+            qq_protocol::GoalControl::Pause,
+        )
+        .await
+        .unwrap();
         let CommandOutcome::GoalUpdated { goal, .. } = paused.outcome else {
             panic!("paused")
         };
@@ -7537,32 +7528,26 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
             .unwrap()
             .max_goal_runs = ceiling - 1;
         assert!(matches!(
-            runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::GoalControl {
-                        session_id,
-                        expected,
-                        action: qq_protocol::GoalControl::Resume
-                    }
-                )
-                .await,
+            goal_control(
+                &runtime,
+                session_id,
+                expected,
+                qq_protocol::GoalControl::Resume
+            )
+            .await,
             Err(SessionRuntimeError::InvalidGoal(
                 GoalValidationError::Budget
             ))
         ));
         authority.unavailable.store(true, Ordering::SeqCst);
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::GoalControl {
-                    session_id,
-                    expected,
-                    action: qq_protocol::GoalControl::Clear,
-                },
-            )
-            .await
-            .unwrap();
+        goal_control(
+            &runtime,
+            session_id,
+            expected,
+            qq_protocol::GoalControl::Clear,
+        )
+        .await
+        .unwrap();
         authority.unavailable.store(false, Ordering::SeqCst);
     }
     drop(_held);
@@ -7987,20 +7972,14 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
                     assert_eq!(goal.revision, 1);
                     assert_eq!(runtime.command(id, command).await.unwrap(), receipt);
                     if authorization != "pending" {
-                        runtime
-                            .command(
-                                CommandId::generate().unwrap(),
-                                SessionCommand::GoalControl {
-                                    session_id,
-                                    expected: qq_protocol::GoalIdentity {
-                                        goal_id: goal.goal_id,
-                                        revision: goal.revision,
-                                    },
-                                    action: qq_protocol::GoalControl::Pause,
-                                },
-                            )
-                            .await
-                            .unwrap();
+                        goal_control(
+                            &runtime,
+                            session_id,
+                            identity_of(&goal),
+                            qq_protocol::GoalControl::Pause,
+                        )
+                        .await
+                        .unwrap();
                     }
                 }
             }

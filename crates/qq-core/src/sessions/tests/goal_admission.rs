@@ -315,20 +315,14 @@ async fn cancelled_pending_main_request_preserves_unknown_session_and_goal_spend
             assert!(if user_prompt {matches!(serde_json::from_str::<qq_protocol::RunOrigin>(&origin).unwrap(),qq_protocol::RunOrigin::UserPrompt {})} else {matches!(serde_json::from_str::<qq_protocol::RunOrigin>(&origin).unwrap(),qq_protocol::RunOrigin::Goal {..})});
             Ok(())
         }).await.unwrap();
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::GoalControl {
-                    session_id,
-                    expected: qq_protocol::GoalIdentity {
-                        goal_id: goal.goal_id,
-                        revision: goal.revision,
-                    },
-                    action: qq_protocol::GoalControl::Pause,
-                },
-            )
-            .await
-            .unwrap();
+        goal_control(
+            &runtime,
+            session_id,
+            identity_of(&goal),
+            qq_protocol::GoalControl::Pause,
+        )
+        .await
+        .unwrap();
         let finished = collect_until_run_finished(&mut events, run).await;
         let snapshot = runtime
             .snapshot(SnapshotRequest::new(

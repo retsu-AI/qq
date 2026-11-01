@@ -300,6 +300,31 @@ pub(super) fn test_pricing() -> ModelPricing {
     }
 }
 
+pub(super) const fn identity_of(goal: &qq_protocol::GoalSnapshot) -> qq_protocol::GoalIdentity {
+    qq_protocol::GoalIdentity {
+        goal_id: goal.goal_id,
+        revision: goal.revision,
+    }
+}
+
+pub(super) async fn goal_control(
+    runtime: &SessionRuntime,
+    session_id: SessionId,
+    expected: qq_protocol::GoalIdentity,
+    action: qq_protocol::GoalControl,
+) -> Result<CommandReceipt, SessionRuntimeError> {
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::GoalControl {
+                session_id,
+                expected,
+                action,
+            },
+        )
+        .await
+}
+
 pub(super) struct ProviderLoader {
     provider: Arc<dyn Provider>,
     route: String,
