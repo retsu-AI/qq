@@ -1855,6 +1855,14 @@ mod tests {
 
     use super::*;
 
+    thread_local! {
+        static HTTP: reqwest::Client = reqwest::Client::builder().no_proxy().build().unwrap();
+    }
+
+    fn http() -> reqwest::Client {
+        HTTP.with(reqwest::Client::clone)
+    }
+
     #[test]
     fn qq_home_rejects_empty_and_relative_server_roots() {
         for home in ["", "relative", "./relative"] {
@@ -2049,7 +2057,7 @@ mod tests {
             ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_HEADERS,
             ACCESS_CONTROL_REQUEST_METHOD, ORIGIN, VARY,
         };
-        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let http = http();
         let app_origin = "https://app.example.com";
 
         let directory = TestDirectory::new();
@@ -2181,7 +2189,7 @@ mod tests {
         let directory = TestDirectory::new();
         let handler = unavailable_handler();
         let server = start_test_server(directory.paths(), handler).await;
-        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let http = http();
         let health_url = server.connection().endpoint("/v1/health");
 
         let missing = http.get(&health_url).send().await.unwrap();
@@ -2241,7 +2249,7 @@ mod tests {
         );
         let metadata = read_metadata_file(&directory.paths()).unwrap().unwrap();
         assert_eq!(metadata.version, "0.0.1+abc1234.2026-09-09");
-        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let http = http();
         let info = http
             .get(server.connection().endpoint("/v1/health"))
             .bearer_auth(server.connection().expose_bearer_token())
@@ -2273,10 +2281,7 @@ mod tests {
         let directory = TestDirectory::new();
         let handler = unavailable_handler();
         let server = start_test_server(directory.paths(), handler).await;
-        let response = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
+        let response = http()
             .post(server.connection().endpoint("/v1/ask"))
             .bearer_auth(server.connection().expose_bearer_token())
             .send()
@@ -2309,10 +2314,7 @@ mod tests {
             },
         };
 
-        let response = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
+        let response = http()
             .post(server.connection().endpoint("/v1/sessions/prompts"))
             .bearer_auth(server.connection().expose_bearer_token())
             .json(&request)
@@ -2463,10 +2465,7 @@ mod tests {
         path: &str,
         body: &impl Serialize,
     ) -> (StatusCode, serde_json::Value) {
-        let response = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
+        let response = http()
             .post(server.connection().endpoint(path))
             .bearer_auth(server.connection().expose_bearer_token())
             .json(body)
@@ -2770,10 +2769,7 @@ mod tests {
             let (status, _) = post(&server, path, &body).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         }
-        let response = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
+        let response = http()
             .post(server.connection().endpoint("/v1/sessions/prompts"))
             .bearer_auth(server.connection().expose_bearer_token())
             .header("content-type", "application/json")
@@ -2863,10 +2859,7 @@ mod tests {
         let (status, _) = post(&server, "/v1/capabilities", &serde_json::json!({"nope": 1})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
-        let health: serde_json::Value = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
+        let health: serde_json::Value = http()
             .get(server.connection().endpoint("/v1/health"))
             .bearer_auth(server.connection().expose_bearer_token())
             .send()
@@ -3142,7 +3135,7 @@ mod tests {
         assert_eq!(info.server_id, StoreId::from_bytes([0x5A; 16]));
         assert_eq!(info.display_name, "my box");
 
-        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let http = http();
         let health: ServerInfo = http
             .get(server.connection().endpoint("/v1/health"))
             .bearer_auth(server.connection().expose_bearer_token())
@@ -3223,10 +3216,7 @@ mod tests {
             workspace_id: workspace,
             sequence: 0,
         };
-        let response = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
+        let response = http()
             .get(
                 server
                     .connection()
@@ -3286,10 +3276,7 @@ mod tests {
             .connection()
             .endpoint(&format!("/v1/workspaces/{workspace_id}/events"));
         let token = server.connection().expose_bearer_token().to_owned();
-        let mut response = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
+        let mut response = http()
             .get(events_url)
             .bearer_auth(token)
             .header("last-event-id", after.to_string())
@@ -3418,7 +3405,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_stop_route_signals_only_a_host_that_opted_in_and_requires_the_token() {
-        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let http = http();
         let directory = TestDirectory::new();
         let ReserveOutcome::Reserved(reservation) =
             reserve(ServerOptions::new(directory.paths()).with_stop_route())
@@ -3655,7 +3642,7 @@ mod tests {
         .unwrap() else {
             panic!("expected a new server")
         };
-        let http = reqwest::Client::new();
+        let http = http();
         let url = server.connection().endpoint("/v1/workspaces/list");
         let response = http
             .post(url.clone())
