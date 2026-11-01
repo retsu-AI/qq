@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod test_api;
+
 use super::scheduler::schedule_runs;
 use super::side_questions::SideQueryLimits;
 use super::*;

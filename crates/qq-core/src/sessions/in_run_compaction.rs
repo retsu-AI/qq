@@ -1,10 +1,10 @@
+use super::probe::{Checkpoint, PROBE};
 use super::{
     execution::{ModelTurnCommit, RunAccountingAccumulator, cancellation_requested},
     runtime::SessionRuntimeInner,
     store::Priority,
     *,
 };
-use super::probe::{Checkpoint, PROBE};
 use crate::plan::CompiledAgentPlan;
 
 pub(super) struct SessionInRunCompactor {

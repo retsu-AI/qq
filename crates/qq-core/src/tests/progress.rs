@@ -1051,19 +1051,16 @@ fn ab1_verified_exec_reads_report_on_request_sixty_five() {
         std::fs::write(root.join("grep"), image).unwrap();
         std::fs::set_permissions(root.join("grep"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::progress::ab1_verified_exec_reads_report_on_request_sixty_five",
-                "--nocapture",
-            ])
-            .env("QQ_CONTEXT_STALL_WORKER", "1")
-            .env("QQ_CONTEXT_STALL_ROOT", &root)
-            .env("PATH", &root)
-            .env("LANG", "C")
-            .status()
-            .unwrap();
-        assert!(status.success());
+        crate::test_support::run_worker(
+            "tests::progress::ab1_verified_exec_reads_report_on_request_sixty_five",
+            "QQ_CONTEXT_STALL_WORKER",
+            |command| {
+                command
+                    .env("QQ_CONTEXT_STALL_ROOT", &root)
+                    .env("PATH", &root)
+                    .env("LANG", "C");
+            },
+        );
         return;
     }
     let root = PathBuf::from(std::env::var_os("QQ_CONTEXT_STALL_ROOT").unwrap());

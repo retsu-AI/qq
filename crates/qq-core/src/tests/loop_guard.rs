@@ -361,19 +361,16 @@ fn ac4_verified_process_reads_keep_repeated_observations() {
         .unwrap();
         std::fs::set_permissions(root.join("grep"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::loop_guard::ac4_verified_process_reads_keep_repeated_observations",
-                "--nocapture",
-            ])
-            .env("QQ_CONTEXT_GUARD_WORKER", "1")
-            .env("QQ_CONTEXT_GUARD_ROOT", &root)
-            .env("PATH", &root)
-            .env("LANG", "C")
-            .status()
-            .unwrap();
-        assert!(status.success());
+        crate::test_support::run_worker(
+            "tests::loop_guard::ac4_verified_process_reads_keep_repeated_observations",
+            "QQ_CONTEXT_GUARD_WORKER",
+            |command| {
+                command
+                    .env("QQ_CONTEXT_GUARD_ROOT", &root)
+                    .env("PATH", &root)
+                    .env("LANG", "C");
+            },
+        );
         return;
     }
     let root = PathBuf::from(std::env::var_os("QQ_CONTEXT_GUARD_ROOT").unwrap());

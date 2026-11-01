@@ -1103,8 +1103,8 @@ async fn file_state_survives_restart_and_auto_mode_applies_the_edit_without_prom
             if tool_call.name == "read_file" && tool_call.state == ToolCallState::Completed
     )));
     let after = first.last().unwrap().cursor;
-    let ScriptedRunsHarness {
-        _directory,
+    let SessionFixture {
+        directory: _directory,
         runtime,
         workspace_path,
         workspace_id,

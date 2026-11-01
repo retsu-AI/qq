@@ -1306,10 +1306,7 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
     let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
         .await
         .unwrap();
-    let held = Arc::clone(&runtime.inner.permits)
-        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
+    let held = runtime.hold_scheduling().await;
     let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
     let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Ask).await;
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -1437,10 +1434,7 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
 #[tokio::test]
 async fn goal_check_approval_requires_exact_command_and_revision() {
     let (directory, runtime) = test_runtime().await;
-    let held = Arc::clone(&runtime.inner.permits)
-        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
+    let held = runtime.hold_scheduling().await;
     let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
     let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Ask).await;
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -1653,10 +1647,7 @@ async fn invalid_goal_specs_leave_no_goal_event_or_run() {
 #[tokio::test]
 async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
     let (directory, runtime) = test_runtime().await;
-    let held = Arc::clone(&runtime.inner.permits)
-        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
+    let held = runtime.hold_scheduling().await;
     let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
     let created = create_session(&runtime, workspace_id, None).await;
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -1732,10 +1723,7 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
     )
     .await
     .unwrap();
-    let held = Arc::clone(&runtime.inner.permits)
-        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
+    let held = runtime.hold_scheduling().await;
     runtime.inner.store.drive_goals(now_ms()).await.unwrap();
     let restored = runtime
         .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
@@ -4138,10 +4126,7 @@ async fn real_in_run_compactor_preserves_rejected_prefix_and_uncertain_dispatch(
             let runtime = SessionRuntime::open(options, Arc::new(Loader))
                 .await
                 .unwrap();
-            let permit = Arc::clone(&runtime.inner.permits)
-                .acquire_owned()
-                .await
-                .unwrap();
+            let permit = runtime.hold_scheduling().await;
             let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
             let created =
                 create_session_with_mode(&runtime, workspace, None, ApprovalMode::ReadOnly).await;
@@ -6572,10 +6557,7 @@ async fn goal_admission_refuses_expired_or_unknown_budgets_before_loading() {
             )
             .await
             .unwrap();
-            let held = Arc::clone(&runtime.inner.permits)
-                .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-                .await
-                .unwrap();
+            let held = runtime.hold_scheduling().await;
             let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
             let created = create_session(&runtime, workspace_id, None).await;
             let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -6838,10 +6820,7 @@ async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_ori
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
         let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
         let created = create_session(&runtime, workspace_id, None).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -7012,10 +6991,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
         let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
         let created = create_session(&runtime, workspace_id, None).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -7769,10 +7745,7 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
         let child_held = Arc::clone(&runtime.inner.child_permits[0])
             .acquire_many_owned(runtime.inner.child_permits[0].available_permits() as u32)
             .await
@@ -8014,10 +7987,7 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
     let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
         .await
         .unwrap();
-    let _held = Arc::clone(&runtime.inner.permits)
-        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
+    let _held = runtime.hold_scheduling().await;
     for (path, ceiling) in [(directory.path(), 20_u32), (other.as_path(), 100)] {
         let (workspace, _) = resolve_workspace(&runtime, path).await;
         let created = create_session(&runtime, workspace, None).await;
@@ -8298,10 +8268,7 @@ async fn goal_policy_tightening_before_load_or_main_start_prevents_provider_work
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
         let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
         let created = create_session(&runtime, workspace, None).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -8491,10 +8458,7 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
         let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
             .await
             .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
         runtimes.push((runtime, held));
     }
     let mut row = 0;

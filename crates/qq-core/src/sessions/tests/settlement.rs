@@ -1290,7 +1290,7 @@ async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime(
         } if finished == run_id
     )));
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
-    assert!(!*runtime.inner.failed.borrow());
+    assert!(!runtime.has_failed());
 }
 
 #[tokio::test]
@@ -1364,7 +1364,10 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
     else {
         panic!("unexpected receipt")
     };
-    FAULTS.inject(StoreFault::CancellationRead(first_run), [SessionRuntimeError::CONSTRAINT]);
+    FAULTS.inject(
+        StoreFault::CancellationRead(first_run),
+        [SessionRuntimeError::CONSTRAINT],
+    );
     let (second_read, release_second) = PROBE.hold(Checkpoint::CancellationRead(second_run));
     let mut events = runtime
         .subscribe(SubscribeRequest {
@@ -1395,11 +1398,11 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
     })
     .await
     .expect("the permanent read error must settle its own run");
-    assert!(!*runtime.inner.failed.borrow());
+    assert!(!runtime.has_failed());
     release_second.send(()).unwrap();
     let observed = collect_until(&mut events, finished_for(second_run)).await;
     tokio::time::timeout(Duration::from_secs(1), async {
-        while runtime.inner.permits.available_permits() != 2 {
+        while runtime.idle_run_permits() != 2 {
             tokio::task::yield_now().await;
         }
     })
@@ -1441,7 +1444,7 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
         .await
         .unwrap();
     assert_eq!(second.outcome, Some(RunOutcome::Completed));
-    assert!(!*runtime.inner.failed.borrow());
+    assert!(!runtime.has_failed());
 }
 
 #[tokio::test]
@@ -1519,8 +1522,14 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
     };
     let (start_entered, release_start) = PROBE.hold(Checkpoint::ReservedStart(retrying_run));
     let (read_entered, release_read) = PROBE.hold(Checkpoint::CancellationRead(failing_run));
-    FAULTS.inject(StoreFault::CancellationRead(failing_run), [SessionRuntimeError::CONSTRAINT]);
-    FAULTS.inject(StoreFault::ReservedSettlement(failing_run), [SessionRuntimeError::CONSTRAINT]);
+    FAULTS.inject(
+        StoreFault::CancellationRead(failing_run),
+        [SessionRuntimeError::CONSTRAINT],
+    );
+    FAULTS.inject(
+        StoreFault::ReservedSettlement(failing_run),
+        [SessionRuntimeError::CONSTRAINT],
+    );
     runtime.request_schedule();
     tokio::time::timeout(Duration::from_secs(1), start_entered)
         .await
@@ -1541,7 +1550,7 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
     .expect("the sibling terminal-settlement failure must fail the runtime");
     release_start.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
-        while runtime.inner.permits.available_permits() != 2 {
+        while runtime.idle_run_permits() != 2 {
             tokio::task::yield_now().await;
         }
     })
@@ -1662,11 +1671,20 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
     else {
         panic!("unexpected receipt")
     };
-    let (_initial_read, release_initial_read) = PROBE.hold(Checkpoint::CancellationRead(started_run));
-    let (post_start_read, release_post_start_read) = PROBE.hold(Checkpoint::CancellationRead(started_run));
-    let (failing_read, release_failing_read) = PROBE.hold(Checkpoint::CancellationRead(failing_run));
-    FAULTS.inject(StoreFault::CancellationRead(failing_run), [SessionRuntimeError::CONSTRAINT]);
-    FAULTS.inject(StoreFault::ReservedSettlement(failing_run), [SessionRuntimeError::CONSTRAINT]);
+    let (_initial_read, release_initial_read) =
+        PROBE.hold(Checkpoint::CancellationRead(started_run));
+    let (post_start_read, release_post_start_read) =
+        PROBE.hold(Checkpoint::CancellationRead(started_run));
+    let (failing_read, release_failing_read) =
+        PROBE.hold(Checkpoint::CancellationRead(failing_run));
+    FAULTS.inject(
+        StoreFault::CancellationRead(failing_run),
+        [SessionRuntimeError::CONSTRAINT],
+    );
+    FAULTS.inject(
+        StoreFault::ReservedSettlement(failing_run),
+        [SessionRuntimeError::CONSTRAINT],
+    );
     release_initial_read.send(()).unwrap();
     runtime.request_schedule();
     tokio::time::timeout(Duration::from_secs(1), post_start_read)
@@ -1688,7 +1706,7 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
     .expect("the sibling terminal-settlement failure must fail the runtime");
     release_post_start_read.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
-        while runtime.inner.permits.available_permits() != 2 {
+        while runtime.idle_run_permits() != 2 {
             tokio::task::yield_now().await;
         }
     })
@@ -1787,7 +1805,7 @@ async fn poisoned_cancellation_registry_settles_before_start_and_returns_the_per
         while !*failed.borrow() {
             failed.changed().await.unwrap();
         }
-        while runtime.inner.permits.available_permits() != 1 {
+        while runtime.idle_run_permits() != 1 {
             tokio::task::yield_now().await;
         }
     })
@@ -1890,15 +1908,21 @@ async fn permanent_prestart_settlement_failure_is_recovered_on_reopen() {
         })
         .await
         .unwrap();
-    FAULTS.inject(StoreFault::CancellationRead(run_id), [SessionRuntimeError::CONSTRAINT]);
-    FAULTS.inject(StoreFault::ReservedSettlement(run_id), [SessionRuntimeError::CONSTRAINT]);
+    FAULTS.inject(
+        StoreFault::CancellationRead(run_id),
+        [SessionRuntimeError::CONSTRAINT],
+    );
+    FAULTS.inject(
+        StoreFault::ReservedSettlement(run_id),
+        [SessionRuntimeError::CONSTRAINT],
+    );
     runtime.request_schedule();
     let mut failed = runtime.inner.failed.subscribe();
     tokio::time::timeout(Duration::from_secs(1), async {
         while !*failed.borrow() {
             failed.changed().await.unwrap();
         }
-        while runtime.inner.permits.available_permits() != 1 {
+        while runtime.idle_run_permits() != 1 {
             tokio::task::yield_now().await;
         }
     })
@@ -2967,7 +2991,7 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(runtime.inner.permits.available_permits(), 1);
+    assert_eq!(runtime.idle_run_permits(), 1);
     for pool in &runtime.inner.child_permits {
         assert_eq!(pool.available_permits(), 1);
     }

@@ -40,13 +40,7 @@ async fn goal_paid_dense_first_input_is_refused_before_provider_dispatch() {
         )
         .await
         .unwrap();
-        let held = runtime
-            .inner
-            .permits
-            .clone()
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
         let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
         let created = create_session(&runtime, workspace, None).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -194,10 +188,7 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
             )
             .await
             .unwrap();
-            let held = Arc::clone(&runtime.inner.permits)
-                .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-                .await
-                .unwrap();
+            let held = runtime.hold_scheduling().await;
             let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
             let created =
                 create_session_with_mode(&runtime, workspace, None, ApprovalMode::ReadOnly).await;
@@ -532,13 +523,7 @@ async fn goal_paid_summary_overflow_releases_admission_before_fold_retry() {
         )
         .await
         .unwrap();
-        let held = runtime
-            .inner
-            .permits
-            .clone()
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
         let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
         let created = create_session(&runtime, workspace, None).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -671,10 +656,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
         let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
         let created = create_session(&runtime, workspace, None).await;
         let CommandOutcome::SessionCreated {

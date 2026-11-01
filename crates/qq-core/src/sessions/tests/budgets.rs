@@ -323,6 +323,7 @@ async fn run_limits_survive_restart_and_bound_the_recovered_run() {
     };
     let hanging = queue_limited_prompt(&harness, RunLimits::default()).await;
     let limited = queue_limited_prompt(&harness, limits).await;
+    let database_path = harness.database_path();
     let mut events = harness.events;
     collect_until(
         &mut events,
@@ -332,7 +333,7 @@ async fn run_limits_survive_restart_and_bound_the_recovered_run() {
     drop(events);
     harness.runtime.abandon_for_test().await.unwrap();
     drop(harness.runtime);
-    let connection = Connection::open(&harness.database_path).unwrap();
+    let connection = Connection::open(&database_path).unwrap();
     let stored: Option<String> = connection
         .query_row(
             "SELECT limits_json FROM runs WHERE id = ?1",
@@ -360,7 +361,7 @@ async fn run_limits_survive_restart_and_bound_the_recovered_run() {
     drop(connection);
 
     let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(harness.database_path.clone()),
+        SessionRuntimeOptions::new(database_path),
         Arc::new(BudgetLoopLoader {
             requests: Arc::clone(&requests),
             entered: None,

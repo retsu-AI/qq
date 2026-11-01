@@ -42,7 +42,7 @@ async fn ac4_runtime_guard_refusal_is_durable_and_reopens_identically() {
         live.runs[0].outcome,
         Some(qq_protocol::RunOutcome::Completed)
     ));
-    let database = harness._directory.path().join("sessions.sqlite3");
+    let database = harness.directory.path().join("sessions.sqlite3");
     drop(harness.events);
     drop(harness.runtime);
     let reopened = SessionRuntime::open(

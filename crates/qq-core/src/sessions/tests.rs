@@ -13,6 +13,7 @@ mod deadlines;
 mod delegation;
 mod execution_context;
 mod feeds;
+mod fixtures;
 mod goal_admission;
 mod goal_check;
 mod goal_check_recovery;
@@ -48,6 +49,7 @@ use qq_provider::{ModelRequest, Provider, ProviderStream};
 use tempfile::TempDir;
 
 use super::probe::{Checkpoint, FAULTS, PROBE, StoreFault};
+use fixtures::*;
 
 fn hold_outcome_read(
     run_id: RunId,
@@ -1275,103 +1277,44 @@ impl Provider for ScriptedRunProvider {
     }
 }
 
-struct ScriptedRunsHarness {
-    _directory: TempDir,
-    runtime: SessionRuntime,
-    requests: Arc<StdMutex<Vec<ModelRequest>>>,
-    workspace_path: PathBuf,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
-    events: SessionEventStream,
-}
-
 async fn scripted_runs_harness(
     mode: ApprovalMode,
     runs: Vec<Vec<(&'static str, String)>>,
-) -> ScriptedRunsHarness {
-    let directory = test_directory();
+) -> SessionFixture {
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    SessionFixture::open(
         Arc::new(ScriptedRunsLoader {
             requests: Arc::clone(&requests),
             runs,
             loads: StdMutex::new(0),
         }),
+        mode,
     )
     .await
-    .unwrap();
-    let workspace_path = directory.path().to_owned();
-    let (workspace_id, _) = resolve_workspace(&runtime, &workspace_path).await;
-    let created = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: mode,
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    ScriptedRunsHarness {
-        _directory: directory,
-        runtime,
-        requests,
-        workspace_path,
-        workspace_id,
-        session_id,
-        events,
-    }
+    .recording(&requests)
 }
 
-async fn submit_prompt(harness: &ScriptedRunsHarness, prompt: &str) -> RunId {
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text(prompt.to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
-    run_id
+async fn submit_prompt(harness: &SessionFixture, prompt: &str) -> RunId {
+    harness.submit(prompt).await
 }
 
 struct ApprovalHarness {
-    _directory: TempDir,
-    runtime: SessionRuntime,
-    requests: Arc<StdMutex<Vec<ModelRequest>>>,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
+    fixture: SessionFixture,
     run_id: RunId,
-    events: SessionEventStream,
+}
+
+impl std::ops::Deref for ApprovalHarness {
+    type Target = SessionFixture;
+
+    fn deref(&self) -> &SessionFixture {
+        &self.fixture
+    }
+}
+
+impl std::ops::DerefMut for ApprovalHarness {
+    fn deref_mut(&mut self) -> &mut SessionFixture {
+        &mut self.fixture
+    }
 }
 
 async fn approval_harness(
@@ -1381,82 +1324,24 @@ async fn approval_harness(
     tool_turns: usize,
     approval_timeout: Option<Duration>,
 ) -> ApprovalHarness {
-    let directory = test_directory();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions {
-            database_path: directory.path().join("sessions.sqlite3"),
-            max_active_runs: 1,
-            max_active_side_queries: None,
-            side_query_limits: SideQueryLimits::default(),
-            approval_timeout,
-            retention: None,
-            policy_authority: None,
-        },
+    let fixture = SessionFixture::open_with(
         Arc::new(ApprovalLoader {
             requests: Arc::clone(&requests),
             tool,
             arguments,
             tool_turns,
         }),
+        mode,
+        |options| {
+            options.max_active_runs = 1;
+            options.approval_timeout = approval_timeout;
+        },
     )
     .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: mode,
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text("mutate something".to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
-    ApprovalHarness {
-        _directory: directory,
-        runtime,
-        requests,
-        workspace_id,
-        session_id,
-        run_id,
-        events,
-    }
+    .recording(&requests);
+    let run_id = fixture.submit("mutate something").await;
+    ApprovalHarness { fixture, run_id }
 }
 
 async fn collect_until_approval_requested(
@@ -1562,50 +1447,37 @@ impl RuntimeLoader for RecordingApprovalLoader {
 }
 
 struct SessionManagementHarness {
-    directory: TempDir,
-    runtime: SessionRuntime,
+    fixture: SessionFixture,
     models: Arc<StdMutex<Vec<Option<String>>>>,
-    requests: Arc<StdMutex<Vec<ModelRequest>>>,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
-    store_id: StoreId,
-    events: SessionEventStream,
+}
+
+impl std::ops::Deref for SessionManagementHarness {
+    type Target = SessionFixture;
+
+    fn deref(&self) -> &SessionFixture {
+        &self.fixture
+    }
+}
+
+impl std::ops::DerefMut for SessionManagementHarness {
+    fn deref_mut(&mut self) -> &mut SessionFixture {
+        &mut self.fixture
+    }
 }
 
 async fn session_management_harness() -> SessionManagementHarness {
-    let directory = test_directory();
     let models = Arc::new(StdMutex::new(Vec::new()));
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    let fixture = SessionFixture::open(
         Arc::new(RecordingApprovalLoader {
             models: Arc::clone(&models),
             requests: Arc::clone(&requests),
         }),
+        ApprovalMode::Ask,
     )
     .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Ask).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    SessionManagementHarness {
-        directory,
-        runtime,
-        models,
-        requests,
-        workspace_id,
-        session_id,
-        store_id: created.committed_through.store_id,
-        events,
-    }
+    .recording(&requests);
+    SessionManagementHarness { fixture, models }
 }
 
 async fn store_with_one_spill(
@@ -3568,15 +3440,7 @@ impl Provider for AutoCompactProvider {
     }
 }
 
-struct AutoCompactHarness {
-    _directory: TempDir,
-    runtime: SessionRuntime,
-    requests: Arc<StdMutex<Vec<ModelRequest>>>,
-    workspace_path: PathBuf,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
-    events: SessionEventStream,
-}
+type AutoCompactHarness = SessionFixture;
 
 async fn auto_compact_harness(scripts: Vec<AutoCompactScript>) -> AutoCompactHarness {
     auto_compact_harness_with_window(scripts, None).await
@@ -3613,55 +3477,14 @@ async fn auto_compact_harness_with_loader_and_mode(
     loader: AutoCompactLoader,
     approval_mode: ApprovalMode,
 ) -> AutoCompactHarness {
-    let directory = test_directory();
     let requests = Arc::clone(&loader.requests);
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-        Arc::new(loader),
-    )
-    .await
-    .unwrap();
-    let workspace_path = directory.path().to_owned();
-    let (workspace_id, _) = resolve_workspace(&runtime, &workspace_path).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, approval_mode).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    AutoCompactHarness {
-        _directory: directory,
-        runtime,
-        requests,
-        workspace_path,
-        workspace_id,
-        session_id,
-        events,
-    }
+    SessionFixture::open(Arc::new(loader), approval_mode)
+        .await
+        .recording(&requests)
 }
 
 async fn queue_prompt(runtime: &SessionRuntime, session_id: SessionId, prompt: String) -> RunId {
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text(prompt)],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
-    run_id
+    submit(runtime, session_id, prompt).await
 }
 
 async fn collect_until(
@@ -4571,40 +4394,16 @@ async fn create_claimed_parent(
     (workspace_id, session_id, claimed)
 }
 
-struct SpawnHarness {
-    _directory: TempDir,
-    runtime: SessionRuntime,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
-    events: SessionEventStream,
-}
+type SpawnHarness = SessionFixture;
 
 async fn spawn_harness_with_loader(
     loader: Arc<dyn RuntimeLoader>,
     max_active_runs: usize,
 ) -> SpawnHarness {
-    let directory = test_directory();
-    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-    options.max_active_runs = max_active_runs;
-    let runtime = SessionRuntime::open(options, loader).await.unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    SpawnHarness {
-        _directory: directory,
-        runtime,
-        workspace_id,
-        session_id,
-        events,
-    }
+    SessionFixture::open_with(loader, ApprovalMode::default(), |options| {
+        options.max_active_runs = max_active_runs;
+    })
+    .await
 }
 
 async fn spawn_harness(
@@ -4623,23 +4422,7 @@ async fn spawn_harness(
 }
 
 async fn submit_prompt_to(runtime: &SessionRuntime, session_id: SessionId, prompt: &str) -> RunId {
-    let queued = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id,
-                input: vec![InputPart::text(prompt.to_owned())],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
-    run_id
+    submit(runtime, session_id, prompt).await
 }
 
 async fn completed_instruction_hash(
@@ -4755,65 +4538,19 @@ impl Provider for TextScriptProvider {
     }
 }
 
-struct OutputContractHarness {
-    _directory: TempDir,
-    runtime: SessionRuntime,
-    requests: Arc<StdMutex<Vec<ModelRequest>>>,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
-    events: SessionEventStream,
-}
+type OutputContractHarness = SessionFixture;
 
 async fn output_contract_harness(answers: &[&'static str]) -> OutputContractHarness {
-    let directory = test_directory();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    SessionFixture::open(
         Arc::new(TextScriptLoader {
             requests: Arc::clone(&requests),
             answers: Arc::new(StdMutex::new(answers.iter().copied().collect())),
         }),
+        ApprovalMode::ReadOnly,
     )
     .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::CreateSession {
-                workspace_id,
-                parent_id: None,
-                model: ModelSelection {
-                    model_is_fallback: false,
-                    model: Some("test/model".to_owned()),
-                    max_output_tokens: Some(256),
-                    organization: None,
-                },
-                approval_mode: ApprovalMode::ReadOnly,
-                profile: AgentProfileId::default(),
-                reasoning_effort: None,
-                correlation: Correlation::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    OutputContractHarness {
-        _directory: directory,
-        runtime,
-        requests,
-        workspace_id,
-        session_id,
-        events,
-    }
+    .recording(&requests)
 }
 
 fn report_contract(repair_turns: u8) -> qq_protocol::OutputContract {
@@ -4832,19 +4569,12 @@ async fn submit_with_contract(
     harness: &OutputContractHarness,
     contract: qq_protocol::OutputContract,
 ) -> Result<RunId, SessionRuntimeError> {
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("report")],
-                limits: qq_protocol::RunLimits::default(),
-                correlation: Correlation::default(),
-                output: Some(Box::new(contract)),
-            },
-        )
-        .await?;
+    let queued = try_submit(
+        &harness.runtime,
+        harness.session_id,
+        Prompt::text("report").output(Some(Box::new(contract))),
+    )
+    .await?;
     let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
         panic!("unexpected receipt")
     };
@@ -4925,42 +4655,21 @@ async fn write_child_harness(
         script: parent_script,
         turn: StdMutex::new(0),
     });
-    let directory = test_directory();
-    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-    options.max_active_runs = 8;
-    options.approval_timeout = Some(Duration::from_secs(2));
-    let runtime = SessionRuntime::open(
-        options,
+    let harness = SessionFixture::open_with(
         Arc::new(WriteChildLoader {
             inner: QueueLoader {
                 routed: vec![("test/child", child)],
                 queue: StdMutex::new(vec![Arc::clone(&parent), parent]),
             },
         }),
-    )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, parent_mode).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    (
-        SpawnHarness {
-            _directory: directory,
-            runtime,
-            workspace_id,
-            session_id,
-            events,
+        parent_mode,
+        |options| {
+            options.max_active_runs = 8;
+            options.approval_timeout = Some(Duration::from_secs(2));
         },
-        parent_requests,
     )
+    .await;
+    (harness, parent_requests)
 }
 
 struct DepthLoader {
@@ -5478,9 +5187,7 @@ async fn child_budget_harness_with_window(
     audit: crate::runtime::AuditMode,
     child_context_window: Option<u32>,
 ) -> SpawnHarness {
-    let directory = test_directory();
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+    SessionFixture::open(
         Arc::new(ChildBudgetLoader {
             inner: QueueLoader {
                 routed: vec![("test/child", child)],
@@ -5490,27 +5197,9 @@ async fn child_budget_harness_with_window(
             child_context_window,
             audit,
         }),
+        ApprovalMode::Full,
     )
     .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("expected session")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    SpawnHarness {
-        _directory: directory,
-        runtime,
-        workspace_id,
-        session_id,
-        events,
-    }
 }
 
 async fn submit_child_budget_prompt(harness: &SpawnHarness, limits: RunLimits) -> RunId {
@@ -5604,68 +5293,20 @@ fn budget_pricing() -> ModelPricing {
     }
 }
 
-struct BudgetHarness {
-    _directory: TempDir,
-    runtime: SessionRuntime,
-    requests: Arc<StdMutex<Vec<ModelRequest>>>,
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
-    events: SessionEventStream,
-    database_path: PathBuf,
-}
+type BudgetHarness = SessionFixture;
 
 async fn budget_harness(loader: BudgetLoopLoader) -> BudgetHarness {
     let directory = test_directory();
     std::fs::write(directory.path().join("note.txt"), "note").unwrap();
     let requests = Arc::clone(&loader.requests);
-    let database_path = directory.path().join("sessions.sqlite3");
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(database_path.clone()),
-        Arc::new(loader),
-    )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    BudgetHarness {
-        _directory: directory,
-        runtime,
-        requests,
-        workspace_id,
-        session_id,
-        events,
-        database_path,
-    }
+    let options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    SessionFixture::open_in(directory, options, Arc::new(loader), ApprovalMode::Auto)
+        .await
+        .recording(&requests)
 }
 
 async fn queue_limited_prompt(harness: &BudgetHarness, limits: RunLimits) -> RunId {
-    let queued = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("loop".to_owned())],
-                limits,
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        panic!("unexpected receipt")
-    };
-    run_id
+    harness.submit(Prompt::text("loop").limits(limits)).await
 }
 
 fn exhaustion_of(observed: &[SessionEventEnvelope], run_id: RunId) -> BudgetExhaustion {
@@ -5726,7 +5367,7 @@ fn side_capture_omits_an_oversized_unit_before_loading_payload() {
 #[tokio::test]
 async fn side_answer_bypasses_the_main_permit_and_leaves_session_rows_unchanged() {
     let harness = spawn_harness_with_loader(Arc::new(ScriptedLoader), 1).await;
-    let _main_permit = harness.runtime.inner.permits.acquire().await.unwrap();
+    let _main_permit = harness.runtime.hold_scheduling().await;
     let before = harness
         .runtime
         .inner
@@ -5768,7 +5409,7 @@ async fn side_answer_bypasses_the_main_permit_and_leaves_session_rows_unchanged(
         .await
         .unwrap();
     assert_eq!(before, after);
-    assert_eq!(harness.runtime.inner.permits.available_permits(), 0);
+    assert_eq!(harness.runtime.idle_run_permits(), 0);
     assert_eq!(harness.runtime.inner.side_permits.available_permits(), 1);
     assert!(
         harness
@@ -5823,7 +5464,7 @@ async fn side_answer_cancellation_while_waiting_releases_only_side_admission() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(harness.runtime.inner.permits.available_permits(), 1);
+    assert_eq!(harness.runtime.idle_run_permits(), 1);
     let states = harness
         .runtime
         .inner
@@ -6802,7 +6443,7 @@ async fn side_wire_cancel_does_not_cancel_main_and_replays_same_receipt() {
         .await
         .unwrap();
     assert_eq!(state.state, qq_protocol::SideQuestionState::Cancelled);
-    assert_eq!(harness.runtime.inner.permits.available_permits(), 1);
+    assert_eq!(harness.runtime.idle_run_permits(), 1);
     harness.runtime.shutdown().await.unwrap();
 }
 
@@ -7609,7 +7250,7 @@ async fn side_running_question_blocks_delete_and_prune() {
         qq_protocol::SideQuestionState::Running
     );
     harness.runtime.shutdown().await.unwrap();
-    assert!(!*harness.runtime.inner.failed.borrow());
+    assert!(!harness.runtime.has_failed());
 }
 
 #[tokio::test]
@@ -7658,7 +7299,7 @@ async fn side_settlement_tolerates_a_session_deleted_after_cancel() {
         .await
         .unwrap();
     assert_eq!(effective, qq_protocol::SideQuestionState::Cancelled);
-    assert!(!*harness.runtime.inner.failed.borrow());
+    assert!(!harness.runtime.has_failed());
     harness.runtime.shutdown().await.unwrap();
 }
 

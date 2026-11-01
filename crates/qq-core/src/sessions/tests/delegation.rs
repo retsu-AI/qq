@@ -21,7 +21,7 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
         turn: StdMutex::new(0),
     });
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
-    let skill = harness._directory.path().join(".qq/skills/review");
+    let skill = harness.directory.path().join(".qq/skills/review");
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(skill.join("SKILL.md"), "User-selected guidance only.\n").unwrap();
     let run_id =
@@ -275,7 +275,7 @@ async fn a_child_sessions_summarizer_uses_the_childs_own_prompt_prefix() {
         turn: StdMutex::new(0),
     });
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
-    std::fs::write(harness._directory.path().join("a.txt"), "widgets\n").unwrap();
+    std::fs::write(harness.directory.path().join("a.txt"), "widgets\n").unwrap();
     let run_id =
         submit_prompt_to(&harness.runtime, harness.session_id, "delegate the survey").await;
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
@@ -332,7 +332,7 @@ async fn multi_turn_child_returns_only_its_final_answer() {
         requests: Arc::clone(&child_requests),
     });
     let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
-    std::fs::write(harness._directory.path().join("note.txt"), "evidence\n").unwrap();
+    std::fs::write(harness.directory.path().join("note.txt"), "evidence\n").unwrap();
     let parent_run = submit_prompt_to(
         &harness.runtime,
         harness.session_id,
@@ -1988,7 +1988,7 @@ async fn an_auto_child_denies_writes_beneath_an_ask_parent_without_prompting() {
     assert!(!observed.iter().any(|event| matches!(&event.event,
         SessionEvent::ToolCallStarted { tool_call } if tool_call.name == "write_file"
     )));
-    assert!(!harness._directory.path().join("child.txt").exists());
+    assert!(!harness.directory.path().join("child.txt").exists());
     harness.runtime.shutdown().await.unwrap();
 }
 
@@ -2068,7 +2068,7 @@ async fn a_write_child_executes_authorized_edits() {
         SessionEvent::ToolApprovalRequested { .. } | SessionEvent::ToolApprovalResolved { .. }
     )));
     assert_eq!(
-        std::fs::read_to_string(harness._directory.path().join("child.txt")).unwrap(),
+        std::fs::read_to_string(harness.directory.path().join("child.txt")).unwrap(),
         "written by the child"
     );
     let child_reqs = child_requests.lock().unwrap().clone();
@@ -2367,7 +2367,7 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
             ApprovalMode::Full,
         )
         .await;
-        let workspace = std::fs::canonicalize(harness._directory.path()).unwrap();
+        let workspace = std::fs::canonicalize(harness.directory.path()).unwrap();
 
         let keep_clock = if deadline {
             tokio::time::pause();
@@ -2535,14 +2535,14 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
             ));
         }
         assert_eq!(
-            std::fs::read_to_string(harness._directory.path().join("child.txt")).unwrap(),
+            std::fs::read_to_string(harness.directory.path().join("child.txt")).unwrap(),
             "child"
         );
         if shutting_down {
-            assert!(!harness._directory.path().join("parent.txt").exists());
+            assert!(!harness.directory.path().join("parent.txt").exists());
         } else {
             assert_eq!(
-                std::fs::read_to_string(harness._directory.path().join("parent.txt")).unwrap(),
+                std::fs::read_to_string(harness.directory.path().join("parent.txt")).unwrap(),
                 "parent"
             );
         }
@@ -2566,7 +2566,8 @@ async fn interrupting_steering_owns_a_child_whose_creation_reply_is_pending() {
         ApprovalMode::Full,
     )
     .await;
-    let (created, release) = PROBE.hold_reporting_run(Checkpoint::ChildCreated(harness.session_id), 0);
+    let (created, release) =
+        PROBE.hold_reporting_run(Checkpoint::ChildCreated(harness.session_id), 0);
     let parent_run = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
     let child_run = tokio::time::timeout(Duration::from_secs(2), created)
         .await
@@ -2603,7 +2604,7 @@ async fn interrupting_steering_owns_a_child_whose_creation_reply_is_pending() {
         Some(RunOutcome::Cancelled)
     );
     assert_eq!(
-        std::fs::read_to_string(harness._directory.path().join("parent.txt")).unwrap(),
+        std::fs::read_to_string(harness.directory.path().join("parent.txt")).unwrap(),
         "resumed"
     );
 }
@@ -2741,7 +2742,7 @@ async fn store_saturation_does_not_release_a_running_write_child() {
         Some(RunOutcome::Completed)
     ));
     assert_eq!(
-        std::fs::read_to_string(harness._directory.path().join("parent.txt")).unwrap(),
+        std::fs::read_to_string(harness.directory.path().join("parent.txt")).unwrap(),
         "parent resumed"
     );
 }
@@ -2770,7 +2771,10 @@ async fn child_cancellation_persistence_failure_prevents_parent_continuation() {
     })
     .await
     .unwrap();
-    FAULTS.inject(StoreFault::ChildCancellation(child_run), [SessionRuntimeError::CONSTRAINT]);
+    FAULTS.inject(
+        StoreFault::ChildCancellation(child_run),
+        [SessionRuntimeError::CONSTRAINT],
+    );
     let child_cancel = harness
         .runtime
         .inner
@@ -2825,7 +2829,7 @@ async fn unconfirmed_shell_exit_prevents_session_continuation() {
         ApprovalMode::Full,
     )
     .await;
-    let workspace = std::fs::canonicalize(harness._directory.path()).unwrap();
+    let workspace = std::fs::canonicalize(harness.directory.path()).unwrap();
     let spawned = crate::tools::observe_shell_spawn(&workspace, true);
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "run a command").await;
     let pid = tokio::time::timeout(Duration::from_secs(2), spawned)
@@ -4717,8 +4721,7 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
                 panic!("summary start");
             };
             let child_prompt = session.active_run_id.unwrap();
-            let (entered, release) =
-                PROBE.hold(Checkpoint::DropSettlement(*summary));
+            let (entered, release) = PROBE.hold(Checkpoint::DropSettlement(*summary));
             let summary_id = *summary;
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
@@ -4799,7 +4802,7 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
             .unwrap()
             .unwrap();
         assert_eq!(spend.cost_usd_nanos, None);
-        assert!(!*harness.runtime.inner.failed.borrow());
+        assert!(!harness.runtime.has_failed());
         release.send(()).unwrap();
         let next = queue_prompt(
             &harness.runtime,
@@ -5213,8 +5216,8 @@ async fn a_text_only_slice_report_is_never_audited_or_treated_as_the_answer() {
         requests: Arc::clone(&auditor_requests),
     });
     let mut harness = audit_harness(parent, auditor, crate::runtime::AuditMode::Always, 1).await;
-    std::fs::write(harness._directory.path().join("note.txt"), "tool result\n").unwrap();
-    std::fs::write(harness._directory.path().join("slice-effects.txt"), "seed").unwrap();
+    std::fs::write(harness.directory.path().join("note.txt"), "tool result\n").unwrap();
+    std::fs::write(harness.directory.path().join("slice-effects.txt"), "seed").unwrap();
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "long task").await;
     let mut observed = Vec::new();
     loop {
@@ -5285,7 +5288,7 @@ async fn an_ask_parent_cannot_widen_its_read_child_to_human_approved_writes() {
             .any(|event| matches!(&event.event, SessionEvent::ToolApprovalRequested { .. })),
         "the child's denied write must never become approvable"
     );
-    assert!(!harness._directory.path().join("read-child.txt").exists());
+    assert!(!harness.directory.path().join("read-child.txt").exists());
     harness.runtime.shutdown().await.unwrap();
 }
 
@@ -5367,7 +5370,7 @@ async fn parent_readonly_revocation_denies_a_late_client_child_approval() {
         }
     ));
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
-    assert!(!harness._directory.path().join("human-revoked.txt").exists());
+    assert!(!harness.directory.path().join("human-revoked.txt").exists());
     assert!(!observed.iter().any(|event| matches!(&event.event,
         SessionEvent::ToolCallStarted { tool_call } if tool_call.id == call.id)));
 
@@ -5474,7 +5477,7 @@ async fn a_late_child_approval_runs_once_after_the_parent_switches_to_auto() {
                 ApprovalMode::Full,
             )
             .await;
-            std::fs::create_dir(harness._directory.path().join("approval-scratch")).unwrap();
+            std::fs::create_dir(harness.directory.path().join("approval-scratch")).unwrap();
             let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
             let child_id = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
@@ -5523,7 +5526,7 @@ async fn a_late_child_approval_runs_once_after_the_parent_switches_to_auto() {
                 "a child approval must respect the current parent's mode: {receipt:?}"
             );
             collect_until_run_finished(&mut harness.events, run_id).await;
-            assert!(!harness._directory.path().join("approval-scratch").exists());
+            assert!(!harness.directory.path().join("approval-scratch").exists());
             harness.runtime.shutdown().await.unwrap();
         }
     }

@@ -433,7 +433,7 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
     harness.runtime.shutdown().await.unwrap();
     drop(store);
     assert_assembly_matches_reference(
-        &harness._directory.path().join("sessions.sqlite3"),
+        &harness.directory.path().join("sessions.sqlite3"),
         harness.session_id,
     );
 }
@@ -448,7 +448,7 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
         DEFAULT_APPROVAL_TIMEOUT,
     )
     .await;
-    let workspace = harness._directory.path().to_owned();
+    let workspace = harness.directory.path().to_owned();
     std::fs::write(workspace.join("notes.txt"), "STEER_ORIGINAL\nsecond\n").unwrap();
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
     let receipt = harness
@@ -552,7 +552,7 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
     harness.runtime.shutdown().await.unwrap();
     drop(store);
     assert_assembly_matches_reference(
-        &harness._directory.path().join("sessions.sqlite3"),
+        &harness.directory.path().join("sessions.sqlite3"),
         harness.session_id,
     );
 }
@@ -2056,7 +2056,7 @@ async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_
         }
     );
     assert!(focused.runs[0].resolved_model.is_some());
-    assert!(!*runtime.inner.failed.borrow());
+    assert!(!runtime.has_failed());
 }
 
 #[tokio::test]

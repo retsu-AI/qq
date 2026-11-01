@@ -25,6 +25,8 @@ pub mod output;
 pub mod plan;
 mod runtime;
 mod sessions;
+#[cfg(test)]
+mod test_support;
 mod tools;
 pub mod undo;
 
@@ -8525,20 +8527,14 @@ mod tests {
             )
             .unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "tests::ab1_inherited_path_shadowed_read_counts_as_work_and_audit",
-                    "--nocapture",
-                ])
-                .env("QQ_CONTEXT_SHADOW_WORKER", "1")
-                .env("QQ_CONTEXT_SHADOW_ROOT", &workspace)
-                .env("PATH", &bin)
-                .status()
-                .unwrap();
-            assert!(
-                status.success(),
-                "shadowed executable classification worker failed"
+            crate::test_support::run_worker(
+                "tests::ab1_inherited_path_shadowed_read_counts_as_work_and_audit",
+                "QQ_CONTEXT_SHADOW_WORKER",
+                |command| {
+                    command
+                        .env("QQ_CONTEXT_SHADOW_ROOT", &workspace)
+                        .env("PATH", &bin);
+                },
             );
             return;
         }

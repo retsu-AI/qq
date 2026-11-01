@@ -78,7 +78,7 @@ async fn undo_root_snapshot_covers_a_spawned_write_child() {
         ApprovalMode::Auto,
     )
     .await;
-    let root = harness._directory.path().to_owned();
+    let root = harness.directory.path().to_owned();
     test_support::repository(&root);
     std::fs::write(root.join(".gitignore"), "sessions.sqlite3*\n").unwrap();
     let run = submit_prompt_to(&harness.runtime, harness.session_id, "delegate the write").await;
@@ -125,7 +125,7 @@ async fn undo_root_snapshot_covers_a_spawned_write_child() {
     assert!(!root.join("child.txt").exists());
 }
 
-fn workspace_repository(harness: &ScriptedRunsHarness) {
+fn workspace_repository(harness: &SessionFixture) {
     let root = &harness.workspace_path;
     test_support::repository(root);
     std::fs::write(root.join(".gitignore"), "sessions.sqlite3*\n").unwrap();
@@ -386,7 +386,7 @@ async fn a_duration_budget_does_not_wait_for_the_snapshot() {
 }
 
 async fn undo_workspace(
-    harness: &ScriptedRunsHarness,
+    harness: &SessionFixture,
     command_id: CommandId,
 ) -> Result<CommandReceipt, SessionRuntimeError> {
     harness

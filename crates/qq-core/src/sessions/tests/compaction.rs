@@ -1396,7 +1396,7 @@ async fn saturated_reserved_reload_waits_after_auto_compaction() {
         } if finished == run_id
     )));
     assert_eq!(harness.requests.lock().unwrap().len(), 3);
-    assert!(!*harness.runtime.inner.failed.borrow());
+    assert!(!harness.runtime.has_failed());
 }
 
 #[tokio::test]
@@ -1433,7 +1433,10 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
     let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
         panic!("unexpected receipt")
     };
-    FAULTS.inject(StoreFault::ReservedReload(run_id), [SessionRuntimeError::CONSTRAINT]);
+    FAULTS.inject(
+        StoreFault::ReservedReload(run_id),
+        [SessionRuntimeError::CONSTRAINT],
+    );
     harness.runtime.request_schedule();
     let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
 
@@ -1450,7 +1453,7 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
             ..
         } if *finished == run_id && message.contains("failed to reload the reserved prompt")
     )));
-    assert!(!*harness.runtime.inner.failed.borrow());
+    assert!(!harness.runtime.has_failed());
     let next = queue_prompt(&harness.runtime, harness.session_id, "next".to_owned()).await;
     let observed = collect_until(&mut harness.events, finished_for(next)).await;
     assert!(observed.iter().any(|event| matches!(
@@ -1462,7 +1465,7 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
         } if finished == next
     )));
     assert_eq!(harness.requests.lock().unwrap().len(), 3);
-    assert!(!*harness.runtime.inner.failed.borrow());
+    assert!(!harness.runtime.has_failed());
 }
 
 #[tokio::test]
@@ -2355,7 +2358,7 @@ async fn oversized_compaction_summary_fails_without_committing_a_marker() {
             .iter()
             .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
     );
-    let connection = Connection::open(harness._directory.path().join("sessions.sqlite3")).unwrap();
+    let connection = Connection::open(harness.directory.path().join("sessions.sqlite3")).unwrap();
     let markers: u64 = connection
         .query_row("SELECT COUNT(*) FROM session_compactions", [], |row| {
             row.get(0)
@@ -4576,10 +4579,7 @@ async fn in_run_compaction_harness(turns: usize, window: u32, summary: &str) -> 
 async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
     for max_runs in [200, 1] {
         let mut harness = in_run_compaction_harness(30, 16 * 1024, "goal progress").await;
-        let held = Arc::clone(&harness.runtime.inner.permits)
-            .acquire_many_owned(harness.runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = harness.runtime.hold_scheduling().await;
         let session = harness.session_id;
         harness
             .runtime
@@ -6172,10 +6172,7 @@ async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verba
             ApprovalMode::Full,
         )
         .await;
-        let held = Arc::clone(&harness.runtime.inner.permits)
-            .acquire_many_owned(harness.runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = harness.runtime.hold_scheduling().await;
         if with_goal {
             harness.runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
             "type":"set_goal","session_id":harness.session_id,"objective":"bounded multi-request summary",
@@ -6847,7 +6844,7 @@ async fn early_constraints_and_corrections_survive_repeated_automatic_compaction
         before_failure,
         "a failed summary cannot advance the cutoff"
     );
-    assert!(!*harness.runtime.inner.failed.borrow());
+    assert!(!harness.runtime.has_failed());
     harness.runtime.shutdown().await.unwrap();
     let replay = load_model_context(
         &Connection::open(&database).unwrap(),
@@ -7077,7 +7074,7 @@ async fn oversized_legacy_inputs_fail_only_the_affected_run() {
             matches!(finished_outcome(&observed, run), Some(RunOutcome::Failed { failure })
             if failure.kind == RunFailureKind::Policy && failure.message.contains("4 MiB"))
         );
-        assert!(!*runtime.inner.failed.borrow());
+        assert!(!runtime.has_failed());
     }
     let healthy = create_session(&runtime, workspace_id, None).await;
     let CommandOutcome::SessionCreated {

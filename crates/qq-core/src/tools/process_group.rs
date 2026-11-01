@@ -209,16 +209,11 @@ mod tests {
     #[test]
     fn a_zombie_descendant_counts_as_stopped() {
         if std::env::var_os("QQ_ZOMBIE_GROUP_WORKER").is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "tools::process_group::tests::a_zombie_descendant_counts_as_stopped",
-                    "--nocapture",
-                ])
-                .env("QQ_ZOMBIE_GROUP_WORKER", "1")
-                .status()
-                .unwrap();
-            assert!(status.success());
+            crate::test_support::run_worker(
+                "tools::process_group::tests::a_zombie_descendant_counts_as_stopped",
+                "QQ_ZOMBIE_GROUP_WORKER",
+                |_| {},
+            );
             return;
         }
         rustix::process::set_child_subreaper(Some(rustix::process::getpid())).unwrap();

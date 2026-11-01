@@ -4936,19 +4936,16 @@ mod tests {
     #[test]
     fn commands_see_their_working_directory_in_pwd_and_no_oldpwd() {
         if std::env::var_os("QQ_STALE_PWD_WORKER").is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "tools::tests::commands_see_their_working_directory_in_pwd_and_no_oldpwd",
-                    "--nocapture",
-                ])
-                .env("QQ_STALE_PWD_WORKER", "1")
-                .env("PWD", "/stale-pwd")
-                .env("OLDPWD", "/stale-oldpwd")
-                .stdout(std::process::Stdio::null())
-                .status()
-                .unwrap();
-            assert!(status.success());
+            crate::test_support::run_worker(
+                "tools::tests::commands_see_their_working_directory_in_pwd_and_no_oldpwd",
+                "QQ_STALE_PWD_WORKER",
+                |command| {
+                    command
+                        .env("PWD", "/stale-pwd")
+                        .env("OLDPWD", "/stale-oldpwd")
+                        .stdout(std::process::Stdio::null());
+                },
+            );
             return;
         }
         assert_eq!(std::env::var("OLDPWD").unwrap(), "/stale-oldpwd");

@@ -1,62 +1,24 @@
 use super::*;
 
-struct DeadlineSession {
-    _directory: TempDir,
-    runtime: SessionRuntime,
-    session_id: SessionId,
-    events: SessionEventStream,
-}
+struct DeadlineSession;
 
 impl DeadlineSession {
-    async fn open(loader: Arc<dyn RuntimeLoader>, mode: ApprovalMode) -> Self {
-        let directory = tempfile::tempdir().unwrap();
-        let runtime = SessionRuntime::open(
-            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-            loader,
-        )
-        .await
-        .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
-        Self {
-            _directory: directory,
-            runtime,
-            session_id,
-            events,
-        }
+    async fn open(loader: Arc<dyn RuntimeLoader>, mode: ApprovalMode) -> SessionFixture {
+        SessionFixture::open(loader, mode).await
     }
+}
 
-    async fn submit(&self, text: &str, duration_ms: u64) -> RunId {
-        let receipt = self
-            .runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::SubmitPrompt {
-                    session_id: self.session_id,
-                    input: vec![InputPart::text(text.to_owned())],
-                    limits: RunLimits {
-                        max_duration_ms: Some(duration_ms),
-                        ..RunLimits::default()
-                    },
-                    correlation: Correlation::default(),
-                    output: None,
-                },
-            )
-            .await
-            .unwrap();
-        let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
-            panic!("prompt")
-        };
-        run_id
+trait SubmitWithDeadline {
+    async fn submit_within(&self, text: &str, duration_ms: u64) -> RunId;
+}
+
+impl SubmitWithDeadline for SessionFixture {
+    async fn submit_within(&self, text: &str, duration_ms: u64) -> RunId {
+        self.submit(Prompt::text(text).limits(RunLimits {
+            max_duration_ms: Some(duration_ms),
+            ..RunLimits::default()
+        }))
+        .await
     }
 }
 
@@ -73,7 +35,7 @@ async fn duration_withdraws_pending_approval_without_executing_the_tool() {
         ApprovalMode::Ask,
     )
     .await;
-    let run_id = harness.submit("wait for approval", 500).await;
+    let run_id = harness.submit_within("wait for approval", 500).await;
     let (_, call) = collect_until_approval_requested(&mut harness.events).await;
     let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
     assert!(observed.iter().any(|event| matches!(&event.event,
@@ -119,9 +81,9 @@ async fn duration_limited_run_does_not_settle_when_process_cleanup_is_unconfirme
         ApprovalMode::Full,
     )
     .await;
-    let workspace = std::fs::canonicalize(harness._directory.path()).unwrap();
+    let workspace = std::fs::canonicalize(harness.directory.path()).unwrap();
     let spawned = crate::tools::observe_shell_spawn(&workspace, true);
-    let run_id = harness.submit("run a command", 1_000).await;
+    let run_id = harness.submit_within("run a command", 1_000).await;
     let pid = tokio::time::timeout(Duration::from_secs(2), spawned)
         .await
         .unwrap()
@@ -164,9 +126,9 @@ async fn duration_stops_shell_while_output_persistence_is_blocked() {
         ApprovalMode::Ask,
     )
     .await;
-    let workspace = std::fs::canonicalize(harness._directory.path()).unwrap();
+    let workspace = std::fs::canonicalize(harness.directory.path()).unwrap();
     let spawned = crate::tools::observe_shell_spawn(&workspace, false);
-    let run_id = harness.submit("run a command", 1_000).await;
+    let run_id = harness.submit_within("run a command", 1_000).await;
     let (_, call) = collect_until_approval_requested(&mut harness.events).await;
     let (buffered, release_output) = PROBE.hold(Checkpoint::BufferedToolOutput(call.id));
     respond_approval(
@@ -241,7 +203,7 @@ async fn duration_waits_for_blocking_attachment_guidance_and_skill_cleanup() {
             ApprovalMode::Full,
         )
         .await;
-        let workspace = std::fs::canonicalize(harness._directory.path()).unwrap();
+        let workspace = std::fs::canonicalize(harness.directory.path()).unwrap();
         let skill = workspace.join(".qq/skills/stable");
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(skill.join("SKILL.md"), "Follow the workspace policy.\n").unwrap();
@@ -387,7 +349,9 @@ async fn completed_compaction_does_not_restart_the_original_duration() {
     .await;
     let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
-    let run_id = harness.submit(&"y".repeat(MAX_PROMPT_BYTES), 1_500).await;
+    let run_id = harness
+        .submit_within(&"y".repeat(MAX_PROMPT_BYTES), 1_500)
+        .await;
     collect_until(&mut harness.events, |event| {
         matches!(event, SessionEvent::SessionCompacted { .. })
     })
@@ -462,7 +426,7 @@ async fn duration_cancels_context_preparation_before_any_provider_request() {
         ApprovalMode::Full,
     )
     .await;
-    let run_id = harness.submit("retrieve context", 300).await;
+    let run_id = harness.submit_within("retrieve context", 300).await;
     let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
     assert!(matches!(finished_outcome(&observed, run_id),
         Some(RunOutcome::BudgetExhausted { exhaustion }) if exhaustion.limit == BudgetLimitKind::Duration
@@ -531,7 +495,7 @@ async fn duration_cancels_read_only_and_mutating_external_calls() {
             ApprovalMode::Full,
         )
         .await;
-        let run_id = harness.submit("call the host", 60_000).await;
+        let run_id = harness.submit_within("call the host", 60_000).await;
         tokio::time::timeout(Duration::from_secs(2), entered.notified())
             .await
             .unwrap();
@@ -662,7 +626,7 @@ async fn preparation_cooperates_with_deadline_and_explicit_cancel() {
         )
         .await;
         let duration_ms = if cancel { 10_000 } else { 3_600_000 };
-        let run_id = harness.submit("prepare", duration_ms).await;
+        let run_id = harness.submit_within("prepare", duration_ms).await;
         assert_eq!(
             entered_rx.recv().await,
             Some(true),
@@ -791,7 +755,7 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     tokio::time::advance(Duration::from_millis(100)).await;
     let progress = progress.lock().unwrap().clone().unwrap();
     progress.cancelled().await;
-    assert_eq!(runtime.inner.permits.available_permits(), 7);
+    assert_eq!(runtime.idle_run_permits(), 7);
     assert!(
         runtime
             .inner

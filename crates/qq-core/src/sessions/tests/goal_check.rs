@@ -680,13 +680,7 @@ async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
     )
     .await
     .unwrap();
-    let held = runtime
-        .inner
-        .permits
-        .clone()
-        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
+    let held = runtime.hold_scheduling().await;
     let (workspace_id, resolved) = resolve_workspace(&runtime, directory.path()).await;
     let mut events = runtime
         .subscribe(SubscribeRequest {

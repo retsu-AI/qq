@@ -1,10 +1,10 @@
+use super::probe::{Checkpoint, PROBE};
 use super::*;
 use super::{
     approvals::SessionToolGate,
     runtime::SessionRuntimeInner,
     subagents::{ChildTasks, SessionAuditHook, SessionEvidenceReader, SessionSubagentSpawner},
 };
-use super::probe::{Checkpoint, PROBE};
 use crate::runtime::RunDeadline;
 use crate::tools;
 

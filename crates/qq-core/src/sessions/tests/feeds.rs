@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn unknown_workspace_subscription_churn_retains_no_feeds() {
     let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
-    let before = harness.runtime.inner.store.retained_feeds();
+    let before = harness.runtime.stats().retained_feeds;
     for _ in 0..256 {
         let workspace_id = WorkspaceId::generate().unwrap();
         let mut events = harness
@@ -17,13 +17,13 @@ async fn unknown_workspace_subscription_churn_retains_no_feeds() {
                 },
             })
             .unwrap();
-        assert_eq!(harness.runtime.inner.store.retained_feeds(), before);
+        assert_eq!(harness.runtime.stats().retained_feeds, before);
         assert_eq!(
             events.next().await.unwrap().unwrap_err(),
             SessionRuntimeError::WorkspaceNotFound
         );
         drop(events);
-        assert_eq!(harness.runtime.inner.store.retained_feeds(), before);
+        assert_eq!(harness.runtime.stats().retained_feeds, before);
     }
     harness.runtime.close().await.unwrap();
 }
@@ -31,7 +31,7 @@ async fn unknown_workspace_subscription_churn_retains_no_feeds() {
 #[tokio::test]
 async fn disconnected_subscribers_release_the_feed_and_replay_missed_commits() {
     let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
     let request = SubscribeRequest {
         workspace_id: harness.workspace_id,
         after: EventCursor {
@@ -42,19 +42,19 @@ async fn disconnected_subscribers_release_the_feed_and_replay_missed_commits() {
     };
     let mut first = harness.runtime.subscribe_published(request).unwrap();
     let mut second = harness.runtime.subscribe_published(request).unwrap();
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
     let initial = first.next().await.unwrap().unwrap();
     assert_eq!(second.next().await.unwrap().unwrap().json, initial.json);
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 1);
+    assert_eq!(harness.runtime.stats().retained_feeds, 1);
     drop(first);
     let created = create_session(&harness.runtime, harness.workspace_id, None).await;
     let live = second.next().await.unwrap().unwrap();
     assert_eq!(live.envelope.cursor, created.committed_through);
     drop(second);
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
 
     let missed = create_session(&harness.runtime, harness.workspace_id, None).await;
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
     let mut restarted = harness.runtime.subscribe_published(request).unwrap();
     assert_eq!(restarted.next().await.unwrap().unwrap().json, initial.json);
     let newest = create_session(&harness.runtime, harness.workspace_id, None).await;
@@ -69,7 +69,7 @@ async fn disconnected_subscribers_release_the_feed_and_replay_missed_commits() {
         );
     }
     drop(restarted);
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
     harness.runtime.close().await.unwrap();
 }
 
@@ -105,7 +105,7 @@ async fn canceled_feed_attachment_releases_queued_and_unreceived_replies() {
                 .unwrap(),
         );
         assert!(events.as_mut().unwrap().next().now_or_never().is_none());
-        assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+        assert_eq!(harness.runtime.stats().retained_feeds, 0);
         if cancel_before_reply {
             drop(events.take());
         }
@@ -119,11 +119,11 @@ async fn canceled_feed_attachment_releases_queued_and_unreceived_replies() {
             .await
             .unwrap();
         assert_eq!(
-            harness.runtime.inner.store.retained_feeds(),
+            harness.runtime.stats().retained_feeds,
             usize::from(!cancel_before_reply)
         );
         drop(events);
-        assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+        assert_eq!(harness.runtime.stats().retained_feeds, 0);
         harness.runtime.close().await.unwrap();
     }
 }
@@ -156,7 +156,7 @@ async fn failed_initial_replay_releases_its_feed() {
         events.next().await.unwrap().unwrap_err(),
         SessionRuntimeError::CODEC
     );
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
     harness.runtime.close().await.unwrap();
 }
 
@@ -242,7 +242,7 @@ async fn live_subscribers_read_the_store_once_and_receive_committed_bytes() {
     for subscriber in &mut subscribers {
         caught_up.push(subscriber.next().await.unwrap().unwrap());
     }
-    let reads_before = harness.runtime.inner.store.catch_up_reads();
+    let reads_before = harness.runtime.stats().catch_up_reads;
 
     let run_id = submit_prompt(&harness, "hello").await;
     let mut streams = Vec::with_capacity(8);
@@ -265,7 +265,7 @@ async fn live_subscribers_read_the_store_once_and_receive_committed_bytes() {
     let events_per_subscriber = streams[0].len();
     assert!(events_per_subscriber >= 4, "{events_per_subscriber} events");
     assert_eq!(
-        harness.runtime.inner.store.catch_up_reads(),
+        harness.runtime.stats().catch_up_reads,
         reads_before,
         "8 subscribers observing {events_per_subscriber} events must not read the store"
     );
@@ -309,11 +309,11 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
     };
     let mut anchor = harness.runtime.subscribe_published(request).unwrap();
     let created = anchor.next().await.unwrap().unwrap();
-    assert_eq!(harness.runtime.inner.store.catch_up_reads(), 1);
+    assert_eq!(harness.runtime.stats().catch_up_reads, 1);
 
     let mut cold = harness.runtime.subscribe_published(request).unwrap();
     assert_eq!(cold.next().await.unwrap().unwrap().json, created.json);
-    assert_eq!(harness.runtime.inner.store.catch_up_reads(), 2);
+    assert_eq!(harness.runtime.stats().catch_up_reads, 2);
     drop(cold);
 
     let mut warm_at_tail = harness
@@ -324,7 +324,7 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
         })
         .unwrap();
     assert!(warm_at_tail.next().now_or_never().is_none());
-    assert_eq!(harness.runtime.inner.store.catch_up_reads(), 2);
+    assert_eq!(harness.runtime.stats().catch_up_reads, 2);
 
     submit_prompt(&harness, "hello").await;
     let mut live = Vec::new();
@@ -345,7 +345,7 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
         let observed = warm_at_tail.next().await.unwrap().unwrap();
         assert_eq!(observed.json, expected.json);
     }
-    assert_eq!(harness.runtime.inner.store.catch_up_reads(), 2);
+    assert_eq!(harness.runtime.stats().catch_up_reads, 2);
 
     let midpoint = live[1].envelope.cursor;
     let mut reconnect = harness
@@ -365,17 +365,17 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
     }
     assert!(reconnect.next().now_or_never().is_none());
     assert_eq!(
-        harness.runtime.inner.store.catch_up_reads(),
+        harness.runtime.stats().catch_up_reads,
         2,
         "warm reconnects must not read the store"
     );
 
     let mut cold_again = harness.runtime.subscribe_published(request).unwrap();
     assert_eq!(cold_again.next().await.unwrap().unwrap().json, created.json);
-    assert_eq!(harness.runtime.inner.store.catch_up_reads(), 3);
+    assert_eq!(harness.runtime.stats().catch_up_reads, 3);
 
     drop((anchor, warm_at_tail, reconnect, cold_again));
-    assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+    assert_eq!(harness.runtime.stats().retained_feeds, 0);
     let mut after_release = harness
         .runtime
         .subscribe_published(SubscribeRequest {
@@ -387,7 +387,7 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
         after_release.next().await.unwrap().unwrap().envelope.cursor,
         live[2].envelope.cursor
     );
-    assert_eq!(harness.runtime.inner.store.catch_up_reads(), 4);
+    assert_eq!(harness.runtime.stats().catch_up_reads, 4);
     harness.runtime.shutdown().await.unwrap();
 }
 
@@ -525,7 +525,7 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
         let run_id = call.run_id;
         let call_id = call.id;
         for missing in [false, true] {
-            let path = harness._directory.path().join(if missing {
+            let path = harness.directory.path().join(if missing {
                 "legacy-missing.sqlite3"
             } else {
                 "legacy-complete.sqlite3"
@@ -765,7 +765,7 @@ async fn terminal_receipts_remain_scoped_and_recover_from_legacy_delivery_histor
     );
 
     for missing in [false, true] {
-        let path = harness._directory.path().join(if missing {
+        let path = harness.directory.path().join(if missing {
             "missing-receipts.sqlite3"
         } else {
             "legacy-receipts.sqlite3"
@@ -1100,7 +1100,7 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
         ))
         .await
         .unwrap();
-    let other_path = harness._directory.path().join("other-workspace");
+    let other_path = harness.directory.path().join("other-workspace");
     tokio::fs::create_dir(&other_path).await.unwrap();
     let receipt = harness
         .runtime
@@ -1170,10 +1170,7 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
         })
         .await
         .unwrap();
-    let legacy_path = harness
-        ._directory
-        .path()
-        .join("legacy-full-journal.sqlite3");
+    let legacy_path = harness.directory.path().join("legacy-full-journal.sqlite3");
     let backup = legacy_path.clone();
     harness
         .runtime

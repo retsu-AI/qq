@@ -558,7 +558,7 @@ async fn ab2_ambiguous_history_fails_only_its_run_and_keeps_fresh_sessions_usabl
         SessionEvent::RunFinished { outcome: RunOutcome::Failed { failure }, .. }
         if failure.message.contains("start a new session"))));
     assert_eq!(harness.requests.lock().unwrap().len(), before);
-    assert!(!*harness.runtime.inner.failed.borrow());
+    assert!(!harness.runtime.has_failed());
     let (preparing, turns, results, projections): (u32,u32,u32,u32) = harness.runtime.inner.store.call(Priority::Control, |connection| {
         Ok(connection.query_row("SELECT (SELECT count(*) FROM sessions WHERE preparing_run_id IS NOT NULL),(SELECT count(*) FROM model_turns),(SELECT count(*) FROM tool_calls WHERE result IS NOT NULL),(SELECT count(*) FROM model_turns WHERE tool_results_projection_json IS NOT NULL)", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?)
     }).await.unwrap();

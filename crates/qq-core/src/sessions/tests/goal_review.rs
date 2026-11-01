@@ -575,10 +575,7 @@ async fn sponsored_child_requests_respect_positive_inherited_token_allowance() {
         Some(8192),
     )
     .await;
-    let held = Arc::clone(&harness.runtime.inner.permits)
-        .acquire_many_owned(harness.runtime.inner.permits.available_permits() as u32)
-        .await
-        .unwrap();
+    let held = harness.runtime.hold_scheduling().await;
     harness.runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":harness.session_id,"objective":"delegate bounded research","budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":100_000}})).unwrap()).await.unwrap();
     let run = submit_child_budget_prompt(
         &harness,

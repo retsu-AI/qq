@@ -244,11 +244,7 @@ async fn assert_replay_matches_live(delegation: &mut Delegation) {
             .collect::<Vec<_>>();
         assert_eq!(live_content, replayed_content, "content at {index}");
     }
-    let database = delegation
-        .harness
-        ._directory
-        .path()
-        .join("sessions.sqlite3");
+    let database = delegation.harness.directory.path().join("sessions.sqlite3");
     let session_id = delegation.harness.session_id;
     let mut connection = Connection::open(database).unwrap();
     let transaction = connection.transaction().unwrap();
@@ -280,7 +276,7 @@ async fn assert_replay_matches_live(delegation: &mut Delegation) {
 }
 
 fn harness_root(harness: &SpawnHarness) -> std::path::PathBuf {
-    harness._directory.path().to_path_buf()
+    harness.directory.path().to_path_buf()
 }
 
 async fn parent_sent(delegation: &Delegation, count: usize) {

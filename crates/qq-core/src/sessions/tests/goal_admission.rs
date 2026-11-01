@@ -289,10 +289,7 @@ async fn cancelled_pending_main_request_preserves_unknown_session_and_goal_spend
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
         let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
         let created = create_session(&runtime, workspace_id, None).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -611,10 +608,7 @@ async fn goal_failure_after_start_before_provider_poll_preserves_known_zero() {
         )
         .await
         .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
+        let held = runtime.hold_scheduling().await;
         let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
         let created = create_session(&runtime, workspace_id, None).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -647,7 +641,8 @@ async fn goal_failure_after_start_before_provider_poll_preserves_known_zero() {
                 .unwrap()
         };
         let (_initial_read, release_initial) = PROBE.hold(Checkpoint::CancellationRead(run_id));
-        let (post_start_read, release_post_start) = PROBE.hold(Checkpoint::CancellationRead(run_id));
+        let (post_start_read, release_post_start) =
+            PROBE.hold(Checkpoint::CancellationRead(run_id));
         release_initial.send(()).unwrap();
         drop(held);
         runtime.inner.schedule.send(()).await.unwrap();
@@ -661,7 +656,10 @@ async fn goal_failure_after_start_before_provider_poll_preserves_known_zero() {
                 Ok(())
             }).await.unwrap();
         } else {
-            FAULTS.inject(StoreFault::CancellationRead(run_id), [SessionRuntimeError::CONSTRAINT]);
+            FAULTS.inject(
+                StoreFault::CancellationRead(run_id),
+                [SessionRuntimeError::CONSTRAINT],
+            );
         }
         release_post_start.send(()).unwrap();
         let observed = collect_until_run_finished(&mut events, run_id).await;
@@ -1350,10 +1348,7 @@ async fn twenty_minute_permit_wait_reclamps_unbounded_prompts_and_goal_runs() {
             )
             .await
             .unwrap();
-            let held = Arc::clone(&runtime.inner.permits)
-                .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-                .await
-                .unwrap();
+            let held = runtime.hold_scheduling().await;
             let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
             let created = create_session(&runtime, workspace_id, None).await;
             let CommandOutcome::SessionCreated { session_id } = created.outcome else {
