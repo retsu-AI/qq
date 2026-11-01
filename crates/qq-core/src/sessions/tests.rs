@@ -556,28 +556,17 @@ impl Provider for ToolLoopProvider {
         requests.push(request);
         drop(requests);
         if turn == 0 {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: "call_0".to_owned(),
-                    name: "read_file".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: "call_0".to_owned(),
-                    json: r#"{"path":"note.txt"}"#.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                    id: "call_0".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: Some(qq_provider::ProviderUsage {
+            provider_script(
+                tool_call("call_0", "read_file", r#"{"path":"note.txt"}"#)
+                    .into_iter()
+                    .chain([completed(Some(qq_provider::ProviderUsage {
                         input_tokens: 4,
                         cache_read_input_tokens: 0,
                         cache_write_input_tokens: 0,
                         output_tokens: 2,
                         reasoning_tokens: None,
-                    }),
-                }),
-            ]))
+                    }))]),
+            )
         } else {
             provider_script([
                 text_delta("done"),
@@ -1005,20 +994,15 @@ impl Provider for ApprovalProvider {
         *current += 1;
         drop(current);
         if turn < self.tool_turns {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: format!("call_{turn}"),
-                    name: self.tool.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: format!("call_{turn}"),
-                    json: self.arguments.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                    id: format!("call_{turn}"),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: self.usage }),
-            ]))
+            provider_script(
+                tool_call(
+                    format!("call_{turn}"),
+                    self.tool.to_owned(),
+                    self.arguments.to_owned(),
+                )
+                .into_iter()
+                .chain([completed(self.usage)]),
+            )
         } else {
             provider_script([text_delta("done"), completed(self.usage)])
         }
@@ -1066,20 +1050,15 @@ impl Provider for ScriptedRunProvider {
         *turn += 1;
         drop(turn);
         match self.script.get(current) {
-            Some((name, arguments)) => Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: format!("call_{current}"),
-                    name: (*name).to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: format!("call_{current}"),
-                    json: arguments.clone(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                    id: format!("call_{current}"),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ])),
+            Some((name, arguments)) => provider_script(
+                tool_call(
+                    format!("call_{current}"),
+                    (*name).to_owned(),
+                    arguments.clone(),
+                )
+                .into_iter()
+                .chain([completed(None)]),
+            ),
             None => text_reply("done"),
         }
     }
@@ -2754,40 +2733,22 @@ impl Provider for AutoCompactProvider {
                 if already_read {
                     text_reply(text.clone())
                 } else {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: "call_tool".to_owned(),
-                            name: tool.clone(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: "call_tool".to_owned(),
-                            json: arguments.clone(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                            id: "call_tool".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call("call_tool", tool.clone(), arguments.clone())
+                            .into_iter()
+                            .chain([completed(None)]),
+                    )
                 }
             }
             AutoCompactScript::ReadNoteThenText(text) => {
                 if already_read {
                     text_reply(text.clone())
                 } else {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: "call_read".to_owned(),
-                            name: "read_file".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: "call_read".to_owned(),
-                            json: r#"{"path":"note.txt"}"#.to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                            id: "call_read".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call("call_read", "read_file", r#"{"path":"note.txt"}"#)
+                            .into_iter()
+                            .chain([completed(None)]),
+                    )
                 }
             }
             AutoCompactScript::ReadNotesThenText { notes, text } => {
@@ -2823,20 +2784,11 @@ impl Provider for AutoCompactProvider {
                 if already_read {
                     provider_script([text_delta(text.clone()), completed(usage)])
                 } else {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: "call_read".to_owned(),
-                            name: "read_file".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: "call_read".to_owned(),
-                            json: r#"{"path":"note.txt"}"#.to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                            id: "call_read".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage }),
-                    ]))
+                    provider_script(
+                        tool_call("call_read", "read_file", r#"{"path":"note.txt"}"#)
+                            .into_iter()
+                            .chain([completed(usage)]),
+                    )
                 }
             }
             AutoCompactScript::ToolRepeatedlyWithTruncatedSummaries {
@@ -2868,18 +2820,15 @@ impl Provider for AutoCompactProvider {
                     text_reply(text.clone())
                 } else {
                     let id = format!("call_shell_{done}");
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: id.clone(),
-                            name: "__test_mutate".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: id.clone(),
-                            json: bulk_step_arguments(done, SHELL_STEP_PADDING),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call(
+                            id,
+                            "__test_mutate",
+                            bulk_step_arguments(done, SHELL_STEP_PADDING),
+                        )
+                        .into_iter()
+                        .chain([completed(None)]),
+                    )
                 }
             }
             AutoCompactScript::ToolRepeatedlyWithSummaries {
@@ -2991,18 +2940,15 @@ impl Provider for AutoCompactProvider {
                     text_reply(text.clone())
                 } else {
                     let id = format!("call_shell_{done}");
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: id.clone(),
-                            name: "__test_mutate".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: id.clone(),
-                            json: bulk_step_arguments(done, SHELL_STEP_PADDING),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call(
+                            id,
+                            "__test_mutate",
+                            bulk_step_arguments(done, SHELL_STEP_PADDING),
+                        )
+                        .into_iter()
+                        .chain([completed(None)]),
+                    )
                 }
             }
             AutoCompactScript::ToolRepeatedlyWithProviderOverflow {
@@ -3030,18 +2976,11 @@ impl Provider for AutoCompactProvider {
                     text_reply(text.clone())
                 } else {
                     let id = format!("call_shell_{done}");
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: id.clone(),
-                            name: "__test_mutate".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: id.clone(),
-                            json: bulk_step_arguments(done, 0),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call(id, "__test_mutate", bulk_step_arguments(done, 0))
+                            .into_iter()
+                            .chain([completed(None)]),
+                    )
                 }
             }
             AutoCompactScript::ReadNoteRepeatedly { turns, text } => {
@@ -3049,38 +2988,31 @@ impl Provider for AutoCompactProvider {
                     text_reply(text.clone())
                 } else {
                     let id = format!("call_read_{}", prior_results.len());
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: id.clone(),
-                            name: "read_file".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: id.clone(),
-                            json: serde_json::json!({"path":"note.txt","limit":64+prior_results.len()}).to_string(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call(
+                            id,
+                            "read_file",
+                            serde_json::json!({"path":"note.txt","limit":64+prior_results.len()})
+                                .to_string(),
+                        )
+                        .into_iter()
+                        .chain([completed(None)]),
+                    )
                 }
             }
             AutoCompactScript::SearchHistoryThenText(query, text) => {
                 if already_read {
                     text_reply(text.clone())
                 } else {
-                    Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: "call_history".to_owned(),
-                            name: crate::runtime::SEARCH_HISTORY_TOOL.to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: "call_history".to_owned(),
-                            json: serde_json::json!({ "query": query, "limit": 2 }).to_string(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                            id: "call_history".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ]))
+                    provider_script(
+                        tool_call(
+                            "call_history",
+                            crate::runtime::SEARCH_HISTORY_TOOL.to_owned(),
+                            serde_json::json!({ "query": query, "limit": 2 }).to_string(),
+                        )
+                        .into_iter()
+                        .chain([completed(None)]),
+                    )
                 }
             }
             #[cfg(unix)]
@@ -3097,37 +3029,23 @@ impl Provider for AutoCompactProvider {
                     Some(rest[..end].to_owned())
                 });
                 match (results.len(), handle) {
-                    (0, _) => Box::pin(stream::iter([
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: "call_shell".to_owned(),
-                            name: "shell".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: "call_shell".to_owned(),
-                            json: serde_json::json!({ "command": command }).to_string(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                            id: "call_shell".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                    ])),
+                    (0, _) => provider_script(
+                        tool_call(
+                            "call_shell",
+                            "shell",
+                            serde_json::json!({ "command": command }).to_string(),
+                        )
+                        .into_iter()
+                        .chain([completed(None)]),
+                    ),
                     (1, Some(handle)) => {
                         let mut arguments = recall.clone();
                         arguments["handle"] = serde_json::Value::String(handle);
-                        Box::pin(stream::iter([
-                            Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                                id: "call_recall".to_owned(),
-                                name: "read_tool_result".to_owned(),
-                            }),
-                            Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                                id: "call_recall".to_owned(),
-                                json: arguments.to_string(),
-                            }),
-                            Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                                id: "call_recall".to_owned(),
-                            }),
-                            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-                        ]))
+                        provider_script(
+                            tool_call("call_recall", "read_tool_result", arguments.to_string())
+                                .into_iter()
+                                .chain([completed(None)]),
+                        )
                     }
                     _ => text_reply(text.clone()),
                 }
@@ -3882,20 +3800,15 @@ struct SpawnThenHangProvider {
 impl Provider for SpawnThenHangProvider {
     fn stream(&self, _request: ModelRequest) -> ProviderStream {
         if self.turn.fetch_add(1, Ordering::AcqRel) == 0 {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: "spawn".to_owned(),
-                    name: "spawn_agent".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: "spawn".to_owned(),
-                    json: r#"{"task":"finish first","model":"test/child"}"#.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                    id: "spawn".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]))
+            provider_script(
+                tool_call(
+                    "spawn",
+                    "spawn_agent",
+                    r#"{"task":"finish first","model":"test/child"}"#,
+                )
+                .into_iter()
+                .chain([completed(None)]),
+            )
         } else {
             self.second_turn_started.notify_one();
             Box::pin(stream::pending())
@@ -4615,20 +4528,15 @@ impl Provider for MutateThenScriptProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
         self.requests.lock().unwrap().push(request);
         if self.turn.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: "call_0".to_owned(),
-                    name: "write_file".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: "call_0".to_owned(),
-                    json: r#"{"path":"out.txt","content":"hello"}"#.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                    id: "call_0".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]));
+            return provider_script(
+                tool_call(
+                    "call_0",
+                    "write_file",
+                    r#"{"path":"out.txt","content":"hello"}"#,
+                )
+                .into_iter()
+                .chain([completed(None)]),
+            );
         }
         let text = self
             .answers
@@ -4804,22 +4712,15 @@ impl Provider for BudgetLoopProvider {
         }
         let turn = self.turn.fetch_add(1, Ordering::SeqCst);
         if has_tools {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: format!("call_{turn}"),
-                    name: "read_file".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: format!("call_{turn}"),
-                    json: r#"{"path":"note.txt"}"#.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                    id: format!("call_{turn}"),
-                }),
-                Ok(qq_provider::ProviderEvent::Completed {
-                    usage: self.usage.map(provider_usage_of),
-                }),
-            ]))
+            provider_script(
+                tool_call(
+                    format!("call_{turn}"),
+                    "read_file",
+                    r#"{"path":"note.txt"}"#,
+                )
+                .into_iter()
+                .chain([completed(self.usage.map(provider_usage_of))]),
+            )
         } else {
             provider_script([
                 text_delta("final status"),
@@ -5788,27 +5689,14 @@ async fn side_failure_with_a_request_in_flight_reports_unknown_spend_without_cha
                 impl Provider for FailureProvider {
                     fn stream(&self, _: ModelRequest) -> ProviderStream {
                         if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                            Box::pin(stream::iter([
-                                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                                    id: "bad".to_owned(),
-                                    name: "shell".to_owned(),
-                                }),
-                                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                                    id: "bad".to_owned(),
-                                    json: "{}".to_owned(),
-                                }),
-                                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                                    id: "bad".to_owned(),
-                                }),
-                                Ok(qq_provider::ProviderEvent::Completed {
-                                    usage: Some(qq_provider::ProviderUsage {
-                                        input_tokens: 10,
-                                        output_tokens: 2,
-                                        cache_read_input_tokens: 0,
-                                        cache_write_input_tokens: 0,
-                                        reasoning_tokens: None,
-                                    }),
-                                }),
+                            provider_script(tool_call("bad", "shell", "{}").into_iter().chain([
+                                completed(Some(qq_provider::ProviderUsage {
+                                    input_tokens: 10,
+                                    output_tokens: 2,
+                                    cache_read_input_tokens: 0,
+                                    cache_write_input_tokens: 0,
+                                    reasoning_tokens: None,
+                                })),
                             ]))
                         } else {
                             Box::pin(stream::once(async {

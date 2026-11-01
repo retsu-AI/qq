@@ -623,18 +623,11 @@ async fn client_revision_is_shown_once_without_refreshing_model_control_authorit
                 ("tree", serde_json::json!({"path":"."}))
             };
             let id = format!("call-{turn}");
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                    id: id.clone(),
-                    name: name.to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                    id: id.clone(),
-                    json: args.to_string(),
-                }),
-                Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
-            ]))
+            provider_script(
+                tool_call(id, name.to_owned(), args.to_string())
+                    .into_iter()
+                    .chain([completed(None)]),
+            )
         }
     }
     let (directory, store, claim) = model_goal_claim(true).await;
@@ -3876,28 +3869,17 @@ async fn real_in_run_compactor_preserves_rejected_prefix_and_uncertain_dispatch(
     impl Provider for Fault {
         fn stream(&self, _: ModelRequest) -> ProviderStream {
             if self.prefix && self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Box::pin(stream::iter([
-                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                        id: "summary_call".to_owned(),
-                        name: "read_file".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                        id: "summary_call".to_owned(),
-                        json: r#"{"path":"note"}"#.to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                        id: "summary_call".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::Completed {
-                        usage: Some(qq_provider::ProviderUsage {
+                return provider_script(
+                    tool_call("summary_call", "read_file", r#"{"path":"note"}"#)
+                        .into_iter()
+                        .chain([completed(Some(qq_provider::ProviderUsage {
                             input_tokens: 11,
                             output_tokens: 3,
                             cache_read_input_tokens: 0,
                             cache_write_input_tokens: 0,
                             reasoning_tokens: None,
-                        }),
-                    }),
-                ]));
+                        }))]),
+                );
             }
             if self.evidence == "eof" {
                 return Box::pin(stream::empty());
@@ -4102,28 +4084,17 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
             );
             self.requests.lock().unwrap().push(request);
             if self.prefix && self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Box::pin(stream::iter([
-                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                        id: "summary_call".to_owned(),
-                        name: "read_file".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                        id: "summary_call".to_owned(),
-                        json: r#"{"path":"note"}"#.to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                        id: "summary_call".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::Completed {
-                        usage: Some(qq_provider::ProviderUsage {
+                return provider_script(
+                    tool_call("summary_call", "read_file", r#"{"path":"note"}"#)
+                        .into_iter()
+                        .chain([completed(Some(qq_provider::ProviderUsage {
                             input_tokens: 11,
                             output_tokens: 3,
                             cache_read_input_tokens: 0,
                             cache_write_input_tokens: 0,
                             reasoning_tokens: None,
-                        }),
-                    }),
-                ]));
+                        }))]),
+                );
             }
             if self.cancel {
                 return Box::pin(stream::pending());

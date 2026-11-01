@@ -1896,28 +1896,17 @@ async fn known_later_turn_context_overflow_starts_no_second_provider_request() {
         fn stream(&self, _request: ModelRequest) -> ProviderStream {
             let call = self.provider_calls.fetch_add(1, Ordering::AcqRel);
             if call == 0 {
-                Box::pin(stream::iter(vec![
-                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                        id: "list".to_owned(),
-                        name: "tree".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                        id: "list".to_owned(),
-                        json: r#"{"path":".","depth":1}"#.to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                        id: "list".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::Completed {
-                        usage: Some(qq_provider::ProviderUsage {
+                provider_script(
+                    tool_call("list", "tree", r#"{"path":".","depth":1}"#)
+                        .into_iter()
+                        .chain([completed(Some(qq_provider::ProviderUsage {
                             input_tokens: 99_998,
                             cache_read_input_tokens: 0,
                             cache_write_input_tokens: 0,
                             output_tokens: 1,
                             reasoning_tokens: None,
-                        }),
-                    }),
-                ]))
+                        }))]),
+                )
             } else {
                 Box::pin(stream::iter(vec![Ok(
                     qq_provider::ProviderEvent::Completed { usage: None },
