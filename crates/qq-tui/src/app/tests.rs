@@ -5911,7 +5911,9 @@ fn switcher_ranks_title_prefix_then_word_prefix_then_subsequence_then_agents_the
         agent.clone(),
         answered.clone(),
     ]);
-    initial.included.push(body_for(&answered, "found a bug in the parser"));
+    initial
+        .included
+        .push(body_for(&answered, "found a bug in the parser"));
     app.apply_snapshot(initial);
     app.execute(Command::OpenSessions);
     for character in "bug".chars() {
@@ -5937,7 +5939,10 @@ fn deleting_the_highlighted_agent_falls_back_to_its_session() {
     app.execute(Command::OpenSessions);
     app.handle_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
     let listed = app.filtered_sessions();
-    assert!(listed.contains(&agent), "Ctrl-A lists every agent: {listed:?}");
+    assert!(
+        listed.contains(&agent),
+        "Ctrl-A lists every agent: {listed:?}"
+    );
     for _ in 0..listed.len() {
         app.handle_key(key(KeyCode::Up, KeyModifiers::NONE));
     }
@@ -6040,7 +6045,13 @@ fn clicking_a_rail_row_focuses_that_session_and_a_stale_hit_is_refused() {
     let stale = order[0].0;
     app.sessions.remove(&stale);
     let before = app.focused();
-    let stale_row = app.geometry.rail_rows.iter().find(|(_, id)| *id == stale).unwrap().0;
+    let stale_row = app
+        .geometry
+        .rail_rows
+        .iter()
+        .find(|(_, id)| *id == stale)
+        .unwrap()
+        .0;
     app.handle_terminal_event(click(
         u16::try_from(area.x + 4).unwrap(),
         u16::try_from(area.y + stale_row).unwrap(),

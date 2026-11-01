@@ -48,14 +48,15 @@ bottom.
 - **Sessions column** (90 columns and wider, with two or more sessions;
   `Ctrl-\` toggles): sessions numbered 1–9 and grouped by what you should
   do — NEEDS YOU, WORKING, RECENT — with `N new` for unread replies and
-  `↳N` for child agents. From 160 columns each session gets a second row
+  `↳N` for child agents, which fold into their session's row. Click a row,
+  or press `Alt-1`…`Alt-9`, to focus it. From 160 columns each session gets a second row
   with its activity and cost. Below 90 columns the column is gone and the
   rule carries the counts instead (`8 sessions  ◐ 2  ◇ 2  ^G`).
 - **Rule**: the focused session's state and activity (`◐ editing · 14s`),
   or the last notice. Its color follows the session: dim when idle, blue
   while running, yellow when it needs you, red after a failure. On the
   right, `◇ N needs you ^G` counts approvals waiting in other sessions.
-- **Panel**: approvals, questions, `/goal`, and every picker (`/sessions`,
+- **Panel**: approvals, questions, `/goal`, and every picker (`Ctrl-T`,
   `/models`, `/theme`, …) open here, between the rule and the composer, and
   take at most half the screen. `Esc` closes them with your draft intact.
 - **Composer**: type and press `Enter`. `Shift-Enter` or `Alt-Enter` inserts
@@ -73,8 +74,10 @@ bottom.
 | --- | --- | --- |
 | new session | `Alt-N` | `/new`, `/clear` |
 | new child session (sub-agent under the focused one) | `Alt-C` | |
-| open the session list; type to search names | | `/sessions`, `/resume` |
-| the focused session's agent tree | | `/agents` |
+| switch session: type to search, `Enter` opens, `Tab` unfolds a session's agents, `Ctrl-A` lists every agent | `Ctrl-T` | `/sessions`, `/resume` |
+| swap to the previous session | `Ctrl-^` (also `Ctrl-6`) | |
+| focus the Nth row of the sessions column | `Alt-1`…`Alt-9` | |
+| switch session, scoped to the focused session's agents | | `/agents` |
 | focus parent / first child / next / previous sibling | `Esc`* / `Alt-Down` / `Alt-Right` / `Alt-Left` | |
 | jump to the next session that needs you | `Ctrl-G` | |
 | delete the highlighted session in the list (confirms) | `Ctrl-D` | |
@@ -304,9 +307,10 @@ searchable palette that runs the highlighted command on `Enter`.
 | --- | --- | --- |
 | show every command and key | `/help` | `F1`, `?` |
 | open the command palette | `/commands` | `Ctrl-K` |
-| open sessions | `/sessions`, `/resume` |  |
-| open the focused session's agent tree | `/agents` |  |
-| toggle the session navigator |  | `Ctrl-T` |
+| open the session switcher | `/sessions`, `/resume` |  |
+| switch to an agent of the focused session | `/agents` |  |
+| switch session |  | `Ctrl-T` |
+| swap to the previous session |  | `Ctrl-6`, `Ctrl-^` |
 | create a session | `/new`, `/clear` | `Alt-N` |
 | create a child session |  | `Alt-C` |
 | compact session context | `/compact` |  |
@@ -336,7 +340,7 @@ searchable palette that runs the highlighted command on `Enter`.
 | move the block cursor down; y copies the block |  | `Ctrl-Down` |
 | copy the last answer; /copy code copies its last code block | `/copy` |  |
 | toggle reasoning detail |  | `Alt-R` |
-| toggle the session sidebar |  | `Ctrl-\` |
+| toggle the session rail |  | `Ctrl-\` |
 | toggle the inspector pane |  | `Alt-I` |
 | toggle mouse capture | `/mouse` |  |
 | show everything that needs you | `/attention` |  |
@@ -354,8 +358,8 @@ Keys shown beside `?`, `Enter`, `Esc`, and `Esc Esc` apply only in context:
 focuses the parent only when there is no overlay, approval, or
 question prompt, `@` completion list, transcript selection, open view, error notice,
 or active run to claim it, and `Esc Esc` cancels only while running.
-Rebind `toggle_navigator`, `create_root_session`, `create_child_session`,
-`cancel_run`, and `interrupt_run` in [`tui.ron`](configuration.md#tuiron);
+Rebind `toggle_navigator`, `previous_session`, `create_root_session`,
+`create_child_session`, `cancel_run`, and `interrupt_run` in [`tui.ron`](configuration.md#tuiron);
 every hint that mentions a rebound key updates.
 
 Scrolling: mouse wheel, `PageUp` / `PageDown`, `Shift-Up` / `Shift-Down`,

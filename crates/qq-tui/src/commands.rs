@@ -122,7 +122,7 @@ pub(crate) const COMMANDS: [CommandSpec; 47] = [
     ),
     spec!(
         OpenSessions,
-        "switch session",
+        "open the session switcher",
         Session,
         ["/sessions", "/resume"],
         []

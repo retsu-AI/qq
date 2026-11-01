@@ -281,18 +281,14 @@ impl SessionStore {
 
     #[must_use]
     pub fn needing_attention(&self) -> Vec<SessionId> {
-        let mut needing: Vec<(Need, std::cmp::Reverse<(u64, SessionId)>, SessionId)> = self
+        let mut needing: Vec<_> = self
             .sessions
             .values()
             .filter(|view| !self.is_hidden(view.summary.id))
             .filter_map(|view| {
-                view.need().map(|need| {
-                    (
-                        need,
-                        std::cmp::Reverse((view.summary.updated_at_ms, view.summary.id)),
-                        view.summary.id,
-                    )
-                })
+                let newest_first = std::cmp::Reverse((view.summary.updated_at_ms, view.summary.id));
+                view.need()
+                    .map(|need| (need, newest_first, view.summary.id))
             })
             .collect();
         needing.sort();
