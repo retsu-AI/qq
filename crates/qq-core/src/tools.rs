@@ -4841,8 +4841,15 @@ mod tests {
     async fn cancel_and_timeout_kill_descendants_that_left_the_group() {
         let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
+        let mut cases = Vec::new();
         for timeout in [false, true] {
             for tree in escaped_trees(workspace.path()).await {
+                cases.push((timeout, tree));
+            }
+        }
+        futures_util::future::join_all(cases.into_iter().map(|(timeout, tree)| {
+            let workspace = workspace.clone();
+            async move {
                 let command = tree.command.clone();
                 let cancelled = RunCancellation::new();
                 let arguments = match timeout {
@@ -4850,7 +4857,7 @@ mod tests {
                     false => serde_json::json!({"command": command}),
                 };
                 let execution = tokio::spawn(execute(
-                    workspace.clone(),
+                    workspace,
                     Arc::new(FileState::default()),
                     "shell".to_owned(),
                     arguments.to_string(),
@@ -4880,7 +4887,8 @@ mod tests {
                 );
                 assert_all_exit(pids).await;
             }
-        }
+        }))
+        .await;
     }
 
     #[cfg(unix)]
