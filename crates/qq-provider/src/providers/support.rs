@@ -254,11 +254,23 @@ pub(crate) fn subtract_cached_input_tokens(
 pub(crate) fn client_for_endpoint(
     endpoint: &reqwest::Url,
 ) -> Result<reqwest::Client, ProviderError> {
-    if endpoint.scheme() == "http" {
-        build_direct_client()
-    } else {
-        build_client()
+    thread_local! {
+        static DIRECT: std::cell::OnceCell<reqwest::Client> = const { std::cell::OnceCell::new() };
+        static PROXIED: std::cell::OnceCell<reqwest::Client> = const { std::cell::OnceCell::new() };
     }
+    let (cache, build): (_, fn() -> Result<reqwest::Client, ProviderError>) =
+        if endpoint.scheme() == "http" {
+            (&DIRECT, build_direct_client)
+        } else {
+            (&PROXIED, build_client)
+        };
+    cache.with(|cell| match cell.get() {
+        Some(client) => Ok(client.clone()),
+        None => {
+            let client = build()?;
+            Ok(cell.get_or_init(|| client).clone())
+        }
+    })
 }
 
 #[cfg(test)]
