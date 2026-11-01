@@ -990,7 +990,7 @@ impl TranscriptCache {
                 },
                 expanded: app.expanded_tool_calls.contains(&call.id),
                 inline_detail,
-                fold: app.tool_detail == ToolDetail::Folded,
+                fold: !app.receipts_open,
                 selected: app.block_cursor == Some(Block::Tool(call.id)),
             }
         };

@@ -389,12 +389,12 @@ fn consecutive_call_only_turns_merge_into_one_folded_group() {
     session.tool_calls = Some(calls);
 
     let rows = squashed_rows(&transcript_lines(&app, 80));
+    assert_eq!(rows, [" row 0", "", "● 4 calls · read 4"]);
+
+    app.receipts_open = true;
+    let rows = squashed_rows(&transcript_lines(&app, 80));
     assert_eq!(rows.len(), 6, "{rows:?}");
     assert!(rows[2..].iter().all(|row| row.contains("Read a.rs")));
-
-    app.tool_detail = ToolDetail::Folded;
-    let rows = squashed_rows(&transcript_lines(&app, 80));
-    assert_eq!(rows, [" row 0", "", "● 4 calls · read 4"]);
 }
 
 #[test]
@@ -1560,7 +1560,7 @@ fn expanding_a_read_shows_the_head_of_the_file_and_never_its_json() {
         KeyCode::Char('o'),
         KeyModifiers::CONTROL,
     )));
-    assert_eq!(app.tool_detail, ToolDetail::Folded);
+    assert!(app.receipts_open);
 }
 
 #[test]
@@ -2716,9 +2716,18 @@ fn the_sidebar_stays_hidden_with_one_session_and_scales_with_width() {
         "one session: nothing to list"
     );
     let rail_width = |width, prefs, sessions| {
-        layout::compute_layout(width, 24, 2, prefs, sessions)
-            .rail
-            .map_or(0, |rail| rail.width)
+        layout::compute_layout(
+            width,
+            24,
+            2,
+            prefs,
+            layout::LayoutDemand {
+                sessions,
+                inspector_content: false,
+            },
+        )
+        .rail
+        .map_or(0, |rail| rail.width)
     };
     let auto = LayoutPrefs::default();
     assert_eq!(rail_width(100, auto, 2), layout::RAIL_REGULAR_WIDTH);
@@ -5053,7 +5062,10 @@ fn transcript_and_inspector(app: &App, frame: &[Line]) -> (String, String) {
         frame.len(),
         3,
         app.layout,
-        app.sessions.listed_count(),
+        layout::LayoutDemand {
+            sessions: app.sessions.listed_count(),
+            inspector_content: super::inspector_content(app),
+        },
     );
     let split = layout.inspector.map_or(width, |inspector| inspector.x);
     let rows = frame_rows(frame);

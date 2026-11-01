@@ -284,7 +284,7 @@ pub(super) fn side_questions_body(app: &App, session_id: SessionId, width: usize
     let mut rows = vec![
         section("SIDE QUESTIONS", "main agent continues"),
         Line::default(),
-        Line::styled("/btw QUESTION · /btw-new QUESTION · /btw-cancel", muted()),
+        Line::styled("/btw QUESTION · /btw new QUESTION · /btw cancel", muted()),
     ];
     let session = app.sessions.get(&session_id);
     let items = session.map(|session| &session.side_questions);

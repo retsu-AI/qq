@@ -760,14 +760,14 @@ async fn interactive(
             (None, true, Some(model)) => qq_client::InitialSession::New(model.clone()),
             (None, _, _) => qq_client::InitialSession::Existing,
         };
-        let (connection, initial) = match server::reserve(options)
+        let (connection, initial, owns_server) = match server::reserve(options)
             .await
             .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?
         {
             server::ReserveOutcome::Existing(connection) => {
                 reject_read_approvals_for_existing_server(&approved_read_images)
                     .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?;
-                (connection, initial(false))
+                (connection, initial(false), false)
             }
             server::ReserveOutcome::Reserved(reservation) => {
                 let handler = Arc::new(
@@ -789,7 +789,7 @@ async fn interactive(
                 };
                 let connection = server.connection().clone();
                 let _ = embedded_tx.send(EmbeddedRuntime { server, handler });
-                (connection, initial(true))
+                (connection, initial(true), true)
             }
         };
         let client = client::TuiClient::start(
@@ -826,6 +826,7 @@ async fn interactive(
             themes,
             workspace_root: Some(workspace),
             environment: environment_lines,
+            owns_server,
         };
         Ok((client, options))
     };

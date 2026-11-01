@@ -159,8 +159,8 @@ impl Harness {
         tokio::task::yield_now().await;
     }
 
-    fn quit(&self) {
-        self.key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    fn quit(&mut self) {
+        self.events = mpsc::unbounded_channel().0;
     }
 
     fn sent(&self) -> Vec<ClientRequest> {
@@ -744,12 +744,7 @@ async fn the_first_frame_paints_before_the_client_port_connects() {
         "{}",
         frames.len()
     );
-    events
-        .send(Ok(Event::Key(KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        ))))
-        .unwrap();
+    drop(events);
     let app = task.await.expect("loop task").expect("loop exits cleanly");
     assert_eq!(app.connection, ConnectionState::Live);
 }
@@ -814,12 +809,7 @@ async fn prompt_submitted_before_delayed_startup_is_sent_after_the_snapshot() {
             )
     ));
 
-    events
-        .send(Ok(Event::Key(KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        ))))
-        .unwrap();
+    drop(events);
     task.await.expect("loop task").expect("loop exits cleanly");
 }
 
@@ -992,7 +982,8 @@ async fn copy_then_quit(commands: &[&str]) -> String {
         }
         harness.key(KeyCode::Enter, KeyModifiers::NONE);
     }
-    harness.quit();
+    harness.key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    harness.key(KeyCode::Char('c'), KeyModifiers::CONTROL);
     task.await.expect("loop task").expect("loop exits cleanly");
     std::fs::read_to_string(&target).unwrap()
 }

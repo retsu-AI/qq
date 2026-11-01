@@ -102,7 +102,7 @@ both before they start.
 
 Useful keys while it works: `Esc Esc` cancels, `Enter` steers the running
 agent with a new instruction, `Ctrl-K` opens the command palette, `?` on an
-empty prompt or `F1` lists every key. `Ctrl-C` or `/quit` exits and prints
+empty prompt or `F1` lists every key. `Ctrl-C` twice or `/quit` exits and prints
 how to resume:
 
 ```

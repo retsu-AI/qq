@@ -34,8 +34,6 @@ pub(crate) enum Command {
     ShowChanges,
     ShowSideQuestions,
     ShowGoal,
-    NewSideThread,
-    CancelSideQuestion,
     FocusParent,
     FocusFirstChild,
     FocusNextSibling,
@@ -105,7 +103,20 @@ macro_rules! spec {
     (@action $action:ident) => { Some(Action::$action) };
 }
 
-pub(crate) const COMMANDS: [CommandSpec; 47] = [
+pub(crate) const RETIRED_SLASH: [(&str, &str); 3] = [
+    ("/btw-new", "/btw new"),
+    ("/btw-cancel", "/btw cancel"),
+    ("/clear", "/new"),
+];
+
+pub(crate) fn retired_replacement(name: &str) -> Option<&'static str> {
+    RETIRED_SLASH
+        .iter()
+        .find(|(retired, _)| *retired == name)
+        .map(|(_, replacement)| *replacement)
+}
+
+pub(crate) const COMMANDS: [CommandSpec; 45] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -154,7 +165,7 @@ pub(crate) const COMMANDS: [CommandSpec; 47] = [
         NewRootSession,
         "create a session",
         Session,
-        ["/new", "/clear"],
+        ["/new"],
         [],
         CreateRootSession
     ),
@@ -293,7 +304,7 @@ pub(crate) const COMMANDS: [CommandSpec; 47] = [
     spec!(OpenThemes, "choose a theme", View, ["/theme"], []),
     spec!(
         ToggleToolDetail,
-        "toggle tool call detail",
+        "open or close turn receipts",
         View,
         [],
         ["Ctrl-O"]
@@ -326,13 +337,7 @@ pub(crate) const COMMANDS: [CommandSpec; 47] = [
         [],
         ["Alt-R"]
     ),
-    spec!(
-        ToggleSidebar,
-        "toggle the session rail",
-        View,
-        [],
-        ["Ctrl-\\"]
-    ),
+    spec!(ToggleSidebar, "toggle the rail", View, [], ["Ctrl-\\"]),
     spec!(
         ToggleInspector,
         "toggle the inspector pane",
@@ -379,23 +384,9 @@ pub(crate) const COMMANDS: [CommandSpec; 47] = [
     ),
     spec!(
         ShowSideQuestions,
-        "ask or view side questions",
+        "ask or view side questions; /btw new starts a thread, /btw cancel stops one",
         View,
         ["/btw", "/ask"],
-        []
-    ),
-    spec!(
-        NewSideThread,
-        "ask in a new side thread",
-        View,
-        ["/btw-new"],
-        []
-    ),
-    spec!(
-        CancelSideQuestion,
-        "cancel only the side question",
-        Run,
-        ["/btw-cancel"],
         []
     ),
 ];
@@ -535,6 +526,7 @@ mod tests {
     fn slash_names_match_the_protocol_reservation_exactly() {
         let here: BTreeSet<String> = slash_entries()
             .map(|entry| entry.name.into_owned())
+            .chain(RETIRED_SLASH.iter().map(|(name, _)| (*name).to_owned()))
             .collect();
         let reserved: BTreeSet<String> = qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS
             .iter()
@@ -607,7 +599,7 @@ mod tests {
         let names = entry_names(matching("/"));
         assert_eq!(
             names.len(),
-            qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS.len()
+            qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS.len() - RETIRED_SLASH.len()
         );
         assert_eq!(names[0], "/help");
         let quit: Vec<_> = matching("/qu")

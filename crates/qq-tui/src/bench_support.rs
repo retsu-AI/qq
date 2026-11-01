@@ -285,7 +285,7 @@ impl BenchHarness {
     }
 
     pub fn fold_tools(&mut self) {
-        self.app.tool_detail = crate::app::ToolDetail::Folded;
+        self.app.receipts_open = false;
     }
 
     pub fn expand_every_tool(&mut self) {

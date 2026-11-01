@@ -696,6 +696,7 @@ fn new_slash_command_creates_a_root_session_with_the_selected_model() {
         themes: Vec::new(),
         workspace_root: None,
         environment: Vec::new(),
+        owns_server: false,
     });
     app.apply_snapshot(snapshot());
     app.composer.text = "/new".to_owned();
@@ -734,9 +735,10 @@ fn slash_clear_is_a_client_alias_for_a_new_session() {
         themes: Vec::new(),
         workspace_root: None,
         environment: Vec::new(),
+        owns_server: false,
     });
     app.apply_snapshot(snapshot());
-    app.composer.text = "/clear".to_owned();
+    app.composer.text = "/new".to_owned();
     let (_, requests) = app
         .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .split();
@@ -760,7 +762,10 @@ fn slash_autocomplete_filters_selects_and_executes_commands() {
     app.composer.text = "/".to_owned();
 
     {
-        let mut reserved = qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS.to_vec();
+        let mut reserved: Vec<&str> = qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS
+            .into_iter()
+            .filter(|name| crate::commands::retired_replacement(name).is_none())
+            .collect();
         reserved.sort_unstable();
         let mut here: Vec<String> = app
             .filtered_slash_commands()
@@ -770,7 +775,7 @@ fn slash_autocomplete_filters_selects_and_executes_commands() {
         here.sort_unstable();
         assert_eq!(here, reserved);
     }
-    let last = qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS.len() - 1;
+    let last = listed_slash_commands() - 1;
     for _ in 0..last {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
@@ -1110,6 +1115,7 @@ fn context_meter_app() -> App {
         themes: Vec::new(),
         workspace_root: None,
         environment: Vec::new(),
+        owns_server: false,
     })
 }
 
@@ -1421,6 +1427,7 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
         themes: Vec::new(),
         workspace_root: None,
         environment: Vec::new(),
+        owns_server: false,
     });
     app.apply_snapshot(snapshot());
     app.open_models();
@@ -1522,6 +1529,7 @@ fn model_picker_applies_to_the_focused_session_and_ctrl_n_creates() {
         themes: Vec::new(),
         workspace_root: None,
         environment: Vec::new(),
+        owns_server: false,
     });
     app.apply_snapshot(snapshot());
     app.composer.text = "/models".to_owned();
@@ -1592,6 +1600,7 @@ fn model_picker_enter_without_a_focused_session_creates_one() {
         themes: Vec::new(),
         workspace_root: None,
         environment: Vec::new(),
+        owns_server: false,
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -1649,6 +1658,7 @@ fn model_picker_selection_becomes_the_default_for_new_sessions() {
         themes: Vec::new(),
         workspace_root: None,
         environment: Vec::new(),
+        owns_server: false,
     });
     app.apply_snapshot(snapshot());
     app.open_models();
@@ -2158,23 +2168,23 @@ fn mid_run_queued_prompts_stay_after_the_streaming_runs_turn_messages() {
 }
 
 #[test]
-fn ctrl_o_cycles_tool_detail_and_yields_to_overlays() {
+fn ctrl_o_opens_and_closes_receipts_and_yields_to_overlays() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
-    assert_eq!(app.tool_detail, ToolDetail::Rows);
+    assert!(!app.receipts_open);
     let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
 
     let (changed, requests) = app.handle_key(ctrl_o).split();
     assert!(changed);
     assert!(requests.is_empty());
-    assert_eq!(app.tool_detail, ToolDetail::Folded);
+    assert!(app.receipts_open);
 
     app.handle_key(ctrl_o);
-    assert_eq!(app.tool_detail, ToolDetail::Rows);
+    assert!(!app.receipts_open);
 
     app.open_session_picker_with("", None, None);
     app.handle_key(ctrl_o);
-    assert_eq!(app.tool_detail, ToolDetail::Rows);
+    assert!(!app.receipts_open);
 }
 
 #[test]
@@ -3334,6 +3344,7 @@ fn themed_app() -> App {
         ],
         workspace_root: None,
         environment: Vec::new(),
+        owns_server: false,
     });
     app.apply_snapshot(snapshot());
     app
@@ -3665,13 +3676,13 @@ fn ctrl_k_opens_the_palette_and_enter_runs_the_highlighted_command() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
     app.execute(Command::OpenCommands);
-    for character in "toggle tool".chars() {
+    for character in "turn receipts".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }
-    let before = app.tool_detail;
+    let before = app.receipts_open;
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.overlay.is_none());
-    assert_ne!(app.tool_detail, before);
+    assert_ne!(app.receipts_open, before);
 }
 
 #[test]
@@ -3871,6 +3882,7 @@ fn profile_chosen_without_a_focused_session_applies_to_the_next_create() {
         themes: Vec::new(),
         workspace_root: None,
         environment: Vec::new(),
+        owns_server: false,
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -3991,6 +4003,7 @@ fn effort_chosen_without_a_focused_session_applies_to_the_next_create() {
         themes: Vec::new(),
         workspace_root: None,
         environment: Vec::new(),
+        owns_server: false,
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -4068,6 +4081,7 @@ fn effort_picker_is_shaped_by_the_focused_models_advertised_ladder() {
             themes: Vec::new(),
             workspace_root: None,
             environment: Vec::new(),
+            owns_server: false,
         });
         app.apply_snapshot(snap.clone());
         app.execute(Command::OpenEffort);
@@ -4212,6 +4226,7 @@ fn approval_mode_chosen_without_a_focused_session_applies_to_the_next_create() {
         themes: Vec::new(),
         workspace_root: None,
         environment: Vec::new(),
+        owns_server: false,
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -4272,16 +4287,17 @@ fn capabilities_with_skills() -> std::sync::Arc<qq_protocol::ServerCapabilities>
     std::sync::Arc::new(capabilities)
 }
 
+fn listed_slash_commands() -> usize {
+    qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS.len() - crate::commands::RETIRED_SLASH.len()
+}
+
 #[test]
 fn slash_completion_offers_workspace_commands_and_skills_after_client_commands() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
     let session_id = app.focused().unwrap();
     app.composer.text = "/".to_owned();
-    assert_eq!(
-        app.filtered_slash_commands().len(),
-        qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS.len()
-    );
+    assert_eq!(app.filtered_slash_commands().len(), listed_slash_commands());
 
     app.apply_client_update(ClientUpdate::Capabilities(capabilities_with_skills()));
     let names: Vec<String> = app
@@ -4289,10 +4305,7 @@ fn slash_completion_offers_workspace_commands_and_skills_after_client_commands()
         .iter()
         .map(|entry| entry.name.to_string())
         .collect();
-    assert_eq!(
-        names.len(),
-        qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS.len() + 2
-    );
+    assert_eq!(names.len(), listed_slash_commands() + 2);
     assert_eq!(&names[names.len() - 2..], ["/ship", "/qq-verify"]);
 
     app.composer.text = "/shi".to_owned();
@@ -4847,7 +4860,7 @@ fn without_a_workspace_root_mentions_stay_literal_text() {
 
 #[test]
 fn side_aliases_never_submit_or_steer_main_even_while_running() {
-    for (alias, reset) in [("/btw", false), ("/ask", false), ("/btw-new", true)] {
+    for (alias, reset) in [("/btw", false), ("/ask", false), ("/btw new", true)] {
         let mut app = App::new(TuiOptions::default());
         let mut initial = snapshot();
         initial.focused.as_mut().unwrap().summary.active_run_id = Some(RunId::generate().unwrap());
@@ -4904,7 +4917,7 @@ fn side_cancel_targets_side_id_and_not_main_run() {
     });
     app.apply_snapshot(initial);
     app.execute(Command::ShowSideQuestions);
-    let (_, requests) = app.execute(Command::CancelSideQuestion).split();
+    let (_, requests) = app.cancel_side_question().split();
     assert!(
         matches!(requests.as_slice(), [ClientRequest::Command(CommandRequest {
         command: SessionCommand::CancelSideQuestion { side_question_id }, ..
@@ -4994,7 +5007,9 @@ fn rejected_side_commands_stay_visible_in_the_side_view() {
         2,
         side_item(id, running, qq_protocol::SideQuestionState::Running),
     ));
-    let request = only_command(app.execute(Command::CancelSideQuestion));
+    app.composer.text = "/btw cancel".to_owned();
+    let request = only_command(press(&mut app, KeyCode::Enter));
+    assert!(app.composer.text.is_empty());
     app.apply_client_update(ClientUpdate::CommandResult {
         command_id: request.command_id,
         result: Err(ClientFailure::new("server unavailable")),
@@ -5084,7 +5099,7 @@ fn side_cancel_uses_the_acknowledged_id_before_its_update_arrives() {
     let side = RunId::generate().unwrap();
     app.apply_client_update(submitted_receipt(submit.command_id, side));
     assert!(app.sessions[&id].side_questions.is_empty());
-    let cancel = only_command(app.execute(Command::CancelSideQuestion));
+    let cancel = only_command(app.cancel_side_question());
     assert!(matches!(
         cancel.command,
         SessionCommand::CancelSideQuestion { side_question_id } if side_question_id == side
@@ -5098,7 +5113,7 @@ fn side_cancel_uses_the_acknowledged_id_before_its_update_arrives() {
         3,
         side_item(id, side, qq_protocol::SideQuestionState::Cancelled),
     ));
-    let (_, requests) = app.execute(Command::CancelSideQuestion).split();
+    let (_, requests) = app.cancel_side_question().split();
     assert!(requests.is_empty());
     assert_eq!(
         app.visible_status(),
@@ -5114,7 +5129,7 @@ fn a_cancel_that_loses_the_race_releases_the_acknowledged_id() {
     let submit = only_command(press(&mut app, KeyCode::Enter));
     let side = RunId::generate().unwrap();
     app.apply_client_update(submitted_receipt(submit.command_id, side));
-    let cancel = only_command(app.execute(Command::CancelSideQuestion));
+    let cancel = only_command(app.cancel_side_question());
     app.apply_client_update(ClientUpdate::CommandResult {
         command_id: cancel.command_id,
         result: Ok(qq_protocol::CommandReceipt {
@@ -5130,7 +5145,7 @@ fn a_cancel_that_loses_the_race_releases_the_acknowledged_id() {
         app.visible_status(),
         Some(("side question already finished", NoticeLevel::Info))
     );
-    let (_, requests) = app.execute(Command::CancelSideQuestion).split();
+    let (_, requests) = app.cancel_side_question().split();
     assert!(requests.is_empty());
 }
 
@@ -5151,23 +5166,16 @@ fn a_receipt_after_the_terminal_update_is_not_retained_for_cancel() {
         side_item(id, side, qq_protocol::SideQuestionState::Completed),
     ));
     app.apply_client_update(submitted_receipt(submit.command_id, side));
-    let (_, requests) = app.execute(Command::CancelSideQuestion).split();
+    let (_, requests) = app.cancel_side_question().split();
     assert!(requests.is_empty());
 }
 
 #[test]
-fn btw_new_autocomplete_leaves_the_command_for_its_question() {
+fn btw_subcommands_start_a_thread_or_cancel_and_retired_spellings_name_their_replacement() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
     let id = app.focused().unwrap();
-    for accept in [KeyCode::Tab, KeyCode::Enter] {
-        app.composer.replace("/btw-n".to_owned());
-        let (_, requests) = press(&mut app, accept).split();
-        assert!(requests.is_empty());
-        assert_eq!(app.composer.text, "/btw-new ");
-        assert_eq!(app.view(), View::Transcript(Some(id)));
-    }
-    app.composer.text.push_str("fresh start?");
+    app.composer.replace("/btw new fresh start?".to_owned());
     let request = only_command(press(&mut app, KeyCode::Enter));
     assert!(matches!(
         request.command,
@@ -5176,10 +5184,28 @@ fn btw_new_autocomplete_leaves_the_command_for_its_question() {
     ));
 
     press(&mut app, KeyCode::Esc);
-    app.composer.replace("/btw-new".to_owned());
+    app.composer.replace("/btw new".to_owned());
     let (_, requests) = app.submit_prompt().split();
     assert!(requests.is_empty());
-    assert_eq!(app.view(), View::Transcript(Some(id)));
+    assert_eq!(
+        app.visible_status().map(|(text, _)| text),
+        Some("use /btw new QUESTION to start a new side thread")
+    );
+
+    for (retired, replacement) in [
+        ("/btw-new what?", "/btw new"),
+        ("/btw-cancel", "/btw cancel"),
+        ("/clear", "/new"),
+    ] {
+        app.composer.replace(retired.to_owned());
+        let (_, requests) = app.submit_prompt().split();
+        assert!(requests.is_empty(), "{retired}");
+        let name = retired.split_whitespace().next().unwrap();
+        assert_eq!(
+            app.visible_status().map(|(text, _)| text.to_owned()),
+            Some(format!("{name} is gone; use {replacement}"))
+        );
+    }
 
     for alias in ["/btw", "/as"] {
         press(&mut app, KeyCode::Esc);

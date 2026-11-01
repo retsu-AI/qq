@@ -18,7 +18,7 @@ fn fixed_instant() -> std::time::Instant {
 fn app() -> App {
     let summary = fixtures::session_summary(fixtures::SESSION);
     let mut app = App::new(TuiOptions::default());
-    app.click_clock = fixed_instant;
+    app.clock = fixed_instant;
     let user = qq_protocol::MessageSnapshot {
         role: MessageRole::User,
         turn_ordinal: 0,
@@ -344,11 +344,60 @@ fn ctrl_c_copies_a_selection_and_quits_otherwise() {
     let effects = app.handle_key(ctrl_c);
     assert!(!effects.iter().any(|effect| matches!(effect, Effect::Quit)));
     assert_eq!(copies(effects, &renderer), ["Then"]);
-    assert!(
-        app.handle_key(ctrl_c)
-            .iter()
-            .any(|effect| matches!(effect, Effect::Quit))
+    assert!(!quits(app.handle_key(ctrl_c)));
+    assert!(quits(app.handle_key(ctrl_c)));
+}
+
+fn quits(effects: Effects) -> bool {
+    effects.iter().any(|effect| matches!(effect, Effect::Quit))
+}
+
+fn later_instant() -> std::time::Instant {
+    fixed_instant() + std::time::Duration::from_millis(2001)
+}
+
+#[test]
+fn ctrl_c_clears_a_draft_then_asks_before_quitting_within_two_seconds() {
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let mut app = app();
+    app.composer.replace("half a thought".to_owned());
+    assert!(!quits(app.handle_key(ctrl_c)));
+    assert!(app.composer.text.is_empty());
+    assert_eq!(app.visible_status(), None);
+
+    assert!(!quits(app.handle_key(ctrl_c)));
+    assert_eq!(
+        app.visible_status(),
+        Some(("Ctrl-C again to quit", NoticeLevel::Info))
     );
+    app.clock = later_instant;
+    assert!(!quits(app.handle_key(ctrl_c)), "the window is two seconds");
+    assert!(quits(app.handle_key(ctrl_c)));
+
+    let mut app = self::app();
+    assert!(!quits(app.handle_key(ctrl_c)));
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    app.composer.clear();
+    assert!(!quits(app.handle_key(ctrl_c)), "another key disarms it");
+}
+
+#[test]
+fn the_first_ctrl_c_counts_the_runs_that_stop_only_when_this_qq_owns_the_server() {
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    for (owns_server, expected) in [
+        (true, "Ctrl-C again to quit; 1 run will stop"),
+        (false, "Ctrl-C again to quit"),
+    ] {
+        let mut app = app();
+        app.owns_server = owns_server;
+        app.sessions
+            .get_mut(&fixtures::SESSION)
+            .unwrap()
+            .summary
+            .active_run_id = Some(qq_protocol::RunId::from_bytes([9; 16]));
+        app.handle_key(ctrl_c);
+        assert_eq!(app.visible_status().map(|(text, _)| text), Some(expected));
+    }
 }
 
 #[test]
@@ -483,7 +532,7 @@ fn folded_tool_calls_stay_reachable_by_the_block_cursor() {
         id: ToolCallId::from_bytes([byte; 16]),
         ..first.clone()
     }));
-    app.tool_detail = ToolDetail::Folded;
+    app.receipts_open = false;
     let mut renderer = FrameRenderer::default();
     draw(&mut app, &mut renderer);
     let tools: Vec<Block> = app

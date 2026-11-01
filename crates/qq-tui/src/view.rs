@@ -25,7 +25,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     StatusItem,
-    app::{App, SessionView, ToolDetail, terminal_safe_character},
+    app::{App, SessionView, terminal_safe_character},
     input::{Mode, SessionConfirm, approval_mode_label, effort_label},
     render::{
         Line, Style, accent, border, brand, failure, faint, info, muted, normal, selection,
@@ -104,6 +104,22 @@ pub(crate) fn code_blocks(source: &str) -> Vec<String> {
 
 pub(crate) fn rail_visible(width: usize, prefs: LayoutPrefs, sessions: usize) -> bool {
     layout::rail_width(width, prefs, sessions) > 0
+}
+
+fn inspector_content(app: &App) -> bool {
+    match app.pane().view {
+        View::Attention | View::Changes => true,
+        View::Transcript(Some(session_id)) => app
+            .sessions
+            .get(&session_id)
+            .and_then(|session| session.tool_calls.as_deref())
+            .is_some_and(|calls| {
+                calls
+                    .iter()
+                    .any(|call| app.expanded_tool_calls.contains(&call.id))
+            }),
+        View::Transcript(None) | View::Goal(_) | View::SideQuestions(_) => false,
+    }
 }
 
 #[derive(Default)]
@@ -278,7 +294,10 @@ impl FrameRenderer {
             height,
             dock.len(),
             app.layout,
-            app.sessions.listed_count(),
+            layout::LayoutDemand {
+                sessions: app.sessions.listed_count(),
+                inspector_content: inspector_content(app),
+            },
         );
         let body_height = layout.body.height;
         let inline_detail = layout.inspector.is_none();
