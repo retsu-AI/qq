@@ -520,7 +520,7 @@ async fn ab1_historical_context_stays_unavailable_and_wrong_schema_is_rejected()
         .unwrap();
     store.close().await.unwrap();
     let connection = Connection::open(&path).unwrap();
-    connection.execute_batch("ALTER TABLE tool_calls DROP COLUMN execution_context_json; UPDATE metadata SET value='45' WHERE key='schema_version'").unwrap();
+    connection.execute_batch("ALTER TABLE tool_calls DROP COLUMN execution_context_json; UPDATE metadata SET value='43' WHERE key='schema_version'").unwrap();
     drop(connection);
     let (connection, _) = open_database(&path).unwrap();
     let row = connection

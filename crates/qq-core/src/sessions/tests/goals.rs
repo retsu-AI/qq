@@ -2045,7 +2045,7 @@ async fn goal_claim_storage_upgrades_goal_less_runs_without_rebinding() {
         ALTER TABLE runs DROP COLUMN goal_revision;
         ALTER TABLE runs DROP COLUMN goal_snapshot_json;
         ALTER TABLE runs DROP COLUMN origin_json;
-        UPDATE metadata SET value = '46' WHERE key = 'schema_version';",
+        UPDATE metadata SET value = '43' WHERE key = 'schema_version';",
         )
         .unwrap();
     drop(connection);
@@ -3694,105 +3694,6 @@ async fn pending_goal_request_recovery_poison_spend_without_charging_a_run() {
 }
 
 #[tokio::test]
-async fn goal_parent51_upgrade_retains_notices_and_process_receipts() {
-    let (directory, store, goal_claim) = model_goal_claim(false).await;
-    let run = goal_claim.identity.run_id;
-    let goal = goal_claim.goal.as_ref().unwrap().goal_id;
-    let (process, call, receipt) =
-        super::execution_context::process_call_fixture(&store, directory.path()).await;
-    store
-        .finish_tool_call(
-            &process,
-            call,
-            "exec exit=0\n".to_owned(),
-            false,
-            Vec::new(),
-            None,
-            None,
-            Some(Box::new(receipt.clone())),
-        )
-        .await
-        .unwrap();
-    store.close().await.unwrap();
-    let path = directory.path().join("sessions.sqlite3");
-    let connection = Connection::open(&path).unwrap();
-    let original: (String, String, String) = (
-        connection
-            .query_row(
-                "SELECT payload_json FROM session_goals WHERE goal_id=?1",
-                [goal.to_string()],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        connection
-            .query_row(
-                "SELECT goal_initial_notice FROM runs WHERE id=?1",
-                [run.to_string()],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        connection
-            .query_row(
-                "SELECT execution_context_json FROM tool_calls WHERE id=?1",
-                [call.to_string()],
-                |row| row.get(0),
-            )
-            .unwrap(),
-    );
-    assert_eq!(original.2, serde_json::to_string(&receipt).unwrap());
-    connection
-        .execute_batch(
-            "ALTER TABLE runs DROP COLUMN goal_paid_owner_run_id;
-        ALTER TABLE runs DROP COLUMN goal_request_pending;
-        ALTER TABLE runs DROP COLUMN goal_helper_admitted;
-        ALTER TABLE model_turns DROP COLUMN work_disposition;
-        UPDATE metadata SET value='51' WHERE key='schema_version';",
-        )
-        .unwrap();
-    drop(connection);
-    for _ in 0..2 {
-        let (connection, _) = open_database(&path).unwrap();
-        let preserved: (String, String, String) = (
-            connection
-                .query_row(
-                    "SELECT payload_json FROM session_goals WHERE goal_id=?1",
-                    [goal.to_string()],
-                    |row| row.get(0),
-                )
-                .unwrap(),
-            connection
-                .query_row(
-                    "SELECT goal_initial_notice FROM runs WHERE id=?1",
-                    [run.to_string()],
-                    |row| row.get(0),
-                )
-                .unwrap(),
-            connection
-                .query_row(
-                    "SELECT execution_context_json FROM tool_calls WHERE id=?1",
-                    [call.to_string()],
-                    |row| row.get(0),
-                )
-                .unwrap(),
-        );
-        assert_eq!(preserved, original);
-        let version: String = connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key='schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            version,
-            crate::sessions::store::STORE_SCHEMA_VERSION.to_string()
-        );
-        let proof: (bool, bool, Option<String>) = connection.query_row("SELECT goal_request_pending,goal_helper_admitted,goal_paid_owner_run_id FROM runs WHERE id=?1", [run.to_string()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
-        assert_eq!(proof, (false, false, None));
-    }
-}
-
-#[tokio::test]
 async fn goal_request_migration_refuses_bad_shapes_without_advancing_version() {
     for column in ["goal_request_pending", "goal_helper_admitted"] {
         for definition in ["TEXT", "INTEGER", "INTEGER NOT NULL DEFAULT 7"] {
@@ -3804,7 +3705,7 @@ async fn goal_request_migration_refuses_bad_shapes_without_advancing_version() {
                     "ALTER TABLE runs DROP COLUMN {column};
             ALTER TABLE runs ADD COLUMN {column} {definition};
             ALTER TABLE model_turns DROP COLUMN work_disposition;
-            UPDATE metadata SET value='51' WHERE key='schema_version';"
+            UPDATE metadata SET value='50' WHERE key='schema_version';"
                 ))
                 .unwrap();
             drop(connection);
@@ -5174,7 +5075,7 @@ fn paid_owner_schema_upgrades_and_rejects_bad_shapes_atomically() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("sessions.sqlite3");
         let (connection, _) = open_database(&path).unwrap();
-        connection.execute_batch("ALTER TABLE runs DROP COLUMN goal_paid_owner_run_id; UPDATE metadata SET value='52' WHERE key='schema_version';").unwrap();
+        connection.execute_batch("ALTER TABLE runs DROP COLUMN goal_paid_owner_run_id; UPDATE metadata SET value='50' WHERE key='schema_version';").unwrap();
         if let Some(definition) = definition {
             connection
                 .execute_batch(&format!(
@@ -5369,125 +5270,6 @@ async fn parent_deletion_preserves_unsettled_paid_child_then_detaches_settled_ch
     }).await.unwrap();
     assert_eq!(detached, (None, None, None));
     store.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn paid_owner_upgrade_reconstructs_pending_child_through_settled_ancestor() {
-    for mode in ["direct", "nested", "helper"] {
-        let nested = mode == "nested";
-        let (directory, store, parent) = model_goal_claim(false).await;
-        let session = parent.identity.session_id;
-        let child = store
-            .create_child_run(
-                &parent,
-                ToolCallId::generate().unwrap(),
-                ChildAdmission {
-                    reasoning_effort: None,
-                    profile: AgentProfileId::default(),
-                    model: parent.model.clone(),
-                    task: "delegated work".to_owned(),
-                    limits: RunLimits::default(),
-                    approval_mode: ApprovalMode::ReadOnly,
-                    purpose: SessionPurpose::Task,
-                    detached: true,
-                },
-            )
-            .await
-            .unwrap();
-        let grandchild = if nested {
-            let claim = store.claim_next_run(true).await.unwrap().unwrap();
-            assert_eq!(claim.identity.run_id, child.run_id);
-            let grandchild = store
-                .create_child_run(
-                    &claim,
-                    ToolCallId::generate().unwrap(),
-                    ChildAdmission {
-                        reasoning_effort: None,
-                        profile: AgentProfileId::default(),
-                        model: claim.model.clone(),
-                        task: "nested work".to_owned(),
-                        limits: RunLimits::default(),
-                        approval_mode: ApprovalMode::ReadOnly,
-                        purpose: SessionPurpose::Task,
-                        detached: true,
-                    },
-                )
-                .await
-                .unwrap();
-            store
-                .finish_run(
-                    &claim,
-                    RunOutcome::Completed,
-                    None,
-                    TeardownComplete::nothing_ran(),
-                )
-                .await
-                .unwrap();
-            Some(grandchild)
-        } else {
-            if mode == "helper" {
-                let owner = store.reserve_next_run(true).await.unwrap().unwrap();
-                assert_eq!(owner.identity.run_id, child.run_id);
-                store
-                    .start_auto_compaction(&owner, test_prepared_audit(&owner), None)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                store
-                    .finish_reserved_run(&owner, RunOutcome::Cancelled)
-                    .await
-                    .unwrap();
-            }
-            None
-        };
-        store
-            .finish_run(
-                &parent,
-                RunOutcome::Completed,
-                None,
-                TeardownComplete::nothing_ran(),
-            )
-            .await
-            .unwrap();
-        store.close().await.unwrap();
-        let path = directory.path().join("sessions.sqlite3");
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection.execute_batch("ALTER TABLE runs DROP COLUMN goal_paid_owner_run_id; UPDATE metadata SET value='52' WHERE key='schema_version';").unwrap();
-        drop(connection);
-        for _ in 0..2 {
-            let (connection, _) = open_database(&path).unwrap();
-            let anchor: Option<String> = connection
-                .query_row(
-                    "SELECT goal_paid_owner_run_id FROM runs WHERE id=?1",
-                    [child.run_id.to_string()],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(
-                anchor,
-                Some(parent.identity.run_id.to_string()),
-                "migration retains the captured root for pending descendant work"
-            );
-            if let Some(grandchild) = &grandchild {
-                let anchor: Option<String> = connection
-                    .query_row(
-                        "SELECT goal_paid_owner_run_id FROM runs WHERE id=?1",
-                        [grandchild.run_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                assert_eq!(anchor, Some(child.run_id.to_string()));
-            }
-            let goal = crate::sessions::goals::load_live(&connection, session)
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                goal.counters,
-                qq_protocol::GoalCounters::default(),
-                "migration never recharges settled ancestor runs"
-            );
-        }
-    }
 }
 
 #[tokio::test]
@@ -7387,7 +7169,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
 
 #[tokio::test]
 async fn goal_upgrade_preserves_deployed_notice_and_projection_bytes() {
-    for version in [47, 48, 49, 50] {
+    for version in [43, 50] {
         let (directory, store, claim) = claimed_store_fixture().await;
         let run = claim.identity.run_id.to_string();
         store.close().await.unwrap();
@@ -7395,7 +7177,7 @@ async fn goal_upgrade_preserves_deployed_notice_and_projection_bytes() {
         let connection = Connection::open(&path).unwrap();
         let projection = r#"{"version":1,"results":[{"call_id":"legacy-read","content":"exact retained reply","is_error":false}],"correction_notice":null}"#;
         crate::sessions::projection::SavedProjection::decode(projection).unwrap();
-        let notice = matches!(version, 48 | 50).then_some("root_stall_report");
+        let notice = (version == 50).then_some("root_stall_report");
         connection.execute("INSERT INTO model_turns(run_id,turn_ordinal,assistant_content_json,notice,tool_results_projection_json) VALUES(?1,1,'[]',?2,?3)", params![run,notice,projection]).unwrap();
         connection
             .execute_batch(
@@ -7413,7 +7195,7 @@ async fn goal_upgrade_preserves_deployed_notice_and_projection_bytes() {
             ALTER TABLE session_compactions DROP COLUMN goal_notice;",
             )
             .unwrap();
-        if matches!(version, 47 | 48) {
+        if version == 43 {
             connection
                 .execute_batch("ALTER TABLE model_turns DROP COLUMN tool_results_projection_json;")
                 .unwrap();
@@ -7440,7 +7222,7 @@ async fn goal_upgrade_preserves_deployed_notice_and_projection_bytes() {
                 actual,
                 (
                     notice.map(str::to_owned),
-                    matches!(version, 49 | 50).then(|| projection.to_owned()),
+                    (version == 50).then(|| projection.to_owned()),
                     None,
                     None
                 ),
@@ -8348,81 +8130,42 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
 }
 
 #[tokio::test]
-async fn goal_policy_migration_retains_legacy_unknown_and_rolls_back_bad_shapes() {
-    let (directory, store, claim) = model_goal_claim(true).await;
-    let goal = claim.goal.as_ref().unwrap().clone();
-    store.close().await.unwrap();
-    drop(store);
-    let path = directory.path().join("sessions.sqlite3");
-    let connection = Connection::open(&path).unwrap();
-    connection
-        .execute_batch(
-            "ALTER TABLE session_goals DROP COLUMN specification_at_ms;
-        ALTER TABLE session_goals DROP COLUMN policy_json;
-        UPDATE metadata SET value='57' WHERE key='schema_version';",
-        )
-        .unwrap();
-    drop(connection);
-    let (connection, _) = open_database(&path).unwrap();
-    assert_eq!(
-        crate::sessions::goals::load_live(&connection, goal.session_id)
-            .unwrap()
-            .unwrap(),
-        *goal
-    );
-    let (policy, at) = goal_policy::load(&connection, goal.goal_id).unwrap();
-    assert_eq!(policy, GoalPolicy::default());
-    assert_eq!(at, None);
-    policy
-        .validate_specification(&goal.budget, goal.check.as_ref(), at)
-        .unwrap();
-    assert!(matches!(
-        GoalPolicy {
-            max_duration_ms: 86_400_000,
-            ..policy
-        }
-        .validate_specification(&goal.budget, goal.check.as_ref(), at),
-        Err(SessionRuntimeError::InvalidGoal(
-            GoalValidationError::Budget
-        ))
-    ));
-    drop(connection);
-    for previous in [57, STORE_SCHEMA_VERSION] {
-        for definition in ["INTEGER", "TEXT"] {
-            let directory = TempDir::new().unwrap();
-            let path = directory.path().join("sessions.sqlite3");
-            let (connection, _) = open_database(&path).unwrap();
-            connection
-                .execute_batch(&format!(
-                    "ALTER TABLE session_goals DROP COLUMN specification_at_ms;
-                ALTER TABLE session_goals DROP COLUMN policy_json;
-                ALTER TABLE session_goals ADD COLUMN policy_json {definition};
-                UPDATE metadata SET value='{previous}' WHERE key='schema_version';"
-                ))
-                .unwrap();
-            drop(connection);
-            assert!(matches!(
-                open_database(&path),
-                Err(SessionRuntimeError::CONSTRAINT)
-            ));
-            let connection = Connection::open(&path).unwrap();
-            let version: String = connection
-                .query_row(
-                    "SELECT value FROM metadata WHERE key='schema_version'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(version, previous.to_string());
-            let columns: u32 = connection.query_row(
-                "SELECT count(*) FROM pragma_table_info('session_goals') WHERE name='specification_at_ms'",
-                [], |row| row.get(0)
-            ).unwrap();
-            assert_eq!(
-                columns, 0,
-                "a failed migration must roll back the new anchor column"
-            );
-        }
+async fn goal_policy_schema_rejects_bad_shapes_without_advancing_the_version() {
+    let previous = STORE_SCHEMA_VERSION;
+    for definition in ["INTEGER", "TEXT"] {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let (connection, _) = open_database(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "ALTER TABLE session_goals DROP COLUMN specification_at_ms;
+            ALTER TABLE session_goals DROP COLUMN policy_json;
+            ALTER TABLE session_goals ADD COLUMN policy_json {definition};
+            UPDATE metadata SET value='{previous}' WHERE key='schema_version';"
+            ))
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            open_database(&path),
+            Err(SessionRuntimeError::CONSTRAINT)
+        ));
+        let connection = Connection::open(&path).unwrap();
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, previous.to_string());
+        let columns: u32 = connection.query_row(
+            "SELECT count(*) FROM pragma_table_info('session_goals') WHERE name='specification_at_ms'",
+            [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(
+            columns, 0,
+            "a failed migration must roll back the new anchor column"
+        );
     }
 }
 

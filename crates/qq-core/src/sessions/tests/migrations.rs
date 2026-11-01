@@ -273,7 +273,7 @@ fn version_twenty_eight_migration_adds_the_spill_table_empty() {
     let (connection, _) = open_database(&path).unwrap();
     connection
         .execute_batch(
-            "UPDATE metadata SET value = '27' WHERE key = 'schema_version';
+            "UPDATE metadata SET value = '26' WHERE key = 'schema_version';
              DROP TABLE tool_spills;",
         )
         .unwrap();
@@ -340,7 +340,7 @@ fn version_thirty_migration_adds_the_messages_run_index() {
     let (connection, _) = open_database(&path).unwrap();
     connection
         .execute_batch(
-            "UPDATE metadata SET value = '29' WHERE key = 'schema_version';
+            "UPDATE metadata SET value = '28' WHERE key = 'schema_version';
              DROP INDEX messages_run_steering;",
         )
         .unwrap();
@@ -762,7 +762,7 @@ fn version_thirty_one_migration_keeps_old_runs_unrouted() {
         .unwrap();
     connection
         .execute(
-            "UPDATE metadata SET value = '30' WHERE key = 'schema_version'",
+            "UPDATE metadata SET value = '28' WHERE key = 'schema_version'",
             [],
         )
         .unwrap();
@@ -951,7 +951,7 @@ fn version_thirty_two_migration_preserves_legacy_model_pins() {
         .unwrap();
     connection
         .execute(
-            "UPDATE metadata SET value = '31' WHERE key = 'schema_version'",
+            "UPDATE metadata SET value = '28' WHERE key = 'schema_version'",
             [],
         )
         .unwrap();
@@ -1135,7 +1135,7 @@ fn version_forty_gains_the_child_delivery_table_and_rejects_a_bad_shape() {
     let (connection, _) = open_database(&path).unwrap();
     for statement in [
         "DROP TABLE child_deliveries",
-        "UPDATE metadata SET value = '40' WHERE key = 'schema_version'",
+        "UPDATE metadata SET value = '39' WHERE key = 'schema_version'",
     ] {
         connection.execute(statement, []).unwrap();
     }
@@ -1180,7 +1180,7 @@ fn version_forty_one_gains_the_child_report_table_and_rejects_a_bad_shape() {
     let (connection, _) = open_database(&path).unwrap();
     for statement in [
         "DROP TABLE child_reports",
-        "UPDATE metadata SET value = '41' WHERE key = 'schema_version'",
+        "UPDATE metadata SET value = '39' WHERE key = 'schema_version'",
     ] {
         connection.execute(statement, []).unwrap();
     }
@@ -1271,7 +1271,7 @@ fn version_forty_two_gains_the_prune_watermark_at_the_newest_turn() {
     for statement in [
         "ALTER TABLE sessions DROP COLUMN prune_through_ordinal",
         "ALTER TABLE sessions DROP COLUMN prune_through_turn",
-        "UPDATE metadata SET value = '42' WHERE key = 'schema_version'",
+        "UPDATE metadata SET value = '39' WHERE key = 'schema_version'",
     ] {
         connection.execute(statement, []).unwrap();
     }
@@ -1399,34 +1399,7 @@ fn ab5_store_open_rejects_the_next_schema_before_loading_sessions() {
 }
 
 #[test]
-fn ab5_schema_forty_five_migrates_once_to_fifty() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("sessions.sqlite3");
-    let (connection, _) = open_database(&path).unwrap();
-    connection
-        .execute(
-            "UPDATE metadata SET value='45' WHERE key='schema_version'",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    for _ in 0..2 {
-        let (connection, _) = open_database(&path).unwrap();
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT value FROM metadata WHERE key='schema_version'",
-                    [],
-                    |row| row.get::<_, String>(0)
-                )
-                .unwrap(),
-            STORE_SCHEMA_VERSION.to_string()
-        );
-    }
-}
-
-#[test]
-fn ab5_schema_forty_nine_notice_migration_preserves_structure_and_store_identity() {
+fn migrating_a_v0_1_6_store_keeps_its_structure_and_store_identity() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let (connection, store_id) = open_database(&path).unwrap();
@@ -1445,7 +1418,7 @@ fn ab5_schema_forty_nine_notice_migration_preserves_structure_and_store_identity
         .unwrap();
     connection
         .execute(
-            "UPDATE metadata SET value='49' WHERE key='schema_version'",
+            "UPDATE metadata SET value='43' WHERE key='schema_version'",
             [],
         )
         .unwrap();
@@ -1470,7 +1443,7 @@ fn ab5_schema_forty_nine_notice_migration_preserves_structure_and_store_identity
             .unwrap();
         assert_eq!(
             current, structure,
-            "notice migration must not change receipt or accounting structure"
+            "migrations from schema 43 must not change an already-current structure"
         );
         let version: String = connection
             .query_row(
@@ -1520,7 +1493,7 @@ fn ab5_schema_fifty_cannot_hide_a_missing_execution_receipt_column() {
 
 #[tokio::test]
 async fn a_store_with_retired_supervised_mode_opens_and_replays_as_auto() {
-    for schema in [61, 63] {
+    for schema in [58] {
         retired_supervised_mode_upgrades_from(schema).await;
     }
 }

@@ -6329,7 +6329,7 @@ fn owned_compaction_index_migration_failure_preserves_previous_version() {
     let directory = test_directory();
     let path = directory.path().join("owner-index-failure.sqlite");
     let (connection, _) = open_database(&path).unwrap();
-    connection.execute_batch("DROP INDEX runs_owned_compaction; UPDATE metadata SET value = '45' WHERE key = 'schema_version'; CREATE TABLE runs_owned_compaction(protected TEXT); INSERT INTO runs_owned_compaction VALUES ('retained');").unwrap();
+    connection.execute_batch("DROP INDEX runs_owned_compaction; UPDATE metadata SET value = '43' WHERE key = 'schema_version'; CREATE TABLE runs_owned_compaction(protected TEXT); INSERT INTO runs_owned_compaction VALUES ('retained');").unwrap();
     drop(connection);
     assert!(open_database(&path).is_err());
     let connection = Connection::open(&path).unwrap();
@@ -6354,7 +6354,7 @@ fn owned_compaction_index_rejects_wrong_existing_predicate() {
     let directory = test_directory();
     let path = directory.path().join("wrong-owner-index.sqlite");
     let (connection, _) = open_database(&path).unwrap();
-    connection.execute_batch("DROP INDEX runs_owned_compaction; CREATE INDEX runs_owned_compaction ON runs(auto_compaction_for_run_id) WHERE kind = 'prompt'; UPDATE metadata SET value = '45' WHERE key = 'schema_version';").unwrap();
+    connection.execute_batch("DROP INDEX runs_owned_compaction; CREATE INDEX runs_owned_compaction ON runs(auto_compaction_for_run_id) WHERE kind = 'prompt'; UPDATE metadata SET value = '43' WHERE key = 'schema_version';").unwrap();
     drop(connection);
     assert!(open_database(&path).is_err());
     let connection = Connection::open(&path).unwrap();
@@ -6368,7 +6368,7 @@ fn owned_compaction_index_rejects_wrong_existing_predicate() {
     assert_eq!(version, "45");
     connection
         .execute(
-            "UPDATE metadata SET value = '46' WHERE key = 'schema_version'",
+            "UPDATE metadata SET value = '43' WHERE key = 'schema_version'",
             [],
         )
         .unwrap();

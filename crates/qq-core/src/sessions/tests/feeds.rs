@@ -546,7 +546,7 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
                 .execute_batch(
                     "DROP TRIGGER tool_calls_clear_approval_inputs;
                 ALTER TABLE tool_calls DROP COLUMN approval_inputs_json;
-                UPDATE metadata SET value='60' WHERE key='schema_version';",
+                UPDATE metadata SET value='58' WHERE key='schema_version';",
                 )
                 .unwrap();
             if missing {
@@ -787,7 +787,7 @@ async fn terminal_receipts_remain_scoped_and_recover_from_legacy_delivery_histor
                 "DROP INDEX runs_completion;
             ALTER TABLE runs DROP COLUMN completion_json;
             ALTER TABLE runs DROP COLUMN completion_sequence;
-            UPDATE metadata SET value='61' WHERE key='schema_version';",
+            UPDATE metadata SET value='58' WHERE key='schema_version';",
             )
             .unwrap();
         if missing {
@@ -1189,7 +1189,7 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
     legacy.execute_batch("DROP TRIGGER event_journal_insert; DROP TRIGGER event_journal_delete; DROP TRIGGER event_journal_update;
         DROP TABLE event_journal_usage; DROP INDEX messages_run_reply;
         DROP INDEX message_chunks_delivery; ALTER TABLE messages DROP COLUMN chunks_ordered;
-        UPDATE metadata SET value='62' WHERE key='schema_version';").unwrap();
+        UPDATE metadata SET value='58' WHERE key='schema_version';").unwrap();
     drop(legacy);
     let (migrated, _) = store::open_database(&legacy_path).unwrap();
     let (rows, bytes): (u64, u64) = migrated

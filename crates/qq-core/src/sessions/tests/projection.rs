@@ -121,7 +121,7 @@ async fn historical_projection_fixture(version: u16) {
         } else {
             store.close().await.unwrap();
             let connection = Connection::open(&path).unwrap();
-            connection.execute_batch("ALTER TABLE model_turns DROP COLUMN tool_results_projection_json; UPDATE metadata SET value='47' WHERE key='schema_version'").unwrap();
+            connection.execute_batch("ALTER TABLE model_turns DROP COLUMN tool_results_projection_json; UPDATE metadata SET value='43' WHERE key='schema_version'").unwrap();
             drop(connection);
             reopened = Store::open(path.clone()).await.unwrap();
             &reopened
@@ -466,7 +466,7 @@ fn ab2_projection_migration_preserves_old_rows_and_refuses_incompatible_stores()
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let (connection, _) = open_database(&path).unwrap();
-    connection.execute_batch("ALTER TABLE model_turns DROP COLUMN tool_results_projection_json; UPDATE metadata SET value='47' WHERE key='schema_version'").unwrap();
+    connection.execute_batch("ALTER TABLE model_turns DROP COLUMN tool_results_projection_json; UPDATE metadata SET value='43' WHERE key='schema_version'").unwrap();
     drop(connection);
     let (connection, _) = open_database(&path).unwrap();
     assert!(has_column(&connection, "model_turns", "tool_results_projection_json").unwrap());
@@ -480,48 +480,11 @@ fn ab2_projection_migration_preserves_old_rows_and_refuses_incompatible_stores()
             .unwrap(),
         STORE_SCHEMA_VERSION.to_string()
     );
-    drop(connection);
-    let (connection, _) = open_database(&path).unwrap();
-    connection
-        .execute_batch("UPDATE metadata SET value='48' WHERE key='schema_version'")
-        .unwrap();
-    drop(connection);
-    let connection = if crate::runtime::TurnNotice::from_stored("root_stall_report").is_some() {
-        let (connection, _) = open_database(&path).unwrap();
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT value FROM metadata WHERE key='schema_version'",
-                    [],
-                    |row| row.get::<_, String>(0)
-                )
-                .unwrap(),
-            STORE_SCHEMA_VERSION.to_string()
-        );
-        connection
-    } else {
-        assert!(
-            open_database(&path).is_err(),
-            "experimental notice schema requires its notice decoder"
-        );
-        let connection = Connection::open(&path).unwrap();
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT value FROM metadata WHERE key='schema_version'",
-                    [],
-                    |row| row.get::<_, String>(0)
-                )
-                .unwrap(),
-            "48"
-        );
-        connection
-    };
-    connection.execute_batch("UPDATE metadata SET value='49' WHERE key='schema_version'; ALTER TABLE model_turns DROP COLUMN tool_results_projection_json").unwrap();
+    connection.execute_batch("UPDATE metadata SET value='50' WHERE key='schema_version'; ALTER TABLE model_turns DROP COLUMN tool_results_projection_json").unwrap();
     drop(connection);
     assert!(
         open_database(&path).is_err(),
-        "claimed schema49 cannot omit projection storage"
+        "a schema 50 store cannot omit projection storage"
     );
 }
 
@@ -676,7 +639,7 @@ async fn checkpoint_without_exact_projection_fails_closed(reviewed: bool) {
     Connection::open(&path)
         .unwrap()
         .execute(
-            "UPDATE metadata SET value='60' WHERE key='schema_version'",
+            "UPDATE metadata SET value='58' WHERE key='schema_version'",
             [],
         )
         .unwrap();
