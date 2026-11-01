@@ -71,6 +71,7 @@ pub(super) struct StartedWorker {
 
 pub(super) fn start(
     path: PathBuf,
+    ownership_wait: std::time::Duration,
     feed: std::sync::Arc<feed::WorkspaceFeed>,
 ) -> Result<StartedWorker, SessionRuntimeError> {
     let (control, control_rx) = bounded(CONTROL_QUEUE_CAPACITY);
@@ -90,7 +91,7 @@ pub(super) fn start(
             crate::sessions::codec::TEST_EPOCH.with(|slot| slot.replace(epoch));
             #[cfg(test)]
             let _clock = clock.as_ref().map(tokio::runtime::Handle::enter);
-            let ownership = acquire_ownership(&path);
+            let ownership = acquire_ownership(&path, ownership_wait);
             match ownership.and_then(|ownership| open_database(&path).map(|db| (ownership, db))) {
                 Ok((ownership, (mut connection, store_id))) => {
                     let _ = ready_tx.send(Ok(store_id));
