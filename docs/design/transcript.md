@@ -481,6 +481,11 @@ terminal background. Fenced code in answers keeps its `surface` panel
 - **Diffs** show line numbers in `faint` and `+`/`-` signs and text in the
   diff colors, the same rows the approval panel draws
   (`overlay::dock_diff_lines`).
+- **The newest edit of a running turn** shows its diff under its row
+  without being expanded, at most 8 rows (`MAX_TOOL_DIFF_ROWS`) plus a
+  `… N more lines` row, once the call has a diff. Older edits, and every
+  edit once the run settles, keep only the row until they are opened; a
+  newer edit still waiting or running hides the older one's diff.
 - **Live output** of a running command renders on the same rail from the
   first frame, so nothing jumps when the call completes.
 - There is no timing line; the summary row carries the duration.
@@ -492,7 +497,9 @@ terminal background. Fenced code in answers keeps its `surface` panel
 Two sources render as unified diffs with per-line coloring:
 
 - `EditPreview.diff` in the dock's approval panel (carried on
-  `ToolApprovalRequested`), at most 8 rows.
+  `ToolApprovalRequested`), at most 8 rows. `e` swaps the preview for the
+  whole diff, windowed to the panel's height with a `faint`
+  `1–17 of 30 · PgUp PgDn` row; `e` or `Esc` swaps it back.
 - Completed `edit_file`/`write_file` calls at the expanded tool detail
   level, from the call's `display` payload — an extensible tagged
   snapshot field (first variant: diff) persisted alongside the result,
@@ -500,12 +507,18 @@ Two sources render as unified diffs with per-line coloring:
   model context and the session context budget. The model sees the
   summary result string; the transcript sees the diff. The approval
   preview and the persisted display share one diff builder with two
-  bounds (2 KiB per side for previews, 32 KiB per side persisted, same
-  truncation marker). Diff-shaped results without a payload (shell
+  bounds (32 KiB per side for previews, 32 KiB per side persisted, same
+  truncation marker). The preview bound is half the 64 KiB tool-argument
+  bound, so the approval's full diff (`e`) shows the whole change for
+  ordinary calls. Diff-shaped results without a payload (shell
   output, legacy stores) still color via shape detection.
 
 Coloring: `+` lines green, `-` lines red, context lines normal, line
 numbers `faint`; `@@` hunk headers set the line numbers and are not drawn.
+When a run of removed lines is followed by the same number of added lines,
+each pair's changed words (the span between the common leading and
+trailing words) are drawn in inverse video. A pair that differs in every
+word gets no inverse span.
 Diff lines are literal (no reflow). Fenced blocks tagged ` ```diff ` render
 inside the code panel instead, where the add/remove backgrounds win over
 the panel surface.

@@ -1018,11 +1018,22 @@ pub(super) fn dock_keys(app: &App) -> Option<Vec<(&'static str, &'static str)>> 
             let edit = app
                 .pending_approval()
                 .is_some_and(|call| matches!(call.name.as_str(), "edit_file" | "write_file"));
-            Some(if edit {
+            let mut keys = if edit {
                 vec![("y", "apply"), ("n", "deny"), ("Y / N", "with a note")]
             } else {
                 vec![("y", "allow"), ("n", "deny"), ("Y / N", "with a note")]
-            })
+            };
+            if app
+                .pending_approval_preview()
+                .is_some_and(|preview| preview.edit.is_some())
+            {
+                keys.push(if app.approval_diff_start().is_some() {
+                    ("e", "short diff")
+                } else {
+                    ("e", "full diff")
+                });
+            }
+            Some(keys)
         }
         Mode::GoalForm => Some(match &app.overlay {
             Some(crate::input::Overlay::GoalForm(form)) if form.confirm => {

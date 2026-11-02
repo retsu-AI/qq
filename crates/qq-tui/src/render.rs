@@ -16,6 +16,7 @@ impl Attributes {
     const DIM: u8 = 1 << 1;
     const ITALIC: u8 = 1 << 2;
     const UNDERLINE: u8 = 1 << 3;
+    const REVERSE: u8 = 1 << 4;
 
     const fn has(self, flag: u8) -> bool {
         self.0 & flag != 0
@@ -62,6 +63,11 @@ impl Style {
         self
     }
 
+    pub(crate) const fn reversed(mut self) -> Self {
+        self.attributes.0 |= Attributes::REVERSE;
+        self
+    }
+
     #[cfg(test)]
     pub(crate) const fn is_bold(self) -> bool {
         self.attributes.has(Attributes::BOLD)
@@ -80,6 +86,11 @@ impl Style {
     #[cfg(test)]
     pub(crate) const fn is_underline(self) -> bool {
         self.attributes.has(Attributes::UNDERLINE)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn is_reversed(self) -> bool {
+        self.attributes.has(Attributes::REVERSE)
     }
 }
 
@@ -380,6 +391,9 @@ pub(crate) fn write_line(
             if added.has(Attributes::UNDERLINE) {
                 queue!(output, SetAttribute(Attribute::Underlined))?;
             }
+            if added.has(Attributes::REVERSE) {
+                queue!(output, SetAttribute(Attribute::Reverse))?;
+            }
             current = next;
         }
         if span
@@ -448,6 +462,18 @@ mod tests {
         let out = bytes(&line);
         assert_eq!(
             out, "\x1b[38;5;9msee \x1b[4mhere\x1b[0m\x1b[38;5;9m now",
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn reverse_video_is_emitted_for_its_span_and_cleared_by_a_reset() {
+        let mut line = Line::styled("a ", Style::color(Color::Red));
+        line.push("<=", Style::color(Color::Red).reversed());
+        line.push(" b", Style::color(Color::Red));
+        let out = bytes(&line);
+        assert_eq!(
+            out, "\x1b[38;5;9ma \x1b[7m<=\x1b[0m\x1b[38;5;9m b",
             "{out:?}"
         );
     }

@@ -136,6 +136,7 @@ pub(crate) struct FrameRenderer {
     theme_generation: u64,
     pane_updates: Vec<(usize, PaneUpdate)>,
     goal_scroll: Option<usize>,
+    approval_diff: Option<(usize, usize)>,
     cursor: Option<CursorPosition>,
     transcript_area: Option<crate::selection::Area>,
     rail_area: Option<crate::selection::Area>,
@@ -159,6 +160,12 @@ impl FrameRenderer {
     pub(crate) fn commit(&mut self, app: &mut App) {
         if let Some(scroll) = self.goal_scroll.take() {
             app.goal_scroll = scroll;
+        }
+        if let Some((start, window)) = self.approval_diff.take()
+            && let Some((_, committed)) = app.approval_diff.as_mut()
+        {
+            *committed = start;
+            app.approval_diff_page = window;
         }
         app.geometry.transcript = self.transcript_area;
         app.geometry.rail = self.rail_area;
@@ -309,6 +316,7 @@ impl FrameRenderer {
         let panel_limit = height.saturating_sub(fixed_rows + draft_lines.len()) / 2;
         let (panel, goal_scroll) = dock_panel(app, dock_width, panel_limit.max(1));
         self.goal_scroll = goal_scroll;
+        self.approval_diff = approval_diff_window(app, panel_limit.max(1));
         let mut dock: Vec<Line> = Vec::new();
         dock.push(Line::default());
         dock.extend(panel);

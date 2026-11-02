@@ -126,16 +126,16 @@ fn transcript_rows(size: (u16, u16)) -> usize {
 
 #[test]
 fn dropping_the_header_and_strip_gives_the_transcript_more_rows() {
-    let compact_v0_1_11 = 24 - 1 - 1 - 3;
+    let compact_v0_1_10 = 24 - 1 - 1 - 3;
     assert!(
-        transcript_rows((80, 24)) >= compact_v0_1_11 + 2,
-        "80x24 transcript has {} rows; v0.1.11 had {compact_v0_1_11}",
+        transcript_rows((80, 24)) >= compact_v0_1_10 + 2,
+        "80x24 transcript has {} rows; v0.1.10 had {compact_v0_1_10}",
         transcript_rows((80, 24))
     );
-    let regular_v0_1_11 = 40 - 1 - 3;
+    let regular_v0_1_10 = 40 - 1 - 3;
     assert!(
-        transcript_rows((120, 40)) > regular_v0_1_11,
-        "120x40 transcript has {} rows; v0.1.11 had {regular_v0_1_11}",
+        transcript_rows((120, 40)) > regular_v0_1_10,
+        "120x40 transcript has {} rows; v0.1.10 had {regular_v0_1_10}",
         transcript_rows((120, 40))
     );
 }

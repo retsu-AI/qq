@@ -56,5 +56,5 @@
     41 -      while column <= width {
     41 +      while column < width {
     42            column += 1;
-  ┃ y apply   n deny   Y / N with a note
+  ┃ y apply   n deny   Y / N with a note   e full diff
     Session 0 · gpt-test                                                                                                                          /workspace

@@ -501,7 +501,7 @@ fn display_payload_diffs_replace_the_result_summary_at_expanded_detail() {
     );
     call.display = Some(ToolCallDisplay::Diff {
         path: "src/lib.rs".to_owned(),
-        diff: "- old line\n+ new line\n".to_owned(),
+        diff: "- old line\n+ fresh text\n".to_owned(),
     });
 
     let lines = render_tool_calls_simple(
@@ -520,7 +520,7 @@ fn display_payload_diffs_replace_the_result_summary_at_expanded_detail() {
             .map(|span| span.style)
     };
     assert_eq!(style_of("old line"), Some(failure()));
-    assert_eq!(style_of("new line"), Some(success()));
+    assert_eq!(style_of("fresh text"), Some(success()));
     assert!(style_of("replaced 1 occurrence").is_none());
 
     let lines = render_tool_calls_simple(
@@ -1103,6 +1103,7 @@ fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
         },
         expanded: true,
         inline_detail: false,
+        inline_diff: false,
         fold: false,
         selected: false,
         scroll: None,
@@ -1274,6 +1275,7 @@ fn denied_and_interrupted_keep_their_reason_and_outcomes_expand_to_full_output()
             },
             expanded: true,
             inline_detail,
+            inline_diff: false,
             fold: false,
             selected: false,
             scroll: None,
@@ -1316,6 +1318,7 @@ fn expanded_outcomes_window_the_whole_tail_without_repeating_the_exit() {
         },
         expanded: true,
         inline_detail: true,
+        inline_diff: false,
         fold: false,
         selected: false,
         scroll: None,
@@ -1744,6 +1747,7 @@ fn tool_metrics_sit_two_columns_after_the_subject_at_every_width() {
         },
         expanded: false,
         inline_detail: true,
+        inline_diff: false,
         fold: false,
         selected: false,
         scroll: None,
@@ -1780,6 +1784,7 @@ fn narrow_tool_rows_drop_the_duration_then_the_metric_before_the_verb() {
         },
         expanded: false,
         inline_detail: true,
+        inline_diff: false,
         fold: false,
         selected: false,
         scroll: None,
@@ -3845,6 +3850,7 @@ fn expanded_call_rows(call: &ToolCallSnapshot, width: usize) -> Vec<Line> {
         },
         expanded: true,
         inline_detail: true,
+        inline_diff: false,
         fold: false,
         selected: false,
         scroll: None,
@@ -4103,6 +4109,7 @@ fn every_expanded_result_is_a_window_of_its_rows_plus_one_position_row() {
         },
         expanded: true,
         inline_detail: true,
+        inline_diff: false,
         fold: false,
         selected: false,
         scroll: Some(usize::MAX),
@@ -5473,6 +5480,7 @@ fn a_tool_row_reuses_its_panel_across_frames_and_relays_out_on_a_new_width() {
         },
         expanded: true,
         inline_detail: true,
+        inline_diff: false,
         fold: false,
         selected: false,
         scroll: None,
@@ -6622,4 +6630,324 @@ fn the_focused_agent_keeps_a_rail_row_past_the_agent_cap() {
         "{rail:#?}"
     );
     assert!(rail.iter().any(|row| row == "+3 more"), "{rail:#?}");
+}
+
+fn edit_call(byte: u8, run_id: RunId, path: &str, diff: &str) -> ToolCallSnapshot {
+    let mut call = tool_call_snapshot(
+        byte,
+        "edit_file",
+        &format!(r#"{{"path":"{path}"}}"#),
+        ToolCallState::Completed,
+        Some("edited"),
+        false,
+    );
+    call.run_id = run_id;
+    call.display = Some(ToolCallDisplay::Diff {
+        path: path.to_owned(),
+        diff: diff.to_owned(),
+    });
+    call
+}
+
+#[test]
+fn the_newest_edit_of_a_running_turn_shows_its_diff_inline_and_older_edits_do_not() {
+    let (mut app, session_id, run_id, _) = running_view_app();
+    app.sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .messages
+        .as_mut()
+        .unwrap()[0]
+        .run_id = run_id;
+    let long: String = (0..12).map(|index| format!("+added {index}\n")).collect();
+    app.sessions.get_mut(&session_id).unwrap().tool_calls = Some(vec![
+        edit_call(
+            0x61,
+            run_id,
+            "src/old.rs",
+            "@@ -1 +1 @@\n-older_call()\n+older_fix()\n",
+        ),
+        edit_call(
+            0x62,
+            run_id,
+            "src/new.rs",
+            &format!("@@ -0,0 +1,12 @@\n{long}"),
+        ),
+    ]);
+
+    let rows = squashed_rows(&transcript_lines(&app, 100));
+
+    assert!(
+        !rows.iter().any(|row| row.contains("older_fix")),
+        "an older edit keeps only its row: {rows:#?}"
+    );
+    let header = rows
+        .iter()
+        .position(|row| row.contains("src/new.rs"))
+        .expect("newest edit row");
+    assert_eq!(
+        rows[header + 1..header + 10],
+        [
+            "│ 1 + added 0",
+            "│ 2 + added 1",
+            "│ 3 + added 2",
+            "│ 4 + added 3",
+            "│ 5 + added 4",
+            "│ 6 + added 5",
+            "│ 7 + added 6",
+            "│ 8 + added 7",
+            "│ … 4 more lines",
+        ],
+        "{rows:#?}"
+    );
+
+    let mut running = tool_call_snapshot(
+        0x64,
+        "edit_file",
+        r#"{"path":"src/next.rs"}"#,
+        ToolCallState::Running,
+        None,
+        false,
+    );
+    running.run_id = run_id;
+    app.sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .tool_calls
+        .as_mut()
+        .unwrap()
+        .push(running);
+    let rows = squashed_rows(&transcript_lines(&app, 100));
+    assert!(
+        rows.iter().any(|row| row.contains("src/next.rs")),
+        "{rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("added 0")),
+        "a newer edit in flight hides the previous diff: {rows:#?}"
+    );
+}
+
+#[test]
+fn a_settled_turn_drops_the_inline_diff() {
+    let (mut app, session_id, run_id, _) = running_view_app();
+    app.sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .messages
+        .as_mut()
+        .unwrap()[0]
+        .run_id = run_id;
+    app.sessions.get_mut(&session_id).unwrap().tool_calls = Some(vec![edit_call(
+        0x63,
+        run_id,
+        "src/lib.rs",
+        "@@ -1 +1 @@\n-before()\n+after()\n",
+    )]);
+    let mut renderer = FrameRenderer::default();
+    let running = squashed_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    assert!(
+        running.iter().any(|row| row.contains("+ after()")),
+        "{running:#?}"
+    );
+
+    let session = app.sessions.get_mut(&session_id).unwrap();
+    session.summary.status = SessionStatus::Idle;
+    session.summary.active_run_id = None;
+    let settled = squashed_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    assert!(
+        settled.iter().any(|row| row.contains("src/lib.rs")),
+        "{settled:#?}"
+    );
+    assert!(
+        !settled.iter().any(|row| row.contains("after()")),
+        "{settled:#?}"
+    );
+}
+
+#[test]
+fn changed_words_inside_a_paired_diff_line_are_in_inverse_video() {
+    let diff = "@@ -41 +41 @@\n-    while column <= width {\n+    while column < width {\n";
+    let lines = super::overlay::dock_diff_lines(diff, 8, 60);
+    let reversed = |line: &Line| -> Vec<String> {
+        line.spans
+            .iter()
+            .filter(|span| span.style.is_reversed())
+            .map(|span| span.text.clone())
+            .collect()
+    };
+    assert_eq!(reversed(&lines[0]), ["<="]);
+    assert_eq!(reversed(&lines[1]), ["<"]);
+    assert_eq!(
+        squashed_rows(&lines),
+        [
+            " 41 - while column <= width {",
+            " 41 + while column < width {"
+        ]
+    );
+
+    let whole = super::overlay::dock_diff_lines("@@ -1 +1 @@\n-alpha\n+omega\n", 8, 60);
+    assert!(whole.iter().all(|line| reversed(line).is_empty()));
+    let unpaired =
+        super::overlay::dock_diff_lines("@@ -1 +1,2 @@\n-one two\n+one three\n+four\n", 8, 60);
+    assert!(unpaired.iter().all(|line| reversed(line).is_empty()));
+}
+
+fn app_with_edit_approval(diff: &str) -> App {
+    let mut app = app_with_messages(1);
+    let session_id = app.focused().unwrap();
+    let tool_call = tool_call_snapshot(
+        9,
+        "edit_file",
+        r#"{"path":"src/lib.rs"}"#,
+        ToolCallState::AwaitingApproval,
+        None,
+        false,
+    );
+    app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(tool_call.run_id),
+        occurred_at_ms: 2,
+        ..fixtures::envelope(
+            2,
+            session_id,
+            SessionEvent::ToolApprovalRequested {
+                tool_call,
+                shell: None,
+                edit: Some(qq_protocol::EditPreview {
+                    path: "src/lib.rs".to_owned(),
+                    diff: diff.to_owned(),
+                }),
+                question: None,
+                fetch: None,
+            },
+        )
+    }));
+    app
+}
+
+#[test]
+fn e_opens_the_whole_approval_diff_in_the_dock_and_pages_it() {
+    let body: String = (1..=30).map(|index| format!("+line {index}\n")).collect();
+    let mut app = app_with_edit_approval(&format!("@@ -0,0 +1,30 @@\n{body}"));
+    let key = |code| TerminalEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    let mut renderer = FrameRenderer::default();
+    let mut draw = |app: &mut App| squashed_rows(&renderer.frame_and_commit(app, 80, 40));
+
+    let short = draw(&mut app);
+    assert!(
+        short.iter().any(|row| row.ends_with("e full diff")),
+        "{short:#?}"
+    );
+    assert!(short.iter().any(|row| row.contains("… 22 more lines")));
+
+    app.handle_terminal_event(key(KeyCode::Char('e')));
+    let full = draw(&mut app);
+    assert!(
+        full.iter().any(|row| row.ends_with("e short diff")),
+        "{full:#?}"
+    );
+    assert!(
+        full.iter().any(|row| row.contains("1 + line 1")),
+        "{full:#?}"
+    );
+    assert!(
+        full.iter().any(|row| row == " 1–17 of 30 · PgUp PgDn"),
+        "{full:#?}"
+    );
+
+    app.handle_terminal_event(key(KeyCode::PageDown));
+    let paged = draw(&mut app);
+    assert!(
+        paged.iter().any(|row| row == " 14–30 of 30 · PgUp PgDn"),
+        "{paged:#?}"
+    );
+    assert!(
+        paged.iter().any(|row| row.contains("30 + line 30")),
+        "{paged:#?}"
+    );
+
+    let (_, requests) = app.handle_terminal_event(key(KeyCode::Esc)).split();
+    assert!(requests.is_empty(), "Esc closes the diff, it does not deny");
+    let closed = draw(&mut app);
+    assert!(
+        closed.iter().any(|row| row.ends_with("e full diff")),
+        "{closed:#?}"
+    );
+    assert_eq!(app.mode(), Mode::Approval);
+
+    let (_, requests) = app.handle_terminal_event(key(KeyCode::Char('y'))).split();
+    assert!(matches!(
+        requests.as_slice(),
+        [ClientRequest::Command(CommandRequest {
+            command: SessionCommand::RespondToolApproval {
+                decision: qq_protocol::ApprovalDecision::ApproveOnce,
+                ..
+            },
+            ..
+        })]
+    ));
+}
+
+#[test]
+fn approvals_without_an_edit_preview_offer_no_full_diff_key() {
+    let mut app = app_with_messages(1);
+    let session_id = app.focused().unwrap();
+    app.sessions.upsert_tool_call(ToolCallSnapshot {
+        state: ToolCallState::AwaitingApproval,
+        ..fixtures::tool_call(ToolCallId::from_bytes([7; 16]), session_id, "shell")
+    });
+    let rows = squashed_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
+    assert!(rows.iter().any(|row| row.contains("y allow")), "{rows:#?}");
+    assert!(
+        !rows.iter().any(|row| row.contains("full diff")),
+        "{rows:#?}"
+    );
+    let (_, requests) = app
+        .handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::NONE,
+        )))
+        .split();
+    assert!(requests.is_empty());
+}
+
+#[test]
+fn the_inline_diff_follows_call_order_not_snapshot_order() {
+    let (mut app, session_id, run_id, _) = running_view_app();
+    app.sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .messages
+        .as_mut()
+        .unwrap()[0]
+        .run_id = run_id;
+    let mut newer = tool_call_snapshot(
+        0x65,
+        "edit_file",
+        r#"{"path":"src/newer.rs"}"#,
+        ToolCallState::Requested,
+        None,
+        false,
+    );
+    newer.run_id = run_id;
+    newer.turn_ordinal = 2;
+    let mut older = edit_call(
+        0x66,
+        run_id,
+        "src/older.rs",
+        "@@ -1 +1 @@\n-was()\n+now()\n",
+    );
+    older.turn_ordinal = 1;
+    app.sessions.get_mut(&session_id).unwrap().tool_calls = Some(vec![newer, older]);
+
+    let rows = squashed_rows(&transcript_lines(&app, 100));
+
+    assert!(
+        rows.iter().any(|row| row.contains("src/older.rs")),
+        "{rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("now()")),
+        "the newer edit in flight wins even when it is listed first: {rows:#?}"
+    );
 }
