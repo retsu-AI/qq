@@ -1315,7 +1315,7 @@ async fn a_store_older_than_the_first_release_fails_to_open_naming_its_schema() 
 }
 
 #[test]
-fn ab5_store_open_rejects_the_next_schema_before_loading_sessions() {
+fn store_open_rejects_the_next_schema_before_loading_sessions() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let (connection, _) = open_database(&path).unwrap();
@@ -1403,7 +1403,7 @@ fn migrating_a_v0_1_6_store_keeps_its_structure_and_store_identity() {
 }
 
 #[test]
-fn ab5_schema_fifty_cannot_hide_a_missing_execution_receipt_column() {
+fn schema_fifty_cannot_hide_a_missing_execution_receipt_column() {
     for previous in [50, STORE_SCHEMA_VERSION] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sessions.sqlite3");
@@ -1836,4 +1836,138 @@ async fn a_schema_64_store_with_reviewer_delegate_and_grant_state_opens_and_repl
             .unwrap();
         assert_eq!(parse_approval_resolution(&stored).unwrap(), expected);
     }
+}
+
+async fn store_with_one_spill(
+    directory: &std::path::Path,
+    text: &str,
+) -> (Store, SessionId, ToolCallId, String) {
+    let store = Store::open(directory.join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let resolved = store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::ResolveWorkspace {
+                path: directory.to_str().unwrap().to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
+        panic!("unexpected receipt")
+    };
+    let created = store
+        .command(
+            CommandId::generate().unwrap(),
+            create_session_command(workspace_id, None, ApprovalMode::default()),
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
+        panic!("unexpected receipt")
+    };
+    let (tool_call_id, digest) = spill_one_call(&store, session_id, text, "first").await;
+    (store, session_id, tool_call_id, digest)
+}
+
+async fn spill_one_call(
+    store: &Store,
+    session_id: SessionId,
+    text: &str,
+    prompt: &str,
+) -> (ToolCallId, String) {
+    store_command(store, session_id, prompt).await.unwrap();
+    let claimed = store.claim_next_run(false).await.unwrap().unwrap();
+    let tool_call_id = ToolCallId::generate().unwrap();
+    let call = RuntimeToolCall {
+        id: tool_call_id,
+        turn_ordinal: 1,
+        call_ordinal: 1,
+        provider_call_id: "call_0".to_owned(),
+        name: "read_file".to_owned(),
+        effect: crate::catalog::EffectClass::ReadOnly,
+        arguments: r#"{"path":"big.txt"}"#.to_owned(),
+        rejection: None,
+    };
+    store
+        .persist_model_turn(
+            &claimed,
+            TurnCommit::new(
+                1,
+                Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::ToolCall {
+                        id: call.provider_call_id.clone(),
+                        name: call.name.clone(),
+                        arguments: serde_json::from_str(&call.arguments).unwrap(),
+                    }],
+                ),
+            )
+            .calls(vec![call])
+            .build(),
+        )
+        .await
+        .unwrap();
+    store.start_tool_call(&claimed, tool_call_id).await.unwrap();
+    let digest = crate::workspace::content_hash(text.as_bytes());
+    let handle = format!(
+        "t:read_file:{}:{}",
+        &tool_call_id.to_string()[..8],
+        &digest[..8]
+    );
+    store
+        .finish_tool_call(
+            &claimed,
+            tool_call_id,
+            format!("head\n…[qq: 9 bytes / 1 lines omitted; full output {handle}; read_tool_result offset=2]…\ntail\n"),
+            false,
+            Vec::new(),
+            None,
+            Some(crate::tools::SpillRecord {
+                text: text.to_owned(),
+                digest: digest.clone(),
+                omitted_from_line: 2,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .finish_run(
+            &claimed,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    (tool_call_id, digest)
+}
+
+fn rewrite_run_capacity_schema(path: &Path, base_declaration: &str, increment_declaration: &str) {
+    let connection = Connection::open(path).unwrap();
+    let schema: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'runs'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let schema = schema
+        .replacen("context_base_bytes INTEGER", base_declaration, 1)
+        .replacen(
+            "context_increment_bytes INTEGER NOT NULL DEFAULT 0",
+            increment_declaration,
+            1,
+        );
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             PRAGMA legacy_alter_table = ON;
+             ALTER TABLE runs RENAME TO runs_valid;
+             DROP TABLE runs_valid;",
+        )
+        .unwrap();
+    connection.execute_batch(&schema).unwrap();
 }

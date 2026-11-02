@@ -46,7 +46,7 @@ impl runtime::SpillReader for NoSpillLookup {
 }
 
 #[tokio::test]
-async fn t20_placeholder_handle_is_a_dispatch_correction_without_a_store_lookup() {
+async fn placeholder_handle_is_a_dispatch_correction_without_a_store_lookup() {
     let workspace = tempfile::tempdir().unwrap();
     let runtime = Runtime::new(
         ToolOnce {
@@ -94,7 +94,7 @@ async fn t20_placeholder_handle_is_a_dispatch_correction_without_a_store_lookup(
 
 #[cfg(unix)]
 #[tokio::test]
-async fn t20_strict_refuses_only_unprefixed_contained_reads_and_keeps_hints() {
+async fn strict_builtin_preference_refuses_only_unprefixed_contained_reads_and_keeps_hints() {
     let workspace = tempfile::tempdir().unwrap();
     std::fs::create_dir(workspace.path().join("x")).unwrap();
     std::fs::write(workspace.path().join("a"), "alpha\n").unwrap();

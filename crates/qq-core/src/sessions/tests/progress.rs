@@ -519,7 +519,7 @@ async fn a_report_retried_after_a_fault_reaches_the_parent_whole() {
 }
 
 #[tokio::test]
-async fn ab5_read_only_root_notice_replays_and_legacy_notice_keeps_its_text() {
+async fn read_only_root_notice_replays_and_legacy_notice_keeps_its_text() {
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let provider: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::clone(&requests),

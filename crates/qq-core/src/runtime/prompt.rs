@@ -606,7 +606,7 @@ fn push_tokens(text: &mut String, tokens: u32) {
 }
 
 #[cfg(test)]
-mod ab2_contract {
+mod contract_tests {
     use super::*;
 
     const ACTION: &str = "Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.";
@@ -629,7 +629,7 @@ mod ab2_contract {
     }
 
     #[test]
-    fn ab2_root_contract_preserves_analysis_scope_and_names_next_action() {
+    fn root_contract_preserves_analysis_scope_and_names_next_action() {
         let specs = crate::tools::specs();
         let prompt = render(None, &specs);
         eprintln!(
@@ -651,7 +651,7 @@ mod ab2_contract {
     }
 
     #[test]
-    fn ab2_read_child_keeps_its_brief_and_omits_the_action_obligation() {
+    fn read_child_keeps_its_brief_and_omits_the_action_obligation() {
         let prompt = render(Some(SubagentAuthority::Read), &crate::tools::specs());
         assert!(!prompt.contains("Do the work."));
         assert!(!prompt.contains("Once you can name the file and the change, make the change"));
@@ -661,13 +661,13 @@ mod ab2_contract {
     }
 
     #[test]
-    fn ab2_ignored_walk_guidance_requires_the_explicit_override() {
+    fn ignored_walk_guidance_requires_the_explicit_override() {
         let prompt = render(None, &crate::tools::specs());
         assert!(prompt.contains("pass path and include_ignored=true"));
     }
 
     #[test]
-    fn ab2_header_omits_absent_recall_and_spill_tools() {
+    fn header_omits_absent_recall_and_spill_tools() {
         let prompt = render(None, &crate::tools::specs());
         let header = prompt
             .lines()
@@ -679,7 +679,7 @@ mod ab2_contract {
 }
 
 #[cfg(test)]
-mod ab2_header_authority {
+mod header_authority_tests {
     use super::*;
 
     fn environment(mode: ApprovalMode, snapshots: bool) -> String {
@@ -788,7 +788,7 @@ mod ab2_header_authority {
     }
 
     #[test]
-    fn ab2_single_tool_prompts_omit_all_other_tool_instructions() {
+    fn single_tool_prompts_omit_all_other_tool_instructions() {
         for spec in crate::tools::specs() {
             let name = spec.name().to_owned();
             let prompt = agent_system_prompt(
@@ -824,7 +824,7 @@ mod ab2_header_authority {
     }
 
     #[test]
-    fn ab2_prompt_omits_descriptions_and_question_guidance_for_absent_tools() {
+    fn prompt_omits_descriptions_and_question_guidance_for_absent_tools() {
         let specs = crate::tools::specs()
             .into_iter()
             .filter(|spec| matches!(spec.name(), "read_file" | "tree" | "search"))

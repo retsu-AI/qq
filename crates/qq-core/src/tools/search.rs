@@ -1098,7 +1098,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ab2_depth_excluded_siblings_advance_the_scan_frontier() {
+    fn depth_excluded_siblings_advance_the_scan_frontier() {
         let directory = tempfile::tempdir().unwrap();
         let deep = vec!["a"; MAX_WALK_DEPTH].join("/");
         std::fs::create_dir_all(directory.path().join(&deep)).unwrap();

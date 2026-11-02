@@ -358,3 +358,38 @@ async fn an_unenforceable_contract_is_refused_at_admission_and_creates_no_run() 
         .unwrap();
     assert!(snapshot.focused.unwrap().runs.is_empty());
 }
+
+async fn submit_with_contract(
+    harness: &OutputContractHarness,
+    contract: qq_protocol::OutputContract,
+) -> Result<RunId, SessionRuntimeError> {
+    let queued = try_submit(
+        &harness.runtime,
+        harness.session_id,
+        Prompt::text("report").output(Some(Box::new(contract))),
+    )
+    .await?;
+    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
+        panic!("unexpected receipt")
+    };
+    Ok(run_id)
+}
+
+async fn run_snapshot(harness: &OutputContractHarness, run_id: RunId) -> RunSnapshot {
+    harness
+        .runtime
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            32,
+        ))
+        .await
+        .unwrap()
+        .focused
+        .unwrap()
+        .runs
+        .into_iter()
+        .find(|run| run.id == run_id)
+        .unwrap()
+}

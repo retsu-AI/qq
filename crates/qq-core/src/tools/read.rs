@@ -697,7 +697,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ab3_zero_row_window_returns_an_explicit_budget_error() {
+    fn zero_row_window_returns_an_explicit_budget_error() {
         let path = format!(
             "{}/f.txt",
             std::iter::repeat_n("界".repeat(95), 110)
@@ -732,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn ab3_masked_long_header_keeps_room_for_a_separate_repair_note() {
+    fn masked_long_header_keeps_room_for_a_separate_repair_note() {
         let path = format!(
             "SECRET={}/f.txt",
             std::iter::repeat_n("界".repeat(100), 110)

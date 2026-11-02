@@ -1673,7 +1673,7 @@ mod tests {
     }
 
     #[test]
-    fn ab4_inspection_only_descriptor_differs_from_prompt20_identity() {
+    fn inspection_only_descriptor_differs_from_prompt_version_20() {
         let workspace = canonical_temp();
         let plan = CompiledAgentPlan::compile_blocking(
             profile(workspace.path()).with_exposed_tools(vec!["read_file".to_owned()]),

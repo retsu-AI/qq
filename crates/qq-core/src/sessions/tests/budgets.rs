@@ -415,3 +415,83 @@ async fn every_session_request_carries_the_session_as_its_cache_key() {
         assert_eq!(request.cache_key(), Some(session.as_str()));
     }
 }
+
+struct BudgetLoopLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    entered: Option<Arc<tokio::sync::Notify>>,
+    usage: Option<TokenUsage>,
+    pricing: Option<ModelPricing>,
+    hang: bool,
+}
+
+impl RuntimeLoader for BudgetLoopLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let provider = BudgetLoopProvider {
+            requests: Arc::clone(&self.requests),
+            entered: self.entered.clone(),
+            usage: self.usage,
+            hang: self.hang,
+            turn: AtomicUsize::new(0),
+        };
+        let pricing = self.pricing.clone();
+        Box::pin(async move {
+            Runtime::new(provider, "test-model", 256)
+                .map(|runtime| loaded_runtime(runtime, &request.workspace, pricing))
+                .map_err(load_error)
+        })
+    }
+}
+
+struct BudgetLoopProvider {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    entered: Option<Arc<tokio::sync::Notify>>,
+    usage: Option<TokenUsage>,
+    hang: bool,
+    turn: AtomicUsize,
+}
+
+impl Provider for BudgetLoopProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let has_tools = request.tool_choice() == qq_provider::ToolChoice::Auto;
+        self.requests.lock().unwrap().push(request);
+        if let Some(entered) = &self.entered {
+            entered.notify_one();
+        }
+        if self.hang {
+            return Box::pin(stream::pending());
+        }
+        let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+        if has_tools {
+            provider_script(
+                tool_call(
+                    format!("call_{turn}"),
+                    "read_file",
+                    r#"{"path":"note.txt"}"#,
+                )
+                .into_iter()
+                .chain([completed(self.usage.map(provider_usage_of))]),
+            )
+        } else {
+            provider_script([
+                text_delta("final status"),
+                completed(self.usage.map(provider_usage_of)),
+            ])
+        }
+    }
+}
+
+type BudgetHarness = SessionFixture;
+
+async fn budget_harness(loader: BudgetLoopLoader) -> BudgetHarness {
+    let directory = test_directory();
+    std::fs::write(directory.path().join("note.txt"), "note").unwrap();
+    let requests = Arc::clone(&loader.requests);
+    let options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    SessionFixture::open_in(directory, options, Arc::new(loader), ApprovalMode::Auto)
+        .await
+        .recording(&requests)
+}
+
+async fn queue_limited_prompt(harness: &BudgetHarness, limits: RunLimits) -> RunId {
+    harness.submit(Prompt::text("loop").limits(limits)).await
+}

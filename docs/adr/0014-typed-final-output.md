@@ -113,5 +113,5 @@ authority lives and what the run loop pays.
   `…repair_turns_spend_the_turn_budget_and_exhaustion_publishes_no_verdict`,
   `…the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runtime`,
   `…an_unenforceable_contract_is_refused_at_admission_and_creates_no_run`,
-  `headless::tests::a_valid_typed_answer_rides_the_outcome_record…`,
+  `headless::tests::output::a_valid_typed_answer_rides_the_outcome_record…`,
   `main::tests::an_unenforceable_output_schema_is_invalid_configuration_before_config_loads`.

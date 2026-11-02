@@ -720,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn ab1_read_approval_flag_parses_for_every_execution_surface() {
+    fn read_approval_flag_parses_for_every_execution_surface() {
         let value = format!("grep:{}", "01".repeat(32));
         for command in [
             Vec::new(),

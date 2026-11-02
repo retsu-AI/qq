@@ -180,7 +180,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn ab6_cancelled_producer_capture_does_not_poison_later_evidence() {
+    fn cancelled_producer_capture_does_not_poison_later_evidence() {
         let producer = ProcessProducer::new(&"a".repeat(40));
         let cancellation = crate::RunCancellation::new();
         cancellation.cancel();
@@ -197,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn ab6_concurrent_producer_capture_shares_one_complete_identity() {
+    fn concurrent_producer_capture_shares_one_complete_identity() {
         let producer = Arc::new(ProcessProducer::new(&"a".repeat(40)));
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let handles: Vec<_> = (0..2)
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn ab6_producer_source_is_closed_and_capture_is_shared() {
+    fn producer_source_is_closed_and_capture_is_shared() {
         let clean = ProcessProducer::new(&"a".repeat(40));
         let dirty = ProcessProducer::new(&format!("{}-dirty", "a".repeat(40)));
         assert!(matches!(clean.source, SourceRevision::Clean(_)));

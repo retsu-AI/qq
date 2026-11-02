@@ -1905,7 +1905,7 @@ mod tests {
     }
 
     #[test]
-    fn ab1_existing_server_cannot_silently_ignore_read_approvals() {
+    fn existing_server_cannot_silently_ignore_read_approvals() {
         assert!(
             reject_read_approvals_for_existing_server(&qq_core::ApprovedReadImages::default())
                 .is_ok()

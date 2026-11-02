@@ -2579,3 +2579,69 @@ async fn retention_deletes_idle_sessions_older_than_the_cutoff_when_the_runtime_
     );
     runtime.shutdown().await.unwrap();
 }
+
+struct MutableResolvedLoader {
+    resolved_model: Arc<StdMutex<ResolvedModel>>,
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+}
+
+impl RuntimeLoader for MutableResolvedLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let resolved_model = self.resolved_model.lock().unwrap().clone();
+        let requests = Arc::clone(&self.requests);
+        Box::pin(async move {
+            Runtime::new(
+                CapturedResolvedProvider { requests },
+                resolved_model.provider_model.clone(),
+                resolved_model.max_output_tokens,
+            )
+            .map(|runtime| runtime.with_context_window(resolved_model.context_window))
+            .map(|runtime| {
+                LoadedRuntime::compile_blocking_for_profile(
+                    &runtime,
+                    resolved_model,
+                    PathBuf::from(&request.workspace),
+                    request.profile,
+                )
+                .expect("test plan compiles")
+            })
+            .map_err(load_error)
+        })
+    }
+}
+
+struct CapturedResolvedProvider {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+}
+
+impl Provider for CapturedResolvedProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        self.requests.lock().unwrap().push(request);
+        text_reply("done")
+    }
+}
+
+async fn completed_instruction_hash(
+    runtime: &SessionRuntime,
+    workspace_id: WorkspaceId,
+    session_id: SessionId,
+    events: &mut SessionEventStream,
+    prompt: &str,
+) -> String {
+    let run_id = submit_prompt_to(runtime, session_id, prompt).await;
+    collect_through_finished(events).await;
+    runtime
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 32))
+        .await
+        .unwrap()
+        .focused
+        .unwrap()
+        .runs
+        .into_iter()
+        .find(|run| run.id == run_id)
+        .unwrap()
+        .prompt_identity
+        .expect("a sent prompt must retain its prompt identity")
+        .instruction_hash
+        .to_string()
+}
