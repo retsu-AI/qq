@@ -149,6 +149,7 @@ impl Harness {
                 },
                 herdr,
                 clipboard,
+                colors: crate::render::ColorOutput::Enabled,
             },
         ))
     }
@@ -716,6 +717,7 @@ async fn the_first_frame_paints_before_the_client_port_connects() {
             editor: |_| -> EditorFuture { Box::pin(async { Err(EditorError::NotConfigured) }) },
             herdr: None,
             clipboard: crate::clipboard::Clipboard::default(),
+            colors: crate::render::ColorOutput::Enabled,
         },
     ));
     tokio::task::yield_now().await;
@@ -788,6 +790,7 @@ async fn prompt_submitted_before_delayed_startup_is_sent_after_the_snapshot() {
             editor: |_| -> EditorFuture { Box::pin(async { Err(EditorError::NotConfigured) }) },
             herdr: None,
             clipboard: crate::clipboard::Clipboard::default(),
+            colors: crate::render::ColorOutput::Enabled,
         },
     ));
     events
@@ -850,6 +853,7 @@ async fn a_failed_connection_is_reported_once_and_then_the_client_stops() {
             editor: |_| -> EditorFuture { Box::pin(async { Err(EditorError::NotConfigured) }) },
             herdr: None,
             clipboard: crate::clipboard::Clipboard::default(),
+            colors: crate::render::ColorOutput::Enabled,
         },
     ));
     let result = task.await.expect("loop task");

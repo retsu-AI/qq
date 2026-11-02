@@ -42,9 +42,6 @@ because watching every file would relink `qq` on every edit. See
 
 - Workspace tests bind loopback listeners for the HTTP/SSE server and the
   fake provider; a host that blocks loopback will fail them.
-- Some color-output tests fail if `NO_COLOR` is set in the environment.
-  `cargo xtask check` unsets it for the test gate; unset it yourself for a
-  direct run: `env -u NO_COLOR cargo nextest run -p qq-tui`.
 - Tests create temporary SQLite stores and workspaces; nothing touches the
   user's XDG state.
 

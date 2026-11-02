@@ -149,6 +149,8 @@ impl SessionStore {
                 if context.caused_by_me {
                     self.warm_empty(session.id);
                     effects.push(StateEffect::AdoptCreated(session.id));
+                } else if context.focused == Some(session.id) {
+                    self.warm_empty(session.id);
                 }
             }
             SessionEvent::SessionUpdated { session } => {
