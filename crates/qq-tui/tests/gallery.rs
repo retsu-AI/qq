@@ -4,7 +4,6 @@ use qq_config::{ConfigLoader, ConfigPaths};
 use qq_tui::{
     SyntaxOverrides, Theme, ThemeColor, TuiOptions,
     bench_support::{BenchHarness, GOLDEN_SIZES, Scene},
-    design::{self, DesignScene},
 };
 
 fn gallery_root() -> PathBuf {
@@ -100,20 +99,8 @@ async fn write_every_scene_under_every_theme() {
             }
         }
     }
-    for theme in &themes {
-        let directory = root.join("design").join(&theme.name);
-        fs::create_dir_all(&directory).expect("design gallery theme directory");
-        for scene in DesignScene::ALL {
-            for &size in GOLDEN_SIZES {
-                let frame = design::render(&scene.scene(), size).ansi(&theme.palette);
-                let path = directory.join(format!("{}-{}x{}.ans", scene.name(), size.0, size.1));
-                fs::write(&path, frame).expect("write design gallery frame");
-                written += 1;
-            }
-        }
-    }
     assert!(
-        written >= (Scene::ALL.len() + DesignScene::ALL.len()) * GOLDEN_SIZES.len(),
+        written >= Scene::ALL.len() * GOLDEN_SIZES.len(),
         "wrote {written} frames"
     );
     eprintln!("wrote {written} frames under {}", root.display());
