@@ -5154,6 +5154,40 @@ fn auto_opens_the_inspector_with_content_and_the_first_alt_i_hides_what_is_shown
 }
 
 #[test]
+fn auto_keeps_an_expansion_inline_when_the_inspector_could_not_show_all_of_it() {
+    let (mut app, call) = app_with_expandable_read();
+    app.expanded_tool_calls.insert(call);
+    let session_id = app.focused().unwrap();
+    let mut later = app.sessions[&session_id].tool_calls.as_ref().unwrap()[0].clone();
+    later.id = ToolCallId::from_bytes([8; 16]);
+    later.call_ordinal += 1;
+    later.arguments = r#"{"path":"later.txt"}"#.to_owned();
+    app.expanded_tool_calls.insert(later.id);
+    app.sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .tool_calls
+        .as_mut()
+        .unwrap()
+        .push(later);
+    let mut renderer = FrameRenderer::default();
+    let tall = frame_text(&renderer.frame_and_commit(&mut app, 200, 60));
+    assert!(tall.contains("INSPECTOR"), "{tall}");
+    let short = frame_rows(&renderer.frame_and_commit(&mut app, 200, 12));
+    assert!(
+        !short.iter().any(|row| row.contains("INSPECTOR")),
+        "{short:#?}"
+    );
+    assert!(
+        !short.iter().any(|row| row.contains("rows more")),
+        "nothing is cut where it cannot scroll: {short:#?}"
+    );
+    app.layout.inspector = PanePref::Shown;
+    let pinned = frame_text(&renderer.frame_and_commit(&mut app, 200, 12));
+    assert!(pinned.contains("INSPECTOR"), "a pin still wins: {pinned}");
+}
+
+#[test]
 fn two_routine_calls_keep_their_rows_and_three_fold_into_a_receipt() {
     let read = |byte| {
         tool_call_snapshot(

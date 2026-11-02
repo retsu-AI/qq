@@ -177,17 +177,13 @@ fn diff_counts(diff: &str) -> (usize, usize) {
     (added, removed)
 }
 
-pub(super) fn inspector_pane(
+pub(super) fn inspector_rows(
     app: &App,
     cache: &TranscriptCache,
     pane: &TranscriptPane,
     width: usize,
-    height: usize,
 ) -> Vec<Line> {
     let inner = width.saturating_sub(2);
-    let mut header = Line::styled("│ ", border());
-    header.push("INSPECTOR", muted().bold());
-    let body_height = height.saturating_sub(1);
     let mut rows: Vec<Line> = Vec::new();
     match pane.view {
         View::Attention => rows = attention_body(app, inner),
@@ -224,9 +220,6 @@ pub(super) fn inspector_pane(
                     expanded.rotate_left(selected);
                 }
                 for call in expanded {
-                    if rows.len() >= body_height {
-                        break;
-                    }
                     let derived;
                     let row = match cache.tool_row(call) {
                         Some(row) => row,
@@ -268,6 +261,14 @@ pub(super) fn inspector_pane(
             }
         }
     }
+    rows
+}
+
+pub(super) fn inspector_pane(rows: Vec<Line>, width: usize, height: usize) -> Vec<Line> {
+    let mut header = Line::styled("│ ", border());
+    header.push("INSPECTOR", muted().bold());
+    let body_height = height.saturating_sub(1);
+    let mut rows = rows;
     let overflow = rows.len().saturating_sub(body_height);
     if overflow > 0 {
         rows.truncate(body_height.saturating_sub(1));

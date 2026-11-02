@@ -294,16 +294,31 @@ impl FrameRenderer {
             dock_width,
             rail_width == 0 && Tier::of(width) == Tier::Compact,
         ));
-        let layout = compute_layout(
-            width,
-            height,
-            dock.len(),
-            app.layout,
-            layout::LayoutDemand {
-                sessions: app.sessions.listed_count(),
-                inspector_content: inspector_content(app),
-            },
-        );
+        let demand = layout::LayoutDemand {
+            sessions: app.sessions.listed_count(),
+            inspector_content: inspector_content(app),
+        };
+        let mut layout = compute_layout(width, height, dock.len(), app.layout, demand);
+        let mut inspector_rows = layout
+            .inspector
+            .map(|inspector| inspector_rows(app, &self.cache, app.pane(), inspector.width));
+        if app.layout.inspector == layout::PanePref::Auto
+            && inspector_rows
+                .as_ref()
+                .is_some_and(|rows| rows.len() + 1 > layout.body.height)
+        {
+            layout = compute_layout(
+                width,
+                height,
+                dock.len(),
+                app.layout,
+                layout::LayoutDemand {
+                    inspector_content: false,
+                    ..demand
+                },
+            );
+            inspector_rows = None;
+        }
         let body_height = layout.body.height;
         self.inspector_shown = layout.inspector.is_some();
         let inline_detail = layout.inspector.is_none();
@@ -348,10 +363,10 @@ impl FrameRenderer {
                 columns.push((slot.area.x, fit_height(rows, body_height)));
             }
         }
-        if let Some(inspector) = layout.inspector {
+        if let (Some(inspector), Some(rows)) = (layout.inspector, inspector_rows) {
             columns.push((
                 inspector.x,
-                inspector_pane(app, &self.cache, app.pane(), inspector.width, body_height),
+                inspector_pane(rows, inspector.width, body_height),
             ));
         }
         for line in &mut dock {

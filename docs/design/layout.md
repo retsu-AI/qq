@@ -157,7 +157,9 @@ shows it at any width that can carve one (140 columns and up with no
 sessions column). `Auto` shows it at the same widths only while it has
 content: the focused session has an expanded tool call
 (`view::inspector_content`). `/attention` and `/changes` stay in the main
-pane under `Auto`, where they scroll; the inspector does not scroll. Otherwise its columns
+pane under `Auto`, where they scroll, and `Auto` also keeps expanded calls
+inline when their rows would not fit the inspector's height: the inspector
+does not scroll, so `Auto` never moves anything there that it would cut. Otherwise its columns
 go back to the transcript. `Hidden` keeps it off.
 
 What it holds, top to bottom under a `│ INSPECTOR` header:

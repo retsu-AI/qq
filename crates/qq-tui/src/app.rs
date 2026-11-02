@@ -1202,7 +1202,7 @@ impl App {
                     .replace(if side_view || text.starts_with('/') {
                         text
                     } else {
-                        format!("/btw {text}")
+                        format!("/ask {text}")
                     });
             }
             Some(PendingIntent::Prompt { session_id, text })
@@ -2065,7 +2065,7 @@ impl App {
         }
         if matches!(name, "/btw" | "/ask") {
             let trimmed = question.trim();
-            let (word, rest) = if side_follow_up {
+            let (word, rest) = if side_follow_up || name == "/ask" {
                 ("", trimmed)
             } else {
                 trimmed

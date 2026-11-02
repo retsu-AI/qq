@@ -297,8 +297,9 @@ do not grant check consent.
 
 `/changes` lists every file edited in this workspace by any session,
 flagging files touched by more than one. From 140 columns the
-inspector pane opens on its own while the focused session has an expanded
-tool call, and closes when it has nothing to show. `Alt-I` pins it open or hides it.
+inspector pane opens on its own while the focused session has expanded tool
+calls that fit in it, and closes otherwise; details that would not fit stay
+in the scrollable transcript. `Alt-I` pins it open or hides it.
 
 ## Every command
 
