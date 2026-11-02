@@ -748,7 +748,6 @@ fn run_gate(root: &Path, gate: &Gate, log_dir: &Path) -> GateReport {
                     .args(args)
                     .current_dir(root)
                     .env("CARGO_TERM_COLOR", "never")
-                    .env_remove("NO_COLOR")
                     .stdin(Stdio::null())
                     .stdout(log);
                 match stderr {

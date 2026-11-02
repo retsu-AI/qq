@@ -97,11 +97,7 @@ fn copies(effects: Effects, renderer: &FrameRenderer) -> Vec<String> {
 
 fn selection_background() -> String {
     let mut bytes = Vec::new();
-    crossterm::queue!(
-        bytes,
-        crossterm::style::SetBackgroundColor(crate::theme::active().selection_bg)
-    )
-    .unwrap();
+    crate::render::write_background(&mut bytes, crate::theme::active().selection_bg).unwrap();
     String::from_utf8(bytes).unwrap()
 }
 

@@ -109,6 +109,7 @@ where
             editor: external_editor,
             herdr: herdr.as_ref().map(crate::herdr::Reporter::sink),
             clipboard: crate::clipboard::Clipboard::detect(),
+            colors: crate::render::ColorOutput::from_env(),
         },
     )
     .await;
@@ -204,6 +205,7 @@ pub(crate) struct Hooks<X> {
     pub(crate) editor: X,
     pub(crate) herdr: Option<crate::herdr::ReportSink>,
     pub(crate) clipboard: crate::clipboard::Clipboard,
+    pub(crate) colors: crate::render::ColorOutput,
 }
 
 pub(crate) async fn run_loop<P, E, W, S, F, X>(
@@ -227,9 +229,10 @@ where
         mut editor,
         herdr,
         clipboard,
+        colors,
     } = hooks;
     tokio::pin!(shutdown);
-    let mut renderer = FrameRenderer::default();
+    let mut renderer = FrameRenderer::with_colors(colors);
     let mut frame_tick = interval(FRAME_INTERVAL);
     let mut animation_tick = interval(ANIMATION_INTERVAL);
     frame_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
