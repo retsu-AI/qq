@@ -5276,6 +5276,45 @@ fn the_inspector_bounds_its_rows_to_the_pane_height() {
     for row in &frame[..frame.len() - 3] {
         assert_eq!(row.width(), 200);
     }
+
+    let second = ToolCallId::from_bytes([8; 16]);
+    {
+        let calls = app
+            .sessions
+            .get_mut(&session_id)
+            .unwrap()
+            .tool_calls
+            .as_mut()
+            .unwrap();
+        calls[1].arguments = r#"{"path":"later.txt"}"#.to_owned();
+    }
+    let detail_after = |inspector: &str, path: &str| {
+        let rows: Vec<&str> = inspector.lines().collect();
+        rows.iter()
+            .position(|row| row.contains(path))
+            .and_then(|at| rows.get(at + 1))
+            .is_some_and(|row| row.contains("line 1"))
+    };
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 200, 12);
+    let (_, inspector) = transcript_and_inspector(&app, &frame);
+    assert!(
+        !detail_after(&inspector, "later.txt"),
+        "oldest first, so the later call's detail is cut: {inspector}"
+    );
+    app.block_cursor = Some(Block::Tool(second));
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 200, 12);
+    let (_, inspector) = transcript_and_inspector(&app, &frame);
+    let summaries: Vec<&str> = inspector
+        .lines()
+        .filter(|row| row.contains("Read "))
+        .collect();
+    assert!(
+        summaries
+            .first()
+            .is_some_and(|row| row.contains("later.txt")),
+        "the selected expansion leads, so it is never pushed out: {inspector}"
+    );
+    assert!(detail_after(&inspector, "later.txt"), "{inspector}");
 }
 
 #[test]

@@ -213,12 +213,19 @@ pub(super) fn inspector_pane(
                 .and_then(|session_id| app.sessions.get(&session_id))
                 .and_then(|session| Some((session, session.tool_calls.as_deref()?)));
             if let Some((session, calls)) = calls {
-                for call in calls {
+                let mut expanded: Vec<&ToolCallSnapshot> = calls
+                    .iter()
+                    .filter(|call| app.expanded_tool_calls.contains(&call.id))
+                    .collect();
+                if let Some(selected) = expanded
+                    .iter()
+                    .position(|call| app.block_cursor == Some(Block::Tool(call.id)))
+                {
+                    expanded.rotate_left(selected);
+                }
+                for call in expanded {
                     if rows.len() >= body_height {
                         break;
-                    }
-                    if !app.expanded_tool_calls.contains(&call.id) {
-                        continue;
                     }
                     let derived;
                     let row = match cache.tool_row(call) {

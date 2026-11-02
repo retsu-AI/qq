@@ -167,6 +167,7 @@ What it holds, top to bottom under a `│ INSPECTOR` header:
   the view replaced, so the list is read in context; Esc still returns to
   that session. Without an inspector the view takes the pane, as before.
 - Otherwise, every expanded tool call of the pane's session in call order,
+  starting from the one under the block cursor so it is never cut off,
   each as its summary row followed by its expanded body (timing line,
   result head or tail, diff, arguments for unknown tools), with one blank
   row between calls. The transcript then shows only the summary rows: the
