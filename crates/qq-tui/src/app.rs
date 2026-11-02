@@ -1210,6 +1210,10 @@ impl App {
     }
 
     pub fn handle_terminal_event(&mut self, event: Event) -> Effects {
+        if matches!(&event, Event::Key(key) if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat))
+        {
+            return Effects::none();
+        }
         let armed = self.quit_armed_at.take();
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
@@ -1986,11 +1990,13 @@ impl App {
 
     fn submit_prompt(&mut self) -> Effects {
         let mut prompt = self.composer.expanded().trim().to_owned();
+        let mut side_follow_up = false;
         if matches!(self.view(), View::SideQuestions(_))
             && !prompt.is_empty()
             && !prompt.starts_with('/')
         {
             prompt = format!("/btw {prompt}");
+            side_follow_up = true;
         }
         if prompt.is_empty() {
             return Effects::none();
@@ -2044,9 +2050,13 @@ impl App {
         }
         if matches!(name, "/btw" | "/ask") {
             let trimmed = question.trim();
-            let (word, rest) = trimmed
-                .split_once(char::is_whitespace)
-                .map_or((trimmed, ""), |(word, rest)| (word, rest.trim()));
+            let (word, rest) = if side_follow_up {
+                ("", trimmed)
+            } else {
+                trimmed
+                    .split_once(char::is_whitespace)
+                    .map_or((trimmed, ""), |(word, rest)| (word, rest.trim()))
+            };
             if word == "cancel" {
                 if !rest.is_empty() {
                     self.set_warning("use /btw cancel with nothing after it".to_owned());

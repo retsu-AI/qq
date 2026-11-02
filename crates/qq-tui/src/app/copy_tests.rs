@@ -411,6 +411,19 @@ fn a_copy_or_mouse_event_between_presses_disarms_the_quit() {
 }
 
 #[test]
+fn releasing_ctrl_c_keeps_the_quit_armed() {
+    let press = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let release = KeyEvent {
+        kind: crossterm::event::KeyEventKind::Release,
+        ..press
+    };
+    let mut app = app();
+    assert!(!quits(app.handle_terminal_event(Event::Key(press))));
+    assert!(!quits(app.handle_terminal_event(Event::Key(release))));
+    assert!(quits(app.handle_terminal_event(Event::Key(press))));
+}
+
+#[test]
 fn the_first_ctrl_c_counts_the_runs_that_stop_only_when_this_qq_owns_the_server() {
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     for (owns_server, expected) in [

@@ -5240,6 +5240,27 @@ fn btw_subcommands_start_a_thread_or_cancel_and_retired_spellings_name_their_rep
 }
 
 #[test]
+fn plain_text_in_the_side_view_is_a_question_even_when_it_reads_like_a_subcommand() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.execute(Command::ShowSideQuestions);
+    assert_eq!(app.view(), View::SideQuestions(id));
+    for text in ["cancel", "new tests?"] {
+        app.composer.replace(text.to_owned());
+        let request = only_command(app.submit_prompt());
+        assert!(
+            matches!(
+                request.command,
+                SessionCommand::SubmitSideQuestion { new_thread: false, ref question, .. }
+                    if question == text
+            ),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn deleting_the_side_views_source_leaves_the_view() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
