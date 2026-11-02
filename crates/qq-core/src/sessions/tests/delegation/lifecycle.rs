@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn cancelling_the_parent_run_cancels_its_in_flight_child() {
@@ -81,7 +82,7 @@ async fn cancelling_the_parent_interrupts_an_in_flight_child_tool() {
         submit_prompt_to(&harness.runtime, harness.session_id, "delegate slow work").await;
 
     let mut observed = Vec::new();
-    let (child_run, child_call) = tokio::time::timeout(Duration::from_secs(2), async {
+    let (child_run, child_call) = within(async {
         loop {
             let event = harness.events.next().await.unwrap().unwrap();
             let started = match &event.event {
@@ -99,7 +100,7 @@ async fn cancelling_the_parent_interrupts_an_in_flight_child_tool() {
     .await
     .expect("the child tool never started");
     cancel_run(&harness.runtime, parent_run).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    within(async {
         while finished_outcome(&observed, parent_run).is_none()
             || finished_outcome(&observed, child_run).is_none()
         {
@@ -136,7 +137,7 @@ async fn cancelling_the_parent_after_child_completion_preserves_the_child() {
         submit_prompt_to(&harness.runtime, harness.session_id, "delegate then wait").await;
 
     let mut observed = Vec::new();
-    let (child_session_id, child_run) = tokio::time::timeout(Duration::from_secs(2), async {
+    let (child_session_id, child_run) = within(async {
         loop {
             let event = harness.events.next().await.unwrap().unwrap();
             let completed = match &event.event {
@@ -156,11 +157,11 @@ async fn cancelling_the_parent_after_child_completion_preserves_the_child() {
     })
     .await
     .expect("the child did not complete");
-    tokio::time::timeout(Duration::from_secs(2), second_turn_started.notified())
+    within(second_turn_started.notified())
         .await
         .expect("the parent did not consume the child answer");
     cancel_run(&harness.runtime, parent_run).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    within(async {
         while finished_outcome(&observed, parent_run).is_none() {
             observed.push(harness.events.next().await.unwrap().unwrap());
         }
@@ -209,7 +210,7 @@ async fn shutdown_settles_a_running_parent_and_its_in_flight_child() {
         submit_prompt_to(&harness.runtime, harness.session_id, "delegate forever").await;
 
     let mut observed = Vec::new();
-    let (child_session_id, child_run) = tokio::time::timeout(Duration::from_secs(1), async {
+    let (child_session_id, child_run) = within(async {
         loop {
             let event = harness.events.next().await.unwrap().unwrap();
             let child = match &event.event {
@@ -229,13 +230,13 @@ async fn shutdown_settles_a_running_parent_and_its_in_flight_child() {
     .await
     .expect("the child must start before shutdown");
 
-    tokio::time::timeout(Duration::from_secs(1), harness.runtime.shutdown())
+    within(harness.runtime.shutdown())
         .await
         .expect("shutdown must settle the parent and child")
         .unwrap();
 
     let mut terminal_count = 0;
-    tokio::time::timeout(Duration::from_secs(1), async {
+    within(async {
         while finished_outcome(&observed, parent_run).is_none()
             || finished_outcome(&observed, child_run).is_none()
         {
@@ -341,16 +342,11 @@ async fn shutdown_waits_for_started_child_loader_work_without_creating_a_child()
     )
     .await;
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
-    tokio::time::timeout(Duration::from_secs(2), entered.notified())
-        .await
-        .unwrap();
+    within(entered.notified()).await.unwrap();
     let stopped = PROBE.observe(Checkpoint::ExecutionStop(run_id));
     let runtime = harness.runtime.clone();
     let mut shutdown = tokio::spawn(async move { runtime.shutdown().await });
-    tokio::time::timeout(Duration::from_secs(2), stopped)
-        .await
-        .unwrap()
-        .unwrap();
+    within(stopped).await.unwrap().unwrap();
     let premature = tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
         .await
         .is_ok();
@@ -360,11 +356,7 @@ async fn shutdown_waits_for_started_child_loader_work_without_creating_a_child()
         !premature,
         "shutdown cannot finish while admitted loader work is running"
     );
-    tokio::time::timeout(Duration::from_secs(2), shutdown)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    within(shutdown).await.unwrap().unwrap().unwrap();
     assert!(!completed_before_release);
     assert!(completed.load(Ordering::Acquire));
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
@@ -492,16 +484,16 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
             detached: false,
         },
     ));
-    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+    within(entered.notified())
         .await
         .expect("child admission must reach its pre-commit load");
 
-    tokio::time::timeout(Duration::from_secs(1), runtime.shutdown())
+    within(runtime.shutdown())
         .await
         .expect("shutdown must complete while pre-commit child work is paused")
         .unwrap();
     release.notify_one();
-    let outcome = tokio::time::timeout(Duration::from_secs(1), child)
+    let outcome = within(child)
         .await
         .expect("released child admission must observe shutdown")
         .unwrap();
@@ -580,10 +572,7 @@ async fn steering_charges_a_completed_but_unconsumed_child_exactly_once() {
     let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
         panic!("expected run");
     };
-    tokio::time::timeout(Duration::from_secs(2), delivered)
-        .await
-        .unwrap()
-        .unwrap();
+    within(delivered).await.unwrap().unwrap();
     steer(
         &harness.runtime,
         run_id,
@@ -697,10 +686,7 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
             steer(&harness.runtime, parent_run, "stop the child", true)
                 .await
                 .unwrap();
-            tokio::time::timeout(Duration::from_secs(2), stopping.take().unwrap())
-                .await
-                .unwrap()
-                .unwrap();
+            within(stopping.take().unwrap()).await.unwrap().unwrap();
         }
         let shutdown = if shutting_down {
             let runtime = harness.runtime.clone();
@@ -730,10 +716,7 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
         if deadline {
             tokio::time::advance(Duration::from_millis(1_200)).await;
         } else if interruption != 2 {
-            tokio::time::timeout(Duration::from_secs(2), stopping.take().unwrap())
-                .await
-                .unwrap()
-                .unwrap();
+            within(stopping.take().unwrap()).await.unwrap().unwrap();
         }
         if let Some(keep_clock) = keep_clock {
             tokio::time::resume();
@@ -760,11 +743,7 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
         release.send(()).unwrap();
         observed.extend(collect_until_run_finished(&mut harness.events, last_run).await);
         if let Some(shutdown) = shutdown {
-            tokio::time::timeout(Duration::from_secs(2), shutdown)
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
+            within(shutdown).await.unwrap().unwrap().unwrap();
         } else {
             harness.runtime.shutdown().await.unwrap();
         }
@@ -835,10 +814,7 @@ async fn interrupting_steering_owns_a_child_whose_creation_reply_is_pending() {
     let (created, release) =
         PROBE.hold_reporting_run(Checkpoint::ChildCreated(harness.session_id), 0);
     let parent_run = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
-    let child_run = tokio::time::timeout(Duration::from_secs(2), created)
-        .await
-        .unwrap()
-        .unwrap();
+    let child_run = within(created).await.unwrap().unwrap();
     steer(
         &harness.runtime,
         parent_run,
@@ -916,12 +892,10 @@ async fn store_saturation_does_not_release_a_running_write_child() {
     .await;
     let parent_run =
         submit_prompt_to(&harness.runtime, harness.session_id, "delegate then write").await;
-    tokio::time::timeout(Duration::from_secs(2), entered.notified())
-        .await
-        .unwrap();
+    within(entered.notified()).await.unwrap();
     let mut observed = Vec::new();
     let (child_run, cursor) = loop {
-        let event = tokio::time::timeout(Duration::from_secs(2), harness.events.next())
+        let event = within(harness.events.next())
             .await
             .unwrap()
             .unwrap()
@@ -937,10 +911,7 @@ async fn store_saturation_does_not_release_a_running_write_child() {
     };
     let (read_entered, release_read, read_attempted) = hold_outcome_read(child_run);
     harness.runtime.inner.notify(cursor);
-    tokio::time::timeout(Duration::from_secs(2), read_entered)
-        .await
-        .unwrap()
-        .unwrap();
+    within(read_entered).await.unwrap().unwrap();
 
     let blocked_store = harness.runtime.store().clone();
     let (worker_entered, worker_started) = oneshot::channel();
@@ -964,10 +935,7 @@ async fn store_saturation_does_not_release_a_running_write_child() {
         queued.push(job);
     }
     release_read.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(2), read_attempted)
-        .await
-        .unwrap()
-        .unwrap();
+    within(read_attempted).await.unwrap().unwrap();
     release_worker.send(()).unwrap();
     worker.await.unwrap().unwrap();
     for job in queued {
@@ -1025,7 +993,7 @@ async fn child_cancellation_persistence_failure_prevents_parent_continuation() {
     )
     .await;
     let parent_run = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
-    let child_run = tokio::time::timeout(Duration::from_secs(2), async {
+    let child_run = within(async {
         loop {
             let event = harness.events.next().await.unwrap().unwrap();
             if event.run_id != Some(parent_run)
@@ -1053,7 +1021,7 @@ async fn child_cancellation_persistence_failure_prevents_parent_continuation() {
     steer(&harness.runtime, parent_run, "continue", true)
         .await
         .unwrap();
-    let unavailable = tokio::time::timeout(Duration::from_secs(2), async {
+    let unavailable = within(async {
         while let Some(event) = harness.events.next().await {
             match event {
                 Err(SessionRuntimeError::Unavailable) => return true,
@@ -1098,11 +1066,8 @@ async fn unconfirmed_shell_exit_prevents_session_continuation() {
     let workspace = std::fs::canonicalize(harness.directory.path()).unwrap();
     let spawned = crate::tools::observe_shell_spawn(&workspace, true);
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "run a command").await;
-    let pid = tokio::time::timeout(Duration::from_secs(2), spawned)
-        .await
-        .unwrap()
-        .unwrap();
-    let unavailable = tokio::time::timeout(Duration::from_secs(2), async {
+    let pid = within(spawned).await.unwrap().unwrap();
+    let unavailable = within(async {
         while let Some(event) = harness.events.next().await {
             match event {
                 Err(SessionRuntimeError::Unavailable) => return true,
@@ -1141,7 +1106,7 @@ async fn unreadable_child_outcome_fails_the_runtime_before_parent_continuation()
     .await;
     let parent_run = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
     let (child_run, cursor) = loop {
-        let event = tokio::time::timeout(Duration::from_secs(2), harness.events.next())
+        let event = within(harness.events.next())
             .await
             .unwrap()
             .unwrap()
@@ -1154,10 +1119,7 @@ async fn unreadable_child_outcome_fails_the_runtime_before_parent_continuation()
     };
     let (read_entered, release_read, _read_attempted) = hold_outcome_read(child_run);
     harness.runtime.inner.notify(cursor);
-    tokio::time::timeout(Duration::from_secs(2), read_entered)
-        .await
-        .unwrap()
-        .unwrap();
+    within(read_entered).await.unwrap().unwrap();
     harness
         .runtime
         .store()
@@ -1180,7 +1142,7 @@ async fn unreadable_child_outcome_fails_the_runtime_before_parent_continuation()
         .unwrap()
         .subscribe();
     release_read.send(()).unwrap();
-    let unavailable = tokio::time::timeout(Duration::from_secs(2), async {
+    let unavailable = within(async {
         while let Some(event) = harness.events.next().await {
             match event {
                 Err(SessionRuntimeError::Unavailable) => return true,

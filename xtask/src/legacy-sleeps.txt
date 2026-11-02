@@ -1,11 +1,11 @@
-crates/qq-core/src/sessions/tests/commands.rs	1773	fn stream(&self, _request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(50)).await;
-crates/qq-core/src/sessions/tests/compaction/auto_compaction.rs	271	async fn saturated_reserved_reload_waits_after_auto_compaction() {	tokio::time::sleep(Duration::from_millis(50)).await;
-crates/qq-core/src/sessions/tests/deadlines.rs	322	fn stream(&self, request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(1_000)).await;
-crates/qq-core/src/sessions/tests/delegation.rs	306	fn stream(&self, _request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(50)).await;
-crates/qq-core/src/sessions/tests/nonblocking.rs	1694	fn stream(&self, request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(5)).await;
-crates/qq-core/src/sessions/tests/nonblocking.rs	2445	fn cancel_first(children: &[String]) -> String {	tokio::time::sleep(Duration::from_millis(300)).await;
-crates/qq-core/src/sessions/tests/settlement.rs	935	async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime() {	tokio::time::sleep(Duration::from_millis(50)).await;
-crates/qq-core/src/sessions/tests/side_questions.rs	1188	async fn side_cancel_drains_a_blocked_inspection_tool_before_settlement() {	tokio::time::sleep(Duration::from_millis(50)).await;
-crates/qq-core/src/sessions/tests/side_questions.rs	1777	async fn side_replacement_waits_for_the_cancelled_owner_to_tear_down() {	tokio::time::sleep(Duration::from_millis(50)).await;
-crates/qq-core/src/tools.rs	236	pub(crate) async fn assert_panicked_process_exits(pid: u32) {	tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-crates/qq-core/src/tools/tests/shell.rs	331	async fn assert_process_exits(pid: u32) {	tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+crates/qq-core/src/sessions/tests/commands.rs	fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_zero	tokio::time::sleep(Duration::from_millis(50))
+crates/qq-core/src/sessions/tests/compaction/auto_compaction.rs	fn saturated_reserved_reload_waits_after_auto_compaction	tokio::time::sleep(Duration::from_millis(50))
+crates/qq-core/src/sessions/tests/deadlines.rs	fn stream	tokio::time::sleep(Duration::from_millis(1_000))
+crates/qq-core/src/sessions/tests/delegation.rs	fn stream	tokio::time::sleep(Duration::from_millis(50))
+crates/qq-core/src/sessions/tests/nonblocking.rs	fn cancelling_a_child_that_just_finished_reports_it_finished	tokio::time::sleep(Duration::from_millis(300))
+crates/qq-core/src/sessions/tests/nonblocking.rs	fn stream	tokio::time::sleep(Duration::from_millis(5))
+crates/qq-core/src/sessions/tests/settlement.rs	fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime	tokio::time::sleep(Duration::from_millis(50))
+crates/qq-core/src/sessions/tests/side_questions.rs	fn side_cancel_drains_a_blocked_inspection_tool_before_settlement	tokio::time::sleep(Duration::from_millis(50))
+crates/qq-core/src/sessions/tests/side_questions.rs	fn side_replacement_waits_for_the_cancelled_owner_to_tear_down	tokio::time::sleep(Duration::from_millis(50))
+crates/qq-core/src/tools.rs	fn assert_panicked_process_exits	tokio::time::sleep(std::time::Duration::from_millis(10))
+crates/qq-core/src/tools/tests/shell.rs	fn assert_process_exits	tokio::time::sleep(std::time::Duration::from_millis(25))

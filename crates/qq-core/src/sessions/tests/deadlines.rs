@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 struct DeadlineSession;
 
@@ -84,11 +85,8 @@ async fn duration_limited_run_does_not_settle_when_process_cleanup_is_unconfirme
     let workspace = std::fs::canonicalize(harness.directory.path()).unwrap();
     let spawned = crate::tools::observe_shell_spawn(&workspace, true);
     let run_id = harness.submit_within("run a command", 1_000).await;
-    let pid = tokio::time::timeout(Duration::from_secs(2), spawned)
-        .await
-        .unwrap()
-        .unwrap();
-    let unavailable = tokio::time::timeout(Duration::from_secs(3), async {
+    let pid = within(spawned).await.unwrap().unwrap();
+    let unavailable = within(async {
         loop {
             match harness.events.next().await.unwrap() {
                 Err(SessionRuntimeError::Unavailable) => break true,
@@ -139,14 +137,8 @@ async fn duration_stops_shell_while_output_persistence_is_blocked() {
     )
     .await
     .unwrap();
-    let pid = tokio::time::timeout(Duration::from_secs(2), spawned)
-        .await
-        .unwrap()
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), buffered)
-        .await
-        .unwrap()
-        .unwrap();
+    let pid = within(spawned).await.unwrap().unwrap();
+    within(buffered).await.unwrap().unwrap();
     let (entered, entered_rx) = oneshot::channel();
     let (release, release_rx) = std::sync::mpsc::channel();
     let store = harness.runtime.store().clone();
@@ -491,9 +483,7 @@ async fn duration_cancels_read_only_and_mutating_external_calls() {
         )
         .await;
         let run_id = harness.submit_within("call the host", 60_000).await;
-        tokio::time::timeout(Duration::from_secs(2), entered.notified())
-            .await
-            .unwrap();
+        within(entered.notified()).await.unwrap();
         tokio::time::pause();
         tokio::time::advance(Duration::from_millis(60_001)).await;
         tokio::time::resume();
@@ -879,7 +869,7 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
     let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
         panic!("unexpected receipt")
     };
-    tokio::time::timeout(Duration::from_secs(2), spawned)
+    within(spawned)
         .await
         .expect("the process must reach actual spawn")
         .unwrap();

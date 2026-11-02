@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
@@ -282,7 +283,7 @@ async fn child(setup: Setup) {
                     emit(Output::Ack(serde_json::Value::Null)).await;
                 }
                 Input::ProbeAdmission => {
-                    let permits = tokio::time::timeout(Duration::from_secs(5), Arc::clone(&runtime.inner.permits).acquire_many_owned(runtime.inner.max_active_runs as u32)).await.unwrap().unwrap();
+                    let permits = within(Arc::clone(&runtime.inner.permits).acquire_many_owned(runtime.inner.max_active_runs as u32)).await.unwrap().unwrap();
                     let receipt = try_submit(&runtime, session, "probe-after-check-crash").await.unwrap();
                     let CommandOutcome::PromptQueued { run_id:admitted, .. } = receipt.outcome else { panic!("probe prompt") };
                     let claim = runtime.store().reserve_next_run_at_depth(0).await.unwrap();

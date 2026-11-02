@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
@@ -716,7 +717,7 @@ async fn restart_cancels_a_queued_child_owned_by_an_interrupted_parent() {
     .await
     .unwrap();
     let mut events = subscribe_after(&runtime, workspace_id, child.committed_through);
-    let recovered = tokio::time::timeout(Duration::from_secs(2), async {
+    let recovered = within(async {
         let mut recovered = Vec::new();
         while recovered
             .iter()

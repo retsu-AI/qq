@@ -2414,21 +2414,15 @@ mod tests {
         assert!(futures_util::poll!(reload.as_mut()).is_pending());
         release.send(()).unwrap();
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(2), cancellation)
-                .await
-                .unwrap(),
+            crate::test_support::within(cancellation).await.unwrap(),
             Err(SessionRuntimeError::RunNotFound)
         );
         assert!(!matches!(
-            tokio::time::timeout(Duration::from_secs(2), search)
-                .await
-                .unwrap(),
+            crate::test_support::within(search).await.unwrap(),
             Err(SessionRuntimeError::Overloaded)
         ));
         assert!(!matches!(
-            tokio::time::timeout(Duration::from_secs(2), reload)
-                .await
-                .unwrap(),
+            crate::test_support::within(reload).await.unwrap(),
             Err(SessionRuntimeError::Overloaded)
         ));
         for call in queued {
@@ -2460,7 +2454,7 @@ mod tests {
         assert!(futures_util::poll!(following.as_mut()).is_pending());
         release.send(()).unwrap();
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(2), following)
+            crate::test_support::within(following)
                 .await
                 .unwrap()
                 .unwrap(),
@@ -2491,9 +2485,7 @@ mod tests {
         let mut closing = Box::pin(store.close());
         assert!(futures_util::poll!(closing.as_mut()).is_pending());
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(2), waiting)
-                .await
-                .unwrap(),
+            crate::test_support::within(waiting).await.unwrap(),
             Err(SessionRuntimeError::Unavailable)
         );
         release.send(()).unwrap();
@@ -2603,7 +2595,7 @@ mod tests {
             .unwrap();
 
         release_tx.send(()).unwrap();
-        let observed = tokio::time::timeout(Duration::from_secs(1), observed_rx)
+        let observed = crate::test_support::within(observed_rx)
             .await
             .unwrap()
             .unwrap();

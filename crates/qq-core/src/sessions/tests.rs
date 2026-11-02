@@ -1,3 +1,4 @@
+use crate::test_support::within;
 use std::sync::atomic::AtomicBool;
 
 use super::*;
@@ -642,7 +643,7 @@ async fn approval_harness(
 async fn collect_until_approval_requested(
     events: &mut SessionEventStream,
 ) -> (Vec<SessionEventEnvelope>, ToolCallSnapshot) {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    within(async {
         let mut observed = Vec::new();
         loop {
             let event = events.next().await.unwrap().unwrap();

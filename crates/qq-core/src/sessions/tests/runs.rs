@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn creates_root_and_child_sessions_in_one_workspace_snapshot() {
@@ -260,7 +261,7 @@ async fn reasoning_replays_without_entering_transcript_or_model_context() {
     );
 
     let mut replay = subscribe_after(&runtime, workspace_id, after_creation);
-    let replayed = tokio::time::timeout(Duration::from_secs(2), async {
+    let replayed = within(async {
         let mut replayed = Vec::new();
         for _ in 0..observed.len() {
             replayed.push(replay.next().await.unwrap().unwrap());
@@ -349,7 +350,7 @@ async fn streams_committed_run_events_and_snapshots_the_result() {
     try_submit(&runtime, session_id, "Say hello").await.unwrap();
 
     let mut observed = Vec::new();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    within(async {
         while let Some(event) = events.next().await {
             let event = event.unwrap();
             let finished = matches!(event.event, SessionEvent::RunFinished { .. });

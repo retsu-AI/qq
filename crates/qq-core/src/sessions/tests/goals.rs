@@ -1844,7 +1844,7 @@ async fn goal_write_capacity_wait_obeys_cancellation_and_deadline() {
         if !deadline {
             cancellation.cancel();
         }
-        let result = tokio::time::timeout(Duration::from_secs(3), &mut next).await;
+        let result = crate::test_support::within(&mut next).await;
         assert!(
             result.is_ok(),
             "admission must abort while capacity remains occupied: deadline={deadline}"

@@ -21,6 +21,10 @@ first comment. `--wait` polls until nothing is `pending:` (at most 30
 minutes), so do not write your own sleep loop. `--no-codex` drops the
 Codex requirement when the user says it is not needed.
 
+Each check counts by its latest run: a check cancelled because a newer run
+of the same workflow replaced it (a push or a label change) is not a
+failure.
+
 Ready means: open, not a draft, no conflicts, every check passed, every
 review thread resolved, and Codex finished a review of the current head
 with no unresolved findings and reacted 👍. A clean receipt without the

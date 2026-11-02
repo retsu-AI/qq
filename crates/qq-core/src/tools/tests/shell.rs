@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[cfg(unix)]
 async fn run_shell_tool(
@@ -56,10 +57,7 @@ async fn dropped_write_waiter_drains_the_actual_atomic_apply() {
         Arc::default(),
     ));
     assert!(futures_util::poll!(execution.as_mut()).is_pending());
-    tokio::time::timeout(std::time::Duration::from_secs(5), entered)
-        .await
-        .unwrap()
-        .unwrap();
+    within(entered).await.unwrap().unwrap();
     drop(execution);
 
     let mut abandoned_drain = Box::pin(tasks.drain());
@@ -69,10 +67,7 @@ async fn dropped_write_waiter_drains_the_actual_atomic_apply() {
     drop(abandoned_drain);
     assert!(!directory.path().join("result.txt").exists());
     release.send(()).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), drain)
-        .await
-        .unwrap()
-        .unwrap();
+    within(drain).await.unwrap().unwrap();
     assert_eq!(
         fs::read_to_string(directory.path().join("result.txt")).unwrap(),
         "committed locally"
@@ -96,13 +91,10 @@ async fn dropped_shell_waiter_is_reaped_before_drain_with_full_live_output() {
         tasks.clone(),
     ));
     assert!(futures_util::poll!(execution.as_mut()).is_pending());
-    let first = tokio::time::timeout(std::time::Duration::from_secs(5), chunks.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let first = within(chunks.recv()).await.unwrap().unwrap();
     let pid = parse_marked_pid(&first);
     fs::write(directory.path().join("start-output"), "go").unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    within(async {
         while chunks.capacity() != 0 {
             tokio::task::yield_now().await;
         }
@@ -110,10 +102,7 @@ async fn dropped_shell_waiter_is_reaped_before_drain_with_full_live_output() {
     .await
     .unwrap();
     drop(execution);
-    tokio::time::timeout(std::time::Duration::from_secs(5), tasks.drain())
-        .await
-        .unwrap()
-        .unwrap();
+    within(tasks.drain()).await.unwrap().unwrap();
     let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
     assert!(rustix::process::test_kill_process(pid).is_err());
     assert!(!cancelled.is_cancelled());
@@ -205,10 +194,7 @@ async fn stalled_process_receipt_cannot_delay_cancellation_or_timeout() {
             Arc::default(),
             Some(qq_protocol::ToolCallId::generate().unwrap()),
         ));
-        let pid = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
-            .await
-            .unwrap()
-            .unwrap();
+        let pid = within(spawned).await.unwrap().unwrap();
         let stopped = crate::tools::shell::observe_shell_termination(pid);
         if expire {
             tokio::time::pause();
@@ -270,11 +256,8 @@ async fn dropped_windows_shell_waiter_kills_the_owned_process_before_drain() {
         tasks.clone(),
     ));
     assert!(futures_util::poll!(execution.as_mut()).is_pending());
-    tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
-        .await
-        .unwrap()
-        .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    within(spawned).await.unwrap().unwrap();
+    within(async {
         while chunks.capacity() != 0 {
             tokio::task::yield_now().await;
         }
@@ -282,10 +265,7 @@ async fn dropped_windows_shell_waiter_kills_the_owned_process_before_drain() {
     .await
     .unwrap();
     drop(execution);
-    tokio::time::timeout(std::time::Duration::from_secs(5), tasks.drain())
-        .await
-        .unwrap()
-        .unwrap();
+    within(tasks.drain()).await.unwrap().unwrap();
     assert_eq!(
         chunks.capacity(),
         0,
@@ -299,16 +279,13 @@ async fn windows_shell_timeout_kills_the_owned_process() {
     let directory = tempfile::tempdir().unwrap();
     let workspace = Workspace::open(directory.path()).unwrap();
     let tasks = ToolTasks::default();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        shell_tool(
-            workspace,
-            r#"{"command":"for /L %i in (1,1,2147483647) do @echo waiting","timeout_seconds":1}"#,
-            RunCancellation::new(),
-            None,
-            tasks.clone(),
-        ),
-    )
+    let result = within(shell_tool(
+        workspace,
+        r#"{"command":"for /L %i in (1,1,2147483647) do @echo waiting","timeout_seconds":1}"#,
+        RunCancellation::new(),
+        None,
+        tasks.clone(),
+    ))
     .await
     .unwrap();
     assert!(result.is_error);
@@ -722,7 +699,7 @@ async fn running_build_survives_clock_advance(arguments: &'static str, seconds: 
         cancellation.clone(),
         Some(output),
     ));
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    within(async {
         let mut observed = String::new();
         while !observed.contains("ready") {
             observed.push_str(&chunks.recv().await.expect("command reached its gate"));
@@ -740,7 +717,7 @@ async fn running_build_survives_clock_advance(arguments: &'static str, seconds: 
     })
     .await
     .unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), execution).await;
+    let result = within(execution).await;
     cancellation.cancel();
     let result = result.expect("released command completed").unwrap();
     assert!(!result.is_error, "{}", result.model_text);

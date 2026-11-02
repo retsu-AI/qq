@@ -3421,9 +3421,7 @@ mod tests {
         let anonymous = http.post(&endpoint).send().await.unwrap();
         assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), server.stop_requested())
-                .await
-                .is_err(),
+            futures_util::FutureExt::now_or_never(server.stop_requested()).is_none(),
             "an unauthenticated request must not stop the server"
         );
         let accepted = http
@@ -3455,9 +3453,7 @@ mod tests {
             .unwrap();
         assert_eq!(refused.status(), StatusCode::NOT_FOUND);
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), embedded.stop_requested())
-                .await
-                .is_err(),
+            futures_util::FutureExt::now_or_never(embedded.stop_requested()).is_none(),
             "a server without the stop route must never report a stop request"
         );
         embedded.shutdown().await.unwrap();

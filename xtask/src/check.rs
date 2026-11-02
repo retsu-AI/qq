@@ -97,6 +97,8 @@ pub struct Selection {
 
 const CROSS_CRATE_INPUTS: &[(&str, &str)] = &[
     (".github/scripts/test-pre-push.sh", "xtask"),
+    (".github/scripts/test-pr-status.sh", "xtask"),
+    (".qq/skills/babysit-pr/pr-status.sh", "xtask"),
     ("docs/guide/", "qq"),
     ("docs/design/protocol.md", "qq"),
     ("docs/design/architecture.md", "qq"),
@@ -1161,6 +1163,24 @@ mod tests {
             .unwrap();
         let output = std::process::Command::new("bash")
             .arg(root.join(".github/scripts/test-pre-push.sh"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pr_status_judges_each_check_by_its_latest_run() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let output = std::process::Command::new("bash")
+            .arg(root.join(".github/scripts/test-pr-status.sh"))
             .output()
             .unwrap();
         assert!(

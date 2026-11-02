@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn unresolvable_slash_prompts_are_refused_at_admission_without_a_run_row() {
@@ -2292,11 +2293,7 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
         .unwrap();
     let mut expected_sequence = 0;
     loop {
-        let event = tokio::time::timeout(Duration::from_secs(2), replay.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let event = within(replay.next()).await.unwrap().unwrap().unwrap();
         expected_sequence += 1;
         assert_eq!(event.cursor.sequence, expected_sequence);
         if matches!(event.event, SessionEvent::SessionDeleted { session_id }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 struct GatedChild {
     gate: Arc<tokio::sync::Semaphore>,
@@ -142,7 +143,7 @@ async fn delegation(script: Vec<ParentTurn>, answer: &'static str) -> Delegation
 }
 
 async fn children_started(delegation: &Delegation, count: usize) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    within(async {
         while delegation.children_started.load(Ordering::Acquire) < count {
             tokio::task::yield_now().await;
         }
@@ -259,7 +260,7 @@ fn harness_root(harness: &SpawnHarness) -> std::path::PathBuf {
 }
 
 async fn parent_sent(delegation: &Delegation, count: usize) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    within(async {
         loop {
             let notified = delegation.parent_turn.notified();
             if delegation.parent_requests.lock().unwrap().len() >= count {
@@ -315,10 +316,7 @@ async fn a_parent_keeps_working_and_receives_each_answer_once() {
         );
         assert!(delivered_answers(&requests).is_empty());
     }
-    tokio::time::timeout(Duration::from_secs(5), waiting)
-        .await
-        .unwrap()
-        .unwrap();
+    within(waiting).await.unwrap().unwrap();
     delegation.gate.add_permits(3);
     let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
     assert!(matches!(
@@ -385,10 +383,7 @@ async fn an_answer_after_the_parent_settles_reaches_its_next_run() {
         "survey",
     )
     .await;
-    tokio::time::timeout(Duration::from_secs(5), waiting)
-        .await
-        .unwrap()
-        .unwrap();
+    within(waiting).await.unwrap().unwrap();
     cancel_run(&delegation.harness.runtime, run).await.unwrap();
     let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
     assert!(matches!(
@@ -437,10 +432,7 @@ async fn steering_wakes_a_parent_waiting_for_answers() {
         "survey",
     )
     .await;
-    tokio::time::timeout(Duration::from_secs(5), waiting)
-        .await
-        .unwrap()
-        .unwrap();
+    within(waiting).await.unwrap().unwrap();
     delegation
         .harness
         .runtime
@@ -639,10 +631,10 @@ async fn a_budget_final_turn_cancels_running_children() {
     let CommandOutcome::PromptQueued { run_id: run, .. } = receipt.outcome else {
         panic!("expected a queued prompt");
     };
-    let observed = tokio::time::timeout(
-        Duration::from_secs(5),
-        collect_until_run_finished(&mut delegation.harness.events, run),
-    )
+    let observed = within(collect_until_run_finished(
+        &mut delegation.harness.events,
+        run,
+    ))
     .await
     .expect("the budget-final turn settles the run with a child still running");
     assert!(matches!(
@@ -829,7 +821,7 @@ async fn an_interrupt_does_not_stop_detached_children() {
     )
     .await;
     children_started(&delegation, 1).await;
-    tokio::time::timeout(Duration::from_secs(5), async {
+    within(async {
         loop {
             let event = delegation.harness.events.next().await.unwrap().unwrap();
             if let SessionEvent::ToolCallStarted { tool_call } = event.event
@@ -892,10 +884,7 @@ async fn an_empty_reply_while_waiting_keeps_the_request_valid() {
         "survey",
     )
     .await;
-    tokio::time::timeout(Duration::from_secs(5), waiting)
-        .await
-        .unwrap()
-        .unwrap();
+    within(waiting).await.unwrap().unwrap();
     delegation.gate.add_permits(1);
     let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
     assert!(matches!(
@@ -1080,10 +1069,7 @@ async fn a_spawn_call_dropped_while_its_receipt_is_in_flight_keeps_the_child() {
         "survey",
     )
     .await;
-    tokio::time::timeout(Duration::from_secs(5), held)
-        .await
-        .unwrap()
-        .unwrap();
+    within(held).await.unwrap().unwrap();
     delegation
         .harness
         .runtime
@@ -1097,7 +1083,7 @@ async fn a_spawn_call_dropped_while_its_receipt_is_in_flight_keeps_the_child() {
         )
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    within(async {
         loop {
             let event = delegation.harness.events.next().await.unwrap().unwrap();
             if matches!(event.event, SessionEvent::RunInterrupted { run_id, .. } if run_id == run) {

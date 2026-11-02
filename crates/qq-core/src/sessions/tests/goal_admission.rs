@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test(start_paused = true)]
 async fn loading_exhaustion_without_work_blocks_after_three_attempts() {
@@ -55,7 +56,7 @@ async fn loading_exhaustion_without_work_blocks_after_three_attempts() {
     set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"do not loop on unproductive loading",
         "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000,"per_run":{"max_duration_ms":100}}
     })).await.unwrap();
-    let stopped = tokio::time::timeout(Duration::from_secs(2), async {
+    let stopped = within(async {
         while let Some(event) = events.next().await {
             if let SessionEvent::GoalUpdated { goal } = event.unwrap().event
                 && goal.status != qq_protocol::GoalStatus::Active
@@ -304,9 +305,7 @@ async fn cancelled_pending_main_request_preserves_unknown_session_and_goal_spend
         };
         drop(held);
         runtime.request_schedule();
-        tokio::time::timeout(Duration::from_secs(3), entered.notified())
-            .await
-            .unwrap();
+        within(entered.notified()).await.unwrap();
         runtime.store().call(Priority::Control,move |connection| {
             let (pending,origin,turns):(bool,String,u64)=connection.query_row("SELECT goal_request_pending,origin_json,(SELECT COUNT(*) FROM model_turns WHERE run_id=runs.id) FROM runs WHERE id=?1",[run.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
             assert!(pending);
@@ -587,10 +586,7 @@ async fn goal_failure_after_start_before_provider_poll_preserves_known_zero() {
         release_initial.send(()).unwrap();
         drop(held);
         runtime.request_schedule();
-        tokio::time::timeout(Duration::from_secs(3), post_start_read)
-            .await
-            .unwrap()
-            .unwrap();
+        within(post_start_read).await.unwrap().unwrap();
         if activity_failure {
             runtime.store().call(Priority::Control, |connection| {
                 connection.execute_batch("CREATE TEMP TRIGGER refuse_waiting_activity BEFORE INSERT ON events WHEN json_extract(NEW.envelope_json,'$.event.type')='run_activity_changed' AND json_extract(NEW.envelope_json,'$.event.activity')='waiting_for_provider' BEGIN SELECT RAISE(ABORT,'activity event failure'); END;")?;

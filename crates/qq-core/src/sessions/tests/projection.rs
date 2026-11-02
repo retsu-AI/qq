@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn known_historical_projection_preserves_the_eighth_search_page() {
@@ -522,12 +523,9 @@ async fn ambiguous_history_fails_only_its_run_and_keeps_fresh_sessions_usable() 
         Ok(())
     }).await.unwrap();
     submit_prompt(&harness, "continue").await;
-    let observed = tokio::time::timeout(
-        Duration::from_secs(5),
-        collect_through_finished(&mut harness.events),
-    )
-    .await
-    .unwrap();
+    let observed = within(collect_through_finished(&mut harness.events))
+        .await
+        .unwrap();
     assert!(observed.iter().any(|event| matches!(&event.event,
         SessionEvent::RunFinished { outcome: RunOutcome::Failed { failure }, .. }
         if failure.message.contains("start a new session"))));

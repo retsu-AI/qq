@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn depth_two_lets_children_spawn_read_only_grandchildren_that_cannot_spawn() {
@@ -315,7 +316,7 @@ async fn cancelling_the_root_settles_the_whole_subtree() {
     )
     .await;
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "go").await;
-    tokio::time::timeout(Duration::from_secs(5), child_started.notified())
+    within(child_started.notified())
         .await
         .expect("the grandchild must start");
     cancel_run(&harness.runtime, run_id).await.unwrap();
