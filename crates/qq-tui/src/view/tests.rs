@@ -1289,7 +1289,7 @@ fn denied_and_interrupted_keep_their_reason_and_outcomes_expand_to_full_output()
 }
 
 #[test]
-fn expanded_outcomes_show_the_bounded_tail_without_repeating_the_exit() {
+fn expanded_outcomes_window_the_whole_tail_without_repeating_the_exit() {
     let diagnostics: String = (1..=10).map(|n| format!("diagnostic {n}\n")).collect();
     let result = format!("exec exit=101 elapsed=2.0 bytes=90\n{diagnostics}");
     let call = tool_call_snapshot(1, "exec", "{}", ToolCallState::Failed, Some(&result), true);
@@ -1324,7 +1324,17 @@ fn expanded_outcomes_show_the_bounded_tail_without_repeating_the_exit() {
     let lines = squashed_rows(&tools::tool_expanded_lines(&call, context, 120));
     assert_eq!(
         lines,
-        ["│ …", "│ diagnostic 8", "│ diagnostic 9", "│ diagnostic 10"]
+        [
+            "│ diagnostic 3",
+            "│ diagnostic 4",
+            "│ diagnostic 5",
+            "│ diagnostic 6",
+            "│ diagnostic 7",
+            "│ diagnostic 8",
+            "│ diagnostic 9",
+            "│ diagnostic 10",
+            "│ 3–10 of 10 · PgUp PgDn",
+        ]
     );
     assert!(!lines.iter().any(|line| line.contains("exit")), "{lines:?}");
 }

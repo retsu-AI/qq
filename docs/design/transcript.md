@@ -475,7 +475,9 @@ terminal background. Fenced code in answers keeps its `surface` panel
   paging steps by that size (`App::tool_window`). An expanded running
   command windows its whole buffered live output the same way. Argument rows and result are
   separated by one blank rail row when both exist.
-- **Error tails** keep their `error` or `warning` foreground.
+- **Error tails** keep their `error` or `warning` foreground. Collapsed, a
+  failure shows its last three rows; expanded, its whole output goes into the
+  same scrollable window as any other result, in that color.
 - **Diffs** show line numbers in `faint` and `+`/`-` signs and text in the
   diff colors, the same rows the approval panel draws
   (`overlay::dock_diff_lines`).

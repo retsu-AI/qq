@@ -612,12 +612,15 @@ pub(super) fn render_tool_blocks(
         let start = lines.len();
         lines.push(tool_summary_line(call, context, tick, width));
         if let Some(result) = call.result.as_deref() {
+            let expanded_inline = context.expanded && context.inline_detail;
             let panel = match (call.error_kind(), call.is_error) {
+                (Some(ToolErrorKind::Failure | ToolErrorKind::Outcome), _) | (None, true)
+                    if expanded_inline =>
+                {
+                    None
+                }
                 (Some(ToolErrorKind::Failure), _) | (None, true) => {
                     Some((MAX_TOOL_ERROR_ROWS, failure()))
-                }
-                (Some(ToolErrorKind::Outcome), _) if context.expanded && context.inline_detail => {
-                    None
                 }
                 (Some(ToolErrorKind::Outcome), _) => Some((1, warning())),
                 (None, false) if nonzero_exit(call) && !context.expanded => {
@@ -1052,17 +1055,7 @@ pub(super) fn tool_expanded_lines(
             muted(),
             width,
         ),
-        Some(ToolErrorKind::Outcome) => tool_error_lines(
-            strip_header(
-                call.result.as_deref().unwrap_or_default(),
-                header_word(&call.name),
-            ),
-            MAX_TOOL_RESULT_ROWS,
-            MAX_TOOL_DETAIL_BYTES,
-            warning(),
-            width,
-        ),
-        Some(ToolErrorKind::Failure) | None => Vec::new(),
+        Some(ToolErrorKind::Outcome | ToolErrorKind::Failure) | None => Vec::new(),
     };
     lines.extend(graded);
     let mut cached = row.panel.borrow_mut();
@@ -1192,8 +1185,15 @@ fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line>
             content_width,
         ));
         None
+    } else if call.error_kind() == Some(ToolErrorKind::Correction) {
+        None
     } else {
-        call.result.as_deref().filter(|_| !call.is_error)
+        call.result.as_deref()
+    };
+    let style = match (call.error_kind(), call.is_error) {
+        (Some(ToolErrorKind::Failure), _) | (None, true) => failure(),
+        (Some(ToolErrorKind::Outcome), _) => warning(),
+        (Some(ToolErrorKind::Correction), _) | (None, false) => muted(),
     };
     if let Some(result) = result {
         let result = strip_header(result, header_word(&call.name));
@@ -1204,7 +1204,7 @@ fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line>
             ResultBody::Head => {
                 let text = bounded_head(result, MAX_EXPANDED_BYTES);
                 for line in text.lines().filter(|line| !is_marker_line(line)) {
-                    body.push(Line::styled(preview(line, content_width), muted()));
+                    body.push(Line::styled(preview(line, content_width), style));
                 }
                 if text.len() < result.len() {
                     body.push(Line::styled("…", faint()));
@@ -1216,7 +1216,7 @@ fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line>
                     body.push(Line::styled("…", faint()));
                 }
                 for line in text.lines() {
-                    body.push(Line::styled(preview(line, content_width), muted()));
+                    body.push(Line::styled(preview(line, content_width), style));
                 }
             }
         }

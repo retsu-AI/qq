@@ -474,6 +474,27 @@ fn inspector_pages_step_by_the_rows_it_can_show() {
 }
 
 #[test]
+fn find_reveals_an_early_error_in_a_failed_command() {
+    let mut app = app(1);
+    let session = app.sessions.get_mut(&fixtures::SESSION).unwrap();
+    let failed = &mut session.tool_calls.as_mut().unwrap()[0];
+    failed.state = qq_protocol::ToolCallState::Failed;
+    failed.is_error = true;
+    failed.result = Some(format!(
+        "shell exit=101\nerror[E0308]: mismatched types\n{}",
+        shell_output(20)
+    ));
+    let mut renderer = FrameRenderer::default();
+    let rows = draw(&mut app, &mut renderer);
+    assert!(!rows.iter().any(|row| row.contains("E0308")), "{rows:#?}");
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    type_text(&mut app, "E0308");
+    let text = draw(&mut app, &mut renderer).join("\n");
+    assert!(text.contains("│ error[E0308]: mismatched types"), "{text}");
+    assert!(text.contains("1–8 of 21"), "{text}");
+}
+
+#[test]
 fn find_with_no_match_says_so_and_moves_nothing() {
     let mut app = app(30);
     let mut renderer = FrameRenderer::default();
