@@ -36,6 +36,7 @@ use crate::{
     viewport::{Block, TranscriptPane, View, Viewport},
 };
 mod find;
+pub(crate) use find::find_matches;
 mod pickers;
 
 const GOAL_PAGE_ROWS: usize = 1;
@@ -475,6 +476,7 @@ impl App {
                     pane.view = View::Transcript(None);
                 }
                 self.overlay = None;
+                self.find_opened = None;
                 self.last_sequence = 0;
                 self.recent_events.clear();
                 self.set_warning("session state reset after reconnecting".to_owned());
@@ -1246,6 +1248,15 @@ impl App {
                 None => Effects::changed_now(self.push_composer_text(&text)),
             },
             Event::Mouse(mouse) if self.overlay.is_none() => self.handle_mouse(mouse),
+            Event::Mouse(mouse)
+                if self.find().is_some()
+                    && matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) =>
+            {
+                self.handle_mouse(mouse)
+            }
             Event::FocusGained => {
                 self.terminal_focused = true;
                 Effects::redraw(Redraw::Immediate)
@@ -1369,6 +1380,10 @@ impl App {
 
     fn handle_armed_key(&mut self, key: KeyEvent, armed: Option<std::time::Instant>) -> Effects {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            if self.find().is_some() {
+                self.close_find();
+                return Effects::redraw(Redraw::Immediate);
+            }
             if let Some(selection) = self.selection.take()
                 && !selection.is_click()
             {
@@ -1661,6 +1676,7 @@ impl App {
         if self.pane().view != view {
             self.block_cursor = None;
             self.selection = None;
+            self.close_find();
         }
         self.pane_mut().view = view;
     }
@@ -3366,7 +3382,7 @@ impl App {
             start.saturating_sub(window)
         };
         self.tool_scroll.insert(id, next);
-        next != start
+        true
     }
 
     fn move_block_cursor(&mut self, down: bool) -> bool {

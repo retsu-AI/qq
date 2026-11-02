@@ -148,7 +148,7 @@ fn word_starts_with(haystack: &str, lowered_needle: &str) -> bool {
     false
 }
 
-pub(crate) fn contains_ignore_case(haystack: &str, lowered_needle: &str) -> bool {
+fn contains_ignore_case(haystack: &str, lowered_needle: &str) -> bool {
     let needle = lowered_needle.as_bytes();
     !needle.is_empty()
         && haystack

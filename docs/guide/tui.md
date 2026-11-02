@@ -41,11 +41,13 @@ bottom.
   second. A failed command keeps its last three output rows under it.
   `Ctrl-Up` / `Ctrl-Down` select a row; `Enter` expands it (a read shows the
   result head, an edit its diff, a command its output tail, an MCP call its
-  arguments). A long expanded result shows eight rows at a time with its
+  arguments). A result longer than nine rows shows eight at a time with its
   position (`1–8 of 40 · PgUp PgDn`); while it is selected, `PageUp` /
-  `PageDown` scroll inside it instead of the transcript. Once a turn settles, three or more routine calls fold into one
+  `PageDown` scroll inside it instead of the transcript. Once a turn
+  settles, three or more routine calls fold into one
   receipt row (`● 6 calls · read 2 · edited 2 · ran 2   2 files`); edits
-  and failures keep their rows. `Ctrl-O` opens or closes every receipt. `Alt-R` shows or hides all reasoning, which
+  and failures keep their rows. `Ctrl-O` opens or closes every receipt.
+  `Alt-R` shows or hides all reasoning, which
   otherwise reads `∴ thought for 12s`; the block cursor also stops on that
   row, and `Enter` opens just that one.
 - **Sessions column** (90 columns and wider, with two or more sessions;
@@ -384,7 +386,9 @@ matches`. The nearest match at or below the top of the view is chosen first.
 previous one, wrapping at either end. A match inside a folded tool call or
 reasoning opens it and scrolls it into view, with a long result windowed at
 the matching row; moving to another match folds it again. `Esc` closes find
-and leaves the current match open.
+and leaves the current match open. While find is open, the wheel,
+`PageUp` / `PageDown` and `End` still scroll, and `Ctrl-C` closes find
+rather than copying the match.
 
 \* `Ctrl-C` copies while a mouse selection or the block cursor is active,
 and clears a draft in the composer. Otherwise the first press says `Ctrl-C

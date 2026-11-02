@@ -216,8 +216,11 @@ it paints the block's rows on the `selection` background.
 ## Scrolling and find
 
 `viewport::Viewport` holds the pane's distance from the tail. While it is
-nonzero, rows that arrive below keep the top row still and add to
-`Viewport::unseen`, which the rule draws on its right as `↓ N new  End`
+nonzero, rows that arrive below keep the top row still. While the session
+runs and the pane width is unchanged, the growth is added to
+`Viewport::unseen`; a rewrap at a new width or a change to an idle
+transcript (an expanded call, a fetched body) is not counted. The rule draws
+it on its right as `↓ N new  End`
 (`chrome::dock_rule`); scrolling down drains it and reaching the tail clears
 it. `End` on an empty composer and `Ctrl-End` return to the tail.
 
@@ -450,14 +453,15 @@ terminal background. Fenced code in answers keeps its `surface` panel
 ```
 
 - **Expanded results** (read heads, command tails, MCP `key: value`
-  argument rows, then the result) keep up to 64 KiB of output and show it
-  through a window of `EXPANDED_WINDOW_ROWS` (8) rows in `muted`, with a
-  `faint` `1–8 of 40 · PgUp PgDn` position row when there is more. A read
+  argument rows, then the result) keep up to 64 KiB of output. Up to nine
+  rows show whole; longer results show a window of `EXPANDED_WINDOW_ROWS`
+  (8) rows in `muted` with a `faint` `1–8 of 40 · PgUp PgDn` position row.
+  A read
   opens at its head and a command at its tail; while the call is under the
   block cursor, `PageUp` / `PageDown` move the window by a page
-  (`App::tool_scroll`), so a long result never pushes the answer off
-  screen. Argument rows and result are separated by one blank rail row
-  when both exist.
+  (`App::tool_scroll`) and never fall through to the transcript, so a long
+  result never pushes the answer off screen. Argument rows and result are
+  separated by one blank rail row when both exist.
 - **Error tails** keep their `error` or `warning` foreground.
 - **Diffs** show line numbers in `faint` and `+`/`-` signs and text in the
   diff colors, the same rows the approval panel draws

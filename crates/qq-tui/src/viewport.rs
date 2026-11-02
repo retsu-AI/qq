@@ -60,6 +60,8 @@ pub(crate) struct Viewport {
     height: usize,
     offset: usize,
     unseen: usize,
+    width: usize,
+    count_growth: bool,
 }
 
 impl Viewport {
@@ -81,6 +83,8 @@ impl Viewport {
                     0
                 },
                 unseen: 0,
+                width: self.width,
+                count_growth: false,
             };
             return;
         }
@@ -92,7 +96,7 @@ impl Viewport {
                 .body_rows
                 .saturating_sub(self.offset)
                 .saturating_sub(self.height);
-            if self.offset > 0 && matches!(context, View::Transcript(_)) {
+            if self.offset > 0 && self.count_growth {
                 self.unseen = self
                     .unseen
                     .saturating_add(body_rows.saturating_sub(self.body_rows));
@@ -111,6 +115,11 @@ impl Viewport {
 
     pub(crate) const fn unseen(&self) -> usize {
         self.unseen
+    }
+
+    pub(crate) fn note_layout(&mut self, width: usize, live: bool) {
+        self.count_growth = live && self.width == width;
+        self.width = width;
     }
 
     pub(crate) const fn height(&self) -> usize {
@@ -192,7 +201,9 @@ mod tests {
     fn rows_that_arrive_below_a_scrolled_view_count_as_unseen_until_scrolled_to() {
         let mut viewport = Viewport::default();
         let context = View::Transcript(Some(session(1)));
+        viewport.note_layout(80, true);
         viewport.update(context, 100, 10, false);
+        viewport.note_layout(80, true);
         viewport.update(context, 104, 10, false);
         assert_eq!(viewport.unseen(), 0, "following the tail sees every row");
         assert!(viewport.scroll(20));
@@ -202,7 +213,24 @@ mod tests {
         assert_eq!(viewport.unseen(), 9);
         viewport.update(context, 113, 10, true);
         assert_eq!(viewport.unseen(), 9, "a re-layout adds nothing new");
-        assert!(viewport.scroll(-25));
+        viewport.note_layout(60, true);
+        viewport.update(context, 140, 10, false);
+        assert_eq!(
+            viewport.unseen(),
+            9,
+            "rewrapping at a new width is not output"
+        );
+        viewport.note_layout(60, false);
+        viewport.update(context, 150, 10, false);
+        assert_eq!(
+            viewport.unseen(),
+            9,
+            "rows from an idle session are not output"
+        );
+        viewport.note_layout(60, true);
+        viewport.update(context, 140, 10, false);
+        assert_eq!(viewport.window(), 74..84, "the top row never moved");
+        assert!(viewport.scroll(-52));
         assert_eq!(viewport.unseen(), 4, "scrolling down reveals some");
         assert!(viewport.scroll(isize::MIN));
         assert_eq!(viewport.unseen(), 0);

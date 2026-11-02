@@ -168,6 +168,99 @@ fn ctrl_f_finds_text_inside_collapsed_tool_output_and_reasoning_and_opens_each_m
 }
 
 #[test]
+fn changing_session_closes_find_so_its_matches_never_act_on_another_transcript() {
+    let mut app = app(30);
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    type_text(&mut app, "needle");
+    assert!(app.pane().reveal.is_some());
+    app.set_view(crate::viewport::View::Transcript(Some(
+        fixtures::session_id(9),
+    )));
+    assert_eq!(app.mode(), Mode::Compose);
+    assert_eq!(app.pane().reveal, None);
+    assert_eq!(app.block_cursor, None);
+}
+
+#[test]
+fn ctrl_c_with_find_open_closes_find_and_a_second_press_quits() {
+    let mut app = app(30);
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    type_text(&mut app, "needle");
+    assert!(app.block_cursor.is_some());
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let first = app.handle_key(ctrl_c);
+    assert!(
+        !first
+            .into_iter()
+            .any(|effect| matches!(effect, crate::effect::Effect::Copy(_))),
+        "Ctrl-C does not copy the find match"
+    );
+    assert_eq!(app.mode(), Mode::Compose);
+    assert_eq!(app.block_cursor, None);
+    app.handle_key(ctrl_c);
+    let quit = app.handle_key(ctrl_c);
+    assert!(
+        quit.into_iter()
+            .any(|effect| matches!(effect, crate::effect::Effect::Quit))
+    );
+}
+
+#[test]
+fn find_ignores_case_beyond_ascii_and_clears_the_cursor_without_a_match() {
+    let mut app = app(30);
+    let session = app.sessions.get_mut(&fixtures::SESSION).unwrap();
+    session.messages.as_mut().unwrap()[3].output = "Résumé ÉTÉ".to_owned();
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    type_text(&mut app, "été");
+    let rows = draw(&mut app, &mut renderer);
+    assert!(
+        rows.iter().any(|row| row.contains("/ été  1 of 1")),
+        "{rows:#?}"
+    );
+    app.handle_key(key(KeyCode::Backspace));
+    app.handle_key(key(KeyCode::Backspace));
+    app.handle_key(key(KeyCode::Backspace));
+    type_text(&mut app, "ÉTÉ");
+    let rows = draw(&mut app, &mut renderer);
+    assert!(
+        rows.iter().any(|row| row.contains("/ ÉTÉ  1 of 1")),
+        "{rows:#?}"
+    );
+    type_text(&mut app, "zzz");
+    assert_eq!(app.block_cursor, None, "no match leaves no cursor behind");
+}
+
+#[test]
+fn paging_past_an_expanded_calls_window_edge_never_scrolls_the_transcript() {
+    let mut app = app(30);
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    let call = ToolCallId::from_bytes([3; 16]);
+    app.block_cursor = Some(Block::Tool(call));
+    app.handle_key(key(KeyCode::Enter));
+    draw(&mut app, &mut renderer);
+    let before = app.viewport().offset();
+    for _ in 0..8 {
+        app.handle_key(key(KeyCode::PageUp));
+        draw(&mut app, &mut renderer);
+    }
+    assert_eq!(app.tool_scroll.get(&call), Some(&0));
+    assert_eq!(app.viewport().offset(), before);
+    for _ in 0..8 {
+        app.handle_key(key(KeyCode::PageDown));
+        draw(&mut app, &mut renderer);
+    }
+    assert_eq!(app.tool_scroll.get(&call), Some(&32));
+    assert_eq!(app.viewport().offset(), before);
+}
+
+#[test]
 fn find_with_no_match_says_so_and_moves_nothing() {
     let mut app = app(30);
     let mut renderer = FrameRenderer::default();
@@ -188,6 +281,8 @@ fn find_with_no_match_says_so_and_moves_nothing() {
 
 fn stream(app: &mut App, text: &str) {
     let session = app.sessions.get_mut(&fixtures::SESSION).unwrap();
+    session.summary.active_run_id = Some(fixtures::run_id(2));
+    session.summary.status = qq_protocol::SessionStatus::Running;
     let message = session.messages.as_mut().unwrap().last_mut().unwrap();
     message.state = MessageState::Streaming;
     message.output.push_str(text);
@@ -275,6 +370,11 @@ fn an_expanded_call_scrolls_inside_its_own_block_and_keeps_the_answer_on_screen(
     }
     let text = draw(&mut app, &mut renderer).join("\n");
     assert!(text.contains("1–8 of 40"), "clamped at the top: {text}");
+    assert_eq!(
+        app.viewport().offset(),
+        0,
+        "paging past the window's top does not scroll the transcript"
+    );
 
     app.handle_key(key(KeyCode::Enter));
     app.handle_key(key(KeyCode::PageUp));

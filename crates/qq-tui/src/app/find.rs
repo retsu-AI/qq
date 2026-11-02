@@ -1,11 +1,17 @@
+use std::borrow::Cow;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, message_source};
 use crate::{
     effect::{Effects, Redraw},
-    input::{Find, Overlay, contains_ignore_case},
+    input::{Find, Overlay},
     viewport::Block,
 };
+
+pub(crate) fn find_matches(text: &str, lowered_query: &str) -> bool {
+    !lowered_query.is_empty() && text.to_lowercase().contains(lowered_query)
+}
 
 impl App {
     pub(super) fn open_find(&mut self) -> Effects {
@@ -13,6 +19,7 @@ impl App {
             self.set_info("find works in a transcript".to_owned());
             return Effects::redraw(Redraw::Immediate);
         }
+        self.find_opened = None;
         self.overlay = Some(Overlay::Find(Find {
             origin: self.viewport().window().start,
             ..Find::default()
@@ -20,18 +27,27 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    pub(crate) fn find(&self) -> Option<&Find> {
-        match &self.overlay {
-            Some(Overlay::Find(find)) => Some(find),
-            _ => None,
+    pub(super) fn close_find(&mut self) {
+        if let Some(Overlay::Find(_)) = self.overlay {
+            self.overlay = None;
+            self.block_cursor = None;
         }
+        self.find_opened = None;
+        self.pane_mut().reveal = None;
+    }
+
+    pub(crate) fn find(&self) -> Option<&Find> {
+        if let Some(Overlay::Find(find)) = &self.overlay {
+            return Some(find);
+        }
+        None
     }
 
     fn find_mut(&mut self) -> Option<&mut Find> {
-        match &mut self.overlay {
-            Some(Overlay::Find(find)) => Some(find),
-            _ => None,
+        if let Some(Overlay::Find(find)) = &mut self.overlay {
+            return Some(find);
         }
+        None
     }
 
     pub(super) fn handle_find_key(&mut self, key: KeyEvent) -> Effects {
@@ -40,14 +56,13 @@ impl App {
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         match key.code {
             KeyCode::Esc => {
-                self.overlay = None;
-                self.find_opened = None;
-                self.block_cursor = None;
+                self.close_find();
                 Effects::redraw(Redraw::Immediate)
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => self.step_find(false),
             KeyCode::Enter | KeyCode::Down => self.step_find(true),
             KeyCode::Up => self.step_find(false),
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::End => self.handle_compose_key(key),
             KeyCode::Backspace => {
                 let popped = self
                     .find_mut()
@@ -73,7 +88,7 @@ impl App {
         Effects::changed_now(pushed)
     }
 
-    fn block_text(&self, block: Block) -> Option<String> {
+    fn block_text(&self, block: Block) -> Option<Cow<'_, str>> {
         let session = self.sessions.get(&self.view().transcript()?)?;
         match block {
             Block::Message(id) => session
@@ -81,22 +96,22 @@ impl App {
                 .as_ref()?
                 .iter()
                 .find(|message| message.id == id)
-                .map(|message| message_source(message).into_owned()),
+                .map(message_source),
             Block::Tool(id) => session
                 .tool_calls
                 .as_ref()?
                 .iter()
                 .find(|call| call.id == id)
                 .map(|call| {
-                    crate::view::tool_copy_text(
+                    Cow::Owned(crate::view::tool_copy_text(
                         call,
                         session.live_tool_output.get(&id).map(String::as_str),
-                    )
+                    ))
                 }),
             Block::Reasoning(run) => session
                 .reasoning
                 .get(&run)
-                .map(|reasoning| reasoning.text.clone()),
+                .map(|reasoning| Cow::Borrowed(reasoning.text.as_str())),
             Block::Code(..) => None,
         }
     }
@@ -119,17 +134,15 @@ impl App {
         blocks.dedup_by_key(|(block, _)| *block);
         let mut matches = Vec::new();
         let mut first_below = None;
-        if !query.is_empty() {
-            for (block, range) in blocks {
-                if self
-                    .block_text(block)
-                    .is_some_and(|text| contains_ignore_case(&text, &query))
-                {
-                    if first_below.is_none() && range.start >= top {
-                        first_below = Some(matches.len());
-                    }
-                    matches.push(block);
+        for (block, range) in blocks {
+            if self
+                .block_text(block)
+                .is_some_and(|text| find_matches(&text, &query))
+            {
+                if first_below.is_none() && range.start >= top {
+                    first_below = Some(matches.len());
                 }
+                matches.push(block);
             }
         }
         let current = (!matches.is_empty()).then(|| first_below.unwrap_or(matches.len() - 1));
@@ -193,12 +206,17 @@ impl App {
             }
         }
         let Some(target) = target else {
+            self.block_cursor = None;
+            self.pane_mut().reveal = None;
             return;
         };
         let opened = match target {
             Block::Tool(call) => {
-                self.scroll_tool_to_query(call);
-                self.expanded_tool_calls.insert(call)
+                let opened = self.expanded_tool_calls.insert(call);
+                if opened || self.find_opened == Some(target) {
+                    self.scroll_tool_to_query(call);
+                }
+                opened
             }
             Block::Reasoning(run) => self.open_reasoning.insert(run),
             Block::Message(_) | Block::Code(..) => false,

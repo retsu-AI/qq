@@ -1101,7 +1101,7 @@ pub(crate) fn expanded_panel_match(call: &ToolCallSnapshot, lowered_query: &str)
         .iter()
         .position(|line| {
             let text: String = line.spans.iter().map(|span| span.text.as_str()).collect();
-            crate::input::contains_ignore_case(&text, lowered_query)
+            crate::app::find_matches(&text, lowered_query)
         })
 }
 
