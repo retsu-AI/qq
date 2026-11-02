@@ -424,6 +424,21 @@ fn releasing_ctrl_c_keeps_the_quit_armed() {
 }
 
 #[test]
+fn holding_ctrl_c_does_not_confirm_the_quit() {
+    let press = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let repeat = KeyEvent {
+        kind: crossterm::event::KeyEventKind::Repeat,
+        ..press
+    };
+    let mut app = app();
+    assert!(!quits(app.handle_terminal_event(Event::Key(press))));
+    for _ in 0..3 {
+        assert!(!quits(app.handle_terminal_event(Event::Key(repeat))));
+    }
+    assert!(quits(app.handle_terminal_event(Event::Key(press))));
+}
+
+#[test]
 fn the_first_ctrl_c_counts_the_runs_that_stop_only_when_this_qq_owns_the_server() {
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     for (owns_server, expected) in [

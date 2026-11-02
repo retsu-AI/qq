@@ -5261,6 +5261,27 @@ fn plain_text_in_the_side_view_is_a_question_even_when_it_reads_like_a_subcomman
 }
 
 #[test]
+fn a_side_follow_up_held_until_startup_finishes_is_still_a_question() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.execute(Command::ShowSideQuestions);
+    let workspace = app.workspace_id.take();
+    app.composer.replace("cancel".to_owned());
+    let (_, requests) = app.submit_prompt().split();
+    assert!(requests.is_empty(), "held while qq starts");
+    app.workspace_id = workspace;
+    let (_, requests) = app.replay_queued_prompts().split();
+    assert!(
+        matches!(requests.as_slice(), [ClientRequest::Command(CommandRequest {
+            command: SessionCommand::SubmitSideQuestion { session_id, question, new_thread: false },
+            ..
+        })] if *session_id == id && question == "cancel"),
+        "{requests:?}"
+    );
+}
+
+#[test]
 fn deleting_the_side_views_source_leaves_the_view() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());

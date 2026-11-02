@@ -1210,9 +1210,13 @@ impl App {
     }
 
     pub fn handle_terminal_event(&mut self, event: Event) -> Effects {
-        if matches!(&event, Event::Key(key) if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat))
-        {
-            return Effects::none();
+        if let Event::Key(key) = &event {
+            let repeated_ctrl_c = key.kind == KeyEventKind::Repeat
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('c');
+            if repeated_ctrl_c || !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                return Effects::none();
+            }
         }
         let armed = self.quit_armed_at.take();
         match event {
@@ -1989,7 +1993,8 @@ impl App {
     }
 
     fn submit_prompt(&mut self) -> Effects {
-        let mut prompt = self.composer.expanded().trim().to_owned();
+        let typed = self.composer.expanded().trim().to_owned();
+        let mut prompt = typed.clone();
         let mut side_follow_up = false;
         if matches!(self.view(), View::SideQuestions(_))
             && !prompt.is_empty()
@@ -2009,7 +2014,7 @@ impl App {
                 return Effects::redraw(Redraw::Immediate);
             }
             self.startup_submits.push_back(QueuedPrompt {
-                text: prompt,
+                text: typed,
                 session_id: self.focused(),
                 view: self.view(),
             });
