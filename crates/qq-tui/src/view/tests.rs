@@ -1105,6 +1105,7 @@ fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
         inline_detail: false,
         fold: false,
         selected: false,
+        scroll: None,
     };
     let transcript = tools::render_tool_calls(
         &[&corrected],
@@ -1274,6 +1275,7 @@ fn denied_and_interrupted_keep_their_reason_and_outcomes_expand_to_full_output()
             inline_detail,
             fold: false,
             selected: false,
+            scroll: None,
         };
         let lines = squashed_rows(&tools::tool_expanded_lines(&outcome, context, 120));
         assert!(
@@ -1314,6 +1316,7 @@ fn expanded_outcomes_show_the_bounded_tail_without_repeating_the_exit() {
         inline_detail: true,
         fold: false,
         selected: false,
+        scroll: None,
     };
     let lines = squashed_rows(&tools::tool_expanded_lines(&call, context, 120));
     assert_eq!(
@@ -1545,12 +1548,9 @@ fn expanding_a_read_shows_the_head_of_the_file_and_never_its_json() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("line 1\n"), "head first: {text}");
-    assert!(
-        text.contains(&format!("line {MAX_TOOL_RESULT_ROWS}")),
-        "{text}"
-    );
+    assert!(text.contains("line 8\n"), "{text}");
     assert!(!text.contains("line 20"), "bounded: {text}");
-    assert!(text.contains("… 17 more lines"), "{text}");
+    assert!(text.contains("1–8 of 20 · PgUp PgDn"), "{text}");
     assert!(
         !text.contains("\"path\""),
         "known tools show no JSON: {text}"
@@ -1733,6 +1733,7 @@ fn tool_metrics_sit_two_columns_after_the_subject_at_every_width() {
         inline_detail: true,
         fold: false,
         selected: false,
+        scroll: None,
     };
     let row = frame_rows(&[tool_summary_line(&running, lookup(&running), 0, 72)]).remove(0);
     assert_eq!(
@@ -1767,6 +1768,7 @@ fn narrow_tool_rows_drop_the_duration_then_the_metric_before_the_verb() {
         inline_detail: true,
         fold: false,
         selected: false,
+        scroll: None,
     };
     let at = |width| squash(&frame_rows(&[tool_summary_line(&call, lookup(&call), 0, width)])[0]);
     assert_eq!(at(60), "● Read crates/qq-client/src/sse.rs 3 lines 1.4s");
@@ -3834,6 +3836,7 @@ fn expanded_call_rows(call: &ToolCallSnapshot, width: usize) -> Vec<Line> {
         inline_detail: true,
         fold: false,
         selected: false,
+        scroll: None,
     };
     tool_expanded_lines(call, context, width)
 }
@@ -3868,8 +3871,8 @@ fn expanded_read_detail_is_a_rail_without_panel_padding() {
     let rows = frame_rows(&lines);
     assert_eq!(
         rows,
-        ["│ line 1", "│ line 2", "│ line 3", "│ … 2 more lines"],
-        "at most 3 rows on the rail, then a count"
+        ["│ line 1", "│ line 2", "│ line 3", "│ line 4", "│ line 5"],
+        "a short result shows whole on the rail"
     );
     assert!(lines.iter().all(is_rail_row), "{lines:?}");
     assert!(lines.iter().all(|line| line.width() <= 40));
@@ -4004,7 +4007,7 @@ fn overlong_detail_rows_are_truncated_to_the_width_with_an_ellipsis() {
 }
 
 #[test]
-fn every_detail_budget_is_its_row_cap_plus_one_overflow_marker() {
+fn every_expanded_result_is_a_window_of_its_rows_plus_one_position_row() {
     let body = (1..=40)
         .map(|n| format!("line {n}"))
         .collect::<Vec<_>>()
@@ -4020,12 +4023,13 @@ fn every_detail_budget_is_its_row_cap_plus_one_overflow_marker() {
     let lines = expanded_call_rows(&read, 80);
     assert_eq!(
         lines.len(),
-        MAX_TOOL_RESULT_ROWS + 1,
-        "head budget + more marker"
+        EXPANDED_WINDOW_ROWS + 1,
+        "window + position row"
     );
     let text = frame_text(&lines);
-    assert!(text.contains(&format!("line {MAX_TOOL_RESULT_ROWS}")));
-    assert!(!text.contains(&format!("line {}", MAX_TOOL_RESULT_ROWS + 1)));
+    assert!(text.contains(&format!("line {EXPANDED_WINDOW_ROWS}")));
+    assert!(!text.contains(&format!("line {}", EXPANDED_WINDOW_ROWS + 1)));
+    assert!(text.contains("1–8 of 40"), "{text}");
 
     let run = tool_call_snapshot(
         2,
@@ -4036,8 +4040,13 @@ fn every_detail_budget_is_its_row_cap_plus_one_overflow_marker() {
         false,
     );
     let lines = expanded_call_rows(&run, 80);
-    assert_eq!(lines.len(), 1 + MAX_TOOL_RESULT_ROWS);
-    assert!(frame_text(&lines).contains("line 40"));
+    assert_eq!(lines.len(), EXPANDED_WINDOW_ROWS + 1);
+    let text = frame_text(&lines);
+    assert!(
+        text.contains("line 40"),
+        "a command opens at its tail: {text}"
+    );
+    assert!(text.contains("33–40 of 40"), "{text}");
 
     let arguments = (0..12)
         .map(|n| format!("\"k{n}\":\"v{n}\""))
@@ -4053,20 +4062,48 @@ fn every_detail_budget_is_its_row_cap_plus_one_overflow_marker() {
     );
     let lines = expanded_call_rows(&mcp, 80);
     assert!(lines.iter().all(is_rail_row), "{lines:?}");
+    let rows = frame_rows(&lines);
     assert_eq!(
         lines.len(),
-        MAX_TOOL_ARGUMENT_ROWS + 1 + 1 + 1,
-        "argument budget + marker + separator + result"
+        EXPANDED_WINDOW_ROWS + 1,
+        "arguments and result share one window: {rows:#?}"
     );
-    let rows = frame_rows(&lines);
     assert_eq!(rows[0], "│ k0: v0");
-    assert_eq!(rows[MAX_TOOL_ARGUMENT_ROWS], "│ …");
+    assert!(
+        rows[EXPANDED_WINDOW_ROWS].contains("1–8 of 11"),
+        "{rows:#?}"
+    );
+    let mut scrolled = tool_call_snapshot(
+        3,
+        "mcp__srv__tool",
+        &format!("{{{arguments}}}"),
+        ToolCallState::Completed,
+        Some("ok"),
+        false,
+    );
+    scrolled.id = ToolCallId::from_bytes([30; 16]);
+    let row = ToolRow::derive(&scrolled);
+    let context = ToolRowContext {
+        row: &row,
+        clock: RowClock {
+            timing: qq_client::state::ToolCallTiming::default(),
+            now_ms: 0,
+        },
+        expanded: true,
+        inline_detail: true,
+        fold: false,
+        selected: false,
+        scroll: Some(usize::MAX),
+    };
+    let rows = frame_rows(&tools::tool_expanded_lines(&scrolled, context, 80));
+    assert_eq!(rows[MAX_TOOL_ARGUMENT_ROWS - 3], "│ …");
     assert_eq!(
-        rows[MAX_TOOL_ARGUMENT_ROWS + 1].trim_end(),
+        rows[MAX_TOOL_ARGUMENT_ROWS - 2].trim_end(),
         "│",
         "separator"
     );
-    assert_eq!(rows[MAX_TOOL_ARGUMENT_ROWS + 2], "│ ok");
+    assert_eq!(rows[MAX_TOOL_ARGUMENT_ROWS - 1], "│ ok");
+    assert!(rows[MAX_TOOL_ARGUMENT_ROWS].contains("4–11 of 11"));
 
     let quiet = tool_call_snapshot(
         4,
@@ -5244,9 +5281,9 @@ fn expanded_detail_moves_between_the_transcript_and_the_inspector_as_it_toggles(
     );
     assert!(inspector.contains("line 1\n"), "{inspector}");
     assert!(
-        inspector.contains(&format!("line {MAX_TOOL_RESULT_ROWS}"))
-            && inspector.contains("… 17 more lines"),
-        "same row budget as inline: {inspector}"
+        inspector.contains(&format!("line {EXPANDED_WINDOW_ROWS}"))
+            && inspector.contains("1–8 of 20"),
+        "same window as inline: {inspector}"
     );
 
     app.execute(Command::ToggleInspector);
@@ -5261,7 +5298,7 @@ fn expanded_detail_moves_between_the_transcript_and_the_inspector_as_it_toggles(
         transcript.contains("line 1\n"),
         "detail back inline: {transcript}"
     );
-    assert!(transcript.contains("… 17 more lines"), "{transcript}");
+    assert!(transcript.contains("1–8 of 20"), "{transcript}");
 
     app.execute(Command::ToggleInspector);
     let shown = renderer.frame_and_commit(&mut app, 200, 60);
@@ -5298,7 +5335,7 @@ fn the_inspector_bounds_its_rows_to_the_pane_height() {
     let rows: Vec<&str> = inspector.lines().collect();
     assert_eq!(rows.len(), 9, "{inspector}");
     assert!(
-        rows.iter().any(|row| row.ends_with("… 4 rows more")),
+        rows.iter().any(|row| row.contains("rows more")),
         "overflow is counted, not clipped silently: {inspector}"
     );
     assert!(rows.iter().any(|row| row.contains("line 1")), "{inspector}");
@@ -5425,6 +5462,7 @@ fn a_tool_row_reuses_its_panel_across_frames_and_relays_out_on_a_new_width() {
         inline_detail: true,
         fold: false,
         selected: false,
+        scroll: None,
     };
     let first = tool_expanded_lines(&call, context(43_454_000), 80);
     let second = tool_expanded_lines(&call, context(43_455_000), 80);
@@ -5824,7 +5862,7 @@ fn goal_check_consent_panel_names_workspace_command_and_separate_scopes() {
     for label in ["$ printf", "deny", "allow once", "allow repeated checks"] {
         assert!(text.contains(label), "missing {label}: {text}");
     }
-    let rule = frame_rows(&[super::chrome::dock_rule(&app, 200, false)]).join("");
+    let rule = frame_rows(&[super::chrome::dock_rule(&app, 200, false, 0)]).join("");
     assert!(
         rule.contains("in /workspace?"),
         "the rule names the workspace: {rule}"
@@ -5863,7 +5901,7 @@ fn goal_rule_shows_the_run_budget_wait_and_settled_state() {
     goal.next_run_at_ms = 240_000;
     initial.focused.as_mut().unwrap().goal = Some(goal);
     app.apply_client_update(ClientUpdate::Snapshot(initial));
-    let text = frame_rows(&[super::chrome::dock_rule(&app, 120, true)]).join("");
+    let text = frame_rows(&[super::chrome::dock_rule(&app, 120, true, 0)]).join("");
     for expected in ["goal", "run 12/200", "next 4m"] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
@@ -5873,7 +5911,7 @@ fn goal_rule_shows_the_run_budget_wait_and_settled_state() {
         qq_protocol::RunId::from_bytes([0x71; 16]),
         qq_protocol::RunActivity::PreparingToolCall,
     ));
-    let text = frame_rows(&[super::chrome::dock_rule(&app, 80, true)]).join("");
+    let text = frame_rows(&[super::chrome::dock_rule(&app, 80, true, 0)]).join("");
     assert!(
         text.contains("preparing a tool call"),
         "a running goal shows the run: {text}"
@@ -5885,7 +5923,7 @@ fn goal_rule_shows_the_run_budget_wait_and_settled_state() {
         reason: GoalPauseReason::User,
     };
     goal.pending_run_id = Some(qq_protocol::RunId::from_bytes([0x71; 16]));
-    let text = frame_rows(&[super::chrome::dock_rule(&app, 120, true)]).join("");
+    let text = frame_rows(&[super::chrome::dock_rule(&app, 120, true, 0)]).join("");
     assert!(text.contains("paused by you"), "{text}");
     assert!(text.contains("cancellation draining"), "{text}");
     app.sessions
@@ -5895,7 +5933,7 @@ fn goal_rule_shows_the_run_budget_wait_and_settled_state() {
         .as_mut()
         .unwrap()
         .pending_run_id = None;
-    let text = frame_rows(&[super::chrome::dock_rule(&app, 120, true)]).join("");
+    let text = frame_rows(&[super::chrome::dock_rule(&app, 120, true, 0)]).join("");
     assert!(!text.contains("cancellation draining"), "{text}");
     app.sessions
         .get_mut(&session_id)
@@ -5904,7 +5942,7 @@ fn goal_rule_shows_the_run_budget_wait_and_settled_state() {
         .as_mut()
         .unwrap()
         .status = GoalStatus::Achieved;
-    let text = frame_rows(&[super::chrome::dock_rule(&app, 40, true)]).join("");
+    let text = frame_rows(&[super::chrome::dock_rule(&app, 40, true, 0)]).join("");
     assert!(text.contains("goal") && text.contains("achieved"), "{text}");
     assert!(unicode_width::UnicodeWidthStr::width(text.as_str()) <= 40);
     app.sessions
@@ -5918,7 +5956,7 @@ fn goal_rule_shows_the_run_budget_wait_and_settled_state() {
             reason: "bad\u{1b}[2J\ninput".to_owned(),
         },
     };
-    let text = frame_rows(&[super::chrome::dock_rule(&app, 120, true)]).join("");
+    let text = frame_rows(&[super::chrome::dock_rule(&app, 120, true, 0)]).join("");
     assert!(text.contains("blocked"), "{text}");
     assert!(!text.contains('\u{1b}') && !text.contains('\n'), "{text}");
 }
@@ -6040,7 +6078,7 @@ fn the_composer_rail_color_follows_the_approval_mode() {
 #[test]
 fn the_rule_takes_the_running_color_while_the_focused_session_runs() {
     let mut app = app_with_messages(1);
-    let idle = super::chrome::dock_rule(&app, 80, true);
+    let idle = super::chrome::dock_rule(&app, 80, true, 0);
     assert!(
         idle.spans
             .iter()
@@ -6050,7 +6088,7 @@ fn the_rule_takes_the_running_color_while_the_focused_session_runs() {
     if let Some(session) = app.sessions.get_mut(&SESSION) {
         session.summary.status = SessionStatus::Running;
     }
-    let running = super::chrome::dock_rule(&app, 80, true);
+    let running = super::chrome::dock_rule(&app, 80, true, 0);
     assert!(
         running
             .spans
@@ -6076,7 +6114,7 @@ fn a_goal_check_command_too_long_for_the_rule_stays_readable_in_the_panel() {
         KeyModifiers::NONE,
     )));
     assert!(text_width(&command) > 40 && text_width(&command) + 24 <= 116);
-    let rule = frame_rows(&[super::chrome::dock_rule(&app, 116, true)]).join("");
+    let rule = frame_rows(&[super::chrome::dock_rule(&app, 116, true, 0)]).join("");
     let panel = frame_rows(&super::overlay::goal_check_picker(&app, 116, 12)).join("\n");
     assert!(
         rule.contains("end-marker") || panel.contains("end-marker"),
@@ -6261,7 +6299,7 @@ fn goal_check_app(command: &str) -> App {
 #[test]
 fn a_short_multiline_goal_check_shows_every_line_before_consent() {
     let app = goal_check_app("echo safe\nrm -f victim");
-    let rule = frame_rows(&[super::chrome::dock_rule(&app, 116, true)]).join("");
+    let rule = frame_rows(&[super::chrome::dock_rule(&app, 116, true, 0)]).join("");
     let panel = frame_rows(&super::overlay::goal_check_picker(&app, 116, 12)).join("\n");
     assert!(
         panel.contains("$ echo safe") && panel.contains("$ rm -f victim"),
@@ -6316,7 +6354,7 @@ fn the_selected_goal_check_scope_stays_visible_on_a_short_terminal() {
 fn the_goal_check_panel_always_shows_the_command_even_under_a_notice() {
     let mut app = goal_check_app("cargo test");
     app.note_editor_failure("earlier failure");
-    let rule = frame_rows(&[super::chrome::dock_rule(&app, 116, true)]).join("");
+    let rule = frame_rows(&[super::chrome::dock_rule(&app, 116, true, 0)]).join("");
     assert!(rule.contains("earlier failure"), "{rule}");
     let panel = frame_rows(&super::overlay::goal_check_picker(&app, 116, 12)).join("\n");
     assert!(panel.contains("$ cargo test"), "{panel}");

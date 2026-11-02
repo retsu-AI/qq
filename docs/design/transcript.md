@@ -174,7 +174,9 @@ No message has a role label; the rail says whose it is
   with a `pending` row.
 - Reasoning is one `faint` row, `∴ thought for 12s`, after it finishes;
   while it streams it shows only on the rule (`◐ thinking · 6s`). `Alt-R`
-  expands it under a `faint` `│` rail.
+  expands every reasoning row under a `faint` `│` rail; the block cursor
+  stops on the row (`Block::Reasoning`) and `Enter` opens that one
+  (`App::open_reasoning`).
 - A completed run prints no completion line. Only a run that ends
   `cancelled`, `interrupted`, `paused`, `budget exhausted` (`◌` in
   `warning`) or `failed` (`✕` in `error`) gets one row after its last
@@ -207,9 +209,30 @@ and the rest is **content**:
 
 The rail glyphs alone say what kind of row each is. The block cursor
 (`Ctrl-Up` / `Ctrl-Down`) moves over prompts, answers, code blocks inside
-answers, and tool calls; on a tool call it paints the glyph in `accent` and
+answers, reasoning rows, and tool calls; on a tool call it paints the glyph in `accent` and
 the verb bold rather than shifting the row, and on a message or code block
 it paints the block's rows on the `selection` background.
+
+## Scrolling and find
+
+`viewport::Viewport` holds the pane's distance from the tail. While it is
+nonzero, rows that arrive below keep the top row still and add to
+`Viewport::unseen`, which the rule draws on its right as `↓ N new  End`
+(`chrome::dock_rule`); scrolling down drains it and reaching the tail clears
+it. `End` on an empty composer and `Ctrl-End` return to the tail.
+
+`Ctrl-F` opens `Overlay::Find` in the dock (`chrome::find_panel`). Each
+edit of the query matches it, case-insensitively, against the source of every
+block the last frame laid out (`TranscriptPane::blocks`): message Markdown,
+a tool call's copy text (command and full output), and reasoning text
+(`app/find.rs`). The search reads only the session store and the block list
+from the previous frame, so it adds no work to the frame path, and its
+cost grows with the bounded visible transcript (`MAX_VISIBLE_MESSAGES`), not
+the session. Stepping to a match sets `TranscriptPane::reveal`; the next
+frame scrolls the block into view (`Viewport::reveal`). A match in a folded
+call or reasoning row opens it, positions an expanded result's window on the
+matched row, and folds it again when find moves to another match. Closing
+find leaves the current match open.
 
 ## Row metadata for copying
 
@@ -414,7 +437,12 @@ terminal background. Fenced code in answers keeps its `surface` panel
   │ fn main() {}
   │ fn main() {}
   │ fn main() {}
-  │ … 17 more lines
+  │ fn main() {}
+  │ fn main() {}
+  │ fn main() {}
+  │ fn main() {}
+  │ fn main() {}
+  │ 1–8 of 20 · PgUp PgDn
   ● Edited   crates/qq-tui/src/file_1.rs  6 B
   │ edited
   ● Ran      cargo test -p crate_2
@@ -422,10 +450,14 @@ terminal background. Fenced code in answers keeps its `surface` panel
 ```
 
 - **Expanded results** (read heads, command tails, MCP `key: value`
-  argument rows, then the result) show at most three rows
-  (`MAX_TOOL_RESULT_ROWS`) in `muted`, with a `faint` `… N more lines` or
-  `…` marking what was cut. Argument rows and result are separated by one
-  blank rail row when both exist.
+  argument rows, then the result) keep up to 64 KiB of output and show it
+  through a window of `EXPANDED_WINDOW_ROWS` (8) rows in `muted`, with a
+  `faint` `1–8 of 40 · PgUp PgDn` position row when there is more. A read
+  opens at its head and a command at its tail; while the call is under the
+  block cursor, `PageUp` / `PageDown` move the window by a page
+  (`App::tool_scroll`), so a long result never pushes the answer off
+  screen. Argument rows and result are separated by one blank rail row
+  when both exist.
 - **Error tails** keep their `error` or `warning` foreground.
 - **Diffs** show line numbers in `faint` and `+`/`-` signs and text in the
   diff colors, the same rows the approval panel draws

@@ -44,16 +44,19 @@ use layout::{Tier, TranscriptSlot, compute_layout};
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
 use overlay::*;
 use sidebar::*;
-pub(crate) use tools::tool_copy_text;
 use tools::*;
+pub(crate) use tools::{
+    EXPANDED_WINDOW_ROWS, expanded_panel_match, expanded_panel_rows, expanded_window_start,
+    tool_copy_text,
+};
 use transcript::*;
 use workspace::*;
 pub(crate) use wrap::preview;
 #[cfg(test)]
 use wrap::transcript_viewport;
 use wrap::{
-    bounded_tail, fit_height, indent_lines, selection_viewport, truncate_line, wrap_line,
-    wrap_line_chars,
+    bounded_head, bounded_tail, fit_height, indent_lines, selection_viewport, truncate_line,
+    wrap_line, wrap_line_chars,
 };
 
 const MAX_RENDER_WIDTH: u16 = 1024;
@@ -154,6 +157,7 @@ impl FrameRenderer {
         for (index, update) in self.pane_updates.drain(..) {
             if let Some(pane) = app.panes.get_mut(index) {
                 pane.viewport = update.viewport;
+                pane.reveal = None;
                 pane.live_message_ranges = update.live_message_ranges;
                 let previous = std::mem::replace(&mut pane.blocks, update.blocks);
                 self.cache.recycle_blocks(previous);
@@ -284,7 +288,7 @@ impl FrameRenderer {
         let (panel, goal_scroll) = dock_panel(app, dock_width, panel_limit.max(1));
         self.goal_scroll = goal_scroll;
         let mut dock: Vec<Line> = Vec::new();
-        dock.push(dock_rule(app, dock_width, rail_width > 0));
+        dock.push(Line::default());
         dock.extend(panel);
         dock.extend(draft_lines);
         let composer_top = dock.len();
@@ -369,6 +373,12 @@ impl FrameRenderer {
                 inspector_pane(rows, inspector.width, body_height),
             ));
         }
+        let unseen = self
+            .pane_updates
+            .iter()
+            .find(|(index, _)| *index == app.focused_pane)
+            .map_or(0, |(_, update)| update.viewport.unseen());
+        dock[0] = dock_rule(app, dock_width, rail_width > 0, unseen);
         for line in &mut dock {
             line.indent = layout::MARGIN as u16;
         }

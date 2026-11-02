@@ -15,6 +15,8 @@ pub(super) const MAX_TOOL_ARGUMENT_ROWS: usize = 8;
 pub(super) const MAX_TOOL_RESULT_ROWS: usize = 3;
 pub(super) const MAX_TOOL_DIFF_ROWS: usize = 8;
 pub(super) const MAX_LIVE_TAIL_ROWS: usize = 3;
+pub(crate) const EXPANDED_WINDOW_ROWS: usize = 8;
+const MAX_EXPANDED_BYTES: usize = 64 * 1024;
 pub(super) const TOOL_SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const TRUNCATED_SUFFIX: &str = " · truncated";
 
@@ -512,6 +514,7 @@ pub(crate) struct ToolRowContext<'a> {
     pub inline_detail: bool,
     pub fold: bool,
     pub selected: bool,
+    pub scroll: Option<usize>,
 }
 
 pub(super) type ChildRows<'a> = &'a dyn Fn(ToolCallId, usize) -> Vec<Line>;
@@ -1059,9 +1062,47 @@ pub(super) fn tool_expanded_lines(
         *cached = Some((width, tool_panel(call, row, width)));
     }
     if let Some((_, panel)) = cached.as_ref() {
-        lines.extend_from_slice(panel);
+        if panel.len() <= EXPANDED_WINDOW_ROWS + 1 {
+            lines.extend_from_slice(panel);
+        } else {
+            let start = expanded_window_start(row.body, panel.len(), context.scroll);
+            let end = start + EXPANDED_WINDOW_ROWS;
+            lines.extend_from_slice(&panel[start..end]);
+            let mut footer = Line::styled("│ ", faint()).with_chrome(2);
+            footer.kind = RowKind::Output;
+            footer.push(
+                format!("{}–{end} of {} · PgUp PgDn", start + 1, panel.len()),
+                faint(),
+            );
+            lines.push(truncate_line(footer, width));
+        }
     }
     lines
+}
+
+pub(crate) fn expanded_window_start(body: ResultBody, rows: usize, scroll: Option<usize>) -> usize {
+    let last = rows.saturating_sub(EXPANDED_WINDOW_ROWS);
+    match (scroll, body) {
+        (Some(start), _) => start.min(last),
+        (None, ResultBody::Head) => 0,
+        (None, ResultBody::Tail) => last,
+    }
+}
+
+pub(crate) fn expanded_panel_rows(call: &ToolCallSnapshot) -> (ResultBody, usize) {
+    let row = ToolRow::derive(call);
+    let rows = tool_panel(call, &row, 80).len();
+    (row.body, rows)
+}
+
+pub(crate) fn expanded_panel_match(call: &ToolCallSnapshot, lowered_query: &str) -> Option<usize> {
+    let row = ToolRow::derive(call);
+    tool_panel(call, &row, MAX_RENDER_WIDTH.into())
+        .iter()
+        .position(|line| {
+            let text: String = line.spans.iter().map(|span| span.text.as_str()).collect();
+            crate::input::contains_ignore_case(&text, lowered_query)
+        })
 }
 
 fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line> {
@@ -1101,34 +1142,20 @@ fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line>
         }
         match row.body {
             ResultBody::Head => {
-                let total = result.lines().count();
-                for line in result
-                    .lines()
-                    .filter(|line| !is_marker_line(line))
-                    .take(MAX_TOOL_RESULT_ROWS)
-                {
+                let text = bounded_head(result, MAX_EXPANDED_BYTES);
+                for line in text.lines().filter(|line| !is_marker_line(line)) {
                     body.push(Line::styled(preview(line, content_width), muted()));
                 }
-                if total > MAX_TOOL_RESULT_ROWS {
-                    body.push(Line::styled(
-                        format!(
-                            "… {}",
-                            count_noun(total - MAX_TOOL_RESULT_ROWS, "more line", "more lines")
-                        ),
-                        faint(),
-                    ));
+                if text.len() < result.len() {
+                    body.push(Line::styled("…", faint()));
                 }
             }
             ResultBody::Tail => {
-                let text = bounded_tail(result, MAX_TOOL_DETAIL_BYTES);
-                let total = text.lines().count();
-                if total > MAX_TOOL_RESULT_ROWS || text.len() < result.len() {
+                let text = bounded_tail(result, MAX_EXPANDED_BYTES);
+                if text.len() < result.len() {
                     body.push(Line::styled("…", faint()));
                 }
-                for line in text
-                    .lines()
-                    .skip(total.saturating_sub(MAX_TOOL_RESULT_ROWS))
-                {
+                for line in text.lines() {
                     body.push(Line::styled(preview(line, content_width), muted()));
                 }
             }
@@ -1226,6 +1253,7 @@ pub(super) fn render_tool_calls_simple(
         inline_detail: true,
         fold: detail == SimpleDetail::Folded,
         selected: false,
+        scroll: None,
     };
     render_tool_calls(calls, live_output, &lookup, tick, width, children)
 }

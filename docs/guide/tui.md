@@ -41,10 +41,13 @@ bottom.
   second. A failed command keeps its last three output rows under it.
   `Ctrl-Up` / `Ctrl-Down` select a row; `Enter` expands it (a read shows the
   result head, an edit its diff, a command its output tail, an MCP call its
-  arguments). Once a turn settles, three or more routine calls fold into one
+  arguments). A long expanded result shows eight rows at a time with its
+  position (`1–8 of 40 · PgUp PgDn`); while it is selected, `PageUp` /
+  `PageDown` scroll inside it instead of the transcript. Once a turn settles, three or more routine calls fold into one
   receipt row (`● 6 calls · read 2 · edited 2 · ran 2   2 files`); edits
-  and failures keep their rows. `Ctrl-O` opens or closes every receipt. `Alt-R` shows or hides reasoning, which
-  otherwise reads `∴ thought for 12s`.
+  and failures keep their rows. `Ctrl-O` opens or closes every receipt. `Alt-R` shows or hides all reasoning, which
+  otherwise reads `∴ thought for 12s`; the block cursor also stops on that
+  row, and `Enter` opens just that one.
 - **Sessions column** (90 columns and wider, with two or more sessions;
   `Ctrl-\` toggles): sessions numbered 1–9 and grouped by what you should
   do — NEEDS YOU, WORKING, RECENT — with `N new` for unread replies and
@@ -55,7 +58,8 @@ bottom.
 - **Rule**: the focused session's state and activity (`◐ editing · 14s`),
   or the last notice. Its color follows the session: dim when idle, blue
   while running, yellow when it needs you, red after a failure. On the
-  right, `◇ N needs you ^G` counts approvals waiting in other sessions.
+  right, `◇ N needs you ^G` counts approvals waiting in other sessions, and
+  `↓ N new  End` counts rows that arrived below while you read further up.
 - **Panel**: approvals, questions, `/goal`, and every picker (`Ctrl-T`,
   `/models`, `/theme`, …) open here, between the rule and the composer, and
   take at most half the screen. `Esc` closes them with your draft intact.
@@ -343,6 +347,7 @@ searchable palette that runs the highlighted command on `Enter`.
 | move the block cursor up; y copies the block |  | `Ctrl-Up` |
 | move the block cursor down; y copies the block |  | `Ctrl-Down` |
 | copy the last answer; /copy code copies its last code block | `/copy` |  |
+| find in the transcript, including collapsed blocks |  | `Ctrl-F` |
 | toggle reasoning detail |  | `Alt-R` |
 | toggle the rail |  | `Ctrl-\` |
 | toggle the inspector pane |  | `Alt-I` |
@@ -365,7 +370,21 @@ Rebind `toggle_navigator`, `previous_session`, `create_root_session`,
 every hint that mentions a rebound key updates.
 
 Scrolling: mouse wheel, `PageUp` / `PageDown`, `Shift-Up` / `Shift-Down`,
-`Ctrl-Home` / `Ctrl-End` for top and live tail.
+`Ctrl-Home` / `Ctrl-End` for top and live tail; `End` on an empty composer
+also returns to the tail. Scrolled away from the tail, streaming never moves
+the view.
+
+## Finding text
+
+`Ctrl-F` opens a find row in the dock. Typing searches the focused
+transcript's prompts, answers, tool calls (their commands and full output,
+folded or not) and reasoning, ignoring case; the row shows `2 of 5` or `no
+matches`. The nearest match at or below the top of the view is chosen first.
+`Enter` or `Down` moves to the next match and `Shift-Enter` or `Up` to the
+previous one, wrapping at either end. A match inside a folded tool call or
+reasoning opens it and scrolls it into view, with a long result windowed at
+the matching row; moving to another match folds it again. `Esc` closes find
+and leaves the current match open.
 
 \* `Ctrl-C` copies while a mouse selection or the block cursor is active,
 and clears a draft in the composer. Otherwise the first press says `Ctrl-C

@@ -258,6 +258,17 @@ pub(crate) fn preview(text: &str, width: usize) -> String {
     }
 }
 
+pub(crate) fn bounded_head(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 pub(crate) fn bounded_tail(text: &str, max_bytes: usize) -> &str {
     if text.len() <= max_bytes {
         return text;

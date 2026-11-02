@@ -242,6 +242,7 @@ pub(super) fn inspector_rows(
                         inline_detail: true,
                         fold: false,
                         selected: app.block_cursor == Some(Block::Tool(call.id)),
+                        scroll: app.tool_scroll.get(&call.id).copied(),
                     };
                     if !rows.is_empty() {
                         rows.push(Line::default());
