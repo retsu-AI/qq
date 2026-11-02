@@ -1912,7 +1912,7 @@ fn final_output_sanitizes_every_dynamic_span() {
     let line = Line::styled("title\u{1b}]52;c;Y2xpcGJvYXJk\u{7}\u{202e}", normal());
     let mut rendered = Vec::new();
 
-    write_line(&mut rendered, &line).unwrap();
+    write_line(&mut rendered, &line, ColorOutput::Enabled).unwrap();
 
     let rendered = String::from_utf8(rendered).unwrap();
     assert!(!rendered.contains("\u{1b}]52"));
@@ -1930,15 +1930,11 @@ fn panel_rows_carry_the_surface_background_through_output() {
     );
     let mut rendered = Vec::new();
 
-    write_line(&mut rendered, &row).unwrap();
+    write_line(&mut rendered, &row, ColorOutput::Enabled).unwrap();
 
     let rendered = String::from_utf8(rendered).unwrap();
     assert!(rendered.contains('x'));
-    if std::env::var_os("NO_COLOR").is_none() {
-        assert!(rendered.contains("\u{1b}[48;2;38;40;48m"));
-    } else {
-        assert!(!rendered.contains("\u{1b}[48;2;38;40;48m"));
-    }
+    assert!(rendered.contains("\u{1b}[48;2;38;40;48m"));
 }
 
 #[test]

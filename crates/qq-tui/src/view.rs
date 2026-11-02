@@ -28,8 +28,8 @@ use crate::{
     app::{App, SessionView, terminal_safe_character},
     input::{Mode, SessionConfirm, approval_mode_label, effort_label},
     render::{
-        Line, Style, accent, border, brand, failure, faint, info, muted, normal, selection,
-        success, surface, text_width, warning, write_line,
+        ColorOutput, Line, Style, accent, border, brand, failure, faint, info, muted, normal,
+        selection, success, surface, text_width, warning, write_line,
     },
     theme,
     viewport::{Block, MAX_PANES, TranscriptPane, View, Viewport},
@@ -146,9 +146,17 @@ pub(crate) struct FrameRenderer {
     refreshed_find: bool,
     shapes: Vec<crate::selection::RowShape>,
     shapes_ready: bool,
+    colors: ColorOutput,
 }
 
 impl FrameRenderer {
+    pub(crate) fn with_colors(colors: ColorOutput) -> Self {
+        Self {
+            colors,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn commit(&mut self, app: &mut App) {
         if let Some(scroll) = self.goal_scroll.take() {
             app.goal_scroll = scroll;
@@ -214,7 +222,7 @@ impl FrameRenderer {
                     ResetColor,
                     Clear(ClearType::CurrentLine)
                 )?;
-                write_line(&mut output, line)?;
+                write_line(&mut output, line, self.colors)?;
             }
         }
         queue!(&mut output, SetAttribute(Attribute::Reset), ResetColor)?;

@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use crossterm::{
     queue,
-    style::{Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor},
+    style::{Attribute, Color, Print, SetAttribute},
 };
 use unicode_width::UnicodeWidthChar;
 
@@ -290,7 +290,61 @@ pub(crate) fn diff_line_style(line: &str) -> Style {
     }
 }
 
-pub(crate) fn write_line(output: &mut impl Write, line: &Line) -> io::Result<()> {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ColorOutput {
+    #[default]
+    Enabled,
+    Disabled,
+}
+
+impl ColorOutput {
+    pub(crate) fn from_env() -> Self {
+        if std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()) {
+            Self::Disabled
+        } else {
+            Self::Enabled
+        }
+    }
+}
+
+const FOREGROUND: u8 = 38;
+const BACKGROUND: u8 = 48;
+
+fn write_color(output: &mut impl Write, layer: u8, color: Color) -> io::Result<()> {
+    let index = match color {
+        Color::Reset => return write!(output, "\x1b[{}m", layer + 1),
+        Color::Rgb { r, g, b } => return write!(output, "\x1b[{layer};2;{r};{g};{b}m"),
+        Color::AnsiValue(index) => index,
+        Color::Black => 0,
+        Color::DarkRed => 1,
+        Color::DarkGreen => 2,
+        Color::DarkYellow => 3,
+        Color::DarkBlue => 4,
+        Color::DarkMagenta => 5,
+        Color::DarkCyan => 6,
+        Color::Grey => 7,
+        Color::DarkGrey => 8,
+        Color::Red => 9,
+        Color::Green => 10,
+        Color::Yellow => 11,
+        Color::Blue => 12,
+        Color::Magenta => 13,
+        Color::Cyan => 14,
+        Color::White => 15,
+    };
+    write!(output, "\x1b[{layer};5;{index}m")
+}
+
+#[cfg(test)]
+pub(crate) fn write_background(output: &mut impl Write, color: Color) -> io::Result<()> {
+    write_color(output, BACKGROUND, color)
+}
+
+pub(crate) fn write_line(
+    output: &mut impl Write,
+    line: &Line,
+    colors: ColorOutput,
+) -> io::Result<()> {
     let mut current = Style::default();
     if line.indent > 0 {
         queue!(output, crossterm::cursor::MoveRight(line.indent))?;
@@ -299,7 +353,11 @@ pub(crate) fn write_line(output: &mut impl Write, line: &Line) -> io::Result<()>
         if span.text.is_empty() {
             continue;
         }
-        let next = span.style;
+        let mut next = span.style;
+        if colors == ColorOutput::Disabled {
+            next.color = None;
+            next.background = None;
+        }
         if next != current {
             let attribute_dropped = current.attributes.added_over(next.attributes).0 != 0;
             if attribute_dropped {
@@ -308,16 +366,16 @@ pub(crate) fn write_line(output: &mut impl Write, line: &Line) -> io::Result<()>
             }
             match (current.color, next.color) {
                 (same, Some(color)) if same != Some(color) => {
-                    queue!(output, SetForegroundColor(color))?;
+                    write_color(output, FOREGROUND, color)?;
                 }
-                (Some(_), None) => queue!(output, SetForegroundColor(Color::Reset))?,
+                (Some(_), None) => write_color(output, FOREGROUND, Color::Reset)?,
                 _ => {}
             }
             match (current.background, next.background) {
                 (same, Some(background)) if same != Some(background) => {
-                    queue!(output, SetBackgroundColor(background))?;
+                    write_color(output, BACKGROUND, background)?;
                 }
-                (Some(_), None) => queue!(output, SetBackgroundColor(Color::Reset))?,
+                (Some(_), None) => write_color(output, BACKGROUND, Color::Reset)?,
                 _ => {}
             }
             let added = next.attributes.added_over(current.attributes);
@@ -361,8 +419,12 @@ mod tests {
     use super::*;
 
     fn bytes(line: &Line) -> String {
+        bytes_with(line, ColorOutput::Enabled)
+    }
+
+    fn bytes_with(line: &Line, colors: ColorOutput) -> String {
         let mut out = Vec::new();
-        write_line(&mut out, line).unwrap();
+        write_line(&mut out, line, colors).unwrap();
         String::from_utf8(out).unwrap()
     }
 
@@ -413,6 +475,28 @@ mod tests {
         assert_eq!(
             out, "\x1b[38;5;9ma \x1b[7m<=\x1b[0m\x1b[38;5;9m b",
             "{out:?}"
+        );
+    }
+
+    #[test]
+    fn colors_use_truecolor_and_palette_sequences_and_reset_to_default() {
+        let mut line = Line::styled("a", Style::color(Color::Rgb { r: 1, g: 2, b: 3 }));
+        line.push("b", Style::color(Color::AnsiValue(200)).on(Color::DarkGrey));
+        line.push("c", Style::default());
+        assert_eq!(
+            bytes(&line),
+            "\x1b[38;2;1;2;3ma\x1b[38;5;200m\x1b[48;5;8mb\x1b[39m\x1b[49mc"
+        );
+    }
+
+    #[test]
+    fn disabled_colors_keep_attributes_and_drop_every_color() {
+        let mut line = Line::styled("a", Style::color(Color::Red).on(Color::Blue));
+        line.push("b", Style::color(Color::Green).bold());
+        line.push("c", Style::color(Color::Green));
+        assert_eq!(
+            bytes_with(&line, ColorOutput::Disabled),
+            "a\x1b[1mb\x1b[0mc"
         );
     }
 

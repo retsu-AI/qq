@@ -2408,6 +2408,44 @@ fn creating_a_session_adopts_it_without_a_snapshot_round_trip() {
 }
 
 #[test]
+fn a_created_session_whose_receipt_beats_its_event_still_opens_empty() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let (_, requests) = app.execute(Command::NewRootSession).split();
+    let [ClientRequest::Command(request)] = requests.as_slice() else {
+        panic!("expected one create command, got {requests:?}");
+    };
+    let created = id(0x42, SessionId::from_bytes);
+
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Ok(qq_protocol::CommandReceipt {
+            command_id: request.command_id,
+            outcome: CommandOutcome::SessionCreated {
+                session_id: created,
+            },
+            committed_through: fixtures::cursor(2),
+        }),
+    });
+    assert_eq!(app.focused(), Some(created));
+
+    let effects = app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        caused_by: Some(request.command_id),
+        ..fixtures::envelope(
+            2,
+            created,
+            SessionEvent::SessionCreated {
+                session: Box::new(summary_named(0x42, "New session")),
+            },
+        )
+    }));
+
+    assert_eq!(app.focused(), Some(created));
+    assert!(app.sessions[&created].is_warm());
+    assert!(effects.requests().next().is_none());
+}
+
+#[test]
 fn a_tool_starved_focused_snapshot_requests_its_own_body_once() {
     let mut app = App::new(TuiOptions::default());
     let mut initial = snapshot();
