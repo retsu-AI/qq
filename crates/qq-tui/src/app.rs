@@ -2098,7 +2098,7 @@ impl App {
             return self.send(
                 PendingIntent::Side {
                     session_id,
-                    text: prompt.clone(),
+                    text: typed.clone(),
                 },
                 SessionCommand::SubmitSideQuestion {
                     session_id,

@@ -5282,6 +5282,26 @@ fn a_side_follow_up_held_until_startup_finishes_is_still_a_question() {
 }
 
 #[test]
+fn a_rejected_side_follow_up_is_restored_as_typed_and_retries_as_the_same_question() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    app.execute(Command::ShowSideQuestions);
+    app.composer.replace("new errors appeared".to_owned());
+    let request = only_command(app.submit_prompt());
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Err(ClientFailure::new("a side question is already running")),
+    });
+    assert_eq!(app.composer.text, "new errors appeared");
+    let retry = only_command(app.submit_prompt());
+    assert!(matches!(
+        retry.command,
+        SessionCommand::SubmitSideQuestion { new_thread: false, ref question, .. }
+            if question == "new errors appeared"
+    ));
+}
+
+#[test]
 fn deleting_the_side_views_source_leaves_the_view() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
