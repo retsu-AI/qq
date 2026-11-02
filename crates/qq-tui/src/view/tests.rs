@@ -5146,8 +5146,11 @@ fn auto_opens_the_inspector_with_content_and_the_first_alt_i_hides_what_is_shown
     app.expanded_tool_calls.clear();
     app.execute(crate::commands::Command::ShowAttention);
     let wide = renderer.frame_and_commit(&mut app, 200, 60);
-    let (_, inspector) = transcript_and_inspector(&app, &wide);
-    assert!(inspector.contains("NEEDS YOU"), "{inspector}");
+    assert!(
+        !frame_text(&wide).contains("INSPECTOR"),
+        "a workspace list stays in the scrollable main pane"
+    );
+    assert!(frame_text(&wide).contains("NEEDS YOU"));
 }
 
 #[test]

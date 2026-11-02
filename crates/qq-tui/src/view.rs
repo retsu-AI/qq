@@ -107,7 +107,6 @@ pub(crate) fn rail_visible(width: usize, prefs: LayoutPrefs, sessions: usize) ->
 
 fn inspector_content(app: &App) -> bool {
     match app.pane().view {
-        View::Attention | View::Changes => true,
         View::Transcript(Some(session_id)) => app
             .sessions
             .get(&session_id)
@@ -117,7 +116,11 @@ fn inspector_content(app: &App) -> bool {
                     .iter()
                     .any(|call| app.expanded_tool_calls.contains(&call.id))
             }),
-        View::Transcript(None) | View::Goal(_) | View::SideQuestions(_) => false,
+        View::Transcript(None)
+        | View::Attention
+        | View::Changes
+        | View::Goal(_)
+        | View::SideQuestions(_) => false,
     }
 }
 
