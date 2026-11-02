@@ -177,11 +177,16 @@ fn diff_counts(diff: &str) -> (usize, usize) {
     (added, removed)
 }
 
+pub(super) fn inspector_window(height: usize) -> usize {
+    height.saturating_sub(4).clamp(1, EXPANDED_WINDOW_ROWS)
+}
+
 pub(super) fn inspector_rows(
     app: &App,
     cache: &TranscriptCache,
     pane: &TranscriptPane,
     width: usize,
+    window: usize,
 ) -> Vec<Line> {
     let inner = width.saturating_sub(2);
     let mut rows: Vec<Line> = Vec::new();
@@ -242,6 +247,8 @@ pub(super) fn inspector_rows(
                         inline_detail: true,
                         fold: false,
                         selected: app.block_cursor == Some(Block::Tool(call.id)),
+                        scroll: app.tool_scroll.get(&call.id).copied(),
+                        window,
                     };
                     if !rows.is_empty() {
                         rows.push(Line::default());

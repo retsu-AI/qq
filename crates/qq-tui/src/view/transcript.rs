@@ -545,28 +545,29 @@ impl TranscriptCache {
             inline_detail,
         );
         body.pad_top();
+        let counts_output = pane.output_arrived && !pane.relayout;
+        viewport.note_layout(width, counts_output);
         viewport.update(view, body.rows, height, body.preserve_tail_anchor);
+        if let Some((target, query)) = &pane.reveal
+            && let Some((_, range)) = body.blocks.iter().find(|(block, _)| block == target)
+        {
+            let mut range = range.clone();
+            if range.len() > 1 && !query.is_empty() {
+                let rendered = body.viewport(app, range.len(), body.rows - range.end);
+                if let Some(row) = rendered.iter().position(|line| {
+                    let text: String = line.spans.iter().map(|span| span.text.as_str()).collect();
+                    crate::app::find_matches(&text, query)
+                }) {
+                    range = range.start + row..range.start + row + 1;
+                }
+            }
+            viewport.reveal(&range);
+        }
         let offset = viewport.offset();
         let live_message_ranges = body.live_message_ranges.iter().cloned().collect();
-        let mut rows = body.viewport(app, height, offset);
+        let rows = body.viewport(app, height, offset);
         let blocks = std::mem::take(&mut body.blocks);
         drop(body);
-        let running = session_id
-            .and_then(|id| app.sessions.get(&id))
-            .is_some_and(|session| session.summary.active_run_id.is_some());
-        if offset > 0
-            && running
-            && let Some(last) = rows.last_mut()
-        {
-            let pill = format!(" ↓ {} more ", count_noun(offset, "row", "rows"));
-            let pill_width = pill.chars().count();
-            let mut row = std::mem::take(last);
-            pad_line(&mut row, width);
-            let mut clipped = truncate_line(row, width.saturating_sub(pill_width + 1));
-            pad_line(&mut clipped, width.saturating_sub(pill_width));
-            clipped.push(pill, accent().bold());
-            *last = clipped;
-        }
         (
             fit_height(rows, height),
             PaneUpdate {
@@ -992,6 +993,8 @@ impl TranscriptCache {
                 inline_detail,
                 fold: !app.receipts_open,
                 selected: app.block_cursor == Some(Block::Tool(call.id)),
+                scroll: app.tool_scroll.get(&call.id).copied(),
+                window: EXPANDED_WINDOW_ROWS,
             }
         };
         let turns = TurnIndex::build(messages, tool_calls);
@@ -1048,7 +1051,10 @@ impl TranscriptCache {
                 if first_of_run {
                     let rows = reasoning_rows(app, message.session_id, message.run_id, width);
                     if !rows.is_empty() {
+                        let start = body.rows;
                         body.extend_owned(rows);
+                        body.blocks
+                            .push((Block::Reasoning(message.run_id), start..body.rows));
                         body.push_line(Line::default());
                     }
                 }
@@ -1465,9 +1471,17 @@ pub(super) fn reasoning_rows(
     let seconds = reasoning.ticks / 8;
     let mut header = Line::styled("∴ ", faint());
     header.push(format!("thought for {seconds}s"), faint());
-    match app.reasoning_detail {
-        crate::app::ReasoningDetail::Collapsed => vec![truncate_line(header, width)],
-        crate::app::ReasoningDetail::Expanded => {
+    let open = app.reasoning_detail == crate::app::ReasoningDetail::Expanded
+        || app.open_reasoning.contains(&run_id);
+    if !open {
+        let selected = app.block_cursor == Some(Block::Reasoning(run_id));
+        if selected {
+            header.spans[0].style = accent();
+        }
+        return vec![truncate_line(header, width)];
+    }
+    {
+        {
             let mut rows = vec![truncate_line(header, width)];
             let content_width = width.saturating_sub(LANE).max(1);
             for paragraph in reasoning.text.split("\n\n") {

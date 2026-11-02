@@ -254,8 +254,32 @@ pub(crate) const GOAL_CHECK_ROWS: [GoalCheckRow; 3] = [
     },
 ];
 
+pub(crate) const MAX_FIND_QUERY_BYTES: usize = 256;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Find {
+    pub query: String,
+    pub matches: Vec<crate::viewport::Block>,
+    pub current: Option<usize>,
+    pub origin: usize,
+}
+
+impl Find {
+    pub(crate) fn push_text(&mut self, text: &str) -> bool {
+        let before = self.query.len();
+        for character in text.chars().filter(|character| !character.is_control()) {
+            if self.query.len() + character.len_utf8() > MAX_FIND_QUERY_BYTES {
+                break;
+            }
+            self.query.push(character);
+        }
+        self.query.len() != before
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Overlay {
+    Find(Find),
     GoalForm(Box<GoalForm>),
     GoalCheck {
         target: GoalCheckTarget,
@@ -287,6 +311,7 @@ pub(crate) enum Overlay {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
+    Find,
     GoalForm,
     GoalCheck,
     Models,
@@ -350,6 +375,7 @@ impl Overlay {
     #[must_use]
     pub(crate) fn mode(&self) -> Mode {
         match self {
+            Self::Find(_) => Mode::Find,
             Self::GoalForm(_) => Mode::GoalForm,
             Self::GoalCheck { .. } => Mode::GoalCheck,
             Self::Models(_) => Mode::Models,
@@ -395,6 +421,7 @@ impl Overlay {
             }
         }
         match self {
+            Self::Find(_) => PickerOutcome::Ignored,
             Self::GoalForm(form) => form.handle_key(key),
             Self::GoalCheck {
                 picker, detail_row, ..
@@ -423,6 +450,7 @@ impl Overlay {
 
     pub(crate) fn push_query(&mut self, text: &str) -> bool {
         match self {
+            Self::Find(find) => find.push_text(text),
             Self::GoalForm(form) => form.push_text(text),
             Self::GoalCheck { picker, .. } => picker.push_query(text),
             Self::Models(picker) => picker.push_query(text),

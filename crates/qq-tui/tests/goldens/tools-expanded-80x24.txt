@@ -1,11 +1,6 @@
-
-    Done. Every file compiles.
-
-  ● Read     crates/qq-tui/src/file_0.rs  20 lines
   │ fn main() {}
   │ fn main() {}
-  │ fn main() {}
-  │ … 17 more lines
+  │ 1–8 of 20 · PgUp PgDn
   ● Edited   crates/qq-tui/src/file_1.rs  6 B
   │ edited
   ● Ran      cargo test -p crate_2
@@ -14,7 +9,12 @@
   │ fn main() {}
   │ fn main() {}
   │ fn main() {}
-  │ … 17 more lines
+  │ fn main() {}
+  │ fn main() {}
+  │ fn main() {}
+  │ fn main() {}
+  │ fn main() {}
+  │ 1–8 of 20 · PgUp PgDn
   ● Edited   crates/qq-tui/src/file_4.rs  6 B
   │ edited
   ● Ran      cargo test -p crate_5

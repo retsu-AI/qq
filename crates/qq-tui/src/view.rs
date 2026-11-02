@@ -44,16 +44,19 @@ use layout::{Tier, TranscriptSlot, compute_layout};
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
 use overlay::*;
 use sidebar::*;
-pub(crate) use tools::tool_copy_text;
 use tools::*;
+pub(crate) use tools::{
+    EXPANDED_WINDOW_ROWS, expanded_panel_match, expanded_panel_rows, expanded_window_start,
+    tool_copy_text,
+};
 use transcript::*;
 use workspace::*;
 pub(crate) use wrap::preview;
 #[cfg(test)]
 use wrap::transcript_viewport;
 use wrap::{
-    bounded_tail, fit_height, indent_lines, selection_viewport, truncate_line, wrap_line,
-    wrap_line_chars,
+    bounded_head, bounded_tail, fit_height, indent_lines, selection_viewport, truncate_line,
+    wrap_line, wrap_line_chars,
 };
 
 const MAX_RENDER_WIDTH: u16 = 1024;
@@ -138,6 +141,8 @@ pub(crate) struct FrameRenderer {
     rail_area: Option<crate::selection::Area>,
     rail_rows: Vec<(usize, SessionId)>,
     inspector_shown: bool,
+    tool_window: usize,
+    refreshed_find: bool,
     shapes: Vec<crate::selection::RowShape>,
     shapes_ready: bool,
 }
@@ -151,13 +156,21 @@ impl FrameRenderer {
         app.geometry.rail = self.rail_area;
         app.geometry.rail_rows.clone_from(&self.rail_rows);
         app.inspector_shown = self.inspector_shown;
+        app.tool_window = self.tool_window.max(1);
         for (index, update) in self.pane_updates.drain(..) {
             if let Some(pane) = app.panes.get_mut(index) {
                 pane.viewport = update.viewport;
+                pane.reveal = None;
+                pane.relayout = false;
+                pane.output_arrived = false;
                 pane.live_message_ranges = update.live_message_ranges;
                 let previous = std::mem::replace(&mut pane.blocks, update.blocks);
                 self.cache.recycle_blocks(previous);
             }
+        }
+        if std::mem::take(&mut app.find_stale) {
+            app.refresh_find();
+            self.refreshed_find = true;
         }
     }
 
@@ -170,6 +183,11 @@ impl FrameRenderer {
         let (width, height) = render_size(actual_size);
         let mut frame = self.frame(app, width, height);
         self.commit(app);
+        if std::mem::take(&mut self.refreshed_find) {
+            frame = self.frame(app, width, height);
+            self.commit(app);
+            self.refreshed_find = false;
+        }
         self.paint_selection(app, &mut frame);
         let resized = self.size != Some(actual_size);
         let mut output = Vec::with_capacity(4096);
@@ -284,7 +302,7 @@ impl FrameRenderer {
         let (panel, goal_scroll) = dock_panel(app, dock_width, panel_limit.max(1));
         self.goal_scroll = goal_scroll;
         let mut dock: Vec<Line> = Vec::new();
-        dock.push(dock_rule(app, dock_width, rail_width > 0));
+        dock.push(Line::default());
         dock.extend(panel);
         dock.extend(draft_lines);
         let composer_top = dock.len();
@@ -299,9 +317,14 @@ impl FrameRenderer {
             inspector_content: inspector_content(app),
         };
         let mut layout = compute_layout(width, height, dock.len(), app.layout, demand);
-        let mut inspector_rows = layout
-            .inspector
-            .map(|inspector| inspector_rows(app, &self.cache, app.pane(), inspector.width));
+        let tool_window = if layout.inspector.is_some() {
+            inspector_window(layout.body.height)
+        } else {
+            EXPANDED_WINDOW_ROWS
+        };
+        let mut inspector_rows = layout.inspector.map(|inspector| {
+            inspector_rows(app, &self.cache, app.pane(), inspector.width, tool_window)
+        });
         if app.layout.inspector == layout::PanePref::Auto
             && inspector_rows
                 .as_ref()
@@ -321,6 +344,11 @@ impl FrameRenderer {
         }
         let body_height = layout.body.height;
         self.inspector_shown = layout.inspector.is_some();
+        self.tool_window = if self.inspector_shown {
+            tool_window
+        } else {
+            EXPANDED_WINDOW_ROWS
+        };
         let inline_detail = layout.inspector.is_none();
         let slots = layout.transcripts.len();
         let first_shown = app
@@ -369,6 +397,12 @@ impl FrameRenderer {
                 inspector_pane(rows, inspector.width, body_height),
             ));
         }
+        let unseen = self
+            .pane_updates
+            .iter()
+            .find(|(index, _)| *index == app.focused_pane)
+            .map_or(0, |(_, update)| update.viewport.unseen());
+        dock[0] = dock_rule(app, dock_width, rail_width > 0, unseen);
         for line in &mut dock {
             line.indent = layout::MARGIN as u16;
         }
@@ -552,6 +586,12 @@ impl FrameRenderer {
     ) -> Vec<Line> {
         let frame = self.frame(app, width, height);
         self.commit(app);
+        if std::mem::take(&mut self.refreshed_find) {
+            let frame = self.frame(app, width, height);
+            self.commit(app);
+            self.refreshed_find = false;
+            return frame;
+        }
         frame
     }
 }

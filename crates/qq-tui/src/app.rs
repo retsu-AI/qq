@@ -35,6 +35,8 @@ use crate::{
     theme::Theme,
     viewport::{Block, TranscriptPane, View, Viewport},
 };
+mod find;
+pub(crate) use find::find_matches;
 mod pickers;
 
 const GOAL_PAGE_ROWS: usize = 1;
@@ -294,6 +296,10 @@ pub(crate) struct App {
     quit_armed_at: Option<std::time::Instant>,
     pub(crate) owns_server: bool,
     pub(crate) expanded_tool_calls: std::collections::HashSet<qq_protocol::ToolCallId>,
+    pub(crate) tool_scroll: HashMap<qq_protocol::ToolCallId, usize>,
+    pub(crate) open_reasoning: std::collections::HashSet<RunId>,
+    find_opened: Option<Block>,
+    pub(crate) find_stale: bool,
     pub(crate) block_cursor: Option<Block>,
     pub(crate) selection: Option<Selection>,
     pub(crate) geometry: FrameGeometry,
@@ -303,6 +309,7 @@ pub(crate) struct App {
     pub(crate) goal_scroll: usize,
     pub layout: crate::view::LayoutPrefs,
     pub(crate) inspector_shown: bool,
+    pub(crate) tool_window: usize,
     pub(crate) mouse_capture: bool,
     terminal_width: usize,
     pub(crate) themes: Vec<Theme>,
@@ -366,6 +373,10 @@ impl App {
             quit_armed_at: None,
             owns_server: options.owns_server,
             expanded_tool_calls: std::collections::HashSet::new(),
+            tool_scroll: HashMap::new(),
+            open_reasoning: std::collections::HashSet::new(),
+            find_opened: None,
+            find_stale: false,
             block_cursor: None,
             selection: None,
             geometry: FrameGeometry::default(),
@@ -375,6 +386,7 @@ impl App {
             goal_scroll: 0,
             layout: crate::view::LayoutPrefs::default(),
             inspector_shown: false,
+            tool_window: crate::view::EXPANDED_WINDOW_ROWS,
             terminal_width: 0,
             mouse_capture: true,
             themes: if options.themes.is_empty() {
@@ -468,6 +480,7 @@ impl App {
                     pane.view = View::Transcript(None);
                 }
                 self.overlay = None;
+                self.find_opened = None;
                 self.last_sequence = 0;
                 self.recent_events.clear();
                 self.set_warning("session state reset after reconnecting".to_owned());
@@ -1048,6 +1061,14 @@ impl App {
         let mut effects = Effects::changed(self.event_is_visible(&event));
         if !already_loaded {
             effects.extend(self.reduce_event(&event));
+            for pane in &mut self.panes {
+                if pane.view.transcript() == Some(event.session_id) {
+                    pane.output_arrived = true;
+                }
+            }
+            if self.find().is_some() && self.view().transcript() == Some(event.session_id) {
+                self.find_stale = true;
+            }
         }
         if let Some(command_id) = event.caused_by {
             if matches!(event.event, SessionEvent::GoalUpdated { .. }) {
@@ -1233,14 +1254,21 @@ impl App {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 self.handle_armed_key(key, armed)
             }
-            Event::Paste(text) => {
-                let changed = match &mut self.overlay {
-                    Some(overlay) => overlay.push_query(&text),
-                    None => self.push_composer_text(&text),
-                };
-                Effects::changed_now(changed)
-            }
+            Event::Paste(text) => match &mut self.overlay {
+                Some(Overlay::Find(_)) => self.push_find_text(&text),
+                Some(overlay) => Effects::changed_now(overlay.push_query(&text)),
+                None => Effects::changed_now(self.push_composer_text(&text)),
+            },
             Event::Mouse(mouse) if self.overlay.is_none() => self.handle_mouse(mouse),
+            Event::Mouse(mouse)
+                if self.find().is_some()
+                    && matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) =>
+            {
+                self.handle_mouse(mouse)
+            }
             Event::FocusGained => {
                 self.terminal_focused = true;
                 Effects::redraw(Redraw::Immediate)
@@ -1364,6 +1392,10 @@ impl App {
 
     fn handle_armed_key(&mut self, key: KeyEvent, armed: Option<std::time::Instant>) -> Effects {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            if self.find().is_some() {
+                self.close_find();
+                return Effects::redraw(Redraw::Immediate);
+            }
             if let Some(selection) = self.selection.take()
                 && !selection.is_click()
             {
@@ -1389,6 +1421,7 @@ impl App {
 
     fn dispatch_key(&mut self, key: KeyEvent) -> Effects {
         match self.mode() {
+            Mode::Find => self.handle_find_key(key),
             Mode::GoalForm
             | Mode::GoalCheck
             | Mode::Sessions
@@ -1507,9 +1540,30 @@ impl App {
                     }
                     self.expanded_tool_calls.insert(call);
                 }
+                let expanded = &self.expanded_tool_calls;
+                self.tool_scroll.retain(|id, _| expanded.contains(id));
+                self.pane_mut().relayout = true;
+                Effects::redraw(Redraw::Immediate)
+            }
+            KeyCode::Enter
+                if matches!(self.block_cursor, Some(Block::Reasoning(_)))
+                    && self.composer.text.is_empty() =>
+            {
+                if let Some(Block::Reasoning(run)) = self.block_cursor
+                    && !self.open_reasoning.remove(&run)
+                {
+                    self.open_reasoning.insert(run);
+                }
+                self.pane_mut().relayout = true;
                 Effects::redraw(Redraw::Immediate)
             }
             KeyCode::Enter => self.submit_prompt(),
+            KeyCode::PageUp if self.scroll_cursor_block(false) => {
+                Effects::redraw(Redraw::Immediate)
+            }
+            KeyCode::PageDown if self.scroll_cursor_block(true) => {
+                Effects::redraw(Redraw::Immediate)
+            }
             KeyCode::PageUp => Effects::changed_now(self.scroll_focused_page(true)),
             KeyCode::PageDown => Effects::changed_now(self.scroll_focused_page(false)),
             KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
@@ -1566,6 +1620,9 @@ impl App {
                 Effects::changed_now(self.viewport_mut().scroll(isize::MIN))
             }
             KeyCode::Home => Effects::changed_now(self.composer.move_line_start()),
+            KeyCode::End if self.composer.text.is_empty() => {
+                Effects::changed_now(self.viewport_mut().scroll(isize::MIN))
+            }
             KeyCode::End => Effects::changed_now(self.composer.move_line_end()),
             KeyCode::Char(character) if key.modifiers == KeyModifiers::CONTROL => {
                 let changed = match character.to_ascii_lowercase() {
@@ -1633,6 +1690,7 @@ impl App {
         if self.pane().view != view {
             self.block_cursor = None;
             self.selection = None;
+            self.close_find();
         }
         self.pane_mut().view = view;
     }
@@ -1784,8 +1842,10 @@ impl App {
             Command::CursorUp => Effects::changed_now(self.move_block_cursor(false)),
             Command::CursorDown => Effects::changed_now(self.move_block_cursor(true)),
             Command::CopyAnswer => self.copy_last_answer(false),
+            Command::Find => self.open_find(),
             Command::ToggleToolDetail => {
                 self.receipts_open = !self.receipts_open;
+                self.pane_mut().relayout = true;
                 Effects::redraw(Redraw::Immediate)
             }
             Command::ToggleReasoning => {
@@ -1793,6 +1853,8 @@ impl App {
                     ReasoningDetail::Collapsed => ReasoningDetail::Expanded,
                     ReasoningDetail::Expanded => ReasoningDetail::Collapsed,
                 };
+                self.open_reasoning.clear();
+                self.pane_mut().relayout = true;
                 Effects::redraw(Redraw::Immediate)
             }
             Command::ToggleSidebar => {
@@ -3302,9 +3364,57 @@ fn is_composer_newline_key(key: KeyEvent) -> bool {
 #[cfg(test)]
 mod copy_tests;
 #[cfg(test)]
+mod scale_tests;
+#[cfg(test)]
 mod tests;
 
 impl App {
+    fn scroll_cursor_block(&mut self, down: bool) -> bool {
+        let Some(Block::Tool(id)) = self.block_cursor else {
+            return false;
+        };
+        if !self.expanded_tool_calls.contains(&id) {
+            return false;
+        }
+        let Some(session) = self
+            .view()
+            .transcript()
+            .and_then(|session| self.sessions.get(&session))
+        else {
+            return false;
+        };
+        let Some(call) = session
+            .tool_calls
+            .as_deref()
+            .and_then(|calls| calls.iter().find(|call| call.id == id))
+        else {
+            return false;
+        };
+        let (body, rows) = crate::view::expanded_panel_rows(
+            call,
+            session.live_tool_output.get(&id).map(String::as_str),
+        );
+        let window = self.tool_window.max(1);
+        if rows <= window + 1 {
+            return false;
+        }
+        let start = crate::view::expanded_window_start(
+            body,
+            rows,
+            window,
+            self.tool_scroll.get(&id).copied(),
+        );
+        let last = rows - window;
+        let next = if down {
+            (start + window).min(last)
+        } else {
+            start.saturating_sub(window)
+        };
+        self.tool_scroll.insert(id, next);
+        self.pane_mut().relayout = true;
+        true
+    }
+
     fn move_block_cursor(&mut self, down: bool) -> bool {
         if self.view().transcript().is_none() {
             return false;
@@ -3359,6 +3469,9 @@ impl App {
                     .into_iter()
                     .nth(index)
             }),
+            Block::Reasoning(run) => session
+                .and_then(|session| session.reasoning.get(&run))
+                .map(|reasoning| reasoning.text.clone()),
             Block::Tool(id) => session.and_then(|session| {
                 let call = session
                     .tool_calls
