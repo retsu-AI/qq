@@ -168,7 +168,7 @@ with an error naming the minimum.
 ## Check the install
 
 ```sh
-qq --version        # qq 0.1.10 (6809a21 2026-10-26)
+qq --version        # qq 0.1.10 (b07fa9f 2026-10-30)
 qq version          # adds the protocol, capabilities, descriptor, and store schema versions
 qq config paths     # where QQ will look for configuration and keep sessions
 ```
