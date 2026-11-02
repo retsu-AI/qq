@@ -1530,6 +1530,7 @@ impl App {
                 }
                 let expanded = &self.expanded_tool_calls;
                 self.tool_scroll.retain(|id, _| expanded.contains(id));
+                self.pane_mut().relayout = true;
                 Effects::redraw(Redraw::Immediate)
             }
             KeyCode::Enter
@@ -1541,6 +1542,7 @@ impl App {
                 {
                     self.open_reasoning.insert(run);
                 }
+                self.pane_mut().relayout = true;
                 Effects::redraw(Redraw::Immediate)
             }
             KeyCode::Enter => self.submit_prompt(),
@@ -1831,6 +1833,7 @@ impl App {
             Command::Find => self.open_find(),
             Command::ToggleToolDetail => {
                 self.receipts_open = !self.receipts_open;
+                self.pane_mut().relayout = true;
                 Effects::redraw(Redraw::Immediate)
             }
             Command::ToggleReasoning => {
@@ -1838,6 +1841,8 @@ impl App {
                     ReasoningDetail::Collapsed => ReasoningDetail::Expanded,
                     ReasoningDetail::Expanded => ReasoningDetail::Collapsed,
                 };
+                self.open_reasoning.clear();
+                self.pane_mut().relayout = true;
                 Effects::redraw(Redraw::Immediate)
             }
             Command::ToggleSidebar => {
@@ -3382,6 +3387,7 @@ impl App {
             start.saturating_sub(window)
         };
         self.tool_scroll.insert(id, next);
+        self.pane_mut().relayout = true;
         true
     }
 

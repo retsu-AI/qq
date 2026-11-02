@@ -218,8 +218,10 @@ it paints the block's rows on the `selection` background.
 `viewport::Viewport` holds the pane's distance from the tail. While it is
 nonzero, rows that arrive below keep the top row still. While the session
 runs and the pane width is unchanged, the growth is added to
-`Viewport::unseen`; a rewrap at a new width or a change to an idle
-transcript (an expanded call, a fetched body) is not counted. The rule draws
+`Viewport::unseen`; a rewrap at a new width, a change to an idle
+transcript (a fetched body), and any layout change the user caused (opening
+or folding a call, reasoning or receipts, find opening a match; marked by
+`TranscriptPane::relayout` for one frame) are not counted. The rule draws
 it on its right as `↓ N new  End`
 (`chrome::dock_rule`); scrolling down drains it and reaching the tail clears
 it. `End` on an empty composer and `Ctrl-End` return to the tail.
@@ -231,8 +233,9 @@ a tool call's copy text (command and full output), and reasoning text
 (`app/find.rs`). The search reads only the session store and the block list
 from the previous frame, so it adds no work to the frame path, and its
 cost grows with the bounded visible transcript (`MAX_VISIBLE_MESSAGES`), not
-the session. Stepping to a match sets `TranscriptPane::reveal`; the next
-frame scrolls the block into view (`Viewport::reveal`). A match in a folded
+the session. Stepping to a match sets `TranscriptPane::reveal` with the
+query; the next frame scrolls to the first row of the block that contains
+the query, or to the block when no single row does (`Viewport::reveal`). A match in a folded
 call or reasoning row opens it, positions an expanded result's window on the
 matched row, and folds it again when find moves to another match. Closing
 find leaves the current match open.

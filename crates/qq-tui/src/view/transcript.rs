@@ -548,12 +548,21 @@ impl TranscriptCache {
         let running = session_id
             .and_then(|id| app.sessions.get(&id))
             .is_some_and(|session| session.summary.active_run_id.is_some());
-        viewport.note_layout(width, running);
+        viewport.note_layout(width, running && !pane.relayout);
         viewport.update(view, body.rows, height, body.preserve_tail_anchor);
-        if let Some(target) = pane.reveal
-            && let Some((_, range)) = body.blocks.iter().find(|(block, _)| *block == target)
+        if let Some((target, query)) = &pane.reveal
+            && let Some((_, range)) = body.blocks.iter().find(|(block, _)| block == target)
         {
-            let range = range.clone();
+            let mut range = range.clone();
+            if range.len() > 1 && !query.is_empty() {
+                let rendered = body.viewport(app, range.len(), body.rows - range.end);
+                if let Some(row) = rendered.iter().position(|line| {
+                    let text: String = line.spans.iter().map(|span| span.text.as_str()).collect();
+                    crate::app::find_matches(&text, query)
+                }) {
+                    range = range.start + row..range.start + row + 1;
+                }
+            }
             viewport.reveal(&range);
         }
         let offset = viewport.offset();

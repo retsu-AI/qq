@@ -34,6 +34,7 @@ impl App {
         }
         self.find_opened = None;
         self.pane_mut().reveal = None;
+        self.pane_mut().relayout = true;
     }
 
     pub(crate) fn find(&self) -> Option<&Find> {
@@ -207,6 +208,7 @@ impl App {
             }
         }
         let Some(target) = target else {
+            self.pane_mut().relayout = true;
             self.block_cursor = None;
             self.pane_mut().reveal = None;
             return;
@@ -222,7 +224,12 @@ impl App {
         if opened {
             self.find_opened = Some(target);
         }
+        self.pane_mut().relayout = true;
+        let query = self
+            .find()
+            .map(|find| find.query.to_lowercase())
+            .unwrap_or_default();
         self.block_cursor = Some(target);
-        self.pane_mut().reveal = Some(target);
+        self.pane_mut().reveal = Some((target, query));
     }
 }

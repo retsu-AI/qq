@@ -158,6 +158,7 @@ impl FrameRenderer {
             if let Some(pane) = app.panes.get_mut(index) {
                 pane.viewport = update.viewport;
                 pane.reveal = None;
+                pane.relayout = false;
                 pane.live_message_ranges = update.live_message_ranges;
                 let previous = std::mem::replace(&mut pane.blocks, update.blocks);
                 self.cache.recycle_blocks(previous);

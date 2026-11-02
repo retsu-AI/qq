@@ -50,7 +50,8 @@ pub(crate) struct TranscriptPane {
     pub viewport: Viewport,
     pub live_message_ranges: HashMap<MessageId, Range<usize>>,
     pub blocks: Vec<(Block, Range<usize>)>,
-    pub reveal: Option<Block>,
+    pub reveal: Option<(Block, String)>,
+    pub relayout: bool,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

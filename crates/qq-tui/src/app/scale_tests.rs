@@ -298,6 +298,81 @@ fn end_with_find_open_returns_to_the_tail_even_with_a_draft() {
 }
 
 #[test]
+fn find_scrolls_to_the_matching_row_inside_a_block_taller_than_the_view() {
+    let mut app = app(30);
+    let text = (0..60)
+        .map(|row| format!("thought {row}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("thought 55", "thought 55 gemstone");
+    app.sessions
+        .get_mut(&fixtures::SESSION)
+        .unwrap()
+        .reasoning
+        .get_mut(&fixtures::run_id(2))
+        .unwrap()
+        .text = text;
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    type_text(&mut app, "gemstone");
+    let rows = draw(&mut app, &mut renderer);
+    assert!(
+        rows.iter().any(|row| row.contains("thought 55 gemstone")),
+        "{rows:#?}"
+    );
+    app.handle_key(key(KeyCode::Enter));
+    let rows = draw(&mut app, &mut renderer);
+    assert!(
+        rows.iter().any(|row| row.contains("thought 55 gemstone")),
+        "stepping to the sole match stays on its row: {rows:#?}"
+    );
+}
+
+#[test]
+fn expanding_a_block_while_scrolled_up_during_a_run_is_not_new_output() {
+    let mut app = app(30);
+    let mut renderer = FrameRenderer::default();
+    stream(&mut app, "");
+    draw(&mut app, &mut renderer);
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::PageUp));
+    }
+    draw(&mut app, &mut renderer);
+    app.block_cursor = Some(Block::Tool(ToolCallId::from_bytes([3; 16])));
+    app.handle_key(key(KeyCode::Enter));
+    let rows = draw(&mut app, &mut renderer);
+    assert_eq!(app.viewport().unseen(), 0, "{}", rule(&rows));
+    app.block_cursor = Some(Block::Reasoning(fixtures::run_id(2)));
+    app.handle_key(key(KeyCode::Enter));
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
+    let rows = draw(&mut app, &mut renderer);
+    assert_eq!(app.viewport().unseen(), 0, "{}", rule(&rows));
+    stream(&mut app, "\n\nreal output");
+    draw(&mut app, &mut renderer);
+    assert_eq!(app.viewport().unseen(), 2, "real output still counts");
+}
+
+#[test]
+fn alt_r_twice_hides_reasoning_opened_one_at_a_time() {
+    let mut app = app(1);
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    app.block_cursor = Some(Block::Reasoning(fixtures::run_id(2)));
+    app.handle_key(key(KeyCode::Enter));
+    let rows = draw(&mut app, &mut renderer);
+    assert!(rows.iter().any(|row| row.contains("weighed the")));
+    let alt_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT);
+    app.handle_key(alt_r);
+    app.handle_key(alt_r);
+    let rows = draw(&mut app, &mut renderer);
+    assert!(
+        !rows.iter().any(|row| row.contains("weighed the")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
 fn find_with_no_match_says_so_and_moves_nothing() {
     let mut app = app(30);
     let mut renderer = FrameRenderer::default();
