@@ -216,9 +216,10 @@ it paints the block's rows on the `selection` background.
 ## Scrolling and find
 
 `viewport::Viewport` holds the pane's distance from the tail. While it is
-nonzero, rows that arrive below keep the top row still. While the session
-runs and the pane width is unchanged, the growth is added to
-`Viewport::unseen`; a rewrap at a new width, a change to an idle
+nonzero, rows that arrive below keep the top row still. Rows added in a
+frame that follows a session event for that transcript
+(`TranscriptPane::output_arrived`), at an unchanged pane width, are added to
+`Viewport::unseen`, even when the same batch also finished the run. A rewrap at a new width, a change to an idle
 transcript (a fetched body), and any layout change the user caused (opening
 or folding a call, reasoning or receipts, find opening a match; marked by
 `TranscriptPane::relayout` for one frame) are not counted. The rule draws
@@ -239,8 +240,10 @@ the query, or to the block when no single row does (`Viewport::reveal`). A match
 call or reasoning row opens it, positions an expanded result's window on the
 matched row, and folds it again when find moves to another match. While
 find is open, any event that changes the focused transcript marks the
-matches stale; the next committed frame re-runs the query
-(`App::refresh_find`), keeping the current match when it still matches.
+matches stale; after the next frame is laid out, `FrameRenderer::draw`
+re-runs the query (`App::refresh_find`) and lays the frame out once more, so the
+frame that reaches the terminal already shows the refreshed matches. The
+current match is kept when it still matches.
 Closing
 find leaves the current match open.
 

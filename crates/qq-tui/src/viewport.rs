@@ -52,6 +52,7 @@ pub(crate) struct TranscriptPane {
     pub blocks: Vec<(Block, Range<usize>)>,
     pub reveal: Option<(Block, String)>,
     pub relayout: bool,
+    pub output_arrived: bool,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

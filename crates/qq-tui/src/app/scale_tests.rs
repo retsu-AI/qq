@@ -416,12 +416,35 @@ fn find_picks_up_text_that_streams_in_after_the_query() {
             text: " latecomer".to_owned(),
         },
     )));
-    draw(&mut app, &mut renderer);
     let rows = draw(&mut app, &mut renderer);
     assert!(
         rows.iter().any(|row| row.contains("/ latecomer  1 of 1")),
-        "{rows:#?}"
+        "the first frame after the text already shows the match: {rows:#?}"
     );
+}
+
+#[test]
+fn output_that_lands_with_the_run_finishing_still_counts_as_new() {
+    let mut app = app(30);
+    let mut renderer = FrameRenderer::default();
+    stream(&mut app, "");
+    draw(&mut app, &mut renderer);
+    app.handle_key(key(KeyCode::PageUp));
+    draw(&mut app, &mut renderer);
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        fixtures::SESSION,
+        qq_protocol::SessionEvent::TextAppended {
+            message_id: MessageId::from_bytes([39; 16]),
+            channel: qq_protocol::TextChannel::Output,
+            text: "\n\nfinal paragraph".to_owned(),
+        },
+    )));
+    let session = app.sessions.get_mut(&fixtures::SESSION).unwrap();
+    session.summary.active_run_id = None;
+    session.summary.status = qq_protocol::SessionStatus::Idle;
+    let rows = draw(&mut app, &mut renderer);
+    assert_eq!(app.viewport().unseen(), 2, "{}", rule(&rows));
 }
 
 #[test]
@@ -475,7 +498,20 @@ fn stream(app: &mut App, text: &str) {
     session.summary.status = qq_protocol::SessionStatus::Running;
     let message = session.messages.as_mut().unwrap().last_mut().unwrap();
     message.state = MessageState::Streaming;
-    message.output.push_str(text);
+    let message_id = message.id;
+    if text.is_empty() {
+        return;
+    }
+    let sequence = app.last_sequence + 1;
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        sequence.max(2),
+        fixtures::SESSION,
+        qq_protocol::SessionEvent::TextAppended {
+            message_id,
+            channel: qq_protocol::TextChannel::Output,
+            text: text.to_owned(),
+        },
+    )));
 }
 
 #[test]

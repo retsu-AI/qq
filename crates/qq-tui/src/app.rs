@@ -1061,6 +1061,11 @@ impl App {
         let mut effects = Effects::changed(self.event_is_visible(&event));
         if !already_loaded {
             effects.extend(self.reduce_event(&event));
+            for pane in &mut self.panes {
+                if pane.view.transcript() == Some(event.session_id) {
+                    pane.output_arrived = true;
+                }
+            }
             if self.find().is_some() && self.view().transcript() == Some(event.session_id) {
                 self.find_stale = true;
             }

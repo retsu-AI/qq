@@ -142,6 +142,7 @@ pub(crate) struct FrameRenderer {
     rail_rows: Vec<(usize, SessionId)>,
     inspector_shown: bool,
     tool_window: usize,
+    refreshed_find: bool,
     shapes: Vec<crate::selection::RowShape>,
     shapes_ready: bool,
 }
@@ -161,6 +162,7 @@ impl FrameRenderer {
                 pane.viewport = update.viewport;
                 pane.reveal = None;
                 pane.relayout = false;
+                pane.output_arrived = false;
                 pane.live_message_ranges = update.live_message_ranges;
                 let previous = std::mem::replace(&mut pane.blocks, update.blocks);
                 self.cache.recycle_blocks(previous);
@@ -168,6 +170,7 @@ impl FrameRenderer {
         }
         if std::mem::take(&mut app.find_stale) {
             app.refresh_find();
+            self.refreshed_find = true;
         }
     }
 
@@ -180,6 +183,11 @@ impl FrameRenderer {
         let (width, height) = render_size(actual_size);
         let mut frame = self.frame(app, width, height);
         self.commit(app);
+        if std::mem::take(&mut self.refreshed_find) {
+            frame = self.frame(app, width, height);
+            self.commit(app);
+            self.refreshed_find = false;
+        }
         self.paint_selection(app, &mut frame);
         let resized = self.size != Some(actual_size);
         let mut output = Vec::with_capacity(4096);
@@ -578,6 +586,12 @@ impl FrameRenderer {
     ) -> Vec<Line> {
         let frame = self.frame(app, width, height);
         self.commit(app);
+        if std::mem::take(&mut self.refreshed_find) {
+            let frame = self.frame(app, width, height);
+            self.commit(app);
+            self.refreshed_find = false;
+            return frame;
+        }
         frame
     }
 }

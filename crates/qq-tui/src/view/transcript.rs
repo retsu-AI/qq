@@ -545,10 +545,8 @@ impl TranscriptCache {
             inline_detail,
         );
         body.pad_top();
-        let running = session_id
-            .and_then(|id| app.sessions.get(&id))
-            .is_some_and(|session| session.summary.active_run_id.is_some());
-        viewport.note_layout(width, running && !pane.relayout);
+        let counts_output = pane.output_arrived && !pane.relayout;
+        viewport.note_layout(width, counts_output);
         viewport.update(view, body.rows, height, body.preserve_tail_anchor);
         if let Some((target, query)) = &pane.reveal
             && let Some((_, range)) = body.blocks.iter().find(|(block, _)| block == target)
