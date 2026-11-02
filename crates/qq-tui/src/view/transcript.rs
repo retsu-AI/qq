@@ -982,8 +982,8 @@ impl TranscriptCache {
         let newest_edit = session.summary.active_run_id.and_then(|run_id| {
             tool_calls
                 .iter()
-                .rev()
-                .find(|call| call.run_id == run_id && is_edit(call))
+                .filter(|call| call.run_id == run_id && is_edit(call))
+                .max_by_key(|call| (call.turn_ordinal, call.call_ordinal))
                 .filter(|call| row_of(call).diff.is_some())
                 .map(|call| call.id)
         });

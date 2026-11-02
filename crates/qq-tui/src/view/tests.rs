@@ -6910,3 +6910,44 @@ fn approvals_without_an_edit_preview_offer_no_full_diff_key() {
         .split();
     assert!(requests.is_empty());
 }
+
+#[test]
+fn the_inline_diff_follows_call_order_not_snapshot_order() {
+    let (mut app, session_id, run_id, _) = running_view_app();
+    app.sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .messages
+        .as_mut()
+        .unwrap()[0]
+        .run_id = run_id;
+    let mut newer = tool_call_snapshot(
+        0x65,
+        "edit_file",
+        r#"{"path":"src/newer.rs"}"#,
+        ToolCallState::Requested,
+        None,
+        false,
+    );
+    newer.run_id = run_id;
+    newer.turn_ordinal = 2;
+    let mut older = edit_call(
+        0x66,
+        run_id,
+        "src/older.rs",
+        "@@ -1 +1 @@\n-was()\n+now()\n",
+    );
+    older.turn_ordinal = 1;
+    app.sessions.get_mut(&session_id).unwrap().tool_calls = Some(vec![newer, older]);
+
+    let rows = squashed_rows(&transcript_lines(&app, 100));
+
+    assert!(
+        rows.iter().any(|row| row.contains("src/older.rs")),
+        "{rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("now()")),
+        "the newer edit in flight wins even when it is listed first: {rows:#?}"
+    );
+}

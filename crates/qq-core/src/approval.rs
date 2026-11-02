@@ -183,7 +183,7 @@ pub(crate) fn classify(
     }
 }
 
-const MAX_PREVIEW_SIDE_BYTES: usize = 2 * 1024;
+const MAX_PREVIEW_SIDE_BYTES: usize = 32 * 1024;
 const PREVIEW_TRUNCATION_MARKER: &str = "[preview truncated]";
 
 pub(crate) fn edit_preview(name: &str, arguments: &str) -> Option<EditPreview> {
@@ -1350,6 +1350,17 @@ mod tests {
                 .is_none()
             );
         }
+    }
+
+    #[test]
+    fn a_write_of_several_kilobytes_previews_every_line() {
+        let content: String = (0..600).map(|index| format!("line {index:04}\n")).collect();
+        assert!(content.len() > 4 * 1024);
+        let arguments = serde_json::json!({"path": "big.txt", "content": content}).to_string();
+        let preview = edit_preview("write_file", &arguments).unwrap();
+        assert_eq!(preview.diff.lines().count(), 600);
+        assert_eq!(preview.diff.lines().last(), Some("+ line 0599"));
+        assert!(!preview.diff.contains(PREVIEW_TRUNCATION_MARKER));
     }
 
     #[test]

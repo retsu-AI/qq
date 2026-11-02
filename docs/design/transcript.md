@@ -507,8 +507,10 @@ Two sources render as unified diffs with per-line coloring:
   model context and the session context budget. The model sees the
   summary result string; the transcript sees the diff. The approval
   preview and the persisted display share one diff builder with two
-  bounds (2 KiB per side for previews, 32 KiB per side persisted, same
-  truncation marker). Diff-shaped results without a payload (shell
+  bounds (32 KiB per side for previews, 32 KiB per side persisted, same
+  truncation marker). The preview bound is half the 64 KiB tool-argument
+  bound, so the approval's full diff (`e`) shows the whole change for
+  ordinary calls. Diff-shaped results without a payload (shell
   output, legacy stores) still color via shape detection.
 
 Coloring: `+` lines green, `-` lines red, context lines normal, line
