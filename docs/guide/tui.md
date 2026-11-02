@@ -39,15 +39,21 @@ bottom.
   them, and one row per tool call: verb, subject, then a metric such as
   `412 lines`, `+4 −1` or `exit 101`, and the duration once it passes a
   second. A failed command keeps its last three output rows under it.
-  `Ctrl-Up` / `Ctrl-Down` select a row; `Enter` expands it (a read shows the
-  result head, an edit its diff, a command its output tail, an MCP call its
-  arguments). While a turn runs, its newest edit also shows up to eight rows
-  of its diff without being expanded. A result longer than nine rows shows eight at a time with its
-  position (`1–8 of 40 · PgUp PgDn`); while it is selected, `PageUp` /
-  `PageDown` scroll inside it instead of the transcript. Once a turn
-  settles, three or more routine calls fold into one
-  receipt row (`● 6 calls · read 2 · edited 2 · ran 2   2 files`); edits
-  and failures keep their rows. `Ctrl-O` opens or closes every receipt.
+  Click a tool row, or select it with `Ctrl-Up` / `Ctrl-Down` and press
+  `Enter`, to open it in place: every line the client holds, wrapped
+  rather than cut, scrolled with the transcript. A read shows the file
+  text, an edit its whole diff, a command its output (and the full command
+  when the row had to shorten it), an MCP call every argument and its
+  result. Where qq cut a long result for the model, the cut reads
+  `⋯ 312 lines omitted · stored for read_tool_result`. A body of twelve
+  rows or more ends in a `╰ Read src/lib.rs · click or Enter folds` row;
+  clicking it, or the header, folds the call again. Clicking inside the
+  output selects text as usual. While a turn runs, its newest edit also
+  shows up to eight rows of its diff without being opened. Once a turn
+  settles, three or more routine calls fold into one receipt row
+  (`● 6 calls · read 2 · edited 2 · ran 2   2 files`); edits and failures
+  keep their rows. Click the receipt, or press `Ctrl-O`, to open every
+  receipt.
   `Alt-R` shows or hides all reasoning, which
   otherwise reads `∴ thought for 12s`; the block cursor also stops on that
   row, and `Enter` opens just that one.
@@ -306,10 +312,7 @@ do not grant check consent.
 ## Files the agents changed
 
 `/changes` lists every file edited in this workspace by any session,
-flagging files touched by more than one. From 140 columns the
-inspector pane opens on its own while the focused session has expanded tool
-calls that fit in it, and closes otherwise; details that would not fit stay
-in the scrollable transcript. `Alt-I` pins it open or hides it.
+flagging files touched by more than one.
 
 ## Every command
 
@@ -356,7 +359,6 @@ searchable palette that runs the highlighted command on `Enter`.
 | find in the transcript, including collapsed blocks |  | `Ctrl-F` |
 | toggle reasoning detail |  | `Alt-R` |
 | toggle the rail |  | `Ctrl-\` |
-| toggle the inspector pane |  | `Alt-I` |
 | toggle mouse capture | `/mouse` |  |
 | show everything that needs you | `/attention` |  |
 | show every file agents changed | `/changes` |  |

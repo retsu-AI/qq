@@ -33,7 +33,7 @@ use crate::{
     selection::{Copied, FrameGeometry, MULTI_CLICK_MS, Selection, Unit},
     terminal,
     theme::Theme,
-    viewport::{Block, TranscriptPane, View, Viewport},
+    viewport::{Block, Hit, TranscriptPane, View, Viewport},
 };
 mod find;
 pub(crate) use find::find_matches;
@@ -298,7 +298,6 @@ pub(crate) struct App {
     quit_armed_at: Option<std::time::Instant>,
     pub(crate) owns_server: bool,
     pub(crate) expanded_tool_calls: std::collections::HashSet<qq_protocol::ToolCallId>,
-    pub(crate) tool_scroll: HashMap<qq_protocol::ToolCallId, usize>,
     pub(crate) open_reasoning: std::collections::HashSet<RunId>,
     find_opened: Option<Block>,
     pub(crate) find_stale: bool,
@@ -310,8 +309,6 @@ pub(crate) struct App {
     pub reasoning_detail: ReasoningDetail,
     pub(crate) goal_scroll: usize,
     pub layout: crate::view::LayoutPrefs,
-    pub(crate) inspector_shown: bool,
-    pub(crate) tool_window: usize,
     pub(crate) mouse_capture: bool,
     terminal_width: usize,
     pub(crate) themes: Vec<Theme>,
@@ -377,7 +374,6 @@ impl App {
             quit_armed_at: None,
             owns_server: options.owns_server,
             expanded_tool_calls: std::collections::HashSet::new(),
-            tool_scroll: HashMap::new(),
             open_reasoning: std::collections::HashSet::new(),
             find_opened: None,
             find_stale: false,
@@ -389,8 +385,6 @@ impl App {
             reasoning_detail: ReasoningDetail::default(),
             goal_scroll: 0,
             layout: crate::view::LayoutPrefs::default(),
-            inspector_shown: false,
-            tool_window: crate::view::EXPANDED_WINDOW_ROWS,
             terminal_width: 0,
             mouse_capture: true,
             themes: if options.themes.is_empty() {
@@ -1347,7 +1341,7 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => match self.selection {
                 Some(selection) if selection.is_click() => {
                     self.selection = None;
-                    Effects::none()
+                    self.click_transcript(row).unwrap_or_else(Effects::none)
                 }
                 Some(selection) => {
                     let mut effects = Effects::redraw(Redraw::Immediate);
@@ -1524,30 +1518,7 @@ impl App {
                 let Some(Block::Tool(call)) = self.block_cursor else {
                     return Effects::none();
                 };
-                if let Some(child) = self.sessions.child_spawned_by(call) {
-                    self.block_cursor = None;
-                    return self.focus_session(child);
-                }
-                if !self.expanded_tool_calls.remove(&call) {
-                    if self.expanded_tool_calls.len() >= MAX_EXPANDED_TOOL_CALLS {
-                        let live: std::collections::HashSet<_> = self
-                            .sessions
-                            .values()
-                            .filter_map(|session| session.tool_calls.as_deref())
-                            .flatten()
-                            .map(|tool_call| tool_call.id)
-                            .collect();
-                        self.expanded_tool_calls.retain(|id| live.contains(id));
-                        if self.expanded_tool_calls.len() >= MAX_EXPANDED_TOOL_CALLS {
-                            self.expanded_tool_calls.clear();
-                        }
-                    }
-                    self.expanded_tool_calls.insert(call);
-                }
-                let expanded = &self.expanded_tool_calls;
-                self.tool_scroll.retain(|id, _| expanded.contains(id));
-                self.pane_mut().relayout = true;
-                Effects::redraw(Redraw::Immediate)
+                self.toggle_tool(call)
             }
             KeyCode::Enter
                 if matches!(self.block_cursor, Some(Block::Reasoning(_)))
@@ -1562,12 +1533,6 @@ impl App {
                 Effects::redraw(Redraw::Immediate)
             }
             KeyCode::Enter => self.submit_prompt(),
-            KeyCode::PageUp if self.scroll_cursor_block(false) => {
-                Effects::redraw(Redraw::Immediate)
-            }
-            KeyCode::PageDown if self.scroll_cursor_block(true) => {
-                Effects::redraw(Redraw::Immediate)
-            }
             KeyCode::PageUp => Effects::changed_now(self.scroll_focused_page(true)),
             KeyCode::PageDown => Effects::changed_now(self.scroll_focused_page(false)),
             KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
@@ -1683,10 +1648,6 @@ impl App {
 
     pub(crate) fn view(&self) -> View {
         self.pane().view
-    }
-
-    pub(crate) fn view_return(&self) -> Option<SessionId> {
-        self.view_return
     }
 
     pub(crate) fn set_view(&mut self, view: View) {
@@ -1863,14 +1824,6 @@ impl App {
             }
             Command::ToggleSidebar => {
                 self.layout.rail = self.layout.rail.toggled();
-                Effects::redraw(Redraw::Immediate)
-            }
-            Command::ToggleInspector => {
-                self.layout.inspector = if self.inspector_shown {
-                    crate::view::PanePref::Hidden
-                } else {
-                    crate::view::PanePref::Shown
-                };
                 Effects::redraw(Redraw::Immediate)
             }
             Command::FocusParent => match self.focused().and_then(|focused| {
@@ -3422,50 +3375,61 @@ mod scale_tests;
 mod tests;
 
 impl App {
-    fn scroll_cursor_block(&mut self, down: bool) -> bool {
-        let Some(Block::Tool(id)) = self.block_cursor else {
-            return false;
-        };
-        if !self.expanded_tool_calls.contains(&id) {
-            return false;
+    fn toggle_tool(&mut self, call: qq_protocol::ToolCallId) -> Effects {
+        if let Some(child) = self.sessions.child_spawned_by(call) {
+            self.block_cursor = None;
+            return self.focus_session(child);
         }
-        let Some(session) = self
-            .view()
-            .transcript()
-            .and_then(|session| self.sessions.get(&session))
-        else {
-            return false;
-        };
-        let Some(call) = session
-            .tool_calls
-            .as_deref()
-            .and_then(|calls| calls.iter().find(|call| call.id == id))
-        else {
-            return false;
-        };
-        let (body, rows) = crate::view::expanded_panel_rows(
-            call,
-            session.live_tool_output.get(&id).map(String::as_str),
-        );
-        let window = self.tool_window.max(1);
-        if rows <= window + 1 {
-            return false;
+        if !self.expanded_tool_calls.remove(&call) {
+            if self.expanded_tool_calls.len() >= MAX_EXPANDED_TOOL_CALLS {
+                let live: std::collections::HashSet<_> = self
+                    .sessions
+                    .values()
+                    .filter_map(|session| session.tool_calls.as_deref())
+                    .flatten()
+                    .map(|tool_call| tool_call.id)
+                    .collect();
+                self.expanded_tool_calls.retain(|id| live.contains(id));
+                if self.expanded_tool_calls.len() >= MAX_EXPANDED_TOOL_CALLS {
+                    self.expanded_tool_calls.clear();
+                }
+            }
+            self.expanded_tool_calls.insert(call);
         }
-        let start = crate::view::expanded_window_start(
-            body,
-            rows,
-            window,
-            self.tool_scroll.get(&id).copied(),
-        );
-        let last = rows - window;
-        let next = if down {
-            (start + window).min(last)
-        } else {
-            start.saturating_sub(window)
-        };
-        self.tool_scroll.insert(id, next);
-        self.pane_mut().relayout = true;
-        true
+        let pane = self.pane_mut();
+        pane.relayout = true;
+        pane.reveal = Some((Block::Tool(call), String::new()));
+        Effects::redraw(Redraw::Immediate)
+    }
+
+    fn click_transcript(&mut self, row: usize) -> Option<Effects> {
+        let area = self.geometry.transcript?;
+        let offset = row
+            .checked_sub(area.y)
+            .filter(|offset| *offset < area.height)?;
+        let pane = self.pane();
+        let body_row = pane.viewport.window().start + offset;
+        let hit = pane
+            .hits
+            .iter()
+            .find(|(candidate, _)| *candidate == body_row)
+            .map(|(_, hit)| *hit)?;
+        Some(match hit {
+            Hit::Tool(call) => {
+                self.block_cursor = Some(Block::Tool(call));
+                self.toggle_tool(call)
+            }
+            Hit::Receipt(_) => {
+                self.receipts_open = true;
+                self.pane_mut().relayout = true;
+                Effects::redraw(Redraw::Immediate)
+            }
+            Hit::Session(session_id) => {
+                let mut effects = Effects::redraw(Redraw::Immediate);
+                effects.extend(self.focus_session(session_id));
+                effects
+            }
+        })
     }
 
     fn move_block_cursor(&mut self, down: bool) -> bool {

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 
 use super::*;
-use crate::render::RowKind;
+use crate::{render::RowKind, viewport::Hit};
 use qq_client::state::ToolCallTiming;
 use qq_protocol::ToolErrorKind;
 
@@ -11,12 +11,11 @@ pub(super) const TOOL_SUBJECT_WIDTH: usize = 48;
 pub(super) const MAX_TOOL_ERROR_BYTES: usize = 2 * 1024;
 pub(super) const MAX_TOOL_ERROR_ROWS: usize = 3;
 pub(super) const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
-pub(super) const MAX_TOOL_ARGUMENT_ROWS: usize = 8;
-pub(super) const MAX_TOOL_RESULT_ROWS: usize = 3;
 pub(super) const MAX_TOOL_DIFF_ROWS: usize = 8;
 pub(super) const MAX_LIVE_TAIL_ROWS: usize = 3;
-pub(crate) const EXPANDED_WINDOW_ROWS: usize = 8;
+pub(super) const OPEN_FOOTER_MIN_ROWS: usize = 12;
 const MAX_EXPANDED_BYTES: usize = 64 * 1024;
+const TAB: &str = "    ";
 pub(super) const TOOL_SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const TRUNCATED_SUFFIX: &str = " · truncated";
 
@@ -29,16 +28,9 @@ pub(crate) struct ToolRow {
     pub metric: Option<String>,
     pub truncated: bool,
     pub arguments: Vec<(String, String)>,
-    pub body: ResultBody,
     pub diff: Option<String>,
     panel: RefCell<Option<(usize, Vec<Line>)>>,
     inline_diff: RefCell<Option<(usize, Vec<Line>)>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ResultBody {
-    Head,
-    Tail,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,10 +227,6 @@ impl ToolRow {
                 )
             }
         };
-        let body = match call.name.as_str() {
-            "shell" | "exec" => ResultBody::Tail,
-            _ => ResultBody::Head,
-        };
         Self {
             verb,
             raw_name,
@@ -247,7 +235,6 @@ impl ToolRow {
             metric,
             truncated,
             arguments: argument_rows,
-            body,
             diff,
             panel: RefCell::new(None),
             inline_diff: RefCell::new(None),
@@ -513,12 +500,9 @@ pub(crate) struct ToolRowContext<'a> {
     pub row: &'a ToolRow,
     pub clock: RowClock,
     pub expanded: bool,
-    pub inline_detail: bool,
     pub inline_diff: bool,
     pub fold: bool,
     pub selected: bool,
-    pub scroll: Option<usize>,
-    pub window: usize,
 }
 
 pub(super) type ChildRows<'a> = &'a dyn Fn(ToolCallId, usize) -> Vec<Line>;
@@ -541,11 +525,17 @@ pub(super) fn render_tool_calls(
         tick,
         width,
         children,
-        &mut Vec::new(),
+        &mut ToolMarks::default(),
     )
 }
 
 pub(super) type ToolBlocks = Vec<(Block, Range<usize>)>;
+
+#[derive(Default)]
+pub(super) struct ToolMarks {
+    pub blocks: ToolBlocks,
+    pub hits: Vec<(usize, Hit)>,
+}
 
 pub(super) fn render_tool_blocks(
     calls: &[&ToolCallSnapshot],
@@ -554,7 +544,7 @@ pub(super) fn render_tool_blocks(
     tick: usize,
     width: usize,
     children: ChildRows<'_>,
-    blocks: &mut ToolBlocks,
+    marks: &mut ToolMarks,
 ) -> Vec<Line> {
     let shown: Vec<&ToolCallSnapshot>;
     let calls = if calls.iter().any(|call| call.is_error) {
@@ -599,11 +589,12 @@ pub(super) fn render_tool_blocks(
         if routine.len() >= TOOL_FOLD_THRESHOLD {
             let row = lines.len();
             lines.push(tool_fold_line(&routine, calls, lookup, width));
-            blocks.extend(
+            marks.blocks.extend(
                 routine
                     .iter()
                     .map(|call| (Block::Tool(call.id), row..row + 1)),
             );
+            marks.hits.push((row, Hit::Receipt(routine[0].run_id)));
             folded = routine;
         }
     }
@@ -614,11 +605,11 @@ pub(super) fn render_tool_blocks(
         let context = lookup(call);
         let start = lines.len();
         lines.push(tool_summary_line(call, context, tick, width));
+        marks.hits.push((start, Hit::Tool(call.id)));
         if let Some(result) = call.result.as_deref() {
-            let expanded_inline = context.expanded && context.inline_detail;
             let panel = match (call.error_kind(), call.is_error) {
                 (Some(ToolErrorKind::Failure | ToolErrorKind::Outcome), _) | (None, true)
-                    if expanded_inline =>
+                    if context.expanded =>
                 {
                     None
                 }
@@ -641,28 +632,28 @@ pub(super) fn render_tool_blocks(
                 ));
             }
         }
-        if context.expanded && context.inline_detail {
-            lines.extend(tool_expanded_lines(call, context, width));
-        } else if context.inline_diff {
-            lines.extend(tool_inline_diff_lines(context.row, width));
-        }
-        if call.state == ToolCallState::Running
-            && let Some(output) = live_output.get(&call.id)
-        {
-            if context.expanded && context.inline_detail {
-                lines.extend(window_rows(
-                    &live_panel(output, width),
-                    ResultBody::Tail,
-                    context.window,
-                    context.scroll,
-                    width,
-                ));
-            } else {
+        if context.expanded {
+            let opened = tool_open_lines(call, context, live_output.get(&call.id), width);
+            let footer = opened.len() >= OPEN_FOOTER_MIN_ROWS;
+            lines.extend(opened);
+            if footer {
+                marks.hits.push((lines.len(), Hit::Tool(call.id)));
+                lines.push(close_row(context.row, call, width));
+            }
+        } else {
+            if context.inline_diff {
+                lines.extend(tool_inline_diff_lines(context.row, width));
+            }
+            if call.state == ToolCallState::Running
+                && let Some(output) = live_output.get(&call.id)
+            {
                 lines.extend(tool_live_output_lines(output, width));
             }
         }
         lines.extend(children(call.id, width));
-        blocks.push((Block::Tool(call.id), start..lines.len()));
+        marks
+            .blocks
+            .push((Block::Tool(call.id), start..lines.len()));
     }
     lines
 }
@@ -1045,192 +1036,165 @@ fn tool_panel_content_width(width: usize) -> usize {
     width.saturating_sub(2).max(1)
 }
 
-pub(super) fn tool_expanded_lines(
+pub(super) fn tool_open_lines(
     call: &ToolCallSnapshot,
     context: ToolRowContext<'_>,
+    live: Option<&String>,
     width: usize,
 ) -> Vec<Line> {
-    let mut lines = Vec::new();
     let row = context.row;
-    let graded = match call.error_kind() {
-        Some(ToolErrorKind::Correction) => tool_error_lines(
-            call.result.as_deref().unwrap_or_default(),
-            MAX_TOOL_RESULT_ROWS,
-            MAX_TOOL_DETAIL_BYTES,
-            muted(),
-            width,
-        ),
-        Some(ToolErrorKind::Outcome | ToolErrorKind::Failure) | None => Vec::new(),
-    };
-    lines.extend(graded);
     let mut cached = row.panel.borrow_mut();
     if !cached
         .as_ref()
         .is_some_and(|(cached_width, _)| *cached_width == width)
     {
-        *cached = Some((width, tool_panel(call, row, width)));
+        *cached = Some((width, open_body(call, row, width)));
     }
-    if let Some((_, panel)) = cached.as_ref() {
-        lines.extend(window_rows(
-            panel,
-            row.body,
-            context.window,
-            context.scroll,
-            width,
-        ));
+    let mut lines = cached
+        .as_ref()
+        .map(|(_, lines)| lines.clone())
+        .unwrap_or_default();
+    if call.state == ToolCallState::Running
+        && let Some(output) = live
+    {
+        lines.extend(open_live_lines(output, width));
     }
     lines
 }
 
-fn window_rows(
-    panel: &[Line],
-    body: ResultBody,
-    window: usize,
-    scroll: Option<usize>,
-    width: usize,
-) -> Vec<Line> {
-    let window = window.max(1);
-    if panel.len() <= window + 1 {
-        return panel.to_vec();
+pub(super) fn close_row(row: &ToolRow, call: &ToolCallSnapshot, width: usize) -> Line {
+    let mut line = Line::styled("╰ ", faint()).with_chrome(2);
+    line.kind = RowKind::Output;
+    line.push(verb_for(row, call), muted());
+    if let Some(subject) = &row.subject {
+        line.push(" ", muted());
+        line.push(subject.as_str(), muted());
     }
-    let start = expanded_window_start(body, panel.len(), window, scroll);
-    let end = start + window;
-    let mut lines = panel[start..end].to_vec();
-    let mut footer = Line::styled("│ ", faint()).with_chrome(2);
-    footer.kind = RowKind::Output;
-    footer.push(
-        format!("{}–{end} of {} · PgUp PgDn", start + 1, panel.len()),
-        faint(),
-    );
-    lines.push(truncate_line(footer, width));
-    lines
+    line.push("  · click or Enter folds", faint());
+    truncate_line(line, width)
 }
 
-fn live_panel(output: &str, width: usize) -> Vec<Line> {
-    let complete = &output[..output.rfind('\n').map_or(0, |index| index + 1)];
-    let text = bounded_tail(complete, MAX_EXPANDED_BYTES);
-    let mut rows = Vec::new();
-    if text.len() < complete.len() {
-        rows.push(tail_row("…", faint(), width));
+fn open_body(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line> {
+    let content = width.saturating_sub(2).max(1);
+    let mut sections: Vec<Vec<Line>> = Vec::new();
+    if matches!(call.name.as_str(), "shell" | "exec")
+        && let Some(command) = row.subject.as_deref()
+        && text_width(command) + TOOL_VERB_WIDTH + 4 > content
+    {
+        let mut line = Line::styled("$ ", faint());
+        line.push(command, normal());
+        sections.push(wrap_line_chars(line, content));
     }
-    rows.extend(text.lines().map(|line| tail_row(line, muted(), width)));
-    rows
-}
-
-fn searchable_panel(call: &ToolCallSnapshot, live: Option<&str>, width: usize) -> Vec<Line> {
-    match live.filter(|_| call.state == ToolCallState::Running) {
-        Some(output) => live_panel(output, width),
-        None => tool_panel(call, &ToolRow::derive(call), width),
-    }
-}
-
-pub(crate) fn expanded_window_start(
-    body: ResultBody,
-    rows: usize,
-    window: usize,
-    scroll: Option<usize>,
-) -> usize {
-    let last = rows.saturating_sub(window);
-    match (scroll, body) {
-        (Some(start), _) => start.min(last),
-        (None, ResultBody::Head) => 0,
-        (None, ResultBody::Tail) => last,
-    }
-}
-
-pub(crate) fn expanded_panel_rows(
-    call: &ToolCallSnapshot,
-    live: Option<&str>,
-) -> (ResultBody, usize) {
-    let body = if live.is_some() && call.state == ToolCallState::Running {
-        ResultBody::Tail
-    } else {
-        ToolRow::derive(call).body
-    };
-    (body, searchable_panel(call, live, 80).len())
-}
-
-pub(crate) fn expanded_panel_match(
-    call: &ToolCallSnapshot,
-    live: Option<&str>,
-    lowered_query: &str,
-) -> Option<usize> {
-    searchable_panel(call, live, MAX_RENDER_WIDTH.into())
-        .iter()
-        .position(|line| {
-            let text: String = line.spans.iter().map(|span| span.text.as_str()).collect();
-            crate::app::find_matches(&text, lowered_query)
-        })
-}
-
-fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line> {
-    let content_width = tool_panel_content_width(width);
-    let mut body: Vec<Line> = Vec::new();
     if row.raw_name {
-        for (shown, (key, value)) in row.arguments.iter().enumerate() {
-            if shown == MAX_TOOL_ARGUMENT_ROWS {
-                body.push(Line::styled("…", muted()));
-                break;
-            }
+        let mut arguments = Vec::new();
+        for (key, value) in &row.arguments {
             let mut line = Line::styled(format!("{key}: "), muted());
-            line.push(
-                preview(value, content_width.saturating_sub(line.width())),
-                normal(),
-            );
-            body.push(truncate_line(line, content_width));
+            line.push(clean(value), normal());
+            arguments.extend(wrap_line_chars(line, content));
         }
+        sections.push(arguments);
     }
-    let result = if let Some(diff) = &row.diff {
-        if !body.is_empty() {
-            body.push(Line::default());
-        }
-        body.extend(super::overlay::dock_diff_lines(
-            diff,
-            MAX_TOOL_DIFF_ROWS,
-            content_width,
-        ));
-        None
-    } else if call.error_kind() == Some(ToolErrorKind::Correction) {
-        None
-    } else {
-        call.result.as_deref()
-    };
     let style = match (call.error_kind(), call.is_error) {
         (Some(ToolErrorKind::Failure), _) | (None, true) => failure(),
         (Some(ToolErrorKind::Outcome), _) => warning(),
         (Some(ToolErrorKind::Correction), _) | (None, false) => muted(),
     };
-    if let Some(result) = result {
+    if let Some(diff) = &row.diff {
+        sections.push(super::overlay::whole_diff_lines(diff, content));
+    } else if let Some(result) = call.result.as_deref() {
         let result = strip_header(result, header_word(&call.name));
-        if !body.is_empty() && !result.is_empty() {
-            body.push(Line::default());
+        let text = bounded_head(result, MAX_EXPANDED_BYTES);
+        let mut body = Vec::new();
+        for source in text.lines() {
+            if is_marker_line(source) {
+                body.push(omitted_notice(source, content));
+                continue;
+            }
+            body.extend(wrap_line_chars(Line::styled(clean(source), style), content));
         }
-        match row.body {
-            ResultBody::Head => {
-                let text = bounded_head(result, MAX_EXPANDED_BYTES);
-                for line in text.lines().filter(|line| !is_marker_line(line)) {
-                    body.push(Line::styled(preview(line, content_width), style));
-                }
-                if text.len() < result.len() {
-                    body.push(Line::styled("…", faint()));
-                }
-            }
-            ResultBody::Tail => {
-                let text = bounded_tail(result, MAX_EXPANDED_BYTES);
-                if text.len() < result.len() {
-                    body.push(Line::styled("…", faint()));
-                }
-                for line in text.lines() {
-                    body.push(Line::styled(preview(line, content_width), style));
-                }
-            }
+        if text.len() < result.len() {
+            body.push(Line::styled(
+                format!(
+                    "⋯ {} more not drawn",
+                    format_result_size(result.len() - text.len())
+                ),
+                faint().italic(),
+            ));
+        }
+        sections.push(body);
+    }
+    let mut lines = Vec::new();
+    for section in sections.into_iter().filter(|section| !section.is_empty()) {
+        if !lines.is_empty() {
+            lines.push(rail_row(Line::default(), width));
+        }
+        lines.extend(section.into_iter().map(|line| rail_row(line, width)));
+    }
+    lines
+}
+
+fn open_live_lines(output: &str, width: usize) -> Vec<Line> {
+    let content = width.saturating_sub(2).max(1);
+    let complete = &output[..output.rfind('\n').map_or(0, |index| index + 1)];
+    let mut lines = Vec::new();
+    if output.len() >= qq_client::state::MAX_LIVE_TOOL_OUTPUT_BYTES {
+        lines.push(rail_row(
+            Line::styled(
+                "⋯ earlier output scrolled away; all of it shows when the command ends",
+                faint().italic(),
+            ),
+            width,
+        ));
+    }
+    for source in complete.lines() {
+        lines.extend(
+            wrap_line_chars(Line::styled(clean(source), muted()), content)
+                .into_iter()
+                .map(|line| rail_row(line, width)),
+        );
+    }
+    lines
+}
+
+fn clean(text: &str) -> String {
+    let mut cleaned = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character == '\t' {
+            cleaned.push_str(TAB);
+        } else if let Some(safe) = terminal_safe_character(character) {
+            cleaned.push(safe);
         }
     }
-    body.into_iter().map(|line| rail_row(line, width)).collect()
+    cleaned
+}
+
+fn omitted_notice(marker: &str, width: usize) -> Line {
+    let inner = marker
+        .trim_start_matches(TOOL_MARKER_PREFIX)
+        .trim_end_matches("]…");
+    let lines = inner
+        .split(" lines omitted")
+        .next()
+        .filter(|_| inner.contains(" lines omitted"))
+        .and_then(|head| head.rsplit(' ').next());
+    let text = match lines {
+        Some(count) => {
+            let kept = if inner.contains("not stored") {
+                "not stored"
+            } else {
+                "stored for read_tool_result"
+            };
+            format!("⋯ {count} lines omitted · {kept}")
+        }
+        None => format!("⋯ {}", clean(inner)),
+    };
+    truncate_line(Line::styled(text, faint().italic()), width)
 }
 
 fn rail_row(line: Line, width: usize) -> Line {
-    let mut row = Line::styled("│ ", faint()).with_chrome(2);
+    let mut row = Line::styled("│ ", faint())
+        .with_chrome(2 + usize::from(line.chrome))
+        .joined(line.join);
     row.kind = RowKind::Output;
     for span in line.spans {
         row.push(span.text, span.style);
@@ -1340,12 +1304,9 @@ pub(super) fn render_tool_calls_simple(
             now_ms: 0,
         },
         expanded: detail == SimpleDetail::Expanded,
-        inline_detail: true,
         inline_diff: false,
         fold: detail == SimpleDetail::Folded,
         selected: false,
-        scroll: None,
-        window: EXPANDED_WINDOW_ROWS,
     };
     render_tool_calls(calls, live_output, &lookup, tick, width, children)
 }

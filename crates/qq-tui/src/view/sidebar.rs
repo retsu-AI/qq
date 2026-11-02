@@ -316,13 +316,44 @@ pub(super) fn live_status_line(app: &App, session_id: SessionId) -> Option<(Stri
     let session = app.sessions.get(&session_id)?;
     let live = &session.live;
     if !live.awaiting_approval.is_empty() {
+        let preview = live
+            .awaiting_approval
+            .iter()
+            .find_map(|id| session.approval_previews.get(id));
+        let named = preview.and_then(|preview| {
+            preview
+                .shell
+                .as_ref()
+                .map(|shell| format!("wants to run {}", shell.command))
+                .or_else(|| {
+                    preview
+                        .edit
+                        .as_ref()
+                        .map(|edit| format!("wants to edit {}", edit.path))
+                })
+                .or_else(|| {
+                    preview
+                        .fetch
+                        .as_ref()
+                        .map(|fetch| format!("wants to fetch {}", fetch.host))
+                })
+                .or_else(|| {
+                    preview
+                        .question
+                        .as_ref()
+                        .map(|_| "has a question".to_owned())
+                })
+        });
         let tool = match live.active_tool.as_deref() {
             Some("shell" | "exec") => "run a command",
             Some("edit_file" | "write_file") => "edit a file",
             Some("web_fetch") => "fetch a URL",
             Some(_) | None => "use a tool",
         };
-        return Some((format!("wants to {tool}"), warning()));
+        return Some((
+            named.unwrap_or_else(|| format!("wants to {tool}")),
+            warning(),
+        ));
     }
     if session.summary.status == SessionStatus::Running {
         if let Some(tool) = &live.active_tool {

@@ -52,7 +52,6 @@ fn main() {
 fn selection_paint(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
     harness.hide_sidebar();
-    harness.hide_inspector();
     harness.settle_highlights();
     black_box(harness.draw());
     let mut end = 30;
@@ -67,7 +66,6 @@ fn selection_paint(iterations: u32) {
 fn switcher_open_and_filter(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 50, STEADY_MESSAGES);
     harness.hide_sidebar();
-    harness.hide_inspector();
     harness.settle_highlights();
     let samples = collect(iterations, || {
         let mut bytes = 0;
@@ -86,7 +84,6 @@ fn switcher_open_and_filter(iterations: u32) {
 fn agents_200_rail(iterations: u32) {
     let mut harness = BenchHarness::with_agents(SIZE, RAIL_ROOTS, AGENTS_PER_ROOT);
     harness.show_sidebar();
-    harness.hide_inspector();
     harness.settle_highlights();
     let samples = collect(iterations, || harness.draw().len());
     report_samples("rail_50_sessions_200_agents_frame", &samples);
@@ -110,7 +107,6 @@ fn agents_200_rail(iterations: u32) {
 fn keystroke_with_8_streams(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, BACKGROUND_SESSIONS, STEADY_MESSAGES);
     harness.hide_sidebar();
-    harness.hide_inspector();
     let messages: Vec<_> = (0..BACKGROUND_SESSIONS)
         .map(|index| (index, harness.start_stream(index)))
         .collect();
@@ -132,7 +128,6 @@ fn keystroke_with_8_streams(iterations: u32) {
 fn steady_state(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
     harness.hide_sidebar();
-    harness.hide_inspector();
     let first = timed(|| harness.draw());
     report("steady_state_first_frame_plain", first.0, 1, first.1);
     let started = Instant::now();
@@ -162,7 +157,6 @@ fn steady_state(iterations: u32) {
 fn steady_state_with_sidebar(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 9, STEADY_MESSAGES);
     harness.show_sidebar();
-    harness.hide_inspector();
     black_box(harness.draw());
     let samples = collect(iterations, || harness.draw().len());
     report_samples("steady_state_with_sidebar_frame", &samples);
@@ -171,7 +165,6 @@ fn steady_state_with_sidebar(iterations: u32) {
 fn streaming_focused(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
     harness.hide_sidebar();
-    harness.hide_inspector();
     let message = harness.start_stream(0);
     for _ in 0..LIVE_PREFILL {
         harness.append(0, message, DELTA);
@@ -187,7 +180,6 @@ fn streaming_focused(iterations: u32) {
 fn streaming_run_on(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
     harness.hide_sidebar();
-    harness.hide_inspector();
     let message = harness.start_stream(0);
     for _ in 0..LIVE_PREFILL * 2 {
         harness.append(0, message, RUN_ON_DELTA);
@@ -203,7 +195,6 @@ fn streaming_run_on(iterations: u32) {
 fn streaming_background(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, BACKGROUND_SESSIONS + 1, STEADY_MESSAGES);
     harness.hide_sidebar();
-    harness.hide_inspector();
     let messages: Vec<_> = (1..=BACKGROUND_SESSIONS)
         .map(|index| (index, harness.start_stream(index)))
         .collect();
@@ -220,7 +211,6 @@ fn streaming_background(iterations: u32) {
 fn children_with_sidebar(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 21, STEADY_MESSAGES);
     harness.show_sidebar();
-    harness.hide_inspector();
     let messages: Vec<_> = (1..=20)
         .map(|index| (index, harness.start_stream(index)))
         .collect();
@@ -237,7 +227,6 @@ fn children_with_sidebar(iterations: u32) {
 fn keystroke_echo(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
     harness.hide_sidebar();
-    harness.hide_inspector();
     black_box(harness.draw());
     let mut alphabet = ('a'..='z').cycle();
     let samples = collect(iterations, || {
@@ -251,7 +240,6 @@ fn keystroke_echo(iterations: u32) {
 fn tool_calls_32(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, 4);
     harness.hide_sidebar();
-    harness.hide_inspector();
     harness.add_tool_calls(32);
     harness.open_receipts(true);
     black_box(harness.draw());
@@ -265,16 +253,11 @@ fn tool_calls_32(iterations: u32) {
     black_box(harness.draw());
     let samples = collect(iterations, || harness.draw().len());
     report_samples("tool_calls_32_expanded_frame", &samples);
-    harness.show_inspector();
-    black_box(harness.draw());
-    let samples = collect(iterations, || harness.draw().len());
-    report_samples("tool_calls_32_expanded_inspector_frame", &samples);
 }
 
 fn sessions_200_with_sidebar(iterations: u32) {
     let mut harness = BenchHarness::with_sessions(SIZE, 200);
     harness.show_sidebar();
-    harness.hide_inspector();
     black_box(harness.draw());
     let samples = collect(iterations, || harness.draw().len());
     report_samples("sessions_200_with_sidebar_frame", &samples);
@@ -283,7 +266,6 @@ fn sessions_200_with_sidebar(iterations: u32) {
 fn picker_open_close(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 4, STEADY_MESSAGES);
     harness.hide_sidebar();
-    harness.hide_inspector();
     harness.settle_highlights();
     let samples = collect(iterations, || {
         harness.open_and_close_session_picker();
@@ -295,7 +277,6 @@ fn picker_open_close(iterations: u32) {
 fn resize_horizontal(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
     harness.hide_sidebar();
-    harness.hide_inspector();
     harness.settle_highlights();
     let mut delta = 1;
     let samples = collect(iterations, || {
@@ -315,7 +296,6 @@ fn compact_80x24(iterations: u32) {
 
 fn wide_160x48_full(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 9, STEADY_MESSAGES);
-    harness.show_inspector();
     harness.settle_highlights();
     black_box(harness.draw());
     let samples = collect(iterations, || harness.draw().len());
@@ -383,7 +363,6 @@ fn micros(nanos: u128) -> String {
 fn wheel_scroll(iterations: u32) {
     let mut harness = BenchHarness::new(SIZE, 1, STEADY_MESSAGES);
     harness.hide_sidebar();
-    harness.hide_inspector();
     harness.settle_highlights();
     black_box(harness.draw());
     let mut up = true;
@@ -405,7 +384,6 @@ fn golden_path_first_minute(iterations: u32) {
     let samples = collect(iterations, || {
         let mut harness = BenchHarness::new(SIZE, 3, 0);
         harness.hide_sidebar();
-        harness.hide_inspector();
         black_box(harness.draw());
         let message = harness.golden_path();
         let mut bytes = harness.draw().len();
