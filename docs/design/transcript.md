@@ -358,8 +358,9 @@ the call's cached `ToolRow` (verb, subject, metric) plus the live clock:
   subject before anything is cut. Error labels are never dropped.
 - A shell or exec call that exits non-zero is `✕` with `exit N`, and keeps
   a `faint` `│` tail of at most three rows (`MAX_TOOL_ERROR_ROWS`) under it.
-- **Turn receipt.** In folded detail (`Ctrl-O`), once every call in a group
-  has settled, its routine calls (completed, not failed, not edits, not
+- **Turn receipt.** Receipts are closed by default; `Ctrl-O` opens or closes
+  them all. Once every call in a group has settled and at least three
+  (`TOOL_FOLD_THRESHOLD`) are routine, those calls (completed, not failed, not edits, not
   expanded or selected) collapse into one `faint` row; edits and failures
   keep their own rows under it:
 

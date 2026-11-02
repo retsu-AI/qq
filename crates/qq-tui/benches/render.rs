@@ -253,10 +253,11 @@ fn tool_calls_32(iterations: u32) {
     harness.hide_sidebar();
     harness.hide_inspector();
     harness.add_tool_calls(32);
+    harness.open_receipts(true);
     black_box(harness.draw());
     let samples = collect(iterations, || harness.draw().len());
     report_samples("tool_calls_32_rows_frame", &samples);
-    harness.fold_tools();
+    harness.open_receipts(false);
     black_box(harness.draw());
     let samples = collect(iterations, || harness.draw().len());
     report_samples("tool_calls_32_folded_frame", &samples);

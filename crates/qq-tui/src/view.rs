@@ -25,7 +25,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     StatusItem,
-    app::{App, SessionView, ToolDetail, terminal_safe_character},
+    app::{App, SessionView, terminal_safe_character},
     input::{Mode, SessionConfirm, approval_mode_label, effort_label},
     render::{
         Line, Style, accent, border, brand, failure, faint, info, muted, normal, selection,
@@ -39,7 +39,6 @@ pub(crate) use chrome::{ComposerMode, CursorPosition};
 use highlight::HighlightKey;
 pub(crate) use highlight::{Highlighted, Highlighter};
 pub(crate) use layout::LayoutPrefs;
-#[cfg(any(test, feature = "bench-support"))]
 pub(crate) use layout::PanePref;
 use layout::{Tier, TranscriptSlot, compute_layout};
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
@@ -106,6 +105,25 @@ pub(crate) fn rail_visible(width: usize, prefs: LayoutPrefs, sessions: usize) ->
     layout::rail_width(width, prefs, sessions) > 0
 }
 
+fn inspector_content(app: &App) -> bool {
+    match app.pane().view {
+        View::Transcript(Some(session_id)) => app
+            .sessions
+            .get(&session_id)
+            .and_then(|session| session.tool_calls.as_deref())
+            .is_some_and(|calls| {
+                calls
+                    .iter()
+                    .any(|call| app.expanded_tool_calls.contains(&call.id))
+            }),
+        View::Transcript(None)
+        | View::Attention
+        | View::Changes
+        | View::Goal(_)
+        | View::SideQuestions(_) => false,
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct FrameRenderer {
     previous: Vec<Line>,
@@ -119,6 +137,7 @@ pub(crate) struct FrameRenderer {
     transcript_area: Option<crate::selection::Area>,
     rail_area: Option<crate::selection::Area>,
     rail_rows: Vec<(usize, SessionId)>,
+    inspector_shown: bool,
     shapes: Vec<crate::selection::RowShape>,
     shapes_ready: bool,
 }
@@ -131,6 +150,7 @@ impl FrameRenderer {
         app.geometry.transcript = self.transcript_area;
         app.geometry.rail = self.rail_area;
         app.geometry.rail_rows.clone_from(&self.rail_rows);
+        app.inspector_shown = self.inspector_shown;
         for (index, update) in self.pane_updates.drain(..) {
             if let Some(pane) = app.panes.get_mut(index) {
                 pane.viewport = update.viewport;
@@ -229,6 +249,7 @@ impl FrameRenderer {
         self.transcript_area = None;
         self.rail_area = None;
         self.rail_rows.clear();
+        self.inspector_shown = false;
         self.shapes_ready = false;
         if self.theme_generation != app.theme_generation {
             self.theme_generation = app.theme_generation;
@@ -241,7 +262,7 @@ impl FrameRenderer {
                     Line::styled(" qq", brand().bold()),
                     Line::default(),
                     Line::styled("Terminal is too small.", warning()),
-                    Line::styled("Resize to at least 32 x 9. Ctrl-C exits.", muted()),
+                    Line::styled("Resize to at least 32 x 9. Ctrl-C twice exits.", muted()),
                 ],
                 height,
             );
@@ -273,14 +294,33 @@ impl FrameRenderer {
             dock_width,
             rail_width == 0 && Tier::of(width) == Tier::Compact,
         ));
-        let layout = compute_layout(
-            width,
-            height,
-            dock.len(),
-            app.layout,
-            app.sessions.listed_count(),
-        );
+        let demand = layout::LayoutDemand {
+            sessions: app.sessions.listed_count(),
+            inspector_content: inspector_content(app),
+        };
+        let mut layout = compute_layout(width, height, dock.len(), app.layout, demand);
+        let mut inspector_rows = layout
+            .inspector
+            .map(|inspector| inspector_rows(app, &self.cache, app.pane(), inspector.width));
+        if app.layout.inspector == layout::PanePref::Auto
+            && inspector_rows
+                .as_ref()
+                .is_some_and(|rows| rows.len() + 1 > layout.body.height)
+        {
+            layout = compute_layout(
+                width,
+                height,
+                dock.len(),
+                app.layout,
+                layout::LayoutDemand {
+                    inspector_content: false,
+                    ..demand
+                },
+            );
+            inspector_rows = None;
+        }
         let body_height = layout.body.height;
+        self.inspector_shown = layout.inspector.is_some();
         let inline_detail = layout.inspector.is_none();
         let slots = layout.transcripts.len();
         let first_shown = app
@@ -323,10 +363,10 @@ impl FrameRenderer {
                 columns.push((slot.area.x, fit_height(rows, body_height)));
             }
         }
-        if let Some(inspector) = layout.inspector {
+        if let (Some(inspector), Some(rows)) = (layout.inspector, inspector_rows) {
             columns.push((
                 inspector.x,
-                inspector_pane(app, &self.cache, app.pane(), inspector.width, body_height),
+                inspector_pane(rows, inspector.width, body_height),
             ));
         }
         for line in &mut dock {

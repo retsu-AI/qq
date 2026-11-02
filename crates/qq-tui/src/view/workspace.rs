@@ -177,17 +177,13 @@ fn diff_counts(diff: &str) -> (usize, usize) {
     (added, removed)
 }
 
-pub(super) fn inspector_pane(
+pub(super) fn inspector_rows(
     app: &App,
     cache: &TranscriptCache,
     pane: &TranscriptPane,
     width: usize,
-    height: usize,
 ) -> Vec<Line> {
     let inner = width.saturating_sub(2);
-    let mut header = Line::styled("│ ", border());
-    header.push("INSPECTOR", muted().bold());
-    let body_height = height.saturating_sub(1);
     let mut rows: Vec<Line> = Vec::new();
     match pane.view {
         View::Attention => rows = attention_body(app, inner),
@@ -213,13 +209,17 @@ pub(super) fn inspector_pane(
                 .and_then(|session_id| app.sessions.get(&session_id))
                 .and_then(|session| Some((session, session.tool_calls.as_deref()?)));
             if let Some((session, calls)) = calls {
-                for call in calls {
-                    if rows.len() >= body_height {
-                        break;
-                    }
-                    if !app.expanded_tool_calls.contains(&call.id) {
-                        continue;
-                    }
+                let mut expanded: Vec<&ToolCallSnapshot> = calls
+                    .iter()
+                    .filter(|call| app.expanded_tool_calls.contains(&call.id))
+                    .collect();
+                if let Some(selected) = expanded
+                    .iter()
+                    .position(|call| app.block_cursor == Some(Block::Tool(call.id)))
+                {
+                    expanded.rotate_left(selected);
+                }
+                for call in expanded {
                     let derived;
                     let row = match cache.tool_row(call) {
                         Some(row) => row,
@@ -261,6 +261,14 @@ pub(super) fn inspector_pane(
             }
         }
     }
+    rows
+}
+
+pub(super) fn inspector_pane(rows: Vec<Line>, width: usize, height: usize) -> Vec<Line> {
+    let mut header = Line::styled("│ ", border());
+    header.push("INSPECTOR", muted().bold());
+    let body_height = height.saturating_sub(1);
+    let mut rows = rows;
     let overflow = rows.len().saturating_sub(body_height);
     if overflow > 0 {
         rows.truncate(body_height.saturating_sub(1));
@@ -284,7 +292,7 @@ pub(super) fn side_questions_body(app: &App, session_id: SessionId, width: usize
     let mut rows = vec![
         section("SIDE QUESTIONS", "main agent continues"),
         Line::default(),
-        Line::styled("/btw QUESTION · /btw-new QUESTION · /btw-cancel", muted()),
+        Line::styled("/btw QUESTION · /btw new QUESTION · /btw cancel", muted()),
     ];
     let session = app.sessions.get(&session_id);
     let items = session.map(|session| &session.side_questions);

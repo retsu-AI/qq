@@ -45,6 +45,7 @@ pub(crate) const ANIMATION_INTERVAL_MS: u64 = 125;
 const MAX_RECENT_EVENTS: usize = 1024;
 const MOUSE_SCROLL_ROWS: usize = 3;
 const NOTICE_TICKS: u16 = 40;
+const QUIT_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 const ESC_CANCEL_TICKS: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +84,7 @@ pub struct TuiOptions {
     pub themes: Vec<Theme>,
     pub workspace_root: Option<std::path::PathBuf>,
     pub environment: Vec<String>,
+    pub owns_server: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,30 +115,6 @@ pub enum TuiError {
     Terminal(#[from] std::io::Error),
     #[error("TUI client stopped{}", .0.as_ref().map(|reason| format!(": {reason}")).unwrap_or_default())]
     ClientStopped(Option<String>),
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum ToolDetail {
-    #[default]
-    Rows,
-    Folded,
-}
-
-impl ToolDetail {
-    #[must_use]
-    pub(crate) const fn next(self) -> Self {
-        match self {
-            Self::Rows => Self::Folded,
-            Self::Folded => Self::Rows,
-        }
-    }
-
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Rows => "rows",
-            Self::Folded => "folded",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -312,16 +290,19 @@ pub(crate) struct App {
     pub(crate) now_ms: u64,
     pub(crate) goal_now_ms: u64,
     pub(crate) goal_defaults: GoalDefaults,
-    pub tool_detail: ToolDetail,
+    pub receipts_open: bool,
+    quit_armed_at: Option<std::time::Instant>,
+    pub(crate) owns_server: bool,
     pub(crate) expanded_tool_calls: std::collections::HashSet<qq_protocol::ToolCallId>,
     pub(crate) block_cursor: Option<Block>,
     pub(crate) selection: Option<Selection>,
     pub(crate) geometry: FrameGeometry,
     last_click: Option<(std::time::Instant, (u16, u16), u8)>,
-    click_clock: fn() -> std::time::Instant,
+    clock: fn() -> std::time::Instant,
     pub reasoning_detail: ReasoningDetail,
     pub(crate) goal_scroll: usize,
     pub layout: crate::view::LayoutPrefs,
+    pub(crate) inspector_shown: bool,
     pub(crate) mouse_capture: bool,
     terminal_width: usize,
     pub(crate) themes: Vec<Theme>,
@@ -381,16 +362,19 @@ impl App {
             now_ms: 0,
             goal_now_ms: 0,
             goal_defaults: options.goals,
-            tool_detail: ToolDetail::default(),
+            receipts_open: false,
+            quit_armed_at: None,
+            owns_server: options.owns_server,
             expanded_tool_calls: std::collections::HashSet::new(),
             block_cursor: None,
             selection: None,
             geometry: FrameGeometry::default(),
             last_click: None,
-            click_clock: std::time::Instant::now,
+            clock: std::time::Instant::now,
             reasoning_detail: ReasoningDetail::default(),
             goal_scroll: 0,
             layout: crate::view::LayoutPrefs::default(),
+            inspector_shown: false,
             terminal_width: 0,
             mouse_capture: true,
             themes: if options.themes.is_empty() {
@@ -418,6 +402,7 @@ impl App {
         self.environment = options.environment;
         self.workspace_root = options.workspace_root;
         self.goal_defaults = options.goals;
+        self.owns_server = options.owns_server;
         self.themes = if options.themes.is_empty() {
             vec![Theme::default()]
         } else {
@@ -1210,7 +1195,17 @@ impl App {
         };
         match intent {
             Some(PendingIntent::Side { session_id, text })
-            | Some(PendingIntent::Prompt { session_id, text })
+                if self.focused() == Some(session_id) && self.composer.text.is_empty() =>
+            {
+                let side_view = self.view() == View::SideQuestions(session_id);
+                self.composer
+                    .replace(if side_view || text.starts_with('/') {
+                        text
+                    } else {
+                        format!("/ask {text}")
+                    });
+            }
+            Some(PendingIntent::Prompt { session_id, text })
             | Some(PendingIntent::Steer { session_id, text })
                 if self.focused() == Some(session_id) && self.composer.text.is_empty() =>
             {
@@ -1225,9 +1220,18 @@ impl App {
     }
 
     pub fn handle_terminal_event(&mut self, event: Event) -> Effects {
+        if let Event::Key(key) = &event {
+            let repeated_ctrl_c = key.kind == KeyEventKind::Repeat
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('c');
+            if repeated_ctrl_c || !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                return Effects::none();
+            }
+        }
+        let armed = self.quit_armed_at.take();
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-                self.handle_key(key)
+                self.handle_armed_key(key, armed)
             }
             Event::Paste(text) => {
                 let changed = match &mut self.overlay {
@@ -1282,7 +1286,7 @@ impl App {
                     }
                     return Effects::changed_now(cleared);
                 }
-                let now = (self.click_clock)();
+                let now = (self.clock)();
                 let clicks = match self.last_click {
                     Some((at, cell, count))
                         if cell == (mouse.column, mouse.row)
@@ -1324,7 +1328,41 @@ impl App {
         }
     }
 
+    fn press_ctrl_c(&mut self, armed: Option<std::time::Instant>) -> Effects {
+        if !self.composer.text.is_empty() {
+            self.composer.clear();
+            self.reset_history_browse();
+            self.slash.select(0);
+            return Effects::redraw(Redraw::Immediate);
+        }
+        let now = (self.clock)();
+        if armed.is_some_and(|armed| now.saturating_duration_since(armed) <= QUIT_CONFIRM_WINDOW) {
+            return self.execute(Command::Quit);
+        }
+        self.quit_armed_at = Some(now);
+        let runs = if self.owns_server {
+            self.sessions
+                .values()
+                .filter(|session| session.summary.active_run_id.is_some())
+                .count()
+        } else {
+            0
+        };
+        self.set_info(match runs {
+            0 => "Ctrl-C again to quit".to_owned(),
+            1 => "Ctrl-C again to quit; 1 run will stop".to_owned(),
+            runs => format!("Ctrl-C again to quit; {runs} runs will stop"),
+        });
+        Effects::redraw(Redraw::Immediate)
+    }
+
+    #[cfg(test)]
     fn handle_key(&mut self, key: KeyEvent) -> Effects {
+        let armed = self.quit_armed_at.take();
+        self.handle_armed_key(key, armed)
+    }
+
+    fn handle_armed_key(&mut self, key: KeyEvent, armed: Option<std::time::Instant>) -> Effects {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if let Some(selection) = self.selection.take()
                 && !selection.is_click()
@@ -1336,7 +1374,7 @@ impl App {
             if self.block_cursor.is_some() {
                 return self.copy_block();
             }
-            return self.execute(Command::Quit);
+            return self.press_ctrl_c(armed);
         }
         if self.selection.take().is_some() {
             if key.code == KeyCode::Esc {
@@ -1700,11 +1738,6 @@ impl App {
                     Effects::redraw(Redraw::Immediate)
                 }
             },
-            Command::NewSideThread => {
-                self.composer.replace("/btw-new ".to_owned());
-                Effects::redraw(Redraw::Immediate)
-            }
-            Command::CancelSideQuestion => self.cancel_side_question(),
             Command::OpenHelp => self.open_commands(true),
             Command::OpenCommands => self.open_commands(false),
             Command::SearchHistory => self.open_history(),
@@ -1752,7 +1785,7 @@ impl App {
             Command::CursorDown => Effects::changed_now(self.move_block_cursor(true)),
             Command::CopyAnswer => self.copy_last_answer(false),
             Command::ToggleToolDetail => {
-                self.tool_detail = self.tool_detail.next();
+                self.receipts_open = !self.receipts_open;
                 Effects::redraw(Redraw::Immediate)
             }
             Command::ToggleReasoning => {
@@ -1767,7 +1800,11 @@ impl App {
                 Effects::redraw(Redraw::Immediate)
             }
             Command::ToggleInspector => {
-                self.layout.inspector = self.layout.inspector.toggled_from_hidden();
+                self.layout.inspector = if self.inspector_shown {
+                    crate::view::PanePref::Hidden
+                } else {
+                    crate::view::PanePref::Shown
+                };
                 Effects::redraw(Redraw::Immediate)
             }
             Command::FocusParent => match self.focused().and_then(|focused| {
@@ -1966,12 +2003,15 @@ impl App {
     }
 
     fn submit_prompt(&mut self) -> Effects {
-        let mut prompt = self.composer.expanded().trim().to_owned();
+        let typed = self.composer.expanded().trim().to_owned();
+        let mut prompt = typed.clone();
+        let mut side_follow_up = false;
         if matches!(self.view(), View::SideQuestions(_))
             && !prompt.is_empty()
             && !prompt.starts_with('/')
         {
             prompt = format!("/btw {prompt}");
+            side_follow_up = true;
         }
         if prompt.is_empty() {
             return Effects::none();
@@ -1984,7 +2024,7 @@ impl App {
                 return Effects::redraw(Redraw::Immediate);
             }
             self.startup_submits.push_back(QueuedPrompt {
-                text: prompt,
+                text: typed,
                 session_id: self.focused(),
                 view: self.view(),
             });
@@ -2019,14 +2059,38 @@ impl App {
                 }
             };
         }
-        if matches!(name, "/btw" | "/ask" | "/btw-new") {
+        if let Some(replacement) = commands::retired_replacement(name) {
+            self.set_warning(format!("{name} is gone; use {replacement}"));
+            return Effects::redraw(Redraw::Immediate);
+        }
+        if matches!(name, "/btw" | "/ask") {
+            let trimmed = question.trim();
+            let (word, rest) = if side_follow_up || name == "/ask" {
+                ("", trimmed)
+            } else {
+                trimmed
+                    .split_once(char::is_whitespace)
+                    .map_or((trimmed, ""), |(word, rest)| (word, rest.trim()))
+            };
+            if word == "cancel" {
+                if !rest.is_empty() {
+                    self.set_warning("use /btw cancel with nothing after it".to_owned());
+                    return Effects::redraw(Redraw::Immediate);
+                }
+                self.composer.clear();
+                return self.cancel_side_question();
+            }
             let Some(session_id) = self.focused().or(self.view_return) else {
                 self.set_warning("create a session before asking a side question".to_owned());
                 return Effects::redraw(Redraw::Immediate);
             };
-            let question = question.trim();
-            if question.is_empty() && name == "/btw-new" {
-                self.set_warning("use /btw-new QUESTION to start a new side thread".to_owned());
+            let (new_thread, question) = if word == "new" {
+                (true, rest)
+            } else {
+                (false, trimmed)
+            };
+            if question.is_empty() && new_thread {
+                self.set_warning("use /btw new QUESTION to start a new side thread".to_owned());
                 return Effects::redraw(Redraw::Immediate);
             }
             if question.is_empty() {
@@ -2044,12 +2108,12 @@ impl App {
             return self.send(
                 PendingIntent::Side {
                     session_id,
-                    text: prompt.clone(),
+                    text: typed.clone(),
                 },
                 SessionCommand::SubmitSideQuestion {
                     session_id,
                     question: question.to_owned(),
-                    new_thread: name == "/btw-new",
+                    new_thread,
                 },
             );
         }
@@ -2583,7 +2647,7 @@ impl App {
         }
     }
 
-    fn cancel_side_question(&mut self) -> Effects {
+    pub(crate) fn cancel_side_question(&mut self) -> Effects {
         let Some(session_id) = self.focused().or(self.view_return) else {
             self.set_warning("create a session before cancelling a side question".to_owned());
             return Effects::redraw(Redraw::Immediate);

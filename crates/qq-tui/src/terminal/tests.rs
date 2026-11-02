@@ -160,7 +160,13 @@ impl Harness {
     }
 
     fn quit(&self) {
-        self.key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        for _ in 0..3 {
+            self.key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        }
+    }
+
+    fn close_input(&mut self) {
+        self.events = mpsc::unbounded_channel().0;
     }
 
     fn sent(&self) -> Vec<ClientRequest> {
@@ -338,7 +344,7 @@ async fn loop_records_send_failures_as_local_updates() {
     harness.key(KeyCode::Char('i'), KeyModifiers::NONE);
     harness.key(KeyCode::Enter, KeyModifiers::NONE);
     harness.settle().await;
-    harness.quit();
+    harness.close_input();
     let app = task.await.expect("loop task").expect("loop exits cleanly");
 
     assert!(harness.sent().is_empty());
@@ -513,7 +519,7 @@ async fn loop_accepts_input_while_a_delayed_prefetch_effect_is_pending() {
     harness.key(KeyCode::Esc, KeyModifiers::NONE);
     harness.key(KeyCode::Char('x'), KeyModifiers::NONE);
     tokio::task::yield_now().await;
-    harness.quit();
+    harness.close_input();
     let app = task.await.expect("loop task").expect("loop exits cleanly");
 
     assert_eq!(app.composer.text, "x");
@@ -606,7 +612,7 @@ async fn loop_hands_the_draft_to_the_external_editor_and_installs_the_result() {
     }
     harness.key(KeyCode::Char('e'), KeyModifiers::ALT);
     harness.settle().await;
-    harness.quit();
+    harness.close_input();
     let app = task.await.expect("loop task").expect("loop exits cleanly");
 
     let script = harness.editor_script.lock().unwrap();
@@ -626,7 +632,7 @@ async fn loop_reports_a_missing_editor_and_keeps_the_draft() {
     harness.key(KeyCode::Char('x'), KeyModifiers::NONE);
     harness.key(KeyCode::Char('e'), KeyModifiers::ALT);
     harness.settle().await;
-    harness.quit();
+    harness.close_input();
     let app = task.await.expect("loop task").expect("loop exits cleanly");
     assert_eq!(app.composer.text, "x");
     let (status, _) = app.visible_status().expect("a warning is shown");
@@ -744,12 +750,14 @@ async fn the_first_frame_paints_before_the_client_port_connects() {
         "{}",
         frames.len()
     );
-    events
-        .send(Ok(Event::Key(KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        ))))
-        .unwrap();
+    for _ in 0..3 {
+        events
+            .send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ))))
+            .unwrap();
+    }
     let app = task.await.expect("loop task").expect("loop exits cleanly");
     assert_eq!(app.connection, ConnectionState::Live);
 }
@@ -814,12 +822,14 @@ async fn prompt_submitted_before_delayed_startup_is_sent_after_the_snapshot() {
             )
     ));
 
-    events
-        .send(Ok(Event::Key(KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        ))))
-        .unwrap();
+    for _ in 0..3 {
+        events
+            .send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ))))
+            .unwrap();
+    }
     task.await.expect("loop task").expect("loop exits cleanly");
 }
 
@@ -914,7 +924,7 @@ async fn drag_through_the_loop(
     }
     let written = harness.frames.frames()[before..].concat();
     harness.key(KeyCode::Esc, KeyModifiers::NONE);
-    harness.quit();
+    harness.close_input();
     let app = task.await.expect("loop task").expect("loop exits cleanly");
     (written, app.status.unwrap_or_default())
 }

@@ -52,8 +52,7 @@ invalidates its timer.
 
 The breakpoints are `view::layout::{REGULAR_MIN_WIDTH, WIDE_MIN_WIDTH,
 ULTRA_MIN_WIDTH}`; the column widths are `RAIL_REGULAR_WIDTH` and
-`RAIL_WIDE_WIDTH`. The inspector never appears on its own: it shows only
-after the inspector toggle (§ Inspector). The layout produces one transcript
+`RAIL_WIDE_WIDTH`. The inspector appears only with content (§ Inspector). The layout produces one transcript
 slot at every tier (`compute_layout` in `view/layout.rs`).
 
 Below 32 × 9 the frame is a "terminal is too small" notice.
@@ -139,9 +138,11 @@ on screen.
 For the sessions column, `Auto` follows the tier and session count; its
 toggle (`Ctrl-\` by default) moves `Auto` or `Shown` to `Hidden` and `Hidden`
 to `Shown`, so the first press hides the column the user is reaching to
-dismiss. The inspector's `Auto` keeps it off; its toggle (`Alt-I`) moves
-`Auto` or `Hidden` to `Shown` and `Shown` to `Hidden`, so the first press
-shows it. `flush` is set while mouse capture is off (`/mouse`): it removes
+dismiss. The inspector's `Auto` shows it only while
+`LayoutDemand::inspector_content` holds; its toggle (`Alt-I`) reads
+whether the last frame showed it (`App::inspector_shown`) and pins the
+opposite, `Hidden` or `Shown`, so the first press always flips what is on
+screen. `flush` is set while mouse capture is off (`/mouse`): it removes
 the sessions column and the transcript slot's margin inset whatever the
 other preferences say, so the terminal's native selection of a full row
 copies clean text. The preferences are runtime state, not configuration;
@@ -153,7 +154,13 @@ The inspector (`view/workspace.rs::inspector_pane`) is the focused pane's
 detail column: 40–80 columns carved only from pane width past 100 transcript
 columns, so opening it never narrows the transcript below that. `Shown`
 shows it at any width that can carve one (140 columns and up with no
-sessions column); `Auto` and `Hidden` keep it off.
+sessions column). `Auto` shows it at the same widths only while it has
+content: the focused session has an expanded tool call
+(`view::inspector_content`). `/attention` and `/changes` stay in the main
+pane under `Auto`, where they scroll, and `Auto` also keeps expanded calls
+inline when their rows would not fit the inspector's height: the inspector
+does not scroll, so `Auto` never moves anything there that it would cut. Otherwise its columns
+go back to the transcript. `Hidden` keeps it off.
 
 What it holds, top to bottom under a `│ INSPECTOR` header:
 
@@ -162,14 +169,15 @@ What it holds, top to bottom under a `│ INSPECTOR` header:
   the view replaced, so the list is read in context; Esc still returns to
   that session. Without an inspector the view takes the pane, as before.
 - Otherwise, every expanded tool call of the pane's session in call order,
+  starting from the one under the block cursor so it is never cut off,
   each as its summary row followed by its expanded body (timing line,
   result head or tail, diff, arguments for unknown tools), with one blank
   row between calls. The transcript then shows only the summary rows: the
   expansion moved, it did not duplicate. Below Wide, or with the inspector
   hidden, the same body renders inline under the row.
-- When nothing is expanded and no view is up, a muted hint naming the
-  cursor chord (`Nothing expanded — Ctrl-Up selects a tool row, Enter
-  expands it`).
+- When nothing is expanded and no view is up (only reachable when pinned
+  with `Shown`), a muted hint naming the cursor chord (`Nothing expanded —
+  Ctrl-Up selects a tool row, Enter expands it`).
 
 Inline and inspector detail come from one path: `tools::tool_expanded_lines`
 (and `tool_summary_line`, `attention_body`, `changes_body`) take a width and

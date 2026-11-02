@@ -41,9 +41,9 @@ bottom.
   second. A failed command keeps its last three output rows under it.
   `Ctrl-Up` / `Ctrl-Down` select a row; `Enter` expands it (a read shows the
   result head, an edit its diff, a command its output tail, an MCP call its
-  arguments). `Ctrl-O` folds each finished turn's routine calls into one
+  arguments). Once a turn settles, three or more routine calls fold into one
   receipt row (`● 6 calls · read 2 · edited 2 · ran 2   2 files`); edits
-  and failures keep their rows. `Alt-R` shows or hides reasoning, which
+  and failures keep their rows. `Ctrl-O` opens or closes every receipt. `Alt-R` shows or hides reasoning, which
   otherwise reads `∴ thought for 12s`.
 - **Sessions column** (90 columns and wider, with two or more sessions;
   `Ctrl-\` toggles): sessions numbered 1–9 and grouped by what you should
@@ -72,7 +72,7 @@ bottom.
 
 | Action | Key | Slash |
 | --- | --- | --- |
-| new session | `Alt-N` | `/new`, `/clear` |
+| new session | `Alt-N` | `/new` |
 | new child session (sub-agent under the focused one) | `Alt-C` | |
 | switch session: type to search, `Enter` opens, `Tab` unfolds a session's agents, `Ctrl-A` lists every agent | `Ctrl-T` | `/sessions`, `/resume` |
 | swap to the previous session | `Ctrl-^` (also `Ctrl-6`) | |
@@ -115,9 +115,11 @@ the run finished first`.
 
 Use `/btw QUESTION` or `/ask QUESTION` while the main agent works. Answers
 appear in a separate scrollable side-question view; `Esc` returns to the main
-transcript. `/btw` without a question reopens the view. `/btw-new QUESTION`
+transcript. `/btw` without a question reopens the view. `/btw new QUESTION`
 starts a new side thread; otherwise questions continue the existing thread.
-`/btw-cancel` cancels only the active side question, not the main agent.
+`/btw cancel` cancels only the active side question, not the main agent.
+The old spellings `/btw-new`, `/btw-cancel` and `/clear` (now `/new`) say
+what replaced them for one release.
 
 Each question captures bounded committed session context. Unfinished tool
 exchanges are omitted explicitly. Only built-in `read_file`, `search`, and
@@ -294,8 +296,10 @@ do not grant check consent.
 ## Files the agents changed
 
 `/changes` lists every file edited in this workspace by any session,
-flagging files touched by more than one. `Alt-I` shows the inspector pane
-with the focused session's details (it stays off until you press it).
+flagging files touched by more than one. From 140 columns the
+inspector pane opens on its own while the focused session has expanded tool
+calls that fit in it, and closes otherwise; details that would not fit stay
+in the scrollable transcript. `Alt-I` pins it open or hides it.
 
 ## Every command
 
@@ -311,7 +315,7 @@ searchable palette that runs the highlighted command on `Enter`.
 | switch to an agent of the focused session | `/agents` |  |
 | switch session |  | `Ctrl-T` |
 | swap to the previous session |  | `Ctrl-6`, `Ctrl-^` |
-| create a session | `/new`, `/clear` | `Alt-N` |
+| create a session | `/new` | `Alt-N` |
 | create a child session |  | `Alt-C` |
 | compact session context | `/compact` |  |
 | undo the newest compaction | `/rollback` |  |
@@ -335,20 +339,18 @@ searchable palette that runs the highlighted command on `Enter`.
 | choose reasoning effort | `/effort` |  |
 | list workspace commands and skills | `/skills` |  |
 | choose a theme | `/theme` |  |
-| toggle tool call detail |  | `Ctrl-O` |
+| open or close turn receipts |  | `Ctrl-O` |
 | move the block cursor up; y copies the block |  | `Ctrl-Up` |
 | move the block cursor down; y copies the block |  | `Ctrl-Down` |
 | copy the last answer; /copy code copies its last code block | `/copy` |  |
 | toggle reasoning detail |  | `Alt-R` |
-| toggle the session rail |  | `Ctrl-\` |
+| toggle the rail |  | `Ctrl-\` |
 | toggle the inspector pane |  | `Alt-I` |
 | toggle mouse capture | `/mouse` |  |
 | show everything that needs you | `/attention` |  |
 | show every file agents changed | `/changes` |  |
 | view session goal and progress | `/goal` |  |
-| ask or view side questions | `/btw`, `/ask` |  |
-| ask in a new side thread | `/btw-new` |  |
-| cancel only the side question | `/btw-cancel` |  |
+| ask or view side questions; /btw new starts a thread, /btw cancel stops one | `/btw`, `/ask` |  |
 | edit the draft in $EDITOR | `/editor` | `Alt-E` |
 | search prompt history |  | `Ctrl-R` |
 | exit QQ | `/quit`, `/exit` | `Ctrl-C`* |
@@ -365,8 +367,10 @@ every hint that mentions a rebound key updates.
 Scrolling: mouse wheel, `PageUp` / `PageDown`, `Shift-Up` / `Shift-Down`,
 `Ctrl-Home` / `Ctrl-End` for top and live tail.
 
-\* `Ctrl-C` copies instead of exiting while a mouse selection or the block
-cursor is active.
+\* `Ctrl-C` copies while a mouse selection or the block cursor is active,
+and clears a draft in the composer. Otherwise the first press says `Ctrl-C
+again to quit` (and how many runs will stop when this `qq` owns the server);
+a second press within two seconds exits.
 
 ## Copying
 
@@ -444,7 +448,7 @@ Windows.
 
 ## Exiting
 
-`Ctrl-C` or `/quit`. The exit message prints the focused session id and
+`Ctrl-C` twice or `/quit`. The exit message prints the focused session id and
 both ways to continue it.
 
 What happens to running work depends on who owns the server:

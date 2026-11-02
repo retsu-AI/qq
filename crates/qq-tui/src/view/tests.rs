@@ -389,12 +389,12 @@ fn consecutive_call_only_turns_merge_into_one_folded_group() {
     session.tool_calls = Some(calls);
 
     let rows = squashed_rows(&transcript_lines(&app, 80));
+    assert_eq!(rows, [" row 0", "", "● 4 calls · read 4"]);
+
+    app.receipts_open = true;
+    let rows = squashed_rows(&transcript_lines(&app, 80));
     assert_eq!(rows.len(), 6, "{rows:?}");
     assert!(rows[2..].iter().all(|row| row.contains("Read a.rs")));
-
-    app.tool_detail = ToolDetail::Folded;
-    let rows = squashed_rows(&transcript_lines(&app, 80));
-    assert_eq!(rows, [" row 0", "", "● 4 calls · read 4"]);
 }
 
 #[test]
@@ -1560,7 +1560,7 @@ fn expanding_a_read_shows_the_head_of_the_file_and_never_its_json() {
         KeyCode::Char('o'),
         KeyModifiers::CONTROL,
     )));
-    assert_eq!(app.tool_detail, ToolDetail::Folded);
+    assert!(app.receipts_open);
 }
 
 #[test]
@@ -2716,9 +2716,18 @@ fn the_sidebar_stays_hidden_with_one_session_and_scales_with_width() {
         "one session: nothing to list"
     );
     let rail_width = |width, prefs, sessions| {
-        layout::compute_layout(width, 24, 2, prefs, sessions)
-            .rail
-            .map_or(0, |rail| rail.width)
+        layout::compute_layout(
+            width,
+            24,
+            2,
+            prefs,
+            layout::LayoutDemand {
+                sessions,
+                inspector_content: false,
+            },
+        )
+        .rail
+        .map_or(0, |rail| rail.width)
     };
     let auto = LayoutPrefs::default();
     assert_eq!(rail_width(100, auto, 2), layout::RAIL_REGULAR_WIDTH);
@@ -5053,7 +5062,10 @@ fn transcript_and_inspector(app: &App, frame: &[Line]) -> (String, String) {
         frame.len(),
         3,
         app.layout,
-        app.sessions.listed_count(),
+        layout::LayoutDemand {
+            sessions: app.sessions.listed_count(),
+            inspector_content: super::inspector_content(app),
+        },
     );
     let split = layout.inspector.map_or(width, |inspector| inspector.x);
     let rows = frame_rows(frame);
@@ -5107,6 +5119,106 @@ fn the_inspector_shows_only_when_toggled_on_and_the_toggle_cycles_it() {
     );
     app.handle_terminal_event(toggle);
     assert_eq!(app.layout.inspector, PanePref::Hidden);
+}
+
+#[test]
+fn auto_opens_the_inspector_with_content_and_the_first_alt_i_hides_what_is_shown() {
+    let (mut app, call) = app_with_expandable_read();
+    let mut renderer = FrameRenderer::default();
+    assert!(!frame_text(&renderer.frame_and_commit(&mut app, 200, 60)).contains("INSPECTOR"));
+
+    app.expanded_tool_calls.insert(call);
+    let wide = renderer.frame_and_commit(&mut app, 200, 60);
+    let (_, inspector) = transcript_and_inspector(&app, &wide);
+    assert!(inspector.contains("INSPECTOR"), "{inspector}");
+    assert!(
+        !frame_text(&renderer.frame_and_commit(&mut app, 120, 40)).contains("INSPECTOR"),
+        "no room below 140 columns"
+    );
+
+    renderer.frame_and_commit(&mut app, 200, 60);
+    let toggle = TerminalEvent::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
+    app.handle_terminal_event(toggle.clone());
+    assert_eq!(app.layout.inspector, PanePref::Hidden, "one press hides it");
+    assert!(!frame_text(&renderer.frame_and_commit(&mut app, 200, 60)).contains("INSPECTOR"));
+
+    app.layout.inspector = PanePref::Auto;
+    app.expanded_tool_calls.clear();
+    app.execute(crate::commands::Command::ShowAttention);
+    let wide = renderer.frame_and_commit(&mut app, 200, 60);
+    assert!(
+        !frame_text(&wide).contains("INSPECTOR"),
+        "a workspace list stays in the scrollable main pane"
+    );
+    assert!(frame_text(&wide).contains("NEEDS YOU"));
+}
+
+#[test]
+fn auto_keeps_an_expansion_inline_when_the_inspector_could_not_show_all_of_it() {
+    let (mut app, call) = app_with_expandable_read();
+    app.expanded_tool_calls.insert(call);
+    let session_id = app.focused().unwrap();
+    let mut later = app.sessions[&session_id].tool_calls.as_ref().unwrap()[0].clone();
+    later.id = ToolCallId::from_bytes([8; 16]);
+    later.call_ordinal += 1;
+    later.arguments = r#"{"path":"later.txt"}"#.to_owned();
+    app.expanded_tool_calls.insert(later.id);
+    app.sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .tool_calls
+        .as_mut()
+        .unwrap()
+        .push(later);
+    let mut renderer = FrameRenderer::default();
+    let tall = frame_text(&renderer.frame_and_commit(&mut app, 200, 60));
+    assert!(tall.contains("INSPECTOR"), "{tall}");
+    let short = frame_rows(&renderer.frame_and_commit(&mut app, 200, 12));
+    assert!(
+        !short.iter().any(|row| row.contains("INSPECTOR")),
+        "{short:#?}"
+    );
+    assert!(
+        !short.iter().any(|row| row.contains("rows more")),
+        "nothing is cut where it cannot scroll: {short:#?}"
+    );
+    app.layout.inspector = PanePref::Shown;
+    let pinned = frame_text(&renderer.frame_and_commit(&mut app, 200, 12));
+    assert!(pinned.contains("INSPECTOR"), "a pin still wins: {pinned}");
+}
+
+#[test]
+fn two_routine_calls_keep_their_rows_and_three_fold_into_a_receipt() {
+    let read = |byte| {
+        tool_call_snapshot(
+            byte,
+            "read_file",
+            r#"{"path":"a.rs"}"#,
+            ToolCallState::Completed,
+            Some("a\n"),
+            false,
+        )
+    };
+    let two = [read(2), read(3)];
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &two.iter().collect::<Vec<_>>(),
+        &HashMap::new(),
+        SimpleDetail::Folded,
+        0,
+        80,
+        &|_, _| Vec::new(),
+    ));
+    assert_eq!(rows, ["● Read a.rs 1 line", "● Read a.rs 1 line"]);
+    let three = [read(2), read(3), read(4)];
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &three.iter().collect::<Vec<_>>(),
+        &HashMap::new(),
+        SimpleDetail::Folded,
+        0,
+        80,
+        &|_, _| Vec::new(),
+    ));
+    assert_eq!(rows, ["● 3 calls · read 3"]);
 }
 
 #[test]
@@ -5198,6 +5310,45 @@ fn the_inspector_bounds_its_rows_to_the_pane_height() {
     for row in &frame[..frame.len() - 3] {
         assert_eq!(row.width(), 200);
     }
+
+    let second = ToolCallId::from_bytes([8; 16]);
+    {
+        let calls = app
+            .sessions
+            .get_mut(&session_id)
+            .unwrap()
+            .tool_calls
+            .as_mut()
+            .unwrap();
+        calls[1].arguments = r#"{"path":"later.txt"}"#.to_owned();
+    }
+    let detail_after = |inspector: &str, path: &str| {
+        let rows: Vec<&str> = inspector.lines().collect();
+        rows.iter()
+            .position(|row| row.contains(path))
+            .and_then(|at| rows.get(at + 1))
+            .is_some_and(|row| row.contains("line 1"))
+    };
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 200, 12);
+    let (_, inspector) = transcript_and_inspector(&app, &frame);
+    assert!(
+        !detail_after(&inspector, "later.txt"),
+        "oldest first, so the later call's detail is cut: {inspector}"
+    );
+    app.block_cursor = Some(Block::Tool(second));
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 200, 12);
+    let (_, inspector) = transcript_and_inspector(&app, &frame);
+    let summaries: Vec<&str> = inspector
+        .lines()
+        .filter(|row| row.contains("Read "))
+        .collect();
+    assert!(
+        summaries
+            .first()
+            .is_some_and(|row| row.contains("later.txt")),
+        "the selected expansion leads, so it is never pushed out: {inspector}"
+    );
+    assert!(detail_after(&inspector, "later.txt"), "{inspector}");
 }
 
 #[test]

@@ -174,7 +174,6 @@ pub enum StatusItem {
     Context,
     Cost,
     Workspace,
-    Tools,
 }
 
 impl StatusItem {

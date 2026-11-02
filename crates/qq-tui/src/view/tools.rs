@@ -589,7 +589,7 @@ pub(super) fn render_tool_blocks(
             .copied()
             .filter(|call| quiet(call) && !is_edit(call))
             .collect();
-        if routine.len() >= TOOL_FOLD_THRESHOLD.min(calls.len()) && !routine.is_empty() {
+        if routine.len() >= TOOL_FOLD_THRESHOLD {
             let row = lines.len();
             lines.push(tool_fold_line(&routine, calls, lookup, width));
             blocks.extend(
