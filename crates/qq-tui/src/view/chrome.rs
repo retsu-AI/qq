@@ -334,7 +334,7 @@ pub(super) fn rule_attention(app: &App, rail_shown: bool) -> Option<(String, Sty
     Some((text, warning()))
 }
 
-pub(super) fn dock_rule(app: &App, width: usize, rail_shown: bool) -> Line {
+pub(super) fn dock_rule(app: &App, width: usize, rail_shown: bool, unseen: usize) -> Line {
     let state = rule_state(app);
     let style = state.style();
     let mut left = Line::default();
@@ -362,9 +362,16 @@ pub(super) fn dock_rule(app: &App, width: usize, rail_shown: bool) -> Line {
         left.push("✕ ", style);
         left.push("run failed ", normal());
     }
-    let right = rule_attention(app, rail_shown)
+    let attention = rule_attention(app, rail_shown)
         .map(|(text, style)| Line::styled(format!(" {text}"), style))
         .unwrap_or_default();
+    let mut right = Line::default();
+    if unseen > 0 {
+        right.push(format!(" ↓ {unseen} new  End "), accent());
+    }
+    for span in attention.spans {
+        right.push(span.text, span.style);
+    }
     let right = if left.width() + right.width() + 4 > width {
         Line::default()
     } else {
@@ -430,6 +437,15 @@ pub(super) fn dock_footer(app: &App, width: usize, compact: bool) -> Line {
             }
             truncate_line(row, width)
         }
+        Mode::Find => {
+            let mut row = Line::styled("  ", normal());
+            for span in
+                key_row(&[("enter", "next"), ("S-enter", "previous"), ("esc", "close")]).spans
+            {
+                row.push(span.text, span.style);
+            }
+            truncate_line(row, width)
+        }
         Mode::Compose | Mode::Approval | Mode::GoalForm | Mode::GoalCheck => {
             if app.mode() == Mode::Compose
                 && matches!(app.view(), View::Goal(_))
@@ -455,6 +471,7 @@ pub(super) fn dock_footer(app: &App, width: usize, compact: bool) -> Line {
 pub(super) fn dock_panel(app: &App, width: usize, limit: usize) -> (Vec<Line>, Option<usize>) {
     let mut goal_scroll = None;
     let rows = match app.mode() {
+        Mode::Find => find_panel(app, width),
         Mode::GoalForm => goal_form(app, width, limit),
         Mode::GoalCheck => goal_check_picker(app, width, limit),
         Mode::Models => model_picker(app, width, limit),
@@ -498,6 +515,31 @@ pub(super) fn dock_panel(app: &App, width: usize, limit: usize) -> (Vec<Line>, O
     }
     rows.truncate(limit);
     (rows, goal_scroll)
+}
+
+pub(super) fn find_panel(app: &App, width: usize) -> Vec<Line> {
+    let Some(find) = app.find() else {
+        return Vec::new();
+    };
+    let mut line = Line::styled("/ ", accent());
+    if find.query.is_empty() {
+        line.push("find in this transcript", faint());
+    } else {
+        line.push(find.query.clone(), normal());
+        let count = match find.current {
+            Some(current) => format!("  {} of {}", current + 1, find.matches.len()),
+            None => "  no matches".to_owned(),
+        };
+        line.push(
+            count,
+            if find.current.is_some() {
+                faint()
+            } else {
+                warning()
+            },
+        );
+    }
+    vec![truncate_line(line, width)]
 }
 
 pub(super) fn goal_panel(app: &App, session_id: SessionId, width: usize) -> Vec<Line> {
@@ -995,6 +1037,7 @@ pub(super) fn dock_keys(app: &App) -> Option<Vec<(&'static str, &'static str)>> 
         }),
         Mode::GoalCheck => Some(vec![("enter", "apply"), ("↑↓", "choose"), ("esc", "back")]),
         Mode::Compose
+        | Mode::Find
         | Mode::Models
         | Mode::Profiles
         | Mode::ApprovalModes

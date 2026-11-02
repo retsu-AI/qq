@@ -50,6 +50,7 @@ pub(crate) enum Command {
     PruneSessions,
     UndoWorkspace,
     CopyAnswer,
+    Find,
     Quit,
 }
 
@@ -116,7 +117,7 @@ pub(crate) fn retired_replacement(name: &str) -> Option<&'static str> {
         .map(|(_, replacement)| *replacement)
 }
 
-pub(crate) const COMMANDS: [CommandSpec; 45] = [
+pub(crate) const COMMANDS: [CommandSpec; 46] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -329,6 +330,13 @@ pub(crate) const COMMANDS: [CommandSpec; 45] = [
         View,
         ["/copy"],
         []
+    ),
+    spec!(
+        Find,
+        "find in the transcript, including collapsed blocks",
+        View,
+        [],
+        ["Ctrl-F"]
     ),
     spec!(
         ToggleReasoning,

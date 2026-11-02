@@ -404,6 +404,7 @@ impl App {
                 }
                 Effects::redraw(Redraw::Immediate)
             }
+            (PickerOutcome::Accept, Overlay::Find(_)) => Effects::none(),
             (PickerOutcome::Accept, Overlay::GoalForm(_)) => self.accept_goal_form(),
             (PickerOutcome::Accept, Overlay::GoalCheck { target, picker, .. }) => {
                 let Some(scope) = picker.current().map(|row| row.scope) else {

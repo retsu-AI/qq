@@ -20,6 +20,8 @@
   | `Alt-S` | interrupt |
   | `Ctrl-Q` | queue |
   | `Ctrl-O` | open or close turn receipts |
+  | `Ctrl-F` | find in the transcript (`Enter` next, `Shift-Enter` previous) |
+  | `End` on an empty composer, `Ctrl-End` | back to the live tail |
   | `Alt-R` | reasoning |
   | `Alt-N` / `Alt-C` | new session / new child |
   | `Ctrl-G` | next session that needs you |
