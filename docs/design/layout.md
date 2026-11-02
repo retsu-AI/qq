@@ -139,9 +139,10 @@ For the sessions column, `Auto` follows the tier and session count; its
 toggle (`Ctrl-\` by default) moves `Auto` or `Shown` to `Hidden` and `Hidden`
 to `Shown`, so the first press hides the column the user is reaching to
 dismiss. The inspector's `Auto` shows it only while
-`LayoutDemand::inspector_content` holds; its toggle (`Alt-I`) moves
-`Auto` or `Hidden` to `Shown` and `Shown` to `Hidden`, so the first press
-shows it. `flush` is set while mouse capture is off (`/mouse`): it removes
+`LayoutDemand::inspector_content` holds; its toggle (`Alt-I`) reads
+whether the last frame showed it (`App::inspector_shown`) and pins the
+opposite, `Hidden` or `Shown`, so the first press always flips what is on
+screen. `flush` is set while mouse capture is off (`/mouse`): it removes
 the sessions column and the transcript slot's margin inset whatever the
 other preferences say, so the terminal's native selection of a full row
 copies clean text. The preferences are runtime state, not configuration;

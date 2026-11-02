@@ -39,7 +39,6 @@ pub(crate) use chrome::{ComposerMode, CursorPosition};
 use highlight::HighlightKey;
 pub(crate) use highlight::{Highlighted, Highlighter};
 pub(crate) use layout::LayoutPrefs;
-#[cfg(any(test, feature = "bench-support"))]
 pub(crate) use layout::PanePref;
 use layout::{Tier, TranscriptSlot, compute_layout};
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
@@ -135,6 +134,7 @@ pub(crate) struct FrameRenderer {
     transcript_area: Option<crate::selection::Area>,
     rail_area: Option<crate::selection::Area>,
     rail_rows: Vec<(usize, SessionId)>,
+    inspector_shown: bool,
     shapes: Vec<crate::selection::RowShape>,
     shapes_ready: bool,
 }
@@ -147,6 +147,7 @@ impl FrameRenderer {
         app.geometry.transcript = self.transcript_area;
         app.geometry.rail = self.rail_area;
         app.geometry.rail_rows.clone_from(&self.rail_rows);
+        app.inspector_shown = self.inspector_shown;
         for (index, update) in self.pane_updates.drain(..) {
             if let Some(pane) = app.panes.get_mut(index) {
                 pane.viewport = update.viewport;
@@ -245,6 +246,7 @@ impl FrameRenderer {
         self.transcript_area = None;
         self.rail_area = None;
         self.rail_rows.clear();
+        self.inspector_shown = false;
         self.shapes_ready = false;
         if self.theme_generation != app.theme_generation {
             self.theme_generation = app.theme_generation;
@@ -257,7 +259,7 @@ impl FrameRenderer {
                     Line::styled(" qq", brand().bold()),
                     Line::default(),
                     Line::styled("Terminal is too small.", warning()),
-                    Line::styled("Resize to at least 32 x 9. Ctrl-C exits.", muted()),
+                    Line::styled("Resize to at least 32 x 9. Ctrl-C twice exits.", muted()),
                 ],
                 height,
             );
@@ -300,6 +302,7 @@ impl FrameRenderer {
             },
         );
         let body_height = layout.body.height;
+        self.inspector_shown = layout.inspector.is_some();
         let inline_detail = layout.inspector.is_none();
         let slots = layout.transcripts.len();
         let first_shown = app

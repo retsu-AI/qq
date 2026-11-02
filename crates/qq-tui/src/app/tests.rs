@@ -5192,6 +5192,29 @@ fn btw_subcommands_start_a_thread_or_cancel_and_retired_spellings_name_their_rep
         Some("use /btw new QUESTION to start a new side thread")
     );
 
+    app.composer.replace("/btw cancel".to_owned());
+    let (_, requests) = app.submit_prompt().split();
+    assert!(requests.is_empty());
+    assert!(app.composer.text.is_empty());
+    assert_eq!(
+        app.visible_status().map(|(text, _)| text),
+        Some("no side question is running")
+    );
+    app.composer.replace("/btw cancel now".to_owned());
+    let (_, requests) = app.submit_prompt().split();
+    assert!(requests.is_empty(), "never sent as a question");
+    assert_eq!(
+        app.visible_status().map(|(text, _)| text),
+        Some("use /btw cancel with nothing after it")
+    );
+    app.composer.replace("/btw newer tests?".to_owned());
+    let request = only_command(app.submit_prompt());
+    assert!(matches!(
+        request.command,
+        SessionCommand::SubmitSideQuestion { new_thread: false, ref question, .. }
+            if question == "newer tests?"
+    ));
+
     for (retired, replacement) in [
         ("/btw-new what?", "/btw new"),
         ("/btw-cancel", "/btw cancel"),

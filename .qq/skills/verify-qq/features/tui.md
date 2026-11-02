@@ -4,11 +4,11 @@
 
 - **Slash commands** (`crates/qq-tui/src/commands.rs`, `docs/guide/tui.md`):
   - Help: `/help`, `/commands`.
-  - Sessions and agents: `/sessions`, `/resume`, `/agents`, `/new`, `/clear`.
+  - Sessions and agents: `/sessions`, `/resume`, `/agents`, `/new`.
   - History: `/compact`, `/rollback`, `/prune`.
   - Settings: `/models`, `/profile`, `/approval`, `/effort`, `/skills`, `/theme`, `/mouse`, `/attention`.
   - Goals: `/goal`.
-  - Side questions: `/btw`, `/ask`, `/btw-new`, `/btw-cancel`.
+  - Side questions: `/btw`, `/ask`, `/btw new`, `/btw cancel`.
   - Other: `/changes`, `/undo`, `/editor`, `/quit`.
 - **Keys:**
 
@@ -19,10 +19,11 @@
   | `Ctrl-X` or `Esc Esc` | cancel |
   | `Alt-S` | interrupt |
   | `Ctrl-Q` | queue |
-  | `Ctrl-O` | fold |
+  | `Ctrl-O` | open or close turn receipts |
   | `Alt-R` | reasoning |
   | `Alt-N` / `Alt-C` | new session / new child |
   | `Ctrl-G` | next session that needs you |
+  | `Ctrl-C` | copy, else clear the draft, else press twice within 2 s to quit |
   | `y` `n` (Ask) | approvals |
 
 ## How to get to it (user POV)
@@ -47,7 +48,7 @@ Bare `qq`, or `qq --session ID`. Both stdin and stdout must be a terminal.
    ROOT=$(mktemp -d /tmp/qq-tui-qa.XXXXXX); chmod 700 $ROOT; mkdir $ROOT/config
    printf '(version: 1, model: "custom/qa-model", providers: {"custom": Custom(connection: (base_url: "http://127.0.0.1:%s/v1", api: OpenAiResponses, auth: NoAuth), models: {"qa-model": (name: "QA")})})' \
      $QQ_FAKE_PORT > $ROOT/config/config.ron
-   (sleep 3; printf hello; sleep .5; printf '\r'; sleep 3; printf '\003') \
+   (sleep 3; printf hello; sleep .5; printf '\r'; sleep 3; printf '\003'; sleep .3; printf '\003') \
      | script -qfec "stty cols 100 rows 30; target/debug/qq --tui-qa-root $ROOT" /dev/null \
      > $QQ_HOME/evidence/tty.log
    sed 's/\x1b\[[0-9;?<>]*[a-zA-Z]//g' $QQ_HOME/evidence/tty.log | rg -o 'verify fake reply|qq --session [0-9a-f]+'

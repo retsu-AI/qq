@@ -382,6 +382,35 @@ fn ctrl_c_clears_a_draft_then_asks_before_quitting_within_two_seconds() {
 }
 
 #[test]
+fn a_copy_or_mouse_event_between_presses_disarms_the_quit() {
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let mut app = app();
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    assert!(!quits(app.handle_terminal_event(Event::Key(ctrl_c))));
+    let shown = rows(&mut app, &mut renderer);
+    let at = find(&shown, "Then push");
+    app.handle_terminal_event(mouse(MouseEventKind::Down(MouseButton::Left), at));
+    app.handle_terminal_event(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        (at.0 + 3, at.1),
+    ));
+    draw(&mut app, &mut renderer);
+    let copied = app.handle_terminal_event(Event::Key(ctrl_c));
+    assert!(!quits(copied), "the press copies");
+    assert!(
+        !quits(app.handle_terminal_event(Event::Key(ctrl_c))),
+        "the arm from before the drag is gone"
+    );
+    assert!(quits(app.handle_terminal_event(Event::Key(ctrl_c))));
+
+    let mut app = self::app();
+    assert!(!quits(app.handle_terminal_event(Event::Key(ctrl_c))));
+    app.handle_terminal_event(mouse(MouseEventKind::ScrollUp, (1, 1)));
+    assert!(!quits(app.handle_terminal_event(Event::Key(ctrl_c))));
+}
+
+#[test]
 fn the_first_ctrl_c_counts_the_runs_that_stop_only_when_this_qq_owns_the_server() {
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     for (owns_server, expected) in [

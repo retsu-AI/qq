@@ -93,7 +93,6 @@ pub(super) fn status_row(app: &App, width: usize, compact: bool) -> Line {
                 .filter(|nanos| *nanos > 0)
                 .map(|nanos| (format_cost(nanos), muted())),
             StatusItem::Workspace => None,
-            StatusItem::Tools => None,
         };
         parts.extend(part);
     }

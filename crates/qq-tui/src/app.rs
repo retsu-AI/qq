@@ -302,6 +302,7 @@ pub(crate) struct App {
     pub reasoning_detail: ReasoningDetail,
     pub(crate) goal_scroll: usize,
     pub layout: crate::view::LayoutPrefs,
+    pub(crate) inspector_shown: bool,
     pub(crate) mouse_capture: bool,
     terminal_width: usize,
     pub(crate) themes: Vec<Theme>,
@@ -373,6 +374,7 @@ impl App {
             reasoning_detail: ReasoningDetail::default(),
             goal_scroll: 0,
             layout: crate::view::LayoutPrefs::default(),
+            inspector_shown: false,
             terminal_width: 0,
             mouse_capture: true,
             themes: if options.themes.is_empty() {
@@ -1208,9 +1210,10 @@ impl App {
     }
 
     pub fn handle_terminal_event(&mut self, event: Event) -> Effects {
+        let armed = self.quit_armed_at.take();
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-                self.handle_key(key)
+                self.handle_armed_key(key, armed)
             }
             Event::Paste(text) => {
                 let changed = match &mut self.overlay {
@@ -1307,20 +1310,15 @@ impl App {
         }
     }
 
-    fn press_ctrl_c(&mut self) -> Effects {
+    fn press_ctrl_c(&mut self, armed: Option<std::time::Instant>) -> Effects {
         if !self.composer.text.is_empty() {
             self.composer.clear();
             self.reset_history_browse();
             self.slash.select(0);
-            self.quit_armed_at = None;
             return Effects::redraw(Redraw::Immediate);
         }
         let now = (self.clock)();
-        if self
-            .quit_armed_at
-            .is_some_and(|armed| now.saturating_duration_since(armed) <= QUIT_CONFIRM_WINDOW)
-        {
-            self.quit_armed_at = None;
+        if armed.is_some_and(|armed| now.saturating_duration_since(armed) <= QUIT_CONFIRM_WINDOW) {
             return self.execute(Command::Quit);
         }
         self.quit_armed_at = Some(now);
@@ -1340,7 +1338,13 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
+    #[cfg(test)]
     fn handle_key(&mut self, key: KeyEvent) -> Effects {
+        let armed = self.quit_armed_at.take();
+        self.handle_armed_key(key, armed)
+    }
+
+    fn handle_armed_key(&mut self, key: KeyEvent, armed: Option<std::time::Instant>) -> Effects {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if let Some(selection) = self.selection.take()
                 && !selection.is_click()
@@ -1352,9 +1356,8 @@ impl App {
             if self.block_cursor.is_some() {
                 return self.copy_block();
             }
-            return self.press_ctrl_c();
+            return self.press_ctrl_c(armed);
         }
-        self.quit_armed_at = None;
         if self.selection.take().is_some() {
             if key.code == KeyCode::Esc {
                 return Effects::redraw(Redraw::Immediate);
@@ -1779,7 +1782,11 @@ impl App {
                 Effects::redraw(Redraw::Immediate)
             }
             Command::ToggleInspector => {
-                self.layout.inspector = self.layout.inspector.toggled_from_hidden();
+                self.layout.inspector = if self.inspector_shown {
+                    crate::view::PanePref::Hidden
+                } else {
+                    crate::view::PanePref::Shown
+                };
                 Effects::redraw(Redraw::Immediate)
             }
             Command::FocusParent => match self.focused().and_then(|focused| {
@@ -2036,20 +2043,26 @@ impl App {
             return Effects::redraw(Redraw::Immediate);
         }
         if matches!(name, "/btw" | "/ask") {
+            let trimmed = question.trim();
+            let (word, rest) = trimmed
+                .split_once(char::is_whitespace)
+                .map_or((trimmed, ""), |(word, rest)| (word, rest.trim()));
+            if word == "cancel" {
+                if !rest.is_empty() {
+                    self.set_warning("use /btw cancel with nothing after it".to_owned());
+                    return Effects::redraw(Redraw::Immediate);
+                }
+                self.composer.clear();
+                return self.cancel_side_question();
+            }
             let Some(session_id) = self.focused().or(self.view_return) else {
                 self.set_warning("create a session before asking a side question".to_owned());
                 return Effects::redraw(Redraw::Immediate);
             };
-            let (new_thread, question) = match question.trim().split_once(char::is_whitespace) {
-                Some(("new", rest)) => (true, rest.trim()),
-                _ => match question.trim() {
-                    "new" => (true, ""),
-                    "cancel" => {
-                        self.composer.clear();
-                        return self.cancel_side_question();
-                    }
-                    other => (false, other),
-                },
+            let (new_thread, question) = if word == "new" {
+                (true, rest)
+            } else {
+                (false, trimmed)
             };
             if question.is_empty() && new_thread {
                 self.set_warning("use /btw new QUESTION to start a new side thread".to_owned());

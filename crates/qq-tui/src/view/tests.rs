@@ -5122,6 +5122,69 @@ fn the_inspector_shows_only_when_toggled_on_and_the_toggle_cycles_it() {
 }
 
 #[test]
+fn auto_opens_the_inspector_with_content_and_the_first_alt_i_hides_what_is_shown() {
+    let (mut app, call) = app_with_expandable_read();
+    let mut renderer = FrameRenderer::default();
+    assert!(!frame_text(&renderer.frame_and_commit(&mut app, 200, 60)).contains("INSPECTOR"));
+
+    app.expanded_tool_calls.insert(call);
+    let wide = renderer.frame_and_commit(&mut app, 200, 60);
+    let (_, inspector) = transcript_and_inspector(&app, &wide);
+    assert!(inspector.contains("INSPECTOR"), "{inspector}");
+    assert!(
+        !frame_text(&renderer.frame_and_commit(&mut app, 120, 40)).contains("INSPECTOR"),
+        "no room below 140 columns"
+    );
+
+    renderer.frame_and_commit(&mut app, 200, 60);
+    let toggle = TerminalEvent::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
+    app.handle_terminal_event(toggle.clone());
+    assert_eq!(app.layout.inspector, PanePref::Hidden, "one press hides it");
+    assert!(!frame_text(&renderer.frame_and_commit(&mut app, 200, 60)).contains("INSPECTOR"));
+
+    app.layout.inspector = PanePref::Auto;
+    app.expanded_tool_calls.clear();
+    app.execute(crate::commands::Command::ShowAttention);
+    let wide = renderer.frame_and_commit(&mut app, 200, 60);
+    let (_, inspector) = transcript_and_inspector(&app, &wide);
+    assert!(inspector.contains("NEEDS YOU"), "{inspector}");
+}
+
+#[test]
+fn two_routine_calls_keep_their_rows_and_three_fold_into_a_receipt() {
+    let read = |byte| {
+        tool_call_snapshot(
+            byte,
+            "read_file",
+            r#"{"path":"a.rs"}"#,
+            ToolCallState::Completed,
+            Some("a\n"),
+            false,
+        )
+    };
+    let two = [read(2), read(3)];
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &two.iter().collect::<Vec<_>>(),
+        &HashMap::new(),
+        SimpleDetail::Folded,
+        0,
+        80,
+        &|_, _| Vec::new(),
+    ));
+    assert_eq!(rows, ["● Read a.rs 1 line", "● Read a.rs 1 line"]);
+    let three = [read(2), read(3), read(4)];
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &three.iter().collect::<Vec<_>>(),
+        &HashMap::new(),
+        SimpleDetail::Folded,
+        0,
+        80,
+        &|_, _| Vec::new(),
+    ));
+    assert_eq!(rows, ["● 3 calls · read 3"]);
+}
+
+#[test]
 fn expanded_detail_moves_between_the_transcript_and_the_inspector_as_it_toggles() {
     let (mut app, call) = app_with_expandable_read();
     app.expanded_tool_calls.insert(call);

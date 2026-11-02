@@ -284,8 +284,8 @@ impl BenchHarness {
         self.draw_full()
     }
 
-    pub fn fold_tools(&mut self) {
-        self.app.receipts_open = false;
+    pub fn open_receipts(&mut self, open: bool) {
+        self.app.receipts_open = open;
     }
 
     pub fn expand_every_tool(&mut self) {
@@ -767,7 +767,6 @@ impl BenchHarness {
             Scene::ToolsFolded => {
                 harness.completed_turn("clean up the renderer", "Done. Every file compiles.");
                 harness.add_tool_calls(6);
-                harness.fold_tools();
             }
             Scene::Approval => {
                 harness.completed_turn(
