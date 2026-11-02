@@ -245,6 +245,7 @@ pub(super) fn inspector_rows(
                         },
                         expanded: true,
                         inline_detail: true,
+                        inline_diff: false,
                         fold: false,
                         selected: app.block_cursor == Some(Block::Tool(call.id)),
                         scroll: app.tool_scroll.get(&call.id).copied(),

@@ -76,7 +76,7 @@ an approval open in the dock (`approval-80x24`):
     41 -   while column <= width {
     41 +   while column < width {
     42         column += 1;
-  ┃ y apply   n deny   Y / N with a note
+  ┃ y apply   n deny   Y / N with a note   e full diff
     Session 0 · gpt-test
 ```
 
@@ -284,10 +284,8 @@ raise per-frame streaming work.
 200 × 60, 320 × 90, and 480 × 120 (the `sessions-*` scene shows the Compact
 rule counts and both column densities; `tools-expanded-*` shows detail
 inline, and a view test asserts the inspector shows the same rows once
-toggled on). The goldens now follow the v0.1.11 design; the R0 reference
-renderer `crates/qq-tui/src/design.rs` and its frames in
-`crates/qq-tui/tests/design/` remain alongside them. `cargo test -p qq-tui
---test gallery -- --ignored` writes both sets as ANSI for a real terminal.
+toggled on). The goldens follow the v0.1.11 design. `cargo test -p qq-tui
+--test gallery -- --ignored` writes them as ANSI for a real terminal.
 The render bench (`cargo bench -p qq-tui --bench render`) includes
 `compact_80x24`, `wide_160x48_full`, `tool_calls_32_expanded_inspector`, and
 `resize_ultra_480x120` alongside the legacy 160 × 48 scenes, which hold the

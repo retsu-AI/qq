@@ -16,6 +16,7 @@ impl Attributes {
     const DIM: u8 = 1 << 1;
     const ITALIC: u8 = 1 << 2;
     const UNDERLINE: u8 = 1 << 3;
+    const REVERSE: u8 = 1 << 4;
 
     const fn has(self, flag: u8) -> bool {
         self.0 & flag != 0
@@ -62,6 +63,11 @@ impl Style {
         self
     }
 
+    pub(crate) const fn reversed(mut self) -> Self {
+        self.attributes.0 |= Attributes::REVERSE;
+        self
+    }
+
     #[cfg(test)]
     pub(crate) const fn is_bold(self) -> bool {
         self.attributes.has(Attributes::BOLD)
@@ -80,6 +86,11 @@ impl Style {
     #[cfg(test)]
     pub(crate) const fn is_underline(self) -> bool {
         self.attributes.has(Attributes::UNDERLINE)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn is_reversed(self) -> bool {
+        self.attributes.has(Attributes::REVERSE)
     }
 }
 
@@ -321,6 +332,9 @@ pub(crate) fn write_line(output: &mut impl Write, line: &Line) -> io::Result<()>
             }
             if added.has(Attributes::UNDERLINE) {
                 queue!(output, SetAttribute(Attribute::Underlined))?;
+            }
+            if added.has(Attributes::REVERSE) {
+                queue!(output, SetAttribute(Attribute::Reverse))?;
             }
             current = next;
         }

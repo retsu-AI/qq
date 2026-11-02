@@ -271,6 +271,8 @@ pub(crate) struct App {
     pub overlay: Option<Overlay>,
     pub composer: Composer,
     pub(crate) approval_amendment: Option<ApprovalChoice>,
+    pub(crate) approval_diff: Option<(qq_protocol::ToolCallId, usize)>,
+    pub(crate) approval_diff_page: usize,
     pub(crate) question_answers: Vec<String>,
     history_position: Option<usize>,
     history_draft: Option<String>,
@@ -348,6 +350,8 @@ impl App {
             overlay: None,
             composer: Composer::default(),
             approval_amendment: None,
+            approval_diff: None,
+            approval_diff_page: 1,
             question_answers: Vec::new(),
             history_position: None,
             history_draft: None,
@@ -2778,6 +2782,44 @@ impl App {
             .get(&tool_call.id)
     }
 
+    pub(crate) fn approval_diff_start(&self) -> Option<usize> {
+        let (id, start) = self.approval_diff?;
+        (self.pending_approval()?.id == id).then_some(start)
+    }
+
+    fn toggle_approval_diff(&mut self) -> Effects {
+        if self.approval_diff_start().is_some() {
+            self.approval_diff = None;
+            return Effects::redraw(Redraw::Immediate);
+        }
+        let Some(call) = self.pending_approval() else {
+            return Effects::none();
+        };
+        if self
+            .pending_approval_preview()
+            .and_then(|preview| preview.edit.as_ref())
+            .is_none()
+        {
+            return Effects::none();
+        }
+        self.approval_diff = Some((call.id, 0));
+        Effects::redraw(Redraw::Immediate)
+    }
+
+    fn page_approval_diff(&mut self, down: bool) -> Effects {
+        let Some((id, start)) = self.approval_diff else {
+            return Effects::none();
+        };
+        let page = self.approval_diff_page.max(1);
+        let next = if down {
+            start.saturating_add(page)
+        } else {
+            start.saturating_sub(page)
+        };
+        self.approval_diff = Some((id, next));
+        Effects::changed_now(next != start)
+    }
+
     pub(crate) fn pending_question(&self) -> Option<&QuestionPreview> {
         self.pending_approval_preview()?.question.as_ref()
     }
@@ -2817,7 +2859,12 @@ impl App {
                 _ => Effects::none(),
             };
         }
+        let diff_open = self.approval_diff_start().is_some();
         match key.code {
+            KeyCode::Char('e') => self.toggle_approval_diff(),
+            KeyCode::Esc if diff_open => self.toggle_approval_diff(),
+            KeyCode::PageDown if diff_open => self.page_approval_diff(true),
+            KeyCode::PageUp if diff_open => self.page_approval_diff(false),
             KeyCode::Char('y') => self.respond_to_approval(ApprovalChoice::Once),
             KeyCode::Char('n') | KeyCode::Esc => self.respond_to_approval(ApprovalChoice::Deny),
             KeyCode::Char('Y') => {

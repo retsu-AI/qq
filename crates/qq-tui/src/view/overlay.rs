@@ -665,7 +665,10 @@ pub(super) fn approval_block(app: &App, width: usize, limit: usize) -> Vec<Line>
         lines.push(truncate_line(line, width));
     }
     if let Some(edit) = preview.and_then(|preview| preview.edit.as_ref()) {
-        lines.extend(dock_diff_lines(&edit.diff, MAX_APPROVAL_DIFF_ROWS, width));
+        match app.approval_diff_start() {
+            Some(start) => return full_diff_window(&edit.diff, start, width, limit),
+            None => lines.extend(dock_diff_lines(&edit.diff, MAX_APPROVAL_DIFF_ROWS, width)),
+        }
     }
     if lines.is_empty()
         && let Some(call) = app.pending_approval()
@@ -681,18 +684,21 @@ pub(super) fn approval_block(app: &App, width: usize, limit: usize) -> Vec<Line>
     lines
 }
 
-pub(super) fn dock_diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<Line> {
-    let diff = trim_leading_context(diff, DIFF_LEADING_CONTEXT);
-    let diff = diff.as_str();
-    let mut lines = Vec::new();
+struct DiffRow {
+    number: Option<usize>,
+    sign: char,
+    text: String,
+    changed: Option<Range<usize>>,
+}
+
+fn diff_rows(diff: &str) -> Vec<DiffRow> {
+    let mut rows = Vec::new();
     let mut old_line: Option<usize> = None;
     let mut new_line: Option<usize> = None;
-    let body: Vec<&str> = diff
+    for text in diff
         .lines()
         .filter(|line| !line.starts_with("+++") && !line.starts_with("---"))
-        .collect();
-    let total = body.iter().filter(|line| !line.starts_with("@@")).count();
-    for text in body {
+    {
         if let Some(header) = text.strip_prefix("@@") {
             let mut ranges = header.split_whitespace();
             let parse = |range: Option<&str>, sign: char| {
@@ -705,40 +711,204 @@ pub(super) fn dock_diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<
             new_line = parse(ranges.next(), '+');
             continue;
         }
-        if lines.len() == max_rows {
-            lines.push(Line::styled(
-                format!(
-                    "  … {}",
-                    count_noun(total - max_rows, "more line", "more lines")
-                ),
-                faint(),
-            ));
-            break;
-        }
         let safe: String = text.chars().filter_map(terminal_safe_character).collect();
-        let (sign, rest) = safe.split_at(safe.chars().next().map_or(0, char::len_utf8));
-        let (number, style, sign) = match sign {
-            "-" => (old_line, failure(), "-"),
-            "+" => (new_line, success(), "+"),
-            _ => (new_line, normal(), " "),
+        let (sign, rest) = match safe.chars().next() {
+            Some(sign @ ('-' | '+')) => (sign, &safe[1..]),
+            Some(other) => (' ', &safe[other.len_utf8()..]),
+            None => (' ', ""),
         };
-        let mut line = Line::styled(
-            number.map_or_else(|| "      ".to_owned(), |number| format!("{number:>4} ")),
-            faint(),
-        );
-        line.push(format!("{sign}  "), style);
-        line.push(rest, style);
-        match sign {
-            "-" => old_line = old_line.map(|number| number + 1),
-            "+" => new_line = new_line.map(|number| number + 1),
+        let advance = |line: &mut Option<usize>| {
+            let current = *line;
+            *line = current.map(|number| number + 1);
+            current
+        };
+        let number = match sign {
+            '-' => advance(&mut old_line),
+            '+' => advance(&mut new_line),
             _ => {
-                old_line = old_line.map(|number| number + 1);
-                new_line = new_line.map(|number| number + 1);
+                advance(&mut old_line);
+                advance(&mut new_line)
+            }
+        };
+        rows.push(DiffRow {
+            number,
+            sign,
+            text: rest.to_owned(),
+            changed: None,
+        });
+    }
+    mark_changed_words(&mut rows);
+    rows
+}
+
+fn mark_changed_words(rows: &mut [DiffRow]) {
+    let mut index = 0;
+    while index < rows.len() {
+        let removed = rows[index..]
+            .iter()
+            .take_while(|row| row.sign == '-')
+            .count();
+        let added = rows[index + removed..]
+            .iter()
+            .take_while(|row| row.sign == '+')
+            .count();
+        if removed > 0 && removed == added {
+            for offset in 0..removed {
+                let (old, new) = rows.split_at_mut(index + removed);
+                let (old, new) = (&mut old[index + offset], &mut new[offset]);
+                if let Some((old_range, new_range)) = changed_words(&old.text, &new.text) {
+                    old.changed = Some(old_range);
+                    new.changed = Some(new_range);
+                }
             }
         }
-        lines.push(truncate_line(line, width));
+        index += (removed + added).max(1);
+    }
+}
+
+fn changed_words(old: &str, new: &str) -> Option<(Range<usize>, Range<usize>)> {
+    let old_tokens = word_tokens(old);
+    let new_tokens = word_tokens(new);
+    let token = |text: &str, range: &Range<usize>| text[range.clone()].to_owned();
+    let prefix = old_tokens
+        .iter()
+        .zip(&new_tokens)
+        .take_while(|(a, b)| token(old, a) == token(new, b))
+        .count();
+    let suffix = old_tokens[prefix..]
+        .iter()
+        .rev()
+        .zip(new_tokens[prefix..].iter().rev())
+        .take_while(|(a, b)| token(old, a) == token(new, b))
+        .count();
+    let span = |text: &str, tokens: &[Range<usize>]| {
+        let middle = &tokens[prefix..tokens.len() - suffix];
+        match (middle.first(), middle.last()) {
+            (Some(first), Some(last)) => first.start..last.end,
+            _ => {
+                let at = tokens.get(prefix).map_or(text.len(), |token| token.start);
+                at..at
+            }
+        }
+    };
+    let old_range = span(old, &old_tokens);
+    let new_range = span(new, &new_tokens);
+    let whole = |text: &str, range: &Range<usize>| {
+        text[..range.start].trim().is_empty() && text[range.end..].trim().is_empty()
+    };
+    if (old_range.is_empty() && new_range.is_empty())
+        || (whole(old, &old_range) && whole(new, &new_range))
+    {
+        return None;
+    }
+    Some((old_range, new_range))
+}
+
+fn word_tokens(text: &str) -> Vec<Range<usize>> {
+    #[derive(PartialEq)]
+    enum Class {
+        Word,
+        Space,
+        Mark,
+    }
+    let class = |character: char| {
+        if character.is_alphanumeric() || character == '_' {
+            Class::Word
+        } else if character.is_whitespace() {
+            Class::Space
+        } else {
+            Class::Mark
+        }
+    };
+    let mut tokens: Vec<Range<usize>> = Vec::new();
+    let mut previous: Option<Class> = None;
+    for (at, character) in text.char_indices() {
+        let current = class(character);
+        match tokens.last_mut() {
+            Some(last) if previous.as_ref() == Some(&current) => {
+                last.end = at + character.len_utf8();
+            }
+            _ => tokens.push(at..at + character.len_utf8()),
+        }
+        previous = Some(current);
+    }
+    tokens
+}
+
+fn diff_line(row: &DiffRow, width: usize) -> Line {
+    let (style, sign) = match row.sign {
+        '-' => (failure(), "-"),
+        '+' => (success(), "+"),
+        _ => (normal(), " "),
+    };
+    let mut line = Line::styled(
+        row.number
+            .map_or_else(|| "      ".to_owned(), |number| format!("{number:>4} ")),
+        faint(),
+    );
+    line.push(format!("{sign}  "), style);
+    match &row.changed {
+        Some(changed) => {
+            line.push(&row.text[..changed.start], style);
+            line.push(&row.text[changed.clone()], style.reversed());
+            line.push(&row.text[changed.end..], style);
+        }
+        None => line.push(row.text.as_str(), style),
+    }
+    truncate_line(line, width)
+}
+
+pub(super) fn dock_diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<Line> {
+    let rows = diff_rows(&trim_leading_context(diff, DIFF_LEADING_CONTEXT));
+    let mut lines: Vec<Line> = rows
+        .iter()
+        .take(max_rows)
+        .map(|row| diff_line(row, width))
+        .collect();
+    if rows.len() > max_rows {
+        lines.push(Line::styled(
+            format!(
+                "  … {}",
+                count_noun(rows.len() - max_rows, "more line", "more lines")
+            ),
+            faint(),
+        ));
     }
     lines
+}
+
+fn diff_window(total: usize, start: usize, limit: usize) -> Option<(usize, usize)> {
+    if total <= limit {
+        return None;
+    }
+    let window = limit.saturating_sub(1).max(1);
+    Some((start.min(total - window), window))
+}
+
+pub(super) fn full_diff_window(diff: &str, start: usize, width: usize, limit: usize) -> Vec<Line> {
+    let rows = diff_rows(diff);
+    let Some((start, window)) = diff_window(rows.len(), start, limit) else {
+        return rows.iter().map(|row| diff_line(row, width)).collect();
+    };
+    let end = start + window;
+    let mut lines: Vec<Line> = rows[start..end]
+        .iter()
+        .map(|row| diff_line(row, width))
+        .collect();
+    lines.push(truncate_line(
+        Line::styled(
+            format!("  {}–{end} of {} · PgUp PgDn", start + 1, rows.len()),
+            faint(),
+        ),
+        width,
+    ));
+    lines
+}
+
+pub(super) fn approval_diff_window(app: &App, limit: usize) -> Option<(usize, usize)> {
+    let start = app.approval_diff_start()?;
+    let diff = &app.pending_approval_preview()?.edit.as_ref()?.diff;
+    Some(diff_window(diff_rows(diff).len(), start, limit).unwrap_or((0, limit)))
 }
 
 const MAX_APPROVAL_DIFF_ROWS: usize = 8;

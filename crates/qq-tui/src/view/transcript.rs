@@ -972,13 +972,23 @@ impl TranscriptCache {
             .filter(|call| !self.tool_rows.contains_key(&call.id))
             .map(|call| (call.id, ToolRow::derive(call)))
             .collect();
-        let lookup = |call: &ToolCallSnapshot| -> ToolRowContext<'_> {
-            let row = self
-                .tool_rows
+        let row_of = |call: &ToolCallSnapshot| {
+            self.tool_rows
                 .get(&call.id)
                 .map(|(_, row)| row)
                 .or_else(|| fallback_rows.get(&call.id))
-                .expect("every call has a derived row");
+                .expect("every call has a derived row")
+        };
+        let newest_edit = session.summary.active_run_id.and_then(|run_id| {
+            tool_calls
+                .iter()
+                .rev()
+                .filter(|call| call.run_id == run_id)
+                .find(|call| row_of(call).diff.is_some())
+                .map(|call| call.id)
+        });
+        let lookup = |call: &ToolCallSnapshot| -> ToolRowContext<'_> {
+            let row = row_of(call);
             ToolRowContext {
                 row,
                 clock: RowClock {
@@ -991,6 +1001,7 @@ impl TranscriptCache {
                 },
                 expanded: app.expanded_tool_calls.contains(&call.id),
                 inline_detail,
+                inline_diff: newest_edit == Some(call.id),
                 fold: !app.receipts_open,
                 selected: app.block_cursor == Some(Block::Tool(call.id)),
                 scroll: app.tool_scroll.get(&call.id).copied(),

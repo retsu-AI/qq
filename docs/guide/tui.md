@@ -156,11 +156,13 @@ transcript row reads `waiting`, and the dock shows the call and its keys:
     41 -   while column <= width {
     41 +   while column < width {
     42         column += 1;
-  ┃ y apply   n deny   Y / N with a note
+  ┃ y apply   n deny   Y / N with a note   e full diff
     Session 0 · gpt-test                                                    /workspace
 ```
 
-`y` / `n`; `Shift-Y` / `Shift-N` decide and steer with a note.
+`y` / `n`; `Shift-Y` / `Shift-N` decide and steer with a note. On an edit,
+`e` opens the whole diff in the dock, `PageUp` / `PageDown` page it, and `e`
+or `Esc` returns to the 8-row preview without deciding.
 `Esc` denies, like `n`, except while a note is being typed, when it drops the
 note and leaves the prompt open.
 `Alt-A` / `Alt-D` answer the oldest waiting call in *another* session.

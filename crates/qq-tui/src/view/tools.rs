@@ -32,6 +32,7 @@ pub(crate) struct ToolRow {
     pub body: ResultBody,
     pub diff: Option<String>,
     panel: RefCell<Option<(usize, Vec<Line>)>>,
+    inline_diff: RefCell<Option<(usize, Vec<Line>)>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,6 +250,7 @@ impl ToolRow {
             body,
             diff,
             panel: RefCell::new(None),
+            inline_diff: RefCell::new(None),
         }
     }
 
@@ -512,6 +514,7 @@ pub(crate) struct ToolRowContext<'a> {
     pub clock: RowClock,
     pub expanded: bool,
     pub inline_detail: bool,
+    pub inline_diff: bool,
     pub fold: bool,
     pub selected: bool,
     pub scroll: Option<usize>,
@@ -640,6 +643,8 @@ pub(super) fn render_tool_blocks(
         }
         if context.expanded && context.inline_detail {
             lines.extend(tool_expanded_lines(call, context, width));
+        } else if context.inline_diff {
+            lines.extend(tool_inline_diff_lines(context.row, width));
         }
         if call.state == ToolCallState::Running
             && let Some(output) = live_output.get(&call.id)
@@ -1221,16 +1226,41 @@ fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line>
             }
         }
     }
-    body.into_iter()
-        .map(|line| {
-            let mut row = Line::styled("│ ", faint()).with_chrome(2);
-            row.kind = RowKind::Output;
-            for span in line.spans {
-                row.push(span.text, span.style);
-            }
-            truncate_line(row, width)
-        })
-        .collect()
+    body.into_iter().map(|line| rail_row(line, width)).collect()
+}
+
+fn rail_row(line: Line, width: usize) -> Line {
+    let mut row = Line::styled("│ ", faint()).with_chrome(2);
+    row.kind = RowKind::Output;
+    for span in line.spans {
+        row.push(span.text, span.style);
+    }
+    truncate_line(row, width)
+}
+
+fn tool_inline_diff_lines(row: &ToolRow, width: usize) -> Vec<Line> {
+    let Some(diff) = row.diff.as_deref() else {
+        return Vec::new();
+    };
+    let mut cached = row.inline_diff.borrow_mut();
+    if !cached
+        .as_ref()
+        .is_some_and(|(cached_width, _)| *cached_width == width)
+    {
+        let lines = super::overlay::dock_diff_lines(
+            diff,
+            MAX_TOOL_DIFF_ROWS,
+            tool_panel_content_width(width),
+        )
+        .into_iter()
+        .map(|line| rail_row(line, width))
+        .collect();
+        *cached = Some((width, lines));
+    }
+    cached
+        .as_ref()
+        .map(|(_, lines)| lines.clone())
+        .unwrap_or_default()
 }
 
 pub(super) fn tool_live_output_lines(output: &str, width: usize) -> Vec<Line> {
@@ -1311,6 +1341,7 @@ pub(super) fn render_tool_calls_simple(
         },
         expanded: detail == SimpleDetail::Expanded,
         inline_detail: true,
+        inline_diff: false,
         fold: detail == SimpleDetail::Folded,
         selected: false,
         scroll: None,
