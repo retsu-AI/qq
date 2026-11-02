@@ -261,6 +261,43 @@ fn paging_past_an_expanded_calls_window_edge_never_scrolls_the_transcript() {
 }
 
 #[test]
+fn find_shows_the_match_inside_a_call_the_user_already_expanded_and_leaves_it_open() {
+    let mut app = app(1);
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    let call = ToolCallId::from_bytes([3; 16]);
+    app.block_cursor = Some(Block::Tool(call));
+    app.handle_key(key(KeyCode::Enter));
+    let text = draw(&mut app, &mut renderer).join("\n");
+    assert!(text.contains("33–40 of 40"), "opens at the tail: {text}");
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    type_text(&mut app, "needle-in-tool");
+    let text = draw(&mut app, &mut renderer).join("\n");
+    assert!(text.contains("needle-in-tool-output"), "{text}");
+    assert!(text.contains("17–24 of 40"), "{text}");
+    app.handle_key(key(KeyCode::Esc));
+    assert!(
+        app.expanded_tool_calls.contains(&call),
+        "find does not fold what the user opened"
+    );
+}
+
+#[test]
+fn end_with_find_open_returns_to_the_tail_even_with_a_draft() {
+    let mut app = app(30);
+    let mut renderer = FrameRenderer::default();
+    draw(&mut app, &mut renderer);
+    type_text(&mut app, "draft");
+    app.handle_key(key(KeyCode::PageUp));
+    draw(&mut app, &mut renderer);
+    assert!(app.viewport().offset() > 0);
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    app.handle_key(key(KeyCode::End));
+    assert_eq!(app.viewport().offset(), 0);
+    assert_eq!(app.composer.text, "draft");
+}
+
+#[test]
 fn find_with_no_match_says_so_and_moves_nothing() {
     let mut app = app(30);
     let mut renderer = FrameRenderer::default();

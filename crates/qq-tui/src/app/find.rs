@@ -62,7 +62,8 @@ impl App {
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => self.step_find(false),
             KeyCode::Enter | KeyCode::Down => self.step_find(true),
             KeyCode::Up => self.step_find(false),
-            KeyCode::PageUp | KeyCode::PageDown | KeyCode::End => self.handle_compose_key(key),
+            KeyCode::End => Effects::changed_now(self.viewport_mut().scroll(isize::MIN)),
+            KeyCode::PageUp | KeyCode::PageDown => self.handle_compose_key(key),
             KeyCode::Backspace => {
                 let popped = self
                     .find_mut()
@@ -212,11 +213,8 @@ impl App {
         };
         let opened = match target {
             Block::Tool(call) => {
-                let opened = self.expanded_tool_calls.insert(call);
-                if opened || self.find_opened == Some(target) {
-                    self.scroll_tool_to_query(call);
-                }
-                opened
+                self.scroll_tool_to_query(call);
+                self.expanded_tool_calls.insert(call)
             }
             Block::Reasoning(run) => self.open_reasoning.insert(run),
             Block::Message(_) | Block::Code(..) => false,
