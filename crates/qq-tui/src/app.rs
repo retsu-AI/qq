@@ -1195,7 +1195,17 @@ impl App {
         };
         match intent {
             Some(PendingIntent::Side { session_id, text })
-            | Some(PendingIntent::Prompt { session_id, text })
+                if self.focused() == Some(session_id) && self.composer.text.is_empty() =>
+            {
+                let side_view = self.view() == View::SideQuestions(session_id);
+                self.composer
+                    .replace(if side_view || text.starts_with('/') {
+                        text
+                    } else {
+                        format!("/btw {text}")
+                    });
+            }
+            Some(PendingIntent::Prompt { session_id, text })
             | Some(PendingIntent::Steer { session_id, text })
                 if self.focused() == Some(session_id) && self.composer.text.is_empty() =>
             {

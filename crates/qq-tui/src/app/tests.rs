@@ -5299,6 +5299,25 @@ fn a_rejected_side_follow_up_is_restored_as_typed_and_retries_as_the_same_questi
         SessionCommand::SubmitSideQuestion { new_thread: false, ref question, .. }
             if question == "new errors appeared"
     ));
+
+    app.composer.replace("plain follow-up".to_owned());
+    let request = only_command(app.submit_prompt());
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.view(), View::Transcript(app.focused()));
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Err(ClientFailure::new("a side question is already running")),
+    });
+    assert_eq!(
+        app.composer.text, "/btw plain follow-up",
+        "outside the side view the restore keeps its route"
+    );
+    let retry = only_command(app.submit_prompt());
+    assert!(matches!(
+        retry.command,
+        SessionCommand::SubmitSideQuestion { new_thread: false, ref question, .. }
+            if question == "plain follow-up"
+    ));
 }
 
 #[test]
