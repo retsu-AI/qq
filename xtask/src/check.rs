@@ -1236,12 +1236,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let git = |args: &[&str]| {
-            assert!(std::process::Command::new("git")
-                .args(args)
-                .current_dir(root)
-                .status()
-                .unwrap()
-                .success());
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
         };
         git(&["init", "-q"]);
         std::fs::write(root.join("a"), "one").unwrap();
@@ -1349,9 +1351,11 @@ mod tests {
             "-qm",
             "Intentional rollback\n\nQQ-Allow-Revert: [id].tsx",
         ]);
-        assert!(super::reverted_base_changes(root, "main")
-            .unwrap()
-            .is_empty());
+        assert!(
+            super::reverted_base_changes(root, "main")
+                .unwrap()
+                .is_empty()
+        );
         write("auth.rs", "old auth");
         git(&["commit", "-qam", "unacknowledged stale auth"]);
         let reverted = super::reverted_base_changes(root, "main").unwrap();
@@ -1367,7 +1371,7 @@ mod tests {
         );
     }
 
-    use super::{parse_nextest_counts, parse_nextest_failures, select, Package, Scope, TestCounts};
+    use super::{Package, Scope, TestCounts, parse_nextest_counts, parse_nextest_failures, select};
 
     fn package(name: &str, dir: &str, deps: &[&str]) -> Package {
         Package {
