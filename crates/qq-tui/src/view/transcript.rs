@@ -996,6 +996,7 @@ impl TranscriptCache {
                 fold: !app.receipts_open,
                 selected: app.block_cursor == Some(Block::Tool(call.id)),
                 scroll: app.tool_scroll.get(&call.id).copied(),
+                window: EXPANDED_WINDOW_ROWS,
             }
         };
         let turns = TurnIndex::build(messages, tool_calls);

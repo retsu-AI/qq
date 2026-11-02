@@ -118,13 +118,33 @@ impl App {
         }
     }
 
-    fn search_find(&mut self) {
-        let Some((query, top)) = self
-            .find()
-            .map(|find| (find.query.to_lowercase(), find.origin))
-        else {
+    pub(crate) fn refresh_find(&mut self) {
+        let Some((previous, query)) = self.find().map(|find| {
+            (
+                find.current
+                    .and_then(|index| find.matches.get(index).copied()),
+                find.query.to_lowercase(),
+            )
+        }) else {
             return;
         };
+        let matches: Vec<Block> = self
+            .matching_blocks(&query)
+            .into_iter()
+            .map(|(block, _)| block)
+            .collect();
+        let kept = previous.and_then(|block| matches.iter().position(|found| *found == block));
+        let current = kept.or((!matches.is_empty()).then_some(0));
+        if let Some(find) = self.find_mut() {
+            find.matches = matches;
+            find.current = current;
+        }
+        if kept.is_none() {
+            self.show_find_match();
+        }
+    }
+
+    fn matching_blocks(&self, query: &str) -> Vec<(Block, usize)> {
         let mut blocks: Vec<(Block, std::ops::Range<usize>)> = self
             .pane()
             .blocks
@@ -134,22 +154,32 @@ impl App {
             .collect();
         blocks.sort_by_key(|(_, range)| range.start);
         blocks.dedup_by_key(|(block, _)| *block);
-        let mut matches = Vec::new();
-        let mut first_below = None;
-        for (block, range) in blocks {
-            if self
-                .block_text(block)
-                .is_some_and(|text| find_matches(&text, &query))
-            {
-                if first_below.is_none() && range.start >= top {
-                    first_below = Some(matches.len());
-                }
-                matches.push(block);
-            }
-        }
-        let current = (!matches.is_empty()).then(|| first_below.unwrap_or(matches.len() - 1));
+        blocks
+            .into_iter()
+            .filter(|(block, _)| {
+                self.block_text(*block)
+                    .is_some_and(|text| find_matches(&text, query))
+            })
+            .map(|(block, range)| (block, range.start))
+            .collect()
+    }
+
+    fn search_find(&mut self) {
+        let Some((query, top)) = self
+            .find()
+            .map(|find| (find.query.to_lowercase(), find.origin))
+        else {
+            return;
+        };
+        let found = self.matching_blocks(&query);
+        let current = (!found.is_empty()).then(|| {
+            found
+                .iter()
+                .position(|(_, start)| *start >= top)
+                .unwrap_or(found.len() - 1)
+        });
         if let Some(find) = self.find_mut() {
-            find.matches = matches;
+            find.matches = found.into_iter().map(|(block, _)| block).collect();
             find.current = current;
         }
         self.show_find_match();
@@ -180,14 +210,21 @@ impl App {
             .view()
             .transcript()
             .and_then(|session| self.sessions.get(&session))
-            .and_then(|session| session.tool_calls.as_deref())
-            .and_then(|calls| calls.iter().find(|call| call.id == id))
-            .and_then(|call| crate::view::expanded_panel_match(call, &query));
+            .and_then(|session| {
+                let call = session
+                    .tool_calls
+                    .as_deref()?
+                    .iter()
+                    .find(|call| call.id == id)?;
+                crate::view::expanded_panel_match(
+                    call,
+                    session.live_tool_output.get(&id).map(String::as_str),
+                    &query,
+                )
+            });
         if let Some(row) = row {
-            self.tool_scroll.insert(
-                id,
-                row.saturating_sub(crate::view::EXPANDED_WINDOW_ROWS / 2),
-            );
+            self.tool_scroll
+                .insert(id, row.saturating_sub(self.tool_window / 2));
         }
     }
 

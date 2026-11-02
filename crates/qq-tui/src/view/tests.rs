@@ -1106,6 +1106,7 @@ fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
         fold: false,
         selected: false,
         scroll: None,
+        window: EXPANDED_WINDOW_ROWS,
     };
     let transcript = tools::render_tool_calls(
         &[&corrected],
@@ -1276,6 +1277,7 @@ fn denied_and_interrupted_keep_their_reason_and_outcomes_expand_to_full_output()
             fold: false,
             selected: false,
             scroll: None,
+            window: EXPANDED_WINDOW_ROWS,
         };
         let lines = squashed_rows(&tools::tool_expanded_lines(&outcome, context, 120));
         assert!(
@@ -1317,6 +1319,7 @@ fn expanded_outcomes_show_the_bounded_tail_without_repeating_the_exit() {
         fold: false,
         selected: false,
         scroll: None,
+        window: EXPANDED_WINDOW_ROWS,
     };
     let lines = squashed_rows(&tools::tool_expanded_lines(&call, context, 120));
     assert_eq!(
@@ -1734,6 +1737,7 @@ fn tool_metrics_sit_two_columns_after_the_subject_at_every_width() {
         fold: false,
         selected: false,
         scroll: None,
+        window: EXPANDED_WINDOW_ROWS,
     };
     let row = frame_rows(&[tool_summary_line(&running, lookup(&running), 0, 72)]).remove(0);
     assert_eq!(
@@ -1769,6 +1773,7 @@ fn narrow_tool_rows_drop_the_duration_then_the_metric_before_the_verb() {
         fold: false,
         selected: false,
         scroll: None,
+        window: EXPANDED_WINDOW_ROWS,
     };
     let at = |width| squash(&frame_rows(&[tool_summary_line(&call, lookup(&call), 0, width)])[0]);
     assert_eq!(at(60), "● Read crates/qq-client/src/sse.rs 3 lines 1.4s");
@@ -3837,6 +3842,7 @@ fn expanded_call_rows(call: &ToolCallSnapshot, width: usize) -> Vec<Line> {
         fold: false,
         selected: false,
         scroll: None,
+        window: EXPANDED_WINDOW_ROWS,
     };
     tool_expanded_lines(call, context, width)
 }
@@ -4094,6 +4100,7 @@ fn every_expanded_result_is_a_window_of_its_rows_plus_one_position_row() {
         fold: false,
         selected: false,
         scroll: Some(usize::MAX),
+        window: EXPANDED_WINDOW_ROWS,
     };
     let rows = frame_rows(&tools::tool_expanded_lines(&scrolled, context, 80));
     assert_eq!(rows[MAX_TOOL_ARGUMENT_ROWS - 3], "│ …");
@@ -5463,6 +5470,7 @@ fn a_tool_row_reuses_its_panel_across_frames_and_relays_out_on_a_new_width() {
         fold: false,
         selected: false,
         scroll: None,
+        window: EXPANDED_WINDOW_ROWS,
     };
     let first = tool_expanded_lines(&call, context(43_454_000), 80);
     let second = tool_expanded_lines(&call, context(43_455_000), 80);

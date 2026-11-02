@@ -237,7 +237,11 @@ the session. Stepping to a match sets `TranscriptPane::reveal` with the
 query; the next frame scrolls to the first row of the block that contains
 the query, or to the block when no single row does (`Viewport::reveal`). A match in a folded
 call or reasoning row opens it, positions an expanded result's window on the
-matched row, and folds it again when find moves to another match. Closing
+matched row, and folds it again when find moves to another match. While
+find is open, any event that changes the focused transcript marks the
+matches stale; the next committed frame re-runs the query
+(`App::refresh_find`), keeping the current match when it still matches.
+Closing
 find leaves the current match open.
 
 ## Row metadata for copying
@@ -463,7 +467,10 @@ terminal background. Fenced code in answers keeps its `surface` panel
   opens at its head and a command at its tail; while the call is under the
   block cursor, `PageUp` / `PageDown` move the window by a page
   (`App::tool_scroll`) and never fall through to the transcript, so a long
-  result never pushes the answer off screen. Argument rows and result are
+  result never pushes the answer off screen. In the inspector the window
+  shrinks to the rows the pane can show (`workspace::inspector_window`), and
+  paging steps by that size (`App::tool_window`). An expanded running
+  command windows its whole buffered live output the same way. Argument rows and result are
   separated by one blank rail row when both exist.
 - **Error tails** keep their `error` or `warning` foreground.
 - **Diffs** show line numbers in `faint` and `+`/`-` signs and text in the

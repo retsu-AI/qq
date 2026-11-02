@@ -141,6 +141,7 @@ pub(crate) struct FrameRenderer {
     rail_area: Option<crate::selection::Area>,
     rail_rows: Vec<(usize, SessionId)>,
     inspector_shown: bool,
+    tool_window: usize,
     shapes: Vec<crate::selection::RowShape>,
     shapes_ready: bool,
 }
@@ -154,6 +155,7 @@ impl FrameRenderer {
         app.geometry.rail = self.rail_area;
         app.geometry.rail_rows.clone_from(&self.rail_rows);
         app.inspector_shown = self.inspector_shown;
+        app.tool_window = self.tool_window.max(1);
         for (index, update) in self.pane_updates.drain(..) {
             if let Some(pane) = app.panes.get_mut(index) {
                 pane.viewport = update.viewport;
@@ -163,6 +165,9 @@ impl FrameRenderer {
                 let previous = std::mem::replace(&mut pane.blocks, update.blocks);
                 self.cache.recycle_blocks(previous);
             }
+        }
+        if std::mem::take(&mut app.find_stale) {
+            app.refresh_find();
         }
     }
 
@@ -304,9 +309,14 @@ impl FrameRenderer {
             inspector_content: inspector_content(app),
         };
         let mut layout = compute_layout(width, height, dock.len(), app.layout, demand);
-        let mut inspector_rows = layout
-            .inspector
-            .map(|inspector| inspector_rows(app, &self.cache, app.pane(), inspector.width));
+        let tool_window = if layout.inspector.is_some() {
+            inspector_window(layout.body.height)
+        } else {
+            EXPANDED_WINDOW_ROWS
+        };
+        let mut inspector_rows = layout.inspector.map(|inspector| {
+            inspector_rows(app, &self.cache, app.pane(), inspector.width, tool_window)
+        });
         if app.layout.inspector == layout::PanePref::Auto
             && inspector_rows
                 .as_ref()
@@ -326,6 +336,11 @@ impl FrameRenderer {
         }
         let body_height = layout.body.height;
         self.inspector_shown = layout.inspector.is_some();
+        self.tool_window = if self.inspector_shown {
+            tool_window
+        } else {
+            EXPANDED_WINDOW_ROWS
+        };
         let inline_detail = layout.inspector.is_none();
         let slots = layout.transcripts.len();
         let first_shown = app

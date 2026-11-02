@@ -515,6 +515,7 @@ pub(crate) struct ToolRowContext<'a> {
     pub fold: bool,
     pub selected: bool,
     pub scroll: Option<usize>,
+    pub window: usize,
 }
 
 pub(super) type ChildRows<'a> = &'a dyn Fn(ToolCallId, usize) -> Vec<Line>;
@@ -640,7 +641,17 @@ pub(super) fn render_tool_blocks(
         if call.state == ToolCallState::Running
             && let Some(output) = live_output.get(&call.id)
         {
-            lines.extend(tool_live_output_lines(output, width));
+            if context.expanded && context.inline_detail {
+                lines.extend(window_rows(
+                    &live_panel(output, width),
+                    ResultBody::Tail,
+                    context.window,
+                    context.scroll,
+                    width,
+                ));
+            } else {
+                lines.extend(tool_live_output_lines(output, width));
+            }
         }
         lines.extend(children(call.id, width));
         blocks.push((Block::Tool(call.id), start..lines.len()));
@@ -1062,26 +1073,66 @@ pub(super) fn tool_expanded_lines(
         *cached = Some((width, tool_panel(call, row, width)));
     }
     if let Some((_, panel)) = cached.as_ref() {
-        if panel.len() <= EXPANDED_WINDOW_ROWS + 1 {
-            lines.extend_from_slice(panel);
-        } else {
-            let start = expanded_window_start(row.body, panel.len(), context.scroll);
-            let end = start + EXPANDED_WINDOW_ROWS;
-            lines.extend_from_slice(&panel[start..end]);
-            let mut footer = Line::styled("│ ", faint()).with_chrome(2);
-            footer.kind = RowKind::Output;
-            footer.push(
-                format!("{}–{end} of {} · PgUp PgDn", start + 1, panel.len()),
-                faint(),
-            );
-            lines.push(truncate_line(footer, width));
-        }
+        lines.extend(window_rows(
+            panel,
+            row.body,
+            context.window,
+            context.scroll,
+            width,
+        ));
     }
     lines
 }
 
-pub(crate) fn expanded_window_start(body: ResultBody, rows: usize, scroll: Option<usize>) -> usize {
-    let last = rows.saturating_sub(EXPANDED_WINDOW_ROWS);
+fn window_rows(
+    panel: &[Line],
+    body: ResultBody,
+    window: usize,
+    scroll: Option<usize>,
+    width: usize,
+) -> Vec<Line> {
+    let window = window.max(1);
+    if panel.len() <= window + 1 {
+        return panel.to_vec();
+    }
+    let start = expanded_window_start(body, panel.len(), window, scroll);
+    let end = start + window;
+    let mut lines = panel[start..end].to_vec();
+    let mut footer = Line::styled("│ ", faint()).with_chrome(2);
+    footer.kind = RowKind::Output;
+    footer.push(
+        format!("{}–{end} of {} · PgUp PgDn", start + 1, panel.len()),
+        faint(),
+    );
+    lines.push(truncate_line(footer, width));
+    lines
+}
+
+fn live_panel(output: &str, width: usize) -> Vec<Line> {
+    let complete = &output[..output.rfind('\n').map_or(0, |index| index + 1)];
+    let text = bounded_tail(complete, MAX_EXPANDED_BYTES);
+    let mut rows = Vec::new();
+    if text.len() < complete.len() {
+        rows.push(tail_row("…", faint(), width));
+    }
+    rows.extend(text.lines().map(|line| tail_row(line, muted(), width)));
+    rows
+}
+
+fn searchable_panel(call: &ToolCallSnapshot, live: Option<&str>, width: usize) -> Vec<Line> {
+    match live.filter(|_| call.state == ToolCallState::Running) {
+        Some(output) => live_panel(output, width),
+        None => tool_panel(call, &ToolRow::derive(call), width),
+    }
+}
+
+pub(crate) fn expanded_window_start(
+    body: ResultBody,
+    rows: usize,
+    window: usize,
+    scroll: Option<usize>,
+) -> usize {
+    let last = rows.saturating_sub(window);
     match (scroll, body) {
         (Some(start), _) => start.min(last),
         (None, ResultBody::Head) => 0,
@@ -1089,15 +1140,24 @@ pub(crate) fn expanded_window_start(body: ResultBody, rows: usize, scroll: Optio
     }
 }
 
-pub(crate) fn expanded_panel_rows(call: &ToolCallSnapshot) -> (ResultBody, usize) {
-    let row = ToolRow::derive(call);
-    let rows = tool_panel(call, &row, 80).len();
-    (row.body, rows)
+pub(crate) fn expanded_panel_rows(
+    call: &ToolCallSnapshot,
+    live: Option<&str>,
+) -> (ResultBody, usize) {
+    let body = if live.is_some() && call.state == ToolCallState::Running {
+        ResultBody::Tail
+    } else {
+        ToolRow::derive(call).body
+    };
+    (body, searchable_panel(call, live, 80).len())
 }
 
-pub(crate) fn expanded_panel_match(call: &ToolCallSnapshot, lowered_query: &str) -> Option<usize> {
-    let row = ToolRow::derive(call);
-    tool_panel(call, &row, MAX_RENDER_WIDTH.into())
+pub(crate) fn expanded_panel_match(
+    call: &ToolCallSnapshot,
+    live: Option<&str>,
+    lowered_query: &str,
+) -> Option<usize> {
+    searchable_panel(call, live, MAX_RENDER_WIDTH.into())
         .iter()
         .position(|line| {
             let text: String = line.spans.iter().map(|span| span.text.as_str()).collect();
@@ -1254,6 +1314,7 @@ pub(super) fn render_tool_calls_simple(
         fold: detail == SimpleDetail::Folded,
         selected: false,
         scroll: None,
+        window: EXPANDED_WINDOW_ROWS,
     };
     render_tool_calls(calls, live_output, &lookup, tick, width, children)
 }

@@ -299,6 +299,7 @@ pub(crate) struct App {
     pub(crate) tool_scroll: HashMap<qq_protocol::ToolCallId, usize>,
     pub(crate) open_reasoning: std::collections::HashSet<RunId>,
     find_opened: Option<Block>,
+    pub(crate) find_stale: bool,
     pub(crate) block_cursor: Option<Block>,
     pub(crate) selection: Option<Selection>,
     pub(crate) geometry: FrameGeometry,
@@ -308,6 +309,7 @@ pub(crate) struct App {
     pub(crate) goal_scroll: usize,
     pub layout: crate::view::LayoutPrefs,
     pub(crate) inspector_shown: bool,
+    pub(crate) tool_window: usize,
     pub(crate) mouse_capture: bool,
     terminal_width: usize,
     pub(crate) themes: Vec<Theme>,
@@ -374,6 +376,7 @@ impl App {
             tool_scroll: HashMap::new(),
             open_reasoning: std::collections::HashSet::new(),
             find_opened: None,
+            find_stale: false,
             block_cursor: None,
             selection: None,
             geometry: FrameGeometry::default(),
@@ -383,6 +386,7 @@ impl App {
             goal_scroll: 0,
             layout: crate::view::LayoutPrefs::default(),
             inspector_shown: false,
+            tool_window: crate::view::EXPANDED_WINDOW_ROWS,
             terminal_width: 0,
             mouse_capture: true,
             themes: if options.themes.is_empty() {
@@ -1057,6 +1061,9 @@ impl App {
         let mut effects = Effects::changed(self.event_is_visible(&event));
         if !already_loaded {
             effects.extend(self.reduce_event(&event));
+            if self.find().is_some() && self.view().transcript() == Some(event.session_id) {
+                self.find_stale = true;
+            }
         }
         if let Some(command_id) = event.caused_by {
             if matches!(event.event, SessionEvent::GoalUpdated { .. }) {
@@ -3364,22 +3371,34 @@ impl App {
         if !self.expanded_tool_calls.contains(&id) {
             return false;
         }
-        let Some(call) = self
+        let Some(session) = self
             .view()
             .transcript()
             .and_then(|session| self.sessions.get(&session))
-            .and_then(|session| session.tool_calls.as_deref())
+        else {
+            return false;
+        };
+        let Some(call) = session
+            .tool_calls
+            .as_deref()
             .and_then(|calls| calls.iter().find(|call| call.id == id))
         else {
             return false;
         };
-        let (body, rows) = crate::view::expanded_panel_rows(call);
-        let window = crate::view::EXPANDED_WINDOW_ROWS;
+        let (body, rows) = crate::view::expanded_panel_rows(
+            call,
+            session.live_tool_output.get(&id).map(String::as_str),
+        );
+        let window = self.tool_window.max(1);
         if rows <= window + 1 {
             return false;
         }
-        let start =
-            crate::view::expanded_window_start(body, rows, self.tool_scroll.get(&id).copied());
+        let start = crate::view::expanded_window_start(
+            body,
+            rows,
+            window,
+            self.tool_scroll.get(&id).copied(),
+        );
         let last = rows - window;
         let next = if down {
             (start + window).min(last)

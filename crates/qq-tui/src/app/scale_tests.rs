@@ -373,6 +373,84 @@ fn alt_r_twice_hides_reasoning_opened_one_at_a_time() {
 }
 
 #[test]
+fn find_reveals_a_match_in_running_output_above_its_live_tail() {
+    let mut app = app(1);
+    let call = ToolCallId::from_bytes([3; 16]);
+    let session = app.sessions.get_mut(&fixtures::SESSION).unwrap();
+    let running = &mut session.tool_calls.as_mut().unwrap()[0];
+    running.state = qq_protocol::ToolCallState::Running;
+    running.result = None;
+    session.live_tool_output.insert(
+        call,
+        format!("{}\nlive-needle\n{}\n", shell_output(5), shell_output(20)),
+    );
+    let mut renderer = FrameRenderer::default();
+    let rows = draw(&mut app, &mut renderer);
+    assert!(!rows.iter().any(|row| row.contains("live-needle")));
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    type_text(&mut app, "live-needle");
+    let text = draw(&mut app, &mut renderer).join("\n");
+    assert!(text.contains("│ live-needle"), "{text}");
+    assert!(text.contains("of 26 · PgUp PgDn"), "{text}");
+}
+
+#[test]
+fn find_picks_up_text_that_streams_in_after_the_query() {
+    let mut app = app(1);
+    let mut renderer = FrameRenderer::default();
+    stream(&mut app, "");
+    draw(&mut app, &mut renderer);
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    type_text(&mut app, "latecomer");
+    let rows = draw(&mut app, &mut renderer);
+    assert!(
+        rows.iter().any(|row| row.contains("no matches")),
+        "{rows:#?}"
+    );
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        fixtures::SESSION,
+        qq_protocol::SessionEvent::TextAppended {
+            message_id: MessageId::from_bytes([10; 16]),
+            channel: qq_protocol::TextChannel::Output,
+            text: " latecomer".to_owned(),
+        },
+    )));
+    draw(&mut app, &mut renderer);
+    let rows = draw(&mut app, &mut renderer);
+    assert!(
+        rows.iter().any(|row| row.contains("/ latecomer  1 of 1")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn inspector_pages_step_by_the_rows_it_can_show() {
+    let mut app = app(1);
+    app.layout.inspector = crate::view::PanePref::Shown;
+    let call = ToolCallId::from_bytes([3; 16]);
+    let mut renderer = FrameRenderer::default();
+    renderer.frame_and_commit(&mut app, 200, 12);
+    app.block_cursor = Some(Block::Tool(call));
+    app.handle_key(key(KeyCode::Enter));
+    let frame = renderer.frame_and_commit(&mut app, 200, 12);
+    let text: String = frame
+        .iter()
+        .flat_map(|line| &line.spans)
+        .map(|span| span.text.as_str())
+        .collect();
+    let window = app.tool_window;
+    assert!(window < 8, "a short inspector shrinks the window: {window}");
+    assert!(
+        text.contains(&format!("{}–40 of 40", 41 - window)),
+        "{text}"
+    );
+    assert!(!text.contains("rows more"), "nothing is clipped: {text}");
+    app.handle_key(key(KeyCode::PageUp));
+    assert_eq!(app.tool_scroll.get(&call), Some(&(40 - 2 * window)));
+}
+
+#[test]
 fn find_with_no_match_says_so_and_moves_nothing() {
     let mut app = app(30);
     let mut renderer = FrameRenderer::default();
