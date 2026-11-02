@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn steering_during_an_audit_reaches_the_next_parent_request() {
@@ -44,9 +45,7 @@ async fn steering_during_an_audit_reaches_the_next_parent_request() {
         let mut harness =
             audit_harness(parent, auditor, crate::runtime::AuditMode::Always, 1).await;
         let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "answer").await;
-        tokio::time::timeout(Duration::from_secs(2), entered.notified())
-            .await
-            .unwrap();
+        within(entered.notified()).await.unwrap();
         let receipt = steer(&harness.runtime, run_id, "use the new direction", interrupt)
             .await
             .unwrap();

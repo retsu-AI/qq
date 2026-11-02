@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 async fn explicit_check_session(
     runtime: &SessionRuntime,
@@ -411,7 +412,7 @@ async fn goal_check_process_cancellation_drains_its_process_group() {
         Arc::new(crate::ProcessProducer::new("test")),
         execution::RunResources::default(),
     ));
-    let descendant = tokio::time::timeout(Duration::from_secs(3), async {
+    let descendant = within(async {
         loop {
             if let Ok(pid) = tokio::fs::read_to_string(directory.path().join("descendant")).await
                 && let Ok(pid) = pid.parse::<u32>()
@@ -495,9 +496,7 @@ async fn goal_check_process_kills_background_descendants_before_success() {
         tokio::time::Instant::now()+Duration::from_secs(5),
         RunCancellation::new(),Arc::new(crate::ProcessProducer::new("test")),execution::RunResources::default(),
     ));
-    tokio::time::timeout(Duration::from_secs(5), check_ready(&ready))
-        .await
-        .unwrap();
+    within(check_ready(&ready)).await.unwrap();
     let pid: u32 = tokio::fs::read_to_string(directory.path().join("descendant-pid"))
         .await
         .unwrap()
@@ -508,20 +507,13 @@ async fn goal_check_process_kills_background_descendants_before_success() {
         rustix::io::write(leader_release.get_ref(), b"release\n").unwrap(),
         8
     );
-    let result = tokio::time::timeout(Duration::from_secs(5), task)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let result = within(task).await.unwrap().unwrap().unwrap();
     assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
     assert_eq!(
         rustix::io::write(descendant_release.get_ref(), b"release\n").unwrap(),
         8
     );
-    let mut exited = tokio::time::timeout(Duration::from_secs(5), descendant.0.readable())
-        .await
-        .unwrap()
-        .unwrap();
+    let mut exited = within(descendant.0.readable()).await.unwrap().unwrap();
     exited.retain_ready();
     assert!(
         !tokio::fs::try_exists(directory.path().join("descendant-wrote"))
@@ -551,9 +543,7 @@ async fn goal_check_noisy_descendants_cannot_starve_leader_exit() {
             Arc::new(crate::ProcessProducer::new("test")),
             execution::RunResources::default(),
         ));
-        tokio::time::timeout(Duration::from_secs(5), check_ready(&ready))
-            .await
-            .unwrap();
+        within(check_ready(&ready)).await.unwrap();
         let pid: u32 = tokio::fs::read_to_string(directory.path().join("descendant"))
             .await
             .unwrap()
@@ -826,12 +816,12 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
         )
         .await
         .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+        within(entered.notified())
             .await
             .expect("check must be reserved before the calendar changes");
         epoch.advance(start + if goal_deadline { 600_001 } else { 60_001 });
         release.notify_one();
-        let observed = tokio::time::timeout(Duration::from_secs(3), async {
+        let observed = within(async {
             loop {
                 let event = events.next().await.unwrap().unwrap();
                 if let SessionEvent::GoalUpdated { goal } = event.event
@@ -1587,9 +1577,7 @@ async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions()
     )
     .await
     .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), entered.notified())
-        .await
-        .unwrap();
+    within(entered.notified()).await.unwrap();
     std::fs::rename(&workspace, directory.path().join("moved-work")).unwrap();
     #[cfg(unix)]
     let opened = crate::workspace::Workspace::observe_next_open(&workspace);
@@ -1601,7 +1589,7 @@ async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions()
         "check filesystem opens must not execute on the Tokio worker"
     );
 
-    tokio::time::timeout(Duration::from_secs(5), async {
+    within(async {
         loop {
             let event = events
                 .next()

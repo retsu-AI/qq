@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn an_auto_child_denies_writes_beneath_an_ask_parent_without_prompting() {
@@ -424,7 +425,7 @@ async fn parent_readonly_revocation_denies_a_late_client_child_approval() {
     )
     .await;
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
-    let child_id = tokio::time::timeout(Duration::from_secs(2), async {
+    let child_id = within(async {
         loop {
             let event = harness.events.next().await.unwrap().unwrap();
             if let SessionEvent::SessionCreated { session } = event.event
@@ -582,7 +583,7 @@ async fn a_late_child_approval_runs_once_after_the_parent_switches_to_auto() {
             .await;
             std::fs::create_dir(harness.directory.path().join("approval-scratch")).unwrap();
             let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
-            let child_id = tokio::time::timeout(Duration::from_secs(2), async {
+            let child_id = within(async {
                 loop {
                     let event = harness.events.next().await.unwrap().unwrap();
                     if let SessionEvent::SessionCreated { session } = event.event

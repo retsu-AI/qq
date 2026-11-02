@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn paid_preparation_freezes_the_optional_goal_before_main_start() {
@@ -1249,7 +1250,7 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
         })).await.unwrap();
         let owner = queue_prompt(&runtime, session, "continue".to_owned()).await;
         let cancelled_helper = if cancel {
-            tokio::time::timeout(Duration::from_secs(5), async {
+            within(async {
                 while requests.lock().unwrap().len() < if prefix { 3 } else { 2 } {
                     tokio::task::yield_now().await;
                 }
@@ -2103,7 +2104,7 @@ async fn goal_admission_refuses_expired_or_unknown_budgets_before_loading() {
                 .unwrap();
             drop(held);
             runtime.request_schedule();
-            let outcome = tokio::time::timeout(Duration::from_secs(3), async {
+            let outcome = within(async {
                 let mut finished = None;
                 let mut exhausted = false;
                 while let Some(event) = events.next().await {
@@ -2331,9 +2332,7 @@ async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_ori
         };
         drop(held);
         runtime.request_schedule();
-        tokio::time::timeout(Duration::from_secs(3), entered.notified())
-            .await
-            .unwrap();
+        within(entered.notified()).await.unwrap();
         let origin = runtime
             .store()
             .call(Priority::Control, move |connection| {
@@ -2356,7 +2355,7 @@ async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_ori
             .await
             .unwrap();
         release.notify_one();
-        let outcome = tokio::time::timeout(Duration::from_secs(3), async {
+        let outcome = within(async {
             while let Some(event) = events.next().await {
                 if let SessionEvent::RunFinished {
                     run_id, outcome, ..
@@ -2505,9 +2504,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
         };
         drop(held);
         runtime.request_schedule();
-        tokio::time::timeout(Duration::from_secs(3), entered.notified())
-            .await
-            .unwrap();
+        within(entered.notified()).await.unwrap();
         runtime
             .store()
             .call(Priority::Control, move |connection| {
@@ -2736,9 +2733,7 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
                 },
             })
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), entered.notified())
-            .await
-            .unwrap();
+        within(entered.notified()).await.unwrap();
         runtime
             .store()
             .call(Priority::Control, move |connection| {

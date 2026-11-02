@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn goal_resume_refuses_spent_unknown_or_draining_state() {
@@ -118,7 +119,7 @@ async fn active_idle_goal_dispatches_fresh_work_without_a_user_prompt() {
     let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
         panic!("goal")
     };
-    let observed = tokio::time::timeout(Duration::from_secs(2), async {
+    let observed = within(async {
         while let Some(event) = events.next().await {
             let event = event.unwrap();
             if let SessionEvent::RunStarted {
@@ -1012,7 +1013,7 @@ async fn driver_loader_failures_pause_or_block_without_unbounded_restart() {
         .await;
         set_goal(&runtime, serde_json::json!({"session_id":session_id,
             "objective":"bounded preparation failures","budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}})).await.unwrap();
-        let goal = tokio::time::timeout(Duration::from_secs(3), async {
+        let goal = within(async {
             while let Some(event) = events.next().await {
                 if let SessionEvent::GoalUpdated { goal } = event.unwrap().event
                     && matches!(

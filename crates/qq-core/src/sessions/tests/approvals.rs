@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 fn assert_no_human_permission_request(events: &[SessionEventEnvelope]) {
     assert!(
@@ -67,7 +68,7 @@ async fn auto_children_execute_authorized_edits_and_obey_parent_revocation() {
             r#"{"task":"edit within parent authority","model":"test/child","authority":"write"}"#.into())],
             ApprovalMode::Auto).await;
         let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
-        let child_id = tokio::time::timeout(Duration::from_secs(2), async {
+        let child_id = within(async {
             loop {
                 let event = harness.events.next().await.unwrap().unwrap();
                 if let SessionEvent::SessionCreated { session } = event.event
@@ -130,12 +131,9 @@ async fn auto_returns_questions_as_tool_errors_and_continues_without_a_human() {
     )
     .await;
     let run_id = submit_prompt(&harness, "make a reasonable choice and continue").await;
-    let observed = tokio::time::timeout(
-        Duration::from_secs(2),
-        collect_until_run_finished(&mut harness.events, run_id),
-    )
-    .await
-    .expect("Auto questions must return a tool error instead of waiting for a human");
+    let observed = within(collect_until_run_finished(&mut harness.events, run_id))
+        .await
+        .expect("Auto questions must return a tool error instead of waiting for a human");
     assert_no_human_permission_request(&observed);
     assert!(
         !observed
@@ -273,7 +271,7 @@ async fn an_auto_parent_prevents_child_mode_changes_from_introducing_human_appro
             r#"{"task":"mutate within parent authority","model":"test/child","authority":"write"}"#.to_owned())],
             ApprovalMode::Auto).await;
         let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
-        let child_id = tokio::time::timeout(Duration::from_secs(2), async {
+        let child_id = within(async {
             loop {
                 let event = harness.events.next().await.unwrap().unwrap();
                 if let SessionEvent::SessionCreated { session } = event.event

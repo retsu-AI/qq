@@ -770,7 +770,7 @@ mod server_tests {
             .unwrap();
         let address = listener.local_addr().unwrap();
         let peer = tokio::spawn(async move {
-            let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            let (stream, _) = crate::test_support::within(listener.accept())
                 .await
                 .unwrap()
                 .unwrap();

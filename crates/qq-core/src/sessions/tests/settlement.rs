@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn settling_a_settled_run_is_a_no_op_on_every_path() {
@@ -621,12 +622,9 @@ async fn a_panicking_run_task_fails_durably_and_the_session_keeps_scheduling() {
     .await;
 
     let failed_run = queue_prompt(&runtime, session_id, "panic".to_owned()).await;
-    let failed = tokio::time::timeout(
-        Duration::from_secs(1),
-        collect_through_finished(&mut events),
-    )
-    .await
-    .expect("a panicking run must settle durably within one second");
+    let failed = within(collect_through_finished(&mut events))
+        .await
+        .expect("a panicking run must settle durably");
     assert!(failed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::RunFinished {
@@ -756,7 +754,7 @@ async fn shutdown_cancels_running_and_queued_prompts_before_returning() {
     .await;
 
     let running = queue_prompt(&runtime, session_id, "run".to_owned()).await;
-    tokio::time::timeout(Duration::from_secs(1), async {
+    within(async {
         loop {
             let event = events.next().await.unwrap().unwrap();
             if matches!(
@@ -771,14 +769,14 @@ async fn shutdown_cancels_running_and_queued_prompts_before_returning() {
     .expect("the first prompt must start before shutdown");
     let queued = queue_prompt(&runtime, session_id, "queued".to_owned()).await;
 
-    tokio::time::timeout(Duration::from_secs(1), runtime.shutdown())
+    within(runtime.shutdown())
         .await
         .expect("shutdown must settle bounded provider work")
         .unwrap();
 
     let mut finished = HashMap::new();
     let mut terminal_count = 0;
-    tokio::time::timeout(Duration::from_secs(1), async {
+    within(async {
         while finished.len() < 2 {
             let event = events.next().await.unwrap().unwrap();
             if let SessionEvent::RunFinished {
@@ -839,7 +837,7 @@ async fn subscribers_converge_and_replay_from_an_intermediate_cursor() {
 
     let split = first.len() / 2;
     let mut replay = subscribe_after(&runtime, workspace_id, first[split - 1].cursor);
-    let replayed = tokio::time::timeout(Duration::from_secs(2), async {
+    let replayed = within(async {
         let mut replayed = Vec::new();
         for _ in split..first.len() {
             replayed.push(replay.next().await.unwrap().unwrap());
@@ -873,7 +871,7 @@ async fn scheduler_store_failure_disables_runtime_and_existing_subscribers() {
 
     let mut failed = runtime.inner.failed.subscribe();
     runtime.request_schedule();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    within(async {
         while !*failed.borrow() {
             failed.changed().await.unwrap();
         }
@@ -926,10 +924,7 @@ async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime(
     let (read_entered, release_read) = PROBE.hold(Checkpoint::CancellationRead(run_id));
     let mut events = subscribe_after(&runtime, workspace_id, created.committed_through);
     runtime.request_schedule();
-    tokio::time::timeout(Duration::from_secs(2), read_entered)
-        .await
-        .unwrap()
-        .unwrap();
+    within(read_entered).await.unwrap().unwrap();
     let saturated = saturate_control_lane(&runtime).await;
     release_read.send(()).unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1010,11 +1005,11 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
     let (second_read, release_second) = PROBE.hold(Checkpoint::CancellationRead(second_run));
     let mut events = subscribe_after(&runtime, workspace_id, second.receipt.committed_through);
     runtime.request_schedule();
-    tokio::time::timeout(Duration::from_secs(1), second_read)
+    within(second_read)
         .await
         .expect("both reservations must transfer to supervisors")
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    within(async {
         loop {
             let run = runtime
                 .store()
@@ -1034,7 +1029,7 @@ async fn permanent_cancellation_read_failure_settles_only_that_run() {
     assert!(!runtime.has_failed());
     release_second.send(()).unwrap();
     let observed = collect_until(&mut events, finished_for(second_run)).await;
-    tokio::time::timeout(Duration::from_secs(1), async {
+    within(async {
         while runtime.idle_run_permits() != 2 {
             tokio::task::yield_now().await;
         }
@@ -1138,17 +1133,17 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
         [SessionRuntimeError::CONSTRAINT],
     );
     runtime.request_schedule();
-    tokio::time::timeout(Duration::from_secs(1), start_entered)
+    within(start_entered)
         .await
         .expect("the first supervisor must enter the reserved-start attempt")
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(1), read_entered)
+    within(read_entered)
         .await
         .expect("the sibling supervisor must own its reservation")
         .unwrap();
     release_read.send(()).unwrap();
     let mut failed = runtime.inner.failed.subscribe();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    within(async {
         while !*failed.borrow() {
             failed.changed().await.unwrap();
         }
@@ -1156,7 +1151,7 @@ async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
     .await
     .expect("the sibling terminal-settlement failure must fail the runtime");
     release_start.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    within(async {
         while runtime.idle_run_permits() != 2 {
             tokio::task::yield_now().await;
         }
@@ -1267,17 +1262,17 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
     );
     release_initial_read.send(()).unwrap();
     runtime.request_schedule();
-    tokio::time::timeout(Duration::from_secs(1), post_start_read)
+    within(post_start_read)
         .await
         .expect("the first run must commit start before provider polling")
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(1), failing_read)
+    within(failing_read)
         .await
         .expect("the sibling supervisor must own its reservation")
         .unwrap();
     release_failing_read.send(()).unwrap();
     let mut failed = runtime.inner.failed.subscribe();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    within(async {
         while !*failed.borrow() {
             failed.changed().await.unwrap();
         }
@@ -1285,7 +1280,7 @@ async fn fatal_settlement_stops_an_already_started_sibling_before_provider_poll(
     .await
     .expect("the sibling terminal-settlement failure must fail the runtime");
     release_post_start_read.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    within(async {
         while runtime.idle_run_permits() != 2 {
             tokio::task::yield_now().await;
         }
@@ -1363,7 +1358,7 @@ async fn poisoned_cancellation_registry_settles_before_start_and_returns_the_per
     assert!(poisoned.is_err());
     runtime.request_schedule();
     let mut failed = runtime.inner.failed.subscribe();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    within(async {
         while !*failed.borrow() {
             failed.changed().await.unwrap();
         }
@@ -1461,7 +1456,7 @@ async fn permanent_prestart_settlement_failure_is_recovered_on_reopen() {
     );
     runtime.request_schedule();
     let mut failed = runtime.inner.failed.subscribe();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    within(async {
         while !*failed.borrow() {
             failed.changed().await.unwrap();
         }
@@ -1559,7 +1554,7 @@ async fn queues_follow_ups_without_reordering_conversation_context() {
         try_submit(&runtime, session_id, prompt).await.unwrap();
     }
     let mut finished = 0;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    within(async {
         while let Some(event) = events.next().await {
             if matches!(event.unwrap().event, SessionEvent::RunFinished { .. }) {
                 finished += 1;
@@ -2104,7 +2099,7 @@ async fn slow_preparation_does_not_serialize_an_independent_permit() {
     };
     let mut events = subscribe_after(&runtime, workspace_id, second.receipt.committed_through);
     runtime.request_schedule();
-    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+    within(entered.notified())
         .await
         .expect("one loader must remain in preparation");
     let observed = collect_until(&mut events, |event| {
@@ -2204,7 +2199,7 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
     let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
         panic!("unexpected receipt")
     };
-    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+    within(entered.notified())
         .await
         .expect("the reserved run must enter preparation");
     let mut events = subscribe_after(&runtime, workspace_id, queued.committed_through);
@@ -2264,7 +2259,7 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
             .is_err()
     );
     release.notify_waiters();
-    tokio::time::timeout(Duration::from_secs(1), shutdown)
+    within(shutdown)
         .await
         .expect("shutdown must finish after preparation exits")
         .unwrap();
@@ -2322,7 +2317,7 @@ async fn chunks_large_deltas_and_ignores_empty_deltas() {
     try_submit(&runtime, session_id, "large").await.unwrap();
 
     let mut chunks = Vec::new();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    within(async {
         while let Some(event) = events.next().await {
             match event.unwrap().event {
                 SessionEvent::TextAppended { text, .. } => chunks.push(text),

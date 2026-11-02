@@ -87,13 +87,10 @@ mod tests {
         assert!(futures_util::poll!(interrupted.as_mut()).is_pending());
         drop(interrupted);
         gate.write_all(b"finish\n").unwrap();
-        let status = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            exit.wait(&mut child, &mut group),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let status = crate::test_support::within(exit.wait(&mut child, &mut group))
+            .await
+            .unwrap()
+            .unwrap();
         group.confirm_stopped().await.unwrap();
         assert_eq!(status.code(), Some(7));
     }

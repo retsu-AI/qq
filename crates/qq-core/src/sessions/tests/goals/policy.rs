@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
@@ -315,13 +316,10 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
         authority.unavailable.store(true, Ordering::SeqCst);
         authority.pending.store(true, Ordering::SeqCst);
         assert_eq!(
-            tokio::time::timeout(
-                Duration::from_secs(1),
-                runtime.command(command, set(ceiling))
-            )
-            .await
-            .unwrap()
-            .unwrap(),
+            within(runtime.command(command, set(ceiling)))
+                .await
+                .unwrap()
+                .unwrap(),
             accepted
         );
         authority.pending.store(false, Ordering::SeqCst);
@@ -565,9 +563,7 @@ async fn goal_policy_tightening_before_load_or_main_start_prevents_provider_work
             .unwrap();
         if during_loading {
             drop(held);
-            tokio::time::timeout(Duration::from_secs(2), entered.notified())
-                .await
-                .unwrap();
+            within(entered.notified()).await.unwrap();
             ceiling.store(lowered, Ordering::SeqCst);
             release.notify_one();
         } else {

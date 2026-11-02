@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn prune_deletes_only_idle_sessions_without_messages() {
@@ -32,11 +33,7 @@ async fn prune_deletes_only_idle_sessions_without_messages() {
 
     let mut deleted = Vec::new();
     while deleted.len() < 2 {
-        let event = tokio::time::timeout(Duration::from_secs(2), events.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let event = within(events.next()).await.unwrap().unwrap().unwrap();
         if let SessionEvent::SessionDeleted { session_id } = event.event {
             deleted.push(session_id);
         }

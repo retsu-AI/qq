@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn concurrent_children_per_run_queue_behind_the_cap() {
@@ -192,11 +193,8 @@ async fn owned_spend_session_deletion_waits_for_the_root_receipt() {
     let mut harness = nested_spend_harness(Some(usage(60, 0))).await;
     let (delivered, release) = PROBE.hold(Checkpoint::ChildDelivery(harness.session_id));
     let root = submit_nested_budget(&harness, true).await;
-    tokio::time::timeout(Duration::from_secs(2), delivered)
-        .await
-        .unwrap()
-        .unwrap();
-    let grandchild = tokio::time::timeout(Duration::from_secs(2), async {
+    within(delivered).await.unwrap().unwrap();
+    let grandchild = within(async {
         loop {
             let event = harness.events.next().await.unwrap().unwrap();
             if let SessionEvent::SessionCreated { session } = event.event
@@ -302,11 +300,8 @@ async fn owned_spend_session_deletion_checks_followup_owners_after_the_original_
         .unwrap();
     let (delivered, release) = PROBE.hold(Checkpoint::ChildDelivery(child));
     let followup = submit_prompt_to(&harness.runtime, child, "new unrelated task").await;
-    tokio::time::timeout(Duration::from_secs(2), delivered)
-        .await
-        .unwrap()
-        .unwrap();
-    let grandchild = tokio::time::timeout(Duration::from_secs(2), async {
+    within(delivered).await.unwrap().unwrap();
+    let grandchild = within(async {
         loop {
             let event = harness.events.next().await.unwrap().unwrap();
             if let SessionEvent::SessionCreated { session } = event.event
@@ -832,7 +827,7 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
             let child_prompt = session.active_run_id.unwrap();
             let (entered, release) = PROBE.hold(Checkpoint::DropSettlement(*summary));
             let summary_id = *summary;
-            tokio::time::timeout(Duration::from_secs(3), async {
+            within(async {
                 loop {
                     let sent = harness
                         .runtime

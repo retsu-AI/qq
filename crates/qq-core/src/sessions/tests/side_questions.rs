@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[test]
 fn side_capture_is_bounded_and_preserves_complete_tool_units() {
@@ -64,14 +65,11 @@ async fn side_answer_bypasses_the_main_permit_and_leaves_session_rows_unchanged(
         })
         .await
         .unwrap();
-    let answer = tokio::time::timeout(
-        Duration::from_secs(5),
-        harness.runtime.answer_side_question(
-            harness.session_id,
-            "what is here?".to_owned(),
-            RunCancellation::new(),
-        ),
-    )
+    let answer = within(harness.runtime.answer_side_question(
+        harness.session_id,
+        "what is here?".to_owned(),
+        RunCancellation::new(),
+    ))
     .await
     .unwrap()
     .unwrap();
@@ -316,7 +314,7 @@ async fn side_answer_finishes_while_main_provider_is_active_without_main_request
     try_submit(&harness.runtime, harness.session_id, "main task")
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    within(async {
         while requests.lock().unwrap().is_empty() {
             tokio::task::yield_now().await;
         }
@@ -493,7 +491,7 @@ async fn side_command_replay_launches_once_and_snapshot_matches_terminal_event()
     else {
         panic!("side receipt")
     };
-    tokio::time::timeout(Duration::from_secs(5), async {
+    within(async {
         loop {
             let item = harness
                 .runtime
@@ -660,7 +658,7 @@ async fn side_partial_text_is_durable_before_completion_and_cancel_preserves_it(
     else {
         panic!("receipt")
     };
-    tokio::time::timeout(Duration::from_secs(5), async {
+    within(async {
         loop {
             let item = harness
                 .runtime
@@ -831,7 +829,7 @@ async fn side_deadline_from_admission_times_out_before_provider_load() {
             )
             .await;
     });
-    tokio::time::timeout(Duration::from_secs(5), async {
+    within(async {
         loop {
             let item = harness
                 .runtime
@@ -1254,9 +1252,7 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
     }
     tokio::time::advance(Duration::from_millis(400)).await;
     keep_clock.abort();
-    tokio::time::timeout(Duration::from_secs(1), deadline_cancelled.cancelled())
-        .await
-        .unwrap();
+    within(deadline_cancelled.cancelled()).await.unwrap();
     assert!(!task.is_finished());
     let state = runtime
         .store()

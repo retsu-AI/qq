@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::within;
 
 #[tokio::test]
 async fn unknown_workspace_subscription_churn_retains_no_feeds() {
@@ -246,11 +247,7 @@ async fn live_subscribers_read_the_store_once_and_receive_committed_bytes() {
     for subscriber in &mut subscribers {
         let mut observed = vec![];
         loop {
-            let event = tokio::time::timeout(Duration::from_secs(5), subscriber.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
+            let event = within(subscriber.next()).await.unwrap().unwrap().unwrap();
             let finished = matches!(event.envelope.event, SessionEvent::RunFinished { .. });
             observed.push(event);
             if finished {
@@ -325,11 +322,7 @@ async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
     submit_prompt(&harness, "hello").await;
     let mut live = Vec::new();
     loop {
-        let event = tokio::time::timeout(Duration::from_secs(5), anchor.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let event = within(anchor.next()).await.unwrap().unwrap().unwrap();
         let finished = matches!(event.envelope.event, SessionEvent::RunFinished { .. });
         live.push(event);
         if finished {
