@@ -405,6 +405,18 @@ mod tests {
     }
 
     #[test]
+    fn reverse_video_is_emitted_for_its_span_and_cleared_by_a_reset() {
+        let mut line = Line::styled("a ", Style::color(Color::Red));
+        line.push("<=", Style::color(Color::Red).reversed());
+        line.push(" b", Style::color(Color::Red));
+        let out = bytes(&line);
+        assert_eq!(
+            out, "\x1b[38;5;9ma \x1b[7m<=\x1b[0m\x1b[38;5;9m b",
+            "{out:?}"
+        );
+    }
+
+    #[test]
     fn unsafe_characters_are_dropped_without_touching_safe_spans() {
         let mut line = Line::styled("ok", Style::default());
         line.push("b\u{7}ell", Style::default());

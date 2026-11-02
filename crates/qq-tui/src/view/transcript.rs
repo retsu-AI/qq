@@ -983,8 +983,8 @@ impl TranscriptCache {
             tool_calls
                 .iter()
                 .rev()
-                .filter(|call| call.run_id == run_id)
-                .find(|call| row_of(call).diff.is_some())
+                .find(|call| call.run_id == run_id && is_edit(call))
+                .filter(|call| row_of(call).diff.is_some())
                 .map(|call| call.id)
         });
         let lookup = |call: &ToolCallSnapshot| -> ToolRowContext<'_> {

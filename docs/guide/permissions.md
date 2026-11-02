@@ -175,7 +175,7 @@ y approve   n deny
 | `n` | deny; the model receives the denial as a tool error and continues |
 | `Shift-Y` / `Shift-N` | decide and then steer the run with a note |
 | `e` | on an edit, show the whole diff (`PageUp` / `PageDown` page it; `e` or `Esc` goes back) |
-| `Esc` | deny, like `n`; after `Shift-Y` / `Shift-N` it first cancels the note and leaves the prompt open |
+| `Esc` | deny, like `n`; after `Shift-Y` / `Shift-N` it first cancels the note and leaves the prompt open, and with the full diff open it closes the diff |
 
 Edits show a diff; `fetch` shows the URL; MCP calls show the server, tool,
 and arguments.

@@ -6704,6 +6704,32 @@ fn the_newest_edit_of_a_running_turn_shows_its_diff_inline_and_older_edits_do_no
         ],
         "{rows:#?}"
     );
+
+    let mut running = tool_call_snapshot(
+        0x64,
+        "edit_file",
+        r#"{"path":"src/next.rs"}"#,
+        ToolCallState::Running,
+        None,
+        false,
+    );
+    running.run_id = run_id;
+    app.sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .tool_calls
+        .as_mut()
+        .unwrap()
+        .push(running);
+    let rows = squashed_rows(&transcript_lines(&app, 100));
+    assert!(
+        rows.iter().any(|row| row.contains("src/next.rs")),
+        "{rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("added 0")),
+        "a newer edit in flight hides the previous diff: {rows:#?}"
+    );
 }
 
 #[test]

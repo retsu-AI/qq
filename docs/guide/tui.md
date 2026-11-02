@@ -41,7 +41,8 @@ bottom.
   second. A failed command keeps its last three output rows under it.
   `Ctrl-Up` / `Ctrl-Down` select a row; `Enter` expands it (a read shows the
   result head, an edit its diff, a command its output tail, an MCP call its
-  arguments). A result longer than nine rows shows eight at a time with its
+  arguments). While a turn runs, its newest edit also shows up to eight rows
+  of its diff without being expanded. A result longer than nine rows shows eight at a time with its
   position (`1–8 of 40 · PgUp PgDn`); while it is selected, `PageUp` /
   `PageDown` scroll inside it instead of the transcript. Once a turn
   settles, three or more routine calls fold into one
@@ -164,7 +165,8 @@ transcript row reads `waiting`, and the dock shows the call and its keys:
 `e` opens the whole diff in the dock, `PageUp` / `PageDown` page it, and `e`
 or `Esc` returns to the 8-row preview without deciding.
 `Esc` denies, like `n`, except while a note is being typed, when it drops the
-note and leaves the prompt open.
+note and leaves the prompt open, or while the full diff is open, when it
+closes the diff.
 `Alt-A` / `Alt-D` answer the oldest waiting call in *another* session.
 `/attention` lists everything waiting across the workspace. Details in
 [Permissions and trust](permissions.md#the-approval-prompt).

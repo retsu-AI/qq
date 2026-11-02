@@ -483,8 +483,9 @@ terminal background. Fenced code in answers keeps its `surface` panel
   (`overlay::dock_diff_lines`).
 - **The newest edit of a running turn** shows its diff under its row
   without being expanded, at most 8 rows (`MAX_TOOL_DIFF_ROWS`) plus a
-  `… N more lines` row. Older edits, and every edit once the run settles,
-  keep only the row until they are opened.
+  `… N more lines` row, once the call has a diff. Older edits, and every
+  edit once the run settles, keep only the row until they are opened; a
+  newer edit still waiting or running hides the older one's diff.
 - **Live output** of a running command renders on the same rail from the
   first frame, so nothing jumps when the call completes.
 - There is no timing line; the summary row carries the duration.

@@ -769,17 +769,17 @@ fn mark_changed_words(rows: &mut [DiffRow]) {
 fn changed_words(old: &str, new: &str) -> Option<(Range<usize>, Range<usize>)> {
     let old_tokens = word_tokens(old);
     let new_tokens = word_tokens(new);
-    let token = |text: &str, range: &Range<usize>| text[range.clone()].to_owned();
+    let same = |a: &Range<usize>, b: &Range<usize>| old[a.clone()] == new[b.clone()];
     let prefix = old_tokens
         .iter()
         .zip(&new_tokens)
-        .take_while(|(a, b)| token(old, a) == token(new, b))
+        .take_while(|(a, b)| same(a, b))
         .count();
     let suffix = old_tokens[prefix..]
         .iter()
         .rev()
         .zip(new_tokens[prefix..].iter().rev())
-        .take_while(|(a, b)| token(old, a) == token(new, b))
+        .take_while(|(a, b)| same(a, b))
         .count();
     let span = |text: &str, tokens: &[Range<usize>]| {
         let middle = &tokens[prefix..tokens.len() - suffix];

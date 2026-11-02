@@ -2861,7 +2861,13 @@ impl App {
         }
         let diff_open = self.approval_diff_start().is_some();
         match key.code {
-            KeyCode::Char('e') => self.toggle_approval_diff(),
+            KeyCode::Char('e')
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.toggle_approval_diff()
+            }
             KeyCode::Esc if diff_open => self.toggle_approval_diff(),
             KeyCode::PageDown if diff_open => self.page_approval_diff(true),
             KeyCode::PageUp if diff_open => self.page_approval_diff(false),

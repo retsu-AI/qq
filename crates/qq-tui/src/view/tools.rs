@@ -720,7 +720,7 @@ fn shell_quote(arg: &str) -> String {
     }
 }
 
-fn is_edit(call: &ToolCallSnapshot) -> bool {
+pub(super) fn is_edit(call: &ToolCallSnapshot) -> bool {
     matches!(call.name.as_str(), "edit_file" | "write_file")
 }
 

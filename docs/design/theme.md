@@ -38,7 +38,8 @@ everywhere; `terminal` is built in code because a file cannot name ANSI
 colors.
 
 These roles are the only colors the view should depend on. Attributes such as
-bold, dim, and italic stay in the renderer; themes supply colors only.
+bold, dim, italic, underline and reverse stay in the renderer; themes supply
+colors only.
 
 ## Selection
 
