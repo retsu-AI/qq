@@ -49,7 +49,12 @@ status() {
         --slurpfile r "$tmp/reactions.json" --argjson require_codex "$codex" '
         def failing: ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"];
         $v[0] as $view | $t[0] as $threads | $c[0] as $comments | $r[0] as $reactions
-        | ($view.statusCheckRollup // []) as $checks
+        | ($view.statusCheckRollup // []) as $rollup
+        | ($rollup | map(. + {run: ((.detailsUrl // .targetUrl // "") | capture("/actions/runs/(?<id>[0-9]+)").id // "0" | tonumber)})) as $all
+        | ($all | group_by([.workflowName // "", .name // .context]) | map(max_by(.run))
+            | map(. as $check | select(
+                $check.conclusion != "CANCELLED" or $check.run == 0
+                or ([$all[] | select(.workflowName == $check.workflowName and .run > $check.run)] | length == 0)))) as $checks
         | ($checks | map(select((.status // "COMPLETED") != "COMPLETED" or .state == "PENDING" or .state == "EXPECTED")) | map(.name // .context)) as $pending
         | ($checks | map(select((.conclusion // .state) as $c | failing | index($c))) | map(.name // .context)) as $failed
         | ([$threads[] | select(.isResolved | not)

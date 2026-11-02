@@ -97,6 +97,8 @@ pub struct Selection {
 
 const CROSS_CRATE_INPUTS: &[(&str, &str)] = &[
     (".github/scripts/test-pre-push.sh", "xtask"),
+    (".github/scripts/test-pr-status.sh", "xtask"),
+    (".qq/skills/babysit-pr/pr-status.sh", "xtask"),
     ("docs/guide/", "qq"),
     ("docs/design/protocol.md", "qq"),
     ("docs/design/architecture.md", "qq"),
@@ -1171,6 +1173,24 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn pr_status_judges_each_check_by_its_latest_run() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let output = std::process::Command::new("bash")
+            .arg(root.join(".github/scripts/test-pr-status.sh"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn the_pull_request_gate_leaves_out_soak_and_quarantine_and_full_keeps_soak() {
         use super::blocking_filter;
@@ -1216,14 +1236,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let git = |args: &[&str]| {
-            assert!(
-                std::process::Command::new("git")
-                    .args(args)
-                    .current_dir(root)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success());
         };
         git(&["init", "-q"]);
         std::fs::write(root.join("a"), "one").unwrap();
@@ -1331,11 +1349,9 @@ mod tests {
             "-qm",
             "Intentional rollback\n\nQQ-Allow-Revert: [id].tsx",
         ]);
-        assert!(
-            super::reverted_base_changes(root, "main")
-                .unwrap()
-                .is_empty()
-        );
+        assert!(super::reverted_base_changes(root, "main")
+            .unwrap()
+            .is_empty());
         write("auth.rs", "old auth");
         git(&["commit", "-qam", "unacknowledged stale auth"]);
         let reverted = super::reverted_base_changes(root, "main").unwrap();
@@ -1351,7 +1367,7 @@ mod tests {
         );
     }
 
-    use super::{Package, Scope, TestCounts, parse_nextest_counts, parse_nextest_failures, select};
+    use super::{parse_nextest_counts, parse_nextest_failures, select, Package, Scope, TestCounts};
 
     fn package(name: &str, dir: &str, deps: &[&str]) -> Package {
         Package {

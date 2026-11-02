@@ -6,7 +6,63 @@ use std::{
 
 use thiserror::Error;
 
-pub const SLEEP_CEILING: usize = 11;
+pub const CEILINGS: Counts = Counts {
+    sleeps: 11,
+    short_timeouts: 47,
+    negative_waits: 9,
+};
+
+const SHORT_TIMEOUT_MILLIS: u64 = 10_000;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub sleeps: usize,
+    pub short_timeouts: usize,
+    pub negative_waits: usize,
+}
+
+impl Counts {
+    fn get(self, rule: Rule) -> usize {
+        match rule {
+            Rule::SleepInTests => self.sleeps,
+            Rule::ShortTimeoutInTests => self.short_timeouts,
+            Rule::NegativeWaitInTests => self.negative_waits,
+            _ => 0,
+        }
+    }
+}
+
+const RATCHETS: [Ratchet; 3] = [
+    Ratchet {
+        rule: Rule::SleepInTests,
+        field: "sleeps",
+        what: "fixed sleeps",
+        baseline: include_str!("legacy-sleeps.txt"),
+        baseline_path: "xtask/src/legacy-sleeps.txt",
+    },
+    Ratchet {
+        rule: Rule::ShortTimeoutInTests,
+        field: "short_timeouts",
+        what: "short real-time timeouts",
+        baseline: include_str!("legacy-timeouts.txt"),
+        baseline_path: "xtask/src/legacy-timeouts.txt",
+    },
+    Ratchet {
+        rule: Rule::NegativeWaitInTests,
+        field: "negative_waits",
+        what: "negative waits",
+        baseline: include_str!("legacy-negative-waits.txt"),
+        baseline_path: "xtask/src/legacy-negative-waits.txt",
+    },
+];
+
+struct Ratchet {
+    rule: Rule,
+    field: &'static str,
+    what: &'static str,
+    baseline: &'static str,
+    baseline_path: &'static str,
+}
 
 #[derive(Debug, Error)]
 pub enum LintError {
@@ -35,6 +91,8 @@ pub enum Rule {
     IgnoreNeedsReason,
     UnboundedChannel,
     SleepInTests,
+    ShortTimeoutInTests,
+    NegativeWaitInTests,
     AdrIndexed,
     SkillCopies,
     Quarantine,
@@ -49,6 +107,8 @@ impl Rule {
             Self::IgnoreNeedsReason => "ignore-needs-reason",
             Self::UnboundedChannel => "unbounded-channel",
             Self::SleepInTests => "sleep-in-tests",
+            Self::ShortTimeoutInTests => "short-timeout-in-tests",
+            Self::NegativeWaitInTests => "negative-wait-in-tests",
             Self::AdrIndexed => "adr-indexed",
             Self::SkillCopies => "skill-copies",
             Self::Quarantine => "quarantine",
@@ -68,6 +128,12 @@ impl Rule {
             }
             Self::SleepInTests => {
                 "wait on a signal/channel or use `#[tokio::test(start_paused = true)]`; a sleep that must stay gets `// lint: allow(sleep) <reason>`"
+            }
+            Self::ShortTimeoutInTests => {
+                "await through the `within()` hang guard instead of a short `timeout(..).await.unwrap()`; a bound that must stay gets `// lint: allow(timeout) <reason>`"
+            }
+            Self::NegativeWaitInTests => {
+                "prove the absence from an event, state, or `now_or_never()` after the cause settled, or use paused time; a wait that must stay gets `// lint: allow(timeout) <reason>`"
             }
             Self::AdrIndexed => "add a row for the ADR to `docs/adr/README.md`",
             Self::SkillCopies => {
@@ -113,9 +179,8 @@ pub struct Source<'a> {
     pub text: Option<&'a str>,
 }
 
-pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, usize) {
+pub fn evaluate(files: &[Source<'_>], ceilings: Counts) -> (Vec<Finding>, Counts) {
     let mut findings = Vec::new();
-    let mut sleeps = Vec::new();
     let mut adr_index: Option<&str> = None;
     let mut adrs = Vec::new();
 
@@ -135,7 +200,6 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
         if !path.ends_with(".rs") {
             continue;
         }
-        let bench = path.starts_with("benches/") || path.contains("/benches/");
         if path == "mod.rs" || path.ends_with("/mod.rs") {
             findings.push(Finding {
                 rule: Rule::NoModRs,
@@ -178,12 +242,10 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
         } else {
             inline_test_lines(text)
         };
-        let mut previous = "";
         for (index, line) in text.lines().enumerate() {
             let number = index + 1;
             let code = stripped[index].trim_start();
             if code.starts_with("//") {
-                previous = line;
                 continue;
             }
             let ignore_reason_empty = code.starts_with("#[ignore")
@@ -226,20 +288,6 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
                     detail: "unbounded channel in production code".to_owned(),
                 });
             }
-            if in_tests
-                && !bench
-                && (code.contains("tokio::time::sleep(") || code.contains("thread::sleep("))
-                && !line.contains("lint: allow(sleep)")
-                && !previous.contains("lint: allow(sleep)")
-            {
-                sleeps.push(Finding {
-                    rule: Rule::SleepInTests,
-                    path: path.to_owned(),
-                    line: number,
-                    detail: "fixed-duration sleep in test code".to_owned(),
-                });
-            }
-            previous = line;
         }
     }
 
@@ -271,31 +319,325 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
         }
     }
 
-    let counted = sleeps.len();
-    if counted < sleep_ceiling {
-        findings.push(Finding {
-            rule: Rule::SleepInTests,
-            path: "xtask/src/lint.rs".to_owned(),
-            line: 0,
-            detail: format!(
-                "{counted} fixed sleeps in test code is below the ceiling of {sleep_ceiling}; \
-                 lower SLEEP_CEILING to {counted} so the ceiling only moves down"
-            ),
-        });
+    let waits = waits(files);
+    let mut counts = Counts::default();
+    for ratchet in &RATCHETS {
+        let found = waits
+            .iter()
+            .filter(|wait| wait.rule == ratchet.rule)
+            .collect::<Vec<_>>();
+        let counted = found.len();
+        let ceiling = ceilings.get(ratchet.rule);
+        let what = ratchet.what;
+        let field = ratchet.field;
+        if counted < ceiling {
+            findings.push(Finding {
+                rule: ratchet.rule,
+                path: "xtask/src/lint.rs".to_owned(),
+                line: 0,
+                detail: format!(
+                    "{counted} {what} in test code is below the ceiling of {ceiling}; \
+                     lower CEILINGS.{field} to {counted} so the ceiling only moves down"
+                ),
+            });
+        }
+        if counted > ceiling {
+            findings.push(Finding {
+                rule: ratchet.rule,
+                path: "xtask/src/lint.rs".to_owned(),
+                line: 0,
+                detail: format!(
+                    "{counted} {what} in test code exceeds the ceiling of {ceiling}; \
+                     new ones are listed below"
+                ),
+            });
+            findings.extend(found.into_iter().map(Wait::finding));
+        }
+        match ratchet.rule {
+            Rule::SleepInTests => counts.sleeps = counted,
+            Rule::ShortTimeoutInTests => counts.short_timeouts = counted,
+            _ => counts.negative_waits = counted,
+        }
     }
-    if counted > sleep_ceiling {
-        findings.push(Finding {
-            rule: Rule::SleepInTests,
-            path: "xtask/src/lint.rs".to_owned(),
-            line: 0,
-            detail: format!(
-                "{counted} fixed sleeps in test code exceeds the ceiling of {sleep_ceiling}; \
-                 new sleeps are listed below"
-            ),
-        });
-        findings.extend(sleeps);
+    (findings, counts)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Wait {
+    rule: Rule,
+    path: String,
+    line: usize,
+    key: String,
+}
+
+impl Wait {
+    fn finding(&self) -> Finding {
+        Finding {
+            rule: self.rule,
+            path: self.path.clone(),
+            line: self.line,
+            detail: match self.rule {
+                Rule::SleepInTests => "fixed-duration sleep in test code".to_owned(),
+                Rule::ShortTimeoutInTests => format!(
+                    "real-time timeout under {} s in test code",
+                    SHORT_TIMEOUT_MILLIS / 1_000
+                ),
+                _ => "real-time wait that expects nothing to happen in test code".to_owned(),
+            },
+        }
     }
-    (findings, counted)
+}
+
+fn waits(files: &[Source<'_>]) -> Vec<Wait> {
+    let mut found = Vec::new();
+    for file in files {
+        let path = file.path;
+        let Some(text) = file.text else { continue };
+        if !path.ends_with(".rs") || path.starts_with("benches/") || path.contains("/benches/") {
+            continue;
+        }
+        let stripped = strip_strings(text);
+        let test_lines = if is_test_path(path) {
+            vec![true; stripped.len()]
+        } else {
+            inline_test_lines(text)
+        };
+        let lines = text.lines().collect::<Vec<_>>();
+        let mut functions = Functions::default();
+        for (index, code) in stripped.iter().enumerate() {
+            let in_tests = test_lines.get(index).copied().unwrap_or(false);
+            let sleeps = calls(code, &["tokio::time::sleep(", "thread::sleep("]);
+            let timeouts = timeout_calls(code);
+            let mut owners = Vec::new();
+            functions.scan(code, sleeps.iter().chain(&timeouts).copied(), &mut owners);
+            if !in_tests {
+                continue;
+            }
+            let previous = index
+                .checked_sub(1)
+                .and_then(|previous| lines.get(previous))
+                .copied()
+                .unwrap_or("");
+            let allowed = |marker: &str| lines[index].contains(marker) || previous.contains(marker);
+            let owner = |column: usize| {
+                owners
+                    .iter()
+                    .find(|(at, _)| *at == column)
+                    .map_or("", |(_, name)| name.as_str())
+                    .to_owned()
+            };
+            let mut push = |rule: Rule, function: String, call: String| {
+                found.push(Wait {
+                    rule,
+                    path: path.to_owned(),
+                    line: index + 1,
+                    key: format!("{path}\t{function}\t{call}"),
+                });
+            };
+            for column in sleeps {
+                if !allowed("lint: allow(sleep)") {
+                    push(
+                        Rule::SleepInTests,
+                        owner(column),
+                        call_text(&stripped, index, column).0,
+                    );
+                }
+            }
+            for column in timeouts {
+                if allowed("lint: allow(timeout)") {
+                    continue;
+                }
+                let (call, after) = call_text(&stripped, index, column);
+                let binding = code[..column]
+                    .trim_end()
+                    .strip_suffix('=')
+                    .and_then(|left| left.trim().strip_prefix("let "))
+                    .map(|name| name.trim().trim_start_matches("mut ").to_owned());
+                let later = || {
+                    stripped[index + 1..stripped.len().min(index + 40)]
+                        .concat()
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .collect::<String>()
+                };
+                let asserted_later = binding.is_some_and(|name| {
+                    (after.starts_with(".await;")
+                        && later().contains(&format!("assert!({name}.is_err()")))
+                        || (after.starts_with(".await.is_ok();")
+                            && later().contains(&format!("assert!(!{name}")))
+                });
+                let negative = [
+                    ".await.is_err()",
+                    ".await.unwrap_err()",
+                    ".await.expect_err(",
+                ]
+                .iter()
+                .any(|tail| after.starts_with(tail))
+                    || asserted_later;
+                if negative {
+                    push(Rule::NegativeWaitInTests, owner(column), call);
+                } else if first_argument_millis(&call).is_some_and(|ms| ms < SHORT_TIMEOUT_MILLIS) {
+                    push(Rule::ShortTimeoutInTests, owner(column), call);
+                }
+            }
+        }
+    }
+    found
+}
+
+#[derive(Default)]
+struct Functions {
+    depth: usize,
+    open: Vec<(String, usize, bool)>,
+}
+
+impl Functions {
+    fn scan(
+        &mut self,
+        code: &str,
+        columns: impl Iterator<Item = usize>,
+        owners: &mut Vec<(usize, String)>,
+    ) {
+        let mut columns = columns.collect::<Vec<_>>();
+        columns.sort_unstable();
+        let mut columns = columns.into_iter().peekable();
+        let bytes = code.as_bytes();
+        let mut at = 0;
+        while at <= bytes.len() {
+            while let Some(column) = columns.next_if(|column| *column <= at) {
+                let name = self
+                    .open
+                    .iter()
+                    .rev()
+                    .find(|(_, _, opened)| *opened)
+                    .map_or(String::new(), |(name, ..)| name.clone());
+                owners.push((column, name));
+            }
+            let Some(&byte) = bytes.get(at) else { break };
+            if bytes[at..].starts_with(b"fn ")
+                && (at == 0 || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_'))
+            {
+                let name = code[at + 3..]
+                    .trim_start()
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or("");
+                if !name.is_empty() {
+                    self.open.push((format!("fn {name}"), self.depth, false));
+                }
+                at += 3;
+                continue;
+            }
+            match byte {
+                b'{' => {
+                    self.depth += 1;
+                    if let Some(top) = self.open.last_mut()
+                        && !top.2
+                        && self.depth == top.1 + 1
+                    {
+                        top.2 = true;
+                    }
+                }
+                b'}' => {
+                    self.depth = self.depth.saturating_sub(1);
+                    while self
+                        .open
+                        .last()
+                        .is_some_and(|(_, base, opened)| *opened && self.depth <= *base)
+                    {
+                        self.open.pop();
+                    }
+                }
+                b';' if self
+                    .open
+                    .last()
+                    .is_some_and(|(_, base, opened)| !*opened && self.depth == *base) =>
+                {
+                    self.open.pop();
+                }
+                _ => {}
+            }
+            at += 1;
+        }
+    }
+}
+
+fn calls(code: &str, patterns: &[&str]) -> Vec<usize> {
+    let mut columns = patterns
+        .iter()
+        .flat_map(|pattern| code.match_indices(pattern).map(|(at, _)| at))
+        .collect::<Vec<_>>();
+    columns.sort_unstable();
+    columns.dedup();
+    columns
+}
+
+fn timeout_calls(code: &str) -> Vec<usize> {
+    let bytes = code.as_bytes();
+    code.match_indices("timeout(")
+        .map(|(at, _)| at)
+        .filter(|at| {
+            *at == 0
+                || !(bytes[at - 1].is_ascii_alphanumeric()
+                    || bytes[at - 1] == b'_'
+                    || bytes[at - 1] == b'.')
+        })
+        .filter(|at| !code[..*at].trim_end().ends_with("fn"))
+        .map(|at| {
+            let prefix = &code[..at];
+            ["tokio::time::", "time::"]
+                .iter()
+                .find_map(|path| prefix.strip_suffix(path).map(str::len))
+                .unwrap_or(at)
+        })
+        .collect()
+}
+
+const KEY_LIMIT: usize = 96;
+
+fn call_text(stripped: &[String], line: usize, column: usize) -> (String, String) {
+    let mut call = String::new();
+    let mut after = String::new();
+    let mut depth = 0usize;
+    let mut opened = false;
+    'lines: for (offset, code) in stripped[line..].iter().take(60).enumerate() {
+        let code = if offset == 0 { &code[column..] } else { code };
+        for character in code.chars().filter(|c| !c.is_whitespace()) {
+            if opened && depth == 0 {
+                after.push(character);
+                if after.len() >= 32 {
+                    break 'lines;
+                }
+                continue;
+            }
+            match character {
+                '(' => {
+                    depth += 1;
+                    opened = true;
+                }
+                ')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            if call.len() < KEY_LIMIT {
+                call.push(character);
+            }
+        }
+    }
+    (call.replace(",)", ")"), after)
+}
+
+fn first_argument_millis(call: &str) -> Option<u64> {
+    let argument = call.split_once('(')?.1;
+    let argument = argument
+        .strip_prefix("std::time::")
+        .or_else(|| argument.strip_prefix("tokio::time::"))
+        .unwrap_or(argument);
+    let (scale, rest) = match argument.strip_prefix("Duration::from_millis(") {
+        Some(rest) => (1, rest),
+        None => (1_000, argument.strip_prefix("Duration::from_secs(")?),
+    };
+    let digits = rest.split_once(')')?.0.replace('_', "");
+    digits.parse::<u64>().ok().map(|value| value * scale)
 }
 
 fn is_crate_root(path: &str) -> bool {
@@ -642,44 +984,30 @@ pub fn tracked_files(root: &Path) -> Result<Vec<String>, LintError> {
         .collect())
 }
 
-fn legacy_sleep_findings(files: &[Source<'_>], baseline: &str) -> Vec<Finding> {
+fn legacy_findings(files: &[Source<'_>], ratchet: &Ratchet, baseline: &str) -> Vec<Finding> {
     let mut remaining = baseline.lines().map(str::to_owned).collect::<Vec<_>>();
     let mut findings = Vec::new();
-    for sleep in evaluate(files, 0)
-        .0
+    for wait in waits(files)
         .into_iter()
-        .filter(|f| f.rule == Rule::SleepInTests && f.line > 0)
+        .filter(|wait| wait.rule == ratchet.rule)
     {
-        let text = files
-            .iter()
-            .find(|file| file.path == sleep.path)
-            .and_then(|file| file.text)
-            .expect("sleep has source");
-        let context = text
-            .lines()
-            .take(sleep.line)
-            .filter(|line| line.contains("fn "))
-            .last()
-            .unwrap_or("")
-            .trim();
-        let code = text
-            .lines()
-            .nth(sleep.line - 1)
-            .expect("sleep has line")
-            .trim();
-        let key = format!("{}\t{}\t{context}\t{code}", sleep.path, sleep.line);
-        if let Some(index) = remaining.iter().position(|entry| entry == &key) {
+        if let Some(index) = remaining.iter().position(|entry| entry == &wait.key) {
             remaining.remove(index);
         } else {
-            findings.push(sleep);
+            let mut finding = wait.finding();
+            finding.detail = format!(
+                "{}; not in {}: {}",
+                finding.detail, ratchet.baseline_path, wait.key
+            );
+            findings.push(finding);
         }
     }
     for stale in remaining {
         findings.push(Finding {
-            rule: Rule::SleepInTests,
-            path: "xtask/src/legacy-sleeps.txt".to_owned(),
+            rule: ratchet.rule,
+            path: ratchet.baseline_path.to_owned(),
             line: 0,
-            detail: format!("remove stale legacy sleep entry: {stale}"),
+            detail: format!("remove stale legacy entry: {stale}"),
         });
     }
     findings
@@ -787,7 +1115,7 @@ fn quarantine_findings(root: &Path) -> Result<Vec<Finding>, LintError> {
     )
 }
 
-pub fn run(root: &Path) -> Result<usize, LintError> {
+pub fn run(root: &Path) -> Result<Counts, LintError> {
     let paths = tracked_files(root)?;
     let mut texts = Vec::with_capacity(paths.len());
     for path in &paths {
@@ -816,7 +1144,7 @@ pub fn run(root: &Path) -> Result<usize, LintError> {
             text: text.as_deref(),
         })
         .collect::<Vec<_>>();
-    let (mut findings, sleeps) = evaluate(&sources, SLEEP_CEILING);
+    let (mut findings, counts) = evaluate(&sources, CEILINGS);
     findings.extend(skill_copies(root, &paths)?);
     findings.extend(quarantine_findings(root)?);
     let mut lists = Vec::new();
@@ -831,16 +1159,21 @@ pub fn run(root: &Path) -> Result<usize, LintError> {
         .collect::<Vec<_>>();
     findings.extend(platform_findings(&sources, &lists));
 
-    findings.extend(legacy_sleep_findings(
-        &sources,
-        include_str!("legacy-sleeps.txt"),
-    ));
+    for ratchet in &RATCHETS {
+        findings.extend(legacy_findings(&sources, ratchet, ratchet.baseline));
+    }
     if findings.is_empty() {
         println!(
-            "lint: ok ({} files; {sleeps}/{SLEEP_CEILING} test sleeps)",
-            paths.len()
+            "lint: ok ({} files; {}/{} test sleeps, {}/{} short timeouts, {}/{} negative waits)",
+            paths.len(),
+            counts.sleeps,
+            CEILINGS.sleeps,
+            counts.short_timeouts,
+            CEILINGS.short_timeouts,
+            counts.negative_waits,
+            CEILINGS.negative_waits,
         );
-        return Ok(sleeps);
+        return Ok(counts);
     }
     let mut seen = Vec::new();
     for finding in &findings {
@@ -857,21 +1190,38 @@ pub fn run(root: &Path) -> Result<usize, LintError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rule, Source, evaluate};
+    use super::{CEILINGS, Counts, RATCHETS, Rule, Source, evaluate};
+
+    fn sleeps(sleeps: usize) -> Counts {
+        Counts {
+            sleeps,
+            ..Counts::default()
+        }
+    }
 
     fn rules(files: &[Source<'_>], ceiling: usize) -> Vec<(Rule, String, usize)> {
-        evaluate(files, ceiling)
+        evaluate(files, sleeps(ceiling))
             .0
             .into_iter()
             .map(|finding| (finding.rule, finding.path, finding.line))
             .collect()
     }
 
+    fn keys(path: &str, text: &str) -> Vec<(Rule, String)> {
+        super::waits(&[Source {
+            path,
+            text: Some(text),
+        }])
+        .into_iter()
+        .map(|wait| (wait.rule, wait.key))
+        .collect()
+    }
+
     const ROOT: &str = "#![forbid(unsafe_code)]\n";
 
     #[test]
-    fn replacing_a_sleep_cannot_spend_a_removed_legacy_entry() {
-        let old = "tests/a.rs\t2\tfn old() {\ttokio::time::sleep(d).await;\n";
+    fn legacy_entries_follow_their_function_and_cannot_be_spent_twice() {
+        let old = "tests/a.rs\tfn old\ttokio::time::sleep(d)\n";
         for (path, text, expected) in [
             (
                 "tests/a.rs",
@@ -880,8 +1230,8 @@ mod tests {
             ),
             (
                 "tests/a.rs",
-                "\nfn old() {\n tokio::time::sleep(d).await;\n}",
-                2,
+                "\n\nuse x;\nfn old() {\n let _ = 1;\n tokio::time::sleep(\n  d,\n ).await;\n}",
+                0,
             ),
             (
                 "tests/b.rs",
@@ -898,19 +1248,182 @@ mod tests {
                 "fn old() {\n tokio::time::sleep(d).await;\n tokio::time::sleep(d).await;\n}",
                 1,
             ),
+            (
+                "tests/a.rs",
+                "fn old() {\n tokio::time::sleep(e).await;\n}",
+                2,
+            ),
             ("tests/a.rs", "fn old() {}", 1),
         ] {
             assert_eq!(
-                super::legacy_sleep_findings(
+                super::legacy_findings(
                     &[Source {
                         path,
                         text: Some(text)
                     }],
+                    &RATCHETS[0],
                     old
                 )
                 .len(),
                 expected,
                 "{path}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wait_is_keyed_by_its_enclosing_function_not_a_nested_one() {
+        let text = "async fn outer() {\n    struct P;\n    impl P {\n        fn stream(&self) {}\n    }\n    fn helper() -> u8 { 1 }\n    tokio::time::sleep(d).await;\n}\n";
+        assert_eq!(
+            keys("tests/a.rs", text),
+            [(
+                Rule::SleepInTests,
+                "tests/a.rs\tfn outer\ttokio::time::sleep(d)".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn short_timeouts_are_counted_and_long_or_allowed_ones_are_not() {
+        let text = concat!(
+            "fn prod() { tokio::time::timeout(Duration::from_secs(1), f).await.unwrap(); }\n",
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    async fn t() {\n",
+            "        tokio::time::timeout(Duration::from_secs(1), a).await.unwrap();\n",
+            "        timeout(std::time::Duration::from_millis(9_999), b).await.unwrap();\n",
+            "        let c = tokio::time::timeout(\n",
+            "            Duration::from_secs(2),\n",
+            "            c,\n",
+            "        )\n",
+            "        .await\n",
+            "        .expect(\"c\");\n",
+            "        tokio::time::timeout(Duration::from_secs(10), d).await.unwrap();\n",
+            "        tokio::time::timeout(GUARD, e).await.unwrap();\n",
+            "        within(f).await.unwrap();\n",
+            "        // lint: allow(timeout) the bound is the deadline under test\n",
+            "        tokio::time::timeout(Duration::from_secs(1), g).await.unwrap();\n",
+            "        client.timeout(Duration::from_secs(1));\n",
+            "        rx.recv_timeout(Duration::from_secs(1));\n",
+            "    }\n",
+            "    fn timeout(d: Duration) {}\n",
+            "}\n",
+        );
+        assert_eq!(
+            keys("crates/x/src/lib.rs", text),
+            [
+                (
+                    Rule::ShortTimeoutInTests,
+                    "crates/x/src/lib.rs\tfn t\ttokio::time::timeout(Duration::from_secs(1),a)"
+                        .to_owned()
+                ),
+                (
+                    Rule::ShortTimeoutInTests,
+                    "crates/x/src/lib.rs\tfn t\ttimeout(std::time::Duration::from_millis(9_999),b)"
+                        .to_owned()
+                ),
+                (
+                    Rule::ShortTimeoutInTests,
+                    "crates/x/src/lib.rs\tfn t\ttokio::time::timeout(Duration::from_secs(2),c)"
+                        .to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn negative_waits_are_counted_at_any_duration_and_cleanup_branches_are_not() {
+        let text = concat!(
+            "async fn t() {\n",
+            "    assert!(tokio::time::timeout(Duration::from_millis(20), a).await.is_err());\n",
+            "    tokio::time::timeout(Duration::from_secs(30), b).await.unwrap_err();\n",
+            "    let quiet = tokio::time::timeout(Duration::from_millis(400), c).await;\n",
+            "    assert!(quiet.is_err(), \"{quiet:?}\");\n",
+            "    let premature = tokio::time::timeout(Duration::from_millis(50), &mut d)\n",
+            "        .await\n",
+            "        .is_ok();\n",
+            "    assert!(!premature);\n",
+            "    let settled = tokio::time::timeout(Duration::from_secs(20), e).await;\n",
+            "    if settled.is_err() { cleanup(); }\n",
+            "    assert!(settled.is_ok());\n",
+            "}\n",
+        );
+        let found = keys("tests/a.rs", text);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|(rule, _)| *rule == Rule::NegativeWaitInTests)
+                .map(|(_, key)| key.rsplit('\t').next().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "tokio::time::timeout(Duration::from_millis(20),a)",
+                "tokio::time::timeout(Duration::from_secs(30),b)",
+                "tokio::time::timeout(Duration::from_millis(400),c)",
+                "tokio::time::timeout(Duration::from_millis(50),&mutd)",
+            ]
+        );
+        assert!(
+            found
+                .iter()
+                .all(|(rule, key)| *rule == Rule::NegativeWaitInTests || !key.ends_with(",e)")),
+            "a 20 s positive wait with a cleanup branch is neither short nor negative: {found:?}"
+        );
+    }
+
+    #[test]
+    fn each_wait_ratchet_fails_above_and_below_its_ceiling() {
+        let text = "async fn t() {\n    tokio::time::timeout(Duration::from_secs(1), a).await.unwrap();\n    assert!(tokio::time::timeout(Duration::from_millis(20), b).await.is_err());\n}\n";
+        let files = [Source {
+            path: "tests/a.rs",
+            text: Some(text),
+        }];
+        let exact = Counts {
+            sleeps: 0,
+            short_timeouts: 1,
+            negative_waits: 1,
+        };
+        assert_eq!(evaluate(&files, exact), (Vec::new(), exact));
+        let (over, _) = evaluate(&files, Counts::default());
+        assert_eq!(
+            over.iter()
+                .map(|finding| (finding.rule, finding.line))
+                .collect::<Vec<_>>(),
+            [
+                (Rule::ShortTimeoutInTests, 0),
+                (Rule::ShortTimeoutInTests, 2),
+                (Rule::NegativeWaitInTests, 0),
+                (Rule::NegativeWaitInTests, 3),
+            ]
+        );
+        let (under, _) = evaluate(
+            &files,
+            Counts {
+                short_timeouts: 2,
+                negative_waits: 2,
+                ..exact
+            },
+        );
+        assert_eq!(under.len(), 2);
+        assert!(
+            under[0]
+                .detail
+                .contains("lower CEILINGS.short_timeouts to 1")
+        );
+        assert!(
+            under[1]
+                .detail
+                .contains("lower CEILINGS.negative_waits to 1")
+        );
+    }
+
+    #[test]
+    fn the_checked_in_baselines_match_the_ceilings() {
+        for ratchet in &RATCHETS {
+            assert_eq!(
+                ratchet.baseline.lines().count(),
+                CEILINGS.get(ratchet.rule),
+                "{}",
+                ratchet.baseline_path
             );
         }
     }
@@ -1030,9 +1543,9 @@ mod tests {
                 path: "src/run.rs",
                 text: Some(text),
             }],
-            1,
+            sleeps(1),
         );
-        assert_eq!(count, 1);
+        assert_eq!(count.sleeps, 1);
         assert_eq!(
             findings
                 .iter()
@@ -1168,8 +1681,11 @@ mod tests {
             path: "crates/qq-x/src/store.rs",
             text: Some(text),
         }];
-        let (findings, counted) = evaluate(&files, 1);
-        assert_eq!(counted, 1, "production and allowed sleeps are not counted");
+        let (findings, counted) = evaluate(&files, sleeps(1));
+        assert_eq!(
+            counted.sleeps, 1,
+            "production and allowed sleeps are not counted"
+        );
         assert!(findings.is_empty());
         let over = rules(&files, 0);
         assert_eq!(over.len(), 2, "the ceiling notice plus the listed sleep");
@@ -1177,9 +1693,9 @@ mod tests {
             over[1],
             (Rule::SleepInTests, "crates/qq-x/src/store.rs".to_owned(), 4)
         );
-        let (under, _) = evaluate(&files, 2);
+        let (under, _) = evaluate(&files, sleeps(2));
         assert_eq!(under.len(), 1, "a removed sleep forces the ceiling down");
-        assert!(under[0].detail.contains("lower SLEEP_CEILING to 1"));
+        assert!(under[0].detail.contains("lower CEILINGS.sleeps to 1"));
     }
 
     #[test]
@@ -1199,8 +1715,11 @@ mod tests {
             path: "crates/qq-x/src/lib.rs",
             text: Some(text),
         }];
-        let (findings, counted) = evaluate(&files, 1);
-        assert_eq!(counted, 1, "the sleep inside the test module is counted");
+        let (findings, counted) = evaluate(&files, sleeps(1));
+        assert_eq!(
+            counted.sleeps, 1,
+            "the sleep inside the test module is counted"
+        );
         assert_eq!(
             findings
                 .into_iter()

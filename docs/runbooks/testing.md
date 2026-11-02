@@ -109,12 +109,36 @@ function in `xtask/src/smoke.rs` plus a row in `SCENARIOS`.
 - Test behavior at the narrowest public boundary that proves it. Assert
   against literal expected values.
 - No fixed sleeps. Wait on the signal, channel, or event; or use
-  `#[tokio::test(start_paused = true)]`. `cargo xtask lint` counts fixed
-  sleeps in test code against `SLEEP_CEILING` (`xtask/src/lint.rs`). New
-  sleeps fail, and so does a count below the ceiling, which forces the
-  ceiling down when a sleep is removed. If a sleep is truly
-  needed (mtime granularity, a real child process), mark it
+  `#[tokio::test(start_paused = true)]`. If a sleep is truly needed (mtime
+  granularity, a real child process), mark it
   `// lint: allow(sleep) <reason>`.
+- No short real-time timeouts as correctness bounds. In qq-core tests,
+  await a future that must finish through
+  `crate::test_support::within(future).await.unwrap()`. It is a hang guard of
+  `HANG_GUARD` (60 s). On expiry it fails with the caller's location, and a
+  loaded CI runner never trips it. A deadline that *is* the behavior under
+  test uses paused time (`tokio::time::pause()` and `advance`) instead of a
+  real-time bound.
+- No real-time negative waits: a `timeout(..)` whose expected outcome is
+  "it timed out" (`.await.is_err()`, `.unwrap_err()`, or a
+  `let x = timeout(..).await;` followed by `assert!(x.is_err())` or
+  `.is_ok()` followed by `assert!(!x)`). Such a test proves only that nothing
+  happened *yet*. Prove the absence after the cause settled instead: a later
+  event, a store read, a counter, or `now_or_never()` once the state that
+  would have caused it is visible.
+- `cargo xtask lint` ratchets all three in test code (`CEILINGS` in
+  `xtask/src/lint.rs`): fixed sleeps, real-time `timeout(Duration::…)`
+  bounds under 10 s, and negative waits of any length. A count above its
+  ceiling fails; so does one below it, which forces the ceiling down
+  when one is removed. The remaining legacy occurrences are listed in
+  `xtask/src/legacy-{sleeps,timeouts,negative-waits}.txt`, keyed by file,
+  enclosing function, and the whitespace-free call text, so moving code
+  within a function does not touch them. A new occurrence, or one moved to
+  another function, fails until it is fixed. When you remove one, delete its
+  line and lower the ceiling. A bound that must stay gets
+  `// lint: allow(timeout) <reason>` on the line or the line above. These
+  markers, like `lint: allow(sleep)`, are the one kind of comment the
+  no-comments rule permits.
 - No wall-clock upper bounds in tests. Measure those in a bench or a perf
   budget.
 - Prefer adding a row to an existing table-driven test over writing a new
