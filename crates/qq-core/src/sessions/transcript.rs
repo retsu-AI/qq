@@ -464,7 +464,7 @@ fn assemble_model_context(
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
                AND m.role = 'user' AND m.steering = 0
                AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
-               AND c.result IS NOT NULL",
+               AND c.result IS NOT NULL AND c.parent_call_id IS NULL",
     )?;
     let rows = statement.query_map(params![session, through_ordinal, cutoff_ordinal], |row| {
         Ok((
@@ -703,7 +703,7 @@ pub(super) fn capture_side_context(
                      + COALESCE(length(CAST(goal_notice AS BLOB)), 0)
                 FROM model_turns WHERE run_id = ?1
               UNION ALL SELECT COALESCE(length(CAST(result AS BLOB)), 0)
-                FROM tool_calls WHERE run_id = ?1
+                FROM tool_calls WHERE run_id = ?1 AND parent_call_id IS NULL
               UNION ALL SELECT length(CAST(a.path AS BLOB)) + COALESCE(length(b.content), 0) + 128
                 FROM message_attachments a JOIN messages m ON m.id = a.message_id
                 JOIN attachment_blobs b ON b.session_id = a.session_id AND b.blob_key = a.blob_key
@@ -1056,6 +1056,9 @@ pub(super) fn prunable_stub(
     content: &str,
 ) -> Option<String> {
     let (name, arguments) = calls.get(call_id)?;
+    if name == crate::runtime::RUN_CODE_TOOL {
+        return None;
+    }
     if !match effect {
         Some(effect) => effect == EffectClass::ReadOnly,
         None => PRUNABLE_READ_ONLY_TOOLS.contains(&name.as_str()),

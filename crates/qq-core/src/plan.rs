@@ -72,6 +72,7 @@ pub struct AgentProfile {
     profile_id: AgentProfileId,
     global_config_dir: Option<PathBuf>,
     exposed_tools: Option<Vec<String>>,
+    code_language: Option<qq_script::Language>,
     side_question_denies: Vec<String>,
     context_sources: Vec<Arc<dyn ContextSource>>,
     context_cache: Option<Arc<ContextCache>>,
@@ -116,6 +117,7 @@ impl AgentProfile {
             profile_id: AgentProfileId::default(),
             global_config_dir: None,
             exposed_tools: None,
+            code_language: None,
             side_question_denies: Vec::new(),
             context_sources: Vec::new(),
             context_cache: None,
@@ -168,6 +170,7 @@ impl AgentProfile {
             profile_id: AgentProfileId::default(),
             global_config_dir: None,
             exposed_tools: None,
+            code_language: runtime.code_language,
             side_question_denies: Vec::new(),
             context_sources: runtime
                 .context_sources
@@ -195,6 +198,12 @@ impl AgentProfile {
     #[must_use]
     pub fn with_global_config_dir(mut self, dir: PathBuf) -> Self {
         self.global_config_dir = Some(dir);
+        self
+    }
+
+    #[must_use]
+    pub fn with_code_language(mut self, language: qq_script::Language) -> Self {
+        self.code_language = Some(language);
         self
     }
 
@@ -352,6 +361,13 @@ pub struct CompiledAgentPlan {
     pub(crate) guidance_roots: Arc<[Workspace]>,
     pub(crate) roster_text: Option<Arc<str>>,
     pub(crate) hosts: Arc<[Arc<dyn ExternalToolHost>]>,
+    pub(crate) code_language: Option<qq_script::Language>,
+    code_surfaces: std::sync::Mutex<
+        Vec<(
+            crate::catalog::StaticFilter,
+            Arc<crate::runtime::CodeSurface>,
+        )>,
+    >,
     prompt_prefixes: std::sync::Mutex<Vec<(PromptPrefixKey, Arc<crate::runtime::PromptPrefix>)>>,
     resolved_model: Arc<ResolvedModel>,
     descriptor: Arc<AgentPlanDescriptor>,
@@ -374,6 +390,27 @@ pub(crate) struct PromptPrefixKey {
 }
 
 impl CompiledAgentPlan {
+    pub(crate) fn code_surface(
+        &self,
+        filter: &crate::catalog::StaticFilter,
+    ) -> Option<Arc<crate::runtime::CodeSurface>> {
+        let language = self.code_language?;
+        let mut surfaces = self
+            .code_surfaces
+            .lock()
+            .expect("code surface cache lock poisoned");
+        if let Some((_, surface)) = surfaces.iter().find(|(existing, _)| existing == filter) {
+            return Some(Arc::clone(surface));
+        }
+        let surface = Arc::new(crate::runtime::CodeSurface::new(
+            language,
+            &self.catalog,
+            filter,
+        ));
+        surfaces.push((*filter, Arc::clone(&surface)));
+        Some(surface)
+    }
+
     pub(crate) fn prompt_prefix(
         &self,
         key: PromptPrefixKey,
@@ -405,6 +442,7 @@ impl CompiledAgentPlan {
                 unattended: key.tools.is_some_and(|filter| filter.unattended),
                 mode: key.mode,
                 snapshots: key.snapshots && self.in_git,
+                code: self.code_language.is_some() && key.tools.is_some(),
             },
             &self.instructions,
         ));
@@ -500,6 +538,7 @@ impl CompiledAgentPlan {
             profile_id,
             global_config_dir,
             exposed_tools,
+            code_language,
             side_question_denies,
             context_sources,
             context_cache,
@@ -792,6 +831,7 @@ impl CompiledAgentPlan {
                 .iter()
                 .map(ContextSourceDescriptor::from)
                 .collect(),
+            code_language,
         };
         let (digest, descriptor_json) = descriptor.encode()?;
         let roster_text: Option<Arc<str>> = crate::runtime::delegation_roster_text(
@@ -827,6 +867,7 @@ impl CompiledAgentPlan {
                 unattended: false,
                 mode: full_key.mode,
                 snapshots: in_git,
+                code: code_language.is_some(),
             },
             &instructions,
         ));
@@ -845,6 +886,8 @@ impl CompiledAgentPlan {
             guidance_roots: guidance_roots.into(),
             roster_text,
             hosts: host_handles,
+            code_language,
+            code_surfaces: std::sync::Mutex::new(Vec::new()),
             prompt_prefixes: std::sync::Mutex::new(vec![(full_key, full_prefix)]),
             resolved_model: Arc::new(resolved_model),
             descriptor_json: Arc::from(descriptor_json),
@@ -1394,6 +1437,7 @@ mod tests {
                 },
                 fail_policy: FailPolicyDescriptor::Open,
             }],
+            code_language: None,
         }
     }
 

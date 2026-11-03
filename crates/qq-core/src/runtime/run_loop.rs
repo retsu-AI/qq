@@ -205,6 +205,7 @@ struct RunEnvironment {
     system_prompt_hash: ContentHash,
     base_specs: Arc<[ToolSpec]>,
     static_filter: Option<catalog::StaticFilter>,
+    code_surface: Option<Arc<runtime::CodeSurface>>,
     reducible_messages: usize,
     audit_prompt: String,
     allow_tools: bool,
@@ -687,11 +688,14 @@ impl plan::CompiledAgentPlan {
                        Some(filter) => catalog.base_specs(filter),
                        None => Arc::from([]),
                    };
+                   let code_surface = static_filter.as_ref().and_then(|filter| plan.code_surface(filter));
                    let mut pins = catalog::PinSet::default();
-                   if allow_tools && catalog.exposure() == catalog::Exposure::Progressive {
+                   if allow_tools && code_surface.is_none() && catalog.exposure() == catalog::Exposure::Progressive {
                        recover_pins(&messages, &catalog, &mut pins, static_filter.as_ref().expect("tools have a filter"));
                    }
-                   let tool_specs: Arc<[ToolSpec]> = if pins.is_empty() {
+                   let tool_specs: Arc<[ToolSpec]> = if let Some(surface) = &code_surface {
+                       Arc::from([surface.spec.clone()])
+                   } else if pins.is_empty() {
                        Arc::clone(&base_specs)
                    } else {
                        catalog.specs_with_pins(&base_specs, &pins, static_filter.as_ref().expect("pins require tools"))
@@ -823,7 +827,7 @@ impl plan::CompiledAgentPlan {
 
         yield TurnStep::Ready(RunState {
            messages, steering, run, window, slice, recovery,
-           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal_spend_tracking: goal_spend_tracking || goal.is_some(), goal_paid, goal, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy, cache_key },
+           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal_spend_tracking: goal_spend_tracking || goal.is_some(), goal_paid, goal, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, code_surface, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy, cache_key },
         });
                }
     }
@@ -1899,7 +1903,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<SettledTurn>> + Send + '_ {
         stream! {
                     let Self { env, messages, steering, run, window, slice, recovery, .. } = self;
-                    let RunEnvironment { plan, cancelled, file_state, summarizer, deadline, output_ceiling, ceiling_by_policy, .. } = env;
+                    let RunEnvironment { plan, cancelled, file_state, summarizer, deadline, output_ceiling, ceiling_by_policy, code_surface, .. } = env;
                     let output_ceiling = *output_ceiling;
                     let ceiling_by_policy = *ceiling_by_policy;
                     let deadline = *deadline;
@@ -1968,7 +1972,11 @@ impl RunState {
                                     break;
                                 }
                             };
-                            let known = catalog.lookup(&pending.name).map(|entry| entry.effect);
+                            let known = match code_surface {
+                                Some(_) if pending.name == runtime::RUN_CODE_TOOL => Some(catalog::EffectClass::ReadOnly),
+                                Some(_) => None,
+                                None => catalog.lookup(&pending.name).map(|entry| entry.effect),
+                            };
                             #[cfg(test)]
                             let known = known.or_else(|| tools::test_tool_effect(&pending.name));
                             let (effect, rejection) = match known {
@@ -2689,7 +2697,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<ToolOutcomes>> + Send + '_ {
         stream! {
                     let Self { env, steering, run, .. } = self;
-                    let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal, spills, audit_hook, tool_tasks, output: _, limits, deadline, base_specs, static_filter, .. } = env;
+                    let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal, spills, audit_hook, tool_tasks, output: _, limits, deadline, base_specs, static_filter, code_surface, .. } = env;
                     let limits = *limits;
                     let workspace = &plan.workspace;
                     let catalog = &plan.catalog;
@@ -2976,7 +2984,8 @@ impl RunState {
                             }.instrument(tool_span)
                         };
                         let overlaps = |call: &RuntimeToolCall| {
-                            !(bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
+                            !(code_surface.is_some() && call.name == runtime::RUN_CODE_TOOL)
+                            && !(bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
                             && !catalog.lookup(&call.name).is_some_and(|entry| {
                                 matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent | catalog::ToolHost::CommandStatus | catalog::ToolHost::UpdateGoal | catalog::ToolHost::SelectTools)
                             })
@@ -3247,6 +3256,169 @@ impl RunState {
                                     if tool_scope.interrupted {
                                         break;
                                     }
+                                    continue;
+                                }
+                                if let Some(surface) = code_surface.as_ref().filter(|_| call.name == runtime::RUN_CODE_TOOL) {
+                                    let tool_span = tracing::info_span!(target: "qq::diagnostic", "run_code", call_ordinal = call.call_ordinal);
+                                    let source = match serde_json::from_str::<runtime::RunCodeArgs>(&call.arguments) {
+                                        Ok(arguments) => Ok(arguments.code),
+                                        Err(error) => Err(format!("invalid arguments: {error}")),
+                                    };
+                                    let mut script = match source.map(|source| surface.program(source)).and_then(|program| qq_script::start(program).map_err(|error| error.to_string())) {
+                                        Ok(script) => Some(script),
+                                        Err(message) => {
+                                            let result = tools::ToolOutput::refused(message);
+                                            run.stall.settled(false);
+                                            results[usize::from(call.call_ordinal - 1)] = Some(RetainedResult::retain(&result, &call.name, call.id));
+                                            yield TurnStep::Emit(RuntimeEvent::ToolCallFinished { id: call.id, result: result.model_text, is_error: true, file_states: Vec::new(), display: None, spill: None, execution_context: None });
+                                            None
+                                        }
+                                    };
+                                    let Some(script) = script.as_mut() else { continue; };
+                                    let mut settled: Vec<qq_script::Settled> = Vec::new();
+                                    let mut progressed = false;
+                                    let completion = 'script: loop {
+                                        let requests = match tool_span.in_scope(|| script.advance(std::mem::take(&mut settled))) {
+                                            qq_script::Advance::Done(completion) => break 'script completion,
+                                            qq_script::Advance::Calls(requests) => requests,
+                                        };
+                                        let mut admitted: Vec<(u16, RuntimeToolCall, bool)> = Vec::with_capacity(requests.len());
+                                        for request in requests {
+                                            let Some(tool) = surface.tool(&request.name) else {
+                                                settled.push(qq_script::Settled { seq: request.seq, result: Err(runtime::code::unknown(&request.name)) });
+                                                continue;
+                                            };
+                                            let id = match ToolCallId::generate() {
+                                                Ok(id) => id,
+                                                Err(error) => {
+                                                    yield TurnStep::Emit(RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() });
+                                                    yield TurnStep::Stop; return;
+                                                }
+                                            };
+                                            let effect = catalog.lookup(&tool.tool_name).map_or(catalog::EffectClass::ReadOnly, |entry| entry.effect);
+                                            let arguments = serde_json::Value::Object(request.arguments).to_string();
+                                            let child = RuntimeToolCall {
+                                                id,
+                                                turn_ordinal: call.turn_ordinal,
+                                                call_ordinal: runtime::child_ordinal(call.call_ordinal, request.seq),
+                                                provider_call_id: runtime::child_provider_id(call.call_ordinal, request.seq),
+                                                name: tool.tool_name.clone(),
+                                                arguments,
+                                                effect,
+                                                rejection: None,
+                                            };
+                                            run.budget.charge_tool_calls(1);
+                                            yield TurnStep::Emit(RuntimeEvent::ScriptCallRequested { call: child.clone(), parent: call.id, seq: request.seq });
+                                            let decision = {
+                                                let interrupt = interrupt_requested(steering, run.handled_interrupt);
+                                                tokio::select! {
+                                                    biased;
+                                                    () = interrupt => None,
+                                                    decision = gate.resolve(&child) => Some(decision),
+                                                }
+                                            };
+                                            let Some(decision) = decision else {
+                                                tool_scope.interrupted = true;
+                                                yield TurnStep::Emit(RuntimeEvent::ToolCallUnexecuted { id: child.id, message: INTERRUPTED_TOOL_RESULT.to_owned(), interrupted: true });
+                                                break 'script runtime::code::interrupted();
+                                            };
+                                            match decision {
+                                                GateDecision::Execute => {
+                                                    let read_only = overlaps(&child);
+                                                    admitted.push((request.seq, child, read_only));
+                                                }
+                                                GateDecision::Deny { message } => {
+                                                    yield TurnStep::Emit(RuntimeEvent::ToolCallDenied { id: child.id, message: message.clone() });
+                                                    settled.push(qq_script::Settled { seq: request.seq, result: Err(runtime::code::denied(&message)) });
+                                                }
+                                                GateDecision::Answered { result } => {
+                                                    progressed = true;
+                                                    yield TurnStep::Emit(RuntimeEvent::ToolCallAnswered { id: child.id, result: result.clone() });
+                                                    settled.push(qq_script::Settled { seq: request.seq, result: Ok(serde_json::Value::String(result)) });
+                                                }
+                                                GateDecision::Fail { kind, message } => {
+                                                    yield TurnStep::Emit(RuntimeEvent::Failed { kind, message });
+                                                    yield TurnStep::Stop; return;
+                                                }
+                                            }
+                                        }
+                                        let mut index = 0;
+                                        while index < admitted.len() {
+                                            let reading = admitted[index].2;
+                                            let end = if reading {
+                                                let mut end = index;
+                                                while end < admitted.len() && admitted[end].2 && end - index < MAX_PARALLEL_READS { end += 1; }
+                                                end
+                                            } else {
+                                                index + 1
+                                            };
+                                            let batch: Vec<(u16, RuntimeToolCall)> = admitted[index..end].iter().map(|(seq, child, _)| (*seq, child.clone())).collect();
+                                            index = end;
+                                            for (_, child) in &batch {
+                                                yield TurnStep::Emit(RuntimeEvent::ToolCallStarted { id: child.id, may_change_files: may_change_files(child, network_policy, catalog.lookup(&child.name)) });
+                                            }
+                                            let child_limits = run.budget.child_budget(tokio::time::Instant::now());
+                                            let seqs: Vec<(ToolCallId, u16)> = batch.iter().map(|(seq, child)| (child.id, *seq)).collect();
+                                            let mut executions = futures_stream::iter(
+                                                batch.into_iter().map(|(_, child)| execute_one(child, None, child_limits.clone(), true)),
+                                            ).buffer_unordered(MAX_PARALLEL_READS);
+                                            loop {
+                                                let interrupt = interrupt_requested(steering, run.handled_interrupt);
+                                                let next = tokio::select! {
+                                                    biased;
+                                                    () = interrupt => { tool_scope.interrupted = true; None }
+                                                    next = executions.next() => next,
+                                                };
+                                                let Some((child, result, child_spend)) = next else { break; };
+                                                if let Err(error) = tool_tasks.check() {
+                                                    yield TurnStep::Emit(RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() });
+                                                    yield TurnStep::Stop; return;
+                                                }
+                                                if let Some(spend) = child_spend {
+                                                    run.budget.charge_child(spend.usage, spend.cost_usd_nanos);
+                                                    if let Some(spawner) = &spawner { spawner.acknowledge(child.id); }
+                                                }
+                                                note_audited_action(&mut run.audit_triggers, &mut run.audit_actions, audit_hook.is_some(), &child, &result);
+                                                progressed |= runtime::is_progress(&child, catalog.lookup(&child.name), &result);
+                                                if may_change_files(&child, network_policy, catalog.lookup(&child.name)) && !result.is_error {
+                                                    run.loop_guard.mutation();
+                                                }
+                                                let seq = seqs.iter().find(|(id, _)| *id == child.id).map(|(_, seq)| *seq).expect("every child has a seq");
+                                                settled.push(qq_script::Settled { seq, result: runtime::code::settle(&result) });
+                                                let result = cite_spill(result, &child.name, child.id, spills.is_some());
+                                                yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
+                                                    id: child.id,
+                                                    result: result.model_text,
+                                                    is_error: result.is_error,
+                                                    file_states: result.file_states,
+                                                    display: result.ui_payload,
+                                                    spill: result.spill,
+                                                    execution_context: result.execution_context,
+                                                });
+                                            }
+                                            drop(executions);
+                                            if tool_scope.interrupted {
+                                                break 'script runtime::code::interrupted();
+                                            }
+                                        }
+                                    };
+                                    drop(tool_span);
+                                    let (text, is_error) = runtime::code::render(&completion);
+                                    let result = tools::bounded_result(text, is_error);
+                                    let result = cite_spill(result, &call.name, call.id, spills.is_some());
+                                    run.stall.settled(progressed);
+                                    run.observe_tool(&call, &RetainedResult::retain(&result, &call.name, call.id), network_policy, None);
+                                    results[usize::from(call.call_ordinal - 1)] = Some(RetainedResult::retain(&result, &call.name, call.id));
+                                    yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
+                                        id: call.id,
+                                        result: result.model_text,
+                                        is_error: result.is_error,
+                                        file_states: Vec::new(),
+                                        display: None,
+                                        spill: result.spill,
+                                        execution_context: None,
+                                    });
+                                    if tool_scope.interrupted { break; }
                                     continue;
                                 }
                                 let call_id = call.id;

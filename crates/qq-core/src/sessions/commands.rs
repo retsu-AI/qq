@@ -1353,6 +1353,7 @@ pub(super) fn execute_command(
                                 WHERE previous.run_id = current.run_id
                                   AND previous.turn_ordinal = current.turn_ordinal
                                   AND previous.result IS NOT NULL
+                                  AND previous.parent_call_id IS NULL
                             ),
                             current.arguments_json
                      FROM tool_calls current WHERE current.id = ?1",

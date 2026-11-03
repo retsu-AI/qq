@@ -1460,6 +1460,21 @@ impl Store {
         .await
     }
 
+    pub(super) async fn request_script_call(
+        &self,
+        claimed: &ClaimedRun,
+        call: crate::runtime::RuntimeToolCall,
+        parent: ToolCallId,
+        seq: u16,
+    ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            request_script_call(connection, store_id, identity, &call, parent, seq)
+        })
+        .await
+    }
+
     pub(super) async fn start_tool_call(
         &self,
         claimed: &ClaimedRun,

@@ -3563,6 +3563,7 @@ dependencies = [
  "ipnet",
  "qq-protocol",
  "qq-provider",
+ "qq-script",
  "regex",
  "reqwest",
  "rusqlite",

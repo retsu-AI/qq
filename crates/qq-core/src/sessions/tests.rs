@@ -6,6 +6,7 @@ use super::*;
 mod accounting;
 mod approvals;
 mod budgets;
+mod code_mode;
 mod commands;
 mod compaction;
 mod context_capacity;

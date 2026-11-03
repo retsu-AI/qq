@@ -160,6 +160,7 @@ pub(crate) const REASONING_TRUNCATED_NOTICE: &str = "[QQ runtime notice; not a u
 previous response spent the whole output token limit on reasoning and produced no text or tool \
 call. Reason less this time: take the next step now, or give the answer briefly.";
 pub use qq_protocol::MAX_TURN_RETRIES;
+pub use qq_script::Language as CodeLanguage;
 
 pub use qq_provider::TurnRecoveryPolicy;
 
@@ -856,9 +857,16 @@ pub struct Runtime {
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
     pub(crate) turn_recovery: TurnRecoveryPolicy,
     pub(crate) tool_calls_per_slice: usize,
+    pub(crate) code_language: Option<CodeLanguage>,
 }
 
 impl Runtime {
+    #[must_use]
+    pub const fn with_code_language(mut self, language: CodeLanguage) -> Self {
+        self.code_language = Some(language);
+        self
+    }
+
     #[must_use]
     pub const fn with_reasoning_effort(mut self, effort: qq_provider::ReasoningEffort) -> Self {
         self.reasoning_effort = Some(effort);
@@ -905,6 +913,7 @@ impl Runtime {
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
             tool_calls_per_slice: MAX_TOOL_CALLS_PER_SLICE,
+            code_language: None,
         })
     }
 
@@ -1575,6 +1584,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::ContextPruned { .. }
                 | RuntimeEvent::ProviderOverflow { .. }
                 | RuntimeEvent::ToolCallStarted { .. }
+                | RuntimeEvent::ScriptCallRequested { .. }
                 | RuntimeEvent::ToolCallDenied { .. }
                 | RuntimeEvent::GoalRequestAdmitted { .. }
                 | RuntimeEvent::GoalPaidCancelled

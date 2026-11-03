@@ -77,6 +77,17 @@ command, fetch a URL, call an MCP tool. The session's
 [approval mode](#approval-mode) decides whether it runs,
 is held for an answer, or is refused. See [Permissions and trust](permissions.md#approval-modes).
 
+### Code mode
+
+Experimental. With `policy: (tool_surface: code)` the model gets one tool,
+`run_code`. It writes a short Python script, and the script calls the other
+tools as async functions, so it can do several reads, filter the results and
+print only what matters in one turn. The script runs in an embedded sandbox
+with no filesystem, network or process access of its own. Every call it makes
+is a [tool call](#tool-call) recorded under the `run_code` call and goes
+through the same approval as a direct call. Variables do not carry over
+between `run_code` calls.
+
 ### Steer
 
 Send more input to a run while it is working. `Enter` during a run steers:

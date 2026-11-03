@@ -85,7 +85,7 @@ fn python_declarations(tools: &[ToolSignature]) -> String {
             parameters.push("**kwargs".to_owned());
         }
         text.push_str(&format!(
-            "async def {}({}) -> dict:\n",
+            "async def {}({}) -> str:\n",
             tool.name,
             parameters.join(", ")
         ));
@@ -137,7 +137,7 @@ fn javascript_declarations(tools: &[ToolSignature]) -> String {
             text.push_str(&format!("/** {} */\n", summary.replace("*/", "* /")));
         }
         text.push_str(&format!(
-            "declare function {}(args: {{ {} }}): Promise<any>;\n",
+            "declare function {}(args: {{ {} }}): Promise<string>;\n",
             tool.name,
             fields.join("; ")
         ));
@@ -275,7 +275,7 @@ mod tests {
     fn python_stub_puts_optional_parameters_after_a_star() {
         assert_eq!(
             declarations(Language::Python, &[read_file()]),
-            "async def read_file(path: str, *, start_line: int = None) -> dict:\n    \"\"\"Read a workspace file.\n    path: Workspace-relative path.\"\"\"\n\n"
+            "async def read_file(path: str, *, start_line: int = None) -> str:\n    \"\"\"Read a workspace file.\n    path: Workspace-relative path.\"\"\"\n\n"
         );
     }
 
@@ -285,7 +285,7 @@ mod tests {
         assert!(signature.accepts_any);
         assert_eq!(
             declarations(Language::Python, &[signature]),
-            "async def mcp__x__y(**kwargs) -> dict:\n    ...\n\n"
+            "async def mcp__x__y(**kwargs) -> str:\n    ...\n\n"
         );
     }
 
@@ -293,7 +293,7 @@ mod tests {
     fn javascript_stub_takes_one_object() {
         assert_eq!(
             declarations(Language::JavaScript, &[read_file()]),
-            "/** Read a workspace file. */\ndeclare function read_file(args: { path: string; start_line?: number }): Promise<any>;\n"
+            "/** Read a workspace file. */\ndeclare function read_file(args: { path: string; start_line?: number }): Promise<string>;\n"
         );
     }
 

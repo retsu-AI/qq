@@ -25,7 +25,7 @@ use super::{
     MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, MAX_RETENTION_DAYS, McpServerConfig,
     McpTransport, ModelMetadata, ModelPricing, ModelRoute, ProfileApprovalMode, ProviderAccess,
     ProviderApi, ProviderConfig, ProviderKind, RuntimeOverrides, SecretRef, SourceIdentity,
-    SourceKind, SourceReport,
+    SourceKind, SourceReport, ToolSurface,
 };
 
 pub(super) fn deserialize_unique_btree_map<'de, D, K, V>(
@@ -593,7 +593,7 @@ impl McpServerPatch {
     }
 }
 
-pub const POLICY_FIELD_NAMES: [&str; 12] = [
+pub const POLICY_FIELD_NAMES: [&str; 13] = [
     "allowed_providers",
     "exposed_tools",
     "denied_providers",
@@ -602,6 +602,7 @@ pub const POLICY_FIELD_NAMES: [&str; 12] = [
     "allow_custom_providers",
     "allow_literal_secrets",
     "builtin_preference",
+    "tool_surface",
     "deny_tools",
     "deny_shell_prefixes",
     "deny_hosts",
@@ -715,6 +716,7 @@ pub(super) struct PolicyPatch {
     allow_custom_providers: Option<bool>,
     allow_literal_secrets: Option<bool>,
     builtin_preference: Option<BuiltinPreference>,
+    tool_surface: Option<ToolSurface>,
     deny_tools: Option<Vec<String>>,
     deny_shell_prefixes: Option<Vec<String>>,
     deny_hosts: Option<Vec<String>>,
@@ -1897,6 +1899,9 @@ impl MergeState {
         }
         if let Some(incoming) = patch.builtin_preference {
             self.policy.builtin_preference = self.policy.builtin_preference.max(incoming);
+        }
+        if let Some(incoming) = patch.tool_surface {
+            self.policy.tool_surface = incoming;
         }
         if let Some(incoming) = &patch.deny_tools {
             let mut combined: BTreeSet<_> = self.policy.deny_tools.iter().cloned().collect();

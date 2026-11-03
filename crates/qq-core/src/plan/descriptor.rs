@@ -146,6 +146,8 @@ pub struct AgentPlanDescriptor {
     pub provenance: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_sources: Vec<ContextSourceDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_language: Option<qq_script::Language>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

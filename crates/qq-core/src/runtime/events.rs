@@ -162,6 +162,11 @@ pub(crate) enum RuntimeEvent {
         goal_notices: Vec<OrderedTurnNotice>,
         reserved_goal_notices: usize,
     },
+    ScriptCallRequested {
+        call: RuntimeToolCall,
+        parent: ToolCallId,
+        seq: u16,
+    },
     ToolCallStarted {
         id: ToolCallId,
         may_change_files: bool,

@@ -89,10 +89,19 @@ impl PythonScript {
                     return self.finish(value, None);
                 }
                 Ok(RunProgress::FunctionCall(call)) => {
-                    let signature = self
+                    let Some(signature) = self
                         .tools
                         .iter()
-                        .find(|tool| tool.name == call.function_name);
+                        .find(|tool| tool.name == call.function_name)
+                    else {
+                        let name = call.function_name.clone();
+                        progress = call.resume(
+                            ExtFunctionResult::NotFound(name),
+                            PrintWriter::Callback(&mut self.print),
+                        );
+                        continue;
+                    };
+                    let signature = Some(signature);
                     let positional = call.args.args().map(|arg| to_json(arg, 0)).collect();
                     let keywords = call
                         .args

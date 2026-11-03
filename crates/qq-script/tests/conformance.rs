@@ -231,3 +231,11 @@ fn printed_output_is_bounded() {
     assert_eq!(printed.tail, "7\n998\n999\n");
     assert_eq!(printed.total_bytes(), 3890);
 }
+
+#[test]
+fn undeclared_functions_raise_name_error_without_a_host_call() {
+    let run =
+        run("try:\n    await write_file(path='x')\nexcept NameError:\n    print('undeclared')");
+    assert!(run.batches.is_empty());
+    assert_eq!(printed(&run), "undeclared\n");
+}
