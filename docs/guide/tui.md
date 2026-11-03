@@ -360,6 +360,7 @@ searchable palette that runs the highlighted command on `Enter`.
 | create a child session |  | `Alt-C` |
 | compact session context | `/compact` |  |
 | undo the newest compaction | `/rollback` |  |
+| reload the login shell environment (/shell reload) | `/shell` |  |
 | restore files to a turn checkpoint | `/rewind` |  |
 | fork before a prompt into a worktree | `/fork` |  |
 | delete every empty session | `/prune` |  |
