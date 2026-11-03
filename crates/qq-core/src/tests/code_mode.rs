@@ -175,3 +175,100 @@ async fn direct_tools_are_unknown_in_code_mode() {
     assert!(is_error);
     assert_eq!(text, "unknown tool \"read_file\"");
 }
+
+struct StructuredHost(MockMcpRegistry);
+
+impl ExternalToolHost for StructuredHost {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn catalog_blocking(&self) -> HostCatalog {
+        self.0.catalog_blocking()
+    }
+    fn catalog_is_current(&self, generation: u64) -> bool {
+        self.0.catalog_is_current(generation)
+    }
+    fn config_grants(&self) -> Vec<String> {
+        self.0.config_grants()
+    }
+    fn call(&self, name: String, arguments: String, cancelled: RunCancellation) -> HostCallFuture {
+        self.0.call(name, arguments, cancelled)
+    }
+    fn call_observed(
+        &self,
+        name: String,
+        arguments: String,
+        cancelled: RunCancellation,
+    ) -> crate::HostCallObservation {
+        let future = self.0.call(name, arguments, cancelled);
+        crate::HostCallObservation::Observed(Box::pin(async move {
+            future.await.map(|result| crate::ObservedHostToolResult {
+                result,
+                result_digest: None,
+                structured: Some(serde_json::json!({"pong": 2, "tags": ["a", "b"]})),
+            })
+        }))
+    }
+    fn readiness(&self) -> HostReadiness {
+        self.0.readiness()
+    }
+    fn shutdown(&self) -> HostShutdownFuture {
+        self.0.shutdown()
+    }
+}
+
+struct ExecuteAll;
+
+impl ToolGate for ExecuteAll {
+    fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
+        Box::pin(std::future::ready(GateDecision::Execute))
+    }
+}
+
+#[tokio::test]
+async fn a_script_receives_mcp_structured_content_as_a_dict() {
+    let directory = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = MockMcpRegistry::returning(HostToolResult {
+        content: "pong".to_owned(),
+        is_error: false,
+    });
+    registry.grants = vec!["mcp__srv__ping".to_owned()];
+    let runtime = Runtime::new(
+        TurnScript {
+            turns: vec![
+                vec![(
+                    "run_code",
+                    run_code("r = await mcp__srv__ping()\nprint(r['pong'] + 1, r['tags'][1])"),
+                )],
+                Vec::new(),
+            ],
+            requests: Arc::clone(&requests),
+        },
+        "gpt-test",
+        256,
+    )
+    .unwrap()
+    .with_tool_host(Arc::new(StructuredHost(registry)))
+    .with_code_language(CodeLanguage::Python);
+    let events = runtime
+        .run_loop(
+            vec![Message::user("ping")],
+            std::fs::canonicalize(directory.path()).unwrap(),
+            RunCancellation::new(),
+            Arc::new(ExecuteAll),
+            Arc::new(workspace::FileState::default()),
+        )
+        .collect::<Vec<_>>()
+        .await;
+    assert!(
+        matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+        "{events:?}"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolCallFinished { result, .. } if result == "pong"
+    )));
+    let requests = requests.lock().unwrap();
+    assert_eq!(script_result(&requests), ("3 b\n".to_owned(), false));
+}

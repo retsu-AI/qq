@@ -2950,13 +2950,14 @@ impl RunState {
                                         let outcome = match hosts[index].call_observed(
                                             call.name.clone(), call.arguments.clone(), cancelled,
                                         ) {
-                                            hosts::HostCallObservation::Rendered(future) => future.await.map(|result| (result, None)),
-                                            hosts::HostCallObservation::Observed(future) => future.await.map(|observed| (observed.result, observed.result_digest)),
+                                            hosts::HostCallObservation::Rendered(future) => future.await.map(|result| (result, None, None)),
+                                            hosts::HostCallObservation::Observed(future) => future.await.map(|observed| (observed.result, observed.result_digest, observed.structured)),
                                         };
                                         match outcome {
-                                            Ok((outcome, identity)) => {
+                                            Ok((outcome, identity, structured)) => {
                                                 let mut result = tools::bounded_result(outcome.content, outcome.is_error);
                                                 if let Some(identity) = identity { result.result_digest = identity; }
+                                                result.value = structured;
                                                 result
                                             }
                                             Err(error) => hosts::host_error_result(&error),

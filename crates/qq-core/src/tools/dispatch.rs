@@ -503,7 +503,7 @@ pub(crate) enum ResultDisposition {
     Interrupted,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ToolOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) native_outcome: Option<CommandOutcome>,
@@ -515,6 +515,8 @@ pub(crate) struct ToolOutput {
     pub(crate) file_states: Vec<FileStateUpdate>,
     pub(crate) spill: Option<SpillRecord>,
     pub(crate) execution_context: Option<Box<super::process_context::ExecutionContextReceipt>>,
+    #[serde(skip)]
+    pub(crate) value: Option<serde_json::Value>,
 }
 
 pub(super) struct ReadSideOutput {
@@ -630,6 +632,7 @@ impl ToolOutput {
             spill,
             execution_context: None,
             native_outcome: None,
+            value: None,
         }
     }
 
@@ -644,6 +647,7 @@ impl ToolOutput {
             spill: None,
             execution_context: None,
             native_outcome: None,
+            value: None,
         }
     }
 
@@ -658,6 +662,7 @@ impl ToolOutput {
             spill: None,
             execution_context: None,
             native_outcome: None,
+            value: None,
         }
     }
 }

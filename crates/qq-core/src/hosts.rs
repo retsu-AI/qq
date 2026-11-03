@@ -81,10 +81,11 @@ pub struct HostToolResult {
 
 pub type HostCallFuture =
     Pin<Box<dyn Future<Output = Result<HostToolResult, HostCallError>> + Send + 'static>>;
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ObservedHostToolResult {
     pub result: HostToolResult,
     pub result_digest: Option<[u8; 32]>,
+    pub structured: Option<serde_json::Value>,
 }
 
 pub type ObservedHostCallFuture =

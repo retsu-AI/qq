@@ -110,7 +110,7 @@ fn run_code_spec(language: Language, signatures: &[ToolSignature]) -> ToolSpec {
         Language::Python => format!(
             "Run a Python script in a sandbox. The script calls QQ's tools as async functions and must await them; \
              independent calls go together in asyncio.gather and run concurrently. Each call returns the tool's \
-             text result. A denied call raises PermissionError, a missing path FileNotFoundError, bad arguments \
+             text result, or a dict when an MCP tool returns structured content. A denied call raises PermissionError, a missing path FileNotFoundError, bad arguments \
              ValueError or TypeError, any other failure RuntimeError. Only print() output and the value of the \
              last expression come back, so print what you need and keep it short. Variables do not persist \
              between run_code calls. There is no filesystem, network or subprocess access except through these \
@@ -120,7 +120,7 @@ fn run_code_spec(language: Language, signatures: &[ToolSignature]) -> ToolSpec {
         Language::JavaScript => format!(
             "Run a JavaScript script in a sandbox. Call QQ's tools as async functions taking one object and \
              await them; use Promise.all for independent calls. Each call resolves to the tool's text result \
-             and rejects with an Error when the tool fails. Only console.log output and the value of the last \
+             (an object for MCP structured content) and rejects with an Error when the tool fails. Only console.log output and the value of the last \
              expression come back.\n\n```ts\n{declarations}```"
         ),
     };
@@ -164,7 +164,10 @@ pub(crate) fn settle(output: &tools::ToolOutput) -> Result<serde_json::Value, To
         Some(tools::dispatch::CommandOutcome::Exited { .. })
     );
     if !output.is_error || ran_to_exit {
-        return Ok(serde_json::Value::String(output.model_text.clone()));
+        return Ok(output
+            .value
+            .clone()
+            .unwrap_or_else(|| serde_json::Value::String(output.model_text.clone())));
     }
     Err(failure(&output.model_text, output.disposition))
 }

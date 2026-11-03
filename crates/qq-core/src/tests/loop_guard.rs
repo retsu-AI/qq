@@ -842,6 +842,7 @@ impl ExternalToolHost for IdentifiedFixtureHost {
                     use sha2::Digest;
                     sha2::Sha256::digest(ordinal.to_le_bytes()).into()
                 }),
+                structured: None,
             })
         }))
     }

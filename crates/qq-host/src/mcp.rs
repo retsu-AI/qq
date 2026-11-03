@@ -142,6 +142,7 @@ impl ExternalToolHost for WiredMcpRegistry {
                         is_error: outcome.is_error,
                     },
                     result_digest: outcome.result_digest,
+                    structured: outcome.structured,
                 }),
                 Some(McpCallFailure::Timeout) => Err(HostCallError::Timeout),
                 Some(McpCallFailure::Cancelled) => Err(HostCallError::Cancelled),
