@@ -3360,7 +3360,7 @@ impl RunState {
                                             let child_limits = run.budget.child_budget(tokio::time::Instant::now());
                                             let seqs: Vec<(ToolCallId, u16)> = batch.iter().map(|(seq, child)| (child.id, *seq)).collect();
                                             let mut executions = futures_stream::iter(
-                                                batch.into_iter().map(|(_, child)| execute_one(child, None, child_limits.clone(), true)),
+                                                batch.into_iter().map(|(_, child)| execute_one(child, None, child_limits, true)),
                                             ).buffer_unordered(MAX_PARALLEL_READS);
                                             loop {
                                                 let interrupt = interrupt_requested(steering, run.handled_interrupt);
