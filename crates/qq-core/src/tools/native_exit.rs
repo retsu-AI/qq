@@ -9,10 +9,14 @@ pub(super) async fn confirm(
 ) -> io::Result<()> {
     static SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
     let deadline = Instant::now() + super::shell::EXIT_CONFIRMATION;
-    let permit = Arc::clone(SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(16))))
-        .acquire_owned()
-        .await
-        .map_err(io::Error::other)?;
+    let permit = Arc::clone(SLOTS.get_or_init(|| {
+        Arc::new(tokio::sync::Semaphore::new(
+            crate::workspace::blocking_capacity().saturating_mul(2),
+        ))
+    }))
+    .acquire_owned()
+    .await
+    .map_err(io::Error::other)?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         loop {

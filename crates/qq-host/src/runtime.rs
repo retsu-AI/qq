@@ -117,6 +117,7 @@ pub struct TuiModelState {
     pub unauthenticated_providers: Vec<ProviderRemedy>,
     pub approval_timeout: Option<std::time::Duration>,
     pub retention: Option<std::time::Duration>,
+    pub max_active_runs: usize,
 }
 
 #[derive(Clone)]
@@ -340,6 +341,7 @@ impl RuntimeFactory {
             unauthenticated_providers,
             approval_timeout: snapshot.approval_timeout(),
             retention: snapshot.retention(),
+            max_active_runs: snapshot.max_active_runs(),
         }
     }
 
@@ -2271,10 +2273,12 @@ impl RuntimeHandler {
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
         retention: Option<std::time::Duration>,
+        max_active_runs: usize,
     ) -> Result<Self, RuntimeHandlerError> {
         factory.validate_isolated_tui_qa_state()?;
         let database_path = factory.inner.config.session_database_path()?;
         let options = SessionRuntimeOptions::new(database_path)
+            .with_max_active_runs(max_active_runs)
             .with_approval_timeout(approval_timeout)
             .with_retention(retention)
             .with_policy_authority(Arc::new(factory.clone()));
@@ -2288,7 +2292,13 @@ impl RuntimeHandler {
         approval_timeout: Option<std::time::Duration>,
         retention: Option<std::time::Duration>,
     ) -> Result<Self, RuntimeHandlerError> {
-        Self::open_owned(factory, approval_timeout, retention).await
+        Self::open_owned(
+            factory,
+            approval_timeout,
+            retention,
+            qq_config::default_max_active_runs(),
+        )
+        .await
     }
 
     pub fn sessions(&self) -> &SessionRuntime {

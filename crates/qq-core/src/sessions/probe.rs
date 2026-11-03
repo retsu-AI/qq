@@ -5,6 +5,7 @@ use super::SessionRuntimeError;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Checkpoint {
     CancellationRead(RunId),
+    AdmissionWaiting(RunId),
     OutcomeRead(RunId),
     OutcomeReadPolled(RunId),
     ChildCreated(SessionId),

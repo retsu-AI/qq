@@ -128,6 +128,13 @@ impl ToolGate for SessionToolGate {
                 }
                 approval::PolicyDecision::AskUser { question } => {
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
+                    let admission = inner
+                        .admissions
+                        .lock()
+                        .expect("run admissions lock")
+                        .get(&claimed.identity.run_id)
+                        .cloned();
+                    let hold = admission.as_ref().map(|admission| admission.suspend());
                     match inner
                         .store
                         .request_tool_approval(
@@ -168,6 +175,10 @@ impl ToolGate for SessionToolGate {
                         () = sleep_until_or_never(deadline) => true,
                     };
                     inner.remove_approval(call.id);
+                    drop(hold);
+                    if let Some(admission) = admission {
+                        admission.reacquire().await;
+                    }
                     conclude(&inner, &claimed, call.id, timed_out).await
                 }
                 approval::PolicyDecision::RequireApproval => {
@@ -193,6 +204,13 @@ impl ToolGate for SessionToolGate {
                     };
                     let edit = approval::edit_preview(&call.name, &call.arguments);
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
+                    let admission = inner
+                        .admissions
+                        .lock()
+                        .expect("run admissions lock")
+                        .get(&claimed.identity.run_id)
+                        .cloned();
+                    let hold = admission.as_ref().map(|admission| admission.suspend());
                     match inner
                         .store
                         .request_tool_approval(
@@ -235,6 +253,10 @@ impl ToolGate for SessionToolGate {
                         () = sleep_until_or_never(deadline) => true,
                     };
                     inner.remove_approval(call.id);
+                    drop(hold);
+                    if let Some(admission) = admission {
+                        admission.reacquire().await;
+                    }
                     conclude(&inner, &claimed, call.id, timed_out).await
                 }
             }

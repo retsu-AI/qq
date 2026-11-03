@@ -9,6 +9,8 @@ mod prepare;
 pub mod skills;
 
 pub use access::WorkspacePathError;
+#[cfg(windows)]
+pub(crate) use access::blocking_capacity;
 pub(crate) use access::{Workspace, WriteTarget, blocking_permits};
 #[cfg(test)]
 pub(crate) use atomic_write::hold_tool_apply;

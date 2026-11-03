@@ -1528,8 +1528,10 @@ adds a bound. Auto has no human wait; headless questions return a result
 telling the agent to decide without human input.
 
 Flow: when policy requires approval, the runtime persists and publishes
-`ToolApprovalRequested` and the run stays active but waiting — it holds its
-run permit, other sessions are unaffected, and cancellation still works. A
+`ToolApprovalRequested` and the run stays active but waiting. Approval and
+`ask_user` holds release their admission slot; an answer queues reacquisition
+before queued new runs, and execution continues only after a slot is available.
+Cancellation still works while waiting or reacquiring. A
 client responds with an idempotent `RespondToolApproval` command (approve
 once, or deny). Denials are returned to the model as tool errors, not run
 failures, so the agent can take another path. Headless runs choose their

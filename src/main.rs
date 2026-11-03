@@ -597,6 +597,7 @@ async fn prepare_headless(
         factory,
         snapshot.approval_timeout(),
         snapshot.retention(),
+        snapshot.max_active_runs(),
     )
     .await
     .map_err(|error| match error {
@@ -787,6 +788,7 @@ async fn interactive(
             unauthenticated_providers,
             approval_timeout,
             retention,
+            max_active_runs,
         } = model_state;
         let models = models
             .into_iter()
@@ -831,6 +833,7 @@ async fn interactive(
                         factory.clone(),
                         approval_timeout,
                         retention,
+                        max_active_runs,
                     )
                     .await
                     .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
