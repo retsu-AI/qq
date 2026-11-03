@@ -39,6 +39,11 @@ pub const DEFAULT_MCP_CALL_TIMEOUT_SECONDS: u64 = 60;
 pub const MAX_MCP_CALL_TIMEOUT_SECONDS: u64 = 600;
 pub const DEFAULT_MCP_MAX_CONCURRENT_CALLS: u32 = 4;
 pub const MAX_MCP_MAX_CONCURRENT_CALLS: u32 = 64;
+#[must_use]
+pub fn default_max_active_runs() -> usize {
+    std::thread::available_parallelism().map_or(8, |count| count.get().max(8))
+}
+
 pub const MAX_APPROVAL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 pub const MAX_RETENTION_DAYS: u32 = 3_650;
 
@@ -1258,6 +1263,7 @@ pub enum ConfigKey {
     Audit,
     Goals,
     ApprovalTimeout,
+    MaxActiveRuns,
     Retention,
     ReasoningEffort,
     MaxOutputTokens,
@@ -1311,6 +1317,7 @@ pub struct ConfigProvenance {
     delegation: Option<SourceIdentity>,
     audit: Option<SourceIdentity>,
     approval_timeout: Option<SourceIdentity>,
+    max_active_runs: Option<SourceIdentity>,
     retention: Option<SourceIdentity>,
     reasoning_effort: Option<SourceIdentity>,
     max_output_tokens: Option<SourceIdentity>,
@@ -1357,6 +1364,11 @@ impl ConfigProvenance {
     #[must_use]
     pub const fn approval_timeout(&self) -> Option<&SourceIdentity> {
         self.approval_timeout.as_ref()
+    }
+
+    #[must_use]
+    pub const fn max_active_runs(&self) -> Option<&SourceIdentity> {
+        self.max_active_runs.as_ref()
     }
 
     #[must_use]
@@ -1426,6 +1438,7 @@ pub struct ConfigSnapshot {
     audit: AuditConfig,
     goals: GoalsConfig,
     approval_timeout: Option<std::time::Duration>,
+    max_active_runs: usize,
     retention: Option<std::time::Duration>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
@@ -1447,6 +1460,7 @@ pub struct ClientSnapshot {
     audit: AuditConfig,
     goals: GoalsConfig,
     approval_timeout: Option<std::time::Duration>,
+    max_active_runs: usize,
     retention: Option<std::time::Duration>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
@@ -1477,6 +1491,11 @@ impl ClientSnapshot {
     #[must_use]
     pub const fn approval_timeout(&self) -> Option<std::time::Duration> {
         self.approval_timeout
+    }
+
+    #[must_use]
+    pub const fn max_active_runs(&self) -> usize {
+        self.max_active_runs
     }
 
     #[must_use]
@@ -1751,6 +1770,11 @@ impl ConfigSnapshot {
     }
 
     #[must_use]
+    pub const fn max_active_runs(&self) -> usize {
+        self.max_active_runs
+    }
+
+    #[must_use]
     pub const fn retention(&self) -> Option<std::time::Duration> {
         self.retention
     }
@@ -1865,6 +1889,8 @@ pub enum ConfigError {
         name: &'static str,
         removed: &'static str,
     },
+    #[error("max_active_runs must be between 1 and 65536, found {0}")]
+    InvalidMaxActiveRuns(usize),
     #[error("invalid {setting} value {value:?}")]
     InvalidSetting {
         setting: &'static str,

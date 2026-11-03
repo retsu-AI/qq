@@ -620,7 +620,7 @@ pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 9] = [
     "goals",
 ];
 
-pub const DOCUMENT_FIELD_NAMES: [&str; 15] = [
+pub const DOCUMENT_FIELD_NAMES: [&str; 16] = [
     "version",
     "organization",
     "model",
@@ -629,6 +629,7 @@ pub const DOCUMENT_FIELD_NAMES: [&str; 15] = [
     "audit",
     "goals",
     "approval_timeout_seconds",
+    "max_active_runs",
     "retention_days",
     "reasoning_effort",
     "max_output_tokens",
@@ -754,6 +755,8 @@ pub(super) struct Document {
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     approval_timeout_seconds: Field<u64>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
+    max_active_runs: Field<usize>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
     retention_days: Field<u32>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     reasoning_effort: Field<qq_provider::ReasoningEffort>,
@@ -852,6 +855,11 @@ impl Document {
             return Err(ConfigError::LiteralSecretForbidden {
                 origin: origin.clone(),
             });
+        }
+        if let Field::Set(limit) = self.max_active_runs
+            && !(1..=65536).contains(&limit)
+        {
+            return Err(ConfigError::InvalidMaxActiveRuns(limit));
         }
         if self.retention_days.is_present()
             && matches!(origin.kind(), SourceKind::Project | SourceKind::Remote)
@@ -1016,6 +1024,9 @@ impl Document {
         }
         if self.approval_timeout_seconds.is_present() {
             touched.push(ConfigKey::ApprovalTimeout);
+        }
+        if self.max_active_runs.is_present() {
+            touched.push(ConfigKey::MaxActiveRuns);
         }
         if self.retention_days.is_present() {
             touched.push(ConfigKey::Retention);
@@ -1398,6 +1409,7 @@ pub(super) struct MergeState {
     audit: Option<AuditPatch>,
     goals: GoalsConfig,
     approval_timeout_seconds: Option<u64>,
+    max_active_runs: usize,
     retention_days: Option<u32>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
@@ -1432,6 +1444,7 @@ impl MergeState {
             .collect::<BTreeMap<_, _>>();
         let provenance = ConfigProvenance {
             max_output_tokens: Some(source.clone()),
+            max_active_runs: Some(source.clone()),
             providers: providers
                 .keys()
                 .cloned()
@@ -1444,6 +1457,7 @@ impl MergeState {
             super::SourceStatus::Applied,
             vec![
                 ConfigKey::MaxOutputTokens,
+                ConfigKey::MaxActiveRuns,
                 ConfigKey::Providers,
                 ConfigKey::Policy,
             ],
@@ -1457,6 +1471,7 @@ impl MergeState {
                 audit: None,
                 goals: GoalsConfig::default(),
                 approval_timeout_seconds: None,
+                max_active_runs: super::default_max_active_runs(),
                 retention_days: None,
                 reasoning_effort: None,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -1489,6 +1504,21 @@ impl MergeState {
                     SourceKind::Compiled,
                     "compiled defaults",
                 ));
+            }
+        }
+        apply_default(
+            &document.max_active_runs,
+            &mut self.max_active_runs,
+            super::default_max_active_runs(),
+        );
+        match document.max_active_runs {
+            Field::Missing => {}
+            Field::Set(_) => self.provenance.max_active_runs = Some(source.clone()),
+            Field::Clear => {
+                self.provenance.max_active_runs = Some(SourceIdentity::virtual_source(
+                    SourceKind::Compiled,
+                    "compiled defaults",
+                ))
             }
         }
         match document.approval_timeout_seconds {
@@ -2092,6 +2122,7 @@ impl MergeState {
             delegation,
             audit,
             approval_timeout,
+            max_active_runs: self.max_active_runs,
             retention,
             reasoning_effort: self.reasoning_effort,
             max_output_tokens: self.max_output_tokens,
@@ -2121,6 +2152,7 @@ impl ClientSnapshot {
             audit: self.audit,
             goals: self.goals,
             approval_timeout: self.approval_timeout,
+            max_active_runs: self.max_active_runs,
             retention: self.retention,
             reasoning_effort: self.reasoning_effort,
             max_output_tokens: self.max_output_tokens,

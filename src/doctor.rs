@@ -137,20 +137,29 @@ pub fn run_checks(
     let mut checks = Vec::with_capacity(CHECK_NAMES.len());
     let global_config = loader.paths().global_dir().join("config.ron");
 
-    let loaded = match loader.check(request) {
+    let loaded = match loader.load_for_client(request) {
         Ok(snapshot) => {
-            let sources = snapshot
-                .as_ref()
-                .map_or(0, |snapshot| snapshot.source_reports().len());
+            let sources = snapshot.source_reports().len();
             checks.push(Check::ok(
                 "configuration",
-                match snapshot.as_ref() {
-                    Some(_) => format!("{sources} sources; qq config sources lists them"),
-                    None => "valid; no model selected".to_owned(),
+                if snapshot.model().is_some() {
+                    format!(
+                        "{sources} sources; max_active_runs: {}; qq config sources lists them",
+                        snapshot.max_active_runs()
+                    )
+                } else {
+                    format!(
+                        "valid; no model selected; max_active_runs: {}",
+                        snapshot.max_active_runs()
+                    )
                 },
             ));
             checks.push(Check::ok("project trust", "nothing pending"));
-            snapshot.ok_or(NotLoaded::NoModel)
+            if snapshot.model().is_some() {
+                Ok(snapshot)
+            } else {
+                Err(NotLoaded::NoModel)
+            }
         }
         Err(config::ConfigError::TrustRequired { pending, reports }) => {
             checks.push(Check::warn(
@@ -193,7 +202,7 @@ pub fn run_checks(
 
     match &loaded {
         Ok(snapshot) => {
-            let route = snapshot.model();
+            let route = snapshot.model().expect("loaded model");
             checks.push(Check::ok("model", route.as_str().to_owned()));
             checks.push(credential_check(store, snapshot, route.provider()));
         }
@@ -296,7 +305,7 @@ pub fn run_checks(
 
 fn credential_check(
     store: &auth::CredentialStore,
-    snapshot: &config::ConfigSnapshot,
+    snapshot: &config::ClientSnapshot,
     provider_id: &str,
 ) -> Check {
     const NAME: &str = "credential";
@@ -468,7 +477,7 @@ fn credential_check(
     }
 }
 
-fn mcp_check(store: &auth::CredentialStore, snapshot: &config::ConfigSnapshot) -> Check {
+fn mcp_check(store: &auth::CredentialStore, snapshot: &config::ClientSnapshot) -> Check {
     const NAME: &str = "mcp";
     let servers = snapshot.mcp_servers();
     if servers.is_empty() {
@@ -997,6 +1006,33 @@ mod tests {
         assert_eq!(store.status, Status::Ok);
         assert_eq!(store.summary, "1 stored (keyring)");
         assert!(report.passed() || report.failed == 0, "{report:#?}");
+    }
+
+    #[test]
+    fn doctor_reports_max_active_runs_with_and_without_a_model() {
+        for model in ["", ", model: \"openai/gpt-5.6\""] {
+            let fixture = Fixture::new(Arc::new(MemoryKeyring::default()));
+            fixture.write_global(&format!("(version: 1, max_active_runs: 2{model})"));
+            let report = fixture.run();
+            assert_eq!(check(&report, "configuration").status, Status::Ok);
+            assert!(
+                check(&report, "configuration")
+                    .summary
+                    .contains("max_active_runs: 2")
+            );
+            let mut text = Vec::new();
+            render_text(&report, false, &mut text).unwrap();
+            assert!(
+                String::from_utf8(text)
+                    .unwrap()
+                    .contains("max_active_runs: 2")
+            );
+            assert!(
+                serde_json::to_string(&report)
+                    .unwrap()
+                    .contains("max_active_runs: 2")
+            );
+        }
     }
 
     #[test]

@@ -8,7 +8,9 @@ use cap_std::fs::Dir;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
-const MAX_BLOCKING_TOOL_TASKS: usize = 8;
+pub(crate) fn blocking_capacity() -> usize {
+    std::thread::available_parallelism().map_or(8, |count| count.get().max(8))
+}
 static BLOCKING_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 static APPLY_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 
@@ -365,7 +367,21 @@ fn apply_lock(path: &Path) -> Arc<Mutex<()>> {
 }
 
 pub(crate) fn blocking_permits() -> Arc<Semaphore> {
-    Arc::clone(BLOCKING_PERMITS.get_or_init(|| Arc::new(Semaphore::new(MAX_BLOCKING_TOOL_TASKS))))
+    Arc::clone(BLOCKING_PERMITS.get_or_init(|| Arc::new(Semaphore::new(blocking_capacity()))))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn file_blocking_capacity_scales_with_cpu_parallelism() {
+        let expected = std::thread::available_parallelism().map_or(8, |count| count.get().max(8));
+        assert_eq!(super::blocking_capacity(), expected);
+        let pool = tokio::sync::Semaphore::new(super::blocking_capacity());
+        let permits = pool.try_acquire_many(expected as u32).unwrap();
+        assert_eq!(pool.available_permits(), 0);
+        drop(permits);
+        assert_eq!(pool.available_permits(), expected);
+    }
 }
 
 #[derive(Debug, Error)]
