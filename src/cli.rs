@@ -77,13 +77,10 @@ pub enum Command {
         prompt: String,
     },
 
-    /// Run one autonomous agent task to completion without a UI.
-    ///
-    /// The task runs through the same durable session runtime as the TUI and
-    /// server. Exit status: 0 success, 1 task or model failure, 2 invalid
-    /// configuration, 3 timeout or budget exhaustion, 4 harness or
-    /// persistence failure, 5 needs input (the model asked a question no
-    /// client could answer), 130 interrupted by Ctrl-C.
+    #[command(
+        about = "Run one autonomous agent task to completion without a UI.",
+        long_about = "Run one autonomous agent task to completion without a UI.\n\nThe task runs through the same durable session runtime as the TUI and server. Exit status: 0 success, 1 task or model failure, 2 invalid configuration, 3 timeout or budget exhaustion, 4 harness or persistence failure, 5 needs input (the model asked a question no client could answer), 130 interrupted by Ctrl-C."
+    )]
     Run(Box<RunArgs>),
 
     /// Run the user-scoped QQ server in the foreground.
@@ -198,7 +195,7 @@ pub struct InitArgs {
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Task prompt.
+    #[arg(help = "Task prompt.")]
     pub prompt: String,
 
     /// Workspace directory. Defaults to the current directory.
