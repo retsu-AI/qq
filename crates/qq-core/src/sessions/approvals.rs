@@ -172,7 +172,7 @@ impl ToolGate for SessionToolGate {
                                 "The run stopped before this question was answered.").await;
                         }
                         result = &mut resolved => result.is_err(),
-                        () = sleep_until_or_never(deadline) => true,
+                        () = probe::PROBE.polled(probe::Checkpoint::ApprovalWaiting(claimed.identity.session_id), sleep_until_or_never(deadline)) => true,
                     };
                     inner.remove_approval(call.id);
                     let decision = conclude(&inner, &claimed, call.id, timed_out).await;
@@ -251,7 +251,7 @@ impl ToolGate for SessionToolGate {
                                 "The run stopped before this approval was resolved.").await;
                         }
                         result = &mut resolved => result.is_err(),
-                        () = sleep_until_or_never(deadline) => true,
+                        () = probe::PROBE.polled(probe::Checkpoint::ApprovalWaiting(claimed.identity.session_id), sleep_until_or_never(deadline)) => true,
                     };
                     inner.remove_approval(call.id);
                     let decision = conclude(&inner, &claimed, call.id, timed_out).await;

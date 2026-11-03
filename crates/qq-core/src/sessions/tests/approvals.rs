@@ -150,6 +150,7 @@ async fn admission_approval_timeout_is_persisted_before_reacquiring_a_slot() {
             },
         )
         .await;
+        let waiting = probe::PROBE.observe(probe::Checkpoint::ApprovalWaiting(fixture.session_id));
         let held = fixture.submit("held timeout").await;
         within(started.recv()).await.unwrap().unwrap();
         let (_, hold) = collect_until_approval_requested(&mut fixture.events).await;
@@ -157,6 +158,7 @@ async fn admission_approval_timeout_is_persisted_before_reacquiring_a_slot() {
             .await
             .unwrap()
             .unwrap();
+        within(waiting).await.unwrap().unwrap();
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(61)).await;
         let observed = within(collect_until(&mut fixture.events, |event| {
