@@ -15,10 +15,10 @@ use qq_provider::Provider;
 use thiserror::Error;
 
 pub use descriptor::{
-    AgentPlanDescriptor, AuditDescriptor, AuditModeDescriptor, ContextBudgetDescriptor,
-    ContextSourceDescriptor, CredentialReference, DESCRIPTOR_VERSION, FailPolicyDescriptor,
-    McpServerDescriptor, McpTransportKind, ProviderDescriptor, SkillIndexDescriptor,
-    ToolCatalogDescriptor, ToolOutputProjection,
+    AgentPlanDescriptor, AuditDescriptor, AuditModeDescriptor, CodeModuleDescriptor,
+    ContextBudgetDescriptor, ContextSourceDescriptor, CredentialReference, DESCRIPTOR_VERSION,
+    FailPolicyDescriptor, McpServerDescriptor, McpTransportKind, ProviderDescriptor,
+    SkillIndexDescriptor, ToolCatalogDescriptor, ToolOutputProjection,
 };
 pub use fingerprint::SourceFingerprint;
 
@@ -362,6 +362,7 @@ pub struct CompiledAgentPlan {
     pub(crate) roster_text: Option<Arc<str>>,
     pub(crate) hosts: Arc<[Arc<dyn ExternalToolHost>]>,
     pub(crate) code_language: Option<qq_script::Language>,
+    code_modules: Arc<[qq_script::Module]>,
     code_surfaces: std::sync::Mutex<
         Vec<(
             crate::catalog::StaticFilter,
@@ -406,6 +407,7 @@ impl CompiledAgentPlan {
             language,
             &self.catalog,
             filter,
+            Arc::clone(&self.code_modules),
         ));
         surfaces.push((*filter, Arc::clone(&surface)));
         Some(surface)
@@ -619,6 +621,18 @@ impl CompiledAgentPlan {
         let (skills, skill_sources) =
             SkillIndex::compile_blocking(&opened, &guidance_roots, &skill_roots);
         sources.extend(skill_sources);
+        let code_modules: Arc<[qq_script::Module]> = match code_language {
+            Some(language) => {
+                let (modules, module_sources) = crate::runtime::code::modules::load_blocking(
+                    language,
+                    &opened,
+                    global_config_dir.as_deref(),
+                );
+                sources.extend(module_sources);
+                modules.into()
+            }
+            None => Arc::from([]),
+        };
 
         let mut static_tools: Vec<StaticTool> = tools::static_tools();
         let spawn_spec = tools::spawn_agent_spec(&runtime.spawn_model_routes, &runtime.delegation);
@@ -832,6 +846,15 @@ impl CompiledAgentPlan {
                 .map(ContextSourceDescriptor::from)
                 .collect(),
             code_language,
+            code_modules: code_modules
+                .iter()
+                .map(|module| CodeModuleDescriptor {
+                    name: module.name.clone(),
+                    digest: qq_protocol::ContentHash::from_bytes(
+                        <sha2::Sha256 as sha2::Digest>::digest(module.source.as_bytes()).into(),
+                    ),
+                })
+                .collect(),
         };
         let (digest, descriptor_json) = descriptor.encode()?;
         let roster_text: Option<Arc<str>> = crate::runtime::delegation_roster_text(
@@ -887,6 +910,7 @@ impl CompiledAgentPlan {
             roster_text,
             hosts: host_handles,
             code_language,
+            code_modules,
             code_surfaces: std::sync::Mutex::new(Vec::new()),
             prompt_prefixes: std::sync::Mutex::new(vec![(full_key, full_prefix)]),
             resolved_model: Arc::new(resolved_model),
@@ -1438,6 +1462,10 @@ mod tests {
                 fail_policy: FailPolicyDescriptor::Open,
             }],
             code_language: Some(qq_script::Language::Python),
+            code_modules: vec![CodeModuleDescriptor {
+                name: "repo".to_owned(),
+                digest: qq_protocol::ContentHash::from_bytes([7; 32]),
+            }],
         }
     }
 
@@ -1464,7 +1492,7 @@ mod tests {
         );
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "a38cead8abe35566625b755f808873ba9f0b1d7ee59321510ca121c44f7a4bdf"
+            "cacb42f146491a0556ce78bdfdb17b2273d42549f58321851392da41c9a2da40"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v18\0".len()..]).unwrap();
@@ -1668,6 +1696,12 @@ mod tests {
                 Box::new(|d| d.context_sources[0].fail_policy = FailPolicyDescriptor::Closed),
             ),
             ("code_language", Box::new(|d| d.code_language = None)),
+            (
+                "code_modules.digest",
+                Box::new(|d| {
+                    d.code_modules[0].digest = qq_protocol::ContentHash::from_bytes([8; 32])
+                }),
+            ),
         ];
         for (name, mutate) in variants {
             let mut variant = golden_descriptor();

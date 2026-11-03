@@ -88,6 +88,13 @@ is a [tool call](#tool-call) recorded under the `run_code` call and goes
 through the same approval as a direct call. Variables do not carry over
 between `run_code` calls.
 
+Scripts can `import` your own helper modules: `.py` files in the
+workspace's `.qq/code/` directory or in `code/` under your global
+configuration directory (the workspace file wins on a name clash). Helpers
+call tools the same way scripts do, and the `run_code` description lists
+each module's top-level functions. At most 32 modules of 64 KiB each are
+loaded; a module named after a built-in one such as `asyncio` is ignored.
+
 ### Steer
 
 Send more input to a run while it is working. `Enter` during a run steers:

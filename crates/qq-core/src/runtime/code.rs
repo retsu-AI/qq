@@ -6,11 +6,14 @@ use serde_json::json;
 
 use crate::{catalog, tools};
 
+pub(crate) mod modules;
+
 pub(crate) const RUN_CODE_TOOL: &str = "run_code";
 pub(crate) const SCRIPT_CHILD_CALL_PREFIX: &str = "qq-script:";
 const SCRIPT_CHILD_ORDINAL_BASE: u16 = 1024;
 const MAX_SCRIPT_CALLS: u16 = 256;
 const MAX_DECLARED_EXTERNAL_TOOLS: usize = 24;
+const MAX_LISTED_DEFINITIONS: usize = 12;
 const EXCLUDED_HOSTS: [catalog::ToolHost; 3] = [
     catalog::ToolHost::RunCode,
     catalog::ToolHost::SelectTools,
@@ -28,6 +31,7 @@ pub(crate) struct ScriptTool {
 pub(crate) struct CodeSurface {
     pub(crate) language: Language,
     pub(crate) tools: Arc<[ScriptTool]>,
+    pub(crate) modules: Arc<[qq_script::Module]>,
     pub(crate) spec: ToolSpec,
 }
 
@@ -36,6 +40,7 @@ impl CodeSurface {
         language: Language,
         catalog: &catalog::ToolCatalog,
         filter: &catalog::StaticFilter,
+        modules: Arc<[qq_script::Module]>,
     ) -> Self {
         let mut external = 0_usize;
         let mut tools = Vec::new();
@@ -66,10 +71,11 @@ impl CodeSurface {
         }
         let signatures: Vec<ToolSignature> =
             tools.iter().map(|tool| tool.signature.clone()).collect();
-        let spec = run_code_spec(language, &signatures);
+        let spec = run_code_spec(language, &signatures, &modules);
         Self {
             language,
             tools: tools.into(),
+            modules,
             spec,
         }
     }
@@ -89,6 +95,7 @@ impl CodeSurface {
                 .iter()
                 .map(|tool| tool.signature.clone())
                 .collect(),
+            modules: self.modules.to_vec(),
             limits: qq_script::Limits {
                 max_calls: MAX_SCRIPT_CALLS,
                 ..qq_script::Limits::default()
@@ -104,8 +111,36 @@ fn script_name(tool_name: &str) -> String {
     }
 }
 
-fn run_code_spec(language: Language, signatures: &[ToolSignature]) -> ToolSpec {
+fn module_index(modules: &[qq_script::Module]) -> String {
+    if modules.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from("\n\nHelper modules you can import:\n");
+    for module in modules {
+        text.push_str(&format!("- {}", module.name));
+        let definitions: Vec<&str> = module
+            .source
+            .lines()
+            .filter(|line| line.starts_with("def ") || line.starts_with("async def "))
+            .map(|line| line.trim_end().trim_end_matches(':'))
+            .take(MAX_LISTED_DEFINITIONS)
+            .collect();
+        if !definitions.is_empty() {
+            text.push_str(": ");
+            text.push_str(&definitions.join("; "));
+        }
+        text.push('\n');
+    }
+    text
+}
+
+fn run_code_spec(
+    language: Language,
+    signatures: &[ToolSignature],
+    modules: &[qq_script::Module],
+) -> ToolSpec {
     let declarations = qq_script::declarations(language, signatures);
+    let modules = module_index(modules);
     let description = match language {
         Language::Python => format!(
             "Run a Python script in a sandbox. The script calls QQ's tools as async functions and must await them; \
@@ -115,13 +150,13 @@ fn run_code_spec(language: Language, signatures: &[ToolSignature]) -> ToolSpec {
              last expression come back, so print what you need and keep it short. Variables do not persist \
              between run_code calls. There is no filesystem, network or subprocess access except through these \
              functions; exec is named run_program here. Most of the standard library is unavailable; asyncio, \
-             json, re, math and datetime are present.\n\n```python\n{declarations}```"
+             json, re, math and datetime are present.\n\n```python\n{declarations}```{modules}"
         ),
         Language::JavaScript => format!(
             "Run a JavaScript script in a sandbox. Call QQ's tools as async functions taking one object and \
              await them; use Promise.all for independent calls. Each call resolves to the tool's text result \
              (an object for MCP structured content) and rejects with an Error when the tool fails. Only console.log output and the value of the last \
-             expression come back.\n\n```ts\n{declarations}```"
+             expression come back.\n\n```ts\n{declarations}```{modules}"
         ),
     };
     ToolSpec::new(

@@ -1,6 +1,6 @@
 mod audit;
 mod budget;
-mod code;
+pub(crate) mod code;
 mod compaction;
 mod deadline;
 mod events;

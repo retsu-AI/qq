@@ -1,6 +1,6 @@
 use qq_script::{
-    Advance, Completion, FailureKind, HostCall, Language, Limits, Program, ScriptFailure, Settled,
-    ToolFailure, ToolSignature,
+    Advance, Completion, FailureKind, HostCall, Language, Limits, Module, Program, ScriptFailure,
+    Settled, ToolFailure, ToolSignature,
 };
 use serde_json::{Value, json};
 
@@ -29,6 +29,19 @@ fn tools() -> Vec<ToolSignature> {
     ]
 }
 
+fn modules() -> Vec<Module> {
+    vec![
+        Module {
+            name: "repo".to_owned(),
+            source: "import asyncio\nimport text\n\nasync def both(a, b):\n    x, y = await asyncio.gather(read_file(a), search(query=b))\n    return text.short(x['args']['path']) + '/' + y['tool']\n\ndef fail():\n    raise ValueError('helper failed')\n".to_owned(),
+        },
+        Module {
+            name: "text".to_owned(),
+            source: "def short(s):\n    return s[:3]\n".to_owned(),
+        },
+    ]
+}
+
 struct Run {
     batches: Vec<Vec<HostCall>>,
     completion: Completion,
@@ -44,6 +57,7 @@ fn run_with(
         language,
         source: source.to_owned(),
         tools: tools(),
+        modules: modules(),
         limits,
     })
     .unwrap();
@@ -238,4 +252,34 @@ fn undeclared_functions_raise_name_error_without_a_host_call() {
         run("try:\n    await write_file(path='x')\nexcept NameError:\n    print('undeclared')");
     assert!(run.batches.is_empty());
     assert_eq!(printed(&run), "undeclared\n");
+}
+
+#[test]
+fn helper_modules_import_and_call_tools() {
+    let run = run("import repo\nprint(await repo.both('abcdef', 'q'))");
+    assert_eq!(run.batches.len(), 1);
+    assert_eq!(run.batches[0].len(), 2);
+    assert_eq!(printed(&run), "abc/search\n");
+}
+
+#[test]
+fn from_imports_bind_helper_names() {
+    let run = run("def go():\n    from text import short as s\n    return s('hello')\nprint(go())");
+    assert_eq!(printed(&run), "hel\n");
+}
+
+#[test]
+fn helper_exceptions_carry_a_traceback_into_the_helper() {
+    let run = run("import repo\nrepo.fail()");
+    let Some(ScriptFailure::Raised(message)) = &run.completion.failure else {
+        panic!("{:?}", run.completion.failure);
+    };
+    assert!(message.contains("ValueError: helper failed"), "{message}");
+    assert!(message.contains("in fail"), "{message}");
+}
+
+#[test]
+fn unknown_modules_are_still_missing() {
+    let run = run("try:\n    import nope\nexcept ModuleNotFoundError:\n    print('missing')");
+    assert_eq!(printed(&run), "missing\n");
 }

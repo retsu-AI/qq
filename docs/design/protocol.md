@@ -69,7 +69,7 @@ an experimental `run_code` script made: `parent` is the `run_code` call and
 `provider_call_id` `qq-script:<parent ordinal>:<seq>` and a `call_ordinal`
 of 1024 or more. A v43 client rejects the field (`ToolCallSnapshot` denies
 unknown fields), so upgrade clients with the server. Descriptor 18 adds
-`code_language`; only descriptor 18 encodes. Store schema 66 adds the
+`code_language` and `code_modules` (name and SHA-256 of each helper module); only descriptor 18 encodes. Store schema 66 adds the
 nullable `tool_calls.parent_call_id` and `tool_calls.script_seq` columns.
 
 Version 43 removes agent packs. `AgentProfileSummary.pack` is gone and a

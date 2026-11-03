@@ -12,6 +12,8 @@ use crate::{
     printed::PrintBuffer,
 };
 
+mod imports;
+
 const MAX_VALUE_DEPTH: usize = 64;
 
 impl PrintWriterCallback for PrintBuffer {
@@ -170,9 +172,11 @@ impl Script for PythonScript {
     fn advance(&mut self, settled: Vec<Settled>) -> Advance {
         match std::mem::replace(&mut self.state, State::Finished) {
             State::Ready(program) => {
-                let input_names = program.tools.iter().map(|tool| tool.name.clone()).collect();
+                let input_names: Vec<String> =
+                    program.tools.iter().map(|tool| tool.name.clone()).collect();
+                let source = imports::rewrite(&program.source, &program.modules, &input_names);
                 let runner = match MontyRun::new(
-                    program.source,
+                    source,
                     "main.py",
                     input_names,
                     CompileOptions::default(),

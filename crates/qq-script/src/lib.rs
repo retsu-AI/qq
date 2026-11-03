@@ -65,7 +65,37 @@ pub struct Program {
     pub language: Language,
     pub source: String,
     pub tools: Vec<ToolSignature>,
+    pub modules: Vec<Module>,
     pub limits: Limits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Module {
+    pub name: String,
+    pub source: String,
+}
+
+impl Language {
+    #[must_use]
+    pub const fn module_extension(self) -> &'static str {
+        match self {
+            Self::Python => "py",
+            Self::JavaScript => "js",
+        }
+    }
+
+    #[must_use]
+    pub fn module_name_allowed(self, name: &str) -> bool {
+        declarations::is_identifier(name) && !self.builtin_module_names().contains(&name)
+    }
+
+    fn builtin_module_names(self) -> Vec<&'static str> {
+        match self {
+            #[cfg(feature = "python")]
+            Self::Python => monty::builtin_module_names(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

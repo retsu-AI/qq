@@ -186,3 +186,53 @@ async fn a_policy_denied_script_command_is_recorded_as_a_denied_child() {
         });
     assert_eq!(result.as_deref(), Some("denied\n"));
 }
+
+#[tokio::test]
+async fn a_workspace_helper_module_imports_and_its_tool_calls_are_children() {
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let loader = Arc::new(CodeModeLoader {
+        requests: Arc::clone(&requests),
+        script: vec![(
+            "run_code",
+            serde_json::json!({ "code": "import repo\nprint(await repo.count_tree())" })
+                .to_string(),
+        )],
+    });
+    let mut harness = SessionFixture::open(loader, ApprovalMode::Auto)
+        .await
+        .recording(&requests);
+    let modules = harness.workspace_path.join(".qq/code");
+    std::fs::create_dir_all(&modules).unwrap();
+    std::fs::write(
+        modules.join("repo.py"),
+        "async def count_tree():\n    listing = await tree()\n    return len(listing.splitlines())\n",
+    )
+    .unwrap();
+    let run = submit_prompt(&harness, "count").await;
+    collect_until(&mut harness.events, finished_for(run)).await;
+    let rows = tool_call_rows(&harness, run).await;
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.0.as_str(), row.1.as_str()))
+            .collect::<Vec<_>>(),
+        [("run_code", "completed"), ("tree", "completed")]
+    );
+    let requests = harness.requests.lock().unwrap();
+    let description = requests[0].tools()[0].description();
+    assert!(
+        description.contains("- repo: async def count_tree()"),
+        "{description}"
+    );
+    let result = requests
+        .last()
+        .unwrap()
+        .messages()
+        .iter()
+        .flat_map(Message::content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(result.trim().parse::<usize>().is_ok(), "{result}");
+}
