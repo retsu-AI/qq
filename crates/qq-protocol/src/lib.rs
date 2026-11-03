@@ -67,11 +67,12 @@ pub use sessions::{
     PromptCacheCapabilities, PromptVersion, ProviderRequestShapeIdentity,
     ProviderRequestShapeVersion, Question, QuestionPreview, ResolvedModel, ResolvedModelVersion,
     RunActivity, RunFailure, RunLimits, RunOrigin, RunOutcome, RunPause, RunPromptIdentity,
-    RunSnapshot, RunStatus, SessionAccounting, SessionCommand, SessionCommandKind, SessionEvent,
-    SessionEventEnvelope, SessionPurpose, SessionSnapshot, SessionStatus, SessionSummary,
-    ShellCommandPreview, ShellVerdict, SideQuestionSnapshot, SideQuestionState, SnapshotRequest,
-    SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallSnapshot,
-    ToolCallState, ToolErrorKind, ToolExposure, WorkspaceSnapshot, WorkspaceSummary,
+    RunSnapshot, RunStatus, ScriptCallRef, SessionAccounting, SessionCommand, SessionCommandKind,
+    SessionEvent, SessionEventEnvelope, SessionPurpose, SessionSnapshot, SessionStatus,
+    SessionSummary, ShellCommandPreview, ShellVerdict, SideQuestionSnapshot, SideQuestionState,
+    SnapshotRequest, SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay,
+    ToolCallSnapshot, ToolCallState, ToolErrorKind, ToolExposure, WorkspaceSnapshot,
+    WorkspaceSummary,
 };
 
 mod workspaces;
@@ -79,7 +80,7 @@ pub use workspaces::{
     MAX_WORKSPACE_PAGE, WorkspaceCatalog, WorkspaceCatalogCursor, WorkspaceCatalogRequest,
 };
 
-pub const PROTOCOL_VERSION: u16 = 43;
+pub const PROTOCOL_VERSION: u16 = 44;
 
 pub const SNAPSHOT_REQUIRED_SSE_EVENT: &str = "snapshot_required";
 

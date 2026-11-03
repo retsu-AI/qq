@@ -100,6 +100,7 @@ pub fn tool_call(id: ToolCallId, session_id: SessionId, name: &str) -> ToolCallS
         result: None,
         is_error: false,
         display: None,
+        script: None,
     }
 }
 

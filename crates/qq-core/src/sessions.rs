@@ -22,11 +22,11 @@ use qq_protocol::{
     MAX_PENDING_HOLDS, MessageId, MessageRole, MessageSnapshot, MessageState, ModelPricing,
     ModelSelection, PendingHold, QuestionPreview, ReasoningEvent, ResolvedModel, RunActivity,
     RunFailure, RunFailureKind, RunId, RunLimits, RunOutcome, RunPlanIdentity, RunPromptIdentity,
-    RunSnapshot, RunStatus, SessionAccounting, SessionCommand, SessionEvent, SessionEventEnvelope,
-    SessionId, SessionPurpose, SessionSnapshot, SessionStatus, SessionSummary, ShellCommandPreview,
-    SnapshotRequest, SpawnOrigin, StoreId, SubscribeRequest, TextChannel, TokenUsage,
-    ToolCallDisplay, ToolCallId, ToolCallSnapshot, ToolCallState, WorkspaceId, WorkspaceSnapshot,
-    WorkspaceSummary, validate_input,
+    RunSnapshot, RunStatus, ScriptCallRef, SessionAccounting, SessionCommand, SessionEvent,
+    SessionEventEnvelope, SessionId, SessionPurpose, SessionSnapshot, SessionStatus,
+    SessionSummary, ShellCommandPreview, SnapshotRequest, SpawnOrigin, StoreId, SubscribeRequest,
+    TextChannel, TokenUsage, ToolCallDisplay, ToolCallId, ToolCallSnapshot, ToolCallState,
+    WorkspaceId, WorkspaceSnapshot, WorkspaceSummary, validate_input,
 };
 use qq_provider::{ContentBlock, Message, Role};
 use rusqlite::{Connection, OptionalExtension, params};

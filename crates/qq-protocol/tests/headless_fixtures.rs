@@ -284,7 +284,7 @@ fn assert_well_formed<'a>(
 
 #[test]
 fn current_version_streams_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 43);
+    assert_eq!(PROTOCOL_VERSION, 44);
 
     let stream = |trial: HeadlessTrial, events: Vec<HeadlessRecord>, outcome: HeadlessOutcome| {
         let mut stream = Vec::with_capacity(events.len() + 2);
@@ -522,6 +522,7 @@ fn current_version_streams_match_their_goldens() {
                                 result: None,
                                 is_error: false,
                                 display: None,
+                                script: None,
                             },
                             shell: None,
                             edit: None,

@@ -6,9 +6,9 @@ use sha2::{Digest, Sha256};
 
 use super::PlanCompileError;
 
-pub const DESCRIPTOR_VERSION: u16 = 17;
+pub const DESCRIPTOR_VERSION: u16 = 18;
 
-const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v17\0";
+const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v18\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "name")]

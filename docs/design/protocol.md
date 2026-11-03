@@ -60,8 +60,17 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 43
+PROTOCOL_VERSION = 44
 ```
+
+Version 44 adds `ToolCallSnapshot.script` (`{parent, seq}`) for a call that
+an experimental `run_code` script made: `parent` is the `run_code` call and
+`seq` the call's order within the script. Such calls have
+`provider_call_id` `qq-script:<parent ordinal>:<seq>` and a `call_ordinal`
+of 1024 or more. A v43 client rejects the field (`ToolCallSnapshot` denies
+unknown fields), so upgrade clients with the server. Descriptor 18 adds
+`code_language`; only descriptor 18 encodes. Store schema 66 adds the
+nullable `tool_calls.parent_call_id` and `tool_calls.script_seq` columns.
 
 Version 43 removes agent packs. `AgentProfileSummary.pack` is gone and a
 skill's `source` is never `pack:<id>/…`. Descriptor 17 drops the `pack`
@@ -177,7 +186,7 @@ its path onto the client machine. Listing neither registers a directory nor
 changes permissions.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v43/`; the `v42` directory (N−1) is
+`crates/qq-protocol/tests/fixtures/v44/`; the `v43` directory (N−1) is
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -698,7 +707,7 @@ optional-bodied:
 ```
 
 Response `ServerCapabilities` (abridged; see
-`crates/qq-protocol/tests/fixtures/v43/capabilities.json` for the full golden):
+`crates/qq-protocol/tests/fixtures/v44/capabilities.json` for the full golden):
 
 ```json
 {
@@ -2216,7 +2225,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v43/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v44/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.

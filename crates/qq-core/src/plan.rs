@@ -1437,7 +1437,7 @@ mod tests {
                 },
                 fail_policy: FailPolicyDescriptor::Open,
             }],
-            code_language: None,
+            code_language: Some(qq_script::Language::Python),
         }
     }
 
@@ -1459,15 +1459,15 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v17\0{\"version\":17,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v18\0{\"version\":18,\"profile\":\"review\","
             )
         );
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "2814afaf56e17b69b3113267aee8fa165d7dbca3373d5a0c9cd96ca66d2c9b8f"
+            "a38cead8abe35566625b755f808873ba9f0b1d7ee59321510ca121c44f7a4bdf"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v17\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v18\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
@@ -1667,6 +1667,7 @@ mod tests {
                 "context_sources.fail_policy",
                 Box::new(|d| d.context_sources[0].fail_policy = FailPolicyDescriptor::Closed),
             ),
+            ("code_language", Box::new(|d| d.code_language = None)),
         ];
         for (name, mutate) in variants {
             let mut variant = golden_descriptor();

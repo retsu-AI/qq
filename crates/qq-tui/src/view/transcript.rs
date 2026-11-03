@@ -482,7 +482,22 @@ impl<'a> TurnIndex<'a> {
             calls.entry(call.run_id).or_default().push(call);
         }
         for run_calls in calls.values_mut() {
-            run_calls.sort_by_key(|call| (call.turn_ordinal, call.call_ordinal));
+            let parent_ordinal: HashMap<ToolCallId, u16> = run_calls
+                .iter()
+                .map(|call| (call.id, call.call_ordinal))
+                .collect();
+            run_calls.sort_by_key(|call| {
+                let anchor = call
+                    .script
+                    .and_then(|script| parent_ordinal.get(&script.parent).copied())
+                    .unwrap_or(call.call_ordinal);
+                (
+                    call.turn_ordinal,
+                    anchor,
+                    call.script.is_some(),
+                    call.call_ordinal,
+                )
+            });
         }
         Self {
             first_assistant,

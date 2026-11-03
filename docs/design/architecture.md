@@ -541,7 +541,8 @@ names, host generations, typed exclusions), the skill index, spawn
 routes, MCP `allow` lists, MCP server declarations (transport, sanitized
 target, credential *reference*, and the configured tool-set `pin`),
 configuration source labels, and every registered context source (name,
-version, the clamped budget the runtime enforces, fail policy). Retry is the
+version, the clamped budget the runtime enforces, fail policy), and the
+experimental code-mode language when `policy.tool_surface` is `code`. Retry is the
 provider's alone (`qq_provider::AttemptPolicy`) and is not part of the plan.
 `AgentPlanDigest` is the SHA-256 of a domain-tagged compact JSON encoding in
 declaration order (`DESCRIPTOR_VERSION` pins the encoding). Secret values,

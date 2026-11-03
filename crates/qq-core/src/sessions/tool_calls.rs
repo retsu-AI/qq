@@ -963,7 +963,7 @@ pub(super) fn load_tool_call(
         .query_row(
             "SELECT r.session_id, t.run_id, t.turn_ordinal, t.call_ordinal,
                     t.provider_call_id, t.name, t.arguments_json, t.state, t.result, t.is_error,
-                    t.display_json
+                    t.display_json, t.parent_call_id, t.script_seq
              FROM tool_calls t JOIN runs r ON r.id = t.run_id WHERE t.id = ?1",
             [tool_call_id.to_string()],
             |row| {
@@ -979,6 +979,8 @@ pub(super) fn load_tool_call(
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, bool>(9)?,
                     row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<u16>>(12)?,
                 ))
             },
         )
@@ -996,6 +998,8 @@ pub(super) fn load_tool_call(
                 result,
                 is_error,
                 display,
+                parent,
+                seq,
             )| {
                 Ok(ToolCallSnapshot {
                     id: tool_call_id,
@@ -1010,6 +1014,14 @@ pub(super) fn load_tool_call(
                     result,
                     is_error,
                     display: display.as_deref().map(serde_json::from_str).transpose()?,
+                    script: match (parent, seq) {
+                        (Some(parent), Some(seq)) => Some(ScriptCallRef {
+                            parent: parse_id(&parent)?,
+                            seq,
+                        }),
+                        (None, None) => None,
+                        _ => return Err(SessionRuntimeError::CONSTRAINT),
+                    },
                 })
             },
         )

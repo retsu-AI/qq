@@ -204,6 +204,59 @@ fn transcript_renders_replayed_tool_activity_collapsed() {
 }
 
 #[test]
+fn script_child_calls_render_indented_under_their_run_code_call() {
+    let mut app = app_with_messages(1);
+    let session_id = app.focused().unwrap();
+    app.receipts_open = true;
+    let parent = tool_call_snapshot(
+        1,
+        "run_code",
+        r#"{"code":"import asyncio\nhits = await search('Widget')"}"#,
+        ToolCallState::Completed,
+        Some("ok\n"),
+        false,
+    );
+    let later = tool_call_snapshot(
+        2,
+        "read_file",
+        r#"{"path":"later.txt"}"#,
+        ToolCallState::Completed,
+        Some("x"),
+        false,
+    );
+    let child = ToolCallSnapshot {
+        call_ordinal: 1024,
+        script: Some(qq_protocol::ScriptCallRef {
+            parent: parent.id,
+            seq: 0,
+        }),
+        ..tool_call_snapshot(
+            3,
+            "search",
+            r#"{"query":"Widget"}"#,
+            ToolCallState::Completed,
+            Some("search \"Widget\" matches=1/1\n"),
+            false,
+        )
+    };
+    app.sessions.get_mut(&session_id).unwrap().tool_calls = Some(vec![later, child, parent]);
+
+    let rows: Vec<String> = frame_rows(&transcript_lines(&app, 100))
+        .into_iter()
+        .filter(|row| row.contains('●'))
+        .collect();
+
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(
+        squash(&rows[0]).starts_with("● Scripted hits = await search('Widget')"),
+        "{rows:?}"
+    );
+    assert!(rows[1].starts_with("  ● "), "{rows:?}");
+    assert!(squash(&rows[1]).contains("Searched \"Widget\""), "{rows:?}");
+    assert!(squash(&rows[2]).contains("Read later.txt"), "{rows:?}");
+}
+
+#[test]
 fn call_only_run_renders_before_its_first_assistant_message() {
     let mut app = app_with_messages(1);
     let session_id = app.focused().unwrap();

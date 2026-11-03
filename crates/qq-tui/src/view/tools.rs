@@ -186,6 +186,19 @@ impl ToolRow {
                 false,
                 None,
             ),
+            "run_code" => (
+                "Script",
+                false,
+                string_argument("code").map(|code| {
+                    code.lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty() && !line.starts_with("import "))
+                        .unwrap_or_default()
+                        .to_owned()
+                }),
+                false,
+                None,
+            ),
             "read_tool_result" => (
                 "Recall",
                 false,
@@ -607,7 +620,10 @@ pub(super) fn render_tool_blocks(
         }
         let context = lookup(call);
         let start = lines.len();
-        lines.push(tool_summary_line(call, context, tick, width));
+        let nested = usize::from(call.script.is_some()) * SCRIPT_CHILD_INDENT;
+        let mut summary = tool_summary_line(call, context, tick, width.saturating_sub(nested));
+        summary.indent = summary.indent.saturating_add(nested as u16);
+        lines.push(summary);
         marks.hits.push((start, Hit::Tool(call.id)));
         if let Some(result) = call.result.as_deref() {
             let panel = match (call.error_kind(), call.is_error) {
@@ -664,6 +680,8 @@ pub(super) fn render_tool_blocks(
     }
     lines
 }
+
+const SCRIPT_CHILD_INDENT: usize = 2;
 
 pub(crate) fn tool_copy_text(call: &ToolCallSnapshot, live_output: Option<&str>) -> String {
     let arguments = serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
@@ -823,6 +841,7 @@ fn verb_for(row: &ToolRow, call: &ToolCallSnapshot) -> String {
         "Spawn" => ("Spawned", "Spawning"),
         "Recall" => ("Recalled", "Recalling"),
         "Fetch" => ("Fetched", "Fetching"),
+        "Script" => ("Scripted", "Scripting"),
         other => (other, other),
     };
     if waiting {

@@ -1968,3 +1968,50 @@ fn rewrite_run_capacity_schema(path: &Path, base_declaration: &str, increment_de
         .unwrap();
     connection.execute_batch(&schema).unwrap();
 }
+
+#[test]
+fn version_sixty_six_migration_adds_null_script_call_columns_to_existing_calls() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, _) = open_database(&path).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO workspaces(id, path) VALUES ('w', '/v65-script');
+             INSERT INTO sessions(id, workspace_id, title, status, created_at_ms,
+                                  updated_at_ms)
+             VALUES ('s', 'w', 'Old', 'idle', 1, 1);
+             INSERT INTO runs(id, session_id, command_id, user_message_id,
+                              assistant_message_id, status, created_at_ms)
+             VALUES ('r', 's', 'cmd', 'u', 'a', 'completed', 1);
+             INSERT INTO tool_calls(id, run_id, turn_ordinal, call_ordinal,
+                                    provider_call_id, name, arguments_json, state,
+                                    result, requested_at_ms)
+             VALUES ('c', 'r', 1, 1, 'p1', 'read_file', '{}', 'completed', 'x', 1);
+             DROP INDEX tool_calls_parent;
+             ALTER TABLE tool_calls DROP COLUMN parent_call_id;
+             ALTER TABLE tool_calls DROP COLUMN script_seq;
+             UPDATE metadata SET value = '65' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    drop(connection);
+
+    let (connection, _) = open_database(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "66"
+    );
+    let row: (String, Option<String>, Option<u16>) = connection
+        .query_row(
+            "SELECT result, parent_call_id, script_seq FROM tool_calls WHERE id = 'c'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(row, ("x".to_owned(), None, None));
+}
