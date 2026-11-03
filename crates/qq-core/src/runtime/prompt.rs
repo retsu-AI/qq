@@ -40,10 +40,9 @@ pub(crate) fn agent_system_prompt(
     specs: &[ToolSpec],
     sections: PromptSections<'_>,
     workspace_instructions: &WorkspaceInstructions,
-    persona: Option<&crate::plan::Persona>,
     selected_guidance: Option<&SelectedGuidance>,
 ) -> String {
-    let mut prompt = agent_prompt_prefix(specs, sections, workspace_instructions, persona);
+    let mut prompt = agent_prompt_prefix(specs, sections, workspace_instructions);
     if let Some(guidance) = selected_guidance {
         guidance.append_to_prompt(&mut prompt);
     }
@@ -61,9 +60,8 @@ impl PromptPrefix {
         specs: &[ToolSpec],
         sections: PromptSections<'_>,
         workspace_instructions: &WorkspaceInstructions,
-        persona: Option<&crate::plan::Persona>,
     ) -> Self {
-        let text = agent_prompt_prefix(specs, sections, workspace_instructions, persona);
+        let text = agent_prompt_prefix(specs, sections, workspace_instructions);
         let mut hasher = Sha256::new();
         hasher.update(text.as_bytes());
         Self {
@@ -96,7 +94,6 @@ fn agent_prompt_prefix(
     specs: &[ToolSpec],
     sections: PromptSections<'_>,
     workspace_instructions: &WorkspaceInstructions,
-    persona: Option<&crate::plan::Persona>,
 ) -> String {
     let PromptSections {
         tool_index,
@@ -425,9 +422,6 @@ fn agent_prompt_prefix(
         prompt.push_str(index.trim_end());
     }
     workspace_instructions.append_to_prompt(&mut prompt);
-    if let Some(persona) = persona {
-        persona.append_to_prompt(&mut prompt);
-    }
     prompt
 }
 
@@ -624,7 +618,6 @@ mod contract_tests {
             },
             &WorkspaceInstructions::empty(),
             None,
-            None,
         )
     }
 
@@ -692,7 +685,6 @@ mod header_authority_tests {
             },
             &WorkspaceInstructions::empty(),
             None,
-            None,
         );
         let start = prompt.find("\nEnvironment:\n").unwrap();
         let end = prompt.find("\nWorking conventions:\n").unwrap();
@@ -724,7 +716,6 @@ mod header_authority_tests {
             },
             &WorkspaceInstructions::empty(),
             None,
-            None,
         );
         assert!(read_only.contains("- Mode: read-only. Only reads run."));
         assert!(!read_only.contains("qq undo"));
@@ -734,7 +725,6 @@ mod header_authority_tests {
                 &crate::tools::specs(),
                 PromptSections::default(),
                 &WorkspaceInstructions::empty(),
-                None,
                 None
             )
             .contains(take)
@@ -747,7 +737,6 @@ mod header_authority_tests {
                 ..PromptSections::default()
             },
             &WorkspaceInstructions::empty(),
-            None,
             None,
         );
         assert!(ask_prompt.contains("Cite code as path:line."));
@@ -763,7 +752,6 @@ mod header_authority_tests {
                 ..PromptSections::default()
             },
             &WorkspaceInstructions::empty(),
-            None,
             None,
         );
         assert!(prompt.contains("- Mode: within your parent's authority."));
@@ -782,7 +770,6 @@ mod header_authority_tests {
             PromptSections::default(),
             &WorkspaceInstructions::empty(),
             None,
-            None,
         );
         assert!(!prompt.contains("Environment:"), "{prompt}");
     }
@@ -795,7 +782,6 @@ mod header_authority_tests {
                 &[spec],
                 PromptSections::default(),
                 &WorkspaceInstructions::empty(),
-                None,
                 None,
             );
             for absent in [
@@ -833,7 +819,6 @@ mod header_authority_tests {
             &specs,
             PromptSections::default(),
             &WorkspaceInstructions::empty(),
-            None,
             None,
         );
         let header = prompt

@@ -1248,10 +1248,6 @@ fn profile_rows(capabilities: &ServerCapabilities) -> Vec<ProfileRow> {
             id: profile.id.clone(),
             model: profile.model.clone(),
             approval_mode: profile.approval_mode,
-            pack: profile
-                .pack
-                .as_ref()
-                .map(|pack| format!("{}@{}", pack.id, pack.version)),
         })
         .collect()
 }

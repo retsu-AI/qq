@@ -21,7 +21,7 @@ set a value; `qq config sources` lists every file consulted in order.
 
 ## Files and precedence
 
-Later layers win. Maps (`providers`, `mcp`, `profiles`, `packs`) merge by
+Later layers win. Maps (`providers`, `mcp`, `profiles`) merge by
 key; an entry set to `Remove` deletes what an earlier layer declared.
 Sections `delegation` and `audit` replace as a whole. The `goals` section
 merges individual fields, including nested `per_run` fields; `goals: Clear`
@@ -30,15 +30,14 @@ restores compiled defaults under managed ceilings.
 | Order | Layer | Path |
 | ---: | --- | --- |
 | 1 | compiled defaults | built-in providers and policy |
-| 2 | global packs | `<global>/packs/<id>/pack.ron` |
-| 3 | organization manifest | cached from `qq org enroll` |
-| 4 | **your global config** | `<global>/config.ron`, then `<global>/config.d/*.ron` sorted |
-| 5 | project layers, repository root first, current directory last | per directory: `.qq/packs/<id>/pack.ron` (each manifest trusted on its own), `qq.ron`, `.qq/config.ron`, `.qq/config.d/*.ron` |
-| 6 | explicit file | `QQ_CONFIG=/path/to/file.ron` |
-| 7 | inline document | `QQ_CONFIG_CONTENT='(version: 1, …)'` |
-| 8 | overrides | `--model` / `QQ_MODEL`, `--organization` / `QQ_ORGANIZATION`, `--max-output-tokens` |
-| 9 | managed | `/etc/qq/managed.ron` + `managed.d/` (Linux), `/Library/Application Support/qq/` (macOS), `%ProgramData%\qq\` (Windows); must be root-owned |
-| 10 | MDM | macOS forced preference `dev.qq` / `ManagedConfig`; Windows policy `HKLM\Software\Policies\dev.qq\ManagedConfig` (`REG_SZ`); none on Linux |
+| 2 | organization manifest | cached from `qq org enroll` |
+| 3 | **your global config** | `<global>/config.ron`, then `<global>/config.d/*.ron` sorted |
+| 4 | project layers, repository root first, current directory last | per directory: `qq.ron`, `.qq/config.ron`, `.qq/config.d/*.ron` |
+| 5 | explicit file | `QQ_CONFIG=/path/to/file.ron` |
+| 6 | inline document | `QQ_CONFIG_CONTENT='(version: 1, …)'` |
+| 7 | overrides | `--model` / `QQ_MODEL`, `--organization` / `QQ_ORGANIZATION`, `--max-output-tokens` |
+| 8 | managed | `/etc/qq/managed.ron` + `managed.d/` (Linux), `/Library/Application Support/qq/` (macOS), `%ProgramData%\qq\` (Windows); must be root-owned |
+| 9 | MDM | macOS forced preference `dev.qq` / `ManagedConfig`; Windows policy `HKLM\Software\Policies\dev.qq\ManagedConfig` (`REG_SZ`); none on Linux |
 
 `<global>` is `~/.config/qq` on Linux, `~/Library/Application
 Support/dev.qq.qq` on macOS, `%APPDATA%\qq\qq\config` on Windows;
@@ -59,7 +58,7 @@ An empty or relative `QQ_HOME` is an error. Without it, platform paths stay
 unchanged.
 
 Project layers that declare anything sensitive — `model`, `providers`,
-`mcp`, `packs`, `profiles`, `delegation`, `audit`, `goals`,
+`mcp`, `profiles`, `delegation`, `audit`, `goals`,
 `reasoning_effort`, `organization`, or `worker_model` — are loaded only after `qq trust`
 has accepted that exact file content. See
 [Permissions and trust](permissions.md#project-trust).
@@ -83,7 +82,6 @@ repository should not commit; this repository's `.gitignore` excludes
 | `providers` | map | built-ins | provider declarations; [below](#providers) |
 | `mcp` | map | empty | MCP servers; [MCP servers](mcp.md) |
 | `profiles` | map | empty | named per-session presets; [below](#profiles) |
-| `packs` | map | discovered | agent packs by id; [below](#packs) |
 | `delegation` | section | empty | sub-agent roster and bounds; [below](#delegation) |
 | `audit` | section | `off` | final-answer audit; [below](#audit) |
 | `goals` | section | finite defaults | defaults and bounds for durable goals; [below](#goals) |
@@ -212,7 +210,7 @@ policy: (
 | `deny_tools`, `deny_hosts` | managed layers only | `deny_hosts` (exact names or `*.suffix`, for `fetch`) is refused in every approval mode, Full included. `deny_tools` removes tools from side questions, and `shell` in it refuses goal checks |
 | `goals` | managed layers only | goal ceilings; fieldwise minimum across administrators, retained by `goals: Clear` |
 
-"Managed layers" are `managed.ron`, `managed.d/`, and MDM (rows 9 and 10
+"Managed layers" are `managed.ron`, `managed.d/`, and MDM (rows 8 and 9
 above). Setting a `managed layers only` key anywhere else fails with
 `managed-only policy settings are only allowed in managed configuration`;
 to cap output tokens for yourself, set the top-level `max_output_tokens`
@@ -235,53 +233,9 @@ profiles: {
 ```
 
 Keys: `model`, `organization`, `max_output_tokens`, `approval_mode`
-(`read_only` `ask` `auto` `full`), `reasoning_effort`. Pack
-profiles (below) add prompts, skills, and tool filters.
-
-## `packs`
-
-A pack is a directory with `pack.ron` that bundles profiles, a persona
-prompt, skills, commands, and MCP declarations. Packs are discovered from
-`<global>/packs/<id>/` and `.qq/packs/<id>/`, or declared explicitly. A
-project pack (discovered under `.qq/packs/` or named by a project file) loads
-only once you have trusted that exact `pack.ron`; editing it disables the
-pack until you run `qq trust` again. A
-project file's `path` must stay inside the repository (no path that leads
-out of it, and no symbolic link):
-
-```ron
-packs: {
-    "reviewer": Pack(path: "tools/qq-packs/reviewer"),   // relative to this file
-    "legacy": Remove,
-}
-```
-
-`pack.ron`:
-
-```ron pack.ron
-(
-    schema: 1,
-    id: "reviewer",
-    version: "2026.09",                  // the pack's own version; any 1–64 bytes
-    name: "Code reviewer",
-    requires: (protocol: 14),
-    profiles: {
-        "reviewer": (
-            approval_mode: read_only,
-            prompt: "prompts/persona.md",
-            skills: ["skills"],
-            commands: ["commands"],
-            tools: (deny: ["shell", "write_file", "edit_file", "spawn_agent", "mcp__*"]),
-            mcp: [],                       // subset of this pack's mcp; absent = all
-        ),
-    },
-    mcp: {},                               // same shape as config `mcp`
-)
-```
-
-Limits: 32 entries across `packs/` directories per load (including
-directories without a `pack.ron` and stray files), 16 profiles per pack, 64 KiB manifest. A pack profile shadows
-nothing: a profile of the same name in your config wins.
+(`read_only` `ask` `auto` `full`), `reasoning_effort`. Instructions and
+procedures belong in [skills](#workspace-commands-and-skills), which every
+profile sees.
 
 ## `delegation`
 
@@ -310,8 +264,8 @@ The parent's approval policy still gates the write spawn.
 
 A run that may spawn sub-agents also gets `wait_agents` (wait for its
 background sub-agents) and `cancel_agent` (stop one). They come and go with
-`spawn_agent`: denying or exposing `spawn_agent` in policy, or allowing or
-denying it in a pack, applies to all three, and the two are not tool names of their own there.
+`spawn_agent`: denying or exposing `spawn_agent` in policy applies to all
+three, and the two are not tool names of their own there.
 
 Up to 8 roster entries. Each route must resolve like `model`. An entry may pin
 the reasoning effort its children run at with `effort: low` (any effort value);

@@ -403,7 +403,6 @@ async fn prefix_plus_suffix_digest_equals_the_full_prompt_digest() {
             ..runtime::PromptSections::default()
         },
         &plan.instructions,
-        plan.persona.as_deref(),
         None,
     );
     assert_eq!(systems[3].as_ref(), expected.as_str());

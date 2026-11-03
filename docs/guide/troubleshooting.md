@@ -8,7 +8,7 @@ puts the fix next to whatever failed. Its header reports the build and
 compatibility versions, also available from `qq version`:
 
 ```
-qq <version> (<commit> <build date>) · protocol 42 · capabilities 1 · descriptor 16 · store schema 65
+qq <version> (<commit> <build date>) · protocol 43 · capabilities 1 · descriptor 17 · store schema 65
 ok    configuration    2 sources; qq config sources lists them
 ok    project trust    nothing pending
 ok    model            anthropic/claude-sonnet-5
@@ -69,7 +69,7 @@ TUI and asks with `/models` instead.
 ### `project configuration needs your trust before it is used: …`
 
 A file under this repository declares something sensitive (a model,
-providers, MCP servers, profiles, packs). Strict inspection commands such as
+providers, MCP servers, profiles). Strict inspection commands such as
 `qq config check` print this. `qq`, `qq ask`, `qq run`, and `qq serve` do
 not stop: they start with that file's sensitive settings switched off, and
 `qq config sources` and `qq doctor` list it as `pending trust`. Read the

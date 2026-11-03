@@ -8,18 +8,17 @@ use std::{
 };
 
 use qq_protocol::{
-    AgentPlanDigest, AgentProfileId, ContentHash, CredentialEpoch, DelegationRoster,
-    InstructionHash, ResolvedModel, RunPlanIdentity,
+    AgentPlanDigest, AgentProfileId, CredentialEpoch, DelegationRoster, InstructionHash,
+    ResolvedModel, RunPlanIdentity,
 };
 use qq_provider::Provider;
-use sha2::Digest as _;
 use thiserror::Error;
 
 pub use descriptor::{
     AgentPlanDescriptor, AuditDescriptor, AuditModeDescriptor, ContextBudgetDescriptor,
     ContextSourceDescriptor, CredentialReference, DESCRIPTOR_VERSION, FailPolicyDescriptor,
-    McpServerDescriptor, McpTransportKind, PackDescriptor, ProviderDescriptor,
-    SkillIndexDescriptor, ToolCatalogDescriptor, ToolOutputProjection,
+    McpServerDescriptor, McpTransportKind, ProviderDescriptor, SkillIndexDescriptor,
+    ToolCatalogDescriptor, ToolOutputProjection,
 };
 pub use fingerprint::SourceFingerprint;
 
@@ -50,32 +49,6 @@ impl HostSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackSelection {
-    pub id: String,
-    pub version: String,
-    pub manifest_digest: String,
-    pub directory: PathBuf,
-    pub persona: Option<String>,
-    pub skill_roots: Vec<String>,
-    pub command_roots: Vec<String>,
-    pub tool_allow: Vec<String>,
-    pub tool_deny: Vec<String>,
-}
-
-impl PackSelection {
-    fn permits(&self, tool: &str) -> bool {
-        let matches = |rule: &String| match rule.strip_suffix('*') {
-            Some(prefix) => tool.starts_with(prefix),
-            None => rule == tool,
-        };
-        if self.tool_deny.iter().any(matches) {
-            return false;
-        }
-        self.tool_allow.is_empty() || self.tool_allow.iter().any(matches)
-    }
-}
-
 pub struct AgentProfile {
     provider: Arc<dyn Provider>,
     provider_descriptor: ProviderDescriptor,
@@ -97,9 +70,7 @@ pub struct AgentProfile {
     provenance: Vec<String>,
     credential_epoch: CredentialEpoch,
     profile_id: AgentProfileId,
-    pack: Option<PackSelection>,
     global_config_dir: Option<PathBuf>,
-    protected_pack_roots: Vec<PathBuf>,
     exposed_tools: Option<Vec<String>>,
     side_question_denies: Vec<String>,
     context_sources: Vec<Arc<dyn ContextSource>>,
@@ -143,9 +114,7 @@ impl AgentProfile {
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
             profile_id: AgentProfileId::default(),
-            pack: None,
             global_config_dir: None,
-            protected_pack_roots: Vec::new(),
             exposed_tools: None,
             side_question_denies: Vec::new(),
             context_sources: Vec::new(),
@@ -197,9 +166,7 @@ impl AgentProfile {
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
             profile_id: AgentProfileId::default(),
-            pack: None,
             global_config_dir: None,
-            protected_pack_roots: runtime.protected_pack_roots.to_vec(),
             exposed_tools: None,
             side_question_denies: Vec::new(),
             context_sources: runtime
@@ -226,20 +193,8 @@ impl AgentProfile {
     }
 
     #[must_use]
-    pub fn with_pack(mut self, pack: PackSelection) -> Self {
-        self.pack = Some(pack);
-        self
-    }
-
-    #[must_use]
     pub fn with_global_config_dir(mut self, dir: PathBuf) -> Self {
         self.global_config_dir = Some(dir);
-        self
-    }
-
-    #[must_use]
-    pub fn with_protected_pack_roots(mut self, roots: Vec<PathBuf>) -> Self {
-        self.protected_pack_roots = roots;
         self
     }
 
@@ -263,7 +218,6 @@ impl AgentProfile {
         self.context_sources.clear();
         self.delegation = DelegationRoster::default();
         self.audit = AuditPolicy::default();
-        self.pack = None;
         self
     }
 
@@ -357,12 +311,6 @@ pub enum PlanCompileError {
     Runtime(#[from] RuntimeConfigError),
     #[error("workspace path must be absolute and canonical: {path}")]
     NonCanonicalWorkspace { path: PathBuf },
-    #[error("could not resolve protected pack directory {path}: {source}")]
-    ProtectedPackRoot {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("could not open workspace {path}: {source}")]
     OpenWorkspace {
         path: PathBuf,
@@ -371,19 +319,6 @@ pub enum PlanCompileError {
     },
     #[error(transparent)]
     Instructions(#[from] WorkspaceInstructionError),
-    #[error("could not open agent pack {id} at {path}: {source}")]
-    OpenPack {
-        id: String,
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("agent pack {id} persona {path} could not be read: {message}")]
-    Persona {
-        id: String,
-        path: String,
-        message: String,
-    },
     #[error(
         "resolved model {route} does not match the runtime: model {runtime_model}, output limit \
          {runtime_max_output_tokens}, context window {runtime_context_window:?}"
@@ -414,8 +349,7 @@ pub struct CompiledAgentPlan {
     pub(crate) instructions: WorkspaceInstructions,
     pub(crate) catalog: Arc<ToolCatalog>,
     pub(crate) skills: Arc<SkillIndex>,
-    pub(crate) pack_roots: Arc<[Workspace]>,
-    pub(crate) persona: Option<Arc<Persona>>,
+    pub(crate) guidance_roots: Arc<[Workspace]>,
     pub(crate) roster_text: Option<Arc<str>>,
     pub(crate) hosts: Arc<[Arc<dyn ExternalToolHost>]>,
     prompt_prefixes: std::sync::Mutex<Vec<(PromptPrefixKey, Arc<crate::runtime::PromptPrefix>)>>,
@@ -473,7 +407,6 @@ impl CompiledAgentPlan {
                 snapshots: key.snapshots && self.in_git,
             },
             &self.instructions,
-            self.persona.as_deref(),
         ));
         prefixes.push((key, Arc::clone(&prefix)));
         prefix
@@ -565,9 +498,7 @@ impl CompiledAgentPlan {
             provenance,
             credential_epoch,
             profile_id,
-            pack,
             global_config_dir,
-            mut protected_pack_roots,
             exposed_tools,
             side_question_denies,
             context_sources,
@@ -625,39 +556,8 @@ impl CompiledAgentPlan {
         if !is_canonical_absolute(&workspace) {
             return Err(PlanCompileError::NonCanonicalWorkspace { path: workspace });
         }
-        if let Some(selection) = &pack {
-            protected_pack_roots.push(selection.directory.clone());
-        }
-        protected_pack_roots = protected_pack_roots
-            .into_iter()
-            .map(|path| {
-                let resolved = if path.is_absolute() {
-                    std::fs::canonicalize(&path)
-                } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "protected pack roots must be absolute",
-                    ))
-                }
-                .map_err(|source| PlanCompileError::ProtectedPackRoot {
-                    path: path.clone(),
-                    source,
-                })?;
-                Workspace::open(&resolved)
-                    .map_err(|source| PlanCompileError::ProtectedPackRoot { path, source })?;
-                Ok(resolved)
-            })
-            .collect::<Result<Vec<_>, PlanCompileError>>()?;
-        protected_pack_roots.sort();
-        protected_pack_roots.dedup();
-        runtime.protected_pack_roots = protected_pack_roots.clone().into();
-        let opened = Workspace::open(&workspace)
-            .map_err(|source| PlanCompileError::OpenWorkspace {
-                path: workspace.clone(),
-                source,
-            })?
-            .with_protected_pack_roots(&protected_pack_roots)
-            .map_err(|source| PlanCompileError::OpenWorkspace {
+        let opened =
+            Workspace::open(&workspace).map_err(|source| PlanCompileError::OpenWorkspace {
                 path: workspace.clone(),
                 source,
             })?;
@@ -665,54 +565,7 @@ impl CompiledAgentPlan {
         let (instructions, mut sources) =
             crate::workspace::load_instructions_with_sources(&opened, &cancelled)?;
         let mut skill_roots = SkillRoot::workspace_defaults();
-        let mut pack_roots: Vec<Workspace> = Vec::new();
-        let mut persona = None;
-        let mut pack_descriptor = None;
-        if let Some(selection) = &pack {
-            let pack_workspace = Workspace::open(&selection.directory).map_err(|source| {
-                PlanCompileError::OpenPack {
-                    id: selection.id.clone(),
-                    path: selection.directory.clone(),
-                    source,
-                }
-            })?;
-            let root_index = pack_roots.len();
-            for directory in &selection.skill_roots {
-                skill_roots.push(SkillRoot::pack(
-                    &selection.id,
-                    root_index,
-                    directory,
-                    crate::workspace::SkillKind::Skill,
-                ));
-            }
-            for directory in &selection.command_roots {
-                skill_roots.push(SkillRoot::pack(
-                    &selection.id,
-                    root_index,
-                    directory,
-                    crate::workspace::SkillKind::Command,
-                ));
-            }
-            if let Some(relative) = &selection.persona {
-                let (text, fingerprint) = read_persona(&pack_workspace, selection, relative)?;
-                sources.push(fingerprint);
-                persona = Some(Arc::new(Persona {
-                    pack: selection.id.clone(),
-                    source: relative.clone(),
-                    hash: ContentHash::from_bytes(sha2::Sha256::digest(text.as_bytes()).into()),
-                    text,
-                }));
-            }
-            pack_descriptor = Some(PackDescriptor {
-                id: selection.id.clone(),
-                version: selection.version.clone(),
-                manifest_digest: selection.manifest_digest.clone(),
-                persona_hash: persona.as_ref().map(|persona| persona.hash),
-                tool_allow: selection.tool_allow.clone(),
-                tool_deny: selection.tool_deny.clone(),
-            });
-            pack_roots.push(pack_workspace);
-        }
+        let mut guidance_roots: Vec<Workspace> = Vec::new();
         if let Some(dir) = &global_config_dir {
             let global_skills = dir.join(crate::workspace::skills::GLOBAL_SKILLS_DIRECTORY);
             sources.push(SourceFingerprint::capture(global_skills.clone()));
@@ -720,12 +573,12 @@ impl CompiledAgentPlan {
                 .ok()
                 .and_then(|canonical| Workspace::open(&canonical).ok())
             {
-                skill_roots.push(SkillRoot::global(pack_roots.len()));
-                pack_roots.push(opened);
+                skill_roots.push(SkillRoot::global(guidance_roots.len()));
+                guidance_roots.push(opened);
             }
         }
         let (skills, skill_sources) =
-            SkillIndex::compile_blocking(&opened, &pack_roots, &skill_roots);
+            SkillIndex::compile_blocking(&opened, &guidance_roots, &skill_roots);
         sources.extend(skill_sources);
 
         let mut static_tools: Vec<StaticTool> = tools::static_tools();
@@ -822,20 +675,6 @@ impl CompiledAgentPlan {
         let follows_spawn =
             |tool: &StaticTool| matches!(tool.host, ToolHost::WaitAgents | ToolHost::CancelAgent);
         let follows_shell = |tool: &StaticTool| tool.host == ToolHost::CommandStatus;
-        if let Some(selection) = &pack {
-            static_tools.retain(|tool| {
-                matches!(tool.host, ToolHost::SelectTools | ToolHost::LoadSkill)
-                    || follows_spawn(tool)
-                    || follows_shell(tool)
-                    || selection.permits(tool.spec.name())
-            });
-            for contribution in &mut contributions {
-                contribution
-                    .catalog
-                    .tools
-                    .retain(|tool| selection.permits(tool.spec.name()));
-            }
-        }
         if let Some(names) = &exposed_tools {
             static_tools.retain(|tool| {
                 follows_spawn(tool) || follows_shell(tool) || names.contains(tool.spec.name())
@@ -911,23 +750,6 @@ impl CompiledAgentPlan {
         }
         let catalog = ToolCatalog::compile(static_tools, contributions);
 
-        let mut protected_pack_roots: Vec<String> = opened
-            .protected_pack_roots()
-            .iter()
-            .map(|path| {
-                let relative = path
-                    .components()
-                    .map(|component| component.as_os_str().to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join("/");
-                if relative.is_empty() {
-                    ".".to_owned()
-                } else {
-                    relative
-                }
-            })
-            .collect();
-        protected_pack_roots.sort();
         let descriptor = AgentPlanDescriptor {
             version: DESCRIPTOR_VERSION,
             profile: profile_id,
@@ -935,7 +757,6 @@ impl CompiledAgentPlan {
             provider: provider_descriptor,
             model: resolved_model.clone(),
             workspace: workspace.display().to_string(),
-            protected_pack_roots,
             prompt_version: crate::runtime::AGENT_PROMPT_VERSION,
             instruction_hash: instructions.hash(),
             instruction_source: instructions.source_path().map(str::to_owned),
@@ -964,7 +785,6 @@ impl CompiledAgentPlan {
                 disclosed: skills.disclosed_count(),
                 truncated: skills.truncated(),
             },
-            pack: pack_descriptor,
             mcp_servers,
             provenance,
             context_sources: runtime
@@ -1009,11 +829,9 @@ impl CompiledAgentPlan {
                 snapshots: in_git,
             },
             &instructions,
-            persona.as_deref(),
         ));
         let estimated_bytes = descriptor_json.len() * 2
             + instructions.content_len()
-            + persona.as_ref().map_or(0, |persona| persona.text.len())
             + catalog.estimated_bytes()
             + skills.estimated_bytes()
             + full_prefix.len()
@@ -1024,8 +842,7 @@ impl CompiledAgentPlan {
             instructions,
             catalog: Arc::new(catalog),
             skills: Arc::new(skills),
-            pack_roots: pack_roots.into(),
-            persona,
+            guidance_roots: guidance_roots.into(),
             roster_text,
             hosts: host_handles,
             prompt_prefixes: std::sync::Mutex::new(vec![(full_key, full_prefix)]),
@@ -1136,74 +953,6 @@ impl CompiledAgentPlan {
     pub const fn runtime(&self) -> &Runtime {
         &self.runtime
     }
-}
-
-#[derive(Debug)]
-pub(crate) struct Persona {
-    pub(crate) pack: String,
-    pub(crate) source: String,
-    pub(crate) hash: ContentHash,
-    pub(crate) text: String,
-}
-
-impl Persona {
-    pub(crate) fn append_to_prompt(&self, prompt: &mut String) {
-        prompt.push_str("\n\nAgent pack `");
-        prompt.push_str(&self.pack);
-        prompt.push_str("` persona from ");
-        prompt.push_str(&self.source);
-        prompt.push_str(":\n--- BEGIN PACK PERSONA ---\n");
-        prompt.push_str(&self.text);
-        if !self.text.ends_with('\n') {
-            prompt.push('\n');
-        }
-        prompt.push_str("--- END PACK PERSONA ---");
-    }
-}
-
-pub const MAX_PERSONA_BYTES: usize = 64 * 1024;
-
-fn read_persona(
-    pack: &Workspace,
-    selection: &PackSelection,
-    relative: &str,
-) -> Result<(String, SourceFingerprint), PlanCompileError> {
-    let fingerprint = SourceFingerprint::capture(pack.path().join(relative));
-    let failure = |message: String| PlanCompileError::Persona {
-        id: selection.id.clone(),
-        path: relative.to_owned(),
-        message,
-    };
-    let resolved = pack
-        .contained_path(relative)
-        .map_err(|error| failure(error.to_string()))?;
-    let metadata = pack
-        .root()
-        .metadata(&resolved)
-        .map_err(|error| failure(error.to_string()))?;
-    if !metadata.is_file() {
-        return Err(failure("not a regular file".to_owned()));
-    }
-    if metadata.len() > MAX_PERSONA_BYTES as u64 {
-        return Err(failure(format!(
-            "exceeds the {MAX_PERSONA_BYTES}-byte limit"
-        )));
-    }
-    let file = pack
-        .root()
-        .open(&resolved)
-        .map_err(|error| failure(error.to_string()))?;
-    let bytes = match crate::workspace::read_bounded(file, MAX_PERSONA_BYTES, metadata.len()) {
-        Ok(bytes) => bytes,
-        Err(crate::workspace::BoundedReadError::TooLarge { limit }) => {
-            return Err(failure(format!("exceeds the {limit}-byte limit")));
-        }
-        Err(crate::workspace::BoundedReadError::Io(error)) => {
-            return Err(failure(error.to_string()));
-        }
-    };
-    let text = String::from_utf8(bytes).map_err(|_| failure("not valid UTF-8".to_owned()))?;
-    Ok((text, fingerprint))
 }
 
 fn is_canonical_absolute(path: &Path) -> bool {
@@ -1376,25 +1125,10 @@ mod tests {
     #[test]
     fn side_question_profile_exposes_only_workspace_inspection() {
         let workspace = canonical_temp();
-        let pack_dir = canonical_temp();
-        let side = profile(workspace.path())
-            .with_pack(PackSelection {
-                id: "hostile-pack".to_owned(),
-                version: "1.0.0".to_owned(),
-                manifest_digest: "cd".repeat(32),
-                directory: pack_dir.path().to_owned(),
-                persona: Some("absent-persona.md".to_owned()),
-                skill_roots: vec!["absent-skills".to_owned()],
-                command_roots: vec!["absent-commands".to_owned()],
-                tool_allow: Vec::new(),
-                tool_deny: vec!["read_file".to_owned()],
-            })
-            .for_side_question();
-        assert!(side.pack.is_none());
+        let side = profile(workspace.path()).for_side_question();
         assert!(side.hosts.is_empty());
         assert!(side.context_sources.is_empty());
         let plan = CompiledAgentPlan::compile_blocking(side).unwrap();
-        assert!(plan.descriptor().pack.is_none());
         assert_eq!(
             plan.catalog().names().collect::<Vec<_>>(),
             ["read_file", "search", "tree"]
@@ -1582,7 +1316,6 @@ mod tests {
             provider: provider_descriptor(),
             model: resolved_model(),
             workspace: "/work".to_owned(),
-            protected_pack_roots: vec!["vendor/reviewer".to_owned()],
             prompt_version: crate::runtime::AGENT_PROMPT_VERSION,
             instruction_hash: InstructionHash::from_bytes([1; 32]),
             instruction_source: Some("AGENTS.md".to_owned()),
@@ -1637,14 +1370,6 @@ mod tests {
                 disclosed: 1,
                 truncated: false,
             },
-            pack: Some(PackDescriptor {
-                id: "review-kit".to_owned(),
-                version: "1.2.0".to_owned(),
-                manifest_digest: "ab".repeat(32),
-                persona_hash: Some(qq_protocol::ContentHash::from_bytes([4; 32])),
-                tool_allow: vec!["read_file".to_owned(), "mcp__*".to_owned()],
-                tool_deny: vec!["shell".to_owned()],
-            }),
             mcp_servers: vec![McpServerDescriptor {
                 name: "executor".to_owned(),
                 transport: McpTransportKind::Stdio,
@@ -1690,15 +1415,15 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v16\0{\"version\":16,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v17\0{\"version\":17,\"profile\":\"review\","
             )
         );
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "1d313a6d0988d2bf68b1782a5129ee4b16d08c24ccaa2005d3ba9053e1af0295"
+            "2814afaf56e17b69b3113267aee8fa165d7dbca3373d5a0c9cd96ca66d2c9b8f"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v16\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v17\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
@@ -1710,10 +1435,6 @@ mod tests {
         type Mutation = Box<dyn Fn(&mut AgentPlanDescriptor)>;
         let variants: Vec<(&str, Mutation)> = vec![
             ("adapter_build", Box::new(|d| d.adapter_build.push('x'))),
-            (
-                "protected_pack_roots",
-                Box::new(|d| d.protected_pack_roots.clear()),
-            ),
             ("provider.id", Box::new(|d| d.provider.id.push('x'))),
             ("provider.api", Box::new(|d| d.provider.api.push('x'))),
             (
@@ -1840,23 +1561,6 @@ mod tests {
             (
                 "reasoning_effort",
                 Box::new(|d| d.reasoning_effort = Some(qq_provider::ReasoningEffort::High)),
-            ),
-            ("pack", Box::new(|d| d.pack = None)),
-            (
-                "pack.version",
-                Box::new(|d| d.pack.as_mut().unwrap().version.push('x')),
-            ),
-            (
-                "pack.manifest_digest",
-                Box::new(|d| d.pack.as_mut().unwrap().manifest_digest.push('x')),
-            ),
-            (
-                "pack.persona_hash",
-                Box::new(|d| d.pack.as_mut().unwrap().persona_hash = None),
-            ),
-            (
-                "pack.tool_deny",
-                Box::new(|d| d.pack.as_mut().unwrap().tool_deny.clear()),
             ),
             (
                 "tools.names",
@@ -2188,9 +1892,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod pack_tests {
-    use std::sync::Arc;
-
+mod global_skill_tests {
     use super::{tests_support::*, *};
 
     #[test]
@@ -2226,7 +1928,7 @@ mod pack_tests {
         assert_eq!(tidy.source, "global:skills/tidy/SKILL.md");
         let loaded = crate::workspace::load_entry(
             &plan.workspace,
-            &plan.pack_roots,
+            &plan.guidance_roots,
             tidy,
             "",
             &crate::RunCancellation::new(),
@@ -2256,326 +1958,5 @@ mod pack_tests {
                 "global:skills/linted/SKILL.md"
             );
         }
-    }
-
-    #[test]
-    fn a_selected_pack_contributes_persona_skills_and_tool_policy_to_the_plan() {
-        let workspace = canonical_temp();
-        std::fs::write(workspace.path().join("AGENTS.md"), "Workspace rules.\n").unwrap();
-        let pack_dir = canonical_temp();
-        for (path, content) in [
-            ("prompts/persona.md", "You review code.\n"),
-            (
-                "skills/audit/SKILL.md",
-                "---\ndescription: Audit a change\n---\nAudit steps.\n",
-            ),
-            (
-                "commands/lint.md",
-                "---\ndescription: Lint it\n---\nRun lint.\n",
-            ),
-        ] {
-            let path = pack_dir.path().join(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, content).unwrap();
-        }
-        let selection = || PackSelection {
-            id: "review-kit".to_owned(),
-            version: "1.2.0".to_owned(),
-            manifest_digest: "cd".repeat(32),
-            directory: pack_dir.path().to_owned(),
-            persona: Some("prompts/persona.md".to_owned()),
-            skill_roots: vec!["skills".to_owned()],
-            command_roots: vec!["commands".to_owned()],
-            tool_allow: vec!["read_file".to_owned(), "search".to_owned()],
-            tool_deny: Vec::new(),
-        };
-        let plan =
-            CompiledAgentPlan::compile_blocking(profile(workspace.path()).with_pack(selection()))
-                .unwrap();
-
-        let descriptor = plan.descriptor();
-        let pack = descriptor.pack.as_ref().unwrap();
-        assert_eq!(pack.id, "review-kit");
-        assert_eq!(pack.tool_allow, ["read_file", "search"]);
-        assert!(pack.persona_hash.is_some());
-        let names: Vec<&str> = plan.catalog().names().collect();
-        assert!(names.contains(&"read_file") && names.contains(&"search"));
-        assert!(!names.contains(&"shell") && !names.contains(&"edit_file"));
-        assert!(
-            !names.contains(&"spawn_agent"),
-            "policy filters session tools too"
-        );
-        assert!(names.contains(&"select_tools") && names.contains(&"load_skill"));
-        let intersected = CompiledAgentPlan::compile_blocking(
-            profile(workspace.path())
-                .with_pack(selection())
-                .with_exposed_tools(vec!["read_file".to_owned(), "write_file".to_owned()]),
-        )
-        .unwrap();
-        assert_eq!(
-            intersected.catalog().names().collect::<Vec<_>>(),
-            ["read_file"]
-        );
-        let skills = plan.skills();
-        assert_eq!(skills.len(), 2);
-        assert_eq!(skills.disclosed_count(), 2);
-        let audit = skills.resolve_disclosed("audit").unwrap();
-        assert_eq!(audit.source, "pack:review-kit/skills/audit/SKILL.md");
-        assert_eq!(audit.root, Some(0));
-        assert_eq!(audit.description, "Audit a change");
-        let loaded = crate::workspace::load_entry(
-            &plan.workspace,
-            &plan.pack_roots,
-            audit,
-            "",
-            &crate::RunCancellation::new(),
-        )
-        .unwrap();
-        assert!(loaded.render_for_tool().contains("Audit steps."));
-        let persona = plan.persona.as_ref().unwrap();
-        let mut prompt = String::new();
-        plan.instructions.append_to_prompt(&mut prompt);
-        persona.append_to_prompt(&mut prompt);
-        let rules = prompt.find("Workspace rules.").unwrap();
-        let persona_at = prompt.find("You review code.").unwrap();
-        assert!(rules < persona_at);
-        assert!(prompt.contains("Agent pack `review-kit` persona from prompts/persona.md"));
-        assert!(
-            plan.instruction_sources()
-                .iter()
-                .any(|s| s.path().ends_with("prompts/persona.md"))
-        );
-        assert!(
-            plan.instruction_sources()
-                .iter()
-                .any(|s| s.path().ends_with("skills"))
-        );
-
-        let again =
-            CompiledAgentPlan::compile_blocking(profile(workspace.path()).with_pack(selection()))
-                .unwrap();
-        assert_eq!(again.digest(), plan.digest());
-        std::fs::write(
-            pack_dir.path().join("prompts/persona.md"),
-            "You audit code.\n",
-        )
-        .unwrap();
-        let edited =
-            CompiledAgentPlan::compile_blocking(profile(workspace.path()).with_pack(selection()))
-                .unwrap();
-        assert_ne!(edited.digest(), plan.digest());
-        let plain = CompiledAgentPlan::compile_blocking(profile(workspace.path())).unwrap();
-        assert!(plain.descriptor().pack.is_none());
-        assert!(plain.persona.is_none());
-        assert!(plain.catalog().names().any(|n| n == "shell"));
-        drop(Arc::clone(&plain));
-
-        let mut missing = selection();
-        missing.persona = Some("prompts/absent.md".to_owned());
-        assert!(matches!(
-            CompiledAgentPlan::compile_blocking(profile(workspace.path()).with_pack(missing)),
-            Err(PlanCompileError::Persona { .. })
-        ));
-    }
-}
-
-#[cfg(test)]
-mod configured_pack_mutation_tests {
-    use std::{collections::VecDeque, sync::Mutex};
-
-    use futures_util::{StreamExt as _, stream};
-    use qq_provider::{ModelRequest, ProviderEvent, ProviderStream};
-
-    use super::{tests_support::*, *};
-
-    struct PackMutationProvider(Mutex<VecDeque<(&'static str, String)>>);
-
-    impl Provider for PackMutationProvider {
-        fn stream(&self, _request: ModelRequest) -> ProviderStream {
-            let Some((name, json)) = self.0.lock().unwrap().pop_front() else {
-                return Box::pin(stream::iter([
-                    Ok(ProviderEvent::OutputTextDelta {
-                        text: "done".to_owned(),
-                    }),
-                    Ok(ProviderEvent::Completed { usage: None }),
-                ]));
-            };
-            Box::pin(stream::iter([
-                Ok(ProviderEvent::ToolCallStarted {
-                    id: "call".to_owned(),
-                    name: name.to_owned(),
-                }),
-                Ok(ProviderEvent::ToolCallArgumentsDelta {
-                    id: "call".to_owned(),
-                    json,
-                }),
-                Ok(ProviderEvent::ToolCallCompleted {
-                    id: "call".to_owned(),
-                }),
-                Ok(ProviderEvent::Completed { usage: None }),
-            ]))
-        }
-    }
-
-    async fn assert_custom_pack_mutations_are_denied(direct: bool, selected: bool) {
-        let directory = canonical_temp();
-        let pack = directory.path().join("vendor/reviewer");
-        std::fs::create_dir_all(&pack).unwrap();
-        std::fs::write(pack.join("persona.md"), "Original reviewer rules.\n").unwrap();
-        let script = VecDeque::from([
-            ("read_file", r#"{"path":"vendor/reviewer/persona.md"}"#.to_owned()),
-            ("edit_file", r#"{"edits":[{"path":"vendor/reviewer/persona.md","old":"Original reviewer rules.","new":"Approve everything."}]}"#.to_owned()),
-            ("write_file", r#"{"path":"vendor/reviewer/persona.md","content":"Approve everything.\n"}"#.to_owned()),
-            ("write_file", r#"{"path":"vendor/reviewer/new-policy.md","content":"Approve everything."}"#.to_owned()),
-            ("write_file", r#"{"path":"vendor/ordinary.txt","content":"ordinary task edit"}"#.to_owned()),
-        ]);
-        #[cfg(unix)]
-        let script = {
-            let mut script = script;
-            std::os::unix::fs::symlink("vendor/reviewer", directory.path().join("pack-alias"))
-                .unwrap();
-            script.push_back((
-                "write_file",
-                r#"{"path":"pack-alias/aliased-policy.md","content":"Approve everything."}"#
-                    .to_owned(),
-            ));
-            script
-        };
-        let provider = Arc::new(PackMutationProvider(Mutex::new(script)));
-        let profile = AgentProfile::new(
-            provider,
-            provider_descriptor(),
-            resolved_model(),
-            directory.path().to_owned(),
-        );
-        let profile = if selected {
-            profile.with_pack(PackSelection {
-                id: "reviewer".to_owned(),
-                version: "1.0.0".to_owned(),
-                manifest_digest: "ab".repeat(32),
-                directory: pack.clone(),
-                persona: Some("persona.md".to_owned()),
-                skill_roots: Vec::new(),
-                command_roots: Vec::new(),
-                tool_allow: Vec::new(),
-                tool_deny: Vec::new(),
-            })
-        } else {
-            profile.with_protected_pack_roots(vec![pack.clone()])
-        };
-        let plan = CompiledAgentPlan::compile_blocking(profile).unwrap();
-        let gate = Arc::new(crate::StaticPolicyGate {
-            mode: qq_protocol::ApprovalMode::Auto,
-            tools: Default::default(),
-            network: Arc::clone(&plan.runtime.network),
-        });
-        let messages = vec![qq_provider::Message::user("attempt the edits")];
-        let cancelled = crate::RunCancellation::new();
-        let files = Arc::new(crate::workspace::FileState::default());
-        let events: Vec<_> = if direct {
-            plan.runtime
-                .run_loop(
-                    messages,
-                    directory.path().to_owned(),
-                    cancelled,
-                    gate,
-                    files,
-                )
-                .collect()
-                .await
-        } else {
-            plan.execute(
-                messages,
-                cancelled,
-                gate,
-                files,
-                crate::RunCapabilities::user(None),
-            )
-            .collect()
-            .await
-        };
-        assert_eq!(
-            std::fs::read_to_string(pack.join("persona.md")).unwrap(),
-            "Original reviewer rules.\n",
-            "pack resource changes must be refused (direct={direct})"
-        );
-        assert!(!pack.join("new-policy.md").exists());
-        assert_eq!(
-            std::fs::read_to_string(directory.path().join("vendor/ordinary.txt")).unwrap(),
-            "ordinary task edit"
-        );
-        let denied = events
-            .iter()
-            .filter(|event| match event {
-                crate::RuntimeEvent::ToolCallUnexecuted { message, .. } => {
-                    message.contains("protected_path")
-                }
-                crate::RuntimeEvent::ToolCallFinished {
-                    result,
-                    is_error: true,
-                    ..
-                } => result.contains("protected_path"),
-                _ => false,
-            })
-            .count();
-        assert_eq!(
-            denied,
-            if cfg!(unix) { 4 } else { 3 },
-            "all pack writes/edits need explicit protected-path refusals"
-        );
-    }
-
-    #[tokio::test]
-    async fn unselected_configured_custom_project_pack_is_protected() {
-        assert_custom_pack_mutations_are_denied(false, false).await;
-    }
-
-    #[test]
-    fn protected_pack_roots_are_normalized_and_change_plan_identity() {
-        let workspace = canonical_temp();
-        let pack = workspace.path().join("vendor/reviewer");
-        std::fs::create_dir_all(&pack).unwrap();
-        let outside = canonical_temp();
-        let plain = CompiledAgentPlan::compile_blocking(profile(workspace.path())).unwrap();
-        let protected = CompiledAgentPlan::compile_blocking(
-            profile(workspace.path()).with_protected_pack_roots(vec![
-                pack.clone(),
-                pack.clone(),
-                outside.path().to_owned(),
-            ]),
-        )
-        .unwrap();
-        assert_eq!(
-            protected.descriptor().protected_pack_roots,
-            ["vendor/reviewer"]
-        );
-        assert_ne!(plain.digest(), protected.digest());
-        assert!(matches!(
-            CompiledAgentPlan::compile_blocking(
-                profile(workspace.path())
-                    .with_protected_pack_roots(vec![PathBuf::from("vendor/reviewer")])
-            ),
-            Err(PlanCompileError::ProtectedPackRoot { .. })
-        ));
-        #[cfg(unix)]
-        {
-            let alias = workspace.path().join("pack-alias");
-            std::os::unix::fs::symlink(&pack, &alias).unwrap();
-            let aliased = CompiledAgentPlan::compile_blocking(
-                profile(workspace.path()).with_protected_pack_roots(vec![alias]),
-            )
-            .unwrap();
-            assert_eq!(aliased.digest(), protected.digest());
-        }
-    }
-
-    #[tokio::test]
-    async fn compiled_plan_protects_custom_project_pack_resources() {
-        assert_custom_pack_mutations_are_denied(false, true).await;
-    }
-
-    #[tokio::test]
-    async fn direct_runtime_preserves_custom_project_pack_protection() {
-        assert_custom_pack_mutations_are_denied(true, true).await;
     }
 }

@@ -137,14 +137,6 @@ pub struct AgentProfileSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub approval_mode: ApprovalMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pack: Option<PackSummary>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PackSummary {
-    pub id: String,
-    pub version: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

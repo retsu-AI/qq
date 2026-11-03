@@ -260,7 +260,7 @@ approval timeout or fabricating an answer; a supervisor resumes the session
 with the answer as the next prompt. A spawned child's question is declined
 on the spot so the child proceeds on its own judgement.
 
-Choose `qq run --profile <name>` to select a pre-compiled profile/pack catalog.
+Choose `qq run --profile <name>` to select a pre-compiled profile catalog.
 Optional `policy.exposed_tools` narrows that catalog further: absent means no
 additional restriction, `[]` exposes no tools, and lists intersect across
 configuration layers. For example, `exposed_tools: ["read_file", "search"]`
@@ -268,11 +268,10 @@ exposes only those tools even under `--approval full`. Restricting exposure
 requires no workspace trust.
 
 `config check` validates exact built-in names and MCP name syntax without
-discovering tools. Compilation checks MCP membership among the servers
-admitted by the profile. Configured servers excluded by a profile's MCP
-subset remain excluded without discovery; an unknown server or a missing
-tool on an admitted server fails compilation. `load_skill` is a known name
-but appears only when workspace or pack skills are available. Large external
+discovering tools. Compilation checks MCP membership among the configured
+servers; an unknown server or a missing tool on a configured server fails
+compilation. `load_skill` is a known name but appears only when workspace or
+global skills are available. Large external
 catalogs stay progressive when `select_tools` is exposed; omitting the
 selector sends the permitted schemas directly, within the existing catalog
 bounds. A discovered name still passes ordinary schema and catalog admission;

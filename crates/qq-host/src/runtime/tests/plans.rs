@@ -59,56 +59,6 @@ fn configured_static_exposure_names_match_the_compiled_catalog() {
 }
 
 #[test]
-fn exposure_intersects_profile_mcp_admission_before_member_validation() {
-    let fixture = RuntimeFixture::new();
-    let factory = fixture.factory();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(fixture.path("data"), fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let manifest = fixture.path("work/.qq/packs/review/pack.ron");
-    fs::create_dir_all(manifest.parent().unwrap()).unwrap();
-    fs::write(
-        manifest,
-        r#"(schema: 1, id: "review", version: "1.0.0", profiles: {
-            "local": Profile(mcp: []),
-            "remote": Profile(mcp: ["notes"]),
-        })"#,
-    )
-    .unwrap();
-    let document = |exposure: &str| {
-        format!(
-            r#"(version: 1, model: "custom/test-model", providers: {{
-            "custom": Custom(connection: (base_url: "http://localhost/v1", api: OpenAiChatCompletions, auth: NoAuth),
-                models: {{"test-model": (name: "Test")}})
-        }}, mcp: {{"notes": Stdio(command: "qq-test-must-not-start")}},
-            policy: (exposed_tools: ["read_file", "{exposure}"]))"#
-        )
-    };
-    let request = fixture.request(document("mcp__notes__missing"));
-    factory.inner.config.grant_pending_trust(&request).unwrap();
-    let local = AgentProfileId::new("local").unwrap();
-    let plan = factory.plan_for_profile(&request, &local).unwrap();
-    assert_eq!(plan.catalog().names().collect::<Vec<_>>(), ["read_file"]);
-    assert!(plan.descriptor().mcp_servers.is_empty());
-    let remote = AgentProfileId::new("remote").unwrap();
-    for (request, profile, expected) in [
-        (request, remote, "mcp__notes__missing"),
-        (
-            fixture.request(document("mcp__typo__missing")),
-            local,
-            "mcp__typo__missing",
-        ),
-    ] {
-        let error = factory.plan_for_profile(&request, &profile).unwrap_err();
-        assert!(
-            matches!(error, RuntimeBuildError::Plan(PlanCompileError::UnknownExposedTool { name }) if name == expected)
-        );
-    }
-}
-
-#[test]
 fn factory_clones_profiles_and_cache_keep_host_read_approvals() {
     let fixture = RuntimeFixture::new();
     let request = fixture.request(r#"(version: 1, model: "custom/test", providers: {"custom": Custom(connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth), models: {"test": (name: "Test")})}, profiles: {"worker": Profile(model: Some("custom/test"))})"#);
@@ -424,148 +374,6 @@ fn profiles_select_defaults_key_the_plan_cache_and_reject_unknown_names() {
 }
 
 #[test]
-fn pack_profiles_compile_persona_skills_tool_policy_and_mcp_subsets_into_plans() {
-    let fixture = RuntimeFixture::new();
-    let factory = fixture.factory();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(fixture.path("data"), fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let config = fixture.path("work/.qq/config.ron");
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
-    fs::write(
-        &config,
-        r#"(
-                version: 1,
-                model: "custom/test-model",
-                max_output_tokens: 64,
-                packs: { "review-kit": Pack(path: "../vendor/review-kit") },
-                providers: {
-                    "custom": Custom(
-                        connection: (
-                            base_url: "http://127.0.0.1:1/v1",
-                            api: OpenAiResponses,
-                            auth: NoAuth,
-                        ),
-                        models: { "test-model": (name: "Test model") },
-                    ),
-                },
-                mcp: {
-                    "notes": Stdio(command: "qq-test-no-such-notes"),
-                    "tickets": Stdio(command: "qq-test-no-such-tickets"),
-                },
-            )"#,
-    )
-    .unwrap();
-    for (path, content) in [
-        (
-            "work/vendor/review-kit/pack.ron",
-            r#"(
-                    schema: 1,
-                    id: "review-kit",
-                    version: "1.0.0",
-                    profiles: {
-                        "reviewer": Profile(
-                            approval_mode: read_only,
-                            prompt: "persona.md",
-                            skills: ["skills"],
-                            tools: (deny: ["shell", "write_file"]),
-                            mcp: ["notes"],
-                        ),
-                    },
-                )"#,
-        ),
-        ("work/vendor/review-kit/persona.md", "Persona v1.\n"),
-        (
-            "work/vendor/review-kit/skills/audit/SKILL.md",
-            "---\ndescription: Audit it\n---\nbody\n",
-        ),
-    ] {
-        let path = fixture.path(path);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, content).unwrap();
-    }
-    let request = LoadRequest::new(fixture.path("work"));
-    factory.inner.config.grant_pending_trust(&request).unwrap();
-
-    let reviewer = AgentProfileId::new("reviewer").unwrap();
-    let (plan, lookup) = factory.plan_with_lookup(&request, &reviewer).unwrap();
-    assert_eq!(lookup, PlanLookup::Compiled);
-    let descriptor = plan.descriptor();
-    let pack = descriptor.pack.as_ref().unwrap();
-    assert_eq!(
-        (pack.id.as_str(), pack.version.as_str()),
-        ("review-kit", "1.0.0")
-    );
-    assert_eq!(pack.tool_deny, ["shell", "write_file"]);
-    assert!(pack.persona_hash.is_some());
-    assert_eq!(descriptor.mcp_servers.len(), 1);
-    assert_eq!(descriptor.mcp_servers[0].name, "notes");
-    let names: Vec<&str> = plan.catalog().names().collect();
-    assert!(!names.contains(&"shell") && !names.contains(&"write_file"));
-    assert!(names.contains(&"edit_file") && names.contains(&"load_skill"));
-    assert_eq!(plan.skills().disclosed_count(), 1);
-    assert_eq!(
-        plan.skills()
-            .entries()
-            .iter()
-            .find(|e| e.name == "audit")
-            .unwrap()
-            .source,
-        "pack:review-kit/skills/audit/SKILL.md"
-    );
-    let default_plan = factory.plan_for(&request).unwrap();
-    assert_eq!(default_plan.descriptor().mcp_servers.len(), 2);
-    assert!(default_plan.descriptor().pack.is_none());
-    assert_eq!(
-        default_plan.descriptor().protected_pack_roots,
-        ["vendor/review-kit"]
-    );
-    assert_eq!(descriptor.protected_pack_roots, ["vendor/review-kit"]);
-    assert!(default_plan.catalog().names().any(|n| n == "shell"));
-
-    assert_eq!(
-        factory.plan_with_lookup(&request, &reviewer).unwrap().1,
-        PlanLookup::Hit
-    );
-    fs::write(
-        fixture.path("work/vendor/review-kit/persona.md"),
-        "Persona v2.\n",
-    )
-    .unwrap();
-    let (edited, lookup) = factory.plan_with_lookup(&request, &reviewer).unwrap();
-    assert_eq!(lookup, PlanLookup::Compiled);
-    assert_ne!(edited.digest(), plan.digest());
-    assert_eq!(plan.descriptor().pack.as_ref().unwrap().version, "1.0.0");
-
-    let profiles = factory
-        .profiles_for(fixture.path("work").to_str().unwrap())
-        .unwrap();
-    let summary = profiles.iter().find(|p| p.id == reviewer).unwrap();
-    assert_eq!(summary.pack.as_ref().unwrap().id, "review-kit");
-    assert_eq!(summary.approval_mode, ApprovalMode::ReadOnly);
-
-    fs::write(
-        fixture.path("work/vendor/review-kit/pack.ron"),
-        r#"(schema: 1, id: "review-kit", version: "9", requires: (protocol: 999),
-                profiles: { "reviewer": Profile(max_output_tokens: 8) })"#,
-    )
-    .unwrap();
-    assert!(matches!(
-        factory.plan_for_profile(&request, &reviewer),
-        Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
-    ));
-    factory.inner.config.grant_pending_trust(&request).unwrap();
-    let error = factory.plan_for_profile(&request, &reviewer).unwrap_err();
-    assert!(matches!(
-        error,
-        RuntimeBuildError::PackRequiresNewerProtocol { required: 999, .. }
-    ));
-    assert_eq!(error.failure_kind(), RunFailureKind::Configuration);
-}
-
-#[test]
 fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {
     let fixture = RuntimeFixture::new();
     let factory = fixture.factory();
@@ -705,7 +513,7 @@ fn plan_descriptor_covers_provider_model_workspace_and_tools_without_secrets() {
             "descriptor leaked {forbidden}"
         );
     }
-    assert!(canonical.starts_with("qq-agent-plan-descriptor-v16\0{"));
+    assert!(canonical.starts_with("qq-agent-plan-descriptor-v17\0{"));
 }
 
 #[test]

@@ -3805,16 +3805,11 @@ fn capabilities_with_profiles() -> std::sync::Arc<qq_protocol::ServerCapabilitie
             id: qq_protocol::AgentProfileId::default(),
             model: Some("openai/gpt-test".to_owned()),
             approval_mode: ApprovalMode::Auto,
-            pack: None,
         },
         qq_protocol::AgentProfileSummary {
             id: qq_protocol::AgentProfileId::new("reviewer").unwrap(),
             model: None,
             approval_mode: ApprovalMode::ReadOnly,
-            pack: Some(qq_protocol::PackSummary {
-                id: "review-kit".to_owned(),
-                version: "1.0.0".to_owned(),
-            }),
         },
     ]);
     std::sync::Arc::new(capabilities)
@@ -3844,7 +3839,6 @@ fn profile_picker_waits_for_capabilities_and_lists_advertised_profiles() {
     };
     let names: Vec<&str> = picker.items().iter().map(|row| row.id.as_str()).collect();
     assert_eq!(names, ["default", "reviewer"]);
-    assert_eq!(picker.items()[1].pack.as_deref(), Some("review-kit@1.0.0"));
     assert_eq!(picker.cursor(), 0);
 }
 
@@ -4169,7 +4163,6 @@ fn a_refreshed_capability_document_updates_the_open_profile_picker() {
             id: qq_protocol::AgentProfileId::new("perf").unwrap(),
             model: None,
             approval_mode: ApprovalMode::Ask,
-            pack: None,
         });
     app.apply_client_update(ClientUpdate::Capabilities(std::sync::Arc::new(refreshed)));
     let Some(Overlay::Profiles(picker)) = &app.overlay else {

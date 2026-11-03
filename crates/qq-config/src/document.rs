@@ -620,7 +620,7 @@ pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 9] = [
     "goals",
 ];
 
-pub const DOCUMENT_FIELD_NAMES: [&str; 16] = [
+pub const DOCUMENT_FIELD_NAMES: [&str; 15] = [
     "version",
     "organization",
     "model",
@@ -635,11 +635,10 @@ pub const DOCUMENT_FIELD_NAMES: [&str; 16] = [
     "providers",
     "mcp",
     "profiles",
-    "packs",
     "policy",
 ];
 
-pub const REMOVED_KEYS: [(&str, &str); 7] = [
+pub const REMOVED_KEYS: [(&str, &str); 8] = [
     (
         "allow_tools",
         "was removed in v0.1.10: Auto and Full run tools without grants and Ask asks every \
@@ -674,6 +673,11 @@ pub const REMOVED_KEYS: [(&str, &str); 7] = [
         "approval_delegate",
         "was removed in v0.1.10 with the approval reviewer: choose `approval_mode` auto or \
          full to skip prompts, or ask to approve every call; delete the key",
+    ),
+    (
+        "packs",
+        "was removed in v0.1.12 with agent packs: move a pack's skills into `.qq/skills/` and \
+         its model and approval mode into `profiles`; delete the key",
     ),
 ];
 
@@ -761,8 +765,6 @@ pub(super) struct Document {
     mcp: Field<UniqueMap<String, McpServerPatch>>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     profiles: Field<UniqueMap<String, ProfilePatch>>,
-    #[serde(default, skip_serializing_if = "Field::is_missing")]
-    packs: Field<UniqueMap<String, PackPatch>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     policy: Option<PolicyPatch>,
 }
@@ -793,13 +795,6 @@ struct DelegationEntryPatch {
     note: Option<String>,
     #[serde(default)]
     effort: Option<qq_provider::ReasoningEffort>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) enum PackPatch {
-    Pack { path: String },
-    Remove,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -898,7 +893,6 @@ impl Document {
             || self.profiles.is_present()
             || self.providers.is_present()
             || self.mcp.is_present()
-            || self.packs.is_present()
     }
 
     pub(super) fn sensitive_sections(&self) -> Vec<&'static str> {
@@ -933,14 +927,7 @@ impl Document {
         if self.profiles.is_present() {
             sections.push("profiles");
         }
-        if self.packs.is_present() {
-            sections.push("packs");
-        }
         sections
-    }
-
-    pub(super) const fn packs(&self) -> &Field<UniqueMap<String, PackPatch>> {
-        &self.packs
     }
 
     pub(super) fn sensitive_digest(&self) -> Result<Option<String>, ConfigError> {
@@ -970,8 +957,6 @@ impl Document {
             providers: Option<&'a Field<UniqueMap<String, ProviderEntryPatch>>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             mcp: Option<&'a Field<UniqueMap<String, McpServerPatch>>>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            packs: Option<&'a Field<UniqueMap<String, PackPatch>>>,
         }
 
         fn present<T>(field: &Field<T>) -> Option<&Field<T>> {
@@ -989,7 +974,6 @@ impl Document {
             profiles: present(&self.profiles),
             providers: present(&self.providers),
             mcp: present(&self.mcp),
-            packs: present(&self.packs),
         };
         let canonical =
             serde_json::to_vec(&projection).map_err(|error| ConfigError::StateSerialization {
@@ -1052,12 +1036,6 @@ impl Document {
             touched.push(ConfigKey::Profiles);
             if let Field::Set(profiles) = &self.profiles {
                 touched.extend(profiles.0.keys().cloned().map(ConfigKey::Profile));
-            }
-        }
-        if self.packs.is_present() {
-            touched.push(ConfigKey::Packs);
-            if let Field::Set(packs) = &self.packs {
-                touched.extend(packs.0.keys().cloned().map(ConfigKey::Pack));
             }
         }
         if self.policy.is_some() {
@@ -1426,7 +1404,6 @@ pub(super) struct MergeState {
     providers: BTreeMap<String, ProviderConfig>,
     mcp: BTreeMap<String, McpServerConfig>,
     profiles: BTreeMap<String, AgentProfileConfig>,
-    packs: BTreeMap<String, crate::pack::AgentPack>,
     policy: EffectivePolicy,
     provenance: ConfigProvenance,
 }
@@ -1486,7 +1463,6 @@ impl MergeState {
                 providers,
                 mcp: BTreeMap::new(),
                 profiles: BTreeMap::new(),
-                packs: BTreeMap::new(),
                 policy: EffectivePolicy::default(),
                 provenance,
             },
@@ -1617,23 +1593,6 @@ impl MergeState {
         }
     }
 
-    pub(super) fn admit_pack(&mut self, pack: crate::pack::AgentPack) {
-        self.provenance
-            .packs
-            .insert(pack.id().to_owned(), pack.source().clone());
-        self.packs.insert(pack.id().to_owned(), pack);
-    }
-
-    pub(super) fn remove_pack(&mut self, id: &str) {
-        self.packs.remove(id);
-        self.provenance.packs.remove(id);
-    }
-
-    pub(super) fn clear_packs(&mut self) {
-        self.packs.clear();
-        self.provenance.packs.clear();
-    }
-
     fn apply_profiles(
         &mut self,
         patch: &Field<UniqueMap<String, ProfilePatch>>,
@@ -1667,7 +1626,6 @@ impl MergeState {
                                     max_output_tokens: *max_output_tokens,
                                     approval_mode: *approval_mode,
                                     reasoning_effort: *reasoning_effort,
-                                    pack: None,
                                 },
                             );
                             self.provenance
@@ -1957,49 +1915,6 @@ impl MergeState {
         reports: Vec<SourceReport>,
         sources: ConfigSources,
     ) -> Result<ClientSnapshot, ConfigError> {
-        let mut pack_profiles: BTreeMap<String, (String, AgentProfileConfig)> = BTreeMap::new();
-        for (pack_id, pack) in &self.packs {
-            for (name, patch) in pack.mcp() {
-                if !self.mcp.contains_key(name) {
-                    let mut patched = BTreeMap::new();
-                    patched.insert(name.clone(), patch.clone());
-                    let field = Field::Set(UniqueMap(patched));
-                    let mut scratch = std::mem::take(&mut self.mcp);
-                    apply_mcp_into(&mut scratch, &field);
-                    self.mcp = scratch;
-                }
-            }
-            for (name, profile) in pack.profiles() {
-                if self.profiles.contains_key(name) {
-                    continue;
-                }
-                if let Some((other, _)) = pack_profiles.get(name) {
-                    return Err(ConfigError::PackProfileConflict {
-                        profile: name.clone(),
-                        packs: format!("{other}, {pack_id}"),
-                    });
-                }
-                pack_profiles.insert(
-                    name.clone(),
-                    (
-                        pack_id.clone(),
-                        AgentProfileConfig {
-                            model: profile.model().map(str::to_owned),
-                            organization: profile.organization().map(str::to_owned),
-                            max_output_tokens: profile.max_output_tokens(),
-                            approval_mode: profile.approval_mode(),
-                            reasoning_effort: None,
-                            pack: Some(crate::PackProfileRef::new(pack, profile.clone())),
-                        },
-                    ),
-                );
-            }
-        }
-        for (name, (pack_id, profile)) in pack_profiles {
-            let source = self.packs[&pack_id].source().clone();
-            self.profiles.insert(name.clone(), profile);
-            self.provenance.profiles.insert(name, source);
-        }
         let model = self.model.map(ModelRoute::parse).transpose()?;
         let worker_model = self.worker_model.map(ModelRoute::parse).transpose()?;
         for route in model.iter().chain(worker_model.as_ref()) {
@@ -2127,20 +2042,6 @@ impl MergeState {
             } else if let Some(cap) = profile.max_output_tokens {
                 enforce_policy(&self.policy, model.as_ref(), cap, &self.providers)?;
             }
-            if let Some(reference) = &profile.pack
-                && let Some(servers) = reference.profile.mcp()
-            {
-                for server in servers {
-                    if !self.mcp.contains_key(server) {
-                        return Err(ConfigError::InvalidPack {
-                            origin: self.packs[&reference.pack].source().clone(),
-                            message: format!(
-                                "profile {name:?} references undeclared MCP server {server:?}"
-                            ),
-                        });
-                    }
-                }
-            }
         }
         let audit = match self.audit.take() {
             Some(patch) => {
@@ -2197,7 +2098,6 @@ impl MergeState {
             providers: self.providers,
             mcp: self.mcp,
             profiles: self.profiles,
-            packs: self.packs,
             policy: self.policy,
             reports,
             provenance: self.provenance,
@@ -2227,7 +2127,6 @@ impl ClientSnapshot {
             providers: self.providers,
             mcp: self.mcp,
             profiles: self.profiles,
-            packs: self.packs,
             policy: self.policy,
             reports: self.reports,
             provenance: self.provenance,

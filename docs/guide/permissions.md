@@ -12,18 +12,16 @@ QQ separates two questions:
 
 QQ starts tasks using trusted configuration and non-sensitive project settings.
 It does not ask you to approve a project before Auto can work. Untrusted project
-providers, models, MCP servers, and packs stay disabled;
+providers, models, MCP servers, and profiles stay disabled;
 QQ neither starts their commands nor records trust automatically.
 
 Your global configuration, `QQ_CONFIG`, `QQ_CONFIG_CONTENT`, and managed
 configuration remain trusted sources. Configure your model and connections
 there when you want them available across projects.
 
-A project can ship `.qq/config.ron`, `qq.ron`, `.qq/config.d/*.ron`, and
-`.qq/packs/`. To enable its sensitive settings, review the content and explicitly
+A project can ship `.qq/config.ron`, `qq.ron`, and `.qq/config.d/*.ron`. To enable its sensitive settings, review the content and explicitly
 run `qq trust` in that project. Trust applies to the exact sensitive content;
 changing it disables the changed settings until you explicitly trust them again.
-Project pack entries must stay inside the project, including through symlinks.
 
 ```sh
 qq trust
@@ -38,18 +36,14 @@ Trust is stored in your QQ data directory, outside the project.
 
 Sensitive settings are `organization`, `model`, `worker_model`,
 `delegation`, `audit`, `goals`, `reasoning_effort`, `providers`, `mcp`,
-`profiles`, and `packs`. A project file that only sets
+and `profiles`. A project file that only sets
 `policy.exposed_tools` or `max_output_tokens` loads without trust. Syntax, path boundaries, and managed policy still apply.
 
 ## Protected task files
 
 Built-in `write_file` and `edit_file` refuse project configuration
-(`.qq/config.ron`, `.qq/config.d/`, `.qq/packs/`, and `qq.ron`) and Git
+(`.qq/config.ron`, `.qq/config.d/`, and `qq.ron`) and Git
 trust files under `.git`, including nested repositories and symlink aliases.
-Resolved configured pack directories inside the workspace (for example,
-`vendor/reviewer`) and their aliases are protected too, even when that pack
-is not selected for the current run. Unconfigured vendor directories remain
-ordinary task files.
 This applies in every approval mode; approving a file tool does not let it
 rewrite its own policy. Ordinary task files, `.github/`, and
 `.qq/skills/` remain writable when the mode permits writes. A batch rejected
@@ -195,9 +189,8 @@ actually asked.
 
 ## Tool catalog vs. approval
 
-Approval decides whether a call *runs*. `policy.exposed_tools` and a pack
-profile's `tools: (allow: …, deny: …)` decide whether the model *sees* a
-tool at all; the model does not know a removed tool exists. Use the
+Approval decides whether a call *runs*. `policy.exposed_tools` decides
+whether the model *sees* a tool at all; the model does not know a removed tool exists. Use the
 catalog for "never", approval for "ask me".
 
 ## Network

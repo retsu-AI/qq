@@ -177,7 +177,7 @@ original command journal retains the escape marker so preparation does not
 reinterpret it. Restart, event replay, snapshots, and follow-up context
 therefore see the same prompt the first provider request saw.
 Only an exact leading invocation is special; ordinary prompts never inject
-skill bodies. Native `.qq/` roots, agent-pack roots, the global
+skill bodies. Native `.qq/` roots, the global
 `<config>/skills` root (`~/.config/qq/skills` on Linux), and `.agents/skills`
 are additionally *disclosed*: the plan's compiled `SkillIndex` lists their
 names and YAML front-matter descriptions in the system prompt, tells the model
@@ -192,8 +192,8 @@ the run's prompt identity.
 The resolver searches sources in three precedence tiers; a name found in a
 higher tier drops every document of that name from lower tiers:
 
-1. Native QQ and pack sources: `.qq/commands/<name>.md`,
-   `.qq/skills/<name>/SKILL.md`, and the selected pack's roots.
+1. Native QQ sources: `.qq/commands/<name>.md` and
+   `.qq/skills/<name>/SKILL.md`.
 2. The global root: `<config>/skills/<name>/SKILL.md`.
 3. Compatibility sources: `.agents/skills/<name>/SKILL.md`,
    `.claude/commands/<name>.md`, and `.claude/skills/<name>/SKILL.md`.
@@ -246,13 +246,6 @@ provider-neutral tool declarations so evaluation artifacts remain explainable.
 Clients may offer completion for discoverable names, but discovery, resolution,
 loading, and rejection remain runtime behavior shared by direct, server, TUI,
 and benchmark paths.
-
-A pack selected by the session's profile contributes its declared skill and
-command roots as `pack:<id>/...` in the native tier, and prepends its persona
-to the system prompt. Packs are directories with a `pack.ron` manifest discovered from the
-global configuration directory and `.qq/packs/` (each project manifest
-admitted only once its exact content is trusted); see
-`docs/design/architecture.md`.
 
 The global root is the server process's configuration directory
 (`<global>/skills`, as `qq-config` resolves it, including `QQ_HOME`), indexed
@@ -1156,7 +1149,7 @@ after a restart.
   interrupt waits only for calls that have not returned; when the run
   ends, its yielded commands are cancelled and teardown reaps them
   like any other tool task. `command_status` is declared exactly when
-  `shell` or `exec` is and follows them through pack and policy filters.
+  `shell` or `exec` is and follows them through policy filters.
 - Timeouts name the limit (`timeout_seconds=<n>`) and suggest a larger
   timeout or the yield mode; a run deadline says so instead.
 - Model-facing text bounded to 16 KiB head+tail behind a
@@ -1550,7 +1543,7 @@ shell, the server, tool, and arguments for MCP.
 
 Catalog exposure is configured with optional
 `policy.exposed_tools: ["read_file", "search"]`. Lists intersect across
-layers and with the selected profile/pack policy; absent adds no restriction
+layers; absent adds no restriction
 and `[]` removes all tools. At most 1024 distinct exact names may appear in
 one declaration. Built-in names and MCP syntax are checked during config
 loading, and admitted MCP tool membership is checked during compilation.
@@ -1567,7 +1560,7 @@ accumulates across all of them. Tool denies match exact names
 for `shell`, to goal checks; shell prefixes are non-empty, without control
 characters or surrounding whitespace.
 
-Workspace-declared providers, models, MCP servers, profiles and packs are
+Workspace-declared providers, models, MCP servers and profiles are
 sensitive. Task startup uses
 `LoadRequest::with_untrusted_project_config_ignored`: the loader withholds
 sensitive content before merging, applies non-sensitive settings, and

@@ -1192,13 +1192,8 @@ fn config_command(
                         })
                     }
                     _ => field
-                        .strip_prefix("pack.")
-                        .and_then(|id| snapshot.provenance().pack(id))
-                        .or_else(|| {
-                            field
-                                .strip_prefix("profile.")
-                                .and_then(|name| snapshot.provenance().profile(name))
-                        })
+                        .strip_prefix("profile.")
+                        .and_then(|name| snapshot.provenance().profile(name))
                         .or_else(|| {
                             field
                                 .strip_prefix("provider.")
@@ -1307,21 +1302,6 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
         "policy.builtin_preference: {:?}",
         snapshot.policy().builtin_preference()
     );
-    if !snapshot.packs().is_empty() {
-        println!("packs:");
-        for pack in snapshot.packs().values() {
-            let name = pack
-                .name()
-                .map(|name| format!(" ({name})"))
-                .unwrap_or_default();
-            println!(
-                "  {} {}{name}\t{}",
-                pack.id(),
-                pack.version(),
-                pack.directory().display()
-            );
-        }
-    }
     if !snapshot.profiles().is_empty() {
         println!("profiles:");
         for (name, profile) in snapshot.profiles() {
@@ -1340,9 +1320,6 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
             }
             if let Some(tokens) = profile.max_output_tokens() {
                 parts.push(format!("max_output_tokens={tokens}"));
-            }
-            if let Some(pack) = profile.pack() {
-                parts.push(format!("pack={}@{}", pack.pack(), pack.version()));
             }
             println!("  {name}: {}", join_or_none(&parts));
         }

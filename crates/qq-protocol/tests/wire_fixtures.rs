@@ -7,10 +7,10 @@ use qq_protocol::{
     Correlation, CredentialEpoch, EventCapabilities, EventCursor, FetchPreview, FinalOutput,
     GenerationCapabilities, InputPart, InputPartKind, InstructionHash, LimitCapabilities,
     MessageId, MessageRole, MessageSnapshot, MessageState, ModelSelection, OutputContract,
-    PROTOCOL_VERSION, PackSummary, PromptCacheCapabilities, PromptVersion, Question,
-    QuestionPreview, ResolvedModel, ResolvedModelVersion, RunActivity, RunFailure, RunFailureKind,
-    RunId, RunLimits, RunOutcome, RunPause, RunPlanIdentity, RunPromptIdentity, RunSnapshot,
-    RunStatus, ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind, SessionEvent,
+    PROTOCOL_VERSION, PromptCacheCapabilities, PromptVersion, Question, QuestionPreview,
+    ResolvedModel, ResolvedModelVersion, RunActivity, RunFailure, RunFailureKind, RunId, RunLimits,
+    RunOutcome, RunPause, RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus,
+    ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind, SessionEvent,
     SessionEventEnvelope, SessionId, SessionStatus, SessionSummary, ShellCommandPreview,
     ShellVerdict, SkillCapabilities, SteeringCapabilities, StoreId, TokenUsage, ToolCallId,
     ToolCallSnapshot, ToolCallState, ToolCapabilities, ToolExposure, ToolHostSummary, WorkspaceId,
@@ -188,7 +188,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 42);
+    assert_eq!(PROTOCOL_VERSION, 43);
     let catalog_cursor = qq_protocol::WorkspaceCatalogCursor {
         store_id: StoreId::from_bytes([1; 16]),
         workspace_id: WorkspaceId::from_bytes([2; 16]),
@@ -1094,16 +1094,11 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     id: AgentProfileId::default(),
                     model: Some("openai/gpt-5.6".to_owned()),
                     approval_mode: ApprovalMode::Auto,
-                    pack: None,
                 },
                 AgentProfileSummary {
                     id: AgentProfileId::new("review").unwrap(),
                     model: Some("anthropic/claude-x".to_owned()),
                     approval_mode: ApprovalMode::ReadOnly,
-                    pack: Some(PackSummary {
-                        id: "review-kit".to_owned(),
-                        version: "1.2.0".to_owned(),
-                    }),
                 },
             ]),
             tools: ToolCapabilities {
@@ -1143,7 +1138,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                         qq_protocol::SkillSummary {
                             name: "audit".to_owned(),
                             kind: qq_protocol::GuidanceKind::Skill,
-                            source: "pack:review-kit/skills/audit/SKILL.md".to_owned(),
+                            source: ".qq/skills/audit/SKILL.md".to_owned(),
                             description: String::new(),
                             disclosed: false,
                         },

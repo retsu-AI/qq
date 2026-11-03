@@ -118,7 +118,7 @@ them.
 
 A repository can ship its own `.qq/config.ron` (like this one does). QQ
 starts there without asking, but leaves the file's sensitive settings off:
-models, providers, MCP servers that run commands, profiles, and packs. Its
+models, providers, MCP servers that run commands, and profiles. Its
 other settings apply. `qq config sources` and `qq doctor` list what is
 waiting:
 

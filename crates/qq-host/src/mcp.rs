@@ -211,13 +211,8 @@ impl McpRegistryCache {
         credentials: &CredentialStore,
         epoch: CredentialEpoch,
         snapshot: &ConfigSnapshot,
-        subset: Option<&[String]>,
     ) -> Result<Option<WiredMcp>, McpBuildError> {
-        let admitted: Vec<(&String, &McpServerConfig)> = snapshot
-            .mcp_servers()
-            .iter()
-            .filter(|(name, _)| subset.is_none_or(|names| names.contains(*name)))
-            .collect();
+        let admitted: Vec<(&String, &McpServerConfig)> = snapshot.mcp_servers().iter().collect();
         if admitted.is_empty() {
             return Ok(None);
         }
@@ -734,12 +729,7 @@ mod tests {
         let cache = McpRegistryCache::new();
         let first_snapshot = fixture.snapshot("first", &server.url, "first-secret");
         let first = cache
-            .registry_for_snapshot(
-                &fixture.credentials,
-                CredentialEpoch::NONE,
-                &first_snapshot,
-                None,
-            )
+            .registry_for_snapshot(&fixture.credentials, CredentialEpoch::NONE, &first_snapshot)
             .unwrap()
             .unwrap();
         assert!(
@@ -754,7 +744,6 @@ mod tests {
                 &fixture.credentials,
                 CredentialEpoch::NONE,
                 &second_snapshot,
-                None,
             )
             .unwrap()
             .unwrap();
@@ -770,7 +759,6 @@ mod tests {
                 &fixture.credentials,
                 CredentialEpoch::NONE,
                 &rotated_snapshot,
-                None,
             )
             .unwrap()
             .unwrap();
@@ -808,23 +796,13 @@ mod tests {
         let first_snapshot =
             fixture.snapshot("first", &format!("{}?key=first", server.url), "secret");
         let first = cache
-            .registry_for_snapshot(
-                &fixture.credentials,
-                CredentialEpoch::NONE,
-                &first_snapshot,
-                None,
-            )
+            .registry_for_snapshot(&fixture.credentials, CredentialEpoch::NONE, &first_snapshot)
             .unwrap()
             .unwrap();
         let same_snapshot =
             fixture.snapshot("second", &format!("{}?key=first", server.url), "secret");
         let same = cache
-            .registry_for_snapshot(
-                &fixture.credentials,
-                CredentialEpoch::NONE,
-                &same_snapshot,
-                None,
-            )
+            .registry_for_snapshot(&fixture.credentials, CredentialEpoch::NONE, &same_snapshot)
             .unwrap()
             .unwrap();
         assert!(Arc::ptr_eq(&first.registry, &same.registry));
@@ -836,7 +814,6 @@ mod tests {
                 &fixture.credentials,
                 CredentialEpoch::NONE,
                 &changed_snapshot,
-                None,
             )
             .unwrap()
             .unwrap();
@@ -874,7 +851,6 @@ mod tests {
                                 &fixture.credentials,
                                 CredentialEpoch::NONE,
                                 &snapshot,
-                                None,
                             )
                             .unwrap()
                             .unwrap()
@@ -909,7 +885,7 @@ mod tests {
                 let credentials = fixture.credentials.clone();
                 tokio::task::spawn_blocking(move || {
                     cache
-                        .registry_for_snapshot(&credentials, CredentialEpoch::NONE, &snapshot, None)
+                        .registry_for_snapshot(&credentials, CredentialEpoch::NONE, &snapshot)
                         .unwrap()
                         .unwrap()
                         .registry
@@ -952,7 +928,7 @@ mod tests {
         );
         let epoch = fixture.credentials.epoch().unwrap();
         let wired = cache
-            .registry_for_snapshot(&fixture.credentials, epoch, &snapshot, None)
+            .registry_for_snapshot(&fixture.credentials, epoch, &snapshot)
             .unwrap()
             .expect("two servers are declared");
         assert_eq!(wired.servers.len(), 2);
@@ -1012,7 +988,7 @@ mod tests {
         let rotated_epoch = fixture.credentials.epoch().unwrap();
         assert!(rotated_epoch > epoch);
         let stale = cache
-            .registry_for_snapshot(&fixture.credentials, epoch, &snapshot, None)
+            .registry_for_snapshot(&fixture.credentials, epoch, &snapshot)
             .unwrap()
             .unwrap();
         assert!(
@@ -1020,7 +996,7 @@ mod tests {
             "the old epoch still keys the degraded registry"
         );
         let fresh = cache
-            .registry_for_snapshot(&fixture.credentials, rotated_epoch, &snapshot, None)
+            .registry_for_snapshot(&fixture.credentials, rotated_epoch, &snapshot)
             .unwrap()
             .unwrap();
         assert!(!Arc::ptr_eq(&fresh.registry, &wired.registry));
@@ -1065,7 +1041,7 @@ mod tests {
             r#"(version: 1, model: "openai/gpt-5.6", mcp: {"srv": Http(url: "http://127.0.0.1:1/mcp", bearer: Stored("srv/default"), allow: ["echo"], call_timeout_seconds: 5)})"#,
         );
         let wired = McpRegistryCache::new()
-            .registry_for_snapshot(&fixture.credentials, CredentialEpoch::NONE, &snapshot, None)
+            .registry_for_snapshot(&fixture.credentials, CredentialEpoch::NONE, &snapshot)
             .unwrap()
             .unwrap();
         let host: Arc<dyn qq_core::ExternalToolHost> = wired.registry;

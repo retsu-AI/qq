@@ -503,10 +503,9 @@ async fn tui_client_delivers_workspace_capabilities_and_refreshes_them() {
     assert!(skills.entries[0].disclosed);
     assert!(initial.steering.boundary);
 
-    fs::create_dir_all(fixture.path("work/.qq/packs/kit")).unwrap();
     fs::write(
-        fixture.path("work/.qq/packs/kit/pack.ron"),
-        r#"(schema: 1, id: "kit", version: "1.0.0", profiles: { "reviewer": (approval_mode: read_only) })"#,
+        fixture.path("work/.qq/config.ron"),
+        r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) }, profiles: { "reviewer": Profile(approval_mode: read_only) })"#,
     )
     .unwrap();
     handler
@@ -521,9 +520,8 @@ async fn tui_client_delivers_workspace_capabilities_and_refreshes_them() {
     let reviewer = profiles
         .iter()
         .find(|profile| profile.id.as_str() == "reviewer")
-        .expect("pack profile advertised");
+        .expect("configured profile advertised");
     assert_eq!(reviewer.approval_mode, qq_protocol::ApprovalMode::ReadOnly);
-    assert_eq!(reviewer.pack.as_ref().unwrap().id, "kit");
 
     drop(tui);
     server.shutdown().await.unwrap();

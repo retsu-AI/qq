@@ -16,7 +16,6 @@ static APPLY_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLoc
 pub(crate) struct Workspace {
     root: Arc<Dir>,
     path: Arc<PathBuf>,
-    protected_pack_roots: Arc<[PathBuf]>,
     protected_directories: Arc<Mutex<Vec<ProtectedDirectory>>>,
     apply_lock: Arc<Mutex<()>>,
 }
@@ -134,27 +133,10 @@ impl Workspace {
             root: Arc::new(Dir::from_std_file(root)),
             apply_lock: apply_lock(path),
             path: Arc::new(path.to_owned()),
-            protected_pack_roots: Arc::from([]),
             protected_directories: Arc::new(Mutex::new(Vec::new())),
         };
         workspace.capture_protected_directories()?;
         Ok(workspace)
-    }
-
-    pub(crate) fn with_protected_pack_roots(mut self, roots: &[PathBuf]) -> std::io::Result<Self> {
-        let mut relative: Vec<_> = roots
-            .iter()
-            .filter_map(|root| root.strip_prefix(self.path()).ok().map(Path::to_owned))
-            .collect();
-        relative.sort();
-        relative.dedup();
-        self.protected_pack_roots = relative.into();
-        self.capture_protected_directories()?;
-        Ok(self)
-    }
-
-    pub(crate) fn protected_pack_roots(&self) -> &[PathBuf] {
-        &self.protected_pack_roots
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -170,22 +152,11 @@ impl Workspace {
     }
 
     fn capture_protected_directories(&self) -> std::io::Result<()> {
-        let mut paths = vec![
+        let paths = [
             (PathBuf::from(".git"), true),
             (PathBuf::from(".qq"), false),
             (PathBuf::from(".qq/config.d"), true),
-            (PathBuf::from(".qq/packs"), true),
         ];
-        for root in self.protected_pack_roots.iter() {
-            paths.push((root.clone(), true));
-            for parent in root
-                .ancestors()
-                .skip(1)
-                .filter(|p| !p.as_os_str().is_empty())
-            {
-                paths.push((parent.to_owned(), false));
-            }
-        }
         let mut guards = self
             .protected_directories
             .lock()
@@ -323,7 +294,7 @@ impl Workspace {
                     match components.peek() {
                         None => return true,
                         Some(std::path::Component::Normal(next))
-                            if ["config.ron", "config.d", "packs", "task-publication.lock"]
+                            if ["config.ron", "config.d", "task-publication.lock"]
                                 .iter()
                                 .any(|protected| {
                                     next.to_string_lossy().eq_ignore_ascii_case(protected)
@@ -337,13 +308,7 @@ impl Workspace {
             }
             false
         }
-        if protected(Path::new(requested))
-            || protected(resolved)
-            || self
-                .protected_pack_roots
-                .iter()
-                .any(|root| Path::new(requested).starts_with(root) || resolved.starts_with(root))
-        {
+        if protected(Path::new(requested)) || protected(resolved) {
             return Err(WorkspacePathError::ProtectedMutation);
         }
         self.capture_protected_directories()
@@ -406,7 +371,7 @@ pub(crate) fn blocking_permits() -> Arc<Semaphore> {
 #[derive(Debug, Error)]
 pub enum WorkspacePathError {
     #[error(
-        "permission_denied: config: protected_path: agent file tools cannot change project configuration (.qq/config.ron, .qq/config.d, .qq/packs, qq.ron), configured pack resources, the task publication lock, or .git trust files; ask the user to change them. Do not retry it in another form."
+        "permission_denied: config: protected_path: agent file tools cannot change project configuration (.qq/config.ron, .qq/config.d, qq.ron), the task publication lock, or .git trust files; ask the user to change them. Do not retry it in another form."
     )]
     ProtectedMutation,
     #[error("path must not be empty")]
