@@ -6,9 +6,9 @@ use sha2::{Digest, Sha256};
 
 use super::PlanCompileError;
 
-pub const DESCRIPTOR_VERSION: u16 = 17;
+pub const DESCRIPTOR_VERSION: u16 = 18;
 
-const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v17\0";
+const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v18\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "name")]
@@ -146,6 +146,17 @@ pub struct AgentPlanDescriptor {
     pub provenance: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_sources: Vec<ContextSourceDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_language: Option<qq_script::Language>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub code_modules: Vec<CodeModuleDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodeModuleDescriptor {
+    pub name: String,
+    pub digest: qq_protocol::ContentHash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

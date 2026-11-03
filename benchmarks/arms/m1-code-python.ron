@@ -1,0 +1,8 @@
+// M1: M0 with the experimental code mode; the model gets only run_code and
+// scripts the tools in Python. Compared against M0.
+(
+    version: 1,
+    delegation: (roster: [], max_depth: 0),
+    audit: (mode: off),
+    policy: (tool_surface: code_python),
+)

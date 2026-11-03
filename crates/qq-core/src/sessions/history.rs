@@ -100,7 +100,7 @@ fn step(
             let row = connection.prepare_cached(
                 "SELECT name, call_ordinal, CASE WHEN name = 'search_history' THEN NULL ELSE result END FROM tool_calls
                  WHERE run_id = (SELECT run_id FROM messages WHERE session_id = ?1 AND ordinal = ?2 AND role = 'user' AND steering = 0)
-                   AND turn_ordinal = ?3 AND call_ordinal < ?4
+                   AND turn_ordinal = ?3 AND call_ordinal < ?4 AND parent_call_id IS NULL
                  ORDER BY call_ordinal DESC LIMIT 1",
             )?.query_row(params![session, prompt, turn, before], |row| Ok((
                 row.get::<_, String>(0)?, row.get::<_, u16>(1)?, row.get::<_, Option<String>>(2)?,

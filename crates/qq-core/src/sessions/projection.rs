@@ -142,7 +142,7 @@ pub(super) fn persist_tool_projection(
         transaction.commit()?;
         return Ok(());
     }
-    let calls = transaction.prepare("SELECT CASE WHEN length(CAST(provider_call_id AS BLOB)) BETWEEN 1 AND 1024 THEN provider_call_id END,result IS NOT NULL FROM tool_calls WHERE run_id=?1 AND turn_ordinal=?2 ORDER BY call_ordinal LIMIT 65")?
+    let calls = transaction.prepare("SELECT CASE WHEN length(CAST(provider_call_id AS BLOB)) BETWEEN 1 AND 1024 THEN provider_call_id END,result IS NOT NULL FROM tool_calls WHERE run_id=?1 AND turn_ordinal=?2 AND parent_call_id IS NULL ORDER BY call_ordinal LIMIT 65")?
         .query_map(params![run, turn], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)))?
         .collect::<Result<Vec<_>, _>>()?;
     let matches_ids = |ids: &[String]| {

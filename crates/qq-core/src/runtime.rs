@@ -1,5 +1,6 @@
 mod audit;
 mod budget;
+pub(crate) mod code;
 mod compaction;
 mod deadline;
 mod events;
@@ -23,6 +24,10 @@ pub use audit::{
     MAX_AUDIT_CHILD_TURNS, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS,
 };
 pub(crate) use budget::{BUDGET_FINAL_RESPONSE_NOTICE, BudgetDecision, BudgetMeter, ChildBudget};
+pub(crate) use code::{
+    CodeSurface, RUN_CODE_TOOL, RunCodeArgs, SCRIPT_CHILD_CALL_PREFIX, child_ordinal,
+    child_provider_id,
+};
 pub(crate) use compaction::{
     InRunCompaction, InRunCompactionError, InRunCompactionFuture, InRunCompactionRequest,
     InRunCompactor, SummarizeError, SummarizeStep, SummaryFold,

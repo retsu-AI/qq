@@ -706,10 +706,20 @@ fn every_experiment_arm_overlay_parses_and_validates() {
                 assert_eq!(snapshot.delegation().max_depth(), 0);
             }
             "c1-write-children" => assert!(snapshot.delegation().write_children()),
+            "m0-direct" => assert_eq!(snapshot.policy().tool_surface(), ToolSurface::Direct),
+            "m1-code-python" => {
+                assert_eq!(snapshot.policy().tool_surface(), ToolSurface::CodePython);
+            }
+            "m2-code-js" => {
+                assert_eq!(
+                    snapshot.policy().tool_surface(),
+                    ToolSurface::CodeJavascript
+                );
+            }
             _ => assert_eq!(snapshot.audit().mode(), AuditMode::Off),
         }
     }
-    assert_eq!(seen, 6, "six arm overlays are documented");
+    assert_eq!(seen, 9, "nine arm overlays are documented");
 }
 
 #[test]
@@ -2263,6 +2273,26 @@ fn managed_only_policy_fields_are_scoped_by_source_kind() {
 }
 
 #[test]
+fn tool_surface_takes_the_last_layer_and_code_means_python() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, policy: (tool_surface: code))"#,
+    );
+    let snapshot = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(snapshot.policy().tool_surface(), ToolSurface::CodePython);
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, policy: (tool_surface: code_javascript))"#,
+    );
+    let snapshot = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(
+        snapshot.policy().tool_surface(),
+        ToolSurface::CodeJavascript
+    );
+}
+
+#[test]
 fn builtin_preference_only_tightens() {
     let tree = TempTree::new();
     tree.write(
@@ -2977,6 +3007,7 @@ fn published_document_field_names_match_the_struct_and_all_parse() {
             "shell_env" => r#"["CARGO_HOME"]"#,
             "task_hosting" => "[]",
             "builtin_preference" => "hint",
+            "tool_surface" => "code",
             "deny_tools" => r#"["shell"]"#,
             "deny_shell_prefixes" => r#"["rm -rf"]"#,
             "deny_hosts" => r#"["evil.example"]"#,
@@ -3036,6 +3067,7 @@ fn published_policy_key_lists_are_exactly_what_each_layer_rejects() {
             "goals" => "(max_runs: 1000)",
             "require_https" | "allow_custom_providers" | "allow_literal_secrets" => "true",
             "builtin_preference" => "hint",
+            "tool_surface" => "code",
             "exposed_tools" | "deny_tools" => r#"["read_file"]"#,
             "deny_shell_prefixes" => r#"["cargo test"]"#,
             "deny_hosts" => r#"["docs.rs"]"#,

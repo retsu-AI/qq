@@ -1,0 +1,7 @@
+// M2: M1 with JavaScript scripts instead of Python. Compared against M0 and M1.
+(
+    version: 1,
+    delegation: (roster: [], max_depth: 0),
+    audit: (mode: off),
+    policy: (tool_surface: code_javascript),
+)

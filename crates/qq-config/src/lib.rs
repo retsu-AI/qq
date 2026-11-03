@@ -1087,6 +1087,7 @@ pub struct EffectivePolicy {
     allow_custom_providers: bool,
     allow_literal_secrets: bool,
     builtin_preference: BuiltinPreference,
+    tool_surface: ToolSurface,
     deny_tools: Vec<String>,
     deny_shell_prefixes: Vec<String>,
     deny_hosts: Vec<String>,
@@ -1104,6 +1105,7 @@ impl Default for EffectivePolicy {
             allow_custom_providers: true,
             allow_literal_secrets: true,
             builtin_preference: BuiltinPreference::default(),
+            tool_surface: ToolSurface::default(),
             deny_tools: Vec::new(),
             deny_shell_prefixes: Vec::new(),
             deny_hosts: Vec::new(),
@@ -1120,7 +1122,22 @@ pub enum BuiltinPreference {
     Strict,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSurface {
+    #[default]
+    Direct,
+    #[serde(alias = "code")]
+    CodePython,
+    CodeJavascript,
+}
+
 impl EffectivePolicy {
+    #[must_use]
+    pub const fn tool_surface(&self) -> ToolSurface {
+        self.tool_surface
+    }
+
     #[must_use]
     pub const fn goal_ceilings(&self) -> &GoalCeilings {
         &self.goal_ceilings

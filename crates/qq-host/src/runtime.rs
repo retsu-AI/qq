@@ -1358,6 +1358,15 @@ impl RuntimeFactory {
         if let Some(names) = snapshot.policy().exposed_tools() {
             profile = profile.with_exposed_tools(names.to_vec());
         }
+        match snapshot.policy().tool_surface() {
+            qq_config::ToolSurface::Direct => {}
+            qq_config::ToolSurface::CodePython => {
+                profile = profile.with_code_language(qq_core::CodeLanguage::Python);
+            }
+            qq_config::ToolSurface::CodeJavascript => {
+                profile = profile.with_code_language(qq_core::CodeLanguage::JavaScript);
+            }
+        }
         profile = profile.with_side_question_denies(snapshot.policy().deny_tools().to_vec());
         let mut bindings = LiveBindings {
             provider: provider_config.access().cloned(),

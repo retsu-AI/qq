@@ -36,6 +36,7 @@ pub(crate) enum ToolHost {
     ReadToolResult,
     SelectTools,
     LoadSkill,
+    RunCode,
     External { host: usize },
 }
 
@@ -464,6 +465,10 @@ impl ToolCatalog {
         }
     }
 
+    pub(crate) fn entries(&self) -> &[ToolEntry] {
+        &self.entries
+    }
+
     pub(crate) fn lookup(&self, name: &str) -> Option<&ToolEntry> {
         self.entries
             .binary_search_by(|entry| entry.spec.name().cmp(name))
@@ -697,7 +702,10 @@ impl StaticFilter {
             ToolHost::ReadToolResult => self.read_tool_result,
             ToolHost::LoadSkill => self.load_skill,
             ToolHost::CommandStatus => !self.read_only && !self.unattended,
-            ToolHost::BuiltIn | ToolHost::SelectTools | ToolHost::External { .. } => true,
+            ToolHost::BuiltIn
+            | ToolHost::SelectTools
+            | ToolHost::RunCode
+            | ToolHost::External { .. } => true,
         }
     }
 }

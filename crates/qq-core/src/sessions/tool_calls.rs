@@ -1,5 +1,55 @@
 use super::*;
 
+pub(super) fn request_script_call(
+    connection: &mut Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    call: &crate::runtime::RuntimeToolCall,
+    parent: ToolCallId,
+    seq: u16,
+) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    let now = now_ms();
+    let parent_running = transaction
+        .query_row(
+            "SELECT 1 FROM tool_calls WHERE id = ?1 AND run_id = ?2 AND state = 'running' AND parent_call_id IS NULL",
+            params![parent.to_string(), identity.run_id.to_string()],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !parent_running {
+        return Err(SessionRuntimeError::Unavailable);
+    }
+    transaction.execute(
+        "INSERT INTO tool_calls(
+                 id, run_id, turn_ordinal, call_ordinal, provider_call_id, name,
+                 arguments_json, state, requested_at_ms, effect, parent_call_id, script_seq
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'requested', ?8, ?9, ?10, ?11)",
+        params![
+            call.id.to_string(),
+            identity.run_id.to_string(),
+            call.turn_ordinal,
+            call.call_ordinal,
+            call.provider_call_id,
+            call.name,
+            call.arguments,
+            now,
+            call.effect.as_str(),
+            parent.to_string(),
+            seq,
+        ],
+    )?;
+    let tool_call = load_tool_call(&transaction, call.id)?;
+    let event = append_event(
+        &transaction,
+        EventContext::for_run(store_id, identity, now),
+        SessionEvent::ToolCallRequested { tool_call },
+    )?;
+    transaction.commit()?;
+    Ok(event)
+}
+
 pub(super) fn start_tool_call(
     connection: &mut Connection,
     store_id: StoreId,
@@ -153,6 +203,7 @@ pub(super) fn finish_tool_call_in_transaction(
                         WHERE previous.run_id = current.run_id
                           AND previous.turn_ordinal = current.turn_ordinal
                           AND previous.result IS NOT NULL
+                          AND previous.parent_call_id IS NULL
                     ), current.execution_context_json
              FROM tool_calls current
              WHERE current.id = ?1 AND current.run_id = ?2 AND current.state='running'",
@@ -594,6 +645,7 @@ pub(super) fn settle_unstarted_tool_call(
                         WHERE previous.run_id = current.run_id
                           AND previous.turn_ordinal = current.turn_ordinal
                           AND previous.result IS NOT NULL
+                          AND previous.parent_call_id IS NULL
                     )
              FROM tool_calls current
              WHERE current.id = ?1 AND current.run_id = ?2 AND (current.state = 'requested' OR (?3 AND current.state = 'awaiting_approval'))",
@@ -730,6 +782,7 @@ pub(super) fn conclude_tool_approval(
                         WHERE previous.run_id = current.run_id
                           AND previous.turn_ordinal = current.turn_ordinal
                           AND previous.result IS NOT NULL
+                          AND previous.parent_call_id IS NULL
                     )
              FROM tool_calls current
              WHERE current.id = ?1 AND current.run_id = ?2",
@@ -816,6 +869,9 @@ pub(super) fn reserve_tool_result_capacity(
     result: &str,
     first_result_in_turn: bool,
 ) -> Result<(), SessionRuntimeError> {
+    if provider_call_id.starts_with(crate::runtime::SCRIPT_CHILD_CALL_PREFIX) {
+        return Ok(());
+    }
     let framing =
         (crate::CONTEXT_BLOCK_FRAMING_BYTES as usize).saturating_add(if first_result_in_turn {
             crate::CONTEXT_MESSAGE_FRAMING_BYTES as usize
@@ -907,7 +963,7 @@ pub(super) fn load_tool_call(
         .query_row(
             "SELECT r.session_id, t.run_id, t.turn_ordinal, t.call_ordinal,
                     t.provider_call_id, t.name, t.arguments_json, t.state, t.result, t.is_error,
-                    t.display_json
+                    t.display_json, t.parent_call_id, t.script_seq
              FROM tool_calls t JOIN runs r ON r.id = t.run_id WHERE t.id = ?1",
             [tool_call_id.to_string()],
             |row| {
@@ -923,6 +979,8 @@ pub(super) fn load_tool_call(
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, bool>(9)?,
                     row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<u16>>(12)?,
                 ))
             },
         )
@@ -940,6 +998,8 @@ pub(super) fn load_tool_call(
                 result,
                 is_error,
                 display,
+                parent,
+                seq,
             )| {
                 Ok(ToolCallSnapshot {
                     id: tool_call_id,
@@ -954,6 +1014,14 @@ pub(super) fn load_tool_call(
                     result,
                     is_error,
                     display: display.as_deref().map(serde_json::from_str).transpose()?,
+                    script: match (parent, seq) {
+                        (Some(parent), Some(seq)) => Some(ScriptCallRef {
+                            parent: parse_id(&parent)?,
+                            seq,
+                        }),
+                        (None, None) => None,
+                        _ => return Err(SessionRuntimeError::CONSTRAINT),
+                    },
                 })
             },
         )

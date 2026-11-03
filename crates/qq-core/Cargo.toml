@@ -7,8 +7,10 @@ repository.workspace = true
 publish = false
 
 [features]
-default = ["tool-fetch"]
+default = ["tool-fetch", "code-python", "code-javascript"]
 tool-fetch = ["dep:htmd"]
+code-python = ["qq-script/python"]
+code-javascript = ["qq-script/javascript"]
 
 [dependencies]
 async-stream.workspace = true
@@ -23,6 +25,7 @@ ignore.workspace = true
 ipnet.workspace = true
 qq-provider.workspace = true
 qq-protocol.workspace = true
+qq-script.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true

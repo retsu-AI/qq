@@ -1,6 +1,7 @@
 #[cfg(unix)]
 mod audit_regression;
 mod checkpoints;
+mod code_mode;
 mod delegation;
 mod dispatch_corrections;
 mod external_tools;

@@ -100,6 +100,9 @@ impl LoadedRuntime {
         if let Some(effort) = runtime.reasoning_effort {
             profile = profile.with_reasoning_effort(effort);
         }
+        if let Some(language) = runtime.code_language {
+            profile = profile.with_code_language(language);
+        }
         profile = profile
             .with_context_cache(Arc::clone(&runtime.context_cache))
             .with_turn_recovery(runtime.turn_recovery)

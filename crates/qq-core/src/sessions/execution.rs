@@ -2494,6 +2494,29 @@ async fn execute_started_run(
                     }
                 }
             }
+            RunInput::Event(Some(RuntimeEvent::ScriptCallRequested { call, parent, seq })) => {
+                if internal {
+                    continue;
+                }
+                if let Err(error) = inner
+                    .store
+                    .request_script_call(&claimed, call, parent, seq)
+                    .await
+                {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure("failed to persist the script tool call", &error),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
+            }
             RunInput::Event(Some(RuntimeEvent::ToolCallStarted {
                 id,
                 may_change_files,

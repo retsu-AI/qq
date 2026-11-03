@@ -25,6 +25,7 @@ members = [
   "crates/qq-provider",
   "crates/qq-protocol",
   "crates/qq-reasoning",
+  "crates/qq-script",
   "crates/qq-server",
   "crates/qq-tui",
   "xtask",
@@ -73,8 +74,12 @@ qq-mcp = { path = "crates/qq-mcp" }
 qq-provider = { path = "crates/qq-provider", default-features = false }
 qq-protocol = { path = "crates/qq-protocol" }
 qq-reasoning = { path = "crates/qq-reasoning" }
+qq-script = { path = "crates/qq-script", default-features = false }
 qq-server = { path = "crates/qq-server" }
 qq-tui = { path = "crates/qq-tui" }
+boa_engine = { version = "0.22", default-features = false }
+monty = "1.4"
+monty-types = "1.4"
 rusqlite = { version = "0.37", features = ["bundled"] }
 rustix = { version = "1", default-features = false, features = ["process", "std"] }
 regex = "1"

@@ -10,11 +10,11 @@ use qq_protocol::{
     PROTOCOL_VERSION, PromptCacheCapabilities, PromptVersion, Question, QuestionPreview,
     ResolvedModel, ResolvedModelVersion, RunActivity, RunFailure, RunFailureKind, RunId, RunLimits,
     RunOutcome, RunPause, RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus,
-    ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind, SessionEvent,
-    SessionEventEnvelope, SessionId, SessionStatus, SessionSummary, ShellCommandPreview,
-    ShellVerdict, SkillCapabilities, SteeringCapabilities, StoreId, TokenUsage, ToolCallId,
-    ToolCallSnapshot, ToolCallState, ToolCapabilities, ToolExposure, ToolHostSummary, WorkspaceId,
-    WorkspaceToolCapabilities,
+    ScriptCallRef, ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind,
+    SessionEvent, SessionEventEnvelope, SessionId, SessionStatus, SessionSummary,
+    ShellCommandPreview, ShellVerdict, SkillCapabilities, SteeringCapabilities, StoreId,
+    TokenUsage, ToolCallId, ToolCallSnapshot, ToolCallState, ToolCapabilities, ToolExposure,
+    ToolHostSummary, WorkspaceId, WorkspaceToolCapabilities,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -188,7 +188,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 43);
+    assert_eq!(PROTOCOL_VERSION, 44);
     let catalog_cursor = qq_protocol::WorkspaceCatalogCursor {
         store_id: StoreId::from_bytes([1; 16]),
         workspace_id: WorkspaceId::from_bytes([2; 16]),
@@ -681,6 +681,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     result: None,
                     is_error: false,
                     display: None,
+                    script: None,
                 },
                 shell: Some(Box::new(ShellCommandPreview {
                     command: "rm -r target".to_owned(),
@@ -733,6 +734,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     result: None,
                     is_error: false,
                     display: None,
+                    script: None,
                 },
                 shell: None,
                 edit: None,
@@ -765,6 +767,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     result: None,
                     is_error: false,
                     display: None,
+                    script: None,
                 },
                 shell: None,
                 edit: None,
@@ -774,6 +777,41 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     host: "docs.rs".to_owned(),
                     method: None,
                 })),
+            },
+        ),
+    );
+    check(
+        "event_tool_approval_requested_script_child",
+        &envelope(
+            24,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: ToolCallSnapshot {
+                    id: ToolCallId::from_bytes([9; 16]),
+                    session_id,
+                    run_id,
+                    turn_ordinal: 1,
+                    call_ordinal: 1025,
+                    provider_call_id: "qq-script:1:1".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments: r#"{"command":"cargo test"}"#.to_owned(),
+                    state: ToolCallState::AwaitingApproval,
+                    result: None,
+                    is_error: false,
+                    display: None,
+                    script: Some(ScriptCallRef {
+                        parent: ToolCallId::from_bytes([6; 16]),
+                        seq: 1,
+                    }),
+                },
+                shell: Some(Box::new(ShellCommandPreview {
+                    command: "cargo test".to_owned(),
+                    cwd: None,
+                    verdict: None,
+                    reasons: Vec::new(),
+                })),
+                edit: None,
+                question: None,
+                fetch: None,
             },
         ),
     );

@@ -513,7 +513,7 @@ fn plan_descriptor_covers_provider_model_workspace_and_tools_without_secrets() {
             "descriptor leaked {forbidden}"
         );
     }
-    assert!(canonical.starts_with("qq-agent-plan-descriptor-v17\0{"));
+    assert!(canonical.starts_with("qq-agent-plan-descriptor-v18\0{"));
 }
 
 #[test]

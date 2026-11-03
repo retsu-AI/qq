@@ -185,6 +185,7 @@ pub enum McpBearer {
 pub struct McpCallOutcome {
     pub result_digest: Option<[u8; 32]>,
     pub content: String,
+    pub structured: Option<serde_json::Value>,
     pub is_error: bool,
     pub failure: Option<McpCallFailure>,
 }
@@ -205,6 +206,7 @@ impl McpCallOutcome {
     fn error(content: impl Into<String>, failure: McpCallFailure) -> Self {
         Self {
             content: content.into(),
+            structured: None,
             is_error: true,
             failure: Some(failure),
             result_digest: None,
@@ -792,6 +794,7 @@ impl ServerHandle {
             Err(ServiceError::McpError(error)) => McpCallOutcome {
                 result_digest: None,
                 content: format!("MCP server returned an error: {error}"),
+                structured: None,
                 is_error: true,
                 failure: None,
             },
@@ -876,6 +879,7 @@ fn render_result(result: CallToolResult) -> McpCallOutcome {
     }
     McpCallOutcome {
         content,
+        structured: result.structured_content,
         is_error: result.is_error.unwrap_or(false),
         failure: None,
         result_digest,
