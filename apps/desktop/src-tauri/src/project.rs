@@ -1240,21 +1240,23 @@ fn validate_submission(connection: ConnectionDto, input: &[InputPart]) -> Result
 mod submission_tests {
     use super::*;
 
-    #[tokio::test]
-    async fn closing_the_last_handle_cancels_an_actor_even_during_connect() {
+    #[test]
+    fn closing_the_last_handle_cancels_an_actor_even_during_connect() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
         let stopped = Arc::new(tokio::sync::Notify::new());
         let lifetime = Arc::new(ActorLifetime(Arc::clone(&stopped)));
+        let mut notified = std::pin::pin!(stopped.notified());
+        let mut context = Context::from_waker(Waker::noop());
         let temporary_handle = Arc::clone(&lifetime);
         drop(temporary_handle);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(1), stopped.notified())
-                .await
-                .is_err()
-        );
+        assert!(notified.as_mut().poll(&mut context).is_pending());
         drop(lifetime);
-        tokio::time::timeout(Duration::from_millis(100), stopped.notified())
-            .await
-            .expect("final handle stops the actor");
+        assert_eq!(
+            notified.as_mut().poll(&mut context),
+            Poll::Ready(()),
+            "final handle stops the actor"
+        );
     }
 
     #[tokio::test]
