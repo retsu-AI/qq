@@ -250,14 +250,24 @@ async fn fork_session(
             )?;
             let load = overrides.load_request()?;
             let prepared = factory.clone();
-            let (approval_timeout, retention) = tokio::task::spawn_blocking(move || {
-                prepared
-                    .load_for_client(&load)
-                    .map(|snapshot| (snapshot.approval_timeout(), snapshot.retention()))
-            })
-            .await??;
-            let handler =
-                runtime::RuntimeHandler::open_owned(factory, approval_timeout, retention).await?;
+            let (approval_timeout, retention, max_active_runs) =
+                tokio::task::spawn_blocking(move || {
+                    prepared.load_for_client(&load).map(|snapshot| {
+                        (
+                            snapshot.approval_timeout(),
+                            snapshot.retention(),
+                            snapshot.max_active_runs(),
+                        )
+                    })
+                })
+                .await??;
+            let handler = runtime::RuntimeHandler::open_owned(
+                factory,
+                approval_timeout,
+                retention,
+                max_active_runs,
+            )
+            .await?;
             let result = handler
                 .sessions()
                 .command(qq_protocol::CommandId::generate()?, command)
