@@ -93,6 +93,15 @@ pub(super) fn capture_prompt(inner: &Arc<SessionRuntimeInner>, claimed: &Claimed
     let session = claimed.identity.session_id;
     let (completed, done) = watch::channel(false);
     let task = tokio::spawn(async move {
+        let root = PathBuf::from(&claimed.workspace);
+        let repository = tokio::task::spawn_blocking(move || {
+            root.ancestors().any(|path| path.join(".git").exists())
+        })
+        .await;
+        if !matches!(repository, Ok(true)) {
+            completed.send_replace(true);
+            return;
+        }
         let result = async {
             let previous = owner.store.call(store::Priority::AwaitControl, move |connection| {
                 Ok(connection.query_row("SELECT baseline FROM prompt_baselines WHERE session_id=?1 ORDER BY prompt_ordinal DESC LIMIT 1", [session.to_string()], |row| row.get::<_, String>(0)).optional()?)
