@@ -353,6 +353,7 @@ impl SessionRuntime {
 
         let data=self.inner.store.call(store::Priority::Control,move |connection| {
             if let Some(receipt)=commands::recorded_receipt(connection,command_id,&cmd)? {return Ok(Err(receipt))}
+            commands::check_command_limit(connection, &cmd)?;
             let reserved:Option<String>=connection.query_row("SELECT request_json FROM temp.restoring_paths WHERE command_id=?1",[command_id.to_string()],|row|row.get(0)).optional()?;
             if let Some(reserved)=reserved && reserved!=serde_json::to_string(&cmd)? {return Err(SessionRuntimeError::IdempotencyConflict)}
             let workspace=commands::session_workspace(connection,session)?;

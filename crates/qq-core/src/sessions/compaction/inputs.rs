@@ -14,6 +14,7 @@ pub(in crate::sessions) fn with_exact_inputs(
                 COALESCE(json_extract(r.origin_json, '$.type'), '') IN ('goal', 'goal_check')
          FROM messages p JOIN runs r ON r.id = p.run_id
          WHERE p.session_id = ?1 AND p.role = 'user' AND p.steering = 0
+           AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=p.run_id AND z.turn_ordinal=0)
            AND ((?2 IS NULL AND p.ordinal <= ?3
                  AND p.state IN ('complete', 'cancelled', 'failed', 'interrupted'))
                 OR p.run_id = ?2)
@@ -30,12 +31,14 @@ pub(in crate::sessions) fn with_exact_inputs(
     let mut sources = connection.prepare_cached(
         "SELECT id, turn_ordinal, steering, 0 AS answer, ordinal AS position
          FROM messages WHERE run_id = ?1 AND role = 'user'
+           AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=messages.run_id AND (z.turn_ordinal=0 OR z.turn_ordinal=messages.turn_ordinal))
            AND ((steering = 0 AND ?2 = 0 AND ?3 IS NULL
                  AND state IN ('complete', 'cancelled', 'failed', 'interrupted'))
                 OR (steering = 1 AND state = 'complete' AND (?3 IS NULL OR turn_ordinal <= ?4)))
          UNION ALL
          SELECT id, turn_ordinal, 0, 1, call_ordinal FROM tool_calls
          WHERE run_id = ?1 AND name = 'ask_user' AND state = 'completed'
+           AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=tool_calls.run_id AND (z.turn_ordinal=0 OR z.turn_ordinal=tool_calls.turn_ordinal))
            AND approval_resolution = 'answered' AND is_error = 0 AND result IS NOT NULL
            AND (?3 IS NULL OR turn_ordinal <= ?3)
          ORDER BY turn_ordinal, answer, position",

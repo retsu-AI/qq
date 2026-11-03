@@ -493,23 +493,50 @@ pub async fn turn_diff(
     baseline: &str,
     checkpoint: &str,
 ) -> Result<String, UndoError> {
-    git(
-        workspace,
-        None,
+    use tokio::io::AsyncReadExt as _;
+    let mut command = command(workspace, None);
+    command.args([
         "diff",
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-renames",
-            "--relative",
-            baseline,
-            checkpoint,
-            "--",
-            ".",
-        ],
-    )
-    .await
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--relative",
+        baseline,
+        checkpoint,
+        "--",
+        ".",
+    ]);
+    let run = async {
+        let mut child = command.spawn()?;
+        let stdout = child.stdout.take().expect("piped git stdout");
+        let stderr = child.stderr.take().expect("piped git stderr");
+        let read = |stream: tokio::process::ChildStdout| async move {
+            let mut bytes = Vec::new();
+            stream.take(256 * 1024 + 1).read_to_end(&mut bytes).await?;
+            Ok::<_, std::io::Error>(bytes)
+        };
+        let error = async move {
+            let mut bytes = Vec::new();
+            stderr.take(8 * 1024).read_to_end(&mut bytes).await?;
+            Ok::<_, std::io::Error>(bytes)
+        };
+        let (out, err) = tokio::join!(read(stdout), error);
+        let out = out?;
+        let err = err?;
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((out, err, status))
+    };
+    let (out, err, status) = tokio::time::timeout(GIT_STEP_TIMEOUT, run)
+        .await
+        .map_err(|_| timeout("diff"))?
+        .map_err(UndoError::Spawn)?;
+    if !status.success() && out.len() <= 256 * 1024 {
+        return Err(UndoError::Git {
+            step: "diff",
+            stderr: String::from_utf8_lossy(&err).into_owned(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
 pub async fn restore_commit(workspace: &Path, commit: &str) -> Result<Restored, UndoError> {

@@ -957,6 +957,9 @@ pub(super) fn execute_command(
                 )
                 .optional()?
                 .ok_or(SessionRuntimeError::SessionNotFound)?;
+            if reserved_for_rewind(&transaction, session_id)? {
+                return Err(SessionRuntimeError::WorkspaceBusy);
+            }
             if queued >= MAX_PENDING_PROMPTS {
                 return Err(SessionRuntimeError::QueueFull);
             }
@@ -2330,6 +2333,34 @@ pub(super) enum WorkspaceRestore {
     Started(String),
 }
 
+pub(super) fn reserved_for_rewind(
+    connection: &Connection,
+    session: SessionId,
+) -> Result<bool, SessionRuntimeError> {
+    Ok(connection.query_row(&format!("SELECT EXISTS(SELECT 1 FROM sessions s JOIN workspaces w ON w.id=s.workspace_id JOIN temp.restoring_paths rp ON {} WHERE s.id=?1 AND json_extract(rp.request_json,'$.type')='rewind_session')",paths_overlap_sql("COALESCE(s.execution_root,w.path)","rp.path")),[session.to_string()],|row|row.get(0))?)
+}
+
+pub(super) fn check_command_limit(
+    connection: &Connection,
+    command: &SessionCommand,
+) -> Result<(), SessionRuntimeError> {
+    let count: String = connection.query_row(
+        "SELECT value FROM metadata WHERE key='command_count'",
+        [],
+        |row| row.get(0),
+    )?;
+    let count: u32 = count.parse().map_err(|_| SessionRuntimeError::CODEC)?;
+    let limit = if command.kind().creates_work() {
+        MAX_COMMANDS
+    } else {
+        MAX_COMMANDS_WITH_CONTROL_HEADROOM
+    };
+    if count >= limit {
+        return Err(SessionRuntimeError::CommandLimitReached);
+    }
+    Ok(())
+}
+
 pub(super) fn begin_workspace_restore(
     connection: &mut Connection,
     command_id: CommandId,
@@ -2348,14 +2379,7 @@ pub(super) fn begin_workspace_restore(
     }
     let request_json = serde_json::to_string(command)?;
     restoring_command(connection, command_id, &request_json)?;
-    let command_count: u32 = connection
-        .prepare_cached("SELECT value FROM metadata WHERE key = 'command_count'")
-        .and_then(|mut statement| statement.query_row([], |row| row.get::<_, String>(0)))?
-        .parse()
-        .map_err(|_| SessionRuntimeError::CODEC)?;
-    if command_count >= MAX_COMMANDS_WITH_CONTROL_HEADROOM {
-        return Err(SessionRuntimeError::CommandLimitReached);
-    }
+    check_command_limit(connection, command)?;
     let transaction = store::begin_unit(connection)?;
     let workspace = workspace_id.to_string();
     let path: String = transaction
