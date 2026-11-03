@@ -1744,7 +1744,7 @@ async fn turn_checkpoints(home: &Home) -> Result<(), String> {
         let offline = home
             .run(
                 &provider.base_url,
-                &["fork", &session_id.to_string(), "--turn", "2"],
+                &["fork", &session_id.to_string(), "--turn", "1"],
             )
             .await?;
         ensure!(

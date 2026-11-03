@@ -172,6 +172,9 @@ fn may_change_files(
     network: &NetworkPolicy,
     entry: Option<&catalog::ToolEntry>,
 ) -> bool {
+    if matches!(call.name.as_str(), "spawn_agent" | "wait_agents") {
+        return true;
+    }
     match approval::classify(call.effect, &call.name, &call.arguments, network) {
         approval::ToolClass::Mutating => true,
         approval::ToolClass::External => !entry.is_some_and(|entry| entry.hints.read_only),
@@ -3084,7 +3087,7 @@ impl RunState {
                                 }).collect::<Vec<_>>();
                                 for (admitted, _) in &overlapped {
                                     started_calls[usize::from(admitted.call_ordinal - 1)] = true;
-                                    yield TurnStep::Emit(RuntimeEvent::ToolCallStarted { id: admitted.id, may_change_files: false });
+                                    yield TurnStep::Emit(RuntimeEvent::ToolCallStarted { id: admitted.id, may_change_files: may_change_files(admitted, network_policy, catalog.lookup(&admitted.name)) });
                                 }
                             let mut executions = futures_stream::iter(
                                 overlapped.into_iter().map(|(call, offered)| execute_one(call, None, child_limits, offered)),

@@ -277,6 +277,7 @@ async fn settle_unstartable_reservation(
 }
 
 async fn settle_panicked_execution(inner: &SessionRuntimeInner, claimed: &ClaimedRun) {
+    checkpoints::settle(inner, claimed, true).await;
     match inner
         .store
         .settle_panicked_execution(

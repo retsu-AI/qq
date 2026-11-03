@@ -474,11 +474,8 @@ impl SessionRuntime {
                 let root = crate::undo::fork_worktree(Path::new(&path), &root, fork, &commit)
                     .await
                     .map_err(|error| SessionRuntimeError::UndoFailed(error.into()))?;
-                let mut commits = checkpoints
-                    .iter()
-                    .filter(|point| point.prompt_ordinal < ordinal)
-                    .flat_map(|point| [point.baseline.clone(), point.checkpoint.clone()])
-                    .collect::<Vec<_>>();
+                let checkpoints=checkpoints.into_iter().filter(|point|point.prompt_ordinal<ordinal).collect::<Vec<_>>();
+                let mut commits = checkpoints.iter().flat_map(|point| [point.baseline.clone(), point.checkpoint.clone()]).collect::<Vec<_>>();
                 commits.extend(self.inner.store.call(store::Priority::Control, move |connection| {
                     let mut statement = connection.prepare("SELECT baseline FROM prompt_baselines WHERE session_id=?1 AND prompt_ordinal<=?2")?;
                     Ok(statement.query_map(params![session.to_string(),ordinal],|row|row.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?)
@@ -526,6 +523,7 @@ impl SessionRuntime {
                     }
                     connection.execute("INSERT OR REPLACE INTO checkpoint_pins(fork_session_id,source_run_id,turn_ordinal) VALUES (?1,?2,?3)",params![fork.to_string(),pin_run.to_string(),pin_turn])?;
                     connection.execute("INSERT INTO fork_history(session_id,prompt) VALUES (?1,?2)",params![fork.to_string(),selected_prompt])?;
+                    connection.execute("DELETE FROM turn_checkpoints WHERE session_id=?1 AND NOT EXISTS(SELECT 1 FROM json_each(?2) p WHERE json_extract(p.value,'$.turn_ordinal')=turn_checkpoints.turn_ordinal AND json_extract(p.value,'$.checkpoint')=turn_checkpoints.checkpoint AND json_extract(p.value,'$.baseline')=turn_checkpoints.baseline)",params![fork.to_string(),serde_json::to_string(&checkpoints)?])?;
                     let outcome=CommandOutcome::SessionForked {session_id:fork,source_session_id:session,turn:prompt.turn,prompt:prompt_text,execution_root};
                     let receipt=commands::record_checkpoint_receipt(connection,store_id,command_id,&fork_command,workspace,outcome)?;
                     transaction.commit()?;
