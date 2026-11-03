@@ -236,3 +236,60 @@ async fn a_workspace_helper_module_imports_and_its_tool_calls_are_children() {
         .unwrap();
     assert!(result.trim().parse::<usize>().is_ok(), "{result}");
 }
+
+#[tokio::test]
+async fn a_crash_mid_script_interrupts_the_parent_and_its_running_children() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let store = Store::open(path.clone()).await.unwrap();
+    let (parent_claimed, parent) = super::execution_context::pending_process_call(
+        &store,
+        directory.path(),
+        "run_code",
+        r#"{"code":"await tree()"}"#,
+    )
+    .await;
+    let child = ToolCallId::generate().unwrap();
+    store
+        .request_script_call(
+            &parent_claimed,
+            crate::runtime::RuntimeToolCall {
+                id: child,
+                turn_ordinal: 1,
+                call_ordinal: crate::runtime::child_ordinal(1, 0),
+                provider_call_id: crate::runtime::child_provider_id(1, 0),
+                name: "tree".to_owned(),
+                arguments: "{}".to_owned(),
+                effect: crate::catalog::EffectClass::ReadOnly,
+                rejection: None,
+            },
+            parent,
+            0,
+        )
+        .await
+        .unwrap();
+    store.start_tool_call(&parent_claimed, child).await.unwrap();
+    store.close().await.unwrap();
+
+    let reopened = Store::open(path).await.unwrap();
+    reopened.recover_interrupted_runs().await.unwrap();
+    let states: Vec<(String, String, Option<u16>)> = reopened
+        .call(Priority::Control, move |connection| {
+            let mut statement = connection
+                .prepare("SELECT name, state, script_seq FROM tool_calls ORDER BY call_ordinal")?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+        .unwrap();
+    reopened.close().await.unwrap();
+    assert_eq!(
+        states,
+        [
+            ("run_code".to_owned(), "interrupted".to_owned(), None),
+            ("tree".to_owned(), "interrupted".to_owned(), Some(0)),
+        ]
+    );
+}

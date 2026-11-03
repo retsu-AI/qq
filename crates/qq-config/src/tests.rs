@@ -706,10 +706,20 @@ fn every_experiment_arm_overlay_parses_and_validates() {
                 assert_eq!(snapshot.delegation().max_depth(), 0);
             }
             "c1-write-children" => assert!(snapshot.delegation().write_children()),
+            "m0-direct" => assert_eq!(snapshot.policy().tool_surface(), ToolSurface::Direct),
+            "m1-code-python" => {
+                assert_eq!(snapshot.policy().tool_surface(), ToolSurface::CodePython);
+            }
+            "m2-code-js" => {
+                assert_eq!(
+                    snapshot.policy().tool_surface(),
+                    ToolSurface::CodeJavascript
+                );
+            }
             _ => assert_eq!(snapshot.audit().mode(), AuditMode::Off),
         }
     }
-    assert_eq!(seen, 6, "six arm overlays are documented");
+    assert_eq!(seen, 9, "nine arm overlays are documented");
 }
 
 #[test]

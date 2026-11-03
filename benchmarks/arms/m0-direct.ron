@@ -1,0 +1,7 @@
+// M0: the model calls each tool directly. Control arm for code mode.
+(
+    version: 1,
+    delegation: (roster: [], max_depth: 0),
+    audit: (mode: off),
+    policy: (tool_surface: direct),
+)

@@ -20,11 +20,16 @@ routes) before running, keeping the *same* primary `--model` for every arm
 | B1 | `b1-audit-heuristic.ron` | does the audit raise pass rate; at what cost |
 | C1 | `c1-write-children.ron` | do write children finish more tasks |
 | T1 | (no overlay) | continuation: compare a build before and after D1 |
+| M0 | `m0-direct.ron` | code-mode baseline: direct tool calls |
+| M1 | `m1-code-python.ron` | does one `run_code` tool with Python scripts cut turns, tokens or $/pass |
+| M2 | `m2-code-js.ron` | does JavaScript do better or worse than Python for the same model |
 
 Every arm turns the audit off except B1, so audit spend never confounds a
 delegation comparison. A1, A2, A3, B1, and C1 are each compared against the
 A0 baseline, and A3 also against A2 (does depth add anything over one level).
-T1 has no configuration knob (continuation has no off switch); it
+M1 and M2 are each compared against M0, and M2 against M1; a code-mode
+comparison should also read `turns` and input tokens per pass, since saving
+round trips is the point. T1 has no configuration knob (continuation has no off switch); it
 is a build-to-build comparison on the long-output task subset, and `compare`
 tolerates the differing `qq_source_revision`.
 

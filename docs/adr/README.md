@@ -65,6 +65,7 @@ written.
 | 0062 | [Use full LTO and balanced release size optimization](0062-full-lto-executable-size-profile.md) | Accepted (ENG-834); supersedes ADR-0010 in part |
 | 0063 | [Opt-in metadata-only structured tracing](0063-opt-in-structured-tracing.md) | Proposed (AF5, ENG-1028) |
 | 0064 | [Built-in HTTP providers are rows in one table](0064-builtin-provider-table.md) | Accepted (auth-providers AP7, ENG-1066) |
+| 0065 | [Run code-mode scripts in-process, with child calls as durable tool calls](0065-in-process-code-mode-engines.md) | Proposed (experimental code mode, #558) |
 
 The following numbers were reserved or released by retired plans. These
 historical reservations do not schedule work or require new ADRs:
