@@ -8,14 +8,6 @@ pub(super) struct AppliedCommand {
     pub(super) replayed: bool,
 }
 
-#[derive(Default)]
-pub(super) struct CommandAdmission {
-    pub(super) goal_work_present: bool,
-    pub(super) pause_goal_only_if_active: bool,
-    pub(super) goal_check_policy: Option<Result<(), GoalCheckPolicyError>>,
-    pub(super) goal_policy: Option<Result<GoalPolicy, GoalPolicyError>>,
-}
-
 pub(super) struct CreatedChildRun {
     pub(super) session_id: SessionId,
     pub(super) run_id: RunId,
@@ -92,15 +84,14 @@ pub(super) fn create_child_run(
     }
     let transaction = store::begin_unit(connection)?;
     ensure_workspace(&transaction, workspace_id)?;
-    let (parent_workspace, paid_owner) = transaction
+    let parent_workspace = transaction
         .query_row(
-            "SELECT s.workspace_id,
-                CASE WHEN r.goal_id IS NOT NULL OR r.goal_paid_owner_run_id IS NOT NULL THEN r.id END
+            "SELECT s.workspace_id
              FROM sessions s JOIN runs r ON r.session_id = s.id
              WHERE s.id = ?1 AND r.id = ?2 AND r.status = 'running'
                AND r.cancel_requested = 0",
             params![parent_session_id.to_string(), parent_run_id.to_string()],
-            |row| Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?)),
+            |row| row.get::<_, String>(0),
         )
         .optional()?
         .ok_or(SessionRuntimeError::RunNotFound)?;
@@ -164,8 +155,8 @@ pub(super) fn create_child_run(
     transaction.execute(
         "INSERT INTO runs(
                 id, session_id, command_id, user_message_id, assistant_message_id,
-                status, created_at_ms, limits_json, origin_json, goal_paid_owner_run_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9)",
+                status, created_at_ms, limits_json, origin_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8)",
         params![
             run_id.to_string(),
             session_id.to_string(),
@@ -178,7 +169,6 @@ pub(super) fn create_child_run(
                 owner_run_id: parent_run_id,
                 purpose
             })?,
-            paid_owner,
         ],
     )?;
     transaction.execute(
@@ -278,7 +268,6 @@ pub(super) fn execute_command(
     command_id: CommandId,
     command: SessionCommand,
     canonical_workspace: Option<Result<String, SessionRuntimeError>>,
-    admission: &CommandAdmission,
     origin: CommandOrigin,
 ) -> Result<AppliedCommand, SessionRuntimeError> {
     let request_json = serde_json::to_string(&command)?;
@@ -297,45 +286,12 @@ pub(super) fn execute_command(
         let receipt = serde_json::from_str(&stored_receipt)?;
         return Ok(AppliedCommand {
             receipt,
-            schedule: matches!(
-                &command,
-                SessionCommand::SetGoal { .. }
-                    | SessionCommand::GoalControl { .. }
-                    | SessionCommand::CancelRun { .. }
-                    | SessionCommand::AcknowledgeCheckInterruption { .. }
-            ),
+            schedule: matches!(&command, SessionCommand::CancelRun { .. }),
             replayed: true,
             side_launch: None,
             cascade_cancels: match &command {
                 SessionCommand::CancelRun { run_id } => {
-                    let mut signals = cancellation_signal_run_ids(connection, *run_id)?;
-                    let captured = connection
-                        .query_row(
-                            "SELECT session_id,goal_id FROM runs WHERE id=?1",
-                            [run_id.to_string()],
-                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-                        )
-                        .optional()?;
-                    if let Some((session, Some(goal))) = captured {
-                        for run in goals::paid_obligations(
-                            connection,
-                            parse_id(&session)?,
-                            Some(parse_id(&goal)?),
-                        )? {
-                            if run.cancelled && !signals.contains(&run.run) {
-                                signals.push(run.run);
-                            }
-                        }
-                    }
-                    signals
-                }
-                SessionCommand::SetGoal { session_id, .. }
-                | SessionCommand::GoalControl { session_id, .. } => {
-                    goals::paid_obligations(connection, *session_id, None)?
-                        .into_iter()
-                        .filter(|run| run.cancelled)
-                        .map(|run| run.run)
-                        .collect()
+                    cancellation_signal_run_ids(connection, *run_id)?
                 }
                 _ => Vec::new(),
             },
@@ -360,308 +316,6 @@ pub(super) fn execute_command(
     let mut cascade_cancels = Vec::new();
     let mut side_launch = None;
     let (receipt, schedule) = match command {
-        SessionCommand::SetGoal {
-            session_id,
-            objective,
-            check,
-            check_approval,
-            budget,
-            expected,
-            replace,
-        } => {
-            let previous = goals::load_live(&transaction, session_id)?;
-            let mut goal = goals::set(
-                &transaction,
-                session_id,
-                goals::Specification {
-                    objective,
-                    check,
-                    budget: *budget,
-                },
-                expected,
-                replace,
-                now,
-                match &admission.goal_policy {
-                    Some(result) => result.clone()?,
-                    None => GoalPolicy::default(),
-                },
-            )?;
-            if let Some(check) = goal.check.as_ref()
-                && load_tool_approval_policy(&transaction, session_id)?.mode == ApprovalMode::Auto
-            {
-                if !goals::auto_check_authority(&transaction, session_id)?
-                    || admission.goal_check_policy.is_none()
-                {
-                    return Err(GoalCheckPolicyError::Unavailable.into());
-                }
-                goals::validate_check_authority(
-                    &transaction,
-                    session_id,
-                    &check.command,
-                    admission.goal_check_policy.as_ref(),
-                )?;
-                if goal.check_authorization == Some(qq_protocol::GoalCheckAuthorization::Pending) {
-                    goal.check_authorization =
-                        Some(qq_protocol::GoalCheckAuthorization::TaskScoped);
-                    if matches!(
-                        goal.status,
-                        qq_protocol::GoalStatus::Paused {
-                            reason: qq_protocol::GoalPauseReason::NeedsUser {
-                                cause: qq_protocol::GoalNeedsUser::CheckApproval,
-                            },
-                        }
-                    ) {
-                        goal.status = qq_protocol::GoalStatus::Active;
-                    }
-                    goals::save(&transaction, &goal)?;
-                }
-            }
-            if let Some(scope) = check_approval {
-                let command = goal
-                    .check
-                    .as_ref()
-                    .ok_or(SessionRuntimeError::GoalCheckMissing)?
-                    .command
-                    .clone();
-                goals::approve_check(
-                    &transaction,
-                    session_id,
-                    &mut goal,
-                    scope,
-                    &command,
-                    admission.goal_check_policy.as_ref(),
-                    now,
-                )?;
-                goals::save(&transaction, &goal)?;
-            }
-            if let Some(previous) = previous {
-                cascade_cancels.extend(cancel_goal_work(
-                    &transaction,
-                    store_id,
-                    session_id,
-                    previous.goal_id,
-                    Some(command_id),
-                    now,
-                    replace || goal.status != qq_protocol::GoalStatus::Active,
-                )?);
-                let payload: String = transaction.query_row(
-                    "SELECT payload_json FROM session_goals WHERE goal_id=?1",
-                    [goal.goal_id.to_string()],
-                    |row| row.get(0),
-                )?;
-                goal = serde_json::from_str(&payload)?;
-            }
-            let workspace_id = session_workspace(&transaction, session_id)?;
-            let event = append_event(
-                &transaction,
-                EventContext::for_session(
-                    store_id,
-                    workspace_id,
-                    session_id,
-                    Some(command_id),
-                    now,
-                ),
-                SessionEvent::GoalUpdated {
-                    goal: Box::new(goal.clone()),
-                },
-            )?;
-            (
-                CommandReceipt {
-                    command_id,
-                    committed_through: event.cursor,
-                    outcome: CommandOutcome::GoalUpdated {
-                        session_id,
-                        goal: Box::new(goal),
-                    },
-                },
-                true,
-            )
-        }
-        SessionCommand::AcknowledgeCheckInterruption {
-            workspace_id,
-            run_id,
-        } => {
-            ensure_workspace(&transaction, workspace_id)?;
-            let session: Option<String> = transaction.query_row(
-                "SELECT r.session_id FROM runs r JOIN sessions s ON s.id=r.session_id WHERE s.workspace_id=?1 AND r.id=?2 AND r.check_acknowledgment_pending=1 AND r.status='interrupted'",
-                params![workspace_id.to_string(),run_id.to_string()],|row|row.get(0),
-            ).optional()?;
-            let Some(session) = session else {
-                return Err(SessionRuntimeError::CheckInterruptionMismatch);
-            };
-            let session_id = parse_id(&session)?;
-            transaction.execute(
-                "UPDATE runs SET check_acknowledgment_pending=0 WHERE id=?1",
-                [run_id.to_string()],
-            )?;
-            if let Some(goal) = goals::load_live(&transaction, session_id)?
-                && matches!(
-                    goal.status,
-                    qq_protocol::GoalStatus::Paused {
-                        reason: qq_protocol::GoalPauseReason::NeedsUser {
-                            cause: qq_protocol::GoalNeedsUser::CheckInterrupted
-                        }
-                    }
-                )
-            {
-                let captured: (Option<String>, Option<u32>) = transaction.query_row(
-                    "SELECT goal_id,goal_revision FROM runs WHERE id=?1",
-                    [run_id.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )?;
-                if captured.0.as_deref() == Some(goal.goal_id.to_string().as_str())
-                    && captured.1 == Some(goal.revision)
-                {
-                    let (goal, _) = goals::control(
-                        &transaction,
-                        session_id,
-                        qq_protocol::GoalIdentity {
-                            goal_id: goal.goal_id,
-                            revision: goal.revision,
-                        },
-                        qq_protocol::GoalControl::Pause,
-                        now,
-                        None,
-                        None,
-                    )?;
-                    append_event(
-                        &transaction,
-                        EventContext::for_session(
-                            store_id,
-                            workspace_id,
-                            session_id,
-                            Some(command_id),
-                            now,
-                        ),
-                        SessionEvent::GoalUpdated {
-                            goal: Box::new(goal),
-                        },
-                    )?;
-                }
-            }
-            let event = append_event(
-                &transaction,
-                EventContext::for_session(
-                    store_id,
-                    workspace_id,
-                    session_id,
-                    Some(command_id),
-                    now,
-                ),
-                SessionEvent::CheckInterruptionChanged {
-                    interruption: super::goal_check::interruption(&transaction, workspace_id)?,
-                },
-            )?;
-            (
-                CommandReceipt {
-                    command_id,
-                    committed_through: event.cursor,
-                    outcome: CommandOutcome::CheckInterruptionAcknowledged {
-                        workspace_id,
-                        run_id,
-                    },
-                },
-                true,
-            )
-        }
-        SessionCommand::GoalControl {
-            session_id,
-            expected,
-            action,
-        } => {
-            if matches!(action, qq_protocol::GoalControl::Resume)
-                && goals::load_live(&transaction, session_id)?.is_some_and(|goal| {
-                    goal.check_authorization
-                        == Some(qq_protocol::GoalCheckAuthorization::TaskScoped)
-                })
-                && !goals::auto_check_authority(&transaction, session_id)?
-            {
-                return Err(GoalCheckPolicyError::Unavailable.into());
-            }
-            let stopped = if admission.pause_goal_only_if_active {
-                goals::load_live(&transaction, session_id)?.filter(|goal| {
-                    goal.goal_id == expected.goal_id
-                        && goal.revision == expected.revision
-                        && goal.status != qq_protocol::GoalStatus::Active
-                })
-            } else {
-                None
-            };
-            let already_stopped = stopped.is_some();
-            let (mut goal, clear) = match stopped {
-                Some(goal) => (goal, false),
-                None => goals::control(
-                    &transaction,
-                    session_id,
-                    expected,
-                    action,
-                    now,
-                    admission.goal_check_policy.as_ref(),
-                    admission.goal_policy.as_ref(),
-                )?,
-            };
-            if !already_stopped && (clear || goal.status != qq_protocol::GoalStatus::Active) {
-                cascade_cancels.extend(cancel_goal_work(
-                    &transaction,
-                    store_id,
-                    session_id,
-                    goal.goal_id,
-                    Some(command_id),
-                    now,
-                    true,
-                )?);
-                let payload: String = transaction.query_row(
-                    "SELECT payload_json FROM session_goals WHERE goal_id=?1",
-                    [goal.goal_id.to_string()],
-                    |row| row.get(0),
-                )?;
-                goal = serde_json::from_str(&payload)?;
-            }
-            let workspace_id = session_workspace(&transaction, session_id)?;
-            let (event_body, outcome) = if clear {
-                (
-                    SessionEvent::GoalCleared {
-                        session_id,
-                        goal_id: goal.goal_id,
-                        revision: goal.revision,
-                    },
-                    CommandOutcome::GoalCleared {
-                        session_id,
-                        goal_id: goal.goal_id,
-                        revision: goal.revision,
-                    },
-                )
-            } else {
-                (
-                    SessionEvent::GoalUpdated {
-                        goal: Box::new(goal.clone()),
-                    },
-                    CommandOutcome::GoalUpdated {
-                        session_id,
-                        goal: Box::new(goal),
-                    },
-                )
-            };
-            let event = append_event(
-                &transaction,
-                EventContext::for_session(
-                    store_id,
-                    workspace_id,
-                    session_id,
-                    Some(command_id),
-                    now,
-                ),
-                event_body,
-            )?;
-            (
-                CommandReceipt {
-                    command_id,
-                    committed_through: event.cursor,
-                    outcome,
-                },
-                true,
-            )
-        }
         SessionCommand::CancelSideQuestion { side_question_id } => {
             let item = side_questions::find_side_snapshot(&transaction, side_question_id)?
                 .ok_or(SessionRuntimeError::SideQuestionNotFound)?;
@@ -916,33 +570,6 @@ pub(super) fn execute_command(
             let prompt = prompt
                 .strip_prefix("//")
                 .map_or(prompt.clone(), |literal| format!("/{literal}"));
-            if admission.goal_work_present {
-                let workspace = session_workspace(&transaction, session_id)?;
-                let mut unclaimed = transaction.prepare(
-                    "SELECT r.id FROM runs r JOIN sessions s ON s.id=r.session_id
-                 WHERE r.session_id=?1 AND r.status='queued' AND r.outcome_json IS NULL
-                   AND s.preparing_run_id IS NOT r.id AND s.active_run_id IS NOT r.id
-                   AND json_extract(r.origin_json,'$.type') IN ('goal','goal_check')
-                 LIMIT ?2",
-                )?;
-                let runs = unclaimed
-                    .query_map(
-                        params![session_id.to_string(), MAX_PENDING_PROMPTS],
-                        |row| row.get::<_, String>(0),
-                    )?
-                    .collect::<Result<Vec<_>, _>>()?;
-                drop(unclaimed);
-                for run in runs {
-                    finish_queued_run(
-                        &transaction,
-                        store_id,
-                        workspace,
-                        session_id,
-                        parse_id(&run)?,
-                        now,
-                    )?;
-                }
-            }
             let (workspace_id, queued, title) = transaction
                 .query_row(
                     "SELECT workspace_id, queued_prompts, title FROM sessions WHERE id = ?1",
@@ -1166,9 +793,9 @@ pub(super) fn execute_command(
             }
         }
         SessionCommand::CancelRun { run_id } => {
-            let (session_id, status, stored_outcome, captured_goal, preparing) = transaction
+            let (session_id, status, stored_outcome, preparing) = transaction
                 .query_row(
-                    "SELECT session_id, status, outcome_json, goal_id,
+                    "SELECT session_id, status, outcome_json,
                         EXISTS(SELECT 1 FROM sessions WHERE preparing_run_id=runs.id)
                      FROM runs WHERE id = ?1",
                     [run_id.to_string()],
@@ -1177,8 +804,7 @@ pub(super) fn execute_command(
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, Option<String>>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                            row.get::<_, bool>(4)?,
+                            row.get::<_, bool>(3)?,
                         ))
                     },
                 )
@@ -1200,61 +826,6 @@ pub(super) fn execute_command(
                         outcome: CommandOutcome::RunAlreadyFinished { run_id, outcome },
                     },
                     false,
-                )
-            } else if let Some(goal) = if origin == CommandOrigin::Client {
-                goals::load_live(&transaction, session_id)?.filter(|goal| {
-                    captured_goal.as_deref() == Some(goal.goal_id.to_string().as_str())
-                        && goal.status == qq_protocol::GoalStatus::Active
-                })
-            } else {
-                None
-            } {
-                let (goal, _) = goals::control(
-                    &transaction,
-                    session_id,
-                    qq_protocol::GoalIdentity {
-                        goal_id: goal.goal_id,
-                        revision: goal.revision,
-                    },
-                    qq_protocol::GoalControl::Pause,
-                    now,
-                    None,
-                    None,
-                )?;
-                cascade_cancels.extend(cancel_goal_work(
-                    &transaction,
-                    store_id,
-                    session_id,
-                    goal.goal_id,
-                    Some(command_id),
-                    now,
-                    true,
-                )?);
-                let payload: String = transaction.query_row(
-                    "SELECT payload_json FROM session_goals WHERE goal_id=?1",
-                    [goal.goal_id.to_string()],
-                    |row| row.get(0),
-                )?;
-                let event = append_event(
-                    &transaction,
-                    EventContext::for_session(
-                        store_id,
-                        workspace_id,
-                        session_id,
-                        Some(command_id),
-                        now,
-                    ),
-                    SessionEvent::GoalUpdated {
-                        goal: Box::new(serde_json::from_str(&payload)?),
-                    },
-                )?;
-                (
-                    CommandReceipt {
-                        command_id,
-                        committed_through: event.cursor,
-                        outcome: CommandOutcome::CancellationRequested { run_id },
-                    },
-                    true,
                 )
             } else {
                 transaction.execute(
@@ -2075,7 +1646,7 @@ pub(super) fn delete_idle_session(
                     EXISTS(
                         SELECT 1 FROM runs
                         WHERE session_id = sessions.id
-                          AND (status IN ('queued', 'running') OR check_acknowledgment_pending=1)
+                          AND status IN ('queued', 'running')
                     ) OR EXISTS(
                         SELECT 1 FROM side_questions
                         WHERE session_id = sessions.id AND state = 'running'
@@ -2128,30 +1699,9 @@ pub(super) fn delete_idle_session(
     if owner_active {
         return Err(SessionRuntimeError::SessionActive);
     }
-    let paid_descendants_active: bool = transaction.query_row(
-        "WITH RECURSIVE paid(run_id,depth) AS (
-            SELECT id,0 FROM runs WHERE session_id=?1
-            UNION ALL
-            SELECT child.id,paid.depth+1 FROM paid JOIN runs child
-              ON child.goal_paid_owner_run_id=paid.run_id WHERE paid.depth<?2
-         ) SELECT EXISTS(
-            SELECT 1 FROM paid JOIN runs r ON r.id=paid.run_id
-            WHERE r.status IN ('queued','running') OR EXISTS(
-                SELECT 1 FROM runs helper WHERE helper.kind='compaction'
-                  AND helper.auto_compaction=1 AND helper.auto_compaction_for_run_id=r.id
-                  AND helper.session_id=r.session_id AND helper.status IN ('queued','running')
-            )
-         )",
-        params![session_id.to_string(), MAX_CHILD_DEPTH],
-        |row| row.get(0),
-    )?;
-    if paid_descendants_active {
-        return Err(SessionRuntimeError::SessionActive);
-    }
     let parent_id = session_parent(transaction, session_id)?;
     let session = session_id.to_string();
     for statement in [
-        "UPDATE runs SET goal_paid_owner_run_id=NULL WHERE goal_paid_owner_run_id IN (SELECT id FROM runs WHERE session_id=?1)",
         "UPDATE sessions SET parent_id = NULL, owner_run_id = NULL WHERE parent_id = ?1",
         "DELETE FROM tool_spills WHERE session_id = ?1",
         "DELETE FROM message_attachments WHERE session_id = ?1",
@@ -2205,7 +1755,6 @@ pub(super) fn expire_idle_sessions(
          WHERE status = 'idle' AND updated_at_ms < ?1
            AND (updated_at_ms, rowid) > (?2, ?3)
            AND active_run_id IS NULL AND preparing_run_id IS NULL AND queued_prompts = 0
-           AND NOT EXISTS (SELECT 1 FROM session_goals g WHERE g.session_id = sessions.id AND g.live = 1)
          ORDER BY updated_at_ms, rowid
          LIMIT ?4",
     )?;
@@ -2347,10 +1896,7 @@ pub(super) fn begin_workspace_restore(
                       OR s.preparing_run_id IS NOT NULL OR s.queued_prompts != 0))
              OR EXISTS(SELECT 1 FROM runs r JOIN sessions s ON s.id = r.session_id
                  WHERE s.workspace_id IN (SELECT id FROM overlapping)
-                   AND (r.status IN ('queued', 'running') OR r.check_acknowledgment_pending = 1))
-             OR EXISTS(SELECT 1 FROM session_goals g JOIN sessions s ON s.id = g.session_id
-                 WHERE s.workspace_id IN (SELECT id FROM overlapping) AND g.live = 1
-                   AND json_extract(g.payload_json, '$.status.type') = 'active')",
+                   AND r.status IN ('queued', 'running'))",
             paths_overlap_sql("o.path", "?1"),
             paths_overlap_sql("rp.path", "?1")
         ),
@@ -2502,59 +2048,4 @@ pub(super) fn prompt_title(prompt: &str) -> String {
     } else {
         title
     }
-}
-
-pub(super) fn cancel_goal_work(
-    transaction: &Connection,
-    store_id: StoreId,
-    session: SessionId,
-    goal: qq_protocol::GoalId,
-    command: Option<CommandId>,
-    now: u64,
-    drain: bool,
-) -> Result<Vec<RunId>, SessionRuntimeError> {
-    let mut signals = Vec::new();
-    for obligation in goals::paid_obligations(transaction, session, Some(goal))? {
-        if !drain
-            && (obligation.session != session
-                || !obligation.queued
-                || obligation.preparing
-                || !obligation.autonomous)
-        {
-            continue;
-        }
-        let run = obligation.run;
-        transaction.execute(
-            "UPDATE runs SET cancel_requested=1 WHERE id=?1 AND outcome_json IS NULL",
-            [run.to_string()],
-        )?;
-        append_event(
-            transaction,
-            EventContext::for_run_ids(
-                store_id,
-                obligation.workspace,
-                obligation.session,
-                run,
-                command,
-                now,
-            ),
-            SessionEvent::CancellationRequested {
-                session: Box::new(load_session_summary(transaction, obligation.session)?),
-                run_id: run,
-            },
-        )?;
-        if obligation.queued && !obligation.preparing {
-            finish_queued_run(
-                transaction,
-                store_id,
-                obligation.workspace,
-                obligation.session,
-                run,
-                now,
-            )?;
-        } else {
-            signals.push(run);
-        }
-    }
-    Ok(signals)
 }

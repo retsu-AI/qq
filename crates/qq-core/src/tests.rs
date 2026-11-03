@@ -389,7 +389,6 @@ async fn prefix_plus_suffix_digest_equals_the_full_prompt_digest() {
         &plan.catalog.base_specs(&catalog::StaticFilter {
             spawn_agent: false,
             search_history: false,
-            update_goal: false,
             read_tool_result: false,
             load_skill: true,
             read_only: false,
@@ -932,11 +931,8 @@ async fn server_cooldown_survives_an_exhausted_http_retry_budget() {
             .next()
             .await
             .expect("the runtime must report the retry");
-        if let RuntimeEvent::AssistantTurnCompleted { model_work, .. } = &event {
-            assert_eq!(
-                *model_work,
-                crate::runtime::ModelWorkDisposition::RejectedBeforeWork
-            );
+        if let RuntimeEvent::AssistantTurnCompleted { message, .. } = &event {
+            assert!(!message.has_content());
             rejected_before_work = true;
         }
         if let RuntimeEvent::TurnRetrying { delay, kind, .. } = event {
@@ -946,7 +942,7 @@ async fn server_cooldown_survives_an_exhausted_http_retry_budget() {
     };
     assert!(
         rejected_before_work,
-        "the rejected turn must commit its no-work disposition before retrying"
+        "the rejected turn must be committed empty before retrying"
     );
     assert!(
         delay >= Duration::from_secs(60),
@@ -989,7 +985,6 @@ async fn summarizer_errors_keep_server_cooldown_before_and_after_partial_output(
             Arc::from([]),
             None,
             256,
-            None,
         ));
         let error = loop {
             if let Err(error) = summary.next().await.unwrap() {

@@ -109,7 +109,6 @@ pub(crate) struct InRunCompactionRequest {
     pub(crate) system: Arc<str>,
     pub(crate) tools: Arc<[ToolSpec]>,
     pub(crate) retained_bytes: u64,
-    pub(crate) goal_notice: Option<Arc<str>>,
     pub(crate) budget: super::ChildBudget,
 }
 
@@ -151,11 +150,8 @@ pub(crate) trait InRunCompactor: Send + Sync {
 }
 
 pub(crate) enum SummarizeStep {
-    RequestStarting {
-        input_tokens: Option<u64>,
-    },
+    RequestStarting,
     TurnCompleted {
-        model_work: crate::runtime::ModelWorkDisposition,
         ordinal: u32,
         message: Message,
         usage: Option<qq_protocol::TokenUsage>,

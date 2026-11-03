@@ -403,11 +403,6 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let parent_run = RunId::generate().unwrap();
     let parent = ClaimedRun {
-        goal_spend_owner: None,
-        goal: None,
-        goal_initial_notice: None,
-        goal_admission: None,
-        check_deadline: None,
         origin: None,
         identity: RunIdentity {
             workspace_id,

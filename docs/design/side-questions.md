@@ -2,10 +2,9 @@
 
 A side question (`/btw` or `/ask` in the TUI) asks the session's model about
 the work in progress without interrupting it. It never submits a steering
-prompt, cancels or pauses the main run, takes the session's execution slot,
-or changes its goal. Its question, answer, tool results and spend stay in the
-side thread: none of them enter the main transcript, a compaction summary, or
-a goal budget.
+prompt, cancels or pauses the main run, or takes the session's execution
+slot. Its question, answer, tool results and spend stay in the side thread:
+none of them enter the main transcript or a compaction summary.
 
 The runtime is `crates/qq-core/src/sessions/side_questions.rs`; the wire
 commands, snapshots and projection updates are protocol 32
@@ -35,7 +34,7 @@ model and a separately compiled least-authority plan. Only the built-in
 the session's tool policy, and the same allowlist is enforced again at
 execution: any other call is denied. Workspace containment and managed hard
 denies apply as usual. Shell, edits, writes, network and MCP tools,
-delegation, approval decisions and goal controls are unavailable.
+delegation and approval decisions are unavailable.
 
 Live reads are not a consistent filesystem snapshot; they may observe edits
 the main agent is making.

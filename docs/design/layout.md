@@ -61,7 +61,7 @@ Below 32 × 9 the frame is a "terminal is too small" notice.
 
 There is no header row: the transcript starts on row 0. The last rows are
 the **dock**, from top to bottom: the rule, a panel when one is open
-(approval, question, goal summary or form, goal-check choices, or a picker),
+(approval, question, or a picker),
 queued drafts, the composer, and the status line. The **body** is everything
 above the dock, and the transcript pane fills it. The sessions column is the one exception: it runs the
 full terminal height, beside the dock as well as the body. At 80 × 24, with

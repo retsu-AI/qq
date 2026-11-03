@@ -4,7 +4,6 @@ pub(crate) mod dispatch;
 mod edit;
 #[cfg(feature = "tool-fetch")]
 pub(crate) mod fetch;
-pub(crate) mod goal;
 mod lang;
 mod matching;
 #[cfg(not(target_os = "linux"))]
@@ -47,52 +46,6 @@ pub(crate) fn parsed_shell_command(arguments: &str) -> Option<String> {
 
 #[cfg(test)]
 pub(crate) use dispatch::{execute, test_executions_started};
-
-#[cfg(any(not(unix), test))]
-pub(crate) async fn run_goal_check_shell(
-    workspace: &crate::workspace::Workspace,
-    command: String,
-    deadline: tokio::time::Instant,
-    cancelled: crate::RunCancellation,
-    producer: std::sync::Arc<crate::ProcessProducer>,
-    process: &mut ToolTaskLease,
-) -> (Option<dispatch::CommandOutcome>, String) {
-    let arguments = shell::ShellArgs {
-        command,
-        cwd: None,
-        timeout_seconds: None,
-        yield_after_seconds: None,
-    };
-    let stop = crate::RunCancellation::new();
-    let policy = crate::runtime::ShellPolicy::default();
-    let stopped = ToolCancellation::new(stop.clone());
-    let run = shell::run_shell(
-        workspace,
-        &policy,
-        std::sync::Arc::default(),
-        producer,
-        None,
-        shell::Launch::Shell(&arguments),
-        &stopped,
-        None,
-        process,
-        None,
-    );
-    tokio::pin!(run);
-    let mut expired = false;
-    let result = tokio::select! {
-        result = &mut run => result,
-        () = cancelled.cancelled() => { stop.cancel(); run.await }
-        () = tokio::time::sleep_until(deadline) => { expired = true; stop.cancel(); run.await }
-    };
-    let outcome = match result.native_outcome {
-        Some(dispatch::CommandOutcome::Cancelled) if expired => {
-            Some(dispatch::CommandOutcome::TimedOut)
-        }
-        outcome => outcome,
-    };
-    (outcome, result.model_text)
-}
 
 pub mod bench_support {
     use std::path::Path;
@@ -260,43 +213,3 @@ pub(crate) async fn assert_panicked_process_exits(pid: u32) {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(all(test, unix))]
-mod goal_check_shell_tests {
-    #[tokio::test]
-    async fn goal_check_shell_keeps_the_absolute_deadline() {
-        let directory = tempfile::tempdir().unwrap();
-        let workspace = crate::workspace::Workspace::open(directory.path()).unwrap();
-        let tasks = super::ToolTasks::default();
-        for (command, budget, expected) in [
-            (
-                "exit 3",
-                5_000,
-                super::dispatch::CommandOutcome::Exited { code: Some(3) },
-            ),
-            (
-                "exec tail -f /dev/null",
-                300,
-                super::dispatch::CommandOutcome::TimedOut,
-            ),
-        ] {
-            let mut lease = tasks.enter();
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(budget);
-            let (outcome, _) = super::run_goal_check_shell(
-                &workspace,
-                command.to_owned(),
-                deadline,
-                crate::RunCancellation::new(),
-                std::sync::Arc::new(crate::ProcessProducer::new("test")),
-                &mut lease,
-            )
-            .await;
-            assert_eq!(outcome, Some(expected), "{command}");
-            assert!(
-                tokio::time::Instant::now() < deadline + std::time::Duration::from_millis(500),
-                "{command} outlived its absolute deadline"
-            );
-        }
-        tasks.drain().await.unwrap();
-    }
-}

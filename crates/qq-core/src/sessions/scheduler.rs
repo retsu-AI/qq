@@ -46,7 +46,6 @@ pub(super) async fn schedule_runs(
     stopped: watch::Sender<bool>,
 ) {
     let _stopped = SchedulerStopGuard(stopped);
-    let mut next_goal_wake: Option<u64> = None;
     let mut next_expiry = Some(tokio::time::Instant::now());
     'scheduler: loop {
         let scheduled = tokio::select! {
@@ -58,12 +57,6 @@ pub(super) async fn schedule_runs(
                 continue;
             }
             scheduled = receiver.recv() => scheduled,
-            () = async {
-                match next_goal_wake {
-                    Some(at)=>tokio::time::sleep(Duration::from_millis(at.saturating_sub(now_ms()))).await,
-                    None=>std::future::pending::<()>().await,
-                }
-            } => Some(()),
             () = async {
                 match next_expiry {
                     Some(at) => tokio::time::sleep_until(at).await,
@@ -88,27 +81,6 @@ pub(super) async fn schedule_runs(
         } else if inner.retention.is_none() {
             next_expiry = None;
         }
-        next_goal_wake = if inner.store.has_goals() {
-            let _lifecycle = inner.lifecycle.read().await;
-            if inner.draining.load(Ordering::Acquire) {
-                None
-            } else {
-                match inner.store.drive_goals(now_ms()).await {
-                    Ok(pass) => {
-                        for cursor in pass.cursors {
-                            inner.notify(cursor);
-                        }
-                        pass.next_wake
-                    }
-                    Err(_) => {
-                        inner.failed.send_replace(true);
-                        break;
-                    }
-                }
-            }
-        } else {
-            None
-        };
         for depth in 0..=MAX_CHILD_DEPTH {
             let pool = if depth == 0 {
                 &inner.permits

@@ -17,7 +17,6 @@ fn every_minimal_call_decodes() {
     decodes::<crate::tools::shell::ExecArgs>("exec");
     #[cfg(feature = "tool-fetch")]
     decodes::<fetch::FetchArgs>("fetch");
-    decodes::<goal::UpdateGoalArgs>("update_goal");
     decodes::<SpawnAgentArgs>(SPAWN_AGENT_TOOL);
     decodes::<WaitAgentsArgs>("wait_agents");
     ask::parse(minimal_call("ask_user").unwrap()).unwrap();

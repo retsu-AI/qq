@@ -80,15 +80,10 @@ pub(super) fn start(
     let (ready_tx, ready) = oneshot::channel();
     let (closed_tx, closed) = watch::channel(false);
     #[cfg(test)]
-    let (epoch, clock) = (
-        crate::sessions::codec::TEST_EPOCH.with(|epoch| epoch.borrow().clone()),
-        tokio::runtime::Handle::try_current().ok(),
-    );
+    let clock = tokio::runtime::Handle::try_current().ok();
     let worker = thread::Builder::new()
         .name("qq-session-store".to_owned())
         .spawn(move || {
-            #[cfg(test)]
-            crate::sessions::codec::TEST_EPOCH.with(|slot| slot.replace(epoch));
             #[cfg(test)]
             let _clock = clock.as_ref().map(tokio::runtime::Handle::enter);
             let ownership = acquire_ownership(&path, ownership_wait);

@@ -18,8 +18,6 @@ struct RunScope {
     audit_actions: Vec<runtime::AuditedAction>,
     audit_revisions: u16,
     output_repairs: u8,
-    goal_handoff_requested: bool,
-    goal_final_slot_announced: bool,
     live_turns: Vec<u32>,
     summarizer_rejected_turns: u8,
     inherited_compaction_attempted: bool,
@@ -137,9 +135,9 @@ struct SliceScope {
     continuing_slice: bool,
     placed_report: Option<runtime::TurnNotice>,
     pending_notice: Option<runtime::TurnNotice>,
-    pending_goal_notices: Vec<runtime::OrderedTurnNotice>,
+    pending_boundary_notices: Vec<runtime::OrderedTurnNotice>,
     pending_deliveries: usize,
-    pending_reserved_goal_notices: usize,
+    pending_reserved_boundary_notices: usize,
 }
 
 struct TurnScope {
@@ -189,9 +187,6 @@ struct RunEnvironment {
     file_state: Arc<workspace::FileState>,
     spawner: Option<Arc<dyn SubagentSpawner>>,
     history: Option<Arc<dyn HistorySearcher>>,
-    goal: Option<sessions::GoalRunInput>,
-    goal_spend_tracking: bool,
-    goal_paid: Option<sessions::GoalPaidInput>,
     spills: Option<Arc<dyn runtime::SpillReader>>,
     compactor: Option<Arc<dyn runtime::InRunCompactor>>,
     audit_hook: Option<Arc<dyn runtime::AuditHook>>,
@@ -529,9 +524,6 @@ impl plan::CompiledAgentPlan {
                        execution_started: _,
                        pricing,
                        history,
-                       goal,
-                       goal_spend_tracking,
-                       goal_paid,
                        spills,
                        steering,
                        compactor,
@@ -669,7 +661,6 @@ impl plan::CompiledAgentPlan {
                            tools: allow_tools.then_some(catalog::StaticFilter {
                                spawn_agent: spawner.is_some(),
                                search_history: history.is_some(),
-                               update_goal: goal.is_some(),
                                read_tool_result: spills.is_some(),
                                load_skill: allow_guidance,
                                read_only,
@@ -727,11 +718,7 @@ impl plan::CompiledAgentPlan {
                            }),
                            context_sources: context_records,
                        }));
-                   if let Some(goal) = &goal {
-                       let notice_index = messages.len().saturating_sub(1);
-                       Arc::make_mut(&mut messages).insert(notice_index, Message::user(goal.initial_notice()));
-                   }
-                   let reducible_messages = messages.len().saturating_sub(1 + usize::from(goal.is_some()));
+                   let reducible_messages = messages.len().saturating_sub(1);
                    let reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
                    let irreducible_message_bytes =
                        measure_messages(&messages[reducible_messages..]);
@@ -779,8 +766,6 @@ impl plan::CompiledAgentPlan {
                        audit_actions,
                        audit_revisions,
                        output_repairs,
-                       goal_handoff_requested: false,
-                       goal_final_slot_announced: false,
                        live_turns,
                        summarizer_rejected_turns,
                        inherited_compaction_attempted: false,
@@ -808,9 +793,9 @@ impl plan::CompiledAgentPlan {
                        continuing_slice,
                        placed_report,
                        pending_notice,
-                       pending_goal_notices: Vec::new(),
+                       pending_boundary_notices: Vec::new(),
                        pending_deliveries: 0,
-                       pending_reserved_goal_notices: 0,
+                       pending_reserved_boundary_notices: 0,
                    };
                    let recovery = TurnScope {
                        turn_retries,
@@ -823,7 +808,7 @@ impl plan::CompiledAgentPlan {
 
         yield TurnStep::Ready(RunState {
            messages, steering, run, window, slice, recovery,
-           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal_spend_tracking: goal_spend_tracking || goal.is_some(), goal_paid, goal, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy, cache_key },
+           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy, cache_key },
         });
                }
     }
@@ -835,43 +820,10 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<PreparedTurn>> + Send + '_ {
         stream! {
                     let Self { env, messages, run, window, slice, recovery, .. } = self;
-                    let RunEnvironment { spawner, system, system_prompt_hash, allow_tools, goal, cancelled, deadline, .. } = env;
+                    let RunEnvironment { spawner, system, system_prompt_hash, allow_tools, .. } = env;
                     let allow_tools = *allow_tools;
                     let system_prompt_hash = *system_prompt_hash;
 
-                        if let Some(goal) = goal {
-                            let refreshed = tokio::select! {
-                                biased;
-                                () = cancelled.cancelled() => { yield TurnStep::Stop; return; },
-                                () = runtime::RunDeadline::wait(*deadline) => {
-                                    yield TurnStep::Emit(RuntimeEvent::BudgetExhausted { exhaustion: deadline.expect("only a finite deadline wakes").exhaustion() });
-                                    yield TurnStep::Stop; return;
-                                },
-                                refreshed = goal.refresh_notice() => refreshed,
-                            };
-                            match refreshed {
-                                Ok(Some(text)) => {
-                                    let notice = Message::user(text.clone());
-                                    window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&notice));
-                                    Arc::make_mut(messages).push(notice);
-                                    slice.pending_goal_notices.push(runtime::OrderedTurnNotice { text, preceding_deliveries: slice.pending_deliveries });
-                                }
-                                Ok(None) => {},
-                                Err(error) => {
-                                    yield TurnStep::Emit(RuntimeEvent::Failed { kind: RunFailureKind::Server, message: format!("refresh goal notice: {error}") });
-                                    yield TurnStep::Stop; return;
-                                }
-                            }
-                        }
-
-                        if !run.goal_final_slot_announced && goal.as_ref().is_some_and(sessions::GoalRunInput::final_slot) {
-                            run.goal_final_slot_announced = true;
-                            let text = sessions::GoalRunInput::FINAL_RUN_NOTICE.to_owned();
-                            let notice = Message::user(text.clone());
-                            window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&notice));
-                            Arc::make_mut(messages).push(notice);
-                            slice.pending_goal_notices.push(runtime::OrderedTurnNotice { text, preceding_deliveries: slice.pending_deliveries });
-                        }
                         let delivered_by_wait = std::mem::take(&mut recovery.wait_delivered_for) == Some(turn_ordinal);
                         if let Some(spawner) = &spawner
                             && !delivered_by_wait
@@ -893,15 +845,10 @@ impl RunState {
                                 }
                             }
                         }
-                        if let Some(cap) = goal.as_ref().and_then(sessions::GoalRunInput::final_slot_turn_cap) {
-                            run.budget.constrain_model_turns(cap);
-                        }
-                        let decision=if goal.as_ref().is_some_and(sessions::GoalRunInput::audit) {
-                            run.budget.before_goal_audit(tokio::time::Instant::now())
-                        } else {run.budget.before_turn(
+                        let decision = run.budget.before_turn(
                             tokio::time::Instant::now(),
                             if allow_tools { MAX_TOOL_CALLS_PER_TURN } else { 0 },
-                        )};
+                        );
                         let budget_final_turn = match decision {
                             BudgetDecision::Continue => false,
                             BudgetDecision::FinalResponse(_) => true,
@@ -910,22 +857,11 @@ impl RunState {
                                 yield TurnStep::Stop; return;
                             }
                         };
-                        if budget_final_turn && !run.goal_handoff_requested
-                            && goal.as_ref().is_some_and(sessions::GoalRunInput::final_slot)
-                        {
-                            run.goal_handoff_requested = true;
-                            run.goal_final_slot_announced = true;
-                            let text = sessions::GoalRunInput::HANDOFF_NOTICE.to_owned();
-                            let notice = Message::user(text.clone());
-                            window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&notice));
-                            Arc::make_mut(messages).push(notice);
-                            slice.pending_goal_notices.push(runtime::OrderedTurnNotice { text, preceding_deliveries: slice.pending_deliveries });
-                        }
-                        let slice_checkpoint = !budget_final_turn && !run.goal_handoff_requested
+                        let slice_checkpoint = !budget_final_turn
                             && slice.slice_tool_calls
                                 .saturating_add(MAX_TOOL_CALLS_PER_TURN)
                                 > env.plan.runtime.tool_calls_per_slice;
-                        let report_due = match (budget_final_turn || run.goal_handoff_requested, slice.placed_report) {
+                        let report_due = match (budget_final_turn, slice.placed_report) {
                             (true, _) => runtime::ReportDue::None,
                             (false, Some(runtime::TurnNotice::FinalAnswer)) => runtime::ReportDue::FinalAnswer,
                             (false, Some(runtime::TurnNotice::Report | runtime::TurnNotice::StallReport | runtime::TurnNotice::RootStallReport)) => {
@@ -953,7 +889,7 @@ impl RunState {
                             };
                             slice.placed_report = Some(notice);
                             Some(notice)
-                        } else if continuation_turn && !budget_final_turn && !final_answer_turn && !run.goal_handoff_requested {
+                        } else if continuation_turn && !budget_final_turn && !final_answer_turn {
                             Some(runtime::TurnNotice::Continuation)
                         } else {
                             None
@@ -963,11 +899,6 @@ impl RunState {
                             window.irreducible_message_bytes =
                                 window.irreducible_message_bytes.saturating_add(measure_message(&message));
                             Arc::make_mut(messages).push(message);
-                            if goal.is_some() {
-                                slice.pending_goal_notices.push(runtime::OrderedTurnNotice {
-                                    text: notice.text().to_owned(), preceding_deliveries: slice.pending_deliveries,
-                                });
-                            }
                             slice.pending_notice = Some(notice);
                         }
                         if budget_final_turn {
@@ -976,7 +907,7 @@ impl RunState {
                             window.irreducible_message_bytes =
                                 window.irreducible_message_bytes.saturating_add(measure_message(&message));
                             Arc::make_mut(messages).push(message);
-                            slice.pending_goal_notices.push(runtime::OrderedTurnNotice {
+                            slice.pending_boundary_notices.push(runtime::OrderedTurnNotice {
                                 text, preceding_deliveries: slice.pending_deliveries,
                             });
                         }
@@ -1001,7 +932,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<CompactedTurn>> + Send + '_ {
         stream! {
                     let Self { env, messages, run, window, slice, recovery, .. } = self;
-                    let RunEnvironment { plan, compactor, goal, system, reducible_messages, model_max_output_tokens, inherited_effects, cancelled, deadline, .. } = env;
+                    let RunEnvironment { plan, compactor, system, reducible_messages, model_max_output_tokens, inherited_effects, cancelled, deadline, .. } = env;
                     let reducible_messages = *reducible_messages;
                     let model_max_output_tokens = *model_max_output_tokens;
                     let deadline = *deadline;
@@ -1096,7 +1027,7 @@ impl RunState {
                                 window.irreducible_message_bytes,
                             ));
                         if still_overflows && let Some(compactor) = compactor.as_ref() {
-                            let run_start = reducible_messages.saturating_add(1 + usize::from(goal.is_some()));
+                            let run_start = reducible_messages.saturating_add(1);
                             let inherited_prefix = provider_rejected_window && reducible_messages > 0 && !run.inherited_compaction_attempted
                                 && sessions::in_run_compaction_boundary(&messages[run_start..], sessions::CONTEXT_PRUNE_KEEP_TURNS).is_none();
                             let boundary = if inherited_prefix {
@@ -1149,14 +1080,11 @@ impl RunState {
                                 } else {
                                     &messages[reducible_messages..cut]
                                 };
-                                let goal_notice = (!inherited_prefix).then(|| goal.as_ref().and_then(|goal| goal.post_summary_notice(run.goal_handoff_requested)).map(Arc::<str>::from)).flatten();
-                                let post_summary_notice = goal_notice.as_ref().map(|text| Message::user(text.as_ref()));
                                 let retained_bytes = system_bytes
                                     .saturating_add(tool_schema_bytes)
                                     .saturating_add(window.reducible_message_bytes)
                                     .saturating_add(measure_messages(&messages[reducible_messages..run_start]))
-                                    .saturating_add(measure_messages(&messages[cut..]))
-                                    .saturating_add(post_summary_notice.as_ref().map_or(0, measure_message));
+                                    .saturating_add(measure_messages(&messages[cut..]));
                                 let retained_bytes = if inherited_prefix {
                                     system_bytes.saturating_add(tool_schema_bytes)
                                         .saturating_add(measure_messages(&messages[reducible_messages..]))
@@ -1183,7 +1111,6 @@ impl RunState {
                                             system: Arc::clone(system),
                                             tools: Arc::clone(&run.tool_specs),
                                             retained_bytes,
-                                            goal_notice: goal_notice.clone(),
                                             budget: allowance,
                                         })
                                         .await;
@@ -1255,19 +1182,14 @@ impl RunState {
                                             env.reducible_messages = 1;
                                             inherited_effects.clear();
                                             window.reducible_message_bytes = measure_messages(&messages[..1]);
-                                        } else { match post_summary_notice {
-                                            Some(notice) => {
-                                                live.splice(run_start..run_start + replace_through, [summary, notice]);
-                                            }
-                                            None => {
-                                                live.splice(run_start..run_start + replace_through, [summary]);
-                                            }
-                                        }}
+                                        } else {
+                                            live.splice(run_start..run_start + replace_through, [summary]);
+                                        }
                                         run.live_turns.drain(..replaced_turns);
                                         window.compatible_request = None;
                                         window.model_text_bytes = 0;
                                         window.irreducible_message_bytes = measure_messages(&messages[if inherited_prefix { 1 } else { reducible_messages }..]);
-                                        slice.pending_reserved_goal_notices = slice.pending_goal_notices.len();
+                                        slice.pending_reserved_boundary_notices = slice.pending_boundary_notices.len();
                                         yield TurnStep::Emit( RuntimeEvent::InRunCompacted { turn_ordinal, turn_cutoff });
                                         if let Err(kind) = run.budget.remaining(tokio::time::Instant::now()) {
                                             yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
@@ -1311,7 +1233,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<StreamedTurn>> + Send + '_ {
         stream! {
                     let Self { env, messages, steering, run, window, slice, recovery, .. } = self;
-                    let RunEnvironment { plan, compactor, summarizer, reducible_messages, goal_paid, goal, cache_key, .. } = env;
+                    let RunEnvironment { plan, compactor, summarizer, reducible_messages, cache_key, .. } = env;
                     let reducible_messages = *reducible_messages;
                     let provider = &plan.runtime.provider;
                     let model = &plan.runtime.model;
@@ -1320,43 +1242,9 @@ impl RunState {
         let CompactedTurn { prepared, message_bytes, compatible_input_tokens } = compacted;
                     let PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes } = prepared;
                         if turn_ordinal == 1 {
-                            slice.pending_reserved_goal_notices = slice.pending_goal_notices.len();
+                            slice.pending_reserved_boundary_notices = slice.pending_boundary_notices.len();
                         }
-                        let input_tokens = if goal_paid.is_some() {
-                            window.reducible_message_bytes.saturating_add(window.irreducible_message_bytes)
-                                .saturating_add(system_bytes).saturating_add(tool_schema_bytes)
-                        } else { 0 };
-                        let mut request_cap = run.max_output_tokens;
-                        if let Some(paid) = goal_paid.as_ref() {
-                            let caller = if turn_ordinal == 1 {
-                                runtime::ChildBudget::default()
-                            } else {
-                                match run.budget.child_budget(tokio::time::Instant::now()) {
-                                    Ok(caller) => caller,
-                                    Err(kind) => {
-                                        yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {exhaustion:run.budget.exhaustion(kind,false,tokio::time::Instant::now())});
-                                        yield TurnStep::Stop; return;
-                                    }
-                                }
-                            };
-                            match paid.preview_request(request_cap, input_tokens, caller).await {
-                                Ok(sessions::PaidRequestAdmission::Reprepare { max_output_tokens }) => request_cap = max_output_tokens,
-                                Ok(sessions::PaidRequestAdmission::Cancelled) => {
-                                    yield TurnStep::Emit(RuntimeEvent::GoalPaidCancelled);
-                                    yield TurnStep::Stop; return;
-                                }
-                                Ok(sessions::PaidRequestAdmission::Exhausted(exhaustion)) => {
-                                    yield TurnStep::Emit(RuntimeEvent::BudgetExhausted { exhaustion });
-                                    yield TurnStep::Stop; return;
-                                }
-                                Ok(sessions::PaidRequestAdmission::Allowed { .. }) => unreachable!("preview cannot admit provider work"),
-                                Err(error) => {
-                                    yield TurnStep::Emit(RuntimeEvent::Failed { kind: RunFailureKind::Server, message: format!("failed to preview goal request allowance: {error}") });
-                                    yield TurnStep::Stop; return;
-                                }
-                            }
-                        }
-                        loop {
+                        let request_cap = run.max_output_tokens;
                         yield TurnStep::Emit( RuntimeEvent::Prepared {
                             turn_ordinal,
                             identity: run.prompt_identity.take(),
@@ -1373,34 +1261,6 @@ impl RunState {
                                 compatible_input_tokens,
                             },
                         });
-                            let Some(paid) = goal_paid.as_ref() else { break; };
-                            let caller=match run.budget.child_budget(tokio::time::Instant::now()) {
-                                Ok(caller)=>caller,
-                                Err(kind)=>{
-                                    yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {exhaustion:run.budget.exhaustion(kind,false,tokio::time::Instant::now())});
-                                    yield TurnStep::Stop; return;
-                                }
-                            };
-                            match paid.admit_request(request_cap, input_tokens, caller).await {
-                                Ok(sessions::PaidRequestAdmission::Allowed { cursor }) => {
-                                    yield TurnStep::Emit(RuntimeEvent::GoalRequestAdmitted { cursor });
-                                    break;
-                                }
-                                Ok(sessions::PaidRequestAdmission::Reprepare { max_output_tokens }) => request_cap = max_output_tokens,
-                                Ok(sessions::PaidRequestAdmission::Cancelled) => {
-                                    yield TurnStep::Emit(RuntimeEvent::GoalPaidCancelled);
-                                    yield TurnStep::Stop; return;
-                                }
-                                Ok(sessions::PaidRequestAdmission::Exhausted(exhaustion)) => {
-                                    yield TurnStep::Emit(RuntimeEvent::BudgetExhausted { exhaustion });
-                                    yield TurnStep::Stop; return;
-                                }
-                                Err(error) => {
-                                    yield TurnStep::Emit(RuntimeEvent::Failed { kind: RunFailureKind::Server, message: format!("failed to admit goal provider request: {error}") });
-                                    yield TurnStep::Stop; return;
-                                }
-                            }
-                        }
                         let request = ModelRequest::new(
                             Arc::clone(model),
                             Arc::clone(messages),
@@ -1426,15 +1286,8 @@ impl RunState {
                         } else {
                             request.with_system(Arc::clone(&request_system))
                         };
-                        let request = if run.goal_handoff_requested || goal.as_ref().is_some_and(sessions::GoalRunInput::audit) {
-                            request.with_tool_choice(qq_provider::ToolChoice::None)
-                        } else {
-                            request
-                        };
                         let activity = RunActivity::WaitingForProvider;
-                        if goal_paid.is_none() {
-                            yield TurnStep::Emit(RuntimeEvent::ActivityChanged { activity });
-                        }
+                        yield TurnStep::Emit(RuntimeEvent::ActivityChanged { activity });
                         let mut provider_events = provider.stream(request);
 
                         let mut provider_span = Some(tracing::info_span!(target: "qq::diagnostic", "provider"));
@@ -1576,7 +1429,7 @@ impl RunState {
                                     yield TurnStep::Emit( RuntimeEvent::RefusalDelta { text });
                                 }
                                 Ok(ProviderEvent::ToolCallStarted { id, name }) => {
-                                    if budget_final_turn && !run.goal_handoff_requested {
+                                    if budget_final_turn {
                                         let BudgetDecision::Exhausted(mut exhaustion) = run.budget
                                             .before_turn(tokio::time::Instant::now(), 0)
                                         else {
@@ -1621,8 +1474,6 @@ impl RunState {
                                     let over_cap = attempt.pending_calls.len() >= MAX_TOOL_CALLS_PER_TURN;
                                     let rejection = if summarizer.is_some() {
                                         Some(SUMMARIZER_TOOL_REJECTION.to_owned())
-                                    } else if run.goal_handoff_requested {
-                                        Some("not executed: the final goal handoff is tool-free".to_owned())
                                     } else if final_answer_turn {
                                         Some(SUBAGENT_FINAL_ANSWER_REJECTION.to_owned())
                                     } else if checkpoint_turn && slice_report {
@@ -1775,9 +1626,6 @@ impl RunState {
                                         && attempt.blocks.is_empty() && attempt.pending_calls.is_empty()
                                         && attempt.reasoning_bytes == 0 && !attempt.reasoning_observed
                                         && attempt.replay.is_none();
-                                    if attempt.rejected_before_work && env.goal_spend_tracking {
-                                        yield TurnStep::Emit(RuntimeEvent::GoalRequestRejected);
-                                    }
                                     let kind = run_failure_kind(error.kind());
                                     if summarizer.is_some()
                                         && attempt.rejected_before_work
@@ -1790,15 +1638,14 @@ impl RunState {
                                         recovery.reasoning_only_truncations = 0;
                                         recovery.empty_output_retries = 0;
                                         yield TurnStep::Emit(RuntimeEvent::AssistantTurnCompleted {
-                                            model_work: runtime::ModelWorkDisposition::RejectedBeforeWork,
                                             turn_ordinal,
                                             message: Message::assistant(String::new()),
                                             usage: Some(TokenUsage::default()),
                                             calls: Vec::new(),
                                             truncated: false,
                                             notice: None,
-                                            goal_notices: Vec::new(),
-                                            reserved_goal_notices: 0,
+                                            boundary_notices: Vec::new(),
+                                            reserved_boundary_notices: 0,
                                         });
                                         env.reducible_messages = messages.len().saturating_sub(1);
                                         env.inherited_effects.clear();
@@ -1909,7 +1756,7 @@ impl RunState {
 
                     let StreamedTurn { prepared, message_bytes, attempt } = streamed;
                     let PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system: _, request_has_tools: _, request_system_hash: _, system_bytes, tool_schema_bytes } = prepared;
-                    let AttemptScope { rejected_before_work, reasoning_bytes, reasoning_observed, pending_calls, replay, blocks, terminal_usage, completed, interrupted_turn, truncated_turn, truncation_reason, streamed_visible_output, turn_fault, retry_after, .. } = attempt;
+                    let AttemptScope { pending_calls, replay, blocks, terminal_usage, completed, interrupted_turn, truncated_turn, truncation_reason, streamed_visible_output, turn_fault, retry_after, .. } = attempt;
                         window.compatible_request = terminal_usage.map(|usage| {
                             (
                                 system_bytes,
@@ -1922,14 +1769,6 @@ impl RunState {
                             )
                         });
 
-                        let model_work = if rejected_before_work {
-                            runtime::ModelWorkDisposition::RejectedBeforeWork
-                        } else if (completed && turn_fault.is_none() && !interrupted_turn)
-                            || !blocks.is_empty() || !pending_calls.is_empty() || reasoning_bytes > 0 || reasoning_observed || replay.is_some() || terminal_usage.is_some() {
-                            runtime::ModelWorkDisposition::Committed
-                        } else {
-                            runtime::ModelWorkDisposition::Uncertain
-                        };
                         let assistant_content = blocks
                             .into_iter()
                             .filter_map(|block| match block {
@@ -1949,7 +1788,7 @@ impl RunState {
                             })
                             .collect::<Vec<_>>();
                         let mut assistant = Message::new(Role::Assistant, assistant_content);
-                        if !checkpoint_turn && !final_answer_turn && !budget_final_turn && !run.goal_handoff_requested && summarizer.is_none()
+                        if !checkpoint_turn && !final_answer_turn && !budget_final_turn && summarizer.is_none()
                             && assistant.content().iter().any(|block| matches!(block, ContentBlock::Text { text } if !text.trim().is_empty())) {
                             run.loop_guard.spontaneous_text();
                         }
@@ -2019,18 +1858,16 @@ impl RunState {
                         }
                         slice.pending_deliveries = 0;
                         yield TurnStep::Emit( RuntimeEvent::AssistantTurnCompleted {
-                            model_work,                            turn_ordinal,
+                            turn_ordinal,
                             message: assistant.clone(),
                             usage: terminal_usage,
                             calls: calls.clone(),
                             truncated: truncated_turn,
                             notice: slice.pending_notice.take(),
-                            goal_notices: std::mem::take(&mut slice.pending_goal_notices),
-                            reserved_goal_notices: std::mem::take(&mut slice.pending_reserved_goal_notices),
+                            boundary_notices: std::mem::take(&mut slice.pending_boundary_notices),
+                            reserved_boundary_notices: std::mem::take(&mut slice.pending_reserved_boundary_notices),
                         });
-                        if !env.goal_spend_tracking || model_work != runtime::ModelWorkDisposition::RejectedBeforeWork {
-                            run.budget.charge_turn(terminal_usage);
-                        }
+                        run.budget.charge_turn(terminal_usage);
                         run.budget.charge_tool_calls(calls.iter().filter(|call| call.rejection.is_none()).count());
                         if summarizer.is_some() {
                             if calls.is_empty() {
@@ -2128,7 +1965,7 @@ impl RunState {
                                         window.irreducible_message_bytes = window.irreducible_message_bytes
                                             .saturating_add(measure_message(&notice));
                                         Arc::make_mut(messages).push(notice);
-                                        slice.pending_goal_notices.push(runtime::OrderedTurnNotice {
+                                        slice.pending_boundary_notices.push(runtime::OrderedTurnNotice {
                                             text, preceding_deliveries: slice.pending_deliveries,
                                         });
                                         yield TurnStep::NextTurn; return;
@@ -2433,45 +2270,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<()>> + Send + '_ {
         stream! {
             let Self { env, messages, steering, run, window, slice, .. } = self;
-            let RunEnvironment { plan, file_state, audit_hook, output, limits, deadline, audit_prompt, goal, summarizer, .. } = env;
-            let refreshed_goal_notice = if !run.goal_handoff_requested && let Some(goal) = goal {
-                let refreshed = tokio::select! {
-                    biased;
-                    () = env.cancelled.cancelled() => { yield TurnStep::Stop; return; },
-                    () = runtime::RunDeadline::wait(*deadline) => {
-                        yield TurnStep::Emit(RuntimeEvent::BudgetExhausted { exhaustion: deadline.expect("only a finite deadline wakes").exhaustion() });
-                        yield TurnStep::Stop; return;
-                    },
-                    refreshed = goal.refresh_handoff_notice() => refreshed,
-                };
-                match refreshed {
-                    Ok(notice) => notice,
-                    Err(error) => {
-                        yield TurnStep::Emit(RuntimeEvent::Failed { kind: RunFailureKind::Server, message: format!("refresh final goal handoff: {error}") });
-                        yield TurnStep::Stop; return;
-                    }
-                }
-            } else { None };
-            if !run.goal_handoff_requested && goal.as_ref().is_some_and(sessions::GoalRunInput::final_slot) {
-                run.goal_handoff_requested = true;
-                run.goal_final_slot_announced = true;
-                let assistant = if assistant.has_content() { assistant } else { Message::assistant(EMPTY_TURN_PLACEHOLDER) };
-                window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&assistant));
-                Arc::make_mut(messages).push(assistant);
-                run.live_turns.push(turn_ordinal);
-                if let Some(text) = refreshed_goal_notice {
-                    let notice = Message::user(text.clone());
-                    window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&notice));
-                    Arc::make_mut(messages).push(notice);
-                    slice.pending_goal_notices.push(runtime::OrderedTurnNotice { text, preceding_deliveries: slice.pending_deliveries });
-                }
-                let text = sessions::GoalRunInput::HANDOFF_NOTICE.to_owned();
-                let notice = Message::user(text.clone());
-                window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&notice));
-                Arc::make_mut(messages).push(notice);
-                slice.pending_goal_notices.push(runtime::OrderedTurnNotice { text, preceding_deliveries: slice.pending_deliveries });
-                yield TurnStep::NextTurn; return;
-            }
+            let RunEnvironment { plan, file_state, audit_hook, output, limits, deadline, audit_prompt, summarizer, .. } = env;
             let _limits = *limits;
             let _deadline = *deadline;
             let workspace = &plan.workspace;
@@ -2632,7 +2431,7 @@ impl RunState {
                                 run.live_turns.push(turn_ordinal);
                                 let text = output::repair_notice(errors);
                                 Arc::make_mut(messages).push(Message::user(text.clone()));
-                                slice.pending_goal_notices.push(runtime::OrderedTurnNotice {
+                                slice.pending_boundary_notices.push(runtime::OrderedTurnNotice {
                                     text,
                                     preceding_deliveries: slice.pending_deliveries,
                                 });
@@ -2689,7 +2488,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<ToolOutcomes>> + Send + '_ {
         stream! {
                     let Self { env, steering, run, .. } = self;
-                    let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal, spills, audit_hook, tool_tasks, output: _, limits, deadline, base_specs, static_filter, .. } = env;
+                    let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, spills, audit_hook, tool_tasks, output: _, limits, base_specs, static_filter, .. } = env;
                     let limits = *limits;
                     let workspace = &plan.workspace;
                     let catalog = &plan.catalog;
@@ -2978,7 +2777,7 @@ impl RunState {
                         let overlaps = |call: &RuntimeToolCall| {
                             !(bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
                             && !catalog.lookup(&call.name).is_some_and(|entry| {
-                                matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent | catalog::ToolHost::CommandStatus | catalog::ToolHost::UpdateGoal | catalog::ToolHost::SelectTools)
+                                matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent | catalog::ToolHost::CommandStatus | catalog::ToolHost::SelectTools)
                             })
                             && matches!(
                                 approval::classify(call.effect, &call.name, &call.arguments, network_policy),
@@ -3163,92 +2962,6 @@ impl RunState {
                                 continue;
                             }
 
-                                if catalog.lookup(&call.name).map(|entry| entry.host) == Some(catalog::ToolHost::UpdateGoal) {
-
-                                    let tool_span = tracing::info_span!(target: "qq::diagnostic", "tool", call_ordinal = call.call_ordinal);
-                                    let index = usize::from(call.call_ordinal - 1);
-                                    if steering.as_ref().is_some_and(|steering| *steering.interrupts.borrow() > run.handled_interrupt) {
-                                        tool_scope.interrupted = true;
-                                        results[index] = Some(RetainedResult::interrupted(INTERRUPTED_TOOL_RESULT.to_owned()));
-                                        drop(tool_span);
-                                        yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
-                                            id:call.id, result:INTERRUPTED_TOOL_RESULT.to_owned(), is_error:true,
-                                            file_states:Vec::new(), display:None, spill:None,
-                                         execution_context: None, });
-                                        break;
-                                    }
-                            let result = match serde_json::from_str::<tools::goal::UpdateGoalArgs>(&call.arguments) {
-                                Err(error) => tools::ToolOutput::refused(format!("invalid arguments: {error}")),
-                                Ok(arguments) => match goal {
-                                    None => tools::ToolOutput::refused("goal_not_claimed: this run has no goal capability"),
-                                    Some(goal) => {
-                                        let interrupt = interrupt_requested(steering, run.handled_interrupt);
-                                        let admitted = tokio::select! {
-                                            biased;
-                                            () = cancelled.cancelled() => { yield TurnStep::Stop; return; },
-                                            () = runtime::RunDeadline::wait(*deadline) => {
-                                                yield TurnStep::Emit(RuntimeEvent::BudgetExhausted { exhaustion: deadline.expect("only a finite deadline wakes").exhaustion() });
-                                                yield TurnStep::Stop; return;
-                                            },
-                                            () = interrupt => None,
-                                            receipt = goal.admit_update(arguments).instrument(tool_span.clone()) => Some(receipt),
-                                        };
-                                        match admitted {
-                                            None => {
-                                                tool_scope.interrupted = true;
-                                                tools::ToolOutput::interrupted(INTERRUPTED_TOOL_RESULT.to_owned())
-                                            }
-                                            Some(admitted) => {
-                                                let updated = match admitted {
-                                                    Err(error) => Err(error),
-                                                    Ok(receipt) => match receipt.instrument(tool_span.clone()).await {
-                                                        Ok(updated) => updated,
-                                                        Err(_) => Err(sessions::SessionRuntimeError::Unavailable),
-                                                    },
-                                                };
-                                                match updated {
-                                        Err(error) => {
-                                            yield TurnStep::Emit(RuntimeEvent::Failed { kind:RunFailureKind::Server, message:format!("persist goal update: {error}") });
-                                            yield TurnStep::Stop; return;
-                                        }
-                                        Ok(updated) => {
-                                            if updated.checklist_changed { run.loop_guard.mutation(); }
-                                            match serde_json::to_string(&updated) {
-                                            Ok(text) => {
-                                                if updated.added == 0 && updated.changed == 0 && updated.dropped == 0 && !updated.notes_applied && !updated.status_applied && !updated.wait_applied && !updated.rejected.is_empty() {
-                                                    tools::ToolOutput::refused(text)
-                                                } else {
-                                                    tools::bounded_result(text, !updated.rejected.is_empty())
-                                                }
-                                            },
-                                            Err(error) => {
-                                                yield TurnStep::Emit(RuntimeEvent::Failed { kind:RunFailureKind::Server, message:format!("encode goal update result: {error}") });
-                                                yield TurnStep::Stop; return;
-                                            }
-                                        }
-                                        }
-
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            };
-                            let mut result = result;
-                            run.hint_repeated_argument_error(&call.name, &mut result);
-                            run.stall.settled(!result.is_error);
-                            run.observe_tool(&call, &RetainedResult::retain(&result, &call.name, call.id), network_policy, catalog.lookup(&call.name));
-                            results[index] = Some(RetainedResult::retain(&result, &call.name, call.id));
-                            drop(tool_span);
-                            yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
-                                id:call.id, result:result.model_text, is_error:result.is_error,
-                                file_states:Vec::new(), display:result.ui_payload, spill:None,
-                             execution_context: None, });
-                                    if tool_scope.interrupted {
-                                        break;
-                                    }
-                                    continue;
-                                }
                                 let call_id = call.id;
                                 let mut call_id_holder = Some(call.clone());
                                 let (delta_sender, mut deltas) =

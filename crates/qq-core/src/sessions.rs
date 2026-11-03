@@ -60,15 +60,7 @@ pub use completions::{RunCompletion, RunResult};
 mod events;
 mod execution;
 mod feed;
-mod goal_check;
-mod goal_paid;
-mod goal_policy;
-pub use goal_policy::{GoalPolicy, GoalPolicyError, GoalPolicyFuture};
-mod goals;
 mod history;
-pub(crate) use goal_paid::{GoalPaidInput, PaidRequestAdmission};
-pub(crate) use goals::GoalRunInput;
-pub use goals::GoalValidationError;
 mod in_run_compaction;
 mod probe;
 mod projection;
@@ -89,11 +81,10 @@ mod transcript;
 pub use commands::MAX_DESCENDANTS_PER_ROOT;
 pub use feed::PublishedEvent;
 pub use runtime::{
-    GoalCheckPolicyError, GoalCheckPolicyFuture, LoadedRuntime, PersistenceFault,
-    PublishedEventStream, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
-    RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, SessionEventStream, SessionRuntime,
-    SessionRuntimeError, SessionRuntimeOptions, SlashCommandError, SpawnModelValidationFuture,
-    WorkerRuntimeLoadFuture, WorkspacePolicyAuthority,
+    LoadedRuntime, PersistenceFault, PublishedEventStream, RuntimeLoadError, RuntimeLoadFuture,
+    RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, SessionEventStream,
+    SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SlashCommandError,
+    SpawnModelValidationFuture, WorkerRuntimeLoadFuture,
 };
 pub use snapshots::run_cost;
 pub use store::STORE_SCHEMA_VERSION;

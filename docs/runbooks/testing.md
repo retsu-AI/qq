@@ -169,7 +169,7 @@ starts empty and should stay close to empty.
 
 ```toml
 [[quarantine]]
-test = "qq-core sessions::tests::goals::a_flaky_case"
+test = "qq-core sessions::tests::runs::a_flaky_case"
 owner = "github-handle"
 issue = "ENG-1234"
 added = "2026-11-01"
@@ -214,8 +214,8 @@ Two test groups shape scheduling:
 
 | Group | Members | Effect |
 | --- | --- | --- |
-| `real-process` | tests that spawn, kill and reap real process trees: `tools::process_group`, `tools::windows_job`, the shell kill/timeout/yield tests, goal-check process teardown, the daemon binaries | at most two run at once, so a loaded host does not starve their exit confirmation |
-| `soak` | `sessions::tests::goal_driver_soak::multi_day_*` and the `qq-core::soak` binary | left out of `cargo xtask check` unless `--full`; CI runs them in the merge queue, on `main`, nightly, and on manual runs |
+| `real-process` | tests that spawn, kill and reap real process trees: `tools::process_group`, `tools::windows_job`, the shell kill/timeout/yield tests, the daemon binaries | at most two run at once, so a loaded host does not starve their exit confirmation |
+| `soak` | the `qq-core::soak` binary | left out of `cargo xtask check` unless `--full`; CI runs them in the merge queue, on `main`, nightly, and on manual runs |
 
 About 15 tests that take over 2.5 s on CI (and the soak group) get
 priority so they start first and overlap the fast tests. Add a test there

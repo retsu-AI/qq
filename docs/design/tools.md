@@ -60,24 +60,6 @@ cancellation watch, run permits, and persist-before-publish ordering. The TUI,
 server, and direct CLI paths share it; no mode gets a parallel agent
 implementation.
 
-### Session Goal Edits
-
-An active goal captured by a prompt's immutable claim exposes `update_goal`.
-Goal-less and internal runs have no mutation capability. The tool changes
-session-owned checklist and notes, so it requires no workspace approval and
-remains available under `ReadOnly`. It never changes objective, check, budget
-or authorization. Status and wait additionally require goal-run origin and
-the exact claimed revision; ordinary user prompts can update only model data.
-
-Goal edits stay in request order among the turn's ordinary calls, outside the
-parallel read batch. Two edits observe successive committed states. Goal
-record and event commit before a successful result; a storage failure stops
-the run without reporting that the write succeeded. Stopped, cancelled,
-replaced and stale-control cases return bounded typed rejection results.
-An interrupting steer can withdraw a goal edit waiting for store capacity.
-After queue admission, the worker owns the edit and its durable result; the
-steer stops later calls without discarding that accepted work.
-
 ### Loop Bounds
 
 "Repeat until no tool calls" needs a ceiling — a model that keeps calling
@@ -490,8 +472,7 @@ a declared window. Separately, context assembly projects original task
 inputs, applied steering, and answered `ask_user` results verbatim from their
 durable source rows, in conversation order. Later corrections take precedence.
 This also restores inputs covered by legacy summaries without another
-compaction. Generated goal continuation/check prompts are excluded; current
-goal state is rendered separately by the runtime. An in-run projection
+compaction. An in-run projection
 covers only inputs removed by its splice, including steering before its first
 kept visible turn. Queued steering and unanswered/denied questions do not
 become instructions.
@@ -1556,8 +1537,8 @@ Restricting exposure grants no authority and needs no trust approval;
 `deny_tools` and `deny_hosts` are managed/MDM-only and accumulate across
 administrator layers; `deny_shell_prefixes` may come from any layer and
 accumulates across all of them. Tool denies match exact names
-(built-ins or `mcp__<server>__<tool>`) and today apply to side questions and,
-for `shell`, to goal checks; shell prefixes are non-empty, without control
+(built-ins or `mcp__<server>__<tool>`) and today apply to side questions;
+shell prefixes are non-empty, without control
 characters or surrounding whitespace.
 
 Workspace-declared providers, models, MCP servers and profiles are

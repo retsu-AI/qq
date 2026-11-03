@@ -325,7 +325,6 @@ fn assemble_model_context(
         status: String,
         outcome_json: Option<String>,
         ordinal: u64,
-        goal_initial_notice: Option<String>,
     }
     let mut remaining_turn_bytes = 64 * 1024 * 1024_usize;
     let mut statement = transaction.prepare_cached(
@@ -335,7 +334,7 @@ fn assemble_model_context(
                          WHERE message_id = m.id AND channel = 'output'
                          ORDER BY chunk_ordinal
                      ) c),
-                    m.id, m.input_json, m.ordinal, r.goal_initial_notice
+                    m.id, m.input_json, m.ordinal
              FROM messages m JOIN runs r ON r.id = m.run_id
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
                AND m.role = 'user' AND m.steering = 0
@@ -356,11 +355,6 @@ fn assemble_model_context(
                 status: row.get(2)?,
                 outcome_json: row.get(3)?,
                 ordinal: row.get(7)?,
-                goal_initial_notice: goals::read_notice_with_budget(
-                    row,
-                    8,
-                    &mut remaining_turn_bytes,
-                )?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -400,7 +394,7 @@ fn assemble_model_context(
                                    THEN json_type(r.plan_descriptor_json,'$.checkpoint') IS NULL
                                         OR json_type(r.plan_descriptor_json,'$.checkpoint')='null'
                                    ELSE 0 END THEN 0
-                         ELSE t.legacy_checkpoint_required END, t.goal_notice
+                         ELSE t.legacy_checkpoint_required END, t.boundary_notices
              FROM messages m
              JOIN runs r ON r.id = m.run_id
              JOIN model_turns t ON t.run_id = r.id
@@ -443,7 +437,7 @@ fn assemble_model_context(
                 ),
                 Err(_) => return Err(SessionRuntimeError::CONSTRAINT),
             },
-            goal_notices: goals::read_turn_notices(row, 10, &mut remaining_turn_bytes)?,
+            boundary_notices: read_turn_notices(row, 10, &mut remaining_turn_bytes)?,
         };
         turns
             .entry(row.get::<_, String>(0)?)
@@ -579,9 +573,6 @@ fn assemble_model_context(
             }
             None => prompt.text,
         };
-        if let Some(notice) = prompt.goal_initial_notice {
-            context.push(Message::user(notice));
-        }
         context.push(Message::user(text));
         if matches!(
             prompt.status.as_str(),
@@ -700,7 +691,7 @@ pub(super) fn capture_side_context(
               UNION ALL SELECT length(CAST(c.text AS BLOB)) FROM message_chunks c
                 JOIN messages m ON m.id = c.message_id WHERE m.run_id = ?1
               UNION ALL SELECT length(CAST(assistant_content_json AS BLOB))
-                     + COALESCE(length(CAST(goal_notice AS BLOB)), 0)
+                     + COALESCE(length(CAST(boundary_notices AS BLOB)), 0)
                 FROM model_turns WHERE run_id = ?1
               UNION ALL SELECT COALESCE(length(CAST(result AS BLOB)), 0)
                 FROM tool_calls WHERE run_id = ?1
@@ -708,15 +699,13 @@ pub(super) fn capture_side_context(
                 FROM message_attachments a JOIN messages m ON m.id = a.message_id
                 JOIN attachment_blobs b ON b.session_id = a.session_id AND b.blob_key = a.blob_key
                 WHERE m.run_id = ?1
-              UNION ALL SELECT length(CAST(summary AS BLOB))
-                     + COALESCE(length(CAST(goal_notice AS BLOB)), 0) FROM session_compactions
+              UNION ALL SELECT length(CAST(summary AS BLOB)) FROM session_compactions
                 WHERE scope_run_id = ?1
               UNION ALL SELECT COALESCE(length(CAST(text AS BLOB)), 0) FROM child_deliveries
                 WHERE parent_run_id = ?1
               UNION ALL SELECT COALESCE(length(CAST(text AS BLOB)), 0) FROM child_reports
                 WHERE parent_run_id = ?1
               UNION ALL SELECT COALESCE(length(CAST(outcome_json AS BLOB)), 0)
-                     + COALESCE(length(CAST(goal_initial_notice AS BLOB)), 0)
                 FROM runs WHERE id = ?1
               LIMIT 1025
             )",
@@ -744,20 +733,13 @@ pub(super) fn capture_side_context(
         newest.push(unit);
     }
     let mut active_context = Vec::new();
-    let active_prompt: Option<(Option<String>, Option<String>)> = connection.query_row(
-        "SELECT CASE WHEN length(CAST(m.output AS BLOB))
-                + COALESCE(length(CAST(r.goal_initial_notice AS BLOB)),0) <= ?2 THEN m.output ELSE NULL END,
-                CASE WHEN length(CAST(m.output AS BLOB))
-                + COALESCE(length(CAST(r.goal_initial_notice AS BLOB)),0) <= ?2 THEN r.goal_initial_notice ELSE NULL END
-         FROM messages m JOIN sessions s ON s.active_run_id = m.run_id JOIN runs r ON r.id=m.run_id
+    let active_prompt: Option<Option<String>> = connection.query_row(
+        "SELECT CASE WHEN length(CAST(m.output AS BLOB)) <= ?2 THEN m.output ELSE NULL END
+         FROM messages m JOIN sessions s ON s.active_run_id = m.run_id
          WHERE m.session_id = ?1 AND m.role = 'user' AND m.steering = 0 ORDER BY m.ordinal DESC LIMIT 1",
-        params![session_id.to_string(), remaining.saturating_sub(128)], |row| Ok((row.get(0)?,row.get(1)?)),
+        params![session_id.to_string(), remaining.saturating_sub(128)], |row| row.get(0),
     ).optional()?;
-    if let Some((Some(prompt), goal_notice)) = active_prompt {
-        if let Some(notice) = goal_notice {
-            remaining = remaining.saturating_sub(notice.len());
-            active_context.push(Message::user(notice));
-        }
+    if let Some(Some(prompt)) = active_prompt {
         let prompt =
             format!("[Current main task; unfinished output and tool exchanges omitted]\n{prompt}");
         remaining = remaining.saturating_sub(prompt.len());
@@ -1194,6 +1176,32 @@ pub(super) fn turn_is_replayed(
     .has_content())
 }
 
+fn read_turn_notices(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+    remaining: &mut usize,
+) -> Result<Vec<crate::runtime::OrderedTurnNotice>, SessionRuntimeError> {
+    let Some(text) = row
+        .get_ref(index)?
+        .as_str_or_null()
+        .map_err(|_| SessionRuntimeError::CODEC)?
+    else {
+        return Ok(Vec::new());
+    };
+    if text.len() > MAX_CONTEXT_BYTES.saturating_mul(6) || text.len() > *remaining {
+        return Err(SessionRuntimeError::ContextTooLarge);
+    }
+    *remaining -= text.len();
+    let notices: Vec<crate::runtime::OrderedTurnNotice> = serde_json::from_str(text)?;
+    let bytes = notices.iter().fold(0_usize, |bytes, notice| {
+        bytes.saturating_add(notice.text.len())
+    });
+    if bytes > MAX_CONTEXT_BYTES {
+        return Err(SessionRuntimeError::ContextTooLarge);
+    }
+    Ok(notices)
+}
+
 pub(super) struct StoredTurn {
     pub(super) strict_projection: bool,
     pub(super) checkpoint_projection_required: bool,
@@ -1204,7 +1212,7 @@ pub(super) struct StoredTurn {
     pub(super) content_json: String,
     pub(super) truncated: bool,
     pub(super) notice: Option<crate::runtime::TurnNotice>,
-    pub(super) goal_notices: Vec<crate::runtime::OrderedTurnNotice>,
+    pub(super) boundary_notices: Vec<crate::runtime::OrderedTurnNotice>,
 }
 
 pub(super) fn append_run_turns(
@@ -1240,7 +1248,7 @@ pub(super) fn append_run_turns(
             if let Some(index) = first_kept_index {
                 for turn in &mut turns[..=index] {
                     turn.notice = None;
-                    turn.goal_notices.clear();
+                    turn.boundary_notices.clear();
                 }
             }
             while steering
@@ -1259,9 +1267,6 @@ pub(super) fn append_run_turns(
                 "{IN_RUN_COMPACTION_PREAMBLE}\n\n{}",
                 marker.summary
             )));
-            if let Some(notice) = marker.goal_notice {
-                context.push(Message::user(notice));
-            }
             ends.push((marker.turn_cutoff, context.len()));
         }
     }
@@ -1275,7 +1280,7 @@ pub(super) fn append_run_turns(
         content_json,
         truncated,
         notice,
-        goal_notices,
+        boundary_notices,
     } in turns
     {
         let mut recorded_turn = recorded.remove(&turn_ordinal).unwrap_or_default();
@@ -1286,10 +1291,13 @@ pub(super) fn append_run_turns(
             let (_, text) = steering.pop_front().expect("front was just checked");
             context.push(Message::user(text));
         }
-        let positioned_notice =
-            notice.is_some_and(|notice| goal_notices.iter().any(|atom| atom.text == notice.text()));
+        let positioned_notice = notice.is_some_and(|notice| {
+            boundary_notices
+                .iter()
+                .any(|atom| atom.text == notice.text())
+        });
         let mut preceding_deliveries = 0;
-        for atom in goal_notices {
+        for atom in boundary_notices {
             if atom.preceding_deliveries < preceding_deliveries {
                 return Err(SessionRuntimeError::CONSTRAINT);
             }
@@ -1569,7 +1577,7 @@ mod action_bias_tests {
                 content_json: serde_json::to_string(&blocks).unwrap(),
                 truncated: false,
                 notice: None,
-                goal_notices: Vec::new(),
+                boundary_notices: Vec::new(),
             }],
             HashMap::from([(1, recorded)]),
             Default::default(),
@@ -1639,7 +1647,7 @@ mod action_bias_tests {
             content_json: serde_json::to_string(&blocks).unwrap(),
             truncated: false,
             notice: None,
-            goal_notices: Vec::new(),
+            boundary_notices: Vec::new(),
         };
         let mut context = Vec::new();
         append_run_turns(

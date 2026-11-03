@@ -8,7 +8,7 @@ use thiserror::Error;
 
 pub const CEILINGS: Counts = Counts {
     sleeps: 11,
-    short_timeouts: 47,
+    short_timeouts: 29,
     negative_waits: 9,
 };
 

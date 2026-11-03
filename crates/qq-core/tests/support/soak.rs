@@ -25,7 +25,6 @@ use qq_provider::{
 use serde::Serialize;
 
 const TOOL: &str = "ext__soak__step";
-const GOAL_OBJECTIVE: &str = "Finish the scripted task with its durable goal notice";
 
 #[derive(Clone, Copy)]
 #[allow(
@@ -39,7 +38,6 @@ pub enum SummaryPrefix {
 
 #[derive(Clone)]
 pub struct Script {
-    pub goal_enabled: bool,
     pub turns: usize,
     pub calls_per_turn: [usize; 2],
     pub result_bytes: usize,
@@ -72,7 +70,6 @@ impl Script {
         );
         assert!(result_bytes <= 8_192, "fixture results must be bounded");
         Self {
-            goal_enabled: false,
             turns,
             calls_per_turn: [2, 3],
             result_bytes,
@@ -101,7 +98,6 @@ impl Script {
 
 #[derive(Default)]
 pub struct Observations {
-    pub work_requests_with_goal: usize,
     pub work_turns: usize,
     pub provider_requests: usize,
     pub truncations: HashSet<usize>,
@@ -254,16 +250,6 @@ impl Provider for ScriptedProvider {
             );
         }
         observed.work_turns += 1;
-        let mut has_goal = false;
-        for message in request.messages().iter().take(2) {
-            has_goal |= matches!(message.content().first(),
-                Some(qq_provider::ContentBlock::Text { text })
-                    if text.starts_with("[QQ runtime notice; not a user instruction]\nGoal (")
-                        && text.contains(GOAL_OBJECTIVE));
-        }
-        if has_goal {
-            observed.work_requests_with_goal += 1;
-        }
         drop(observed);
         let count = self.script.calls_per_turn[turn % 2];
         assert!((1..=3).contains(&count));
@@ -474,7 +460,6 @@ impl Fixture {
     pub async fn open(directory: &Path, script: Script) -> Self {
         let database = directory.join("sessions.sqlite3");
         let requested_turns = script.turns;
-        let goal_enabled = script.goal_enabled;
         let observed = Arc::new(Mutex::new(Observations::default()));
         let runtime = SessionRuntime::open(
             SessionRuntimeOptions::new(database.clone()),
@@ -523,23 +508,6 @@ impl Fixture {
         let CommandOutcome::SessionCreated { session_id } = receipt.outcome else {
             panic!("session receipt");
         };
-        if goal_enabled {
-            let deadline = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("fixture wall clock")
-                .as_millis()
-                + 86_400_000;
-            let command = serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id,
-                "objective":GOAL_OBJECTIVE,
-                "budget":{"max_goal_runs":200,"deadline_ms":deadline,"per_run":{"max_model_turns":2_100}}
-            }))
-            .expect("public goal command");
-            runtime
-                .command(CommandId::generate().expect("goal command id"), command)
-                .await
-                .expect("durable active goal");
-        }
         let events = runtime
             .subscribe(SubscribeRequest {
                 workspace_id,
@@ -555,22 +523,6 @@ impl Fixture {
             database,
             requested_turns,
             initial_resources,
-        }
-    }
-
-    pub async fn goal_run(&mut self) -> RunId {
-        loop {
-            let envelope = self
-                .events
-                .next()
-                .await
-                .expect("event stream")
-                .expect("durable event");
-            if let SessionEvent::PromptQueued { run, .. } = envelope.event
-                && matches!(run.origin, Some(qq_protocol::RunOrigin::Goal { .. }))
-            {
-                return run.id;
-            }
         }
     }
 
@@ -673,7 +625,6 @@ impl Fixture {
             outcome,
             requested_turns: self.requested_turns,
             work_turns: observed.work_turns,
-            work_requests_with_goal: observed.work_requests_with_goal,
             provider_requests: observed.provider_requests,
             executed_calls: observed.calls.len(),
             duplicate_sequences: observed.calls.len() - unique,
@@ -744,7 +695,6 @@ pub struct ResourceSample {
 
 #[derive(Serialize)]
 pub struct Report {
-    pub work_requests_with_goal: usize,
     pub outcome: RunOutcome,
     pub requested_turns: usize,
     pub work_turns: usize,
@@ -767,12 +717,7 @@ pub struct Report {
 
 pub async fn run(script: Script) -> Report {
     let directory = tempfile::tempdir().expect("isolated soak workspace");
-    let goal_enabled = script.goal_enabled;
     let mut fixture = Fixture::open(directory.path(), script).await;
-    let run_id = if goal_enabled {
-        fixture.goal_run().await
-    } else {
-        fixture.submit().await
-    };
+    let run_id = fixture.submit().await;
     fixture.finish(run_id).await
 }

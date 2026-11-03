@@ -16,15 +16,6 @@ impl Store {
         }
     }
 
-    pub(in crate::sessions) async fn hold_control_capacity(
-        &self,
-    ) -> tokio::sync::OwnedSemaphorePermit {
-        Arc::clone(&self.inner.control_slots)
-            .acquire_many_owned(CONTROL_QUEUE_CAPACITY as u32)
-            .await
-            .expect("test store must remain open")
-    }
-
     pub(in crate::sessions) async fn recover_interrupted_runs(
         &self,
     ) -> Result<Vec<EventCursor>, SessionRuntimeError> {
@@ -40,8 +31,7 @@ impl Store {
         command_id: CommandId,
         command: SessionCommand,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
-        self.command_with_admission(command_id, command, CommandAdmission::default())
-            .await
+        self.client_command(command_id, command).await
     }
 
     pub(in crate::sessions) async fn events_after(
@@ -54,13 +44,6 @@ impl Store {
             read_events(connection, workspace_id, sequence, limit)
         })
         .await
-    }
-
-    pub(in crate::sessions) async fn queue_due_goals(
-        &self,
-        now: u64,
-    ) -> Result<Option<u64>, SessionRuntimeError> {
-        Ok(self.drive_goals(now).await?.next_wake)
     }
 
     pub(in crate::sessions) async fn reserve_next_run(
@@ -81,7 +64,6 @@ impl Store {
         if self
             .start_reserved_run(&claimed, audit, None)
             .await?
-            .map_err(|_| SessionRuntimeError::CONSTRAINT)?
             .is_none()
         {
             return Err(SessionRuntimeError::CONSTRAINT);
@@ -102,28 +84,6 @@ impl Store {
         response
             .await
             .map_err(|_| SessionRuntimeError::Unavailable)?
-    }
-
-    pub(in crate::sessions) async fn update_model_goal(
-        &self,
-        claimed: &ClaimedRun,
-        arguments: crate::tools::goal::UpdateGoalArgs,
-    ) -> Result<crate::tools::goal::UpdateGoalResult, SessionRuntimeError> {
-        let store_id = self.store_id;
-        let identity = claimed.identity;
-        let goal = claimed.goal.clone();
-        let origin = claimed.origin;
-        self.call_write(Priority::AwaitControl, move |connection| {
-            goals::update_model(
-                connection,
-                store_id,
-                identity,
-                goal.as_deref(),
-                origin,
-                arguments,
-            )
-        })
-        .await
     }
 
     pub(in crate::sessions) async fn start_in_run_compaction(

@@ -106,7 +106,7 @@ async fn every_persistence_fault_variant_is_reachable() {
         .await
         .unwrap();
     let constraint = store
-        .append_run_activity(&claimed, RunActivity::WaitingForProvider, false)
+        .append_run_activity(&claimed, RunActivity::WaitingForProvider)
         .await
         .unwrap_err();
     assert_eq!(
@@ -1016,7 +1016,7 @@ fn version_thirty_nine_gains_the_turn_notice_as_null_and_rejects_a_bad_shape() {
         let mut context = Vec::new();
         append_run_turns(
             vec![StoredTurn {
-                goal_notices: Vec::new(),
+                boundary_notices: Vec::new(),
                 strict_projection: true,
                 checkpoint_projection_required: false,
                 projection_json: None,
@@ -1967,4 +1967,232 @@ fn rewrite_run_capacity_schema(path: &Path, base_declaration: &str, increment_de
         )
         .unwrap();
     connection.execute_batch(&schema).unwrap();
+}
+
+#[tokio::test]
+async fn a_schema_65_store_with_goal_state_opens_and_replays_without_goals() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (workspace_id, session_id, store_id) = {
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(path.clone()),
+            Arc::new(ScriptedLoader),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let CommandOutcome::SessionCreated { session_id } =
+            create_session(&runtime, workspace_id, None).await.outcome
+        else {
+            panic!("unexpected receipt")
+        };
+        let queued = try_submit(&runtime, session_id, "written by v0.1.11")
+            .await
+            .unwrap();
+        let mut events = subscribe_after(&runtime, workspace_id, queued.committed_through);
+        collect_through_finished(&mut events).await;
+        let store_id = runtime.store_id();
+        runtime.close().await.unwrap();
+        (workspace_id, session_id, store_id)
+    };
+    let goal_id = "51".repeat(16);
+    let goal_origin = format!(r#"{{"type":"goal","goal_id":"{goal_id}","revision":1}}"#);
+    let goal_identity = format!(r#"{{"goal_id":"{goal_id}","revision":1}}"#);
+    let notices = r#"[{"text":"[QQ runtime notice; not a user instruction]\nkeep going","preceding_deliveries":0}]"#;
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "ALTER TABLE model_turns RENAME COLUMN boundary_notices TO goal_notice;
+                 CREATE TABLE session_goals (
+                     goal_id TEXT PRIMARY KEY,
+                     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                     revision INTEGER NOT NULL CHECK(revision > 0),
+                     live INTEGER NOT NULL CHECK(live IN (0, 1)),
+                     payload_json TEXT NOT NULL
+                 );
+                 CREATE UNIQUE INDEX session_goals_live ON session_goals(session_id) WHERE live = 1;
+                 ALTER TABLE runs ADD COLUMN goal_id TEXT;
+                 ALTER TABLE runs ADD COLUMN goal_revision INTEGER;
+                 ALTER TABLE runs ADD COLUMN goal_snapshot_json TEXT;
+                 ALTER TABLE runs ADD COLUMN goal_initial_notice TEXT;
+                 ALTER TABLE runs ADD COLUMN goal_request_pending INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE runs ADD COLUMN goal_helper_admitted INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE runs ADD COLUMN goal_paid_owner_run_id TEXT REFERENCES runs(id);
+                 ALTER TABLE runs ADD COLUMN check_acknowledgment_pending INTEGER NOT NULL DEFAULT 0;
+                 CREATE INDEX runs_pending_check_ack ON runs(session_id) WHERE check_acknowledgment_pending=1;
+                 ALTER TABLE session_compactions ADD COLUMN goal_notice TEXT;
+                 ALTER TABLE model_turns ADD COLUMN work_disposition TEXT;
+                 INSERT INTO session_goals VALUES ('{goal_id}', '{session_id}', 1, 1, '{{}}');
+                 UPDATE runs SET origin_json = '{goal_origin}', goal_id = '{goal_id}', goal_revision = 1;
+                 UPDATE model_turns SET goal_notice = '{notices}', work_disposition = 'committed';
+                 UPDATE runs SET completion_json = json_set(completion_json, '$.event.origin', json('{goal_origin}'))
+                  WHERE completion_json IS NOT NULL;
+                 UPDATE events SET envelope_json = json_set(envelope_json, '$.event.origin', json('{goal_origin}'))
+                  WHERE json_extract(envelope_json, '$.event.type') IN ('run_started', 'run_finished');
+                 UPDATE events SET envelope_json = json_set(envelope_json,
+                     '$.event.run.origin', json('{goal_origin}'), '$.event.run.goal', json('{goal_identity}'))
+                  WHERE json_extract(envelope_json, '$.event.type') = 'prompt_queued';
+                 INSERT INTO commands(id, request_json, receipt_json) VALUES ('{command}',
+                     '{{\"command_id\":\"{command}\",\"type\":\"goal_control\"}}', '{{}}');
+                 UPDATE metadata SET value = (SELECT COUNT(*) FROM commands) WHERE key = 'command_count';",
+                session_id = session_id,
+                command = "52".repeat(16),
+            ))
+            .unwrap();
+        let sequence: u64 = connection
+            .query_row(
+                "UPDATE workspaces SET next_sequence=next_sequence+1 WHERE id=?1
+                 RETURNING next_sequence",
+                [workspace_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let envelope = serde_json::json!({
+            "cursor": { "store_id": store_id, "workspace_id": workspace_id, "sequence": sequence },
+            "session_id": session_id,
+            "occurred_at_ms": 1,
+            "event": { "type": "goal_cleared", "session_id": session_id, "goal_id": goal_id, "revision": 1 },
+        });
+        connection
+            .execute(
+                "INSERT INTO events(workspace_id,sequence,envelope_json) VALUES (?1,?2,?3)",
+                params![workspace_id.to_string(), sequence, envelope.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE metadata SET value='65' WHERE key='schema_version'",
+                [],
+            )
+            .unwrap();
+    }
+
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(path.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let snapshot = runtime
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
+        .await
+        .unwrap();
+    let focused = snapshot.focused.as_ref().unwrap();
+    assert_eq!(
+        focused.runs[0].origin,
+        Some(qq_protocol::RunOrigin::UserPrompt {}),
+        "a goal run is kept as an ordinary prompt run"
+    );
+    let start = EventCursor {
+        store_id,
+        workspace_id,
+        sequence: 0,
+    };
+    let mut events = subscribe_after(&runtime, workspace_id, start);
+    let replayed = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut replayed = Vec::new();
+        while let Some(event) = events.next().await {
+            let event = event.unwrap();
+            let last = event.cursor.sequence == snapshot.cursor.sequence;
+            replayed.push(event);
+            if last {
+                break;
+            }
+        }
+        replayed
+    })
+    .await
+    .unwrap();
+    assert!(replayed.iter().any(|envelope| matches!(
+        &envelope.event,
+        SessionEvent::RunFinished {
+            origin: Some(qq_protocol::RunOrigin::UserPrompt {}),
+            ..
+        }
+    )));
+    assert!(replayed.iter().any(|envelope| matches!(&envelope.event,
+        SessionEvent::PromptQueued { run, .. } if run.origin == Some(qq_protocol::RunOrigin::UserPrompt {}))));
+    assert_eq!(
+        replayed
+            .iter()
+            .filter(|envelope| matches!(envelope.event, SessionEvent::Retired))
+            .count(),
+        1,
+        "the goal event replays as retired"
+    );
+    let completions = runtime
+        .completed_runs(session_id, start, snapshot.cursor)
+        .await
+        .unwrap();
+    assert_eq!(completions.len(), 1, "the receipt survives");
+    let follow_up = try_submit(&runtime, session_id, "after the upgrade")
+        .await
+        .unwrap();
+    let mut events = subscribe_after(&runtime, workspace_id, follow_up.committed_through);
+    collect_through_finished(&mut events).await;
+    runtime.close().await.unwrap();
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, STORE_SCHEMA_VERSION.to_string());
+    let goals_table: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='session_goals')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!goals_table, "session_goals is dropped");
+    for column in [
+        "goal_id",
+        "goal_revision",
+        "goal_snapshot_json",
+        "goal_initial_notice",
+        "goal_request_pending",
+        "goal_helper_admitted",
+        "goal_paid_owner_run_id",
+        "check_acknowledgment_pending",
+    ] {
+        assert!(
+            !has_column(&connection, "runs", column).unwrap(),
+            "{column}"
+        );
+    }
+    assert!(!has_column(&connection, "session_compactions", "goal_notice").unwrap());
+    assert!(!has_column(&connection, "model_turns", "work_disposition").unwrap());
+    let kept: Option<String> = connection
+        .query_row(
+            "SELECT boundary_notices FROM model_turns ORDER BY rowid LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        kept.as_deref(),
+        Some(notices),
+        "ordered turn notices are kept"
+    );
+    let (remaining, commands, counted): (u64, u64, u64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM events WHERE instr(envelope_json,'\"goal\"')>0)
+                  + (SELECT COUNT(*) FROM runs WHERE instr(completion_json,'\"goal\"')>0
+                         OR instr(origin_json,'\"goal\"')>0),
+                    (SELECT COUNT(*) FROM commands),
+                    (SELECT CAST(value AS INTEGER) FROM metadata WHERE key='command_count')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0, "goal origins and identities are rewritten");
+    assert_eq!(
+        commands, counted,
+        "the command count follows the dropped goal commands"
+    );
 }

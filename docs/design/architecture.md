@@ -85,19 +85,11 @@ and the [guide](../guide/troubleshooting.md#diagnostic-tracing) for activation.
 QQ is a Cargo workspace whose root package builds the `qq` binary. Library
 crates live under `crates/`, while repository automation lives in `xtask/`.
 `qq-host` is the composition library: configuration-to-runtime composition
-(`RuntimeFactory`, the `RuntimeLoader`, workspace policy authority,
-`RuntimeHandler`), authenticated model discovery, the bounded compiled-plan cache (`qq_host::plan`) and the configured MCP
+(`RuntimeFactory`, the `RuntimeLoader`, `RuntimeHandler`), authenticated model discovery, the bounded compiled-plan cache (`qq_host::plan`) and the configured MCP
 bridge (`qq_host::mcp`). The binary passes its build identity
 (`qq_host::HostBuild`) in and keeps CLI, TUI and server wiring, headless
 outcome driving and onboarding. Core does not depend on `qq-host` or
 application configuration.
-
-Foreground goal hosting shares session preparation and unattended tool approval
-with ordinary headless runs. It observes the core goal driver, rather than
-submitting a parallel prompt loop. Exact-run snapshots and live paid-family
-ownership checks stay behind SessionRuntime; stopping an unanswered question is
-a revision-fenced core goal control that persists the needs-user reason before
-cancelling sponsored work. Server goal scripting remains a SessionClient path.
 
 The workspace is:
 
@@ -107,12 +99,11 @@ src/
   main.rs        process entry and mode dispatch
   cli.rs         argument parsing and command dispatch
   headless.rs    `qq run` durable non-interactive execution
-  goals.rs       `qq goal` authenticated server client; no store ownership
   daemon.rs      `qq daemon`
   undo.rs        `qq undo`: workspace snapshots and restore
   logging.rs     opt-in structured tracing (`QQ_LOG`)
   doctor.rs      `qq doctor`
-  environment.rs host or container, and the first-run and goal notes
+  environment.rs host or container, and the first-run notes
   init.rs        `qq init`
   output.rs      plain-text command output
   docs_truth.rs  code/docs consistency tests
@@ -249,20 +240,6 @@ xtask/
   `ModelRequired`; `load_for_client` yields a `ClientSnapshot` whose model is
   optional, used only by TUI startup and the served model catalog so an
   interactive client can open and ask for a model instead of exiting.
-  Both snapshots include validated goal defaults and effective managed goal
-  ceilings. Ordinary goal fields merge individually under workspace trust;
-  administrator ceilings compose by minimum and survive an ordinary Clear.
-  Per-field provenance distinguishes defaults from the ceilings constraining
-  them. Configuration-owned goal values do not depend on core runtime types.
-  Root translates workspace goal bounds into core-owned GoalPolicy values
-  through the existing workspace policy authority seam, sharing its bounded configuration
-  loading pool. SetGoal and activating controls validate current settings after
-  journal replay. Goal commands probe immutable journal identity before external
-  policy resolution, so a committed replay cannot wait on a hung resolver.
-  Fresh resolution has a ten-second bound and stops with runtime shutdown.
-  Private goal policy and specification time persist atomically in schema58;
-  neutral controls retain the original deadline anchor. Legacy time remains
-  unknown rather than inventing an admission date.
 - `qq-core` contains the agent loop, session behavior, tool integration, and
   persistence behavior. It consumes the command and event vocabulary from
   `qq-protocol` and exposes a small interface that hides orchestration details
@@ -864,19 +841,7 @@ One durable run follows a guarded loop:
    publishing `RunStarted`. This unpublished coordination transaction may use
    WAL `synchronous=NORMAL`: an OS or power loss may discard only the
    reservation pointer, while the already-FULL-committed queued run remains
-   eligible. The store restores `synchronous=FULL` before returning. The same
-   reservation query captures a session's live active goal into an immutable
-   claim and freezes its active goal identity, revision, snapshot and notice in
-   the reservation transaction. Goal controls can therefore cancel preparing
-   prompts and fence resume until they drain. Their FULL control transaction
-   also makes earlier reservation ownership durable. Preparation does not reload
-   client edits or replacements. For a goal-less claim, the first existing FULL
-   paid admission freezes absence. SQL NULL means uncaptured; JSON null means
-   captured without a goal.
-   Re-reservation after paid preparation uses this frozen claim rather than a
-   replacement live goal. Repeated admission cannot rebind it. Internal steps
-   have no direct goal binding or mutation capability; their owner supplies
-   attribution. This adds no transaction or store hop to goal-less execution.
+   eligible. The store restores `synchronous=FULL` before returning.
    Run creation separately records user, delegated task/audit, manual
    compaction, between-run compaction or in-run compaction provenance with
    its exact owner. Claims and start/finish events preserve that origin; terminal
@@ -885,36 +850,6 @@ One durable run follows a guarded loop:
    suppress in-run completion independently of reconnect timing. Between-run
    automatic compaction retains its foreground idle/draft handoff when its
    queued owner is cancelled.
-   The scoped model-goal writer verifies the running, uncancelled prompt's
-   durable goal binding and origin before editing its still-live active goal.
-   Checklist edits (24 items, 120 bytes each) and 1 KiB notes merge into the
-   current record; status and waits additionally require the claimed revision
-   and goal-run origin. The writer never changes objective, check, budget or
-   authorization. Achievement records bounded evidence and its proposing
-   run/revision as a pending audit, leaving status active until verification.
-   A specification edit clears that proposal. Record and `GoalUpdated` event
-   commit together before the write returns. Every goal write checks the shared
-   notice renderer against 16 KiB with a reserved 4 KiB check-output tail.
-   Runtime goal writes select cancellation, deadline and steering while waiting
-   for bounded store capacity.
-   The queue handoff returns an owned receipt without another await; admitted
-   work then waits for durability even when steering arrives or its receipt
-   is dropped. A steer stops the remaining ordered suffix before new admission.
-   Denying a completion check revokes its authority and pauses an active goal;
-   unrelated paused and blocked states remain stopped. Removing a check from
-   its approval pause leaves a user pause, so edits never implicitly resume it.
-   Under nonempty managed denies, completion checks use a closed set of
-   inspected execution forms: literal terminals, supported transparent
-   launchers and static shells, plus find/fd/sort without executor options.
-   Unknown programs, path-qualified executables, environment assignments and
-   shell login/startup flags refuse authority. Deny selectors still accept
-   arbitrary literal programs such as Cargo; only check execution is restricted.
-   This prevents configured runners and clients such as SQLite from hiding
-   command execution outside the parsed shell syntax. Empty managed policy and
-   ordinary approvals are unchanged. This is syntactic authority checking,
-   not an OS sandbox against replacement of trusted executables or inherited
-   operator configuration. Transparent nice/stdbuf options consume their
-   operands before examining the launched command.
 3. Prepare the runtime and conservatively plan the complete provider request
    under the acquired permit; cancellation remains durable and observable.
    The plan estimates input tokens at four request bytes per token (rounded
@@ -972,8 +907,8 @@ One durable run follows a guarded loop:
    session prefix. The helper reads its complete durable span, even when a
    summary-only admission omitted part of it from the live request. The input
    and cutoff are captured in the same transaction. The marker covers only
-   the ordinals before the active prompt; the prompt, goal notice, current
-   turns and queued future prompts stay verbatim. The live prefix is replaced
+   the ordinals before the active prompt; the prompt, current turns and queued
+   future prompts stay verbatim. The live prefix is replaced
    only after commit, matching session-marker replay. Manual `/compact` is
    optional; an exhausted recovery reports its cause and preserves history.
    Each in-run compaction opens a new *window* for the
@@ -1222,8 +1157,8 @@ repeats one the run already returned for the same tool gets a minimal valid
 call for that tool appended. The result identity the guard observes is
 unchanged.
 
-Novel triples reset quiet attempts. Successful mutations, actual checklist
-changes and applied steering clear both observation windows; spontaneous
+Novel triples reset quiet attempts. Successful mutations and applied steering
+clear both observation windows; spontaneous
 assistant text resets quiet attempts. Runtime-requested report text does not.
 Read-only shell commands and external read hints do not count as mutations;
 those hints never grant execution authority. Confirmed refusals consume quiet
@@ -1550,9 +1485,10 @@ ordinary budgets. Past the allowance the run still completes: the verdict
 written for a cancelled, failed, or budget-exhausted run. Runs without a
 contract pay nothing: no allocation, no event, no prompt change.
 
-Repair instructions use the same bounded ordered boundary-notice storage as
-goal revisions. The next completed turn commits their text and position among
-child deliveries, preserving the actual model window on replay.
+Repair instructions use the bounded ordered boundary-notice storage
+(`model_turns.boundary_notices`). The next completed turn commits their text
+and position among child deliveries, preserving the actual model window on
+replay.
 
 After cancellation, deadline teardown or panic, a started prompt's terminal
 transaction settles its abandoned in-run summary first. This preserves the
@@ -1656,9 +1592,9 @@ With `retention_days` set, the scheduler deletes idle sessions whose
 `updated_at_ms` is older than the cutoff when the runtime opens and at most
 hourly after that, 64 per transaction, through the same path as
 `DeleteSession`, so each deletion is a `session_deleted` event with no causing
-command. Sessions with a live goal, a queued prompt or unfinished work are
-kept. A run's snapshot also drops `refs/qq/snapshots/` entries older than the
-cutoff, on top of the cap of 50.
+command. Sessions with a queued prompt or unfinished work are kept. A run's
+snapshot also drops `refs/qq/snapshots/` entries older than the cutoff, on top
+of the cap of 50.
 
 Pending approval details and their call rows reserve snapshot capacity before
 history. A focused body's irreducible holds that exceed its byte budget fail
@@ -1668,7 +1604,7 @@ tool effects. Exact terminal replies are assembled on demand from stored text
 and committed turn truncations, bounded to 64 MiB and 4,096 text messages.
 
 Terminal `RunFinished` receipts are saved on their run rows in the same
-transaction as their delivery events. Headless goal-result replay reads these
+transaction as their delivery events. Completed-run replay reads these
 receipts in cursor order, in pages bounded by 128 runs and 8 MiB, independently
 of tool-output history. Schema 62 backfills original terminal receipts where
 they remain available; it does not invent receipts for missing legacy events.
@@ -1702,67 +1638,6 @@ terminal event additionally requires proof that its tools and children were
 drained (`TeardownComplete`, minted only by the execution teardown), so
 publication before teardown does not compile (ADR-0012).
 
-A started run with a captured goal charges completed model work to that goal's
-stored row under the same outcome guard. Replacing or clearing the live goal
-does not transfer its spending to the replacement or reactivate the archived
-row. Goal-owned audit admission is retained durably, including when no main model
-turn commits. Reserved and queued settlement charges that spending to the
-captured historical goal without consuming a main run. A live goal
-update precedes the terminal run event in the same transaction; replaced goals
-receive historical accounting without updating the replacement.
-Usage and cost retain uncertainty independently, and settlement releases
-only a matching goal `pending_run_id`. A live goal's counter update precedes
-`RunFinished` in the same transaction; failure to persist either rolls back
-the accounting and terminal outcome. Archived accounting does not publish a
-`GoalUpdated` event that could overwrite the client's replacement goal.
-
-Main and between-run summary requests carry a private accounting-only
-`GoalPaidInput` when they have a direct or sponsored goal. It previews current
-allowance before request preparation, then revalidates it in the transaction
-that records pending provider work. A tighter allowance repeats preparation at
-the same turn ordinal without dispatch. The request cap is separate from the
-caller's cumulative meter. Each dispatch intersects the caller's freshly reduced
-input, output, total-token and cost limits with every sponsoring goal's current
-remainder. The quote reserves estimated input before selecting output, using
-the greatest applicable base/tier fresh, cached-read or cached-write input rate.
-The caller's absolute deadline is checked again inside the store actor after
-queueing; an expired admission writes no pending marker. Turn/tool-count limits
-still permit their reserved tool-free reply when hard spending and time remain.
-Terminal counters and distinct unsettled direct run/helper aggregates are
-counted once. Resolved pricing is carried separately
-from the internal compactor's meter. A summary previews its owner and binds its
-committed helper identity before paid admission. The input grants no goal tools
-or mutation authority. In-run summaries use their committed helper identity at
-each RequestStarting boundary. A private goal-only cap bridge admits the current
-caller/goal allowance before constructing the provider request, including
-continuations and rejected-call retries. Input is estimated from current message
-bytes and cached system/tool measurements. Refusal returns settled durable accounting: known-zero no-send work,
-measured prefixes, or unknown spending when admission committed before its
-acknowledgement was interrupted. Goal-less requests retain the ordinary
-activity path and allocate no bridge.
-
-Goal-bound provider requests record a pending marker in the existing activity
-transaction before dispatch. Their turn transaction records whether the
-attempt committed model work, was rejected before work, or remains uncertain.
-Empty rejected attempts retain their replay rows without erasing earlier
-measured spending or consuming a goal run. Pending or uncertain requests make
-goal spending unknown after recovery without proving a committed model turn.
-Only the durable committed-work evidence increments the goal's run counter.
-The RunStarted transaction seeds known-zero usage and cost for captured and
-sponsored goal runs before any provider admission, including a crash before
-the first waiting-for-provider event. A prior routing receipt takes
-precedence, including unknown spending; pending provider markers still prevent
-an uncertain dispatch from settling as zero. Goal-less execution retains its
-existing accounting initialization.
-Owned automatic compaction rows charge their prompt owner's captured historical
-goal in the compactor's terminal transaction. The owner join requires the same
-session and a prompt owner; manual compaction has no goal attribution. Summary
-work consumes tokens and cost without consuming a main-run allowance or granting
-the compactor goal-writing authority. In-run request admission marks pending
-spend in its existing store write. Owner teardown settles an abandoned in-run
-summary before the owner; later drop cleanup is a no-op. A between-run helper's
-measured prefix remains attributable after its queued owner is cancelled and
-through reopen/recovery.
 The provider-direct in-run summarizer preserves typed rejection before any
 text, reasoning, replay or tool call. Its terminal transaction restores the
 measured prefix; without earlier work, zero usage and zero cost are known even
@@ -1770,209 +1645,6 @@ when pricing is absent. Transport loss, EOF and faults after output retain
 pending uncertainty. Returned compactor spending carries the same certainty
 as the durable receipt, so the owner's remaining allowance does not treat a
 known empty rejection as unknown paid work.
-Between-run automatic compactors carry a private accounting binding copied
-from their owner's captured goal. It supplies request and turn spending proof
-without goal notices, goal tools or model mutation authority. Creation seeds
-known zero; actual provider admission marks pending spend before polling. Empty
-rejections preserve the prefix, while uncertain dispatch poisons spending.
-A durable pending marker prevents cancellation or a deadline from restoring
-an earlier known-zero or measured prefix as the complete run total. Pending
-settlement retains NULL aggregates, publishes unknown usage and charges unknown
-spending to the captured goal; completed work or typed rejection clears the
-marker. The persisted turn rows retain any earlier measured work.
-Settlement reads admission and uncertainty proof from the durable run row,
-including recovery claims without in-memory goal metadata. Session cost and
-public direct/inclusive accounting retain admitted uncertainty even after
-cancellation; an empty rejected turn supplies no paid-work proof by itself.
-Recovery also charges a goal-bound main run's persisted aggregate to stored
-session cost. Committed work without measured cost makes that total unknown;
-a pending next request preserves uncertainty instead of restoring its measured
-prefix. The terminal guard makes both historical goal and session updates
-idempotent, while rejection-only rows consume no spending or goal-run allowance.
-Goal-less compactors retain their existing dispatch path without an extra store
-hop. Their public activity remains Compacting.
-These private records add no transaction or store hop to goal-less turns.
-
-The guarded terminal transaction applies outcome policy only to a directly
-bound live active goal whose revision still matches the run. Authentication and
-configuration failures pause with a bounded needs-user message. Three consecutive
-other failures or per-run budget exhaustions without committed work block the
-goal; two consecutive no-progress pauses block it. Committed-work exhaustion
-resets the failure streak, and overall goal exhaustion takes precedence.
-Interrupted and neutral cancelled outcomes preserve both streaks; other
-nonmatching outcomes reset each respective streak. Completion preserves an
-accepted model wait and resets both streaks. A per-run limit allows fresh work
-when the overall goal allowance remains; spent or unknown capped totals exhaust
-that allowance.
-
-Goal-bound execution resolves current workspace policy before loading, after
-loading, and immediately before main-request or check start. Tightened or
-unavailable policy pauses the active goal and cancels its paid family in the
-same store transaction. Goal-less runs skip this policy work. Refresh preserves
-the specification's original deadline anchor and never resumes a stopped goal.
-
-An unanswered goal-bound tool approval has a fixed deadline: the earlier of its persisted goal approval wait and absolute
-goal deadline. An earlier ordinary human timeout also applies. Timeout durably
-denies the call, pauses the goal for approval, and requests family cancellation
-before another model request. This approval pause takes precedence over goal
-exhaustion, including when the absolute deadline ends the hold. A client resolution
-that committed first retains precedence. Ordinary goal-less approval behavior is unchanged. Sponsored approval
-cancellation also checks live monotonic owner deadlines, retained through child
-drain and removed with the execution owner. Preparation counts toward expiry;
-the later durable RunStarted timestamp is not a replacement clock. Expiry is
-captured on the executor before a store transaction rechecks current goal
-identity, active state and explicit owner cancellation.
-
-Provider-retry pauses keep the goal active with a1-minute exponential backoff,
-capped by the persisted workspace policy (30minutes by default) and the goal deadline. The retry streak comes from at most
-five prior durable terminal prompt outcomes for the same frozen goal/revision,
-separate from ordinary failures. Committed model work in the current or preceding
-retry run resets the delay to1minute. Reopening retains this terminal evidence.
-Descendant and compactor accounting does not apply their outcomes to ancestor
-goals; archived or newer goal revisions retain their own lifecycle state.
-
-A persisted model wait is a lower bound on every active automatic retry,
-including provider backoff, ordinary failures, no-progress and per-run exhaustion.
-The absolute goal deadline remains the upper bound and wins exhaustion.
-
-The TUI's `/goal` opens a session-following, scrollable status view over the
-shared client reducer's goal snapshot. It renders lifecycle reasons, scoped
-check consent, progress, budgets, UTC times and bounded check diagnostics,
-including a workspace hold independent of the live goal. It opens at the top
-and preserves the visible position as diagnostics grow. Snapshot refreshes keep
-the view open, deletion closes it, and navigation submits no work.
-The goal creation/edit overlay captures the exact session, workspace and goal
-revision. Bounded cursor-aware objective/check editors and finite budget presets
-use root-translated configuration defaults, refreshed after workspace trust.
-An edit retains the existing budget until a preset is chosen; preset selection
-changes duration and run allowance while retaining other edit limits. Replacement
-identifies the previous objective and requires an explicit yes. A pending request
-owns its form by command ID; either its committed event or receipt closes it.
-Errors retain the draft and refresh state. Failed refreshes can be retried without
-a mutation, and changed identities are never silently rebound. Check consent
-remains a separate command, and stopped-goal edits do not resume work.
-Pause/resume/clear submit the observed goal identity and revision, with no
-optimistic state mutation or conflict retry. Check consent freezes the session,
-workspace, goal identity/revision and exact command in a scrollable panel.
-Its default is denial; explicit one-shot or repeated-goal consent uses existing
-GoalControl commands. A changed target invalidates the panel, and ordinary tool
-approval settings cannot grant check authority. The composer rule prioritizes
-goal state, with run/deadline/wake counters for active goals and exhaustive stop
-reasons otherwise. A user pause shows draining while its run remains pending,
-then the resume command. Idle active goals refresh the countdown once per second;
-the terminal loop supplies current wall time without changing event-based run
-timing or adding clock reads to goal-less frames.
-
-User prompt admission settles unclaimed queued Goal/GoalCheck work before
-inserting the prompt, in the same transaction. This preemption clears only the
-old run's pending guard and keeps the goal active and its allowance unspent.
-A preempted check also retains its achievement evidence, pending audit and
-unconsumed consent. After the prompt settles, verification queues a fresh check
-instead of retaining the cancelled check's reservation.
-An ordinary edit likewise invalidates only unclaimed autonomous work. A recovered
-user prompt keeps its accepted task and frozen goal binding; pause, clear and
-replacement still cancel its paid obligations.
-Automatic goal queueing and active-goal prompt reservation wait for all earlier
-unsettled sponsored obligations, including uncancelled detached children. The
-reservation predicate excludes its own candidate and filters before selecting
-a session; a waiting user prompt remains queued while other sessions can run.
-Child/helper settlement wakes scheduling and releases the spending fence.
-Goal pause, clear and replacement cancel their exact paid obligations through
-historical run ancestry, including detached descendants whose parent already
-settled and automatic helpers. Unclaimed work settles immediately; reserved or
-running work retains its ownership while cancellation drains. Resume and fresh
-replacement scheduling wait for those cancelled obligations. Replayed controls
-restore outstanding cancellation signals without changing the original receipt
-or appending duplicate events. Later unrelated prompts in child sessions inherit
-no old paid ownership and remain independent of these controls.
-
-The last charged goal run, including a user prompt under an active goal, announces
-its final-slot status before model work. Admission and main start carry this
-classification independently of numeric limits, so a concurrent run-cap edit
-forces reprepare even when those limits stay equal. An early completion reserves
-one tool-free handoff within the existing run allowance. A caller's stricter
-one-turn cap uses that turn for the handoff; hard token, cost and deadline bounds
-still take precedence. Tools requested during the handoff are refused. The
-handoff follows normal output-contract validation and survives in-run compaction.
-Final-slot prompt admission intersects its model-turn cap with the finite goal
-per-run cap. If a live edit makes an already-running prompt final, the next turn
-boundary tightens its meter without resetting spend. A fully consumed tightened
-cap permits no additional response; the final response is reserved only when a
-turn remains. Rejected tools on that response retain a durable completed turn.
-Completion refreshes the live goal display without acknowledging a new revision
-until a subsequent request actually carries its notice.
-
-The session scheduler queues due active goals in batches of at most32. The
-idle-session check, absence of queued prompts/checks, fresh Goal-origin run,
-immutable goal notice and pending guard commit together. Each run starts from
-the current goal, rather than a previous user's prompt. Queue admission applies
-the goal's per-run bounds and known remaining token/cost/deadline allowance;
-spent or unknown capped allowances transition to budget exhausted. The scheduler
-uses one nearest-wake timer for idle goal waits and deadlines and publishes the
-queue/exhaustion cursors after commit. A store-worker presence cache skips driver
-store work when there are no live goals; startup initializes that cache from
-durable rows. SetGoal conservatively enables it, while committed driver sweeps
-recompute it in worker order.
-An OS ownership lock excludes a second store worker before SQLite opens. Store
-clones share the presence cache; a successor reads durable presence after acquiring
-ownership. Replayed goal controls and cancellations retain the scheduler wake
-without changing their original durable receipts.
-When live goals exist at open, the store also captures an immutable event-row
-boundary before recovery and scheduling. Foreground adoption translates that
-boundary into the selected workspace's cursor, so completed startup runs and
-already-held input requests remain replayable. Stores without live goals skip
-this boundary query; ordinary prompt adoption keeps its existing cursor.
-
-After acquiring a scheduler permit, reservation derives paid-work admission
-from the captured goal's current durable budget. Goal-origin runs use current
-per-run limits; user prompts keep their own stricter limits. Both intersect
-all current managed per-run ceilings at reservation and refreshed start. Token, cost and
-duration bounds intersect with known remaining allowance. Expired or unknown
-capped spending refuses execution before runtime loading; stale inactive goal
-ownership cancels it. Sponsored descendants also intersect every historical
-paid ancestor's absolute goal deadline at reservation, routing and main start,
-including when the child has its own goal. This accounting-only admission grants
-no ancestor goal notice or tool authority. Runs without goal ownership or paid
-sponsorship skip this admission lookup.
-Execution also checks the fixed goal deadline before loading. A reserved
-terminal refusal freezes captured goal metadata in its existing settlement
-transaction, so even a user prompt refused before paid work retains exact
-attribution and atomically publishes its goal exhaustion without charging a run.
-The main-start transaction repeats the current goal exhaustion and ownership
-check before writing RunStarted. A goal refusal returns separately from a
-storage failure or lost reservation and settles through the guarded reserved
-terminal path. Runtime loading cannot bypass a goal deadline that expired
-before main start; prior paid preparation remains attributed to its owner.
-When current remaining allowance changes the prepared limits, the start
-transaction returns a reprepare result without publishing a start. The runtime
-drops the unpolled stream and reassembles reserved context under those limits;
-resolved attachment bytes and summary-only admission remain fixed. Refresh uses
-the prompt's submitted limits, retained on its queued row until start, or the
-current goal per-run budget. Raising a goal budget can therefore recover its
-allowance without widening the prompt's own bounds. Effective limits commit
-with RunStarted. Duration is expressed against one fixed admission
-anchor, so rechecking the absolute goal deadline does not subtract preparation
-time again. Initial goal-owned and sponsored-child provider output is capped by the accepted total
-and output token limits.
-
-Initial delegated prompt runs persist their immediate paid-owner run in the
-child-creation transaction. Bounded ancestry follows exact run origins,
-session ownership, workspace and decreasing depth to frozen historical goals.
-Each distinct ancestor receives the child's own measured spending; only a
-prompt's direct captured goal receives its committed main-run count. Owned
-compactors resolve their exact prompt owner before following that ancestry.
-Caller child-spend receipts are not charged again through caller accounting.
-Later prompts in the child session carry no inherited paid-owner link. Live
-ancestor updates use the ancestor's session; archived goal totals update
-without publishing an update for a replacement goal.
-
-Schema53 restores ancestry for unfinished initial delegated obligations from
-schema52, including terminal intermediate owners, without modifying counters.
-Deletion preserves histories while sponsored descendants or their owned
-compactors remain unfinished. Once those obligations settle, deletion clears
-immediate paid-owner references in the same transaction before removing owner
-runs; surviving descendants retain their remaining ownership links.
-
 
 One process owns a store at a time. Opening the store takes an advisory lock
 on a sibling `<store>.lock` file before SQLite is opened and before recovery
@@ -1980,72 +1652,6 @@ runs; a second opener is refused as `StoreBusy` without touching the database
 (ADR-0022). Recovery therefore never runs against runs another live process
 is executing. The store belongs on a local filesystem, which SQLite's WAL
 mode already requires.
-
-Authorized goal checks use a distinct persisted `goal_check` run kind (store
-schema56) and bypass model loading. A current pending native audit may verify the
-last permitted model run because the check consumes no model run. Deadline,
-token and cost ceilings, including unknown accounting, still stop verification;
-a no-check model audit requires another available model run. Reservation fixes one acquisition/process
-deadline, bounded by the goal deadline. Waiting checks hold their own session
-reservation but do not exclude each other or the descendants needed by active
-work. The start transaction waits for active/preparing model work and running
-side questions, consumes exact Once authority, charges one audit, and marks the
-check Running. That durable row excludes new main/helper reservations and side
-questions in the workspace until confirmed process teardown and terminal commit.
-
-The Unix check supervisor reuses minimal-environment/cwd preparation and process
-groups. It observes leader exit without reaping, terminates the group while the
-leader still pins its id, then reaps; this also stops background descendants that
-closed their output pipes. Linux confirms process exit through pidfds before
-reaping the pinned leader. Other Unix targets reap the killed leader, disarm
-signals, and require process-group absence within five seconds using signal-zero
-probes. Reused group ids can only delay confirmation. Bounded blocking permits
-cover workspace opening, preparation and exit observation. Workspace opens run on
-the same bounded blocking path; started work is joined before releasing exclusion.
-Cancellation and the shared deadline drain the process group. A
-resource lease makes unconfirmed exit fail teardown, retaining durable exclusion
-rather than publishing completion. A workspace-open failure before spawn settles
-as a failed check through ordinary drain and finish, preserving host availability.
-Results mask recognized secrets before persistence and retain an exit/timeout
-diagnostic and UTF-8 output suffix within4KiB, including the diagnostic header.
-If raw capture drops a line prefix, its incomplete leading fragment is omitted
-so losing a credential marker cannot expose the retained value. Changing the
-check specification resets its consecutive failure streak; neutral edits retain it. Every check
-settlement persists that diagnostic on its original run's assistant message and
-publishes the existing message event in the terminal transaction, even if the
-goal was edited, replaced, cleared, or cancelled. A check has no user prompt,
-so these records appear in snapshots/replay but not model context assembly.
-Goal changes and terminal settlement share one transaction; only goal changes
-require the live active audit revision. Recovery pauses a
-started check as CheckInterrupted without refunding Once authority; an unstarted
-check remains queued. An expired unstarted check retains Once authority and is settled through the
-queued-run path, releasing its preparation pointer and queue count. Admission
-preserves its explicit calendar-expiry reason independently of the monotonic
-process clock; ordinary timeout counts as a failed check, while the goal
-deadline takes exhaustion precedence. Native process supervision outside Unix
-is unavailable.
-
-Hard-killing QQ can leave a running check shell alive because process guards
-cannot run. Startup recovery pauses the matching goal without repeating its
-check; it does not identify or stop that orphan. Recovery durably holds the
-workspace against new run and side-question admission, including after the goal
-is cleared or replaced. Snapshots expose the oldest unacknowledged check.
-`AcknowledgeCheckInterruption` releases that exact workspace/run hold after the
-operator resolves its uncertain effects; acknowledging one cannot release other
-holds. A matching interrupted goal remains user-paused and needs separate
-resume and any fresh Once authorization. The hold also prevents deleting its
-session, and survives repeated restarts.
-
-A no-check achievement claim queues a separate Goal-origin prompt run with a
-persisted zero-repair output contract. Its single primary turn has no tools,
-children, or nested audit hook; the first turn verifies rather than reserving a
-budget handoff, and no second request is allowed. Starting atomically charges
-one of eight audits. Only a valid positive verdict with nonblank evidence can
-achieve the live active claimed revision, after current overall exhaustion has
-been checked. Negative or invalid verdicts and protocol failures clear that
-claim and return to ordinary work; cancellation, interruption, provider retry,
-and authentication/configuration stops retain their existing recovery rules.
-The verdict is retained on the run through existing FinalOutput persistence.
 
 ## Workspaces And Tools
 

@@ -254,7 +254,7 @@ fn exact_inputs_preserve_applied_corrections_and_answers_in_conversation_order()
     let (_directory, connection, session, runs) = record_fixture(&[
         "original task".to_owned(),
         "newer queued prompt".to_owned(),
-        "generated continuation".to_owned(),
+        "third task".to_owned(),
     ]);
     insert_record_steering(
         &connection,
@@ -267,12 +267,6 @@ fn exact_inputs_preserve_applied_corrections_and_answers_in_conversation_order()
     insert_record_steering(&connection, session, runs[0], 8, 3, "unapplied correction");
     connection
         .execute("UPDATE messages SET state = 'queued' WHERE ordinal = 8", [])
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE runs SET origin_json = '{\"type\":\"goal\"}' WHERE id = ?1",
-            [runs[2].to_string()],
-        )
         .unwrap();
     insert_record_steering(
         &connection,
@@ -311,17 +305,14 @@ fn exact_inputs_preserve_applied_corrections_and_answers_in_conversation_order()
         "Q1: Which path?\nA: staging/report.txt\n",
         "late correction to first task",
         "newer queued prompt",
+        "third task",
         "human steering during continuation",
     ] {
         let at = text.find(input).unwrap();
         assert!(at > last, "{input}: {text}");
         last = at;
     }
-    for omitted in [
-        "unapplied correction",
-        "generated continuation",
-        "not an answer",
-    ] {
+    for omitted in ["unapplied correction", "not an answer"] {
         assert!(!text.contains(omitted), "{text}");
     }
 }

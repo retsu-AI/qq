@@ -1538,7 +1538,6 @@ async fn queues_follow_ups_without_reordering_conversation_context() {
             side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             retention: None,
-            policy_authority: None,
         },
         Arc::new(CapturingLoader {
             requests: Arc::clone(&requests),
@@ -1591,7 +1590,6 @@ async fn follow_up_after_an_empty_completed_turn_reaches_the_provider() {
             side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             retention: None,
-            policy_authority: None,
         },
         Arc::new(EmptyThenTextLoader {
             requests: Arc::clone(&requests),
@@ -1741,7 +1739,6 @@ async fn reservation_is_publicly_queued_exclusive_and_cancel_wins_before_start()
         store
             .start_reserved_run(&claimed, test_prepared_audit(&claimed), None)
             .await
-            .unwrap()
             .unwrap()
             .is_none()
     );
@@ -2426,7 +2423,6 @@ async fn schedules_ready_sessions_fairly() {
             side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             retention: None,
-            policy_authority: None,
         },
         Arc::new(FairnessLoader {
             requests: Arc::clone(&requests),

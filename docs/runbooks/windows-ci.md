@@ -22,9 +22,9 @@ The Windows list covers read budget errors and Unicode headers, owned-process
 teardown on drop, timeout and panic, the atomic write drain, child mutation,
 steering, shutdown and cancellation in delegation, command jobs, the
 detached daemon's job, DPAPI credentials, `cmd` quoting, the `QQ_HOME` path
-tests, and goal approval recovery. The macOS list covers the process-group
+tests. The macOS list covers the process-group
 exit tests (with GNU `timeout` and `setsid` from Homebrew), the `QQ_HOME`
-path tests, and goal approval recovery.
+and path tests.
 
 After the tests, each job runs the `run-in-place`, `run-then-undo`,
 `run-command-deadlines` and `permission-dispatch` smoke scenarios, Clippy

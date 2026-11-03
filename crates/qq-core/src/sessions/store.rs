@@ -33,7 +33,6 @@ const CONTROL_BURST_LIMIT: usize = 4;
 pub(super) struct Store {
     inner: Arc<StoreInner>,
     store_id: StoreId,
-    startup_goal_sequences: Option<Arc<HashMap<WorkspaceId, u64>>>,
 }
 
 pub(super) struct FeedAttachment {
@@ -51,7 +50,6 @@ struct StoreInner {
     shutdown: Sender<()>,
     closed: watch::Receiver<bool>,
     closing: AtomicBool,
-    goals_present: Arc<AtomicBool>,
     admission: Mutex<()>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
 }
@@ -87,7 +85,7 @@ impl Store {
             .ready
             .await
             .map_err(|_| SessionRuntimeError::Unavailable)??;
-        let mut store = Self {
+        Ok(Self {
             inner: Arc::new(StoreInner {
                 control: started.control,
                 control_slots: Arc::new(Semaphore::new(CONTROL_QUEUE_CAPACITY)),
@@ -98,63 +96,12 @@ impl Store {
                 shutdown: started.shutdown,
                 closed: started.closed,
                 closing: AtomicBool::new(false),
-                goals_present: Arc::new(AtomicBool::new(false)),
                 admission: Mutex::new(()),
                 worker: Mutex::new(Some(started.worker)),
             }),
             store_id,
-            startup_goal_sequences: None,
-        };
-        let present = Arc::clone(&store.inner.goals_present);
-        store.startup_goal_sequences = store
-            .call(Priority::Control, move |connection| {
-                let enabled: bool = connection.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM session_goals WHERE live=1)",
-                    [],
-                    |row| row.get(0),
-                )?;
-                present.store(enabled, Ordering::Release);
-                if enabled {
-                    let mut statement =
-                        connection.prepare_cached("SELECT id,next_sequence FROM workspaces")?;
-                    let sequences = statement
-                        .query_map([], |row| {
-                            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
-                        })?
-                        .map(|row| {
-                            let (id, sequence) = row?;
-                            Ok((parse_id::<WorkspaceId>(&id)?, sequence))
-                        })
-                        .collect::<Result<HashMap<_, _>, SessionRuntimeError>>()?;
-                    Ok(Some(Arc::new(sequences)))
-                } else {
-                    Ok(None)
-                }
-            })
-            .await?;
-        Ok(store)
-    }
-
-    pub(super) async fn startup_goal_cursor(
-        &self,
-        workspace_id: WorkspaceId,
-    ) -> Result<Option<EventCursor>, SessionRuntimeError> {
-        let Some(sequences) = &self.startup_goal_sequences else {
-            return Ok(None);
-        };
-        let sequence = sequences.get(&workspace_id).copied().unwrap_or(0);
-        let store_id = self.store_id;
-        self.call(Priority::Control, move |connection| {
-            ensure_workspace(connection, workspace_id)?;
-            Ok(Some(EventCursor {
-                store_id,
-                workspace_id,
-                sequence,
-            }))
         })
-        .await
     }
-
     pub(super) const fn store_id(&self) -> StoreId {
         self.store_id
     }
@@ -423,17 +370,6 @@ impl Store {
         Ok(())
     }
 
-    pub(super) async fn has_preempting_goal_work(
-        &self,
-        session: SessionId,
-        goal: qq_protocol::GoalId,
-    ) -> Result<bool, SessionRuntimeError> {
-        self.call(Priority::Control, move |connection| {
-            connection.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE session_id=?1 AND kind='prompt' AND status IN ('queued','running') AND (json_extract(origin_json,'$.type') NOT IN ('goal','goal_check') OR origin_json IS NULL OR json_extract(origin_json,'$.goal_id') != ?2))",
-                [session.to_string(), goal.to_string()], |row| row.get(0)).map_err(Into::into)
-        }).await
-    }
-
     pub(super) async fn unfinished_run_ids(&self) -> Result<Vec<RunId>, SessionRuntimeError> {
         self.call(Priority::Control, |connection| {
             let mut statement = connection.prepare(
@@ -448,29 +384,6 @@ impl Store {
                     parse_id(&run)
                 })
                 .collect()
-        })
-        .await
-    }
-
-    pub(super) async fn command_is_recorded(
-        &self,
-        command_id: CommandId,
-        command: &SessionCommand,
-    ) -> Result<bool, SessionRuntimeError> {
-        let expected = serde_json::to_string(command)?;
-        self.call(Priority::Control, move |connection| {
-            let stored: Option<String> = connection
-                .query_row(
-                    "SELECT request_json FROM commands WHERE id=?1",
-                    [command_id.to_string()],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            match stored {
-                Some(stored) if stored == expected => Ok(true),
-                Some(_) => Err(SessionRuntimeError::IdempotencyConflict),
-                None => Ok(false),
-            }
         })
         .await
     }
@@ -509,13 +422,12 @@ impl Store {
         .await
     }
 
-    pub(super) async fn command_with_admission(
+    pub(super) async fn client_command(
         &self,
         command_id: CommandId,
         command: SessionCommand,
-        admission: CommandAdmission,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
-        self.command_from(command_id, command, admission, CommandOrigin::Client)
+        self.command_from(command_id, command, CommandOrigin::Client)
             .await
     }
 
@@ -527,7 +439,6 @@ impl Store {
         self.command_from(
             command_id,
             SessionCommand::CancelRun { run_id },
-            CommandAdmission::default(),
             CommandOrigin::RuntimeSettlement,
         )
         .await
@@ -537,7 +448,6 @@ impl Store {
         &self,
         command_id: CommandId,
         command: SessionCommand,
-        admission: CommandAdmission,
         origin: CommandOrigin,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
         let store_id = self.store_id;
@@ -565,24 +475,15 @@ impl Store {
             }
             _ => None,
         };
-        let creates_goal = matches!(&command, SessionCommand::SetGoal { .. });
-        let present = Arc::clone(&self.inner.goals_present);
         self.call_write(Priority::Control, move |connection| {
-            let mut admission = admission;
-            admission.goal_work_present = present.load(Ordering::Acquire);
-            let applied = execute_command(
+            execute_command(
                 connection,
                 store_id,
                 command_id,
                 command,
                 canonical_workspace,
-                &admission,
                 origin,
-            )?;
-            if creates_goal {
-                present.store(true, Ordering::Release);
-            }
-            Ok(applied)
+            )
         })
         .await
     }
@@ -603,7 +504,6 @@ impl Store {
                 command_id,
                 SessionCommand::CancelRun { run_id },
                 None,
-                &CommandAdmission::default(),
                 CommandOrigin::RuntimeSettlement,
             )
         })
@@ -678,75 +578,6 @@ impl Store {
         .await
     }
 
-    pub(super) async fn goal_pending_runs(
-        &self,
-        session_id: SessionId,
-        expected: qq_protocol::GoalIdentity,
-    ) -> Result<Vec<RunId>, SessionRuntimeError> {
-        self.call(Priority::Control, move |connection| {
-            let current = goals::load_live(connection, session_id)?
-                .ok_or(SessionRuntimeError::GoalNotFound)?;
-            if current.goal_id != expected.goal_id || current.revision != expected.revision {
-                return Err(SessionRuntimeError::GoalConflict {
-                    current: Some(qq_protocol::GoalIdentity {
-                        goal_id: current.goal_id,
-                        revision: current.revision,
-                    }),
-                });
-            }
-            Ok(
-                goals::paid_obligations(connection, session_id, Some(expected.goal_id))?
-                    .into_iter()
-                    .map(|work| work.run)
-                    .collect(),
-            )
-        })
-        .await
-    }
-
-    pub(super) async fn cancelled_goal_runs(
-        &self,
-        session_id: SessionId,
-        goal_id: qq_protocol::GoalId,
-    ) -> Result<Vec<RunId>, SessionRuntimeError> {
-        self.call(Priority::Control, move |connection| {
-            Ok(
-                goals::paid_obligations(connection, session_id, Some(goal_id))?
-                    .into_iter()
-                    .filter(|work| work.cancelled)
-                    .map(|work| work.run)
-                    .collect(),
-            )
-        })
-        .await
-    }
-
-    pub(super) async fn goal_owns_run(
-        &self,
-        session_id: SessionId,
-        expected: qq_protocol::GoalIdentity,
-        run_id: RunId,
-    ) -> Result<bool, SessionRuntimeError> {
-        self.call(Priority::Control, move |connection| {
-            let current = goals::load_live(connection, session_id)?
-                .ok_or(SessionRuntimeError::GoalNotFound)?;
-            if current.goal_id != expected.goal_id || current.revision != expected.revision {
-                return Err(SessionRuntimeError::GoalConflict {
-                    current: Some(qq_protocol::GoalIdentity {
-                        goal_id: current.goal_id,
-                        revision: current.revision,
-                    }),
-                });
-            }
-            Ok(
-                goals::paid_obligations(connection, session_id, Some(expected.goal_id))?
-                    .iter()
-                    .any(|work| work.run == run_id && !work.cancelled),
-            )
-        })
-        .await
-    }
-
     pub(super) async fn completed_runs(
         &self,
         session_id: SessionId,
@@ -815,10 +646,6 @@ impl Store {
         .await
     }
 
-    pub(super) fn has_goals(&self) -> bool {
-        self.inner.goals_present.load(Ordering::Acquire)
-    }
-
     pub(super) async fn expire_idle_sessions(
         &self,
         cutoff_ms: u64,
@@ -828,20 +655,6 @@ impl Store {
         let store_id = self.store_id;
         self.call_after_group(Priority::AwaitControl, move |connection| {
             commands::expire_idle_sessions(connection, store_id, cutoff_ms, after, now)
-        })
-        .await
-    }
-
-    pub(super) async fn drive_goals(
-        &self,
-        now: u64,
-    ) -> Result<goals::GoalSchedule, SessionRuntimeError> {
-        let store_id = self.store_id;
-        let present = Arc::clone(&self.inner.goals_present);
-        self.call_after_group(Priority::AwaitControl, move |connection| {
-            let result = goals::queue_due_goals(connection, store_id, now)?;
-            present.store(result.has_goals, Ordering::Release);
-            Ok(result)
         })
         .await
     }
@@ -892,26 +705,14 @@ impl Store {
         }
         let store_id = self.store_id;
         let identity = claimed.identity;
-        let goal = claimed.goal.clone();
         let origin = claimed.origin;
-        let limits = claimed.limits;
-        let admission = claimed.goal_admission;
-        let goal_spend_owner = claimed.goal_spend_owner;
-        let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call_write(Priority::AwaitControl, move |connection| {
             start_reserved_run(
                 connection,
                 store_id,
                 identity,
                 &audit,
-                claim::RunStartMetadata {
-                    goal_spend_owner,
-                    goal: goal.as_deref(),
-                    goal_initial_notice: goal_initial_notice.as_deref(),
-                    origin,
-                    limits,
-                    admission,
-                },
+                claim::RunStartMetadata { origin },
                 resolved_input.as_deref(),
             )
         })
@@ -1155,17 +956,8 @@ impl Store {
         }
         let store_id = self.store_id;
         let identity = claimed.identity;
-        let goal = claimed.goal.clone();
-        let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call_write(Priority::AwaitControl, move |connection| {
-            finish_reserved_run(
-                connection,
-                store_id,
-                identity,
-                outcome,
-                goal.as_deref(),
-                goal_initial_notice.as_deref(),
-            )
+            finish_reserved_run(connection, store_id, identity, outcome)
         })
         .await
     }
@@ -1288,17 +1080,7 @@ impl Store {
         let run_id = claimed.identity.run_id.to_string();
         self.call(Priority::Output, move |connection| {
             let updated = connection.execute(
-                "UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL, context_tokens = NULL,
-                     goal_request_pending = CASE WHEN EXISTS (
-                         SELECT 1 FROM runs owner WHERE owner.id=runs.auto_compaction_for_run_id
-                           AND owner.session_id=runs.session_id AND owner.kind='prompt'
-                           AND (owner.goal_id IS NOT NULL OR owner.goal_paid_owner_run_id IS NOT NULL)
-                     ) THEN 1 ELSE goal_request_pending END,
-                     goal_helper_admitted = CASE WHEN EXISTS (
-                         SELECT 1 FROM runs owner WHERE owner.id=runs.auto_compaction_for_run_id
-                           AND owner.session_id=runs.session_id AND owner.kind='prompt'
-                           AND (owner.goal_id IS NOT NULL OR owner.goal_paid_owner_run_id IS NOT NULL)
-                     ) THEN 1 ELSE goal_helper_admitted END
+                "UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL, context_tokens = NULL
                  WHERE id = ?1 AND status = 'running' AND kind = 'compaction' AND auto_compaction_for_run_id IS NOT NULL",
                 [run_id],
             )?;
@@ -1334,13 +1116,11 @@ impl Store {
         &self,
         claimed: &ClaimedRun,
         activity: RunActivity,
-        rejected: bool,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
-        let goal = claimed.goal.is_some() || claimed.goal_spend_owner.is_some();
         self.call(Priority::Output, move |connection| {
-            append_run_activity(connection, store_id, identity, activity, goal, rejected)
+            append_run_activity(connection, store_id, identity, activity)
         })
         .await
     }
@@ -1622,19 +1402,11 @@ impl Store {
         claimed: &ClaimedRun,
         tool_call_id: ToolCallId,
         timed_out: bool,
-        expired_owners: Vec<RunId>,
     ) -> Result<ConcludedApproval, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            conclude_tool_approval(
-                connection,
-                store_id,
-                identity,
-                tool_call_id,
-                timed_out,
-                &expired_owners,
-            )
+            conclude_tool_approval(connection, store_id, identity, tool_call_id, timed_out)
         })
         .await
     }
@@ -1697,7 +1469,6 @@ impl Store {
         accounting: Option<RunAccounting>,
         record_budget: usize,
         retained_bytes: u64,
-        goal_notice: Option<Arc<str>>,
     ) -> Result<(Vec<SessionEventEnvelope>, Option<String>), SessionRuntimeError> {
         let store_id = self.store_id;
         let claimed = claimed.clone();
@@ -1711,7 +1482,6 @@ impl Store {
                     accounting,
                     record_budget,
                     retained_bytes,
-                    goal_notice: goal_notice.as_deref(),
                 },
             )
         })
@@ -1742,7 +1512,6 @@ impl Store {
                 .map(|json| serde_json::from_str(&json))
                 .transpose()?;
             let accounting = RunAccounting {
-                goal_request_rejected: false,
                 usage,
                 estimated_cost_usd_nanos,
                 context_tokens,
@@ -1766,12 +1535,11 @@ impl Store {
         &self,
         claimed: &ClaimedRun,
         outcome: RunOutcome,
-        mut accounting: RunAccounting,
+        accounting: RunAccounting,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         if claimed.identity.kind != RunKind::Compaction || claimed.in_run_turn_cutoff.is_none() {
             return Err(SessionRuntimeError::CONSTRAINT);
         }
-        accounting.goal_request_rejected = true;
         let store_id = self.store_id;
         let claimed = claimed.clone();
         self.call(Priority::Output, move |connection| {

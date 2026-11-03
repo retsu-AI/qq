@@ -3,7 +3,6 @@
 use serde::{Deserialize, Serialize};
 
 mod capabilities;
-mod goals;
 mod headless;
 mod ids;
 mod input;
@@ -19,19 +18,11 @@ pub use capabilities::{
     ServerCapabilities, SkillCapabilities, SkillSummary, SteeringCapabilities, ToolCapabilities,
     ToolHostSummary, WorkspaceToolCapabilities, child_reasoning_effort,
 };
-pub use goals::{
-    CheckInterruption, DEFAULT_GOAL_RUN_MODEL_TURNS, GoalAchievementClaim, GoalBlockedReason,
-    GoalBudget, GoalCheck, GoalCheckAuthorization, GoalCheckScope, GoalChecklistItem,
-    GoalChecklistState, GoalControl, GoalCounters, GoalExhaustion, GoalIdentity, GoalNeedsUser,
-    GoalPauseReason, GoalSnapshot, GoalStatus, GoalWait,
-};
 pub use headless::{
-    HeadlessApproval, HeadlessGoalOutcome, HeadlessGoalRun, HeadlessGoalStatus, HeadlessOutcome,
-    HeadlessRecord, HeadlessRecordRef, HeadlessStatus, HeadlessTrial,
+    HeadlessApproval, HeadlessOutcome, HeadlessRecord, HeadlessRecordRef, HeadlessStatus,
+    HeadlessTrial,
 };
-pub use ids::{
-    CommandId, GoalId, IdError, MessageId, RunId, SessionId, StoreId, ToolCallId, WorkspaceId,
-};
+pub use ids::{CommandId, IdError, MessageId, RunId, SessionId, StoreId, ToolCallId, WorkspaceId};
 pub use input::{
     Correlation, CorrelationError, InputError, InputPart, InputPartKind, LineRange,
     MAX_CORRELATION_BYTES, MAX_CORRELATION_ENTRIES, MAX_CORRELATION_KEY_BYTES,
@@ -85,8 +76,7 @@ pub const SNAPSHOT_REQUIRED_SSE_EVENT: &str = "snapshot_required";
 
 pub const MAX_TURN_RETRIES: u16 = 5;
 
-pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 29] = [
-    "/goal",
+pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 28] = [
     "/btw",
     "/ask",
     "/btw-new",

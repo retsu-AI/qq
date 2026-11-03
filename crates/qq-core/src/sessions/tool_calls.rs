@@ -131,7 +131,7 @@ pub(super) struct ToolCallCommit {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "one persisted row update; the caller owns the atomic goal settlement"
+    reason = "one persisted row update; the caller owns the atomic settlement"
 )]
 pub(super) fn finish_tool_call_in_transaction(
     transaction: &Connection,
@@ -168,18 +168,17 @@ pub(super) fn finish_tool_call_in_transaction(
         )
         .optional()?
         .ok_or(SessionRuntimeError::ToolCallNotFound)?;
-    let context_exhausted = identity.kind != RunKind::GoalCheck
-        && match reserve_tool_result_capacity(
-            transaction,
-            identity.run_id,
-            &provider_call_id,
-            &result,
-            first_result_in_turn,
-        ) {
-            Ok(()) => false,
-            Err(SessionRuntimeError::OutputTooLarge) => true,
-            Err(error) => return Err(error),
-        };
+    let context_exhausted = match reserve_tool_result_capacity(
+        transaction,
+        identity.run_id,
+        &provider_call_id,
+        &result,
+        first_result_in_turn,
+    ) {
+        Ok(()) => false,
+        Err(SessionRuntimeError::OutputTooLarge) => true,
+        Err(error) => return Err(error),
+    };
     let now = now_ms();
     let state = if is_error { "failed" } else { "completed" };
     let display_json = display.as_ref().map(serde_json::to_string).transpose()?;
@@ -718,7 +717,6 @@ pub(super) fn conclude_tool_approval(
     identity: RunIdentity,
     tool_call_id: ToolCallId,
     timed_out: bool,
-    expired_owners: &[RunId],
 ) -> Result<ConcludedApproval, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let (state, resolution, result, provider_call_id, first_result_in_turn) = transaction
@@ -791,22 +789,10 @@ pub(super) fn conclude_tool_approval(
             resolution: ApprovalResolution::DeniedTimeout,
         },
     )?;
-    let run_ids = goal_policy::pause_for_approval(
-        &transaction,
-        store_id,
-        identity,
-        tool_call_id,
-        now,
-        expired_owners,
-    )?;
     transaction.commit()?;
-    if run_ids.is_empty() {
-        Ok(ConcludedApproval::Denied {
-            message: approval::TIMEOUT_DENIED_RESULT.to_owned(),
-        })
-    } else {
-        Ok(ConcludedApproval::GoalStopped { run_ids })
-    }
+    Ok(ConcludedApproval::Denied {
+        message: approval::TIMEOUT_DENIED_RESULT.to_owned(),
+    })
 }
 
 pub(super) fn reserve_tool_result_capacity(

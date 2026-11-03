@@ -124,7 +124,6 @@ pub(super) fn persist_model_turn(
     reserve_context: bool,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let ModelTurnCommit {
-        model_work,
         turn_ordinal,
         message,
         calls,
@@ -136,43 +135,42 @@ pub(super) fn persist_model_turn(
         accounting,
         truncated,
         notice,
-        goal_notices,
-        reserved_goal_notices,
+        boundary_notices,
+        reserved_boundary_notices,
     } = turn;
     if message.role() != Role::Assistant {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
-    let mut goal_notice_bytes = 0_u64;
-    let mut unreserved_goal_notice_bytes = 0_u64;
-    if *reserved_goal_notices > goal_notices.len()
-        || goal_notices
+    let mut boundary_notice_bytes = 0_u64;
+    let mut unreserved_boundary_notice_bytes = 0_u64;
+    if *reserved_boundary_notices > boundary_notices.len()
+        || boundary_notices
             .windows(2)
             .any(|pair| pair[1].preceding_deliveries < pair[0].preceding_deliveries)
     {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
-    for (index, atom) in goal_notices.iter().enumerate() {
+    for (index, atom) in boundary_notices.iter().enumerate() {
         let text = &atom.text;
-        if text.len() > crate::tools::goal::MAX_GOAL_RENDER_BYTES
+        if text.len() > crate::runtime::MAX_TURN_NOTICE_BYTES
             || !text.starts_with("[QQ runtime notice; not a user instruction]\n")
         {
-            return Err(SessionRuntimeError::InvalidGoal(
-                goals::GoalValidationError::Notice,
-            ));
+            return Err(SessionRuntimeError::CONSTRAINT);
         }
         let bytes = crate::measure_message(&Message::user(text.as_str()));
-        goal_notice_bytes = goal_notice_bytes.saturating_add(bytes);
-        if index >= *reserved_goal_notices {
-            unreserved_goal_notice_bytes = unreserved_goal_notice_bytes.saturating_add(bytes);
+        boundary_notice_bytes = boundary_notice_bytes.saturating_add(bytes);
+        if index >= *reserved_boundary_notices {
+            unreserved_boundary_notice_bytes =
+                unreserved_boundary_notice_bytes.saturating_add(bytes);
         }
     }
-    if goal_notice_bytes > MAX_CONTEXT_BYTES as u64 {
+    if boundary_notice_bytes > MAX_CONTEXT_BYTES as u64 {
         return Err(SessionRuntimeError::OutputTooLarge);
     }
-    let goal_notice_json = if goal_notices.is_empty() {
+    let boundary_notices_json = if boundary_notices.is_empty() {
         None
     } else {
-        Some(serde_json::to_string(goal_notices)?)
+        Some(serde_json::to_string(boundary_notices)?)
     };
     let content = message
         .content()
@@ -223,7 +221,7 @@ pub(super) fn persist_model_turn(
             &transaction,
             claimed.identity.run_id,
             non_text_bytes.saturating_add(
-                usize::try_from(unreserved_goal_notice_bytes)
+                usize::try_from(unreserved_boundary_notice_bytes)
                     .map_err(|_| SessionRuntimeError::OutputTooLarge)?,
             ),
         )?;
@@ -245,7 +243,7 @@ pub(super) fn persist_model_turn(
     transaction.execute(
         "INSERT INTO model_turns(
                  run_id, turn_ordinal, assistant_content_json, model_json,
-                 usage_json, estimated_cost_usd_nanos, completed_at_ms, truncated, notice, goal_notice
+                 usage_json, estimated_cost_usd_nanos, completed_at_ms, truncated, notice, boundary_notices
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             claimed.identity.run_id.to_string(),
@@ -257,28 +255,9 @@ pub(super) fn persist_model_turn(
             now,
             truncated,
             notice.map(crate::runtime::TurnNotice::as_str),
-            goal_notice_json,
+            boundary_notices_json,
         ],
     )?;
-    if claimed.goal.is_some() || claimed.goal_spend_owner.is_some() {
-        let disposition = match model_work {
-            crate::runtime::ModelWorkDisposition::Committed => "committed",
-            crate::runtime::ModelWorkDisposition::RejectedBeforeWork => "rejected_before_work",
-            crate::runtime::ModelWorkDisposition::Uncertain => "uncertain",
-        };
-        transaction.execute(
-            "UPDATE model_turns SET work_disposition=?3 WHERE run_id=?1 AND turn_ordinal=?2",
-            params![
-                claimed.identity.run_id.to_string(),
-                turn_ordinal,
-                disposition
-            ],
-        )?;
-        transaction.execute(
-            "UPDATE runs SET goal_request_pending=0 WHERE id=?1",
-            [claimed.identity.run_id.to_string()],
-        )?;
-    }
     let mut events = Vec::with_capacity(persisted_calls.len().saturating_add(3));
     events.push(append_event(
         &transaction,
@@ -482,20 +461,8 @@ pub(super) fn append_run_activity(
     store_id: StoreId,
     identity: RunIdentity,
     activity: RunActivity,
-    goal: bool,
-    rejected: bool,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    if goal && (activity == RunActivity::WaitingForProvider || rejected) {
-        let pending = activity == RunActivity::WaitingForProvider;
-        transaction.execute(
-            "UPDATE runs SET goal_request_pending=?2,
-             usage_json=CASE WHEN ?2 THEN NULL ELSE usage_json END,
-             estimated_cost_usd_nanos=CASE WHEN ?2 THEN NULL ELSE estimated_cost_usd_nanos END
-             WHERE id=?1 AND status='running' AND (goal_id IS NOT NULL OR goal_paid_owner_run_id IS NOT NULL)",
-            params![identity.run_id.to_string(), pending],
-        )?;
-    }
     let running = transaction
         .prepare_cached(
             "UPDATE runs SET activity = ?3

@@ -6,7 +6,6 @@ use std::{
 mod budgets;
 mod cancellation;
 mod delivery_history;
-mod foreground_goal;
 mod output;
 mod resume;
 
@@ -777,18 +776,6 @@ fn options(workspace: &Path) -> HeadlessOptions {
         trace: None,
         resume_hint: false,
         arm: None,
-    }
-}
-
-fn goal_request() -> GoalInvocation {
-    GoalInvocation {
-        objective: Some("finish the task".to_owned()),
-        check: None,
-        check_approval: None,
-        deadline: None,
-        max_runs: Some(1),
-        replace: false,
-        defaults: qq_config::GoalsConfig::default(),
     }
 }
 

@@ -31,7 +31,6 @@ pub(crate) enum ToolHost {
     WaitAgents,
     CancelAgent,
     CommandStatus,
-    UpdateGoal,
     SearchHistory,
     ReadToolResult,
     SelectTools,
@@ -171,8 +170,6 @@ pub struct ToolCatalog {
     read_only_spawn_spec: Option<ToolSpec>,
     static_measurement: ToolSchemaMeasurement,
     full_specs: Option<Arc<[ToolSpec]>>,
-    goal_less_specs: Arc<[ToolSpec]>,
-    goal_less_measurement: ToolSchemaMeasurement,
     full_measurement: Option<ToolSchemaMeasurement>,
     index_text: Option<Arc<str>>,
     unattended_index_text: Option<Arc<str>>,
@@ -415,14 +412,6 @@ impl ToolCatalog {
             }
         });
 
-        let goal_less_specs: Arc<[ToolSpec]> = full_specs
-            .as_ref()
-            .unwrap_or(&static_specs)
-            .iter()
-            .filter(|spec| spec.name() != "update_goal")
-            .cloned()
-            .collect();
-        let goal_less_measurement = crate::runtime::tool_schema_measurement(&goal_less_specs);
         let mut digest = Sha256::new();
         digest.update(b"qq-tool-catalog-v1\0");
         for entry in &sorted {
@@ -456,8 +445,6 @@ impl ToolCatalog {
             read_only_spawn_spec,
             static_measurement,
             full_specs,
-            goal_less_specs,
-            goal_less_measurement,
             full_measurement,
             index_text,
             unattended_index_text,
@@ -528,7 +515,6 @@ impl ToolCatalog {
         let exposed = self.full_specs.as_ref().map_or(0, |specs| specs.len());
         usize::try_from(entries).unwrap_or(usize::MAX) * 2
             + exposed * 64
-            + self.goal_less_specs.len() * 64
             + self.index_text.as_ref().map_or(0, |text| text.len())
             + self
                 .unattended_index_text
@@ -542,9 +528,6 @@ impl ToolCatalog {
     }
 
     pub(crate) fn schema_measurement(&self, specs: &Arc<[ToolSpec]>) -> ToolSchemaMeasurement {
-        if Arc::ptr_eq(&self.goal_less_specs, specs) {
-            return self.goal_less_measurement;
-        }
         if let Some(full) = &self.full_specs
             && Arc::ptr_eq(full, specs)
         {
@@ -577,11 +560,7 @@ impl ToolCatalog {
             && !include.read_only
             && !include.unattended
         {
-            return Arc::clone(if include.update_goal {
-                source
-            } else {
-                &self.goal_less_specs
-            });
+            return Arc::clone(source);
         }
         source
             .iter()
@@ -661,7 +640,6 @@ impl ToolCatalog {
 pub(crate) struct StaticFilter {
     pub(crate) spawn_agent: bool,
     pub(crate) search_history: bool,
-    pub(crate) update_goal: bool,
     pub(crate) read_tool_result: bool,
     pub(crate) load_skill: bool,
     pub(crate) read_only: bool,
@@ -693,7 +671,6 @@ impl StaticFilter {
         match entry.host {
             ToolHost::SpawnAgent | ToolHost::WaitAgents | ToolHost::CancelAgent => self.spawn_agent,
             ToolHost::SearchHistory => self.search_history,
-            ToolHost::UpdateGoal => self.update_goal,
             ToolHost::ReadToolResult => self.read_tool_result,
             ToolHost::LoadSkill => self.load_skill,
             ToolHost::CommandStatus => !self.read_only && !self.unattended,
@@ -876,7 +853,6 @@ mod tests {
         let base = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
-            update_goal: false,
             read_tool_result: true,
             load_skill: true,
             read_only: false,
@@ -967,7 +943,6 @@ mod tests {
         let base = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
-            update_goal: false,
             read_tool_result: true,
             load_skill: true,
             read_only: false,
@@ -1045,7 +1020,6 @@ mod tests {
         let without = catalog.base_specs(&StaticFilter {
             spawn_agent: false,
             search_history: true,
-            update_goal: false,
             read_tool_result: true,
             load_skill: true,
             read_only: false,
@@ -1055,7 +1029,6 @@ mod tests {
         let with = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
-            update_goal: false,
             read_tool_result: true,
             load_skill: true,
             read_only: false,
@@ -1086,7 +1059,6 @@ mod tests {
             search_history: true,
             load_skill: true,
             read_tool_result: false,
-            update_goal: false,
             read_only: false,
             unattended: false,
         });
@@ -1180,7 +1152,6 @@ mod tests {
         let everything = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
-            update_goal: false,
             read_tool_result: true,
             load_skill: true,
             read_only: false,
@@ -1200,7 +1171,6 @@ mod tests {
         let read_only = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
-            update_goal: false,
             read_tool_result: true,
             load_skill: true,
             read_only: true,
@@ -1269,7 +1239,6 @@ mod measurement_tests {
         let base = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
-            update_goal: false,
             read_tool_result: true,
             load_skill: true,
             read_only: false,

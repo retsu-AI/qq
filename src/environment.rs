@@ -2,8 +2,6 @@ use std::path::Path;
 
 use qq_core::undo::{Coverage, MINIMUM_GIT_VERSION};
 
-pub const UNATTENDED_GUIDE: &str = "https://retsu-ai.github.io/qq/docs/running-unattended/";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {
     Host,
@@ -49,16 +47,6 @@ impl Environment {
                 self.user
             ),
         }
-    }
-
-    pub fn goal_note(&self) -> Option<String> {
-        (self.placement == Placement::Host).then(|| {
-            format!(
-                "note: this goal runs on the host as {}, with this machine's network and \
-                 credentials; to isolate unattended goals see {UNATTENDED_GUIDE}",
-                self.user
-            )
-        })
     }
 }
 
@@ -155,39 +143,6 @@ mod tests {
             .summary(),
             "in a container (/.dockerenv): commands run as agent, with the container's \
              network and the credentials passed into it"
-        );
-    }
-
-    #[test]
-    fn only_a_host_goal_gets_the_unattended_note() {
-        let note = host("ada").goal_note().unwrap();
-        assert_eq!(
-            note,
-            "note: this goal runs on the host as ada, with this machine's network and \
-             credentials; to isolate unattended goals see \
-             https://retsu-ai.github.io/qq/docs/running-unattended/"
-        );
-        assert!(!note.contains('\n'));
-        let container = Environment {
-            placement: Placement::Container("/.dockerenv"),
-            user: "agent".to_owned(),
-        };
-        assert_eq!(container.goal_note(), None);
-    }
-
-    #[test]
-    fn the_guide_link_names_a_guide_page() {
-        let page = UNATTENDED_GUIDE
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap();
-        assert!(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("docs/guide")
-                .join(format!("{page}.md"))
-                .is_file(),
-            "{UNATTENDED_GUIDE} has no docs/guide/{page}.md"
         );
     }
 

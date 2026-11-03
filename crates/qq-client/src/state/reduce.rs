@@ -50,7 +50,6 @@ pub struct ReduceContext<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateEffect {
-    CheckInterruptionChanged(Option<qq_protocol::CheckInterruption>),
     Notice {
         session: Option<SessionId>,
         level: NoticeLevel,
@@ -99,8 +98,7 @@ impl SessionStore {
                 effect @ (StateEffect::RequestSnapshot(_)
                 | StateEffect::Refocus(_)
                 | StateEffect::SessionRemoved { .. }) => Some(effect),
-                StateEffect::CheckInterruptionChanged(_)
-                | StateEffect::Notice { .. }
+                StateEffect::Notice { .. }
                 | StateEffect::Attention(_)
                 | StateEffect::AdoptCreated(_)
                 | StateEffect::SubmitDraft { .. } => None,
@@ -155,24 +153,6 @@ impl SessionStore {
             }
             SessionEvent::SessionUpdated { session } => {
                 self.upsert_summary((**session).clone(), context.models, 0);
-            }
-            SessionEvent::CheckInterruptionChanged { interruption } => {
-                effects.push(StateEffect::CheckInterruptionChanged(*interruption));
-            }
-            SessionEvent::GoalUpdated { goal } => {
-                if let Some(view) = self.get_mut(&session_id) {
-                    view.goal = Some(goal.clone());
-                }
-            }
-            SessionEvent::GoalCleared { goal_id, .. } => {
-                if let Some(view) = self.get_mut(&session_id)
-                    && view
-                        .goal
-                        .as_ref()
-                        .is_some_and(|goal| goal.goal_id == *goal_id)
-                {
-                    view.goal = None;
-                }
             }
             SessionEvent::SessionDeleted { session_id } => {
                 effects.extend(self.remove_session(*session_id, context));

@@ -968,27 +968,3 @@ mod tests {
         assert!(!static_native_elf(&dynamic));
     }
 }
-
-#[cfg(unix)]
-pub(crate) fn prepare_goal_check(
-    workspace: Workspace,
-    command: String,
-    producer: Arc<ProcessProducer>,
-    cancelled: &ToolCancellation,
-    deadline: Instant,
-) -> Result<PreparedLaunch, PreparationError> {
-    prepare(
-        workspace,
-        OwnedLaunch::Shell(ShellArgs {
-            command,
-            cwd: None,
-            timeout_seconds: None,
-            yield_after_seconds: None,
-        }),
-        Arc::new(ApprovedReadImages::default()),
-        producer,
-        None,
-        cancelled,
-        deadline,
-    )
-}

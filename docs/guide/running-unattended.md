@@ -3,7 +3,7 @@
 QQ runs the agent's commands in your checkout, as you, with your network
 and your credentials ([Permissions › Where commands
 run](permissions.md#where-commands-run)). Sitting at the TUI, you see each
-step. A goal left running overnight, a daemon, or a CI job has no one
+step. A `qq run` left going overnight, a daemon, or a CI job has no one
 watching, so what the commands can reach is up to the machine QQ runs on.
 QQ does not sandbox anything itself. This page shows how to set up that
 machine.
@@ -16,8 +16,7 @@ ok    snapshots        on: `qq undo` restores the workspace as it was before eac
 ```
 
 On the host it says `on the host: commands run as you, with this machine's
-network and credentials`, and `qq run --goal` prints a one-line note on
-stderr pointing here. The note never waits for an answer.
+network and credentials`.
 
 None of this is a guarantee. A container limits what a mistake or a
 prompt-injected command can reach; it does not make the agent's choices
@@ -42,7 +41,7 @@ work on the mounted checkout. Everything after the image name is passed to
 `qq`:
 
 ```sh
-docker run --rm -v "$PWD:/workspace" -e ANTHROPIC_API_KEY -e QQ_MODEL=anthropic/claude-sonnet-5 qq run --goal "Make cargo test pass" --check 'cargo test' --format jsonl
+docker run --rm -v "$PWD:/workspace" -e ANTHROPIC_API_KEY -e QQ_MODEL=anthropic/claude-sonnet-5 qq run --format jsonl "Make cargo test pass"
 ```
 
 For a long-lived server, run the daemon and attach to it inside the
@@ -169,19 +168,19 @@ is not caught. Use them to block mistakes you can name, and use
 the token's permissions and branch protection to make the rest impossible.
 The key is described in [Configuration › Policy](configuration.md).
 
-## Don't run unattended goals on a machine with production credentials
+## Don't run unattended on a machine with production credentials
 
 On the host, every command the agent runs can read what you can read: cloud
 credentials in `~/.aws`, a `kubectl` context pointed at production, a
 database URL in your shell's environment, SSH keys that reach servers. An
-unattended goal runs for hours with no one reading each step, and one
+unattended run can go for hours with no one reading each step, and one
 command from a confused model or a prompt-injected file is enough to use
 any of them. Snapshots and `qq undo` restore your files; they cannot undo a
 deleted bucket, a dropped table, or a pushed secret.
 
 So:
 
-- run unattended goals in a container, a VM or a separate user account that
+- run unattended work in a container, a VM or a separate user account that
   has never held production credentials;
 - don't add those credentials to the container "just for this task"; give it
   a narrower token, or do that step yourself;

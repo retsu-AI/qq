@@ -16,8 +16,6 @@ pub(super) enum Checkpoint {
     ExecutionStop(RunId),
     BufferedToolOutput(ToolCallId),
     DropSettlement(RunId),
-    SummaryAdmission(SessionId),
-    GoalCheckResult(SessionId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

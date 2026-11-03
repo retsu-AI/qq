@@ -182,7 +182,7 @@ impl SessionRuntime {
             let applied = match runtime
                 .inner
                 .store
-                .command_with_admission(command_id, command, CommandAdmission::default())
+                .client_command(command_id, command)
                 .await
             {
                 Ok(applied) => applied,
@@ -808,12 +808,6 @@ pub(super) fn admit_side_question(
 ) -> Result<(RuntimeLoadRequest, Vec<Message>), SessionRuntimeError> {
     if question.trim().is_empty() || question.len() > 8192 {
         return Err(SessionRuntimeError::InvalidSideQuestion);
-    }
-    let checking:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM runs r JOIN sessions checker ON checker.id=r.session_id
-        JOIN sessions target ON target.workspace_id=checker.workspace_id WHERE target.id=?1 AND r.kind='goal_check' AND (r.status='running' OR r.check_acknowledgment_pending=1))",
-        [session_id.to_string()],|row|row.get(0))?;
-    if checking {
-        return Err(SessionRuntimeError::SideQuestionBusy);
     }
     let pending: u64 = transaction.query_row(
         "SELECT COUNT(*) FROM side_questions WHERE state = 'running'",

@@ -251,24 +251,6 @@ pub(super) async fn store_command(
         .await
 }
 
-pub(super) fn goal_command(goal: serde_json::Value) -> SessionCommand {
-    let mut command = goal;
-    command
-        .as_object_mut()
-        .expect("a goal is a JSON object")
-        .insert("type".to_owned(), serde_json::json!("set_goal"));
-    serde_json::from_value(command).unwrap()
-}
-
-pub(super) async fn set_goal(
-    runtime: &SessionRuntime,
-    goal: serde_json::Value,
-) -> Result<CommandReceipt, SessionRuntimeError> {
-    runtime
-        .command(CommandId::generate().unwrap(), goal_command(goal))
-        .await
-}
-
 pub(super) const fn provider_usage(
     input_tokens: u64,
     output_tokens: u64,
@@ -298,31 +280,6 @@ pub(super) fn test_pricing() -> ModelPricing {
         context_tier: None,
         provenance: "test".to_owned(),
     }
-}
-
-pub(super) const fn identity_of(goal: &qq_protocol::GoalSnapshot) -> qq_protocol::GoalIdentity {
-    qq_protocol::GoalIdentity {
-        goal_id: goal.goal_id,
-        revision: goal.revision,
-    }
-}
-
-pub(super) async fn goal_control(
-    runtime: &SessionRuntime,
-    session_id: SessionId,
-    expected: qq_protocol::GoalIdentity,
-    action: qq_protocol::GoalControl,
-) -> Result<CommandReceipt, SessionRuntimeError> {
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::GoalControl {
-                session_id,
-                expected,
-                action,
-            },
-        )
-        .await
 }
 
 pub(super) struct ProviderLoader {
@@ -459,7 +416,6 @@ pub(super) struct TurnCommit(ModelTurnCommit);
 impl TurnCommit {
     pub(super) fn new(turn_ordinal: u32, message: Message) -> Self {
         Self(ModelTurnCommit {
-            model_work: crate::runtime::ModelWorkDisposition::Committed,
             turn_ordinal,
             message,
             calls: Vec::new(),
@@ -471,8 +427,8 @@ impl TurnCommit {
             accounting: None,
             truncated: false,
             notice: None,
-            goal_notices: Vec::new(),
-            reserved_goal_notices: 0,
+            boundary_notices: Vec::new(),
+            reserved_boundary_notices: 0,
         })
     }
 
@@ -498,11 +454,6 @@ impl TurnCommit {
 
     pub(super) fn accounting(mut self, accounting: RunAccounting) -> Self {
         self.0.accounting = Some(accounting);
-        self
-    }
-
-    pub(super) fn goal_notices(mut self, notices: Vec<crate::runtime::OrderedTurnNotice>) -> Self {
-        self.0.goal_notices = notices;
         self
     }
 
