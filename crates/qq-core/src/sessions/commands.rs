@@ -2367,8 +2367,15 @@ pub(super) fn begin_workspace_restore(
         .optional()?
         .ok_or(SessionRuntimeError::WorkspaceNotFound)?;
     let path = if let SessionCommand::RewindSession { session_id, .. }
-    | SessionCommand::ForkSession { session_id, .. } = command
+    | SessionCommand::ForkSession { session_id, .. }
+    | SessionCommand::UndoWorkspace {
+        session_id: Some(session_id),
+        ..
+    } = command
     {
+        if session_workspace(&transaction, *session_id)? != workspace_id {
+            return Err(SessionRuntimeError::WorkspaceNotFound);
+        }
         transaction.query_row(
             "SELECT COALESCE(execution_root,?2) FROM sessions WHERE id=?1",
             params![session_id.to_string(), path],

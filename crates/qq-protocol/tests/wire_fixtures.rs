@@ -570,7 +570,20 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             0x28,
             SessionCommand::UndoWorkspace {
                 workspace_id: WorkspaceId::from_bytes([2; 16]),
+                session_id: None,
                 snapshot: Some("3f9a".to_owned()),
+            },
+        ),
+    );
+
+    check(
+        "command_undo_fork",
+        &command(
+            0x29,
+            SessionCommand::UndoWorkspace {
+                workspace_id: WorkspaceId::from_bytes([2; 16]),
+                session_id: Some(session_id),
+                snapshot: None,
             },
         ),
     );

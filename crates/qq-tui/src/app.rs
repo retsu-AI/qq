@@ -633,9 +633,11 @@ impl App {
                                     checkpoints
                                         .iter()
                                         .filter(|point| {
-                                            receipt.is_none_or(|(run, turn)| {
-                                                run == point.run_id && turn == point.turn_ordinal
-                                            })
+                                            (receipt.is_some() || !point.rewound)
+                                                && receipt.is_none_or(|(run, turn)| {
+                                                    run == point.run_id
+                                                        && turn == point.turn_ordinal
+                                                })
                                         })
                                         .map(|point| {
                                             (

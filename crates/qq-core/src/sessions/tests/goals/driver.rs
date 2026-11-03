@@ -1652,6 +1652,7 @@ async fn a_due_goal_waits_for_a_workspace_restore_and_blocks_starting_one() {
                 CommandId::generate().unwrap(),
                 SessionCommand::UndoWorkspace {
                     workspace_id,
+                    session_id: None,
                     snapshot: None,
                 },
             )

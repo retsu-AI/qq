@@ -1102,6 +1102,7 @@ fn undo_sends_the_workspace_command_and_reports_how_to_reverse_it() {
         request.command,
         SessionCommand::UndoWorkspace {
             workspace_id,
+            session_id: app.focused(),
             snapshot: None,
         }
     );

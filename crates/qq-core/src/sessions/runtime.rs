@@ -748,6 +748,7 @@ impl SessionRuntime {
         let SessionCommand::UndoWorkspace {
             workspace_id,
             snapshot,
+            ..
         } = &command
         else {
             return Err(SessionRuntimeError::CONSTRAINT);

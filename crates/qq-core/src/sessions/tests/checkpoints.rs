@@ -10,6 +10,300 @@ async fn checkpoint_command(runtime: &SessionRuntime, command: SessionCommand) -
 }
 
 #[tokio::test]
+async fn checkpoints_fork_preserves_deliveries_and_spill_handles_after_source_deletion() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::Full,
+        vec![
+            vec![("read_file", r#"{"path":"tracked.txt"}"#.to_owned())],
+            vec![],
+        ],
+    )
+    .await;
+    test_support::repository(&harness.workspace_path);
+    std::fs::write(
+        harness.workspace_path.join(".gitignore"),
+        "sessions.sqlite3*\nworktrees/\n",
+    )
+    .unwrap();
+    let source = harness.session_id;
+    let first = submit_prompt(&harness, "first").await;
+    collect_until_run_finished(&mut harness.events, first).await;
+    let original = harness.runtime.inner.store.call_write(store::Priority::AwaitControl, move |connection| {
+        let call: String = connection.query_row("SELECT id FROM tool_calls WHERE run_id=?1", [first.to_string()], |row| row.get(0))?;
+        let handle = crate::tools::output::result_handle("read_file", parse_id(&call)?, "1234567890abcdef");
+        connection.execute("INSERT INTO tool_spills VALUES (?1,?2,?3,'read_file','1234567890abcdef',?4,11,1,1,NULL)", params![call,source.to_string(),first.to_string(),b"full output".as_slice()])?;
+        connection.execute("UPDATE model_turns SET tool_results_projection_json=replace(tool_results_projection_json,'base',?2) WHERE run_id=?1",params![first.to_string(),handle])?;
+        let child = RunId::generate().unwrap().to_string();
+        connection.execute("INSERT INTO child_deliveries VALUES (?1,?2,?3,1,2,1,1,'delegated final evidence')",params![child,source.to_string(),first.to_string()])?;
+        connection.execute("INSERT INTO child_reports VALUES (?1,1,?2,?3,1,0,1,'delegated progress evidence')",params![child,source.to_string(),first.to_string()])?;
+        Ok(handle)
+    }).await.unwrap();
+    let second = submit_prompt(&harness, "second").await;
+    collect_until_run_finished(&mut harness.events, second).await;
+    let CommandOutcome::SessionForked {
+        session_id: fork, ..
+    } = checkpoint_command(
+        &harness.runtime,
+        SessionCommand::ForkSession {
+            session_id: source,
+            turn: Some(2),
+        },
+    )
+    .await
+    else {
+        panic!("fork")
+    };
+    checkpoint_command(
+        &harness.runtime,
+        SessionCommand::DeleteSession { session_id: source },
+    )
+    .await;
+    let context = harness.runtime.capture_side_context(fork).await.unwrap();
+    let text = format!("{context:?}");
+    assert!(text.contains("delegated final evidence"), "{text}");
+    assert!(text.contains("delegated progress evidence"), "{text}");
+    assert!(!text.contains(&original), "{text}");
+    let read = harness
+        .runtime
+        .inner
+        .store
+        .call(store::Priority::AwaitControl, move |connection| {
+            let call: String = connection.query_row(
+                "SELECT tool_call_id FROM tool_spills WHERE session_id=?1",
+                [fork.to_string()],
+                |row| row.get(0),
+            )?;
+            assert!(text.contains(&call[..8]), "{text}");
+            tool_calls::read_tool_spill(connection, fork, &call[..8], "12345678")
+        })
+        .await
+        .unwrap();
+    assert!(matches!(read,crate::runtime::SpillRead::Found {text,..} if text=="full output"));
+}
+
+#[tokio::test]
+async fn checkpoints_fork_children_retain_worktree_and_undo_targets_their_execution_root() {
+    let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![vec![]]).await;
+    test_support::repository(&harness.workspace_path);
+    std::fs::write(
+        harness.workspace_path.join(".gitignore"),
+        "sessions.sqlite3*\nworktrees/\n",
+    )
+    .unwrap();
+    let run = submit_prompt(&harness, "first").await;
+    collect_until_run_finished(&mut harness.events, run).await;
+    let CommandOutcome::SessionForked {
+        session_id: fork,
+        execution_root,
+        ..
+    } = checkpoint_command(
+        &harness.runtime,
+        SessionCommand::ForkSession {
+            session_id: harness.session_id,
+            turn: Some(1),
+        },
+    )
+    .await
+    else {
+        panic!("fork")
+    };
+    let child = create_session(&harness.runtime, harness.workspace_id, Some(fork)).await;
+    let CommandOutcome::SessionCreated { session_id: child } = child.outcome else {
+        panic!("child")
+    };
+    let root = Path::new(&execution_root);
+    crate::undo::snapshot(
+        &harness.workspace_path,
+        crate::undo::SnapshotKind::Run(run),
+        None,
+    )
+    .await
+    .unwrap();
+    crate::undo::snapshot(
+        root,
+        crate::undo::SnapshotKind::Run(RunId::generate().unwrap()),
+        None,
+    )
+    .await
+    .unwrap();
+    std::fs::write(
+        harness.workspace_path.join("tracked.txt"),
+        "source changed\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("tracked.txt"), "fork changed\n").unwrap();
+    checkpoint_command(
+        &harness.runtime,
+        SessionCommand::UndoWorkspace {
+            workspace_id: harness.workspace_id,
+            session_id: Some(child),
+            snapshot: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+        "base\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(harness.workspace_path.join("tracked.txt")).unwrap(),
+        "source changed\n"
+    );
+    checkpoint_command(
+        &harness.runtime,
+        SessionCommand::DeleteSession { session_id: fork },
+    )
+    .await;
+    assert!(root.exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+        "base\n"
+    );
+    checkpoint_command(
+        &harness.runtime,
+        SessionCommand::DeleteSession { session_id: child },
+    )
+    .await;
+    assert!(!root.exists());
+}
+
+#[tokio::test]
+async fn checkpoints_rewind_excludes_later_steering_and_refuses_rewound_targets() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::Full,
+        vec![vec![
+            (
+                "edit_file",
+                r#"{"edits":[{"path":"tracked.txt","old":"base\n","new":"one\n"}]}"#.to_owned(),
+            ),
+            (
+                "edit_file",
+                r#"{"edits":[{"path":"tracked.txt","old":"one\n","new":"two\n"}]}"#.to_owned(),
+            ),
+        ]],
+    )
+    .await;
+    test_support::repository(&harness.workspace_path);
+    std::fs::write(
+        harness.workspace_path.join(".gitignore"),
+        "sessions.sqlite3*\n",
+    )
+    .unwrap();
+    let run = submit_prompt(&harness, "first").await;
+    collect_until_run_finished(&mut harness.events, run).await;
+    harness.runtime.inner.store.call_write(store::Priority::AwaitControl,move |connection| {
+        connection.execute("INSERT INTO messages(id,session_id,run_id,ordinal,turn_ordinal,role,state,output,created_at_ms,steering) SELECT ?1,session_id,run_id,(SELECT MAX(ordinal)+1 FROM messages),2,'user','complete','abandoned steering',1,1 FROM messages WHERE run_id=?2 AND steering=0 AND role='user'",params![MessageId::generate().unwrap().to_string(),run.to_string()])?;
+        Ok(())
+    }).await.unwrap();
+    assert!(
+        format!(
+            "{:?}",
+            harness
+                .runtime
+                .capture_side_context(harness.session_id)
+                .await
+                .unwrap()
+        )
+        .contains("abandoned steering")
+    );
+    checkpoint_command(
+        &harness.runtime,
+        SessionCommand::RewindSession {
+            session_id: harness.session_id,
+            run_id: run,
+            turn_ordinal: 1,
+        },
+    )
+    .await;
+    assert!(
+        !format!(
+            "{:?}",
+            harness
+                .runtime
+                .capture_side_context(harness.session_id)
+                .await
+                .unwrap()
+        )
+        .contains("abandoned steering")
+    );
+    assert_eq!(
+        harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::RewindSession {
+                    session_id: harness.session_id,
+                    run_id: run,
+                    turn_ordinal: 2
+                }
+            )
+            .await,
+        Err(SessionRuntimeError::RunNotFound)
+    );
+    assert_eq!(
+        std::fs::read_to_string(harness.workspace_path.join("tracked.txt")).unwrap(),
+        "one\n"
+    );
+}
+
+#[tokio::test]
+async fn checkpoints_noop_mutation_retains_commit_after_undo_snapshot_pruning() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::Full,
+        vec![vec![("shell", r#"{"command":"true"}"#.to_owned())]],
+    )
+    .await;
+    test_support::repository(&harness.workspace_path);
+    std::fs::write(
+        harness.workspace_path.join(".gitignore"),
+        "sessions.sqlite3*\n",
+    )
+    .unwrap();
+    let run = submit_prompt(&harness, "noop").await;
+    collect_until_run_finished(&mut harness.events, run).await;
+    let CommandOutcome::CheckpointsListed { checkpoints, .. } = checkpoint_command(
+        &harness.runtime,
+        SessionCommand::ListCheckpoints {
+            session_id: harness.session_id,
+        },
+    )
+    .await
+    else {
+        panic!("list")
+    };
+    let point = &checkpoints[0];
+    test_support::git(
+        &harness.workspace_path,
+        &["update-ref", "-d", &format!("refs/qq/snapshots/{run}")],
+    );
+    test_support::git(
+        &harness.workspace_path,
+        &["reflog", "expire", "--expire=now", "--all"],
+    );
+    test_support::git(&harness.workspace_path, &["gc", "--prune=now"]);
+    assert!(
+        !test_support::git(
+            &harness.workspace_path,
+            &["cat-file", "-t", &point.checkpoint]
+        )
+        .is_empty()
+    );
+    let CommandOutcome::TurnDiff { diff, .. } = checkpoint_command(
+        &harness.runtime,
+        SessionCommand::TurnDiff {
+            session_id: harness.session_id,
+            run_id: run,
+            turn_ordinal: 1,
+        },
+    )
+    .await
+    else {
+        panic!("diff")
+    };
+    assert!(diff.is_empty());
+}
+
+#[tokio::test]
 async fn checkpoints_readonly_prompts_fork_before_second_and_delete_resources() {
     let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![vec![], vec![]]).await;
     test_support::repository(&harness.workspace_path);
@@ -465,6 +759,7 @@ async fn checkpoints_three_turn_diffs_exclude_external_edits_rewind_undo_and_for
         &harness.runtime,
         SessionCommand::UndoWorkspace {
             workspace_id: harness.workspace_id,
+            session_id: None,
             snapshot: Some(before),
         },
     )

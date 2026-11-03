@@ -231,15 +231,14 @@ async fn capture_now(
     .await
     {
         Ok(Some(head)) => {
-            if head.commit != baseline.commit
-                && let Err(error) = crate::undo::retain_baseline(
-                    workspace,
-                    claimed.identity.session_id,
-                    run,
-                    turn,
-                    &baseline.commit,
-                )
-                .await
+            if let Err(error) = crate::undo::retain_baseline(
+                workspace,
+                claimed.identity.session_id,
+                run,
+                turn,
+                &baseline.commit,
+            )
+            .await
             {
                 tracing::warn!(%error,"could not retain turn baseline");
             }
@@ -399,7 +398,11 @@ impl SessionRuntime {
             } => {
                 let point = checkpoints
                     .iter()
-                    .find(|point| point.run_id == *run_id && point.turn_ordinal == *turn_ordinal)
+                    .find(|point| {
+                        !point.rewound
+                            && point.run_id == *run_id
+                            && point.turn_ordinal == *turn_ordinal
+                    })
                     .ok_or(SessionRuntimeError::RunNotFound)?
                     .clone();
                 let restored = crate::undo::restore_commit(Path::new(&path), &point.checkpoint)

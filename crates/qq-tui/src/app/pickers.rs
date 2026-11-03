@@ -1155,6 +1155,7 @@ impl App {
             PendingIntent::Undo,
             qq_protocol::SessionCommand::UndoWorkspace {
                 workspace_id,
+                session_id: self.focused(),
                 snapshot: None,
             },
         )

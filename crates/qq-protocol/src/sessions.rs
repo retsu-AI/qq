@@ -463,6 +463,8 @@ pub enum SessionCommand {
     UndoWorkspace {
         workspace_id: WorkspaceId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<SessionId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         snapshot: Option<String>,
     },
     CompactSession {

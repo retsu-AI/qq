@@ -2590,6 +2590,7 @@ mod tests {
             },
             SessionCommandKind::UndoWorkspace => SessionCommand::UndoWorkspace {
                 workspace_id,
+                session_id: None,
                 snapshot: None,
             },
             SessionCommandKind::CompactSession => SessionCommand::CompactSession { session_id },

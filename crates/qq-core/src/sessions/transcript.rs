@@ -518,6 +518,7 @@ fn assemble_model_context(
                AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=m.run_id AND z.turn_ordinal=0)
                AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
                AND s.steering = 1 AND s.state = 'complete'
+               AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=s.run_id AND z.turn_ordinal=s.turn_ordinal)
              ORDER BY s.run_id, s.turn_ordinal, s.ordinal",
     )?;
     let rows = statement.query_map(params![session, through_ordinal, cutoff_ordinal], |row| {
