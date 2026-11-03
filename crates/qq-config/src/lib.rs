@@ -1127,7 +1127,9 @@ pub enum BuiltinPreference {
 pub enum ToolSurface {
     #[default]
     Direct,
-    Code,
+    #[serde(alias = "code")]
+    CodePython,
+    CodeJavascript,
 }
 
 impl EffectivePolicy {

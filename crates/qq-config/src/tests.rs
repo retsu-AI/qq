@@ -2263,6 +2263,26 @@ fn managed_only_policy_fields_are_scoped_by_source_kind() {
 }
 
 #[test]
+fn tool_surface_takes_the_last_layer_and_code_means_python() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, policy: (tool_surface: code))"#,
+    );
+    let snapshot = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(snapshot.policy().tool_surface(), ToolSurface::CodePython);
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, policy: (tool_surface: code_javascript))"#,
+    );
+    let snapshot = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(
+        snapshot.policy().tool_surface(),
+        ToolSurface::CodeJavascript
+    );
+}
+
+#[test]
 fn builtin_preference_only_tightens() {
     let tree = TempTree::new();
     tree.write(

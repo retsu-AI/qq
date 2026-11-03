@@ -80,7 +80,8 @@ is held for an answer, or is refused. See [Permissions and trust](permissions.md
 ### Code mode
 
 Experimental. With `policy: (tool_surface: code)` the model gets one tool,
-`run_code`. It writes a short Python script, and the script calls the other
+`run_code`. It writes a short Python script (`code_javascript` asks for a
+JavaScript module instead), and the script calls the other
 tools as async functions, so it can do several reads, filter the results and
 print only what matters in one turn. The script runs in an embedded sandbox
 with no filesystem, network or process access of its own. Every call it makes
@@ -88,7 +89,8 @@ is a [tool call](#tool-call) recorded under the `run_code` call and goes
 through the same approval as a direct call. Variables do not carry over
 between `run_code` calls.
 
-Scripts can `import` your own helper modules: `.py` files in the
+Scripts can `import` your own helper modules: `.py` files (`.js` in
+JavaScript mode) in the
 workspace's `.qq/code/` directory or in `code/` under your global
 configuration directory (the workspace file wins on a name clash). Helpers
 call tools the same way scripts do, and the `run_code` description lists

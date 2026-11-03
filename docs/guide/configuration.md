@@ -179,7 +179,7 @@ Any layer (your config, a trusted project):
 policy: (
     builtin_preference: hint,             // off | hint | strict
     exposed_tools: ["read_file", "search", "edit_file", "shell"],
-    tool_surface: direct,                 // direct | code (experimental)
+    tool_surface: direct,                 // direct | code | code_javascript (experimental)
 )
 ```
 
@@ -201,7 +201,7 @@ policy: (
 | Key | Who may set it | Meaning |
 | --- | --- | --- |
 | `builtin_preference` | any; only tightens | how hard the model is steered from shell habits to built-in tools |
-| `tool_surface` | any; the last layer wins | `direct` (default) gives the model each tool. `code` is experimental: the model gets one `run_code` tool and calls the other tools as async functions from a sandboxed Python script; see [Code mode](concepts.md#code-mode) |
+| `tool_surface` | any; the last layer wins | `direct` (default) gives the model each tool. `code` (or `code_python`) and `code_javascript` are experimental: the model gets one `run_code` tool and calls the other tools as async functions from a sandboxed Python or JavaScript script; see [Code mode](concepts.md#code-mode) |
 | `exposed_tools` | any; intersects | the tool catalog; empty list exposes nothing. `command_status` comes with `shell` or `exec` and is not listed on its own: it waits on, reads, or cancels a command still running when its `yield_after_seconds` (default 30) passed |
 | `allowed_providers` / `denied_providers` | managed layers only | which providers a model route may use; denies accumulate |
 | `max_output_tokens` | managed layers only | ceiling for the top-level key; only lowers |

@@ -29,17 +29,70 @@ fn tools() -> Vec<ToolSignature> {
     ]
 }
 
-fn modules() -> Vec<Module> {
+fn modules(language: Language) -> Vec<Module> {
+    let (repo, text) = match language {
+        Language::Python => (
+            "import asyncio\nimport text\n\nasync def both(a, b):\n    x, y = await asyncio.gather(read_file(a), search(query=b))\n    return text.short(x['args']['path']) + '/' + y['tool']\n\ndef fail():\n    raise ValueError('helper failed')\n",
+            "def short(s):\n    return s[:3]\n",
+        ),
+        Language::JavaScript => (
+            "import { short } from 'text';\nexport async function both(a, b) {\n  const [x, y] = await Promise.all([read_file(a), search({ query: b })]);\n  return short(x.args.path) + '/' + y.tool;\n}\nexport function fail() {\n  throw new RangeError('helper failed');\n}\n",
+            "export function short(s) {\n  return s.slice(0, 3);\n}\n",
+        ),
+    };
     vec![
         Module {
             name: "repo".to_owned(),
-            source: "import asyncio\nimport text\n\nasync def both(a, b):\n    x, y = await asyncio.gather(read_file(a), search(query=b))\n    return text.short(x['args']['path']) + '/' + y['tool']\n\ndef fail():\n    raise ValueError('helper failed')\n".to_owned(),
+            source: repo.to_owned(),
         },
         Module {
             name: "text".to_owned(),
-            source: "def short(s):\n    return s[:3]\n".to_owned(),
+            source: text.to_owned(),
         },
     ]
+}
+
+fn languages() -> Vec<Language> {
+    [Language::Python, Language::JavaScript]
+        .into_iter()
+        .filter(|language| language.available())
+        .collect()
+}
+
+struct Case {
+    python: &'static str,
+    javascript: &'static str,
+}
+
+impl Case {
+    fn source(&self, language: Language) -> &'static str {
+        match language {
+            Language::Python => self.python,
+            Language::JavaScript => self.javascript,
+        }
+    }
+
+    fn each(&self, check: impl Fn(Language, Run)) {
+        self.each_with(Limits::default(), echo, check);
+    }
+
+    fn each_with(
+        &self,
+        limits: Limits,
+        answer: impl Fn(&HostCall) -> Result<Value, ToolFailure>,
+        check: impl Fn(Language, Run),
+    ) {
+        for language in languages() {
+            check(
+                language,
+                run_with(language, self.source(language), limits, &answer),
+            );
+        }
+    }
+}
+
+fn echo(call: &HostCall) -> Result<Value, ToolFailure> {
+    Ok(json!({"tool": call.name, "args": call.arguments}))
 }
 
 struct Run {
@@ -51,13 +104,13 @@ fn run_with(
     language: Language,
     source: &str,
     limits: Limits,
-    mut answer: impl FnMut(&HostCall) -> Result<Value, ToolFailure>,
+    answer: impl Fn(&HostCall) -> Result<Value, ToolFailure>,
 ) -> Run {
     let mut script = qq_script::start(Program {
         language,
         source: source.to_owned(),
         tools: tools(),
-        modules: modules(),
+        modules: modules(language),
         limits,
     })
     .unwrap();
@@ -86,44 +139,47 @@ fn run_with(
     }
 }
 
-fn run(source: &str) -> Run {
-    run_with(Language::Python, source, Limits::default(), |call| {
-        Ok(json!({"tool": call.name, "args": call.arguments}))
-    })
-}
-
 fn printed(run: &Run) -> String {
     run.completion.printed.render()
 }
 
 #[test]
 fn gather_batches_calls_and_returns_values_in_order() {
-    let run = run(
-        "import asyncio\na, b = await asyncio.gather(read_file('x'), search(query='q'))\nprint(a['args']['path'], b['tool'])",
-    );
-    assert_eq!(run.batches.len(), 1);
-    let names: Vec<_> = run.batches[0]
-        .iter()
-        .map(|call| (call.seq, call.name.as_str()))
-        .collect();
-    assert_eq!(names, [(0, "read_file"), (1, "search")]);
-    assert_eq!(printed(&run), "x search\n");
-    assert_eq!(run.completion.failure, None);
+    Case {
+        python: "import asyncio\na, b = await asyncio.gather(read_file('x'), search(query='q'))\nprint(a['args']['path'], b['tool'])",
+        javascript: "const [a, b] = await Promise.all([read_file('x'), search({ query: 'q' })]);\nconsole.log(a.args.path, b.tool);",
+    }
+    .each(|language, run| {
+        assert_eq!(run.batches.len(), 1, "{language:?}");
+        let names: Vec<_> = run.batches[0]
+            .iter()
+            .map(|call| (call.seq, call.name.as_str()))
+            .collect();
+        assert_eq!(names, [(0, "read_file"), (1, "search")], "{language:?}");
+        assert_eq!(printed(&run), "x search\n", "{language:?}");
+        assert_eq!(run.completion.failure, None, "{language:?}");
+    });
 }
 
 #[test]
 fn sequential_awaits_settle_one_call_at_a_time() {
-    let run =
-        run("for p in ['a', 'b']:\n    r = await read_file(path=p)\n    print(r['args']['path'])");
-    assert_eq!(run.batches.len(), 2);
-    assert_eq!(printed(&run), "a\nb\n");
+    Case {
+        python: "for p in ['a', 'b']:\n    r = await read_file(path=p)\n    print(r['args']['path'])",
+        javascript: "for (const p of ['a', 'b']) {\n  const r = await read_file({ path: p });\n  console.log(r.args.path);\n}",
+    }
+    .each(|language, run| {
+        assert_eq!(run.batches.len(), 2, "{language:?}");
+        assert_eq!(printed(&run), "a\nb\n", "{language:?}");
+    });
 }
 
 #[test]
-fn tool_failures_raise_catchable_builtin_exceptions() {
-    let run = run_with(
-        Language::Python,
-        "try:\n    await read_file('secret')\nexcept PermissionError as e:\n    print('denied:', e)\ntry:\n    await search('x')\nexcept FileNotFoundError:\n    print('missing')",
+fn tool_failures_raise_catchable_typed_errors() {
+    Case {
+        python: "try:\n    await read_file('secret')\nexcept PermissionError as e:\n    print('denied:', e)\ntry:\n    await search('x')\nexcept FileNotFoundError:\n    print('missing')",
+        javascript: "try { await read_file('secret'); } catch (e) { if (e.name === 'PermissionError') console.log('denied:', e.message); }\ntry { await search('x'); } catch (e) { if (e.name === 'NotFoundError') console.log('missing'); }",
+    }
+    .each_with(
         Limits::default(),
         |call| {
             Err(ToolFailure {
@@ -135,151 +191,226 @@ fn tool_failures_raise_catchable_builtin_exceptions() {
                 message: "policy said no".to_owned(),
             })
         },
+        |language, run| {
+            assert_eq!(
+                printed(&run),
+                "denied: policy said no\nmissing\n",
+                "{language:?}"
+            );
+        },
     );
-    assert_eq!(printed(&run), "denied: policy said no\nmissing\n");
 }
 
 #[test]
 fn bad_arguments_raise_type_error_without_a_host_call() {
-    let run = run("try:\n    await read_file(nope=1)\nexcept TypeError as e:\n    print(e)");
-    assert!(run.batches.is_empty());
-    assert_eq!(
-        printed(&run),
-        "read_file() got an unexpected keyword argument 'nope'\n"
-    );
+    Case {
+        python: "try:\n    await read_file(nope=1)\nexcept TypeError as e:\n    print(e)",
+        javascript: "try { await read_file({ nope: 1 }); } catch (e) { if (e instanceof TypeError) console.log(e.message); }",
+    }
+    .each(|language, run| {
+        assert!(run.batches.is_empty(), "{language:?}");
+        assert_eq!(
+            printed(&run),
+            "read_file() got an unexpected keyword argument 'nope'\n",
+            "{language:?}"
+        );
+    });
 }
 
 #[test]
 fn syntax_errors_fail_before_any_call() {
-    let run = run("def f(:\n  pass");
-    assert!(matches!(
-        run.completion.failure,
-        Some(ScriptFailure::Compile(_))
-    ));
-    assert!(run.batches.is_empty());
+    Case {
+        python: "def f(:\n  pass",
+        javascript: "function f( {",
+    }
+    .each(|language, run| {
+        assert!(
+            matches!(run.completion.failure, Some(ScriptFailure::Compile(_))),
+            "{language:?} {:?}",
+            run.completion.failure
+        );
+        assert!(run.batches.is_empty(), "{language:?}");
+    });
 }
 
 #[test]
 fn uncaught_exceptions_keep_printed_output() {
-    let run = run("print('before')\nraise ValueError('boom')");
-    assert_eq!(printed(&run), "before\n");
-    let Some(ScriptFailure::Raised(message)) = &run.completion.failure else {
-        panic!("{:?}", run.completion.failure);
-    };
-    assert!(message.contains("ValueError: boom"), "{message}");
+    Case {
+        python: "print('before')\nraise ValueError('boom')",
+        javascript: "console.log('before');\nthrow new RangeError('boom');",
+    }
+    .each(|language, run| {
+        assert_eq!(printed(&run), "before\n", "{language:?}");
+        let Some(ScriptFailure::Raised(message)) = &run.completion.failure else {
+            panic!("{language:?} {:?}", run.completion.failure);
+        };
+        assert!(message.contains("Error: boom"), "{language:?} {message}");
+    });
 }
 
 #[test]
-fn final_expression_becomes_the_value() {
-    let run = run("r = await read_file('x')\n{'n': 1, 'path': r['args']['path']}");
-    assert_eq!(run.completion.value, Some(json!({"n": 1, "path": "x"})));
+fn the_script_result_becomes_the_value() {
+    Case {
+        python: "r = await read_file('x')\n{'n': 1, 'path': r['args']['path']}",
+        javascript: "const r = await read_file('x');\nexport default { n: 1, path: r.args.path };",
+    }
+    .each(|language, run| {
+        assert_eq!(
+            run.completion.value,
+            Some(json!({"n": 1, "path": "x"})),
+            "{language:?}"
+        );
+    });
 }
 
 #[test]
 fn unawaited_calls_are_reported_and_never_run() {
-    let run = run("read_file('x')\nprint('done')");
-    assert!(run.batches.is_empty());
-    assert_eq!(run.completion.unawaited, ["read_file"]);
+    Case {
+        python: "read_file('x')\nprint('done')",
+        javascript: "read_file('x');\nconsole.log('done');",
+    }
+    .each(|language, run| {
+        assert!(run.batches.is_empty(), "{language:?}");
+        assert_eq!(run.completion.unawaited, ["read_file"], "{language:?}");
+        assert_eq!(printed(&run), "done\n", "{language:?}");
+    });
 }
 
 #[test]
 fn call_limit_stops_the_script() {
-    let limits = Limits {
-        max_calls: 3,
-        ..Limits::default()
-    };
-    let run = run_with(
-        Language::Python,
-        "while True:\n    await search('x')",
-        limits,
+    Case {
+        python: "while True:\n    await search('x')",
+        javascript: "while (true) { await search('x'); }",
+    }
+    .each_with(
+        Limits {
+            max_calls: 3,
+            ..Limits::default()
+        },
         |_| Ok(Value::Null),
-    );
-    assert_eq!(run.batches.len(), 3);
-    assert_eq!(
-        run.completion.failure,
-        Some(ScriptFailure::Limit(
-            "script exceeded the limit of 3 tool calls".to_owned()
-        ))
+        |language, run| {
+            assert_eq!(run.batches.len(), 3, "{language:?}");
+            assert_eq!(
+                run.completion.failure,
+                Some(ScriptFailure::Limit(
+                    "script exceeded the limit of 3 tool calls".to_owned()
+                )),
+                "{language:?}"
+            );
+        },
     );
 }
 
 #[test]
 fn interpreter_time_limit_stops_busy_loops() {
-    let limits = Limits {
-        max_interpreter_time: std::time::Duration::from_millis(50),
-        ..Limits::default()
-    };
-    let run = run_with(Language::Python, "while True:\n    pass", limits, |_| {
-        Ok(Value::Null)
-    });
-    assert!(
-        matches!(run.completion.failure, Some(ScriptFailure::Limit(_))),
-        "{:?}",
-        run.completion.failure
+    Case {
+        python: "while True:\n    pass",
+        javascript: "let i = 0;\nwhile (true) { i += 1; }",
+    }
+    .each_with(
+        Limits {
+            max_interpreter_time: std::time::Duration::from_millis(50),
+            ..Limits::default()
+        },
+        |_| Ok(Value::Null),
+        |language, run| {
+            assert!(
+                matches!(run.completion.failure, Some(ScriptFailure::Limit(_))),
+                "{language:?} {:?}",
+                run.completion.failure
+            );
+        },
     );
 }
 
 #[test]
-fn filesystem_and_imports_are_sandboxed() {
-    let run = run(
-        "try:\n    open('/etc/passwd')\nexcept Exception as e:\n    print(type(e).__name__)\ntry:\n    import subprocess\nexcept ModuleNotFoundError:\n    print('no module')",
-    );
-    assert_eq!(printed(&run), "PermissionError\nno module\n");
+fn files_processes_and_unknown_modules_are_unreachable() {
+    Case {
+        python: "try:\n    open('/etc/passwd')\nexcept Exception as e:\n    print(type(e).__name__)\ntry:\n    import subprocess\nexcept ModuleNotFoundError:\n    print('no module')",
+        javascript: "console.log(typeof require, typeof process, typeof fetch);\ntry { await import('fs'); } catch (e) { console.log('no module'); }",
+    }
+    .each(|language, run| {
+        let expected = match language {
+            Language::Python => "PermissionError\nno module\n",
+            Language::JavaScript => "undefined undefined undefined\nno module\n",
+        };
+        assert_eq!(printed(&run), expected, "{language:?}");
+    });
 }
 
 #[test]
 fn printed_output_is_bounded() {
-    let limits = Limits {
-        printed_head_bytes: 10,
-        printed_tail_bytes: 10,
-        ..Limits::default()
-    };
-    let run = run_with(
-        Language::Python,
-        "for i in range(1000):\n    print(i)",
-        limits,
+    Case {
+        python: "for i in range(1000):\n    print(i)",
+        javascript: "for (let i = 0; i < 1000; i++) console.log(i);",
+    }
+    .each_with(
+        Limits {
+            printed_head_bytes: 10,
+            printed_tail_bytes: 10,
+            ..Limits::default()
+        },
         |_| Ok(Value::Null),
+        |language, run| {
+            let printed = &run.completion.printed;
+            assert_eq!(printed.head, "0\n1\n2\n3\n4\n", "{language:?}");
+            assert_eq!(printed.tail, "7\n998\n999\n", "{language:?}");
+            assert_eq!(printed.total_bytes(), 3890, "{language:?}");
+        },
     );
-    let printed = &run.completion.printed;
-    assert_eq!(printed.head, "0\n1\n2\n3\n4\n");
-    assert_eq!(printed.tail, "7\n998\n999\n");
-    assert_eq!(printed.total_bytes(), 3890);
 }
 
 #[test]
-fn undeclared_functions_raise_name_error_without_a_host_call() {
-    let run =
-        run("try:\n    await write_file(path='x')\nexcept NameError:\n    print('undeclared')");
-    assert!(run.batches.is_empty());
-    assert_eq!(printed(&run), "undeclared\n");
+fn undeclared_functions_raise_without_a_host_call() {
+    Case {
+        python: "try:\n    await write_file(path='x')\nexcept NameError:\n    print('undeclared')",
+        javascript: "try { await write_file({ path: 'x' }); } catch (e) { if (e instanceof ReferenceError) console.log('undeclared'); }",
+    }
+    .each(|language, run| {
+        assert!(run.batches.is_empty(), "{language:?}");
+        assert_eq!(printed(&run), "undeclared\n", "{language:?}");
+    });
 }
 
 #[test]
 fn helper_modules_import_and_call_tools() {
-    let run = run("import repo\nprint(await repo.both('abcdef', 'q'))");
-    assert_eq!(run.batches.len(), 1);
-    assert_eq!(run.batches[0].len(), 2);
-    assert_eq!(printed(&run), "abc/search\n");
+    Case {
+        python: "import repo\nprint(await repo.both('abcdef', 'q'))",
+        javascript: "import { both } from 'repo';\nconsole.log(await both('abcdef', 'q'));",
+    }
+    .each(|language, run| {
+        assert_eq!(run.batches.len(), 1, "{language:?}");
+        assert_eq!(run.batches[0].len(), 2, "{language:?}");
+        assert_eq!(printed(&run), "abc/search\n", "{language:?}");
+    });
 }
 
 #[test]
-fn from_imports_bind_helper_names() {
-    let run = run("def go():\n    from text import short as s\n    return s('hello')\nprint(go())");
+fn helper_exceptions_name_the_helper() {
+    Case {
+        python: "import repo\nrepo.fail()",
+        javascript: "import { fail } from 'repo';\nfail();",
+    }
+    .each(|language, run| {
+        let Some(ScriptFailure::Raised(message)) = &run.completion.failure else {
+            panic!("{language:?} {:?}", run.completion.failure);
+        };
+        assert!(
+            message.contains("Error: helper failed"),
+            "{language:?} {message}"
+        );
+        assert!(message.contains("fail"), "{language:?} {message}");
+    });
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn python_from_imports_bind_helper_names() {
+    let run = run_with(
+        Language::Python,
+        "def go():\n    from text import short as s\n    return s('hello')\nprint(go())",
+        Limits::default(),
+        echo,
+    );
     assert_eq!(printed(&run), "hel\n");
-}
-
-#[test]
-fn helper_exceptions_carry_a_traceback_into_the_helper() {
-    let run = run("import repo\nrepo.fail()");
-    let Some(ScriptFailure::Raised(message)) = &run.completion.failure else {
-        panic!("{:?}", run.completion.failure);
-    };
-    assert!(message.contains("ValueError: helper failed"), "{message}");
-    assert!(message.contains("in fail"), "{message}");
-}
-
-#[test]
-fn unknown_modules_are_still_missing() {
-    let run = run("try:\n    import nope\nexcept ModuleNotFoundError:\n    print('missing')");
-    assert_eq!(printed(&run), "missing\n");
 }

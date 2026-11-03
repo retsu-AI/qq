@@ -444,7 +444,7 @@ impl CompiledAgentPlan {
                 unattended: key.tools.is_some_and(|filter| filter.unattended),
                 mode: key.mode,
                 snapshots: key.snapshots && self.in_git,
-                code: self.code_language.is_some() && key.tools.is_some(),
+                code: self.code_language.filter(|_| key.tools.is_some()),
             },
             &self.instructions,
         ));
@@ -890,7 +890,7 @@ impl CompiledAgentPlan {
                 unattended: false,
                 mode: full_key.mode,
                 snapshots: in_git,
-                code: code_language.is_some(),
+                code: code_language,
             },
             &instructions,
         ));

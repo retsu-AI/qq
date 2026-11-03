@@ -121,8 +121,23 @@ fn module_index(modules: &[qq_script::Module]) -> String {
         let definitions: Vec<&str> = module
             .source
             .lines()
-            .filter(|line| line.starts_with("def ") || line.starts_with("async def "))
-            .map(|line| line.trim_end().trim_end_matches(':'))
+            .filter(|line| {
+                [
+                    "def ",
+                    "async def ",
+                    "export function ",
+                    "export async function ",
+                ]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+            })
+            .map(|line| {
+                line.trim_end()
+                    .trim_end_matches('{')
+                    .trim_end()
+                    .trim_end_matches(':')
+                    .trim_start_matches("export ")
+            })
             .take(MAX_LISTED_DEFINITIONS)
             .collect();
         if !definitions.is_empty() {
@@ -153,10 +168,14 @@ fn run_code_spec(
              json, re, math and datetime are present.\n\n```python\n{declarations}```{modules}"
         ),
         Language::JavaScript => format!(
-            "Run a JavaScript script in a sandbox. Call QQ's tools as async functions taking one object and \
-             await them; use Promise.all for independent calls. Each call resolves to the tool's text result \
-             (an object for MCP structured content) and rejects with an Error when the tool fails. Only console.log output and the value of the last \
-             expression come back.\n\n```ts\n{declarations}```{modules}"
+            "Run a JavaScript module in a sandbox. QQ's tools are global async functions that take one \
+             object of named arguments (a single required argument may be passed bare); await them, and use \
+             Promise.all for independent calls, which run concurrently. Each call resolves to the tool's text \
+             result, or an object when an MCP tool returns structured content. A failed call rejects with an \
+             Error whose name is PermissionError, NotFoundError, InvalidArgumentsError, TimeoutError or \
+             ToolError; bad arguments throw TypeError. Only console.log output and the `export default` value \
+             come back. Top-level await works. Variables do not persist between run_code calls, and there is \
+             no require, process, fetch or filesystem.\n\n```ts\n{declarations}```{modules}"
         ),
     };
     ToolSpec::new(

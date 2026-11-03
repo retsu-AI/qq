@@ -77,6 +77,7 @@ qq-reasoning = { path = "crates/qq-reasoning" }
 qq-script = { path = "crates/qq-script", default-features = false }
 qq-server = { path = "crates/qq-server" }
 qq-tui = { path = "crates/qq-tui" }
+boa_engine = { version = "0.22", default-features = false }
 monty = "1.4"
 monty-types = "1.4"
 rusqlite = { version = "0.37", features = ["bundled"] }

@@ -8,6 +8,14 @@ async fn run_script(
     code: &str,
     mode: ApprovalMode,
 ) -> (Vec<RuntimeEvent>, Vec<ModelRequest>, tempfile::TempDir) {
+    run_script_in(CodeLanguage::Python, code, mode).await
+}
+
+async fn run_script_in(
+    language: CodeLanguage,
+    code: &str,
+    mode: ApprovalMode,
+) -> (Vec<RuntimeEvent>, Vec<ModelRequest>, tempfile::TempDir) {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("a.txt"), "alpha\n").unwrap();
     std::fs::write(directory.path().join("b.txt"), "beta\n").unwrap();
@@ -21,7 +29,7 @@ async fn run_script(
         256,
     )
     .unwrap()
-    .with_code_language(CodeLanguage::Python);
+    .with_code_language(language);
     let network = Arc::clone(&runtime.network);
     let events = runtime
         .run_loop(
@@ -271,4 +279,31 @@ async fn a_script_receives_mcp_structured_content_as_a_dict() {
     )));
     let requests = requests.lock().unwrap();
     assert_eq!(script_result(&requests), ("3 b\n".to_owned(), false));
+}
+
+#[tokio::test]
+async fn javascript_scripts_run_child_calls_and_see_denials() {
+    let (events, requests, directory) = run_script_in(
+        CodeLanguage::JavaScript,
+        "const [a, b] = await Promise.all([read_file('a.txt'), read_file({ path: 'b.txt' })]);\nconsole.log(a.trim().split('\\n').pop(), b.trim().split('\\n').pop());\ntry { await write_file({ path: 'c.txt', content: 'x' }); } catch (e) { console.log(e.name); }",
+        ApprovalMode::ReadOnly,
+    )
+    .await;
+    let spec = &requests[0].tools()[0];
+    assert!(
+        spec.description().contains("declare function read_file("),
+        "{}",
+        spec.description()
+    );
+    assert!(!requests[0].system().unwrap().contains("asyncio"));
+    let children = events
+        .iter()
+        .filter(|event| matches!(event, RuntimeEvent::ScriptCallRequested { .. }))
+        .count();
+    assert_eq!(children, 3);
+    assert!(!directory.path().join("c.txt").exists());
+    assert_eq!(
+        script_result(&requests),
+        ("1\talpha 1\tbeta\nPermissionError\n".to_owned(), false)
+    );
 }

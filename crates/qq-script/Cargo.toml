@@ -7,11 +7,12 @@ repository.workspace = true
 publish = false
 
 [features]
-default = ["python"]
+default = ["python", "javascript"]
 python = ["dep:monty", "dep:monty-types"]
-javascript = []
+javascript = ["dep:boa_engine"]
 
 [dependencies]
+boa_engine = { workspace = true, optional = true }
 monty = { workspace = true, optional = true }
 monty-types = { workspace = true, optional = true }
 serde.workspace = true

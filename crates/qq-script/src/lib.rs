@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 mod declarations;
+#[cfg(feature = "javascript")]
+mod javascript;
 mod printed;
 #[cfg(feature = "python")]
 mod python;
@@ -170,6 +172,9 @@ pub fn start(program: Program) -> Result<Box<dyn Script>, StartError> {
     match program.language {
         #[cfg(feature = "python")]
         Language::Python => Ok(Box::new(python::PythonScript::new(program))),
+        #[cfg(feature = "javascript")]
+        Language::JavaScript => Ok(Box::new(javascript::JavaScriptScript::new(program))),
+        #[allow(unreachable_patterns)]
         language => Err(StartError::Unavailable(language.as_str())),
     }
 }

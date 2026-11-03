@@ -14,7 +14,7 @@ use crate::{
 
 const CODE_MODE_SECTION: &str = "\n\nCode mode:\n\
 - You have one tool, run_code. Every tool named above is an async function inside its scripts; run_code's description lists their signatures. Tool-call conventions above apply to those function calls.\n\
-- Do several steps in one script: gather independent reads with asyncio.gather, filter and join results in code, and print only what you need. Each result is the tool's text exactly as a direct call would return it, or a dict when an MCP tool returns structured content.\n\
+- Do several steps in one script: run independent reads concurrently, filter and join results in code, and print only what you need. Each result is the tool's text exactly as a direct call would return it, or structured data when an MCP tool returns structured content.\n\
 - A failed call raises an exception you can catch; an uncaught one ends the script and is reported with everything printed so far. Every call still goes through approval, and changes apply immediately.\n\
 - Variables do not survive between run_code calls; print what you need to keep.";
 
@@ -33,7 +33,7 @@ pub(crate) struct PromptSections<'a> {
     pub(crate) unattended: bool,
     pub(crate) mode: ApprovalMode,
     pub(crate) snapshots: bool,
-    pub(crate) code: bool,
+    pub(crate) code: Option<qq_script::Language>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,7 +415,7 @@ fn agent_prompt_prefix(
          {final_answer}\
          {ask_guidance}{spawn_section}",
     );
-    if code {
+    if code.is_some() {
         prompt = prompt.replacen(
             "Available tools: ",
             "Available tools: run_code. Inside run_code scripts these are async functions: ",

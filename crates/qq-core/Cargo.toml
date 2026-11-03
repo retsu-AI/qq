@@ -7,9 +7,10 @@ repository.workspace = true
 publish = false
 
 [features]
-default = ["tool-fetch", "code-python"]
+default = ["tool-fetch", "code-python", "code-javascript"]
 tool-fetch = ["dep:htmd"]
 code-python = ["qq-script/python"]
+code-javascript = ["qq-script/javascript"]
 
 [dependencies]
 async-stream.workspace = true
