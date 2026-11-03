@@ -2,6 +2,36 @@ use super::*;
 use crate::undo::test_support;
 
 #[tokio::test]
+async fn checkpoints_deleting_fork_catalog_rejects_new_sessions() {
+    let harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![]).await;
+    let session = harness.session_id;
+    let root = harness.workspace_path.to_string_lossy().into_owned();
+    harness.runtime.inner.store.call_write(store::Priority::AwaitControl,move |connection| {
+        connection.execute("INSERT INTO fork_resources(session_id,workspace,root,state) VALUES (?1,?2,?2,'deleting')",params![session.to_string(),root])?;Ok(())
+    }).await.unwrap();
+    let result = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CreateSession {
+                workspace_id: harness.workspace_id,
+                parent_id: None,
+                model: ModelSelection {
+                    model: Some("test/model".to_owned()),
+                    max_output_tokens: Some(256),
+                    ..ModelSelection::default()
+                },
+                approval_mode: ApprovalMode::ReadOnly,
+                profile: AgentProfileId::default(),
+                correlation: Correlation::default(),
+                reasoning_effort: None,
+            },
+        )
+        .await;
+    assert_eq!(result, Err(SessionRuntimeError::WorkspaceBusy));
+}
+
+#[tokio::test]
 async fn checkpoints_fork_capacity_is_rechecked_after_git_and_cleans_rejected_worktree() {
     let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![vec![]]).await;
     test_support::repository(&harness.workspace_path);

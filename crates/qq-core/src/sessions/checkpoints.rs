@@ -503,7 +503,7 @@ impl SessionRuntime {
                     transaction.execute("UPDATE fork_resources SET state='ready' WHERE session_id=?1",[fork.to_string()])?;
                     transaction.execute("INSERT INTO sessions(id,workspace_id,title,status,model,max_output_tokens,organization,approval_mode,created_at_ms,updated_at_ms,profile,model_is_fallback,reasoning_effort,execution_root) SELECT ?1,workspace_id,title,'idle',model,max_output_tokens,organization,approval_mode,?2,?2,profile,model_is_fallback,reasoning_effort,?3 FROM sessions WHERE id=?4",params![fork.to_string(),now_ms(),root,session.to_string()])?;
                     let connection=&transaction;
-                    let mut statement=connection.prepare("SELECT id,run_id,ordinal FROM messages WHERE session_id=?1 AND ordinal<?2 ORDER BY ordinal")?;
+                    let mut statement=connection.prepare("SELECT m.id,m.run_id,m.ordinal FROM messages m JOIN runs r ON r.id=m.run_id JOIN messages p ON p.id=r.user_message_id WHERE m.session_id=?1 AND p.ordinal<?2 ORDER BY m.ordinal")?;
                     let messages=statement.query_map(params![session.to_string(),ordinal],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,u64>(2)?)))?.collect::<Result<Vec<_>,_>>()?;
                     drop(statement);
                     connection.execute("INSERT OR IGNORE INTO attachment_blobs SELECT ?2,blob_key,content,content_bytes,created_at_ms,evicted_at_ms FROM attachment_blobs WHERE session_id=?1",params![session.to_string(),fork.to_string()])?;
