@@ -168,6 +168,7 @@ impl LoginEnvironment {
     }
 }
 
+#[cfg(unix)]
 fn fish_config_path(home: &std::path::Path, config: Option<OsString>) -> PathBuf {
     config
         .filter(|path| !path.is_empty())
