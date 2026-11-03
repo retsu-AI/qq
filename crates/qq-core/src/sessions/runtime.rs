@@ -129,6 +129,16 @@ pub trait RuntimeLoader: Send + Sync + 'static {
         self.load(request)
     }
 
+    fn load_in_execution_root(
+        &self,
+        mut request: RuntimeLoadRequest,
+        execution_root: String,
+        progress: RuntimeLoadProgress,
+    ) -> RuntimeLoadFuture {
+        request.workspace = execution_root;
+        self.load_with_progress(request, progress)
+    }
+
     fn resolve_worker_model(
         &self,
         workspace: String,
@@ -322,6 +332,10 @@ pub(super) struct SessionRuntimeInner {
     pub(super) side_tasks: AtomicUsize,
     pub(super) restores: AtomicUsize,
     pub(super) side_limits: side_questions::SideCeilings,
+    pub(super) turn_baselines: Mutex<HashMap<RunId, (u32, crate::undo::Snapshot)>>,
+    pub(super) checkpoints: Mutex<HashMap<RunId, super::checkpoints::PendingCheckpoint>>,
+    pub(super) fork_cleanup: Semaphore,
+    pub(super) worktree_directory: PathBuf,
     pub(super) side_sessions: Mutex<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     pub(super) side_cancellations: Mutex<HashMap<RunId, RunCancellation>>,
     pub(super) child_permits: Vec<Arc<Semaphore>>,
@@ -359,6 +373,11 @@ impl SessionRuntime {
             return Err(SessionRuntimeError::InvalidRunLimit);
         }
         let side_limits = options.side_query_limits.resolve()?;
+        let worktree_directory = options
+            .database_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("worktrees");
         let store = Store::open(options.database_path).await?;
         let recovery_store_id = store.store_id();
         let recovered = store
@@ -401,6 +420,10 @@ impl SessionRuntime {
             side_tasks: AtomicUsize::new(0),
             restores: AtomicUsize::new(0),
             side_limits,
+            turn_baselines: Mutex::new(HashMap::new()),
+            checkpoints: Mutex::new(HashMap::new()),
+            fork_cleanup: Semaphore::new(1),
+            worktree_directory,
             side_sessions: Mutex::new(HashMap::new()),
             side_cancellations: Mutex::new(HashMap::new()),
             child_permits: (0..MAX_CHILD_DEPTH)
@@ -420,6 +443,7 @@ impl SessionRuntime {
             settlements,
             lifecycle: RwLock::new(()),
         });
+        fork::cleanup(&inner, true).await?;
         for cursor in recovered {
             inner.notify(cursor);
         }
@@ -446,6 +470,15 @@ impl SessionRuntime {
     ) -> Result<CommandReceipt, SessionRuntimeError> {
         if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
             return Err(SessionRuntimeError::Unavailable);
+        }
+        if matches!(
+            command,
+            SessionCommand::ListCheckpoints { .. }
+                | SessionCommand::TurnDiff { .. }
+                | SessionCommand::RewindSession { .. }
+                | SessionCommand::ForkSession { .. }
+        ) {
+            return self.checkpoint_command(command_id, command).await;
         }
         if matches!(command, SessionCommand::SubmitSideQuestion { .. }) {
             return self.submit_side_question(command_id, command).await;
@@ -521,6 +554,12 @@ impl SessionRuntime {
         if should_schedule || applied.schedule {
             self.request_schedule();
         }
+        if matches!(
+            applied.receipt.outcome,
+            CommandOutcome::SessionDeleted { .. } | CommandOutcome::SessionsPruned { .. }
+        ) {
+            fork::cleanup(&self.inner, false).await?;
+        }
         Ok(applied.receipt)
     }
 
@@ -543,6 +582,7 @@ impl SessionRuntime {
         let SessionCommand::UndoWorkspace {
             workspace_id,
             snapshot,
+            ..
         } = &command
         else {
             return Err(SessionRuntimeError::CONSTRAINT);
@@ -1203,10 +1243,10 @@ impl From<serde_json::Error> for SessionRuntimeError {
 
 const MAX_UNDO_CHANGE_BYTES: usize = 8 * 1024;
 
-struct RestoreSlot(Arc<SessionRuntimeInner>);
+pub(super) struct RestoreSlot(Arc<SessionRuntimeInner>);
 
 impl RestoreSlot {
-    fn new(inner: &Arc<SessionRuntimeInner>) -> Self {
+    pub(super) fn new(inner: &Arc<SessionRuntimeInner>) -> Self {
         inner.restores.fetch_add(1, Ordering::AcqRel);
         Self(Arc::clone(inner))
     }

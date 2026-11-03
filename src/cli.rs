@@ -139,6 +139,13 @@ pub enum Command {
     /// chooser; without it and without a terminal on stdin the command fails.
     Init(InitArgs),
 
+    #[command(about = "Fork before a session prompt into an isolated worktree")]
+    Fork {
+        session: qq_protocol::SessionId,
+        #[arg(long)]
+        turn: Option<u64>,
+    },
+
     /// Restore the workspace to the snapshot taken before a run.
     ///
     /// Before a run first changes files in a Git work tree, QQ records the

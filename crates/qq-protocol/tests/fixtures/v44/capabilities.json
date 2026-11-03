@@ -7,6 +7,9 @@
     "workspace_file"
   ],
   "commands": [
+    "acknowledge_check_interruption",
+    "set_goal",
+    "goal_control",
     "cancel_side_question",
     "submit_side_question",
     "resolve_workspace",
@@ -21,6 +24,10 @@
     "set_session_effort",
     "delete_session",
     "prune_sessions",
+    "list_checkpoints",
+    "turn_diff",
+    "rewind_session",
+    "fork_session",
     "undo_workspace",
     "compact_session",
     "rollback_compaction"

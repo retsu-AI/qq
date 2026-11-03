@@ -265,6 +265,27 @@ the banner.
   keeps fitting; `/rollback` undoes the newest compaction. Stale read-only
   tool results are pruned from the model's context automatically.
 
+## Turn checkpoints, rewind and fork
+
+Click a turn receipt to inspect that model turn's file diff in the dock.
+`/rewind` opens a checkpoint picker. Choosing one restores its
+files and folds later turns as rewound; they remain in the transcript but
+are excluded from future model context. The restore prints a `qq undo NAME`
+that reverses the file restore. Rewind refuses while overlapping work is
+active or queued.
+
+`/fork` opens a prompt picker. It forks **before** the selected prompt,
+keeps earlier history, opens an isolated worktree at the preceding
+checkpoint and places the selected prompt in the composer for editing.
+The draft is saved, so opening a CLI-created fork also restores it. Press
+Enter on a folded rewound transcript block to unfold it without reactivating
+it in model context.
+With the block cursor on a prompt, `f` forks from that prompt directly.
+The original session and files are unchanged. Git 2.32+ and a retained
+checkpoint are required. Ignored files and untracked files over 16 MiB are
+not captured. External edits during a tool turn cannot be separated from
+agent edits; edits between turns are excluded from that turn's diff.
+
 ## Files the agents changed
 
 `/changes` lists every file edited in this workspace by any session,
@@ -288,6 +309,8 @@ searchable palette that runs the highlighted command on `Enter`.
 | create a child session |  | `Alt-C` |
 | compact session context | `/compact` |  |
 | undo the newest compaction | `/rollback` |  |
+| restore files to a turn checkpoint | `/rewind` |  |
+| fork before a prompt into a worktree | `/fork` |  |
 | delete every empty session | `/prune` |  |
 | restore files to before the newest run changed them | `/undo` |  |
 | focus the parent session |  | `Esc` |

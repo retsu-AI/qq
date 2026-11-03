@@ -680,6 +680,7 @@ pub(super) fn retained_deliveries(
                AND m.role = 'user' AND m.steering = 0
                AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
                AND d.delivered_at_ms IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=d.parent_run_id AND (z.turn_ordinal=0 OR z.turn_ordinal=d.turn_ordinal))
          UNION ALL
          SELECT c.parent_run_id, c.turn_ordinal, c.text, c.delivery_ordinal
              FROM messages m
@@ -687,6 +688,7 @@ pub(super) fn retained_deliveries(
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
                AND m.role = 'user' AND m.steering = 0
                AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
+               AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=c.parent_run_id AND (z.turn_ordinal=0 OR z.turn_ordinal=c.turn_ordinal))
          ORDER BY 1, 4",
     )?;
     let rows = statement.query_map(params![session, through_ordinal, cutoff_ordinal], |row| {

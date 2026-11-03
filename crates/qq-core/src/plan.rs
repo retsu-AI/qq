@@ -54,6 +54,7 @@ pub struct AgentProfile {
     provider_descriptor: ProviderDescriptor,
     resolved_model: ResolvedModel,
     workspace: PathBuf,
+    configuration_workspace: Option<PathBuf>,
     hosts: Vec<HostSnapshot>,
     mcp_servers: Vec<McpServerDescriptor>,
     spawn_model_routes: Vec<String>,
@@ -98,6 +99,7 @@ impl AgentProfile {
             provider_descriptor,
             resolved_model,
             workspace,
+            configuration_workspace: None,
             hosts: Vec::new(),
             mcp_servers: Vec::new(),
             spawn_model_routes: Vec::new(),
@@ -146,6 +148,7 @@ impl AgentProfile {
             provider_descriptor: ProviderDescriptor::embedded(),
             resolved_model: runtime.embedded_resolved_model(),
             workspace,
+            configuration_workspace: None,
             hosts: runtime
                 .hosts
                 .iter()
@@ -195,6 +198,12 @@ impl AgentProfile {
     #[must_use]
     pub fn with_global_config_dir(mut self, dir: PathBuf) -> Self {
         self.global_config_dir = Some(dir);
+        self
+    }
+
+    #[must_use]
+    pub fn with_configuration_workspace(mut self, workspace: PathBuf) -> Self {
+        self.configuration_workspace = Some(workspace);
         self
     }
 
@@ -346,6 +355,7 @@ pub enum PlanCompileError {
 pub struct CompiledAgentPlan {
     pub(crate) runtime: Runtime,
     pub(crate) workspace: Workspace,
+    pub(crate) guidance_workspace: Workspace,
     pub(crate) instructions: WorkspaceInstructions,
     pub(crate) catalog: Arc<ToolCatalog>,
     pub(crate) skills: Arc<SkillIndex>,
@@ -482,6 +492,7 @@ impl CompiledAgentPlan {
             provider_descriptor,
             resolved_model,
             workspace,
+            configuration_workspace,
             hosts,
             mcp_servers,
             spawn_model_routes,
@@ -562,8 +573,13 @@ impl CompiledAgentPlan {
                 source,
             })?;
         let cancelled = crate::RunCancellation::new();
+        let configuration_root = match configuration_workspace {
+            Some(root) => Workspace::open(&root)
+                .map_err(|source| PlanCompileError::OpenWorkspace { path: root, source })?,
+            None => opened.clone(),
+        };
         let (instructions, mut sources) =
-            crate::workspace::load_instructions_with_sources(&opened, &cancelled)?;
+            crate::workspace::load_instructions_with_sources(&configuration_root, &cancelled)?;
         let mut skill_roots = SkillRoot::workspace_defaults();
         let mut guidance_roots: Vec<Workspace> = Vec::new();
         if let Some(dir) = &global_config_dir {
@@ -578,7 +594,7 @@ impl CompiledAgentPlan {
             }
         }
         let (skills, skill_sources) =
-            SkillIndex::compile_blocking(&opened, &guidance_roots, &skill_roots);
+            SkillIndex::compile_blocking(&configuration_root, &guidance_roots, &skill_roots);
         sources.extend(skill_sources);
 
         let mut static_tools: Vec<StaticTool> = tools::static_tools();
@@ -833,6 +849,7 @@ impl CompiledAgentPlan {
         Ok(Arc::new(Self {
             runtime,
             workspace: opened,
+            guidance_workspace: configuration_root,
             instructions,
             catalog: Arc::new(catalog),
             skills: Arc::new(skills),

@@ -49,7 +49,7 @@ pub use sessions::{
     AuditOutcome, AuditRecord, BudgetExhaustion, BudgetLimitKind, COMMAND_ROUTES,
     CapabilitySupport, ChildAuthority, CommandOutcome, CommandReceipt, CommandRequest, ContentHash,
     ContentHashError, ContextSourceOutcome, ContextSourceRecord, CursorError,
-    DEFAULT_OUTPUT_REPAIR_TURNS, EditPreview, EventCursor, FetchPreview, FinalOutput,
+    DEFAULT_OUTPUT_REPAIR_TURNS, EditPreview, EventCursor, FetchPreview, FinalOutput, ForkPrompt,
     GenerationCapabilities, GuidanceIdentity, GuidanceKind, InstructionHash, InstructionHashError,
     MAX_INCLUDED_SESSIONS, MAX_OUTPUT_ERROR_BYTES, MAX_OUTPUT_REPAIR_TURNS,
     MAX_OUTPUT_SCHEMA_BYTES, MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MAX_PENDING_HOLDS,
@@ -62,7 +62,8 @@ pub use sessions::{
     SessionEventEnvelope, SessionPurpose, SessionSnapshot, SessionStatus, SessionSummary,
     ShellCommandPreview, ShellVerdict, SideQuestionSnapshot, SideQuestionState, SnapshotRequest,
     SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallSnapshot,
-    ToolCallState, ToolErrorKind, ToolExposure, WorkspaceSnapshot, WorkspaceSummary,
+    ToolCallState, ToolErrorKind, ToolExposure, TurnCheckpoint, WorkspaceSnapshot,
+    WorkspaceSummary,
 };
 
 mod workspaces;
@@ -70,13 +71,13 @@ pub use workspaces::{
     MAX_WORKSPACE_PAGE, WorkspaceCatalog, WorkspaceCatalogCursor, WorkspaceCatalogRequest,
 };
 
-pub const PROTOCOL_VERSION: u16 = 44;
+pub const PROTOCOL_VERSION: u16 = 45;
 
 pub const SNAPSHOT_REQUIRED_SSE_EVENT: &str = "snapshot_required";
 
 pub const MAX_TURN_RETRIES: u16 = 5;
 
-pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 28] = [
+pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 30] = [
     "/btw",
     "/ask",
     "/btw-new",
@@ -98,6 +99,8 @@ pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 28] = [
     "/compact",
     "/rollback",
     "/prune",
+    "/rewind",
+    "/fork",
     "/undo",
     "/mouse",
     "/copy",

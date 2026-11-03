@@ -154,6 +154,9 @@ async fn run(cli: cli::Cli) -> Result<ExitCode, Box<dyn Error>> {
             return doctor_command(args, &overrides).await;
         }
         Some(cli::Command::Init(args)) => run_blocking_command(move || init_command(args)).await?,
+        Some(cli::Command::Fork { session, turn }) => {
+            fork_session(session, turn, &overrides).await?
+        }
         Some(cli::Command::Undo(args)) => return Ok(undo::run(args).await),
         Some(cli::Command::Version) => print!("{}", version_report()),
         None => interactive(&overrides, cli.session, cli.tui_qa_root).await?,
@@ -217,6 +220,59 @@ impl CliOverrides {
         }
         Ok(request.with_overrides(values))
     }
+}
+
+async fn fork_session(
+    session_id: qq_protocol::SessionId,
+    turn: Option<u64>,
+    overrides: &CliOverrides,
+) -> Result<(), Box<dyn Error>> {
+    let paths = server::ServerPaths::for_user()?;
+    let command = qq_protocol::SessionCommand::ForkSession { session_id, turn };
+    let receipt = match server::discover_at(&paths).await? {
+        Some(connection) => {
+            let client = client::SessionClient::new(connection)?;
+            client
+                .command(qq_protocol::CommandId::generate()?, command)
+                .await?
+        }
+        None => {
+            let factory = runtime::RuntimeFactory::system_with_read_images(
+                cli::HOST_BUILD,
+                overrides.approved_read_images.clone(),
+            )?;
+            let load = overrides.load_request()?;
+            let prepared = factory.clone();
+            let (approval_timeout, retention) = tokio::task::spawn_blocking(move || {
+                prepared
+                    .load_for_client(&load)
+                    .map(|snapshot| (snapshot.approval_timeout(), snapshot.retention()))
+            })
+            .await??;
+            let handler =
+                runtime::RuntimeHandler::open_owned(factory, approval_timeout, retention).await?;
+            let result = handler
+                .sessions()
+                .command(qq_protocol::CommandId::generate()?, command)
+                .await;
+            handler.shutdown().await?;
+            result?
+        }
+    };
+    if let qq_protocol::CommandOutcome::SessionForked {
+        session_id,
+        prompt,
+        execution_root,
+        ..
+    } = receipt.outcome
+    {
+        println!(
+            "{session_id}\nworktree: {execution_root}\nprompt: {prompt}\nOpen with: qq --session {session_id}"
+        );
+    } else {
+        return Err(io::Error::other("unexpected fork response").into());
+    }
+    Ok(())
 }
 
 async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {

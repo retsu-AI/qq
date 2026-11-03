@@ -12,22 +12,22 @@ use wasm_bindgen_test::wasm_bindgen_test as test;
 use super::*;
 
 const EVENT_FIXTURES: [&str; 12] = [
-    include_str!("../../../qq-protocol/tests/fixtures/v43/event_prompt_queued.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v43/event_run_started.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v43/event_steering_queued.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v43/event_steering_applied.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v43/event_steering_superseded.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v43/event_run_interrupted.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v43/event_run_finished_failed.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v43/event_run_output_truncated.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v44/event_prompt_queued.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v44/event_run_started.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v44/event_steering_queued.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v44/event_steering_applied.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v44/event_steering_superseded.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v44/event_run_interrupted.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v44/event_run_finished_failed.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v44/event_run_output_truncated.json"),
     include_str!(
-        "../../../qq-protocol/tests/fixtures/v43/event_run_finished_output_truncated.json"
+        "../../../qq-protocol/tests/fixtures/v44/event_run_finished_output_truncated.json"
     ),
     include_str!(
-        "../../../qq-protocol/tests/fixtures/v43/event_assistant_message_started_truncated.json"
+        "../../../qq-protocol/tests/fixtures/v44/event_assistant_message_started_truncated.json"
     ),
-    include_str!("../../../qq-protocol/tests/fixtures/v43/event_run_audit_started.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v43/event_run_audit_completed.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v44/event_run_audit_started.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v44/event_run_audit_completed.json"),
 ];
 
 const REPLAY_GOLDEN: &str = include_str!("../../tests/fixtures/state_replay_v17.json");
@@ -382,6 +382,8 @@ fn store_activity_is_blocked_while_a_human_is_asked_and_the_worst_session_wins()
 
     let snapshot = SessionSnapshot {
         approval_previews: Vec::new(),
+        execution_root: None,
+        fork_prompt: None,
         side_questions: Vec::new(),
         summary: SessionSummary {
             pending_holds: vec![qq_protocol::PendingHold { tool_call_id: held }],
@@ -737,6 +739,8 @@ fn internal_summary_completion_notifies_once_in_both_terminal_orders() {
                 store.install_session_snapshot(
                     qq_protocol::SessionSnapshot {
                         approval_previews: Vec::new(),
+                        execution_root: None,
+                        fork_prompt: None,
                         side_questions: Vec::new(),
                         summary: running.clone(),
                         messages: vec![message(8, session_id, prompt, "work")],
@@ -911,6 +915,8 @@ fn observed_turn_prices_survive_older_snapshot_replay_once() {
     running.active_run_id = Some(run_id);
     let snapshot = qq_protocol::SessionSnapshot {
         approval_previews: Vec::new(),
+        execution_root: None,
+        fork_prompt: None,
         side_questions: Vec::new(),
         summary: running,
         messages: vec![message(8, session_id, run_id, "work")],
@@ -1127,6 +1133,8 @@ fn terminal_cost_uses_the_run_snapshot_instead_of_the_session_delta() {
         );
         let snapshot = qq_protocol::SessionSnapshot {
             approval_previews: Vec::new(),
+        execution_root: None,
+        fork_prompt: None,
             side_questions: Vec::new(), summary: idle, messages: vec![message(8, session_id, prompt, "answer")],
             runs: vec![serde_json::from_value(serde_json::json!({
                 "id":prompt,"session_id":session_id,"status":"completed","outcome":{"type":"completed"},
@@ -1578,7 +1586,7 @@ fn the_output_truncation_notice_names_the_cap_when_capabilities_are_known() {
         }]
     );
     let mut capabilities: qq_protocol::ServerCapabilities = serde_json::from_str(include_str!(
-        "../../../qq-protocol/tests/fixtures/v44/capabilities.json"
+        "../../../qq-protocol/tests/fixtures/v45/capabilities.json"
     ))
     .expect("capabilities fixture decodes");
     capabilities.limits.max_output_continuations = 4;
@@ -1902,6 +1910,8 @@ fn a_body_the_snapshot_budget_starved_stays_cold_instead_of_empty() {
     let session_id = SessionId::from_bytes([7; 16]);
     let starved = SessionSnapshot {
         approval_previews: Vec::new(),
+        execution_root: None,
+        fork_prompt: None,
         side_questions: Vec::new(),
         summary: summary(session_id),
         messages: Vec::new(),

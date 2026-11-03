@@ -128,9 +128,9 @@ pub(super) fn create_child_run(
                 id, workspace_id, parent_id, owner_run_id, spawned_by_tool_call_id, title,
                 status, queued_prompts, model, max_output_tokens, organization, approval_mode,
                 created_at_ms, updated_at_ms, depth, root_run_id, purpose, profile, model_is_fallback,
-                reasoning_effort
+                reasoning_effort, execution_root
              ) VALUES (?1, ?2, ?3, ?4, ?10, ?5, 'queued', 1, ?6, ?7, ?8, ?11, ?9, ?9, ?12, ?13, ?14, ?15, ?16,
-                COALESCE(?17, (SELECT reasoning_effort FROM sessions WHERE id = ?3)))",
+                COALESCE(?17, (SELECT reasoning_effort FROM sessions WHERE id = ?3)),(SELECT execution_root FROM sessions WHERE id=?3))",
             params![
                 session_id.to_string(),
                 workspace_id.to_string(),
@@ -452,6 +452,10 @@ pub(super) fn execute_command(
             validate_model_selection(&model)?;
             let correlation_json = encode_correlation(&correlation)?;
             ensure_workspace(&transaction, workspace_id)?;
+            let reclaiming:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM fork_resources f JOIN workspaces w ON w.id=?1 WHERE f.state='deleting' AND f.root IS NOT NULL AND (w.path=f.root OR substr(w.path,1,length(f.root)+1)=f.root||'/'))",[workspace_id.to_string()],|row|row.get(0))?;
+            if reclaiming {
+                return Err(SessionRuntimeError::WorkspaceBusy);
+            }
             let session_count: u32 = transaction.query_row(
                 "SELECT COUNT(*) FROM sessions WHERE workspace_id = ?1",
                 [workspace_id.to_string()],
@@ -493,8 +497,8 @@ pub(super) fn execute_command(
                         id, workspace_id, parent_id, title, status, model,
                         max_output_tokens, organization, approval_mode,
                         created_at_ms, updated_at_ms, profile, correlation_json, depth,
-                        root_run_id, model_is_fallback, reasoning_effort
-                     ) VALUES (?1, ?2, ?3, 'New session', 'idle', ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                        root_run_id, model_is_fallback, reasoning_effort,execution_root
+                     ) VALUES (?1, ?2, ?3, 'New session', 'idle', ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13, ?14,(SELECT execution_root FROM sessions WHERE id=?3))",
                     params![
                         session_id.to_string(),
                         workspace_id.to_string(),
@@ -584,9 +588,16 @@ pub(super) fn execute_command(
                 )
                 .optional()?
                 .ok_or(SessionRuntimeError::SessionNotFound)?;
+            if reserved_for_rewind(&transaction, session_id)? {
+                return Err(SessionRuntimeError::WorkspaceBusy);
+            }
             if queued >= MAX_PENDING_PROMPTS {
                 return Err(SessionRuntimeError::QueueFull);
             }
+            transaction.execute(
+                "UPDATE fork_history SET prompt=NULL WHERE session_id=?1",
+                [session_id.to_string()],
+            )?;
             let workspace_id = parse_id(&workspace_id)?;
             let run_id = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
             let message_id = MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
@@ -1342,6 +1353,12 @@ pub(super) fn execute_command(
                 false,
             )
         }
+        SessionCommand::ListCheckpoints { .. }
+        | SessionCommand::TurnDiff { .. }
+        | SessionCommand::RewindSession { .. }
+        | SessionCommand::ForkSession { .. } => {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
         SessionCommand::UndoWorkspace { .. } => {
             return Err(SessionRuntimeError::CONSTRAINT);
         }
@@ -1640,6 +1657,13 @@ pub(super) fn delete_idle_session(
     command_id: Option<CommandId>,
     now: u64,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    let reserved: bool = transaction.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM sessions s JOIN workspaces w ON w.id=s.workspace_id JOIN temp.restoring_paths rp ON {} WHERE s.id=?1)", paths_overlap_sql("COALESCE(s.execution_root,w.path)", "rp.path")),
+        [session_id.to_string()], |row| row.get(0),
+    )?;
+    if reserved {
+        return Err(SessionRuntimeError::SessionActive);
+    }
     let state = transaction
         .query_row(
             "SELECT status, active_run_id, preparing_run_id, queued_prompts,
@@ -1699,6 +1723,7 @@ pub(super) fn delete_idle_session(
     if owner_active {
         return Err(SessionRuntimeError::SessionActive);
     }
+    transaction.execute("INSERT INTO fork_resources(session_id,workspace,root,state) SELECT s.id,w.path,NULL,'deleting' FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.id=?1 ON CONFLICT(session_id) DO UPDATE SET state='deleting'",[session_id.to_string()])?;
     let parent_id = session_parent(transaction, session_id)?;
     let session = session_id.to_string();
     for statement in [
@@ -1707,6 +1732,11 @@ pub(super) fn delete_idle_session(
         "DELETE FROM message_attachments WHERE session_id = ?1",
         "DELETE FROM attachment_blobs WHERE session_id = ?1",
         "DELETE FROM tool_calls WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?1)",
+        "DELETE FROM checkpoint_pins WHERE fork_session_id=?1",
+        "DELETE FROM fork_history WHERE session_id=?1",
+        "DELETE FROM prompt_baselines WHERE session_id=?1",
+        "DELETE FROM turn_checkpoints WHERE session_id=?1",
+        "DELETE FROM rewound_turns WHERE run_id IN (SELECT id FROM runs WHERE session_id=?1)",
         "DELETE FROM model_turns WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?1)",
         "DELETE FROM child_deliveries WHERE parent_session_id = ?1",
         "DELETE FROM child_reports WHERE parent_session_id = ?1",
@@ -1856,27 +1886,53 @@ pub(super) enum WorkspaceRestore {
     Started(String),
 }
 
+pub(super) fn reserved_for_rewind(
+    connection: &Connection,
+    session: SessionId,
+) -> Result<bool, SessionRuntimeError> {
+    Ok(connection.query_row(&format!("SELECT EXISTS(SELECT 1 FROM sessions s JOIN workspaces w ON w.id=s.workspace_id JOIN temp.restoring_paths rp ON {} WHERE s.id=?1 AND json_extract(rp.request_json,'$.type')='rewind_session')",paths_overlap_sql("COALESCE(s.execution_root,w.path)","rp.path")),[session.to_string()],|row|row.get(0))?)
+}
+
+pub(super) fn check_command_limit(
+    connection: &Connection,
+    command: &SessionCommand,
+) -> Result<(), SessionRuntimeError> {
+    let count: String = connection.query_row(
+        "SELECT value FROM metadata WHERE key='command_count'",
+        [],
+        |row| row.get(0),
+    )?;
+    let count: u32 = count.parse().map_err(|_| SessionRuntimeError::CODEC)?;
+    let limit = if command.kind().creates_work() {
+        MAX_COMMANDS
+    } else {
+        MAX_COMMANDS_WITH_CONTROL_HEADROOM
+    };
+    if count >= limit {
+        return Err(SessionRuntimeError::CommandLimitReached);
+    }
+    Ok(())
+}
+
 pub(super) fn begin_workspace_restore(
     connection: &mut Connection,
     command_id: CommandId,
     command: &SessionCommand,
 ) -> Result<WorkspaceRestore, SessionRuntimeError> {
-    let SessionCommand::UndoWorkspace { workspace_id, .. } = command else {
-        return Err(SessionRuntimeError::CONSTRAINT);
+    let workspace_id = match command {
+        SessionCommand::UndoWorkspace { workspace_id, .. } => *workspace_id,
+        SessionCommand::RewindSession { session_id, .. }
+        | SessionCommand::ForkSession { session_id, .. } => {
+            session_workspace(connection, *session_id)?
+        }
+        _ => return Err(SessionRuntimeError::CONSTRAINT),
     };
     if let Some(receipt) = recorded_receipt(connection, command_id, command)? {
         return Ok(WorkspaceRestore::Replayed(receipt));
     }
     let request_json = serde_json::to_string(command)?;
     restoring_command(connection, command_id, &request_json)?;
-    let command_count: u32 = connection
-        .prepare_cached("SELECT value FROM metadata WHERE key = 'command_count'")
-        .and_then(|mut statement| statement.query_row([], |row| row.get::<_, String>(0)))?
-        .parse()
-        .map_err(|_| SessionRuntimeError::CODEC)?;
-    if command_count >= MAX_COMMANDS_WITH_CONTROL_HEADROOM {
-        return Err(SessionRuntimeError::CommandLimitReached);
-    }
+    check_command_limit(connection, command)?;
     let transaction = store::begin_unit(connection)?;
     let workspace = workspace_id.to_string();
     let path: String = transaction
@@ -1887,17 +1943,35 @@ pub(super) fn begin_workspace_restore(
         )
         .optional()?
         .ok_or(SessionRuntimeError::WorkspaceNotFound)?;
+    let path = if let SessionCommand::RewindSession { session_id, .. }
+    | SessionCommand::ForkSession { session_id, .. }
+    | SessionCommand::UndoWorkspace {
+        session_id: Some(session_id),
+        ..
+    } = command
+    {
+        if session_workspace(&transaction, *session_id)? != workspace_id {
+            return Err(SessionRuntimeError::WorkspaceNotFound);
+        }
+        transaction.query_row(
+            "SELECT COALESCE(execution_root,?2) FROM sessions WHERE id=?1",
+            params![session_id.to_string(), path],
+            |row| row.get::<_, String>(0),
+        )?
+    } else {
+        path
+    };
     let busy: bool = transaction.query_row(
         &format!(
-            "WITH overlapping(id) AS (SELECT id FROM workspaces o WHERE {})
+            "WITH overlapping(id) AS (SELECT s.id FROM sessions s JOIN workspaces o ON o.id=s.workspace_id WHERE {})
          SELECT EXISTS(SELECT 1 FROM temp.restoring_paths rp WHERE {})
-             OR EXISTS(SELECT 1 FROM sessions s WHERE s.workspace_id IN (SELECT id FROM overlapping)
+             OR EXISTS(SELECT 1 FROM sessions s WHERE s.id IN (SELECT id FROM overlapping)
                  AND (s.status != 'idle' OR s.active_run_id IS NOT NULL
                       OR s.preparing_run_id IS NOT NULL OR s.queued_prompts != 0))
              OR EXISTS(SELECT 1 FROM runs r JOIN sessions s ON s.id = r.session_id
-                 WHERE s.workspace_id IN (SELECT id FROM overlapping)
+                 WHERE s.id IN (SELECT id FROM overlapping)
                    AND r.status IN ('queued', 'running'))",
-            paths_overlap_sql("o.path", "?1"),
+            paths_overlap_sql("COALESCE(s.execution_root,o.path)", "?1"),
             paths_overlap_sql("rp.path", "?1")
         ),
         [&path],
@@ -1949,6 +2023,119 @@ pub(super) fn record_workspace_restore(
         )
         .and_then(|mut statement| statement.execute([]))?;
     transaction.commit()?;
+    Ok(receipt)
+}
+
+pub(super) fn record_checkpoint_command(
+    connection: &mut Connection,
+    store_id: StoreId,
+    command_id: CommandId,
+    command: &SessionCommand,
+    workspace_id: WorkspaceId,
+    outcome: CommandOutcome,
+) -> Result<CommandReceipt, SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    if let Some(receipt) = recorded_receipt(&transaction, command_id, command)? {
+        return Ok(receipt);
+    }
+    let receipt = record_checkpoint_receipt(
+        &transaction,
+        store_id,
+        command_id,
+        command,
+        workspace_id,
+        outcome,
+    )?;
+    transaction.commit()?;
+    Ok(receipt)
+}
+
+pub(super) fn record_checkpoint_receipt(
+    transaction: &Connection,
+    store_id: StoreId,
+    command_id: CommandId,
+    command: &SessionCommand,
+    workspace_id: WorkspaceId,
+    outcome: CommandOutcome,
+) -> Result<CommandReceipt, SessionRuntimeError> {
+    let mut receipt = CommandReceipt {
+        command_id,
+        committed_through: EventCursor {
+            store_id,
+            workspace_id,
+            sequence: workspace_sequence(transaction, workspace_id)?,
+        },
+        outcome,
+    };
+    if let CommandOutcome::SessionForked { session_id, .. } = &receipt.outcome {
+        let summary = load_session_summary(transaction, *session_id)?;
+        receipt.committed_through = append_event(
+            transaction,
+            EventContext::for_session(
+                store_id,
+                workspace_id,
+                *session_id,
+                Some(command_id),
+                now_ms(),
+            ),
+            SessionEvent::SessionCreated {
+                session: Box::new(summary),
+            },
+        )?
+        .cursor;
+    }
+    if let CommandOutcome::SessionRewound {
+        session_id,
+        run_id,
+        turn_ordinal,
+        ..
+    } = &receipt.outcome
+    {
+        let prompt_ordinal:u64=transaction.query_row("SELECT prompt_ordinal FROM turn_checkpoints WHERE session_id=?1 AND run_id=?2 AND turn_ordinal=?3",params![session_id.to_string(),run_id.to_string(),turn_ordinal],|row|row.get(0))?;
+        transaction.execute("INSERT OR IGNORE INTO rewound_turns SELECT t.run_id,t.turn_ordinal FROM model_turns t JOIN runs r ON r.id=t.run_id JOIN messages m ON m.id=r.user_message_id WHERE r.session_id=?1 AND (m.ordinal>?2 OR (m.ordinal=?2 AND t.turn_ordinal>?3))",params![session_id.to_string(),prompt_ordinal,turn_ordinal])?;
+        transaction.execute("INSERT OR IGNORE INTO rewound_turns SELECT r.id,0 FROM runs r JOIN messages m ON m.id=r.user_message_id WHERE r.session_id=?1 AND m.ordinal>?2",params![session_id.to_string(),prompt_ordinal])?;
+        transaction.execute("UPDATE turn_checkpoints SET rewound=1 WHERE session_id=?1 AND (prompt_ordinal>?2 OR (prompt_ordinal=?2 AND turn_ordinal>?3))",params![session_id.to_string(),prompt_ordinal,turn_ordinal])?;
+        transaction.execute(
+            "DELETE FROM session_compactions WHERE session_id=?1 AND (cutoff_ordinal>=?2 OR EXISTS(SELECT 1 FROM runs r JOIN messages m ON m.id=r.user_message_id WHERE r.id=session_compactions.scope_run_id AND (m.ordinal>?2 OR (m.ordinal=?2 AND session_compactions.turn_cutoff>?3))))",
+            params![session_id.to_string(),prompt_ordinal,turn_ordinal],
+        )?;
+        transaction.execute(
+            "DELETE FROM session_files WHERE session_id=?1",
+            [session_id.to_string()],
+        )?;
+        transaction.execute("UPDATE sessions SET context_tokens=NULL,context_occupancy_json=NULL,pending_context_overflow_basis_json=NULL,updated_at_ms=?2 WHERE id=?1",params![session_id.to_string(),now_ms()])?;
+        let mut statement=transaction.prepare("SELECT m.id FROM messages m JOIN rewound_turns z ON z.run_id=m.run_id AND (z.turn_ordinal=0 OR z.turn_ordinal=m.turn_ordinal) WHERE m.session_id=?1 ORDER BY m.ordinal DESC LIMIT 512")?;
+        let ids = statement
+            .query_map([session_id.to_string()], |row| row.get::<_, String>(0))?
+            .map(|row| parse_id(&row?))
+            .collect::<Result<Vec<_>, SessionRuntimeError>>()?;
+        drop(statement);
+        receipt.committed_through = append_event(
+            transaction,
+            EventContext::for_session(
+                store_id,
+                workspace_id,
+                *session_id,
+                Some(command_id),
+                now_ms(),
+            ),
+            SessionEvent::SessionRewound {
+                run_id: *run_id,
+                turn_ordinal: *turn_ordinal,
+                messages: ids,
+            },
+        )?
+        .cursor;
+    }
+    transaction.execute(
+        "INSERT INTO commands(id,request_json,receipt_json) VALUES (?1,?2,?3)",
+        params![
+            command_id.to_string(),
+            serde_json::to_string(command)?,
+            serde_json::to_string(&receipt)?
+        ],
+    )?;
+    transaction.execute("UPDATE metadata SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='command_count'",[])?;
     Ok(receipt)
 }
 

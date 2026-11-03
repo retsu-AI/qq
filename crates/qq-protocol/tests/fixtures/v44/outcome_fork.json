@@ -1,0 +1,8 @@
+{
+  "type": "session_forked",
+  "session_id": "05050505050505050505050505050505",
+  "source_session_id": "03030303030303030303030303030303",
+  "turn": 2,
+  "prompt": "try another approach",
+  "execution_root": "/data/worktrees/fork"
+}

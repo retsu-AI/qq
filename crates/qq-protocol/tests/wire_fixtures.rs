@@ -188,7 +188,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 44);
+    assert_eq!(PROTOCOL_VERSION, 45);
     let catalog_cursor = qq_protocol::WorkspaceCatalogCursor {
         store_id: StoreId::from_bytes([1; 16]),
         workspace_id: WorkspaceId::from_bytes([2; 16]),
@@ -235,6 +235,76 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 slices: 2,
                 calls: 514,
             }),
+        },
+    );
+    check(
+        "event_session_rewound",
+        &envelope(
+            31,
+            SessionEvent::SessionRewound {
+                run_id: RunId::from_bytes([4; 16]),
+                turn_ordinal: 2,
+                messages: vec![MessageId::from_bytes([9; 16])],
+            },
+        ),
+    );
+    for (name, command) in [
+        (
+            "command_list_checkpoints",
+            SessionCommand::ListCheckpoints {
+                session_id: SessionId::from_bytes([3; 16]),
+            },
+        ),
+        (
+            "command_turn_diff",
+            SessionCommand::TurnDiff {
+                session_id: SessionId::from_bytes([3; 16]),
+                run_id: RunId::from_bytes([4; 16]),
+                turn_ordinal: 2,
+            },
+        ),
+        (
+            "command_rewind",
+            SessionCommand::RewindSession {
+                session_id: SessionId::from_bytes([3; 16]),
+                run_id: RunId::from_bytes([4; 16]),
+                turn_ordinal: 2,
+            },
+        ),
+        (
+            "command_fork",
+            SessionCommand::ForkSession {
+                session_id: SessionId::from_bytes([3; 16]),
+                turn: Some(2),
+            },
+        ),
+    ] {
+        check(name, &command)
+    }
+    check(
+        "outcome_fork",
+        &CommandOutcome::SessionForked {
+            session_id: SessionId::from_bytes([5; 16]),
+            source_session_id: SessionId::from_bytes([3; 16]),
+            turn: 2,
+            prompt: "try another approach".to_owned(),
+            execution_root: "/data/worktrees/fork".to_owned(),
+        },
+    );
+    check(
+        "outcome_rewind",
+        &CommandOutcome::SessionRewound {
+            session_id: SessionId::from_bytes([3; 16]),
+            run_id: RunId::from_bytes([4; 16]),
+            turn_ordinal: 2,
+            before: "undo-1700000000000".to_owned(),
+        },
+    );
+    check(
+        "outcome_turn_diff",
+        &CommandOutcome::TurnDiff {
+            diff: "-old\n+new\n".to_owned(),
+            truncated: false,
         },
     );
     let session_id = SessionId::from_bytes([3; 16]);
@@ -500,7 +570,20 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             0x28,
             SessionCommand::UndoWorkspace {
                 workspace_id: WorkspaceId::from_bytes([2; 16]),
+                session_id: None,
                 snapshot: Some("3f9a".to_owned()),
+            },
+        ),
+    );
+
+    check(
+        "command_undo_fork",
+        &command(
+            0x29,
+            SessionCommand::UndoWorkspace {
+                workspace_id: WorkspaceId::from_bytes([2; 16]),
+                session_id: Some(session_id),
+                snapshot: None,
             },
         ),
     );
@@ -1251,7 +1334,7 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
 
 #[test]
 fn historical_fixtures_still_decode() {
-    const REMOVED_IN_44: [&str; 2] = ["goal", "check_interruption"];
+    const REMOVED_IN_45: [&str; 2] = ["goal", "check_interruption"];
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     for version in retained_versions(&root) {
         let directory = fixture_dir(version);
@@ -1268,7 +1351,7 @@ fn historical_fixtures_still_decode() {
         for path in entries {
             let name = path.file_stem().unwrap().to_str().unwrap();
             let stored = fs::read_to_string(&path).unwrap();
-            if REMOVED_IN_44.iter().any(|removed| stored.contains(removed)) {
+            if REMOVED_IN_45.iter().any(|removed| stored.contains(removed)) {
                 if name.starts_with("event_")
                     && let Ok(envelope) = serde_json::from_str::<SessionEventEnvelope>(&stored)
                 {
@@ -1284,12 +1367,14 @@ fn historical_fixtures_still_decode() {
                     "capabilities" => serde_json::from_str::<ServerCapabilities>(&stored).is_ok(),
                     _ if name.starts_with("command_") => {
                         serde_json::from_str::<CommandRequest>(&stored).is_ok()
+                            || serde_json::from_str::<SessionCommand>(&stored).is_ok()
                     }
                     _ if name.starts_with("receipt_") => {
                         serde_json::from_str::<CommandReceipt>(&stored).is_ok()
                     }
                     _ if name.starts_with("outcome_") => {
                         serde_json::from_str::<RunOutcome>(&stored).is_ok()
+                            || serde_json::from_str::<CommandOutcome>(&stored).is_ok()
                     }
                     _ if name.starts_with("snapshot_") => {
                         serde_json::from_str::<RunSnapshot>(&stored).is_ok()
@@ -1300,7 +1385,7 @@ fn historical_fixtures_still_decode() {
                 };
                 assert!(
                     !decodes,
-                    "{}: goal vocabulary removed in 44 must not decode",
+                    "{}: goal vocabulary removed in 45 must not decode",
                     path.display()
                 );
                 continue;
@@ -1319,8 +1404,21 @@ fn historical_fixtures_still_decode() {
                 decode!(qq_protocol::WorkspaceCatalogRequest);
             } else if name.starts_with("workspace_catalog_") {
                 decode!(qq_protocol::WorkspaceCatalog);
-            } else if name == "snapshot_pending_approvals" {
+            } else if name == "snapshot_pending_approvals" || name == "snapshot_fork_prompt" {
                 decode!(qq_protocol::WorkspaceSnapshot);
+            } else if matches!(
+                name,
+                "command_fork"
+                    | "command_list_checkpoints"
+                    | "command_rewind"
+                    | "command_turn_diff"
+            ) {
+                decode!(SessionCommand);
+            } else if matches!(
+                name,
+                "outcome_fork" | "outcome_rewind" | "outcome_turn_diff"
+            ) {
+                decode!(CommandOutcome);
             } else if name.starts_with("command_") {
                 decode!(CommandRequest);
             } else if name.starts_with("receipt_") {
@@ -1379,6 +1477,8 @@ fn pending_approval_snapshot_matches_its_golden() {
     let call = ToolCallId::from_bytes([9; 16]);
     summary.pending_holds = vec![qq_protocol::PendingHold { tool_call_id: call }];
     let body = qq_protocol::SessionSnapshot {
+        execution_root: None,
+        fork_prompt: None,
         approval_previews: vec![qq_protocol::PendingApprovalPreview {
             tool_call_id: call,
             preview: qq_protocol::ApprovalPreview {
@@ -1405,5 +1505,8 @@ fn pending_approval_snapshot_matches_its_golden() {
         "sessions":[summary], "focused":body, "has_older_sessions":false
     }))
     .unwrap();
+    let mut fork_snapshot = snapshot.clone();
+    fork_snapshot.focused.as_mut().unwrap().fork_prompt = Some("edit this fork prompt".to_owned());
+    check("snapshot_fork_prompt", &fork_snapshot);
     check("snapshot_pending_approvals", &snapshot);
 }

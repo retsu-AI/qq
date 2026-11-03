@@ -105,7 +105,19 @@ impl SessionClient {
                 command_id,
                 command,
             },
-            MAX_ERROR_BODY_BYTES,
+            MAX_ERROR_BODY_BYTES.max(2 * 1024 * 1024),
+        )
+        .await
+    }
+
+    pub async fn fork(
+        &self,
+        session_id: SessionId,
+        turn: Option<u64>,
+    ) -> Result<CommandReceipt, ClientError> {
+        self.command(
+            fresh_command_id()?,
+            SessionCommand::ForkSession { session_id, turn },
         )
         .await
     }
@@ -423,6 +435,11 @@ impl SessionClient {
         let exchange = async {
             let response = request.send().await.map_err(|_| ClientError::Unavailable)?;
             let status = response.status().as_u16();
+            let response_limit = if (200..300).contains(&status) {
+                response_limit
+            } else {
+                MAX_ERROR_BODY_BYTES
+            };
             if response
                 .content_length()
                 .is_some_and(|length| length > response_limit as u64)

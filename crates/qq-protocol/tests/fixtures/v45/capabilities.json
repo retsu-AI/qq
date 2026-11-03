@@ -1,15 +1,12 @@
 {
   "version": 1,
-  "protocol_version": 43,
+  "protocol_version": 45,
   "server_version": "0.1.0",
   "input_parts": [
     "text",
     "workspace_file"
   ],
   "commands": [
-    "acknowledge_check_interruption",
-    "set_goal",
-    "goal_control",
     "cancel_side_question",
     "submit_side_question",
     "resolve_workspace",
@@ -24,6 +21,10 @@
     "set_session_effort",
     "delete_session",
     "prune_sessions",
+    "list_checkpoints",
+    "turn_diff",
+    "rewind_session",
+    "fork_session",
     "undo_workspace",
     "compact_session",
     "rollback_compaction"

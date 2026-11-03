@@ -352,11 +352,11 @@ pub(super) fn reserve_next_run_recoverable(
     depth: u16,
 ) -> Result<Option<ClaimedRun>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    let restoring = commands::paths_overlap_sql("w.path", "rp.path");
+    let restoring = commands::paths_overlap_sql("COALESCE(s.execution_root,w.path)", "rp.path");
     let row = transaction
         .query_row(
             &format!("SELECT r.id, r.session_id, r.command_id, r.user_message_id, r.kind,
-                    s.workspace_id, w.path, s.model, s.max_output_tokens, s.organization,
+                    s.workspace_id, COALESCE(s.execution_root, w.path), s.model, s.max_output_tokens, s.organization,
                     r.context_compaction_attempted,
                     (SELECT c.request_json FROM commands c WHERE c.id = r.command_id),
                     s.pending_context_overflow_basis_json,

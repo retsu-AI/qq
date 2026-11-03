@@ -450,6 +450,17 @@ impl SessionStore {
                     text,
                 });
             }
+            SessionEvent::SessionRewound { messages, .. } => {
+                if let Some(view) = self.body_mut(&session_id)
+                    && let Some(body) = view.messages.as_mut()
+                {
+                    for message in body {
+                        if messages.contains(&message.id) {
+                            message.state = MessageState::Rewound;
+                        }
+                    }
+                }
+            }
             SessionEvent::SessionCompactionRolledBack { session, remaining } => {
                 self.upsert_summary((**session).clone(), context.models, 0);
                 effects.push(StateEffect::Notice {

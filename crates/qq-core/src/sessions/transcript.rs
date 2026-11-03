@@ -172,13 +172,18 @@ pub(super) fn load_message(
             },
         )?;
     let (output, refusal) = load_message_text(connection, message_id, output, refusal)?;
+    let rewound: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM rewound_turns WHERE run_id=?1 AND (turn_ordinal=?2 OR turn_ordinal=0))",params![run,turn_ordinal],|row|row.get(0))?;
     Ok(MessageSnapshot {
         id: message_id,
         session_id: parse_id(&session)?,
         run_id: parse_id(&run)?,
         turn_ordinal,
         role: parse_message_role(&role)?,
-        state: parse_message_state(&state)?,
+        state: if rewound {
+            MessageState::Rewound
+        } else {
+            parse_message_state(&state)?
+        },
         steering,
         truncated,
         output,
@@ -338,6 +343,7 @@ fn assemble_model_context(
              FROM messages m JOIN runs r ON r.id = m.run_id
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
                AND m.role = 'user' AND m.steering = 0
+               AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=m.run_id AND z.turn_ordinal=0)
                AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
              ORDER BY m.ordinal",
     )?;
@@ -400,7 +406,9 @@ fn assemble_model_context(
              JOIN model_turns t ON t.run_id = r.id
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
                AND m.role = 'user' AND m.steering = 0
+               AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=m.run_id AND z.turn_ordinal=0)
                AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
+               AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=t.run_id AND z.turn_ordinal=t.turn_ordinal)
              ORDER BY t.run_id, t.turn_ordinal",
     )?;
     let mut rows = statement.query(params![session, through_ordinal, cutoff_ordinal])?;
@@ -457,6 +465,7 @@ fn assemble_model_context(
              LEFT JOIN tool_spills s ON s.tool_call_id = c.id
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
                AND m.role = 'user' AND m.steering = 0
+               AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=m.run_id AND z.turn_ordinal=0)
                AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
                AND c.result IS NOT NULL",
     )?;
@@ -500,8 +509,10 @@ fn assemble_model_context(
              JOIN messages s ON s.run_id = m.run_id
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
                AND m.role = 'user' AND m.steering = 0
+               AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=m.run_id AND z.turn_ordinal=0)
                AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
                AND s.steering = 1 AND s.state = 'complete'
+               AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=s.run_id AND z.turn_ordinal=s.turn_ordinal)
              ORDER BY s.run_id, s.turn_ordinal, s.ordinal",
     )?;
     let rows = statement.query_map(params![session, through_ordinal, cutoff_ordinal], |row| {

@@ -495,6 +495,11 @@ const SCENARIOS: &[Scenario] = &[
         run: |home| Box::pin(permission_dispatch(home)),
     },
     Scenario {
+        name: "turn-checkpoints",
+        proves: "three turn diffs, rewind/undo, and CLI fork preserve pre-prompt files and source history through the real server",
+        run: |home| Box::pin(turn_checkpoints(home)),
+    },
+    Scenario {
         name: "run-then-undo",
         proves: "`qq undo` restores files a run edited, deleted and created, byte for byte, keeps an ignored folder below a folder, leaves the index and stash alone, and can be reversed",
         run: |home| Box::pin(run_then_undo(home)),
@@ -1330,6 +1335,267 @@ async fn follow_run(
     })
     .await
     .map_err(|_| "the run did not finish within 30s".to_owned())?
+}
+
+async fn turn_checkpoints(home: &Home) -> Result<(), String> {
+    home.git(&["add", "inventory.rs"]).await?;
+    home.git(&["commit", "-q", "-m", "base"]).await?;
+    let provider=home.provider(vec![
+        Reply::Tool("edit_file",serde_json::json!({"edits":[{"path":"inventory.rs","old":"pub struct Widget;","new":"pub struct One;"}]})),Reply::Text("first answer"),
+        Reply::Tool("edit_file",serde_json::json!({"edits":[{"path":"inventory.rs","old":"pub struct One;","new":"pub struct Two;"}]})),Reply::Text("second answer"),
+        Reply::Tool("edit_file",serde_json::json!({"edits":[{"path":"inventory.rs","old":"pub struct Two;","new":"pub struct Three;"}]})),Reply::Text("third answer"),
+        Reply::Tool("edit_file",serde_json::json!({"edits":[{"path":"inventory.rs","old":"pub struct One;","new":"pub struct Fork;"}]})),Reply::Text("fork answer"),
+    ]).await.map_err(|error|error.to_string())?;
+    let mut child = home
+        .command(&provider.base_url)
+        .args(["serve", "--bind", "127.0.0.1:0"])
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let result = async {
+        let mut stdout = BufReader::new(child.stdout.take().ok_or("server stdout unavailable")?);
+        let mut line = String::new();
+        stdout
+            .read_line(&mut line)
+            .await
+            .map_err(|error| error.to_string())?;
+        ensure!(
+            line.starts_with("qq server listening at "),
+            "server readiness: {line}"
+        );
+        let connection =
+            qq_server::discover_at(&qq_server::ServerPaths::new(home.root.join("runtime/qq")))
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or("server not discovered")?;
+        let client =
+            qq_client::SessionClient::new(connection).map_err(|error| error.to_string())?;
+        let (workspace_id, cursor) = client
+            .resolve_workspace(&home.workspace)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut events = client
+            .events(workspace_id, cursor)
+            .await
+            .map_err(|error| error.to_string())?;
+        let command = |command| {
+            let client = client.clone();
+            async move {
+                client
+                    .command(
+                        CommandId::generate().map_err(|error| error.to_string())?,
+                        command,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+        };
+        let created = command(SessionCommand::CreateSession {
+            workspace_id,
+            parent_id: None,
+            model: ModelSelection {
+                model: Some("smoke/model".to_owned()),
+                ..Default::default()
+            },
+            approval_mode: ApprovalMode::Auto,
+            profile: Default::default(),
+            reasoning_effort: None,
+            correlation: Default::default(),
+        })
+        .await?;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            return Err("session not created".to_owned());
+        };
+        let mut runs = Vec::new();
+        for prompt in ["prompt one", "prompt two", "prompt three"] {
+            if prompt == "prompt two" {
+                tokio::fs::write(home.workspace.join("external.txt"), "outside agent\n")
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            let submitted = client
+                .submit(
+                    session_id,
+                    vec![InputPart::text(prompt)],
+                    RunLimits::default(),
+                    Correlation::default(),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let CommandOutcome::PromptQueued { run_id, .. } = submitted.outcome else {
+                return Err("prompt not queued".to_owned());
+            };
+            let (outcome, _, _, _) = follow_run(&mut events, run_id).await?;
+            ensure!(
+                outcome == RunOutcome::Completed,
+                "turn outcome: {outcome:?}"
+            );
+            runs.push(run_id);
+        }
+        for (index, (before, after)) in [("Widget", "One"), ("One", "Two"), ("Two", "Three")]
+            .iter()
+            .enumerate()
+        {
+            let receipt = command(SessionCommand::TurnDiff {
+                session_id,
+                run_id: runs[index],
+                turn_ordinal: 1,
+            })
+            .await?;
+            let CommandOutcome::TurnDiff { diff, truncated } = receipt.outcome else {
+                return Err("diff not returned".to_owned());
+            };
+            ensure!(
+                !truncated
+                    && diff.contains(&format!("-pub struct {before};"))
+                    && diff.contains(&format!("+pub struct {after};"))
+                    && !diff.contains("external.txt"),
+                "turn diff: {diff}"
+            );
+        }
+        let original = client
+            .snapshot(qq_protocol::SnapshotRequest::new(
+                workspace_id,
+                Some(session_id),
+                8,
+                32,
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        let fork = home
+            .run(
+                &provider.base_url,
+                &["fork", &session_id.to_string(), "--turn", "2"],
+            )
+            .await?;
+        ensure!(fork.status == Some(0), "CLI fork: {}", fork.stderr);
+        let fork_id = fork
+            .stdout
+            .lines()
+            .next()
+            .ok_or("missing fork id")?
+            .parse::<qq_protocol::SessionId>()
+            .map_err(|error| error.to_string())?;
+        let fork_root = fork
+            .stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("worktree: "))
+            .ok_or("missing fork worktree")?;
+        ensure!(
+            tokio::fs::read_to_string(Path::new(fork_root).join("inventory.rs"))
+                .await
+                .map_err(|error| error.to_string())?
+                .contains("struct One;"),
+            "fork did not restore preceding files"
+        );
+        let body = client
+            .snapshot(qq_protocol::SnapshotRequest::new(
+                workspace_id,
+                Some(fork_id),
+                8,
+                32,
+            ))
+            .await
+            .map_err(|error| error.to_string())?
+            .focused
+            .ok_or("fork absent from source catalog")?;
+        ensure!(
+            body.messages
+                .iter()
+                .any(|message| message.output == "prompt one")
+                && !body
+                    .messages
+                    .iter()
+                    .any(|message| message.output == "prompt two"),
+            "fork history incorrect"
+        );
+        let after = client
+            .snapshot(qq_protocol::SnapshotRequest::new(
+                workspace_id,
+                Some(session_id),
+                8,
+                32,
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        ensure!(
+            after.focused == original.focused,
+            "fork changed source history"
+        );
+        let submitted = client
+            .submit(
+                fork_id,
+                vec![InputPart::text("edited fork prompt")],
+                RunLimits::default(),
+                Correlation::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let CommandOutcome::PromptQueued { run_id, .. } = submitted.outcome else {
+            return Err("fork prompt not queued".to_owned());
+        };
+        let (outcome, _, _, _) = follow_run(&mut events, run_id).await?;
+        ensure!(
+            outcome == RunOutcome::Completed,
+            "fork execution outcome: {outcome:?}"
+        );
+        ensure!(
+            tokio::fs::read_to_string(Path::new(fork_root).join("inventory.rs"))
+                .await
+                .map_err(|error| error.to_string())?
+                .contains("struct Fork;"),
+            "fork tools did not use execution root"
+        );
+        ensure!(
+            tokio::fs::read_to_string(home.workspace.join("inventory.rs"))
+                .await
+                .map_err(|error| error.to_string())?
+                .contains("struct Three;"),
+            "fork changed source files"
+        );
+        let rewound = command(SessionCommand::RewindSession {
+            session_id,
+            run_id: runs[0],
+            turn_ordinal: 1,
+        })
+        .await?;
+        let CommandOutcome::SessionRewound { before, .. } = rewound.outcome else {
+            return Err("rewind not returned".to_owned());
+        };
+        ensure!(
+            tokio::fs::read_to_string(home.workspace.join("inventory.rs"))
+                .await
+                .map_err(|error| error.to_string())?
+                .contains("struct One;"),
+            "rewind files incorrect"
+        );
+        let undo = home.run(&provider.base_url, &["undo", &before]).await?;
+        ensure!(undo.status == Some(0), "undo rewind: {}", undo.stderr);
+        ensure!(
+            tokio::fs::read_to_string(home.workspace.join("inventory.rs"))
+                .await
+                .map_err(|error| error.to_string())?
+                .contains("struct Three;"),
+            "undo did not restore turn three"
+        );
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        let offline = home
+            .run(
+                &provider.base_url,
+                &["fork", &session_id.to_string(), "--turn", "1"],
+            )
+            .await?;
+        ensure!(
+            offline.status == Some(0),
+            "offline CLI fork: {}",
+            offline.stderr
+        );
+        Ok(())
+    }
+    .await;
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    result
 }
 
 async fn serve_sse(home: &Home) -> Result<(), String> {

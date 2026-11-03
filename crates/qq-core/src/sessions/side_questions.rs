@@ -472,11 +472,18 @@ impl SessionRuntime {
                         if *self.inner.shutdown.borrow() {
                             return Err(SessionRuntimeError::SideQuestionCancelled);
                         }
-                        let workspace = PathBuf::from(&request.workspace);
+                        let execution_root=self.inner.store.call(store::Priority::AwaitControl,move |connection| {
+                            Ok(connection.query_row("SELECT COALESCE(s.execution_root,w.path) FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.id=?1",[session.to_string()],|row|row.get::<_,String>(0))?)
+                        }).await?;
+                        let workspace = PathBuf::from(&execution_root);
                         let loaded = self
                             .inner
                             .loader
-                            .load_with_progress(request, RuntimeLoadProgress::default())
+                            .load_in_execution_root(
+                                request,
+                                execution_root,
+                                RuntimeLoadProgress::default(),
+                            )
                             .await
                             .map_err(|_| SessionRuntimeError::Unavailable)?;
                         if loaded.plan.workspace_path() != workspace {

@@ -479,6 +479,7 @@ impl SessionStore {
         let context_window = model_context_window(models, snapshot.summary.model.as_deref());
         let previous = self.remove(&session_id);
         let mut view = SessionView::summary_only(snapshot.summary, context_window, loaded_through);
+        view.execution_root = snapshot.execution_root;
         view.live = LiveStatus::from_body(&messages, &tool_calls, self.sanitizer);
         for run in &snapshot.runs {
             let stats = view.runs.entry(run.id).or_default();
@@ -845,6 +846,7 @@ pub use qq_protocol::ApprovalPreview;
 
 #[derive(Debug, Clone)]
 pub struct SessionView {
+    pub execution_root: Option<String>,
     pub side_questions: Vec<qq_protocol::SideQuestionSnapshot>,
     pub summary: SessionSummary,
     pub foreground_run_id: Option<RunId>,
@@ -923,6 +925,7 @@ impl SessionView {
         let mut live = LiveStatus::default();
         live.set_holds(&summary.pending_holds);
         Self {
+            execution_root: None,
             side_questions: Vec::new(),
             summary,
             foreground_run_id,

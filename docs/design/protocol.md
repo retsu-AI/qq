@@ -59,10 +59,10 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 44
+PROTOCOL_VERSION = 45
 ```
 
-Version 44 removes session goals, which versions 33, 34, 35 and 40
+Version 45 removes session goals, which versions 33, 34, 35 and 40
 added. Gone from the wire: the goal snapshot, budget, check and status types;
 `SessionSnapshot.goal`, `RunSnapshot.goal` and
 `WorkspaceSnapshot.check_interruption`; the `goal` and `goal_check` run
@@ -71,13 +71,24 @@ commands and their receipts; the `/v1/sessions/goal`,
 `/v1/sessions/goal/control` and `/v1/workspaces/check-interruptions/acknowledge`
 routes; and the headless `goal_run` and `goal` records with their goal-only
 exit codes. Recorded `goal_updated`, `goal_cleared` and
-`check_interruption_changed` events decode as `retired`. Store schema 66 is
+`check_interruption_changed` events decode as `retired`. Store schema 67 is
 forward-only: it rewrites stored goal and goal-check origins to `user_prompt`
 (on runs, event envelopes and completion receipts), turns goal-check runs into
 prompt runs, deletes goal commands, drops the `session_goals` table and the
 goal columns on runs, compactions and model turns, and renames
 `model_turns.goal_notice` to `boundary_notices`. The plan descriptor stays at
 17.
+
+Version 44 adds `list_checkpoints`, `turn_diff`, `rewind_session` and
+`fork_session` command routes under `/v1/sessions/`. Model turns use
+`(run_id, turn_ordinal)` checkpoint identity; `fork_session.turn` selects a
+session-wide user prompt and excludes that prompt from inherited history.
+`checkpoints_listed` includes prompt ids for cursor-safe selection,
+`session_forked` includes the new id, prompt and execution root,
+`session_rewound` includes the before-undo snapshot. The corresponding
+`session_rewound` event marks retained messages as `rewound`. A session body
+may carry `fork_prompt` until its first new prompt is submitted. Store
+schema 66 adds execution roots, checkpoints, rewind masks and fork history.
 
 Version 43 removes agent packs. `AgentProfileSummary.pack` is gone and a
 skill's `source` is never `pack:<id>/…`. Descriptor 17 drops the `pack`
@@ -151,7 +162,7 @@ its path onto the client machine. Listing neither registers a directory nor
 changes permissions.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v44/`; the `v43` directory (N−1) is
+`crates/qq-protocol/tests/fixtures/v45/`; the `v44` directory (N−1) is
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -343,7 +354,7 @@ and cancelled attempts enter their owner's child-spend receipt; manual and
 unrelated compactions do not. Unknown usage or cost remains unknown. Internal
 attempts do not consume the child-count or depth allowance. No wire shape changes.
 Schema 51 adds immutable run origin JSON and the ordered boundary-notice list
-on model turns (`model_turns.boundary_notices` since schema 66). Each notice
+on model turns (`model_turns.boundary_notices` since schema 67). Each notice
 is framed and at most 16 KiB and records how many child deliveries preceded it
 since the previous committed turn, so empty reactive retries and child waits
 preserve their live interleaving on replay. Turns without boundary notices
@@ -381,7 +392,7 @@ migration. Roots receive an action-oriented, authority-neutral notice;
 historical `stall_report` wording remains byte-identical and children retain
 it. Older readers refuse the new store at open before session assembly.
 Schemas 52 to 58 added storage for features that have since been removed;
-schema 66 drops it, and those migration steps now only advance the version.
+schema 67 drops it, and those migration steps now only advance the version.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it
@@ -647,12 +658,12 @@ optional-bodied:
 ```
 
 Response `ServerCapabilities` (abridged; see
-`crates/qq-protocol/tests/fixtures/v44/capabilities.json` for the full golden):
+`crates/qq-protocol/tests/fixtures/v45/capabilities.json` for the full golden):
 
 ```json
 {
   "version": 1,
-  "protocol_version": 44,
+  "protocol_version": 45,
   "server_version": "0.1.0",
   "input_parts": ["text", "workspace_file"],
   "commands": ["resolve_workspace", "create_session", "submit_prompt", "steer_run", "..."],
@@ -2163,7 +2174,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v44/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v45/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.

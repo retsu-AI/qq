@@ -206,6 +206,14 @@ enum PendingIntent {
     },
     Prune,
     Undo,
+    Checkpoints {
+        fork: bool,
+        receipt: Option<(RunId, u32)>,
+    },
+    ForkPrompt {
+        message: qq_protocol::MessageId,
+    },
+    CheckpointAction,
 }
 
 #[derive(Debug)]
@@ -259,6 +267,9 @@ pub(crate) struct App {
     pub(crate) now_ms: u64,
     pub receipts_open: bool,
     quit_armed_at: Option<std::time::Instant>,
+    pub(crate) turn_actions: Vec<(String, SessionCommand)>,
+    pub(crate) turn_picker_title: Option<&'static str>,
+    pub(crate) expanded_rewound: std::collections::HashSet<qq_protocol::MessageId>,
     pub(crate) owns_server: bool,
     pub(crate) expanded_tool_calls: std::collections::HashSet<qq_protocol::ToolCallId>,
     pub(crate) open_reasoning: std::collections::HashSet<RunId>,
@@ -331,6 +342,9 @@ impl App {
             now_ms: 0,
             receipts_open: false,
             quit_armed_at: None,
+            turn_actions: Vec::new(),
+            turn_picker_title: None,
+            expanded_rewound: std::collections::HashSet::new(),
             owns_server: options.owns_server,
             expanded_tool_calls: std::collections::HashSet::new(),
             open_reasoning: std::collections::HashSet::new(),
@@ -504,7 +518,7 @@ impl App {
                             _ => None,
                         };
                         if matches!(receipt.outcome, CommandOutcome::RunAlreadyFinished { .. }) {
-                            if let Some(PendingIntent::Steer { session_id, text }) = intent
+                            if let Some(PendingIntent::Steer { session_id, text }) = intent.clone()
                                 && self.focused() == Some(session_id)
                                 && self.composer.text.is_empty()
                             {
@@ -518,6 +532,134 @@ impl App {
                             }
                         }
                         match &receipt.outcome {
+                            CommandOutcome::CheckpointsListed {
+                                session_id,
+                                checkpoints,
+                                prompts,
+                            } => {
+                                if let Some(PendingIntent::ForkPrompt { message }) = intent.as_ref()
+                                {
+                                    let Some(prompt) =
+                                        prompts.iter().find(|prompt| prompt.message_id == *message)
+                                    else {
+                                        self.set_warning(
+                                            "prompt checkpoint is no longer retained".to_owned(),
+                                        );
+                                        return Effects::redraw(Redraw::Immediate);
+                                    };
+                                    return self.send(
+                                        PendingIntent::CheckpointAction,
+                                        SessionCommand::ForkSession {
+                                            session_id: *session_id,
+                                            turn: Some(prompt.turn),
+                                        },
+                                    );
+                                }
+                                let Some(PendingIntent::Checkpoints { fork, receipt }) =
+                                    intent.as_ref()
+                                else {
+                                    return Effects::none();
+                                };
+                                self.turn_picker_title = Some(if *fork {
+                                    "FORK BEFORE PROMPT"
+                                } else if receipt.is_some() {
+                                    "TURN DIFF"
+                                } else {
+                                    "REWIND"
+                                });
+                                self.turn_actions = if *fork {
+                                    prompts
+                                        .iter()
+                                        .map(|prompt| {
+                                            (
+                                                format!("{} · {}", prompt.turn, prompt.text),
+                                                SessionCommand::ForkSession {
+                                                    session_id: *session_id,
+                                                    turn: Some(prompt.turn),
+                                                },
+                                            )
+                                        })
+                                        .collect()
+                                } else {
+                                    checkpoints
+                                        .iter()
+                                        .filter(|point| {
+                                            (receipt.is_some() || !point.rewound)
+                                                && receipt.is_none_or(|(run, turn)| {
+                                                    run == point.run_id
+                                                        && turn == point.turn_ordinal
+                                                })
+                                        })
+                                        .map(|point| {
+                                            (
+                                                format!(
+                                                    "prompt {} · turn {}{}",
+                                                    point.prompt_ordinal,
+                                                    point.turn_ordinal,
+                                                    if point.rewound { " · rewound" } else { "" }
+                                                ),
+                                                if receipt.is_some() {
+                                                    SessionCommand::TurnDiff {
+                                                        session_id: *session_id,
+                                                        run_id: point.run_id,
+                                                        turn_ordinal: point.turn_ordinal,
+                                                    }
+                                                } else {
+                                                    SessionCommand::RewindSession {
+                                                        session_id: *session_id,
+                                                        run_id: point.run_id,
+                                                        turn_ordinal: point.turn_ordinal,
+                                                    }
+                                                },
+                                            )
+                                        })
+                                        .collect()
+                                };
+                                self.overlay = Some(Overlay::History(Picker::with_items(
+                                    self.turn_actions
+                                        .iter()
+                                        .map(|(text, _)| crate::input::HistoryRow {
+                                            text: text.clone(),
+                                        })
+                                        .collect(),
+                                )));
+                            }
+                            CommandOutcome::TurnDiff { diff, truncated } => {
+                                self.turn_picker_title = Some(if *truncated {
+                                    "TURN DIFF · TRUNCATED"
+                                } else {
+                                    "TURN DIFF"
+                                });
+                                self.turn_actions.clear();
+                                self.overlay = Some(Overlay::History(Picker::with_items(
+                                    diff.lines()
+                                        .map(|line| crate::input::HistoryRow {
+                                            text: line.to_owned(),
+                                        })
+                                        .collect(),
+                                )));
+                            }
+                            CommandOutcome::SessionRewound {
+                                session_id, before, ..
+                            } => {
+                                self.set_info_for(Some(*session_id),format!("later turns rewound; qq undo {before} reverses the file restore"));
+                                if let Some(workspace) = self.workspace_id {
+                                    return Effects::send_now(ClientRequest::Snapshot(
+                                        qq_client::state::body_request(workspace, *session_id),
+                                    ));
+                                }
+                            }
+                            CommandOutcome::SessionForked {
+                                session_id, prompt, ..
+                            } => {
+                                self.adopt_created_session(*session_id);
+                                self.composer.replace(prompt.clone());
+                                if let Some(workspace) = self.workspace_id {
+                                    return Effects::send_now(ClientRequest::Snapshot(
+                                        qq_client::state::body_request(workspace, *session_id),
+                                    ));
+                                }
+                            }
                             CommandOutcome::SideQuestionCancelled { side_question_id } => {
                                 self.acknowledged_side_questions
                                     .retain(|_, id| id != side_question_id);
@@ -715,6 +857,11 @@ impl App {
                 .install_session_snapshot(body, &self.models, snapshot_sequence);
         }
         if let Some(focused) = snapshot.focused {
+            if self.composer.text.is_empty()
+                && let Some(prompt) = &focused.fork_prompt
+            {
+                self.composer.replace(prompt.clone());
+            }
             let focused_id = focused.summary.id;
             if may_refetch_focused {
                 self.sessions
@@ -1102,9 +1249,15 @@ impl App {
                 .flat_map(|session| session.tool_calls.iter().flatten())
                 .find(|tool_call| tool_call.id == *tool_call_id)
                 .map(|tool_call| tool_call.session_id),
-            Some(PendingIntent::Create | PendingIntent::Prune | PendingIntent::Undo) | None => {
-                self.focused()
-            }
+            Some(
+                PendingIntent::Create
+                | PendingIntent::Prune
+                | PendingIntent::Undo
+                | PendingIntent::Checkpoints { .. }
+                | PendingIntent::ForkPrompt { .. }
+                | PendingIntent::CheckpointAction,
+            )
+            | None => self.focused(),
         };
         match intent {
             Some(PendingIntent::Side { session_id, text })
@@ -1403,6 +1556,48 @@ impl App {
                 }
                 Effects::none()
             }
+            KeyCode::Char('f')
+                if self.block_cursor.is_some()
+                    && self.composer.text.is_empty()
+                    && key.modifiers.is_empty() =>
+            {
+                let Some(Block::Message(message)) = self.block_cursor else {
+                    return Effects::none();
+                };
+                let Some(session) = self.focused() else {
+                    return Effects::none();
+                };
+                let Some(body) = self.sessions.get(&session) else {
+                    return Effects::none();
+                };
+                if body.messages.iter().flatten().any(|candidate| {
+                    candidate.id == message
+                        && candidate.role == qq_protocol::MessageRole::User
+                        && !candidate.steering
+                }) {
+                    self.send(
+                        PendingIntent::ForkPrompt { message },
+                        SessionCommand::ListCheckpoints {
+                            session_id: session,
+                        },
+                    )
+                } else {
+                    Effects::none()
+                }
+            }
+            KeyCode::Enter
+                if self.composer.text.is_empty()
+                    && matches!(self.block_cursor,Some(Block::Message(id)) if self.sessions.values().flat_map(|session|session.messages.iter().flatten()).any(|message|message.id==id&&message.state==qq_protocol::MessageState::Rewound)) =>
+            {
+                let Some(Block::Message(id)) = self.block_cursor else {
+                    return Effects::none();
+                };
+                if !self.expanded_rewound.remove(&id) {
+                    self.expanded_rewound.insert(id);
+                }
+                self.pane_mut().relayout = true;
+                Effects::redraw(Redraw::Immediate)
+            }
             KeyCode::Enter
                 if matches!(self.block_cursor, Some(Block::Tool(_)))
                     && self.composer.text.is_empty() =>
@@ -1648,6 +1843,8 @@ impl App {
             Command::CompactSession => self.compact_session(),
             Command::RollbackCompaction => self.rollback_compaction(),
             Command::CancelRun => self.cancel_run(),
+            Command::RewindSession => self.open_turn_picker(false, None),
+            Command::ForkSession => self.open_turn_picker(true, None),
             Command::ToggleMouse => {
                 self.mouse_capture = !self.mouse_capture;
                 self.layout.flush = !self.mouse_capture;
@@ -2037,7 +2234,7 @@ impl App {
         self.reset_history_browse();
         self.slash.select(0);
         self.esc_armed_at = None;
-        if self.workspace_root.is_some() && has_mention_syntax(&text) {
+        if self.mention_root(Some(session_id)).is_some() && has_mention_syntax(&text) {
             return Effects::resolve_mentions(
                 self.start_resolution(),
                 PendingSubmit {
@@ -2071,7 +2268,7 @@ impl App {
         if self.status_level == NoticeLevel::Error && self.status_session_id == Some(session_id) {
             self.status = None;
         }
-        if self.workspace_root.is_some() && has_mention_syntax(&prompt) {
+        if self.mention_root(Some(session_id)).is_some() && has_mention_syntax(&prompt) {
             return Effects::resolve_mentions(
                 self.start_resolution(),
                 PendingSubmit {
@@ -2909,8 +3106,16 @@ impl App {
         }
     }
 
+    pub(crate) fn mention_root(&self, session: Option<SessionId>) -> Option<std::path::PathBuf> {
+        session
+            .and_then(|session| self.sessions.get(&session))
+            .and_then(|view| view.execution_root.as_ref())
+            .map(std::path::PathBuf::from)
+            .or_else(|| self.workspace_root.clone())
+    }
+
     fn request_mention_completion(&mut self) -> Effects {
-        if self.workspace_root.is_none() {
+        if self.mention_root(self.focused()).is_none() {
             return Effects::redraw(Redraw::Immediate);
         }
         let Some((_, token)) = self.composer.mention_token() else {
@@ -3082,7 +3287,10 @@ impl App {
                 | PendingIntent::Side { .. }
                 | PendingIntent::CancelSide { .. }
                 | PendingIntent::Prune
-                | PendingIntent::Undo => None,
+                | PendingIntent::Undo
+                | PendingIntent::Checkpoints { .. }
+                | PendingIntent::ForkPrompt { .. }
+                | PendingIntent::CheckpointAction => None,
             })
     }
 
@@ -3249,6 +3457,16 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
+    fn open_turn_picker(&mut self, fork: bool, receipt: Option<(RunId, u32)>) -> Effects {
+        let Some(session_id) = self.focused() else {
+            return Effects::none();
+        };
+        self.send(
+            PendingIntent::Checkpoints { fork, receipt },
+            SessionCommand::ListCheckpoints { session_id },
+        )
+    }
+
     fn click_transcript(&mut self, row: usize) -> Option<Effects> {
         let area = self.geometry.transcript?;
         let offset = row
@@ -3266,11 +3484,14 @@ impl App {
                 self.block_cursor = Some(Block::Tool(call));
                 self.toggle_tool(call)
             }
-            Hit::Receipt(_) => {
-                self.receipts_open = true;
-                self.pane_mut().relayout = true;
-                Effects::redraw(Redraw::Immediate)
-            }
+            Hit::Receipt(run, turn) => self.send(
+                PendingIntent::CheckpointAction,
+                SessionCommand::TurnDiff {
+                    session_id: self.focused()?,
+                    run_id: run,
+                    turn_ordinal: turn,
+                },
+            ),
             Hit::Session(session_id) => {
                 let mut effects = Effects::redraw(Redraw::Immediate);
                 effects.extend(self.focus_session(session_id));

@@ -1,0 +1,5 @@
+{
+  "type": "turn_diff",
+  "diff": "-old\n+new\n",
+  "truncated": false
+}
