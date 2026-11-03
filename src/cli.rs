@@ -258,9 +258,11 @@ pub struct RunArgs {
     #[arg(long, value_enum)]
     pub approval: Option<RunApproval>,
 
-    /// Agent profile to run as: a name under `profiles` in the configuration.
-    /// Defaults to `default`.
-    #[arg(long, value_name = "NAME")]
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Agent profile to run as: a name under `profiles` in the configuration. Defaults to `default`."
+    )]
     pub profile: Option<String>,
 
     /// Removed grant flags, kept hidden so using one fails naming its

@@ -117,5 +117,5 @@ budget overruns; the user decides whether they block delivery.
 - `xtask/src/perf.rs` — the recorder; `FIXTURE_VERSION` bumps when a fixture's
   shape changes.
 - `benchmarks/perf/budgets-v1.json` — the 61 budgets (absolute and relative).
-- [Performance recording](../../../../../docs/runbooks/perf-recording.md) —
+- [Performance recording](../../../docs/runbooks/perf-recording.md) —
   recording procedures and interpretation.
