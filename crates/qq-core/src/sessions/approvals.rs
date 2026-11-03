@@ -175,11 +175,12 @@ impl ToolGate for SessionToolGate {
                         () = sleep_until_or_never(deadline) => true,
                     };
                     inner.remove_approval(call.id);
+                    let decision = conclude(&inner, &claimed, call.id, timed_out).await;
                     drop(hold);
                     if let Some(admission) = admission {
                         admission.reacquire().await;
                     }
-                    conclude(&inner, &claimed, call.id, timed_out).await
+                    decision
                 }
                 approval::PolicyDecision::RequireApproval => {
                     #[cfg(not(feature = "tool-fetch"))]
@@ -253,11 +254,12 @@ impl ToolGate for SessionToolGate {
                         () = sleep_until_or_never(deadline) => true,
                     };
                     inner.remove_approval(call.id);
+                    let decision = conclude(&inner, &claimed, call.id, timed_out).await;
                     drop(hold);
                     if let Some(admission) = admission {
                         admission.reacquire().await;
                     }
-                    conclude(&inner, &claimed, call.id, timed_out).await
+                    decision
                 }
             }
         })

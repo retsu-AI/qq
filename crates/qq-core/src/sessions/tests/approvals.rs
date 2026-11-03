@@ -138,6 +138,71 @@ async fn admission_holds_release_slots_and_answers_resume_before_new_runs() {
 }
 
 #[tokio::test]
+async fn admission_approval_timeout_is_persisted_before_reacquiring_a_slot() {
+    for question in [false, true] {
+        let (starts, mut started) = mpsc::channel(8);
+        let mut fixture = SessionFixture::open_with(
+            Arc::new(AdmissionLoader { question, starts }),
+            ApprovalMode::Ask,
+            |options| {
+                options.max_active_runs = 1;
+                options.approval_timeout = Some(Duration::from_secs(60));
+            },
+        )
+        .await;
+        let held = fixture.submit("held timeout").await;
+        within(started.recv()).await.unwrap().unwrap();
+        let (_, hold) = collect_until_approval_requested(&mut fixture.events).await;
+        let occupied = within(Arc::clone(&fixture.runtime.inner.permits).acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(61)).await;
+        let observed = within(collect_until(&mut fixture.events, |event| {
+            matches!(event, SessionEvent::ToolApprovalResolved {
+                tool_call,
+                resolution: ApprovalResolution::DeniedTimeout,
+            } if tool_call.id == hold.id)
+        }))
+        .await;
+        tokio::time::resume();
+        observed.unwrap();
+        assert!(matches!(
+            respond_approval(
+                &fixture.runtime,
+                held,
+                hold.id,
+                if question {
+                    ApprovalDecision::Answer {
+                        answers: vec!["qq-core".into(), "late".into()],
+                    }
+                } else {
+                    ApprovalDecision::ApproveOnce
+                },
+            )
+            .await
+            .unwrap()
+            .outcome,
+            CommandOutcome::ToolApprovalResolved {
+                resolution: ApprovalResolution::DeniedTimeout,
+                ..
+            }
+        ));
+        assert!(matches!(
+            started.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        drop(occupied);
+        assert_eq!(
+            within(started.recv()).await.unwrap().unwrap(),
+            ("held timeout".into(), 1)
+        );
+        fixture.runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn admission_reacquisition_can_be_cancelled_without_a_free_slot() {
     for question in [false, true] {
         let (starts, mut started) = mpsc::channel(8);
