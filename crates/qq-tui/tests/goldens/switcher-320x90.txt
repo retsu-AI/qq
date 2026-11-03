@@ -74,10 +74,10 @@
 
 
 
-  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇ 1 needs you  ^G
-   SWITCH type to search, Enter opens, Tab agents, Ctrl-A all agents, Ctrl-D deletes, Esc closes
-    search: all sessions
 
+
+
+  ○ switch ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 7 sessions
       ● Refactor            now
     ▎ ○ Session 0       ↳1  now   Drafted the checklist.
           Drafted the checklist.
@@ -86,5 +86,5 @@
       ● Migrate             now
       ○ Scratch             now
       ○ Notes               now
-  ┃ Ask QQ…
+  ┃ type to search sessions…
     enter open   tab agents   ^A all agents   ^D delete   esc back

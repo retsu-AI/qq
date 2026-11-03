@@ -136,9 +136,9 @@ call group, not per run.
 Call groups do not require an assistant message as an anchor. The runtime
 deliberately persists no message row for a call-only turn, so the client renders
 those calls directly after the run's user prompt until a later text turn gives
-the run an assistant-message anchor. Fold/Focus likewise includes the focused
-run's calls; a compressed layout must not turn active work into a generic
-"working" label.
+the run an assistant-message anchor. A turn receipt folds only settled
+calls; a running call keeps its own row rather than a generic "working"
+label.
 
 ## Long Messages
 
@@ -452,7 +452,8 @@ terminal background. Fenced code in answers keeps its `surface` panel
 ```
   ● Read     crates/qq-tui/src/file_0.rs  20 lines
   │ fn main() {}
-  ⋮ (all 20 rows)
+  │ fn main() {}
+  │ …
   │ fn main() {}
   ╰ Read crates/qq-tui/src/file_0.rs  · click or Enter folds
   ● Edited   crates/qq-tui/src/file_1.rs  6 B
@@ -513,8 +514,7 @@ Two sources render as unified diffs with per-line coloring:
   `ToolApprovalRequested`), at most 8 rows. `e` swaps the preview for the
   whole diff, windowed to the panel's height with a `faint`
   `1–17 of 30 · PgUp PgDn` row; `e` or `Esc` swaps it back.
-- Completed `edit_file`/`write_file` calls at the expanded tool detail
-  level, from the call's `display` payload — an extensible tagged
+- Completed `edit_file`/`write_file` calls opened in place, from the call's `display` payload — an extensible tagged
   snapshot field (first variant: diff) persisted alongside the result,
   populated on successful completion, and excluded by construction from
   model context and the session context budget. The model sees the
@@ -546,7 +546,7 @@ call completes.
 Live output is a tail, not a record: the client buffers at most 4 KiB
 per running call, dropping the head on a character boundary, and shows
 the last few complete lines (up to three rows, muted, control characters
-stripped, on the `│` tail rail) at every detail level — a running command's
+stripped, on the `│` tail rail) whether or not the turn is folded — a running command's
 output is the thing the user is waiting for. A trailing partial line
 waits for its newline. The buffer is discarded when the call reaches a
 terminal state or a snapshot reloads; the bounded result persisted on

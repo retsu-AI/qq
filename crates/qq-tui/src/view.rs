@@ -282,7 +282,10 @@ impl FrameRenderer {
         let max_composer_rows = layout::max_composer_rows(width, height)
             .min(height.saturating_sub(4))
             .max(1);
-        let (composer_lines, caret) = composer(app, dock_width, max_composer_rows);
+        let (composer_lines, caret) = match switcher_query(app, dock_width) {
+            Some((line, column)) => (vec![line], Some((column, 0))),
+            None => composer(app, dock_width, max_composer_rows),
+        };
         let fixed_rows = 2 + composer_lines.len();
         let draft_budget = (height / 4).min(height.saturating_sub(fixed_rows + 1));
         let draft_lines = queued_drafts(app, dock_width, draft_budget);
@@ -354,7 +357,8 @@ impl FrameRenderer {
             .iter()
             .find(|(index, _)| *index == app.focused_pane)
             .map_or(0, |(_, update)| update.viewport.unseen());
-        dock[0] = dock_rule(app, dock_width, rail_width > 0, unseen);
+        dock[0] = switcher_rule(app, dock_width)
+            .unwrap_or_else(|| dock_rule(app, dock_width, rail_width > 0, unseen));
         for line in &mut dock {
             line.indent = layout::MARGIN as u16;
         }
@@ -417,7 +421,9 @@ impl FrameRenderer {
             }
         }
         let composer_top = body_height + composer_top;
-        if (mode == Mode::Compose || app.approval_amendment.is_some() || answering_question(app))
+        if (matches!(mode, Mode::Compose | Mode::Sessions)
+            || app.approval_amendment.is_some()
+            || answering_question(app))
             && let Some((column, row)) = caret
             && let (Ok(column), Ok(row)) = (
                 u16::try_from((layout::MARGIN + column).min(width.saturating_sub(1))),

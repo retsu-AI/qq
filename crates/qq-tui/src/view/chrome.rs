@@ -409,16 +409,19 @@ pub(super) fn answering_question(app: &App) -> bool {
 pub(super) fn dock_footer(app: &App, width: usize, compact: bool) -> Line {
     match app.mode() {
         Mode::Sessions => {
+            let keys: &[(&str, &str)] = if app.session_picker_confirm().is_some() {
+                &[("y", "delete"), ("n", "keep"), ("esc", "cancel")]
+            } else {
+                &[
+                    ("enter", "open"),
+                    ("tab", "agents"),
+                    ("^A", "all agents"),
+                    ("^D", "delete"),
+                    ("esc", "back"),
+                ]
+            };
             let mut row = Line::styled("  ", normal());
-            for span in key_row(&[
-                ("enter", "open"),
-                ("tab", "agents"),
-                ("^A", "all agents"),
-                ("^D", "delete"),
-                ("esc", "back"),
-            ])
-            .spans
-            {
+            for span in key_row(keys).spans {
                 row.push(span.text, span.style);
             }
             truncate_line(row, width)

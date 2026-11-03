@@ -2427,11 +2427,35 @@ fn session_picker_pins_search_and_keeps_the_selection_visible() {
     app.open_session_picker_with("", selected, None);
 
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 12);
-    let text = frame_text(&frame);
+    let text = frame_rows(&frame).join("\n");
 
-    assert!(text.contains("SWITCH"));
-    assert!(text.contains("search: all sessions"));
+    assert!(text.contains("○ switch"));
+    assert!(text.contains(" sessions"), "{text}");
+    assert!(text.contains("┃ type to search sessions…"));
+    assert!(!text.contains("SWITCH"));
+    assert!(!text.contains("search:"));
+    assert!(!text.contains("Ask QQ…"), "{text}");
     assert!(text.contains("Session 10"));
+}
+
+#[test]
+fn switcher_takes_the_composer_row_and_hands_the_draft_back_on_close() {
+    let mut app = app_with_messages(0);
+    app.composer.replace("half-typed prompt".to_owned());
+    app.open_session_picker_with("ses", None, None);
+
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 12);
+    let text = frame_rows(&frame).join("\n");
+    assert!(text.contains("┃ ses"), "{text}");
+    assert!(!text.contains("half-typed prompt"), "{text}");
+
+    app.overlay = None;
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 12);
+    assert!(
+        frame_rows(&frame)
+            .join("\n")
+            .contains("┃ half-typed prompt")
+    );
 }
 
 #[test]
@@ -2440,9 +2464,10 @@ fn session_picker_renders_an_empty_search_result() {
     app.open_session_picker_with("missing", None, None);
 
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 12);
-    let text = frame_text(&frame);
+    let text = frame_rows(&frame).join("\n");
 
-    assert!(text.contains("search: missing"));
+    assert!(text.contains("┃ missing"));
+    assert!(text.contains("0 of 1"));
     assert!(text.contains("No matching sessions."));
 }
 
@@ -2457,8 +2482,8 @@ fn session_picker_renders_delete_and_prune_confirmations() {
     );
 
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 100, 12);
-    let text = frame_text(&frame);
-    assert!(text.contains("y confirms, n or Esc cancels"));
+    let text = frame_rows(&frame).join("\n");
+    assert!(text.contains("y delete   n keep   esc cancel"));
     assert!(text.contains("delete 'Session'? y deletes, n keeps"));
 
     app.overlay
@@ -2466,13 +2491,13 @@ fn session_picker_renders_delete_and_prune_confirmations() {
         .unwrap()
         .set_confirm(Some(SessionConfirm::Prune));
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 100, 12);
-    let text = frame_text(&frame);
+    let text = frame_rows(&frame).join("\n");
     assert!(text.contains("delete every empty session in this workspace?"));
 
     app.overlay.as_mut().unwrap().set_confirm(None);
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 100, 12);
-    let text = frame_text(&frame);
-    assert!(text.contains("Ctrl-D deletes"));
+    let text = frame_rows(&frame).join("\n");
+    assert!(text.contains("^D delete"));
     assert!(!text.contains("Ctrl-P"), "Ctrl-P is not a picker chord");
 }
 
