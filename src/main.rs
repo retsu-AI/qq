@@ -135,7 +135,8 @@ async fn run(cli: cli::Cli) -> Result<ExitCode, Box<dyn Error>> {
         Some(cli::Command::Serve {
             bind,
             allow_origins,
-        }) => serve(bind, &allow_origins, &overrides).await?,
+            exit_on_stdin_close,
+        }) => serve(bind, &allow_origins, &overrides, exit_on_stdin_close).await?,
         Some(cli::Command::Daemon { command }) => {
             return daemon::command(command, &overrides).await;
         }
@@ -613,6 +614,7 @@ async fn serve(
     bind: std::net::SocketAddr,
     allow_origins: &[String],
     overrides: &CliOverrides,
+    exit_on_stdin_close: bool,
 ) -> Result<(), Box<dyn Error>> {
     let listen = daemon::Listen {
         bind,
@@ -622,7 +624,9 @@ async fn serve(
         &server::ServerPaths::for_user()?,
         &listen,
         overrides,
-        daemon::Host::Serve,
+        daemon::Host::Serve {
+            exit_on_stdin_close,
+        },
     )
     .await
 }

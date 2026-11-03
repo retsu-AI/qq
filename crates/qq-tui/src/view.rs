@@ -39,6 +39,7 @@ pub(crate) use chrome::{ComposerMode, CursorPosition};
 use highlight::HighlightKey;
 pub(crate) use highlight::{Highlighted, Highlighter};
 pub(crate) use layout::LayoutPrefs;
+#[cfg(any(test, feature = "bench-support"))]
 pub(crate) use layout::PanePref;
 use layout::{Tier, TranscriptSlot, compute_layout};
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
