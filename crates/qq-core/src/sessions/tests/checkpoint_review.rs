@@ -2,6 +2,81 @@ use super::*;
 use crate::undo::test_support;
 
 #[tokio::test]
+async fn checkpoints_fork_capacity_is_rechecked_after_git_and_cleans_rejected_worktree() {
+    let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![vec![]]).await;
+    test_support::repository(&harness.workspace_path);
+    std::fs::write(
+        harness.workspace_path.join(".gitignore"),
+        "sessions.sqlite3*\nworktrees/\n",
+    )
+    .unwrap();
+    let run = submit_prompt(&harness, "first").await;
+    collect_until_run_finished(&mut harness.events, run).await;
+    let session = harness.session_id;
+    let (entered, release) = PROBE.hold(Checkpoint::WorkspaceReserved(session));
+    let runtime = harness.runtime.clone();
+    let fork = tokio::spawn(async move {
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::ForkSession {
+                    session_id: session,
+                    turn: Some(1),
+                },
+            )
+            .await
+    });
+    within(entered).await.unwrap().unwrap();
+    let workspace = harness.workspace_id;
+    harness.runtime.inner.store.call_write(store::Priority::AwaitControl,move |connection| {
+        for _ in 1..MAX_SESSIONS_PER_WORKSPACE {
+            connection.execute("INSERT INTO sessions(id,workspace_id,title,status,model,max_output_tokens,organization,approval_mode,created_at_ms,updated_at_ms,profile,model_is_fallback,reasoning_effort) SELECT ?1,workspace_id,title,'idle',model,max_output_tokens,organization,approval_mode,created_at_ms,updated_at_ms,profile,model_is_fallback,reasoning_effort FROM sessions WHERE id=?2",params![SessionId::generate().unwrap().to_string(),session.to_string()])?;
+        }
+        let count:u32=connection.query_row("SELECT COUNT(*) FROM sessions WHERE workspace_id=?1",[workspace.to_string()],|row|row.get(0))?;
+        assert_eq!(count,MAX_SESSIONS_PER_WORKSPACE);
+        Ok(())
+    }).await.unwrap();
+    release.send(()).unwrap();
+    assert_eq!(
+        fork.await.unwrap(),
+        Err(SessionRuntimeError::SessionLimitReached)
+    );
+    let resources = harness
+        .runtime
+        .inner
+        .store
+        .call(store::Priority::AwaitControl, |connection| {
+            Ok(
+                connection.query_row("SELECT COUNT(*) FROM fork_resources", [], |row| {
+                    row.get::<_, u32>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(resources, 0);
+    assert!(
+        !test_support::git(
+            &harness.workspace_path,
+            &["worktree", "list", "--porcelain"]
+        )
+        .contains("qq/fork/")
+    );
+    assert!(
+        test_support::git(
+            &harness.workspace_path,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/qq/pins/",
+                "refs/qq/fork-pins/"
+            ]
+        )
+        .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn checkpoints_rewind_keeps_safe_summaries_and_removes_crossing_run_summaries() {
     let mut harness = scripted_runs_harness(
         ApprovalMode::Full,
