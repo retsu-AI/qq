@@ -90,6 +90,9 @@ pub(crate) async fn run_goal_check_shell(
         Some(dispatch::CommandOutcome::Cancelled) if expired => {
             Some(dispatch::CommandOutcome::TimedOut)
         }
+        None if expired && result.disposition == dispatch::ResultDisposition::Interrupted => {
+            Some(dispatch::CommandOutcome::TimedOut)
+        }
         outcome => outcome,
     };
     (outcome, result.model_text)
