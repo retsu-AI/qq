@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import clsx from "clsx";
 import {
   Archive,
   ArchiveRestore,
+  ArrowDown,
+  ArrowUp,
   ChevronRight,
   CircleAlert,
   FolderPlus,
@@ -42,6 +44,15 @@ import {
   type SessionPreferences,
 } from "../lib/session-preferences";
 import { useProjectIcons } from "../lib/project-icons";
+import {
+  dragLayout,
+  groupKey,
+  moveGroup,
+  readProjectOrder,
+  saveProjectOrder,
+  sortProjects,
+  type GroupBox,
+} from "../lib/project-order";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Dropdown } from "./Dropdown";
 import { IconDialog, ProjectBadge } from "./ProjectIcon";
@@ -60,6 +71,7 @@ interface Props {
 const EXPANDED_KEY = "qq.sidebar.expanded";
 /** Recent sessions a card lists before "Show all". */
 const RECENT_LIMIT = 8;
+const GLIDE_MS = 150;
 
 function readExpanded(): Record<string, boolean> {
   try {
@@ -119,17 +131,86 @@ export function Sidebar({ app, project }: Props) {
       return next;
     });
 
-  // Worktrees list right after their repository.
-  const sorted = useMemo(() => {
-    const repoOf = (p: ProjectInfo) =>
-      (p.worktree?.main_name ?? p.name).toLowerCase();
-    return [...app.open].sort(
-      (a, b) =>
-        repoOf(a).localeCompare(repoOf(b)) ||
-        Number(Boolean(a.worktree)) - Number(Boolean(b.worktree)) ||
-        a.name.localeCompare(b.name),
-    );
-  }, [app.open]);
+  const [order, setOrder] = useState(readProjectOrder);
+  const sorted = useMemo(() => sortProjects(app.open, order), [app.open, order]);
+  const groups = [...new Set(sorted.map(groupKey))];
+  const reorder = (key: string, to: number) => {
+    const next = moveGroup(order, groups, key, to);
+    try {
+      saveProjectOrder(next);
+      setError(null);
+    } catch (error) {
+      setError(String(error));
+    }
+    setOrder(next);
+  };
+
+  const nav = useRef<HTMLElement>(null);
+  const [drag, setDrag] = useState<{
+    key: string;
+    offsets: Record<string, number>;
+    settling: boolean;
+  } | null>(null);
+  const startDrag = (key: string, event: PointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || groups.length < 2 || drag) return;
+    if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
+    const list = nav.current;
+    if (!list) return;
+    const startY = event.clientY;
+    const startScroll = list.scrollTop;
+    const sections = [...list.querySelectorAll<HTMLElement>("[data-group]")];
+    const boxes: GroupBox[] = groups.flatMap((k) => {
+      const own = sections.filter((s) => s.dataset.group === k);
+      if (own.length === 0) return [];
+      return [
+        {
+          key: k,
+          top: own[0].offsetTop,
+          bottom: own[own.length - 1].offsetTop + own[own.length - 1].offsetHeight,
+        },
+      ];
+    });
+    const gap = sections[1]
+      ? sections[1].offsetTop - sections[0].offsetTop - sections[0].offsetHeight
+      : 0;
+    let layout: ReturnType<typeof dragLayout> | null = null;
+    const move = (e: globalThis.PointerEvent) => {
+      if (layout === null && Math.abs(e.clientY - startY) < 5) return;
+      const dy = e.clientY - startY + list.scrollTop - startScroll;
+      layout = dragLayout(boxes, key, dy, gap);
+      document.body.style.cursor = "grabbing";
+      setDrag({ key, offsets: layout.offsets, settling: false });
+    };
+    const end = (commit: boolean) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("keydown", escape);
+      document.body.style.cursor = "";
+      const done = layout;
+      if (done === null) return;
+      const swallow = (e: MouseEvent) => e.stopPropagation();
+      window.addEventListener("click", swallow, { capture: true, once: true });
+      setTimeout(() => window.removeEventListener("click", swallow, true));
+      const offsets = commit
+        ? { ...done.offsets, [key]: done.slot }
+        : Object.fromEntries(Object.keys(done.offsets).map((k) => [k, 0]));
+      setDrag({ key, offsets, settling: true });
+      setTimeout(() => {
+        if (commit) reorder(key, done.to);
+        setDrag(null);
+      }, GLIDE_MS);
+    };
+    const up = () => end(true);
+    const cancel = () => end(false);
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") end(false);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("keydown", escape);
+  };
 
   const cards = sorted.map((info) => {
     const state = app.projects[info.id] ?? null;
@@ -186,23 +267,35 @@ export function Sidebar({ app, project }: Props) {
       </div>
 
       <nav
+        ref={nav}
         aria-label="Projects and sessions"
         className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3"
       >
-        {cards.map(({ info, state, meta, rows }) => (
-          <ProjectCard
-            key={info.id}
-            info={info}
-            state={state}
-            active={info.id === app.activeId}
-            icon={icons[info.path]}
-            metadata={meta}
-            rows={rows}
-            expanded={isExpanded(info.id)}
-            setExpanded={(open) => setCardExpanded(info.id, open)}
-            onChange={(sessionId, update) => change(info.id, sessionId, update)}
-          />
-        ))}
+        {cards.map(({ info, state, meta, rows }) => {
+          const key = groupKey(info);
+          const at = groups.indexOf(key);
+          return (
+            <ProjectCard
+              key={info.id}
+              info={info}
+              group={key}
+              dragging={drag?.key === key}
+              settling={drag?.settling ?? false}
+              offset={drag ? (drag.offsets[key] ?? 0) : null}
+              onDragStart={(event) => startDrag(key, event)}
+              moveUp={at > 0 ? () => reorder(key, at - 1) : undefined}
+              moveDown={at < groups.length - 1 ? () => reorder(key, at + 1) : undefined}
+              state={state}
+              active={info.id === app.activeId}
+              icon={icons[info.path]}
+              metadata={meta}
+              rows={rows}
+              expanded={isExpanded(info.id)}
+              setExpanded={(open) => setCardExpanded(info.id, open)}
+              onChange={(sessionId, update) => change(info.id, sessionId, update)}
+            />
+          );
+        })}
         {app.open.length === 0 && (
           <button
             onClick={() => void pickProject()}
@@ -237,6 +330,13 @@ export function Sidebar({ app, project }: Props) {
 
 function ProjectCard({
   info,
+  group,
+  dragging,
+  settling,
+  offset,
+  onDragStart,
+  moveUp,
+  moveDown,
   state,
   active,
   icon,
@@ -247,6 +347,13 @@ function ProjectCard({
   onChange,
 }: {
   info: ProjectInfo;
+  group: string;
+  dragging: boolean;
+  settling: boolean;
+  offset: number | null;
+  onDragStart: (event: PointerEvent<HTMLElement>) => void;
+  moveUp?: () => void;
+  moveDown?: () => void;
   state: ProjectState | null;
   active: boolean;
   icon: Parameters<typeof ProjectBadge>[0]["icon"];
@@ -302,13 +409,25 @@ function ProjectCard({
 
   return (
     <section
+      data-group={group}
       className={clsx(
-        "rounded-xl border",
+        "relative rounded-xl border",
         active ? "border-line bg-raised/70" : "border-transparent",
+        dragging && "z-10 cursor-grabbing border-line-strong bg-raised shadow-lg",
       )}
+      style={
+        offset === null
+          ? undefined
+          : {
+              transform: offset ? `translateY(${offset}px)` : undefined,
+              transition:
+                dragging && !settling ? undefined : `transform ${GLIDE_MS}ms ease-out`,
+            }
+      }
     >
       <div
-        className="group/card relative flex items-center"
+        className="group/card relative flex select-none items-center"
+        onPointerDown={onDragStart}
         onContextMenu={(event) => {
           event.preventDefault();
           menu.current?.querySelector("button")?.click();
@@ -335,7 +454,7 @@ function ProjectCard({
             </span>
           </span>
         </button>
-        <div className="absolute right-1.5 flex items-center gap-0.5">
+        <div data-no-drag className="absolute right-1.5 flex items-center gap-0.5">
           {needs > 0 && !expanded && (
             <span
               title={`${needs} session${needs === 1 ? "" : "s"} need you`}
@@ -388,6 +507,24 @@ function ProjectCard({
                     setExpanded(true);
                   },
                 },
+                ...(moveUp
+                  ? [
+                      {
+                        label: "Move up",
+                        icon: <ArrowUp className="h-3.5 w-3.5" />,
+                        onSelect: moveUp,
+                      },
+                    ]
+                  : []),
+                ...(moveDown
+                  ? [
+                      {
+                        label: "Move down",
+                        icon: <ArrowDown className="h-3.5 w-3.5" />,
+                        onSelect: moveDown,
+                      },
+                    ]
+                  : []),
                 ...(info.worktree
                   ? [
                       {
