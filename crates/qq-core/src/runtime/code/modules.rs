@@ -20,7 +20,10 @@ pub(crate) fn load_blocking(
     let mut total = 0_usize;
     let workspace_directory = workspace.path().join(WORKSPACE_MODULE_DIRECTORY);
     let global_directory = global.map(|dir| dir.join(GLOBAL_MODULE_DIRECTORY));
-    for directory in std::iter::once(workspace_directory).chain(global_directory) {
+    for (index, directory) in std::iter::once(workspace_directory)
+        .chain(global_directory)
+        .enumerate()
+    {
         let fingerprint = SourceFingerprint::capture(directory.clone());
         let present = fingerprint.is_present();
         fingerprints.push(fingerprint);
@@ -30,6 +33,15 @@ pub(crate) fn load_blocking(
         let Ok(canonical) = std::fs::canonicalize(&directory) else {
             continue;
         };
+        let inside = match index {
+            0 => canonical.starts_with(workspace.path()),
+            _ => global.is_some_and(|dir| {
+                std::fs::canonicalize(dir).is_ok_and(|dir| canonical.starts_with(dir))
+            }),
+        };
+        if !inside {
+            continue;
+        }
         let Ok(opened) = Workspace::open(&canonical) else {
             continue;
         };
@@ -118,6 +130,22 @@ mod tests {
             .collect();
         assert_eq!(found, [("repo", "X = 'local'\n"), ("util", "Y = 1\n")]);
         assert!(fingerprints.iter().all(SourceFingerprint::is_current));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_code_directory_linked_outside_the_workspace_is_ignored() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("repo.py"), "X = 1\n").unwrap();
+        std::fs::create_dir_all(workspace.path().join(".qq")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path(),
+            workspace.path().join(WORKSPACE_MODULE_DIRECTORY),
+        )
+        .unwrap();
+        let (modules, _) = load_blocking(Language::Python, &open(workspace.path()), None);
+        assert!(modules.is_empty());
     }
 
     #[test]

@@ -172,9 +172,39 @@ impl Script for PythonScript {
     fn advance(&mut self, settled: Vec<Settled>) -> Advance {
         match std::mem::replace(&mut self.state, State::Finished) {
             State::Ready(program) => {
-                let input_names: Vec<String> =
+                let mut input_names: Vec<String> =
                     program.tools.iter().map(|tool| tool.name.clone()).collect();
-                let source = imports::rewrite(&program.source, &program.modules, &input_names);
+                let mut inputs: Vec<MontyObject> = program
+                    .tools
+                    .iter()
+                    .map(|tool| MontyObject::function(tool.name.clone(), None))
+                    .collect();
+                let source = match imports::rewrite(&program.source, &program.modules) {
+                    None => program.source,
+                    Some(rewritten) => {
+                        input_names.extend(
+                            [
+                                imports::STATE_INPUT,
+                                imports::SOURCES_INPUT,
+                                imports::TOOLS_INPUT,
+                            ]
+                            .map(str::to_owned),
+                        );
+                        inputs.push(MontyObject::dict(std::iter::empty()));
+                        inputs.push(MontyObject::dict(rewritten.modules.into_iter().map(
+                            |(name, source)| {
+                                (MontyObject::string(name), MontyObject::string(source))
+                            },
+                        )));
+                        inputs.push(MontyObject::dict(program.tools.iter().map(|tool| {
+                            (
+                                MontyObject::string(tool.name.clone()),
+                                MontyObject::function(tool.name.clone(), None),
+                            )
+                        })));
+                        rewritten.main
+                    }
+                };
                 let runner = match MontyRun::new(
                     source,
                     "main.py",
@@ -187,11 +217,6 @@ impl Script for PythonScript {
                             .finish(None, Some(ScriptFailure::Compile(exception.to_string())));
                     }
                 };
-                let inputs = program
-                    .tools
-                    .iter()
-                    .map(|tool| MontyObject::function(tool.name.clone(), None))
-                    .collect();
                 let limits = ResourceLimits {
                     max_feed_duration: Some(program.limits.max_interpreter_time),
                     max_recursion_depth: program.limits.max_recursion_depth,

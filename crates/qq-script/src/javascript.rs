@@ -3,7 +3,10 @@ use std::{
     collections::VecDeque,
     path::Path,
     rc::Rc,
-    sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel},
+    },
     time::{Duration, Instant},
 };
 
@@ -20,6 +23,28 @@ use crate::{
 };
 
 const MAX_LOOP_ITERATIONS: u64 = 50_000_000;
+const MAX_LIVE_WORKERS: usize = 8;
+
+static LIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+struct WorkerSlot;
+
+impl WorkerSlot {
+    fn claim() -> Option<Self> {
+        LIVE_WORKERS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
+                (live < MAX_LIVE_WORKERS).then_some(live + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for WorkerSlot {
+    fn drop(&mut self) {
+        LIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 enum State {
@@ -64,12 +89,20 @@ impl Script for JavaScriptScript {
     fn advance(&mut self, settled: Vec<Settled>) -> Advance {
         let advance = match std::mem::replace(&mut self.state, State::Finished) {
             State::Ready(program) => {
+                let Some(slot) = WorkerSlot::claim() else {
+                    return failed(ScriptFailure::Limit(format!(
+                        "{MAX_LIVE_WORKERS} JavaScript engines are already running in this process, counting scripts that overran their time limit; try again later"
+                    )));
+                };
                 let (settled_sender, settled_receiver) = sync_channel(1);
                 let (advance_sender, advance_receiver) = sync_channel(1);
                 let spawned = std::thread::Builder::new()
                     .name("qq-script-js".to_owned())
                     .stack_size(WORKER_STACK_BYTES)
-                    .spawn(move || worker(*program, &settled_receiver, &advance_sender));
+                    .spawn(move || {
+                        let _slot = slot;
+                        worker(*program, &settled_receiver, &advance_sender);
+                    });
                 if let Err(error) = spawned {
                     return failed(ScriptFailure::Raised(format!(
                         "could not start the JavaScript engine: {error}"
@@ -404,11 +437,15 @@ fn install_globals(context: &mut Context, shared: &SharedHost) -> JsResult<()> {
         .map(|tool| tool.name.clone())
         .collect();
     for (index, name) in names.into_iter().enumerate() {
+        let key = JsString::from(name.as_str());
+        if context.global_object().has_property(key.clone(), context)? {
+            continue;
+        }
         let function = NativeFunction::from_copy_closure_with_captures(
             |_, args, index: &usize, context| call_tool(*index, args, context),
             index,
         );
-        context.register_global_callable(JsString::from(name.as_str()), 1, function)?;
+        context.register_global_callable(key, 1, function)?;
     }
     Ok(())
 }

@@ -33,7 +33,7 @@ fn modules(language: Language) -> Vec<Module> {
     let (repo, text) = match language {
         Language::Python => (
             "import asyncio\nimport text\n\nasync def both(a, b):\n    x, y = await asyncio.gather(read_file(a), search(query=b))\n    return text.short(x['args']['path']) + '/' + y['tool']\n\ndef fail():\n    raise ValueError('helper failed')\n",
-            "def short(s):\n    return s[:3]\n",
+            "seen = []\n\ndef short(s):\n    return s[:3]\n",
         ),
         Language::JavaScript => (
             "import { short } from 'text';\nexport async function both(a, b) {\n  const [x, y] = await Promise.all([read_file(a), search({ query: b })]);\n  return short(x.args.path) + '/' + y.tool;\n}\nexport function fail() {\n  throw new RangeError('helper failed');\n}\n",
@@ -413,4 +413,65 @@ fn python_from_imports_bind_helper_names() {
         echo,
     );
     assert_eq!(printed(&run), "hel\n");
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn python_helper_imports_share_one_module_and_tolerate_common_forms() {
+    let run = run_with(
+        Language::Python,
+        "import text  # helper\nimport text as t2\ntext.seen.append(1)\nx = 1; from repo import (both,\n    fail,\n)\ns = '''\nimport nope\n'''\nprint(len(t2.seen), type(both).__name__, type(fail).__name__)",
+        Limits::default(),
+        echo,
+    );
+    assert_eq!(run.completion.failure, None);
+    assert_eq!(printed(&run), "1 function function\n");
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn python_import_cycles_raise_import_error() {
+    let mut script = qq_script::start(Program {
+        language: Language::Python,
+        source: "try:\n    import a\nexcept ImportError as e:\n    print(e)".to_owned(),
+        tools: tools(),
+        modules: vec![
+            Module {
+                name: "a".to_owned(),
+                source: "import b\n".to_owned(),
+            },
+            Module {
+                name: "b".to_owned(),
+                source: "import a\n".to_owned(),
+            },
+        ],
+        limits: Limits::default(),
+    })
+    .unwrap();
+    let Advance::Done(completion) = script.advance(Vec::new()) else {
+        panic!("no tool calls expected");
+    };
+    assert_eq!(
+        completion.printed.render(),
+        "helper module a imports itself\n"
+    );
+}
+
+#[cfg(feature = "javascript")]
+#[test]
+fn javascript_recursion_without_loops_still_hits_a_limit() {
+    let run = run_with(
+        Language::JavaScript,
+        "function f(n) { if (n > 22) return 0; return f(n + 1) + f(n + 1); }\nf(0);",
+        Limits {
+            max_interpreter_time: std::time::Duration::from_millis(50),
+            ..Limits::default()
+        },
+        echo,
+    );
+    assert!(
+        matches!(run.completion.failure, Some(ScriptFailure::Limit(_))),
+        "{:?}",
+        run.completion.failure
+    );
 }

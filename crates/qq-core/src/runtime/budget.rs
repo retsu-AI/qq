@@ -216,6 +216,12 @@ impl BudgetMeter {
         })
     }
 
+    pub(crate) fn tool_calls_spent(&self) -> bool {
+        self.limits
+            .max_tool_calls
+            .is_some_and(|limit| self.tool_calls >= limit)
+    }
+
     pub(crate) fn exceeded(&self, now: Instant) -> Option<BudgetLimitKind> {
         let limits = &self.limits;
         if self.deadline().is_some_and(|deadline| now >= deadline) {

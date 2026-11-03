@@ -9,6 +9,7 @@ use crate::{catalog, tools};
 pub(crate) mod modules;
 
 pub(crate) const RUN_CODE_TOOL: &str = "run_code";
+pub(crate) const MAX_STRUCTURED_VALUE_BYTES: usize = 256 * 1024;
 pub(crate) const SCRIPT_CHILD_CALL_PREFIX: &str = "qq-script:";
 const SCRIPT_CHILD_ORDINAL_BASE: u16 = 1024;
 const MAX_SCRIPT_CALLS: u16 = 256;
@@ -244,6 +245,35 @@ pub(crate) fn interrupted() -> qq_script::Completion {
     }
 }
 
+pub(crate) fn stopped(message: &str) -> qq_script::Completion {
+    qq_script::Completion {
+        printed: qq_script::Printed::default(),
+        value: None,
+        failure: Some(ScriptFailure::Limit(message.to_owned())),
+        unawaited: Vec::new(),
+    }
+}
+
+pub(crate) fn repeated(tool: &str) -> ToolFailure {
+    ToolFailure {
+        kind: FailureKind::Failed,
+        message: format!(
+            "{tool} was called again with the same arguments and the same result; change the arguments or stop"
+        ),
+    }
+}
+
+pub(crate) fn crashed(message: &str) -> qq_script::Completion {
+    qq_script::Completion {
+        printed: qq_script::Printed::default(),
+        value: None,
+        failure: Some(ScriptFailure::Raised(format!(
+            "the script engine failed: {message}"
+        ))),
+        unawaited: Vec::new(),
+    }
+}
+
 pub(crate) fn denied(message: &str) -> ToolFailure {
     ToolFailure {
         kind: FailureKind::Permission,
@@ -286,7 +316,7 @@ pub(crate) fn render(completion: &qq_script::Completion) -> (String, bool) {
     }
     if !completion.unawaited.is_empty() {
         push(&format!(
-            "[warning] never awaited, so never ran: {}",
+            "[warning] still pending when the script ended (never awaited), so never ran: {}",
             completion.unawaited.join(", ")
         ));
     }
@@ -340,7 +370,7 @@ mod tests {
         assert_eq!(
             render(&completion),
             (
-                "hi\n[result] {\"n\":1}\n[warning] never awaited, so never ran: search\n[script raised]\nValueError: x"
+                "hi\n[result] {\"n\":1}\n[warning] still pending when the script ended (never awaited), so never ran: search\n[script raised]\nValueError: x"
                     .to_owned(),
                 true
             )

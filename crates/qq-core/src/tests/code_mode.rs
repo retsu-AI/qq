@@ -307,3 +307,122 @@ async fn javascript_scripts_run_child_calls_and_see_denials() {
         ("1\talpha 1\tbeta\nPermissionError\n".to_owned(), false)
     );
 }
+
+async fn run_with_capabilities(
+    code: &str,
+    gate: Arc<dyn ToolGate>,
+    capabilities: RunCapabilities,
+) -> (Vec<RuntimeEvent>, Vec<ModelRequest>) {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("a.txt"), "alpha\n").unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let runtime = Runtime::new(
+        TurnScript {
+            turns: vec![vec![("run_code", run_code(code))], Vec::new()],
+            requests: Arc::clone(&requests),
+        },
+        "gpt-test",
+        256,
+    )
+    .unwrap()
+    .with_code_language(CodeLanguage::Python);
+    let events = runtime
+        .run_loop_with_spawner(
+            vec![Message::user("inspect")],
+            std::fs::canonicalize(directory.path()).unwrap(),
+            RunCancellation::new(),
+            gate,
+            Arc::new(workspace::FileState::default()),
+            capabilities,
+        )
+        .collect::<Vec<_>>()
+        .await;
+    let requests = requests.lock().unwrap().clone();
+    (events, requests)
+}
+
+fn child_count(events: &[RuntimeEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, RuntimeEvent::ScriptCallRequested { .. }))
+        .count()
+}
+
+#[tokio::test]
+async fn a_script_stops_when_the_run_tool_call_budget_is_spent() {
+    let limits = qq_protocol::RunLimits {
+        max_tool_calls: Some(20),
+        ..qq_protocol::RunLimits::default()
+    };
+    let (events, requests) = run_with_capabilities(
+        "for i in range(40):\n    await search(query='q' + str(i))\nprint('never')",
+        Arc::new(ExecuteAll),
+        RunCapabilities::user(None).with_limits(limits, None),
+    )
+    .await;
+    assert_eq!(child_count(&events), 19, "{events:?}");
+    let (text, is_error) = script_result(&requests);
+    assert!(is_error);
+    assert!(
+        text.contains("[script stopped at a limit] the run's tool_calls budget is spent"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn identical_repeated_child_calls_are_refused_by_the_loop_guard() {
+    let (events, requests) = run_with_capabilities(
+        "n = 0\nfor i in range(10):\n    try:\n        await read_file('a.txt')\n    except RuntimeError:\n        n += 1\nprint('refused', n)",
+        Arc::new(ExecuteAll),
+        RunCapabilities::user(None),
+    )
+    .await;
+    assert_eq!(child_count(&events), 4, "{events:?}");
+    assert_eq!(script_result(&requests), ("refused 6\n".to_owned(), false));
+}
+
+struct NeverAnswers(tokio::sync::mpsc::Sender<()>);
+
+impl ToolGate for NeverAnswers {
+    fn resolve(&self, call: &RuntimeToolCall) -> ToolGateFuture {
+        if call.name == "run_code" {
+            return Box::pin(std::future::ready(GateDecision::Execute));
+        }
+        let reached = self.0.clone();
+        Box::pin(async move {
+            let _ = reached.send(()).await;
+            std::future::pending().await
+        })
+    }
+}
+
+#[tokio::test]
+async fn an_interrupt_while_a_child_awaits_approval_ends_the_script() {
+    let (sender, receiver) = runtime::steering_channel();
+    let (reached_sender, mut reached) = tokio::sync::mpsc::channel(1);
+    let gate = Arc::new(NeverAnswers(reached_sender));
+    let run = tokio::spawn(run_with_capabilities(
+        "await read_file('a.txt')\nprint('never')",
+        gate,
+        RunCapabilities::user(None).with_steering(receiver),
+    ));
+    reached.recv().await.unwrap();
+    sender.interrupt();
+    let (events, _) = run.await.unwrap();
+    let interrupted: Vec<bool> = events
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::ToolCallUnexecuted { interrupted, .. } => Some(*interrupted),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(interrupted, [true], "{events:?}");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::ToolCallFinished { result, is_error: true, .. }
+                if result.contains("[script raised]")
+        )),
+        "{events:?}"
+    );
+}

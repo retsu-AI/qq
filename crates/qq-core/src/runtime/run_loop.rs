@@ -2957,7 +2957,7 @@ impl RunState {
                                             Ok((outcome, identity, structured)) => {
                                                 let mut result = tools::bounded_result(outcome.content, outcome.is_error);
                                                 if let Some(identity) = identity { result.result_digest = identity; }
-                                                result.value = structured;
+                                                result.value = structured.filter(|value| value.to_string().len() <= runtime::code::MAX_STRUCTURED_VALUE_BYTES);
                                                 result
                                             }
                                             Err(error) => hosts::host_error_result(&error),
@@ -3275,13 +3275,38 @@ impl RunState {
                                             None
                                         }
                                     };
-                                    let Some(script) = script.as_mut() else { continue; };
+                                    let Some(mut script) = script.take() else { continue; };
                                     let mut settled: Vec<qq_script::Settled> = Vec::new();
                                     let mut progressed = false;
                                     let completion = 'script: loop {
-                                        let requests = match tool_span.in_scope(|| script.advance(std::mem::take(&mut settled))) {
-                                            qq_script::Advance::Done(completion) => break 'script completion,
-                                            qq_script::Advance::Calls(requests) => requests,
+                                        let step_settled = std::mem::take(&mut settled);
+                                        let step_span = tool_span.clone();
+                                        let step = tokio::task::spawn_blocking(move || {
+                                            let advance = step_span.in_scope(|| script.advance(step_settled));
+                                            (script, advance)
+                                        });
+                                        let interrupt = interrupt_requested(steering, run.handled_interrupt);
+                                        let stepped = tokio::select! {
+                                            biased;
+                                            () = interrupt => None,
+                                            stepped = step => Some(stepped),
+                                        };
+                                        let requests = match stepped {
+                                            None => {
+                                                tool_scope.interrupted = true;
+                                                break 'script runtime::code::interrupted();
+                                            }
+                                            Some(Err(error)) => break 'script runtime::code::crashed(&error.to_string()),
+                                            Some(Ok((returned, advance))) => {
+                                                script = returned;
+                                                match advance {
+                                                    qq_script::Advance::Done(completion) => break 'script completion,
+                                                    qq_script::Advance::Calls(requests) if requests.is_empty() => {
+                                                        break 'script runtime::code::crashed("the script engine stalled without requesting a call");
+                                                    }
+                                                    qq_script::Advance::Calls(requests) => requests,
+                                                }
+                                            }
                                         };
                                         let mut admitted: Vec<(u16, RuntimeToolCall, bool)> = Vec::with_capacity(requests.len());
                                         for request in requests {
@@ -3296,8 +3321,22 @@ impl RunState {
                                                     yield TurnStep::Stop; return;
                                                 }
                                             };
-                                            let effect = catalog.lookup(&tool.tool_name).map_or(catalog::EffectClass::ReadOnly, |entry| entry.effect);
+                                            let Some(effect) = catalog.lookup(&tool.tool_name).map(|entry| entry.effect) else {
+                                                settled.push(qq_script::Settled { seq: request.seq, result: Err(runtime::code::unknown(&request.name)) });
+                                                continue;
+                                            };
+                                            if let Some(limit) = run.budget.exceeded(tokio::time::Instant::now()).or_else(|| run.budget.tool_calls_spent().then_some(BudgetLimitKind::ToolCalls)) {
+                                                break 'script runtime::code::stopped(&format!("the run's {} budget is spent; no further tool calls run", limit.as_str()));
+                                            }
+                                            if run.loop_guard.no_progress() {
+                                                break 'script runtime::code::stopped("run paused after 512 quiet tool attempts without progress");
+                                            }
                                             let arguments = serde_json::Value::Object(request.arguments).to_string();
+                                            let key = CallKey::new(&tool.tool_name, &arguments);
+                                            if run.loop_guard.reject(key) {
+                                                settled.push(qq_script::Settled { seq: request.seq, result: Err(runtime::code::repeated(&tool.tool_name)) });
+                                                continue;
+                                            }
                                             let child = RuntimeToolCall {
                                                 id,
                                                 turn_ordinal: call.turn_ordinal,
@@ -3309,6 +3348,7 @@ impl RunState {
                                                 rejection: None,
                                             };
                                             run.budget.charge_tool_calls(1);
+                                            run.guard_eligible.push((child.id, key));
                                             yield TurnStep::Emit(RuntimeEvent::ScriptCallRequested { call: child.clone(), parent: call.id, seq: request.seq });
                                             let decision = {
                                                 let interrupt = interrupt_requested(steering, run.handled_interrupt);
@@ -3381,9 +3421,7 @@ impl RunState {
                                                 }
                                                 note_audited_action(&mut run.audit_triggers, &mut run.audit_actions, audit_hook.is_some(), &child, &result);
                                                 progressed |= runtime::is_progress(&child, catalog.lookup(&child.name), &result);
-                                                if may_change_files(&child, network_policy, catalog.lookup(&child.name)) && !result.is_error {
-                                                    run.loop_guard.mutation();
-                                                }
+                                                run.observe_tool(&child, &RetainedResult::retain(&result, &child.name, child.id), network_policy, catalog.lookup(&child.name));
                                                 let seq = seqs.iter().find(|(id, _)| *id == child.id).map(|(_, seq)| *seq).expect("every child has a seq");
                                                 settled.push(qq_script::Settled { seq, result: runtime::code::settle(&result) });
                                                 let result = cite_spill(result, &child.name, child.id, spills.is_some());
