@@ -435,6 +435,11 @@ impl SessionClient {
         let exchange = async {
             let response = request.send().await.map_err(|_| ClientError::Unavailable)?;
             let status = response.status().as_u16();
+            let response_limit = if (200..300).contains(&status) {
+                response_limit
+            } else {
+                MAX_ERROR_BODY_BYTES
+            };
             if response
                 .content_length()
                 .is_some_and(|length| length > response_limit as u64)

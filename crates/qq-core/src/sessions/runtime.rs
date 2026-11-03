@@ -720,7 +720,12 @@ impl SessionRuntime {
         if should_schedule || applied.schedule {
             self.request_schedule();
         }
-        fork::cleanup(&self.inner, false).await?;
+        if matches!(
+            applied.receipt.outcome,
+            CommandOutcome::SessionDeleted { .. } | CommandOutcome::SessionsPruned { .. }
+        ) {
+            fork::cleanup(&self.inner, false).await?;
+        }
         Ok(applied.receipt)
     }
 

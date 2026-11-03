@@ -643,9 +643,15 @@ pub(super) async fn execute_run(
     }
     let load_progress = RuntimeLoadProgress::default();
     let session = claimed.identity.session_id;
-    let configuration_workspace = inner.store.call(store::Priority::AwaitControl, move |connection| {
-        Ok(connection.query_row("SELECT w.path FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.id=?1",[session.to_string()],|row|row.get::<_,String>(0))?)
-    }).await;
+    let configuration_workspace = if Path::new(&claimed.workspace)
+        .starts_with(&inner.worktree_directory)
+    {
+        inner.store.call(store::Priority::AwaitControl, move |connection| {
+            Ok(connection.query_row("SELECT w.path FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.id=?1",[session.to_string()],|row|row.get::<_,String>(0))?)
+        }).await
+    } else {
+        Ok(claimed.workspace.clone())
+    };
     let configuration_workspace = match configuration_workspace {
         Ok(path) => path,
         Err(error) => {
@@ -3519,7 +3525,9 @@ async fn finish_run_accounted(
         inner.failed.send_replace(true);
         return;
     }
-    checkpoints::settle(inner, claimed, !matches!(outcome, RunOutcome::Completed)).await;
+    if claimed.identity.kind == RunKind::Prompt {
+        checkpoints::settle(inner, claimed, !matches!(outcome, RunOutcome::Completed)).await;
+    }
     if matches!(&outcome, RunOutcome::BudgetExhausted { exhaustion }
         if exhaustion.limit == qq_protocol::BudgetLimitKind::Duration)
         && approvals::expire_goal_hold(inner, claimed, false)

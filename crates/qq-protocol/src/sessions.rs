@@ -2136,6 +2136,7 @@ mod tests {
                 SessionCommandKind::SetSessionModel,
                 SessionCommandKind::SetSessionProfile,
                 SessionCommandKind::SetSessionEffort,
+                SessionCommandKind::ForkSession,
                 SessionCommandKind::CompactSession,
             ]
         );
@@ -2149,6 +2150,9 @@ mod tests {
                 SessionCommandKind::RespondToolApproval,
                 SessionCommandKind::DeleteSession,
                 SessionCommandKind::PruneSessions,
+                SessionCommandKind::ListCheckpoints,
+                SessionCommandKind::TurnDiff,
+                SessionCommandKind::RewindSession,
                 SessionCommandKind::UndoWorkspace,
                 SessionCommandKind::RollbackCompaction,
             ]
@@ -3789,7 +3793,7 @@ mod tests {
             serde_json::to_value(SessionCommandKind::SetSessionProfile).unwrap(),
             "set_session_profile"
         );
-        assert_eq!(SessionCommandKind::ALL.len(), 20);
+        assert_eq!(SessionCommandKind::ALL.len(), 24);
 
         let create = SessionCommand::CreateSession {
             workspace_id: id(2),

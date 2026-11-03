@@ -673,9 +673,15 @@ async fn run_owned_child(
             return Err(spawn_error("the sub-agent admission was cancelled"));
         }
         let configuration_session = parent.identity.session_id;
-        let configuration_workspace=inner.store.call(store::Priority::AwaitControl,move |connection| {
-            Ok(connection.query_row("SELECT w.path FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.id=?1",[configuration_session.to_string()],|row|row.get::<_,String>(0))?)
-        }).await.map_err(|error|spawn_error(format!("could not resolve sub-agent configuration workspace: {error}")))?;
+        let configuration_workspace = if Path::new(&parent.workspace)
+            .starts_with(&inner.worktree_directory)
+        {
+            inner.store.call(store::Priority::AwaitControl,move |connection| {
+                Ok(connection.query_row("SELECT w.path FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.id=?1",[configuration_session.to_string()],|row|row.get::<_,String>(0))?)
+            }).await.map_err(|error|spawn_error(format!("could not resolve sub-agent configuration workspace: {error}")))?
+        } else {
+            parent.workspace.clone()
+        };
         let mut selection = parent.model.clone();
         if let Some(model) = model.and_then(|model| {
             let model = model.trim().to_owned();
@@ -718,20 +724,22 @@ async fn run_owned_child(
         if *prepare_cancel.borrow() {
             return Err(spawn_error("the sub-agent admission was cancelled"));
         }
-        if let Err(error) = inner
-            .loader
-            .load_in_execution_root(
-                RuntimeLoadRequest {
-                    reasoning_effort: child_effort.or(parent.reasoning_effort),
-                    workspace: configuration_workspace,
-                    model: selection.clone(),
-                    profile: parent.profile.clone(),
-                },
+        let request = RuntimeLoadRequest {
+            reasoning_effort: child_effort.or(parent.reasoning_effort),
+            workspace: configuration_workspace.clone(),
+            model: selection.clone(),
+            profile: parent.profile.clone(),
+        };
+        let load = if configuration_workspace == parent.workspace {
+            inner.loader.load(request)
+        } else {
+            inner.loader.load_in_execution_root(
+                request,
                 parent.workspace.clone(),
                 RuntimeLoadProgress::default(),
             )
-            .await
-        {
+        };
+        if let Err(error) = load.await {
             return Err(spawn_error(format!(
                 "the sub-agent model could not be loaded: {}",
                 truncate_utf8(error.message, MAX_FAILURE_MESSAGE_BYTES)
