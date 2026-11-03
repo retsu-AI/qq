@@ -4422,6 +4422,7 @@ fn clicking_an_agent_lane_focuses_that_agent() {
 #[test]
 fn a_background_approval_is_answered_in_place_without_moving_focus() {
     let (mut app, parent, child_id, run_id, call_id) = app_with_child_awaiting_approval();
+    FrameRenderer::default().frame_and_commit(&mut app, 120, 40);
     let (changed, requests) = app
         .handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
             KeyCode::Char('a'),

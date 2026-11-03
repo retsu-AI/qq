@@ -2838,6 +2838,23 @@ impl App {
         }
     }
 
+    fn session_on_screen(&self, session_id: SessionId) -> bool {
+        if self.geometry.rail.is_some()
+            && self
+                .geometry
+                .rail_rows
+                .iter()
+                .any(|(_, id)| *id == session_id)
+        {
+            return true;
+        }
+        let pane = self.pane();
+        let window = pane.viewport.window();
+        pane.hits
+            .iter()
+            .any(|(row, hit)| *hit == Hit::Session(session_id) && window.contains(row))
+    }
+
     fn respond_to_background_approval(&mut self, approve: bool) -> Effects {
         let Some(session_id) = self.sessions_needing_attention().into_iter().find(|id| {
             Some(*id) != self.view().transcript()
@@ -2846,19 +2863,22 @@ impl App {
             self.set_info("no other session is waiting for approval".to_owned());
             return Effects::redraw(Redraw::Immediate);
         };
-        let Some(call) = self
-            .sessions
-            .get(&session_id)
-            .and_then(|session| session.tool_calls.as_ref())
-            .and_then(|calls| {
-                calls.iter().find(|call| {
-                    call.state == ToolCallState::AwaitingApproval
-                        && !self.answered_approvals.contains(&call.id)
-                })
+        let session = &self.sessions[&session_id];
+        let Some(call) = session.tool_calls.as_ref().and_then(|calls| {
+            calls.iter().find(|call| {
+                call.state == ToolCallState::AwaitingApproval
+                    && !self.answered_approvals.contains(&call.id)
             })
-        else {
+        }) else {
             return self.focus_session(session_id);
         };
+        let asks_the_user = session
+            .approval_previews
+            .get(&call.id)
+            .is_some_and(|preview| preview.question.is_some());
+        if asks_the_user || !self.session_on_screen(session_id) {
+            return self.focus_session(session_id);
+        }
         let tool_call_id = call.id;
         let run_id = call.run_id;
         let title = self.sessions[&session_id].summary.title.clone();

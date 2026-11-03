@@ -6322,3 +6322,126 @@ fn switching_away_mid_amendment_clears_its_text_but_a_prompt_draft_survives() {
     app.focus_session(first);
     assert_eq!(app.composer.text, "ordinary draft");
 }
+
+fn hold_approval_in(
+    app: &mut App,
+    session_id: SessionId,
+    question: Option<qq_protocol::QuestionPreview>,
+) -> ToolCallSnapshot {
+    let run_id = id(0x91, RunId::from_bytes);
+    let tool_call = ToolCallSnapshot {
+        run_id,
+        call_ordinal: 1,
+        provider_call_id: "call_bg".to_owned(),
+        arguments: r#"{"command":"rm -rf build"}"#.to_owned(),
+        state: ToolCallState::AwaitingApproval,
+        ..fixtures::tool_call(
+            id(0x92, ToolCallId::from_bytes),
+            session_id,
+            if question.is_some() {
+                "ask_user"
+            } else {
+                "shell"
+            },
+        )
+    };
+    app.sessions.upsert_tool_call(tool_call.clone());
+    let view = app.sessions.get_mut(&session_id).unwrap();
+    view.live.note_tool_call(&tool_call);
+    view.approval_previews.insert(
+        tool_call.id,
+        qq_protocol::ApprovalPreview {
+            shell: None,
+            edit: None,
+            question,
+            fetch: None,
+        },
+    );
+    tool_call
+}
+
+fn approval_commands(effects: Effects) -> Vec<SessionCommand> {
+    let (_, requests) = effects.split();
+    requests
+        .into_iter()
+        .filter_map(|request| match request {
+            ClientRequest::Command(CommandRequest {
+                command: command @ SessionCommand::RespondToolApproval { .. },
+                ..
+            }) => Some(command),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn alt_a_approves_another_sessions_call_only_while_its_row_is_on_screen() {
+    let (mut app, first, other) = two_session_app();
+    let call = hold_approval_in(&mut app, other, None);
+    assert_eq!(app.focused(), Some(first));
+
+    crate::view::FrameRenderer::default().frame_and_commit(&mut app, 120, 40);
+    assert_eq!(
+        approval_commands(app.handle_key(alt('a'))),
+        vec![SessionCommand::RespondToolApproval {
+            run_id: call.run_id,
+            tool_call_id: call.id,
+            decision: ApprovalDecision::ApproveOnce,
+        }]
+    );
+}
+
+#[test]
+fn alt_a_and_alt_d_focus_a_session_whose_name_is_not_on_screen_instead_of_answering() {
+    for chord in ['a', 'd'] {
+        let (mut app, first, other) = two_session_app();
+        hold_approval_in(&mut app, other, None);
+        crate::view::FrameRenderer::default().frame_and_commit(&mut app, 80, 24);
+        assert!(
+            app.geometry.rail.is_none(),
+            "80 columns has no sessions column"
+        );
+        assert_eq!(app.focused(), Some(first));
+
+        let commands = approval_commands(app.handle_key(alt(chord)));
+
+        assert!(
+            commands.is_empty(),
+            "Alt-{chord} answered an unseen call: {commands:?}"
+        );
+        assert_eq!(
+            app.focused(),
+            Some(other),
+            "Alt-{chord} moves to the session instead"
+        );
+        assert!(
+            app.pending_approval().is_some(),
+            "the call waits for y or n there"
+        );
+    }
+}
+
+#[test]
+fn alt_a_never_answers_an_ask_user_hold_even_when_its_row_is_on_screen() {
+    let (mut app, first, other) = two_session_app();
+    hold_approval_in(
+        &mut app,
+        other,
+        Some(qq_protocol::QuestionPreview {
+            questions: vec![qq_protocol::Question {
+                prompt: "Which crate?".to_owned(),
+                options: vec!["qq-core".to_owned(), "qq-tui".to_owned()],
+                free_text: false,
+            }],
+        }),
+    );
+    crate::view::FrameRenderer::default().frame_and_commit(&mut app, 120, 40);
+    assert!(app.geometry.rail.is_some());
+    assert_eq!(app.focused(), Some(first));
+
+    let commands = approval_commands(app.handle_key(alt('a')));
+
+    assert!(commands.is_empty(), "{commands:?}");
+    assert_eq!(app.focused(), Some(other));
+    assert!(app.pending_question().is_some());
+}

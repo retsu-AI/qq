@@ -175,8 +175,9 @@ Edits show a diff; `fetch` shows the URL; MCP calls show the server, tool,
 and arguments.
 
 When several sessions run at once, `Alt-A` / `Alt-D` approve or deny the
-oldest waiting call in another session without leaving yours, and
-`/attention` lists everything waiting.
+oldest waiting call in another session without leaving yours, as long as
+that session's row is on screen. If it isn't, or the agent asked a question,
+they take you to it instead. `/attention` lists everything waiting.
 
 A prompt waits for you. There is no server-side timer that denies it while
 you are away: the hold ends when you answer, when the run's own deadline
