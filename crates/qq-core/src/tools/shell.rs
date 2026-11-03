@@ -865,6 +865,22 @@ pub(super) enum LoginCaptureError {
     Cleanup(String),
 }
 
+#[cfg(all(test, unix))]
+static LOGIN_PREPARATION_HOOKS: std::sync::Mutex<
+    Vec<(
+        std::path::PathBuf,
+        super::login_environment::tests::InspectionGate,
+    )>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(all(test, unix))]
+pub(super) fn hold_login_preparation(
+    root: std::path::PathBuf,
+    gate: super::login_environment::tests::InspectionGate,
+) {
+    LOGIN_PREPARATION_HOOKS.lock().unwrap().push((root, gate));
+}
+
 pub(super) async fn capture_login_environment(
     workspace: &Workspace,
     source: &super::login_environment::Source,
@@ -875,10 +891,32 @@ pub(super) async fn capture_login_environment(
 ) -> Result<super::login_environment::Environment, LoginCaptureError> {
     #[cfg(all(test, unix))]
     let prepared_workspace = workspace.path().to_owned();
+    let permit = tokio::select! {
+        biased;
+        () = cancelled.cancelled() => return Err(LoginCaptureError::Cancelled),
+        () = tokio::time::sleep_until(deadline.into()) => return Err(LoginCaptureError::Timeout),
+        permit = crate::workspace::blocking_permits().acquire_owned() => {
+            permit.map_err(|_| LoginCaptureError::Process(std::io::Error::other("tool executor is unavailable")))?
+        }
+    };
+    #[cfg(all(test, unix))]
+    let preparation_hook = {
+        let mut hooks = LOGIN_PREPARATION_HOOKS.lock().unwrap();
+        hooks
+            .iter()
+            .position(|(root, _)| *root == prepared_workspace)
+            .map(|index| hooks.remove(index).1)
+    };
     let workspace = workspace.clone();
     let source = source.clone();
     let stop = cancelled.clone();
     let preparation = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        #[cfg(all(test, unix))]
+        if let Some(hook) = preparation_hook {
+            let _ = hook.entered.send(());
+            let _ = hook.release.recv();
+        }
         let arguments = ShellArgs {
             command: "env -0".to_owned(),
             cwd: None,

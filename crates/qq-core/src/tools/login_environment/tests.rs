@@ -75,9 +75,55 @@ async fn command_with_cancellation(
 }
 
 #[derive(Debug)]
-pub(super) struct InspectionGate {
-    pub(super) entered: tokio::sync::oneshot::Sender<()>,
-    pub(super) release: std::sync::mpsc::Receiver<()>,
+pub(in crate::tools) struct InspectionGate {
+    pub(in crate::tools) entered: tokio::sync::oneshot::Sender<()>,
+    pub(in crate::tools) release: std::sync::mpsc::Receiver<()>,
+}
+
+#[tokio::test]
+async fn login_environment_cancelled_preparation_retains_blocking_permit() {
+    let root = tempfile::tempdir().unwrap();
+    let producer = fixture(root.path(), "env -0");
+    let workspace = Workspace::open(root.path()).unwrap();
+    let permits = crate::workspace::blocking_permits();
+    let capacity = permits.available_permits();
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::sync_channel(1);
+    crate::tools::shell::hold_login_preparation(
+        root.path().to_owned(),
+        InspectionGate {
+            entered,
+            release: released,
+        },
+    );
+    let cancellation = RunCancellation::new();
+    let cancelled = ToolCancellation::new(cancellation.clone());
+    let tasks = ToolTasks::default();
+    let mut lease = tasks.enter();
+    let mut capture = std::pin::pin!(producer.login_environment.get(
+        &workspace,
+        producer.clone(),
+        &cancelled,
+        &mut lease
+    ));
+    tokio::select! {
+        result = &mut capture => panic!("preparation returned before its gate: {result:?}"),
+        result = entering => result.unwrap(),
+    }
+    cancellation.cancel();
+    let result = capture.await;
+    let remaining = permits.available_permits();
+    release.send(()).unwrap();
+    let drained =
+        crate::test_support::within(permits.acquire_many_owned(capacity.try_into().unwrap()))
+            .await
+            .unwrap()
+            .unwrap();
+    drop(drained);
+    assert!(result.0.is_none());
+    assert!(result.1.is_none());
+    assert_eq!(remaining, capacity - 1);
+    assert!(!root.path().join("count").exists());
 }
 
 #[test]

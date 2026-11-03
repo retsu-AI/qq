@@ -1,5 +1,5 @@
 #[cfg(all(test, unix))]
-mod tests;
+pub(super) mod tests;
 
 use std::{
     ffi::OsString,
