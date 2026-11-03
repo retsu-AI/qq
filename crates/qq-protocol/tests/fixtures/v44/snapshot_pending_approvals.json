@@ -1,0 +1,85 @@
+{
+  "cursor": {
+    "store_id": "01010101010101010101010101010101",
+    "workspace_id": "02020202020202020202020202020202",
+    "sequence": 17
+  },
+  "workspace": {
+    "id": "02020202020202020202020202020202",
+    "path": "/workspace"
+  },
+  "sessions": [
+    {
+      "id": "03030303030303030303030303030303",
+      "workspace_id": "02020202020202020202020202020202",
+      "title": "Fix the login redirect",
+      "status": "running",
+      "active_run_id": "04040404040404040404040404040404",
+      "activity": "generating_response",
+      "queued_prompts": 1,
+      "model": "openai/gpt-5.6",
+      "profile": "review",
+      "approval_mode": "read_only",
+      "correlation": {
+        "thread": "t-1"
+      },
+      "context_tokens": 1200,
+      "estimated_cost_usd_nanos": 42,
+      "updated_at_ms": 1700000000000,
+      "pending_holds": [
+        {
+          "tool_call_id": "09090909090909090909090909090909"
+        }
+      ]
+    }
+  ],
+  "focused": {
+    "approval_previews": [
+      {
+        "tool_call_id": "09090909090909090909090909090909",
+        "preview": {
+          "question": {
+            "questions": [
+              {
+                "prompt": "Which crate?",
+                "options": [
+                  "core",
+                  "provider"
+                ],
+                "free_text": true
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "summary": {
+      "id": "03030303030303030303030303030303",
+      "workspace_id": "02020202020202020202020202020202",
+      "title": "Fix the login redirect",
+      "status": "running",
+      "active_run_id": "04040404040404040404040404040404",
+      "activity": "generating_response",
+      "queued_prompts": 1,
+      "model": "openai/gpt-5.6",
+      "profile": "review",
+      "approval_mode": "read_only",
+      "correlation": {
+        "thread": "t-1"
+      },
+      "context_tokens": 1200,
+      "estimated_cost_usd_nanos": 42,
+      "updated_at_ms": 1700000000000,
+      "pending_holds": [
+        {
+          "tool_call_id": "09090909090909090909090909090909"
+        }
+      ]
+    },
+    "messages": [],
+    "runs": [],
+    "has_older_tool_calls": false,
+    "has_older_messages": false
+  },
+  "has_older_sessions": false
+}

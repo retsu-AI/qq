@@ -1,0 +1,9 @@
+{
+  "command_id": "11111111111111111111111111111111",
+  "command": {
+    "type": "create_session",
+    "workspace_id": "02020202020202020202020202020202",
+    "model": {},
+    "approval_mode": "auto"
+  }
+}

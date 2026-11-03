@@ -1,0 +1,14 @@
+{
+  "command_id": "14141414141414141414141414141414",
+  "command": {
+    "type": "steer_run",
+    "run_id": "04040404040404040404040404040404",
+    "input": [
+      {
+        "type": "text",
+        "text": "stop, do it differently"
+      }
+    ],
+    "interrupt": true
+  }
+}

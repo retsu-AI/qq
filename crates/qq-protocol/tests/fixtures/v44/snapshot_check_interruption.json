@@ -1,0 +1,17 @@
+{
+  "check_interruption": {
+    "session_id": "03030303030303030303030303030303",
+    "run_id": "04040404040404040404040404040404"
+  },
+  "cursor": {
+    "store_id": "02020202020202020202020202020202",
+    "workspace_id": "01010101010101010101010101010101",
+    "sequence": 7
+  },
+  "workspace": {
+    "id": "01010101010101010101010101010101",
+    "path": "/workspace"
+  },
+  "sessions": [],
+  "has_older_sessions": false
+}

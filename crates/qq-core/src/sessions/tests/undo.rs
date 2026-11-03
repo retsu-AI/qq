@@ -114,6 +114,7 @@ async fn undo_root_snapshot_covers_a_spawned_write_child() {
             CommandId::generate().unwrap(),
             SessionCommand::UndoWorkspace {
                 workspace_id: harness.workspace_id,
+                session_id: None,
                 snapshot: None,
             },
         )
@@ -388,6 +389,7 @@ async fn undo_workspace(
             command_id,
             SessionCommand::UndoWorkspace {
                 workspace_id: harness.workspace_id,
+                session_id: None,
                 snapshot: None,
             },
         )
@@ -458,6 +460,7 @@ async fn undo_workspace_is_refused_while_a_run_is_queued_or_active() {
             CommandId::generate().unwrap(),
             SessionCommand::UndoWorkspace {
                 workspace_id: harness.workspace_id,
+                session_id: None,
                 snapshot: None,
             },
         )
@@ -494,6 +497,7 @@ async fn no_run_starts_in_the_workspace_until_its_restore_finishes() {
                     CommandId::generate().unwrap(),
                     SessionCommand::UndoWorkspace {
                         workspace_id,
+                        session_id: None,
                         snapshot: None,
                     },
                 )
@@ -555,6 +559,7 @@ async fn a_failed_undo_leaves_the_workspace_free_to_run() {
             CommandId::generate().unwrap(),
             SessionCommand::UndoWorkspace {
                 workspace_id: harness.workspace_id,
+                session_id: None,
                 snapshot: Some("missing".to_owned()),
             },
         )
@@ -595,6 +600,7 @@ async fn undo_is_refused_while_a_prompt_is_queued() {
         .unwrap();
     let undo = SessionCommand::UndoWorkspace {
         workspace_id: claimed.identity.workspace_id,
+        session_id: None,
         snapshot: None,
     };
     store_command(&store, claimed.identity.session_id, "queued")
@@ -635,6 +641,7 @@ async fn undo_in_a_subdirectory_never_restores_the_parent_workspace() {
             CommandId::generate().unwrap(),
             SessionCommand::UndoWorkspace {
                 workspace_id: nested_id,
+                session_id: None,
                 snapshot: None,
             },
         )
@@ -666,6 +673,7 @@ async fn undo_is_refused_while_a_run_is_active_in_a_nested_workspace() {
             CommandId::generate().unwrap(),
             SessionCommand::UndoWorkspace {
                 workspace_id: parent_id,
+                session_id: None,
                 snapshot: None,
             },
         )
@@ -728,6 +736,7 @@ async fn shutdown_is_not_held_behind_a_stalled_restore() {
                     CommandId::generate().unwrap(),
                     SessionCommand::UndoWorkspace {
                         workspace_id,
+                        session_id: None,
                         snapshot: None,
                     },
                 )
@@ -805,6 +814,7 @@ async fn a_restoring_command_id_is_reserved_against_every_other_request() {
     let command_id = CommandId::generate().unwrap();
     let undo = SessionCommand::UndoWorkspace {
         workspace_id: harness.workspace_id,
+        session_id: None,
         snapshot: None,
     };
     let held = HeldSnapshot::new(&root);
@@ -822,6 +832,7 @@ async fn a_restoring_command_id_is_reserved_against_every_other_request() {
                 command_id,
                 SessionCommand::UndoWorkspace {
                     workspace_id: other_id,
+                    session_id: None,
                     snapshot: None,
                 },
             )

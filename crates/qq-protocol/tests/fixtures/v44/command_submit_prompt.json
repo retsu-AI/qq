@@ -1,0 +1,30 @@
+{
+  "command_id": "12121212121212121212121212121212",
+  "command": {
+    "type": "submit_prompt",
+    "session_id": "03030303030303030303030303030303",
+    "input": [
+      {
+        "type": "text",
+        "text": "Fix the login redirect"
+      },
+      {
+        "type": "workspace_file",
+        "path": "src/auth.rs",
+        "expected_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    ],
+    "limits": {
+      "max_duration_ms": 600000,
+      "max_model_turns": 40,
+      "max_cost_usd_nanos": 2000000000,
+      "max_output_tokens": 50000,
+      "max_tool_output_bytes": 4000000,
+      "max_children": 2,
+      "max_concurrent_children": 1
+    },
+    "correlation": {
+      "job": "j-1"
+    }
+  }
+}

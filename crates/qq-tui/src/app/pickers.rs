@@ -472,6 +472,18 @@ impl App {
                     return Effects::none();
                 };
                 self.overlay = None;
+                if self.turn_picker_title.take().is_some() {
+                    let action = self
+                        .turn_actions
+                        .iter()
+                        .find(|(label, _)| label == &text)
+                        .map(|(_, command)| command.clone());
+                    self.turn_actions.clear();
+                    return action.map_or_else(
+                        || Effects::redraw(Redraw::Immediate),
+                        |command| self.send(PendingIntent::CheckpointAction, command),
+                    );
+                }
                 self.composer.replace(text);
                 Effects::redraw(Redraw::Immediate)
             }
@@ -1143,12 +1155,15 @@ impl App {
             PendingIntent::Undo,
             qq_protocol::SessionCommand::UndoWorkspace {
                 workspace_id,
+                session_id: self.focused(),
                 snapshot: None,
             },
         )
     }
 
     pub(super) fn open_history(&mut self) -> Effects {
+        self.turn_picker_title = None;
+        self.turn_actions.clear();
         let Some(session) = self.focused().and_then(|id| self.sessions.get(&id)) else {
             self.set_info("no session history to search".to_owned());
             return Effects::redraw(Redraw::Immediate);

@@ -95,6 +95,7 @@ fn render_last_reply(
              WHERE p.session_id = ?1 AND p.role = 'user' AND p.steering = 0
                AND p.ordinal <= ?2
                AND a.role = 'assistant' AND a.state = 'complete'
+               AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=a.run_id AND (z.turn_ordinal=0 OR z.turn_ordinal=a.turn_ordinal))
              ORDER BY a.ordinal DESC
              LIMIT 8
          )
@@ -185,6 +186,7 @@ fn render_files_and_failures(
                      JOIN tool_calls c ON c.run_id = p.run_id
                      WHERE p.session_id = ?1 AND p.role = 'user' AND p.steering = 0
                        AND p.ordinal <= ?2
+                       AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=c.run_id AND (z.turn_ordinal=0 OR z.turn_ordinal=c.turn_ordinal))
                      ORDER BY p.ordinal DESC, c.turn_ordinal DESC, c.call_ordinal DESC
                      LIMIT ?3"
             ))?;
@@ -202,6 +204,7 @@ fn render_files_and_failures(
                 ", 0
                      FROM tool_calls c
                      WHERE c.run_id = ?1 AND c.turn_ordinal <= ?2
+                       AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=c.run_id AND (z.turn_ordinal=0 OR z.turn_ordinal=c.turn_ordinal))
                      ORDER BY c.turn_ordinal DESC, c.call_ordinal DESC
                      LIMIT ?3"
             ))?;

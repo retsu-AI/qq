@@ -18,6 +18,9 @@ pub(super) enum Checkpoint {
     DropSettlement(RunId),
     SummaryAdmission(SessionId),
     GoalCheckResult(SessionId),
+    TurnCapture(RunId, u32),
+    WorkspaceReserved(SessionId),
+    SessionResourcesCleaned(SessionId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +29,7 @@ pub(super) enum StoreFault {
     ReservedSettlement(RunId),
     ReservedReload(RunId),
     ChildCancellation(RunId),
+    ForkCreated(SessionId),
 }
 
 pub(super) static PROBE: RuntimeProbe = RuntimeProbe::new();

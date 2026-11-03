@@ -1094,8 +1094,12 @@ pub(super) fn history_picker(app: &App, width: usize, height: usize) -> Vec<Line
         picker,
         PickerChrome {
             header: Some(PickerHeader {
-                title: "HISTORY",
-                hint: "type to search, Enter edits the prompt, Esc closes",
+                title: app.turn_picker_title.unwrap_or("HISTORY"),
+                hint: if app.turn_picker_title.is_some() {
+                    "type to search, Enter selects, Esc closes"
+                } else {
+                    "type to search, Enter edits the prompt, Esc closes"
+                },
                 placeholder: "recent prompts",
             }),
             question: None,

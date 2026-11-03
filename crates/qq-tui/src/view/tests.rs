@@ -5416,7 +5416,7 @@ fn opening_a_tool_row_reveals_it_and_page_keys_scroll_the_transcript() {
 }
 
 #[test]
-fn clicking_a_folded_receipt_opens_the_turn_and_alt_i_is_unbound() {
+fn clicking_a_folded_receipt_requests_its_diff_and_alt_i_is_unbound() {
     let mut app = app_with_messages(1);
     let session_id = app.focused().unwrap();
     let reads: Vec<ToolCallSnapshot> = (0..3)
@@ -5435,13 +5435,25 @@ fn clicking_a_folded_receipt_opens_the_turn_and_alt_i_is_unbound() {
     app.receipts_open = false;
     let mut renderer = FrameRenderer::default();
     let frame = renderer.frame_and_commit(&mut app, 120, 40);
-    click(&mut app, 6, row_of(&frame, "3 calls"));
-    assert!(app.receipts_open);
-    let frame = squashed_rows(&renderer.frame_and_commit(&mut app, 120, 40));
-    assert_eq!(
-        frame.iter().filter(|row| row.contains("Read a.rs")).count(),
-        3,
-        "{frame:#?}"
+    let row = row_of(&frame, "3 calls");
+    let mut requests = Vec::new();
+    for kind in [
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+    ] {
+        requests.extend(
+            app.handle_terminal_event(TerminalEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 6,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .into_requests(),
+        );
+    }
+    assert!(
+        matches!(requests.as_slice(), [qq_client::ClientRequest::Command(request)] if matches!(request.command, qq_protocol::SessionCommand::TurnDiff {session_id: id, ..} if id == session_id)),
+        "{requests:?}"
     );
     assert!(
         !crate::commands::COMMANDS

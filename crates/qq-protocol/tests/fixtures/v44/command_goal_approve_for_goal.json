@@ -1,0 +1,16 @@
+{
+  "command_id": "64646464646464646464646464646464",
+  "command": {
+    "type": "goal_control",
+    "session_id": "03030303030303030303030303030303",
+    "expected": {
+      "goal_id": "61616161616161616161616161616161",
+      "revision": 3
+    },
+    "action": {
+      "type": "approve_check",
+      "scope": "for_goal",
+      "command": "cargo test -p billing"
+    }
+  }
+}

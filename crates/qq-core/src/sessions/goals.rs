@@ -1618,7 +1618,7 @@ pub(super) fn queue_due_goals(
         .replace("?1", "s.id")
         .replace("?2", "NULL")
         .replace("?3", &MAX_CHILD_DEPTH.to_string());
-    let restoring = commands::paths_overlap_sql("w.path", "rp.path");
+    let restoring = commands::paths_overlap_sql("COALESCE(s.execution_root,w.path)", "rp.path");
     let eligible=format!("g.live=1 AND json_extract(g.payload_json,'$.status.type')='active'
         AND json_extract(g.payload_json,'$.pending_run_id') IS NULL
         AND s.active_run_id IS NULL AND s.preparing_run_id IS NULL AND s.queued_prompts=0

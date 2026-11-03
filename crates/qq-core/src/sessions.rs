@@ -49,6 +49,7 @@ use crate::{
 };
 
 mod approvals;
+mod checkpoints;
 mod claim;
 mod codec;
 mod commands;
@@ -60,6 +61,7 @@ pub use completions::{RunCompletion, RunResult};
 mod events;
 mod execution;
 mod feed;
+mod fork;
 mod goal_check;
 mod goal_paid;
 mod goal_policy;

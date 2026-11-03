@@ -172,6 +172,9 @@ fn may_change_files(
     network: &NetworkPolicy,
     entry: Option<&catalog::ToolEntry>,
 ) -> bool {
+    if matches!(call.name.as_str(), "spawn_agent" | "wait_agents") {
+        return true;
+    }
     match approval::classify(call.effect, &call.name, &call.arguments, network) {
         approval::ToolClass::Mutating => true,
         approval::ToolClass::External => !entry.is_some_and(|entry| entry.hints.read_only),
@@ -589,7 +592,7 @@ impl plan::CompiledAgentPlan {
                    let selected_guidance = match parsed_invocation.guidance {
                        None => None,
                        Some(request) => match workspace::prepare_guidance(
-                           workspace.clone(),
+                           plan.guidance_workspace.clone(),
                            Arc::clone(&guidance_roots),
                            Arc::clone(&skills),
                            cancelled.clone(),
@@ -2692,6 +2695,7 @@ impl RunState {
                     let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal, spills, audit_hook, tool_tasks, output: _, limits, deadline, base_specs, static_filter, .. } = env;
                     let limits = *limits;
                     let workspace = &plan.workspace;
+                    let guidance_workspace = &plan.guidance_workspace;
                     let catalog = &plan.catalog;
                     let _model = &plan.runtime.model;
                     let skills = &plan.skills;
@@ -2718,6 +2722,7 @@ impl RunState {
                             tokio::sync::mpsc::Sender<String>,
                         >, child_limits: Result<runtime::ChildBudget, BudgetLimitKind>, offered: bool| {
                             let workspace = (*workspace).clone();
+                            let guidance_workspace = (*guidance_workspace).clone();
                             let file_state = Arc::clone(file_state);
                             let cancelled = cancelled.clone();
                             let catalog = Arc::clone(catalog);
@@ -2909,7 +2914,7 @@ impl RunState {
                                     None if host == Some(catalog::ToolHost::LoadSkill) => {
                                         match serde_json::from_str::<workspace::skills::LoadSkillArgs>(&call.arguments) {
                                             Ok(arguments) => match workspace::load_disclosed_skill(
-                                                workspace,
+                                                guidance_workspace,
                                                 guidance_roots,
                                                 skills,
                                                 cancelled,
@@ -3082,7 +3087,7 @@ impl RunState {
                                 }).collect::<Vec<_>>();
                                 for (admitted, _) in &overlapped {
                                     started_calls[usize::from(admitted.call_ordinal - 1)] = true;
-                                    yield TurnStep::Emit(RuntimeEvent::ToolCallStarted { id: admitted.id, may_change_files: false });
+                                    yield TurnStep::Emit(RuntimeEvent::ToolCallStarted { id: admitted.id, may_change_files: may_change_files(admitted, network_policy, catalog.lookup(&admitted.name)) });
                                 }
                             let mut executions = futures_stream::iter(
                                 overlapped.into_iter().map(|(call, offered)| execute_one(call, None, child_limits, offered)),

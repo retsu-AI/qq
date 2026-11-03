@@ -257,6 +257,22 @@ Snapshots need Git 2.32 or newer; with an older Git, `qq undo` refuses.
 The TUI's `/undo` goes through the server instead, which refuses while a run
 is active, queued or due from a goal.
 
+## `qq fork SESSION [--turn N]`
+
+Fork before the Nth user prompt (default: the newest prompt). The new
+session inherits the preceding conversation and runs in a separate Git
+worktree with the preceding checkpoint's files. The original conversation
+and checkout are unchanged. The command prints the new session id,
+worktree, selected prompt and how to open it. It uses the running server,
+or opens the local session store when no server is running. Fork requires a retained Git
+checkpoint; it does not fall back to editing the source checkout.
+
+File-changing model turns capture a checkpoint after their tools finish.
+Turn diffs use a baseline taken before that turn's first mutation, so
+external edits between turns are not attributed to QQ. Capture runs beside
+the next model request; the next mutation waits for it. The last 200 turns'
+refs are kept per session, plus fork pins, with the same exclusions as undo.
+
 ## `qq version`
 
 Version plus the compatibility contracts this build speaks: protocol,

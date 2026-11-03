@@ -618,15 +618,18 @@ async fn goal_check_process_timeout_and_binary_output_stay_bounded() {
 #[tokio::test]
 async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
     struct CoordinatedAuthority {
+        workspace: PathBuf,
         checks: AtomicUsize,
         barrier: Arc<tokio::sync::Barrier>,
     }
     impl WorkspacePolicyAuthority for CoordinatedAuthority {
-        fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
+        fn goal_policy(&self, workspace: &Path) -> GoalPolicyFuture {
+            assert_eq!(workspace, self.workspace);
             Box::pin(std::future::ready(Ok(GoalPolicy::default())))
         }
 
-        fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
+        fn validate_goal_check(&self, workspace: &Path, command: &str) -> GoalCheckPolicyFuture {
+            assert_eq!(workspace, self.workspace);
             assert_eq!(command, "printf checked >> goal-check-marker");
             let call = self.checks.fetch_add(1, Ordering::SeqCst);
             let barrier = self.barrier.clone();
@@ -641,6 +644,7 @@ async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
     let directory = TempDir::new().unwrap();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.policy_authority = Some(Arc::new(CoordinatedAuthority {
+        workspace: directory.path().canonicalize().unwrap(),
         checks: AtomicUsize::new(0),
         barrier: Arc::new(tokio::sync::Barrier::new(2)),
     }));
@@ -690,6 +694,17 @@ async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
         .await
         .unwrap();
     }
+    let execution_root = directory.path().join("isolated");
+    std::fs::create_dir(&execution_root).unwrap();
+    let root = execution_root.to_string_lossy().into_owned();
+    runtime
+        .store()
+        .call_write(store::Priority::Control, move |connection| {
+            connection.execute("UPDATE sessions SET execution_root=?1", [root])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     drop(held);
     tokio::time::timeout(Duration::from_secs(10), async {
         let mut achieved = std::collections::HashSet::new();
@@ -705,7 +720,7 @@ async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
     .await
     .expect("both prepared checks must acquire workspace exclusion in turn");
     assert_eq!(
-        tokio::fs::read_to_string(directory.path().join("goal-check-marker"))
+        tokio::fs::read_to_string(execution_root.join("goal-check-marker"))
             .await
             .unwrap(),
         "checkedchecked"

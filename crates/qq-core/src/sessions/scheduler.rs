@@ -23,6 +23,9 @@ async fn expire_idle_sessions(inner: &SessionRuntimeInner, retention: Duration) 
     loop {
         match inner.store.expire_idle_sessions(cutoff, after, now).await {
             Ok(expired) => {
+                if let Err(error) = fork::cleanup(inner, false).await {
+                    tracing::warn!(%error, "could not reclaim expired session resources");
+                }
                 for cursor in expired.cursors {
                     inner.notify(cursor);
                 }
@@ -274,6 +277,9 @@ async fn settle_unstartable_reservation(
 }
 
 async fn settle_panicked_execution(inner: &SessionRuntimeInner, claimed: &ClaimedRun) {
+    if claimed.identity.kind == RunKind::Prompt {
+        checkpoints::settle(inner, claimed, true).await;
+    }
     match inner
         .store
         .settle_panicked_execution(
