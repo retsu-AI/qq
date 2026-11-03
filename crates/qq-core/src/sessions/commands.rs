@@ -798,6 +798,10 @@ pub(super) fn execute_command(
             validate_model_selection(&model)?;
             let correlation_json = encode_correlation(&correlation)?;
             ensure_workspace(&transaction, workspace_id)?;
+            let reclaiming:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM fork_resources f JOIN workspaces w ON w.id=?1 WHERE f.state='deleting' AND f.root IS NOT NULL AND (w.path=f.root OR substr(w.path,1,length(f.root)+1)=f.root||'/'))",[workspace_id.to_string()],|row|row.get(0))?;
+            if reclaiming {
+                return Err(SessionRuntimeError::WorkspaceBusy);
+            }
             let session_count: u32 = transaction.query_row(
                 "SELECT COUNT(*) FROM sessions WHERE workspace_id = ?1",
                 [workspace_id.to_string()],
