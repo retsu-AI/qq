@@ -6,6 +6,7 @@ mod edit;
 pub(crate) mod fetch;
 pub(crate) mod goal;
 mod lang;
+pub(crate) mod login_environment;
 mod matching;
 #[cfg(not(target_os = "linux"))]
 mod native_exit;
@@ -87,6 +88,9 @@ pub(crate) async fn run_goal_check_shell(
     };
     let outcome = match result.native_outcome {
         Some(dispatch::CommandOutcome::Cancelled) if expired => {
+            Some(dispatch::CommandOutcome::TimedOut)
+        }
+        None if expired && result.disposition == dispatch::ResultDisposition::Interrupted => {
             Some(dispatch::CommandOutcome::TimedOut)
         }
         outcome => outcome,

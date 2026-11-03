@@ -1980,6 +1980,15 @@ impl App {
             Command::NewRootSession => self.create_session(None),
             Command::NewChildSession => self.create_session(self.focused()),
             Command::CompactSession => self.compact_session(),
+            Command::ReloadShell => {
+                let Some(session_id) = self.focused() else {
+                    self.set_warning(
+                        "create a session before reloading the shell environment".to_owned(),
+                    );
+                    return Effects::redraw(Redraw::Immediate);
+                };
+                self.submit_text(session_id, "/shell reload".to_owned())
+            }
             Command::RollbackCompaction => self.rollback_compaction(),
             Command::CancelRun => self.cancel_run(),
             Command::RewindSession => self.open_turn_picker(false, None),
@@ -2339,6 +2348,10 @@ impl App {
                 .find(|entry| entry.name == name)
                 .map(|entry| entry.action)
             {
+                if command == Command::ReloadShell && prompt != "/shell reload" {
+                    self.set_warning("use /shell reload".to_owned());
+                    return Effects::redraw(Redraw::Immediate);
+                }
                 self.composer.clear();
                 self.slash.select(0);
                 return self.execute(command);

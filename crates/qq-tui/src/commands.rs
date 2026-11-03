@@ -24,6 +24,7 @@ pub(crate) enum Command {
     RollbackCompaction,
     RewindSession,
     ForkSession,
+    ReloadShell,
     CancelRun,
     ToggleToolDetail,
     CursorUp,
@@ -118,7 +119,7 @@ pub(crate) fn retired_replacement(name: &str) -> Option<&'static str> {
         .map(|(_, replacement)| *replacement)
 }
 
-pub(crate) const COMMANDS: [CommandSpec; 47] = [
+pub(crate) const COMMANDS: [CommandSpec; 48] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -390,6 +391,13 @@ pub(crate) const COMMANDS: [CommandSpec; 47] = [
         [],
         ["Ctrl-R"]
     ),
+    spec!(
+        ReloadShell,
+        "reload the login shell environment (/shell reload)",
+        System,
+        ["/shell"],
+        []
+    ),
     spec!(Quit, "exit QQ", System, ["/quit", "/exit"], ["Ctrl-C"]),
     spec!(
         ShowGoal,
@@ -539,7 +547,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slash_names_match_the_protocol_reservation_exactly() {
+    fn slash_names_match_client_reservations_and_server_shell_builtin() {
         let here: BTreeSet<String> = slash_entries()
             .map(|entry| entry.name.into_owned())
             .chain(RETIRED_SLASH.iter().map(|(name, _)| (*name).to_owned()))
@@ -547,6 +555,7 @@ mod tests {
         let reserved: BTreeSet<String> = qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS
             .iter()
             .map(|name| (*name).to_owned())
+            .chain(["/shell".to_owned()])
             .collect();
         assert_eq!(here, reserved);
     }
@@ -615,7 +624,7 @@ mod tests {
         let names = entry_names(matching("/"));
         assert_eq!(
             names.len(),
-            qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS.len() - RETIRED_SLASH.len()
+            qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS.len() - RETIRED_SLASH.len() + 1
         );
         assert_eq!(names[0], "/help");
         let quit: Vec<_> = matching("/qu")

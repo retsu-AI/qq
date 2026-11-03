@@ -1157,7 +1157,22 @@ after a restart.
   head shows how a command started, the tail its verdict; the middle of a
   long build log is what the model should page into deliberately, not read
   by default. `exit` is `signal:<n>` or `timeout` when there is no code.
-- No login/profile shell initialization on the hot path.
+- On Unix, the first `shell` call captures `$SHELL -lc 'env -0'` once per
+  native runtime owner, bounded to 5 seconds and 256 KiB, using the same
+  process-group supervision and cleanup as commands. Later `/bin/sh -c`
+  calls merge that cache over the inherited environment, below QQ's explicit
+  `PWD`, removed `OLDPWD`, `TERM`, and plain-output variables. `exec` and
+  attested read images keep their existing environments.
+  Standard login startup files (including absent files) are checked by mtime
+  before reuse; `/shell reload` invalidates the cache for the next shell call
+  without calling a model. Arbitrarily sourced files require explicit reload.
+  `shell: (login_environment: false)` disables capture. Failed, malformed,
+  oversized or timed-out captures fall back to the inherited environment
+  with one notice per runtime owner, and are retried only after invalidation.
+  Cancelling a capture does not cache a failure or consume the notice; a
+  subsequent command retries. An unset or empty `$SHELL` skips capture.
+  Windows retains its native inherited `cmd` environment: no POSIX login
+  shell or `env -0` is invoked there.
 - The **inherited environment**: the child gets the server process's whole
   environment, credentials included, with `TERM=dumb` and, unless already
   set, `NO_COLOR=1`, `PAGER=cat` and `GIT_PAGER=cat`, because output goes to

@@ -140,6 +140,25 @@ providers: {
 Provider kinds: `OpenAi`, `OpenAiCodex`, `Anthropic`, `Google`, `XAi`,
 `LiteLlm`, `AmazonBedrock`, `AmazonBedrockMantle`, `Custom`.
 
+### Shell environment
+
+On Linux and macOS, the first shell tool call captures your `$SHELL` login
+environment once (a five-second limit); later commands reuse it under QQ's
+working-directory and plain-output settings. Login values override inherited
+values, but QQ's `PWD`, removal of `OLDPWD`, `TERM=dumb`, and inherited or default
+`NO_COLOR`/`PAGER`/`GIT_PAGER` take precedence over the login shell. An unset or
+empty `$SHELL` skips capture. Standard startup-file mtimes
+trigger refresh. Use `/shell reload` after changing other sourced files; the
+next shell call captures again. Capture failures produce one notice and
+commands still run with QQ's inherited environment. Windows uses the native
+inherited environment without a POSIX login-shell probe. `exec` is unchanged.
+
+To opt out in a configuration layer:
+
+```ron
+(version: 1, shell: (login_environment: false))
+```
+
 ### Secret references
 
 Everywhere a credential is expected:

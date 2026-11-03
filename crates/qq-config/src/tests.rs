@@ -12,6 +12,25 @@ use super::*;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn shell_login_environment_can_be_disabled() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        "(version: 1, shell: (login_environment: false))",
+    );
+    let snapshot = tree.loader().load(&tree.request()).unwrap();
+    assert!(!snapshot.shell().login_environment);
+    tree.write("global/config.ron", "(version: 1)");
+    assert!(
+        tree.loader()
+            .load(&tree.request())
+            .unwrap()
+            .shell()
+            .login_environment
+    );
+}
+
 struct TestMdmReader {
     reads: Arc<AtomicUsize>,
     content: String,
@@ -3052,6 +3071,7 @@ fn published_document_field_names_match_the_struct_and_all_parse() {
             }
             "audit" => "(mode: off, max_revisions: 1, role: strong)".to_owned(),
             "goals" => "(default_max_runs: 40)".to_owned(),
+            "shell" => "(login_environment: false)".to_owned(),
             "approval_delegate" => "on".to_owned(),
             "approval_timeout_seconds" => "60".to_owned(),
             "max_active_runs" => "2".to_owned(),

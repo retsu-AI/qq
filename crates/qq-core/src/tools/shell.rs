@@ -55,6 +55,23 @@ pub(crate) fn observe_shell_spawn(
 }
 
 #[cfg(all(test, unix))]
+static LOGIN_SPAWN_HOOKS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, tokio::sync::oneshot::Sender<u32>)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(all(test, unix))]
+pub(crate) fn observe_login_spawn(
+    workspace: &std::path::Path,
+) -> tokio::sync::oneshot::Receiver<u32> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    LOGIN_SPAWN_HOOKS
+        .lock()
+        .unwrap()
+        .push((workspace.to_owned(), sender));
+    receiver
+}
+
+#[cfg(all(test, unix))]
 struct ReceiptHook {
     workspace: std::path::PathBuf,
     entered: tokio::sync::oneshot::Sender<()>,
@@ -325,6 +342,26 @@ pub(super) async fn run_shell(
             alternative.builtin, alternative.program
         )),
     };
+    let (login_environment, login_notice) =
+        if matches!(launch, Launch::Shell(_)) && policy.login_environment {
+            process_producer
+                .login_environment
+                .get(
+                    workspace,
+                    std::sync::Arc::clone(&process_producer),
+                    cancelled,
+                    process,
+                )
+                .await
+        } else {
+            (None, None)
+        };
+    let mut result = async {
+    if process.process_pending() {
+        return ToolOutput::unobserved(
+            "could not confirm login shell capture cleanup; command was not started",
+        );
+    }
     let timeout_seconds = launch.timeout_seconds();
     let preparation_started = std::time::Instant::now();
     let command_deadline = match timeout_seconds {
@@ -359,7 +396,7 @@ pub(super) async fn run_shell(
     use tracing::Instrument as _;
     let mut prepared = match tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        super::process_context::prepare(
+        super::process_context::prepare_with_environment(
             preparation_workspace,
             owned,
             approved_read_images,
@@ -367,6 +404,7 @@ pub(super) async fn run_shell(
             call_id,
             &preparation_cancelled,
             preparation_deadline,
+            login_environment,
         )
     })
     .instrument(tracing::info_span!(target: "qq::diagnostic", "native_prepare"))
@@ -717,6 +755,12 @@ pub(super) async fn run_shell(
     let mut result = result;
     result.execution_context = receipt;
     drop(prepared);
+    result
+    }.await;
+    if let Some(notice) = login_notice {
+        result.model_text.push('\n');
+        result.model_text.push_str(&notice);
+    }
     match yielding.and_then(|yielding| yielding.command.as_ref()) {
         Some(command) => {
             command.finish(result);
@@ -799,6 +843,229 @@ async fn stop_shell(
         }
         Err(error) => Err(format!("could not confirm the command exit: {error}")),
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum LoginCaptureError {
+    #[error("login shell capture exceeded 5 seconds")]
+    Timeout,
+    #[error("login shell capture was cancelled")]
+    Cancelled,
+    #[error("login shell capture failed: {0}")]
+    Process(#[source] std::io::Error),
+    #[error("login shell preparation failed: {0}")]
+    Preparation(#[source] super::process_context::PreparationError),
+    #[error("login shell preparation task failed: {0}")]
+    Task(#[source] tokio::task::JoinError),
+    #[error("login shell exited unsuccessfully")]
+    Exit,
+    #[error("login shell did not produce a valid NUL-delimited environment within 256 KiB")]
+    Environment,
+    #[error("login shell cleanup failed: {0}")]
+    Cleanup(String),
+}
+
+#[cfg(all(test, unix))]
+static LOGIN_PREPARATION_HOOKS: std::sync::Mutex<
+    Vec<(
+        std::path::PathBuf,
+        super::login_environment::tests::InspectionGate,
+    )>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(all(test, unix))]
+pub(super) fn hold_login_preparation(
+    root: std::path::PathBuf,
+    gate: super::login_environment::tests::InspectionGate,
+) {
+    LOGIN_PREPARATION_HOOKS.lock().unwrap().push((root, gate));
+}
+
+pub(super) async fn capture_login_environment(
+    workspace: &Workspace,
+    source: &super::login_environment::Source,
+    producer: std::sync::Arc<crate::ProcessProducer>,
+    cancelled: &ToolCancellation,
+    process: &mut super::ToolTaskLease,
+    deadline: std::time::Instant,
+) -> Result<super::login_environment::Environment, LoginCaptureError> {
+    #[cfg(all(test, unix))]
+    let prepared_workspace = workspace.path().to_owned();
+    let permit = tokio::select! {
+        biased;
+        () = cancelled.cancelled() => return Err(LoginCaptureError::Cancelled),
+        () = tokio::time::sleep_until(deadline.into()) => return Err(LoginCaptureError::Timeout),
+        permit = crate::workspace::blocking_permits().acquire_owned() => {
+            permit.map_err(|_| LoginCaptureError::Process(std::io::Error::other("tool executor is unavailable")))?
+        }
+    };
+    #[cfg(all(test, unix))]
+    let preparation_hook = {
+        let mut hooks = LOGIN_PREPARATION_HOOKS.lock().unwrap();
+        hooks
+            .iter()
+            .position(|(root, _)| *root == prepared_workspace)
+            .map(|index| hooks.remove(index).1)
+    };
+    let workspace = workspace.clone();
+    let source = source.clone();
+    let stop = cancelled.clone();
+    let preparation = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        #[cfg(all(test, unix))]
+        if let Some(hook) = preparation_hook {
+            let _ = hook.entered.send(());
+            let _ = hook.release.recv();
+        }
+        let arguments = ShellArgs {
+            command: "env -0".to_owned(),
+            cwd: None,
+            timeout_seconds: None,
+            yield_after_seconds: None,
+        };
+        let mut prepared = super::process_context::prepare(
+            workspace,
+            super::process_context::OwnedLaunch::Shell(arguments),
+            std::sync::Arc::default(),
+            producer,
+            None,
+            &stop,
+            deadline,
+        )?;
+        let mut command = tokio::process::Command::new(&source.shell);
+        command.args(["-lc", "printf '\\000QQ_LOGIN_ENV\\000'; env -0"]);
+        if let Some(home) = &source.home {
+            command.env("HOME", home);
+        }
+        prepared.replace_command(command);
+        Ok::<_, super::process_context::PreparationError>(prepared)
+    });
+    let mut prepared = tokio::select! {
+        biased;
+        () = cancelled.cancelled() => return Err(LoginCaptureError::Cancelled),
+        () = tokio::time::sleep_until(deadline.into()) => return Err(LoginCaptureError::Timeout),
+        result = preparation => result.map_err(LoginCaptureError::Task)?.map_err(LoginCaptureError::Preparation)?,
+    };
+    let mut exit = child_exit::ChildExit::new().map_err(LoginCaptureError::Process)?;
+    let (mut child, mut guard, _) = prepared
+        .spawn(false, process, cancelled, deadline)
+        .await
+        .map_err(LoginCaptureError::Process)?;
+    process.process_started();
+    #[cfg(all(test, unix))]
+    {
+        let hook = {
+            let mut hooks = LOGIN_SPAWN_HOOKS.lock().unwrap();
+            hooks
+                .iter()
+                .position(|(workspace, _)| *workspace == prepared_workspace)
+                .map(|index| hooks.remove(index).1)
+        };
+        if let Some(hook) = hook {
+            let _ = hook.send(child.id().unwrap());
+        }
+    }
+    let mut stdout = child.stdout.take();
+
+    let mut stderr = child.stderr.take();
+    let mut environment = BoundedCapture::new(256 * 1024);
+    let mut out = [0_u8; SHELL_READ_CHUNK_BYTES];
+    let mut err = [0_u8; SHELL_READ_CHUNK_BYTES];
+    let mut status = None;
+    let result = {
+        let mut wait = std::pin::pin!(exit.wait(&mut child, &mut guard));
+        loop {
+            if stdout.is_none() && stderr.is_none() && status.is_some() {
+                break Ok(());
+            }
+            tokio::select! {
+                biased;
+                () = cancelled.cancelled() => break Err(LoginCaptureError::Cancelled),
+                () = tokio::time::sleep_until(deadline.into()) => break Err(LoginCaptureError::Timeout),
+                read = read_from(&mut stdout, &mut out), if stdout.is_some() => match read {
+                    Ok(0) => stdout = None,
+                    Ok(count) => {
+                        environment.push(&out[..count]);
+                        if environment.total() > 256 * 1024 { break Err(LoginCaptureError::Environment); }
+                    }
+                    Err(error) => break Err(LoginCaptureError::Process(error)),
+                },
+                read = read_from(&mut stderr, &mut err), if stderr.is_some() => match read {
+                    Ok(0) => stderr = None,
+                    Ok(_) => {}
+                    Err(error) => break Err(LoginCaptureError::Process(error)),
+                },
+                exited = &mut wait, if status.is_none() => match exited {
+                    Ok(exited) => status = Some(exited),
+                    Err(error) => break Err(LoginCaptureError::Process(error)),
+                },
+            }
+        }
+    };
+    match result {
+        Ok(()) => {
+            confirm_child_exit(
+                Ok(status.expect("capture observed exit")),
+                &mut guard,
+                process,
+            )
+            .await
+            .map_err(LoginCaptureError::Process)?;
+        }
+        Err(error) => {
+            stop_shell(&mut child, &mut guard, process)
+                .await
+                .map_err(LoginCaptureError::Cleanup)?;
+            return Err(error);
+        }
+    }
+    if !status.is_some_and(|status| status.success()) {
+        return Err(LoginCaptureError::Exit);
+    }
+    parse_login_environment(environment.into_bytes())
+}
+
+fn parse_login_environment(
+    bytes: Vec<u8>,
+) -> Result<super::login_environment::Environment, LoginCaptureError> {
+    let marker = b"\0QQ_LOGIN_ENV\0";
+    let start = bytes
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .ok_or(LoginCaptureError::Environment)?
+        + marker.len();
+    let bytes = &bytes[start..];
+    if bytes.is_empty() || bytes.last() != Some(&0) {
+        return Err(LoginCaptureError::Environment);
+    }
+    let mut environment = Vec::new();
+    for entry in bytes[..bytes.len() - 1].split(|byte| *byte == 0) {
+        let Some(equal) = entry.iter().position(|byte| *byte == b'=') else {
+            return Err(LoginCaptureError::Environment);
+        };
+        let (name, value) = (&entry[..equal], &entry[equal + 1..]);
+        if name.is_empty() {
+            return Err(LoginCaptureError::Environment);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            environment.push((
+                std::ffi::OsString::from_vec(name.to_vec()),
+                std::ffi::OsString::from_vec(value.to_vec()),
+            ));
+        }
+        #[cfg(not(unix))]
+        environment.push((
+            std::ffi::OsString::from(
+                String::from_utf8(name.to_vec()).map_err(|_| LoginCaptureError::Environment)?,
+            ),
+            std::ffi::OsString::from(
+                String::from_utf8(value.to_vec()).map_err(|_| LoginCaptureError::Environment)?,
+            ),
+        ));
+    }
+    Ok(environment.into())
 }
 
 #[cfg(unix)]
@@ -1243,6 +1510,12 @@ impl BoundedCapture {
 
     pub(super) fn total(&self) -> u64 {
         self.total
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        let mut bytes = self.head;
+        bytes.extend(self.tail);
+        bytes
     }
 
     pub(super) fn into_output(self) -> String {
