@@ -1,0 +1,5 @@
+{
+  "type": "acknowledge_check_interruption",
+  "workspace_id": "01010101010101010101010101010101",
+  "run_id": "04040404040404040404040404040404"
+}

@@ -1,0 +1,13 @@
+{
+  "command_id": "27272727272727272727272727272727",
+  "committed_through": {
+    "store_id": "01010101010101010101010101010101",
+    "workspace_id": "02020202020202020202020202020202",
+    "sequence": 14
+  },
+  "outcome": {
+    "type": "session_effort_set",
+    "session_id": "03030303030303030303030303030303",
+    "effort": "xhigh"
+  }
+}

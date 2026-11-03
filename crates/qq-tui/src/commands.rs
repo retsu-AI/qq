@@ -22,6 +22,8 @@ pub(crate) enum Command {
     NewChildSession,
     CompactSession,
     RollbackCompaction,
+    RewindSession,
+    ForkSession,
     CancelRun,
     ToggleToolDetail,
     CursorUp,
@@ -116,7 +118,7 @@ pub(crate) fn retired_replacement(name: &str) -> Option<&'static str> {
         .map(|(_, replacement)| *replacement)
 }
 
-pub(crate) const COMMANDS: [CommandSpec; 45] = [
+pub(crate) const COMMANDS: [CommandSpec; 47] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -189,6 +191,20 @@ pub(crate) const COMMANDS: [CommandSpec; 45] = [
         "undo the newest compaction",
         Session,
         ["/rollback"],
+        []
+    ),
+    spec!(
+        RewindSession,
+        "restore files to a turn checkpoint",
+        Session,
+        ["/rewind"],
+        []
+    ),
+    spec!(
+        ForkSession,
+        "fork before a prompt into a worktree",
+        Session,
+        ["/fork"],
         []
     ),
     spec!(

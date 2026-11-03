@@ -1032,6 +1032,17 @@ impl TranscriptCache {
             if message.steering && message.state == MessageState::Queued {
                 continue;
             }
+            if message.state == MessageState::Rewound && !app.expanded_rewound.contains(&message.id)
+            {
+                let start = body.rows;
+                body.push_line(Line::styled(
+                    "  ▸ rewound turn · retained · Enter unfolds",
+                    faint(),
+                ));
+                body.blocks
+                    .push((Block::Message(message.id), start..body.rows));
+                continue;
+            }
             if !body.is_empty() && !(message.steering && message.role == MessageRole::User) {
                 body.push_line(Line::default());
             }
@@ -1432,6 +1443,7 @@ pub(super) const fn message_is_terminal(message: &MessageSnapshot) -> bool {
             | MessageState::Cancelled
             | MessageState::Failed
             | MessageState::Interrupted
+            | MessageState::Rewound
     )
 }
 
@@ -1567,6 +1579,7 @@ pub(super) fn message_note(message: &MessageSnapshot) -> Option<Line> {
             MessageState::Streaming => return None,
             MessageState::Failed => ("✕ ", "failed", failure()),
             MessageState::Interrupted => ("", "interrupted", warning()),
+            MessageState::Rewound => ("", "rewound", faint()),
         }
     } else {
         match message.state {
@@ -1574,6 +1587,7 @@ pub(super) fn message_note(message: &MessageSnapshot) -> Option<Line> {
             MessageState::Queued => ("", "queued", faint()),
             MessageState::Cancelled => ("", "cancelled", warning()),
             MessageState::Interrupted => ("", "interrupted", warning()),
+            MessageState::Rewound => ("", "rewound", faint()),
             MessageState::Failed => ("✕ ", "failed", failure()),
         }
     };

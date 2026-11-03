@@ -1,0 +1,20 @@
+{
+  "command_id": "15151515151515151515151515151515",
+  "committed_through": {
+    "store_id": "01010101010101010101010101010101",
+    "workspace_id": "02020202020202020202020202020202",
+    "sequence": 12
+  },
+  "outcome": {
+    "type": "run_already_finished",
+    "run_id": "04040404040404040404040404040404",
+    "outcome": {
+      "type": "budget_exhausted",
+      "exhaustion": {
+        "limit": "tool_output_bytes",
+        "final_response": true,
+        "message": "the run's 4000123 bytes of tool output exceeded its 4000000 byte budget"
+      }
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "cursor": {
+    "store_id": "01010101010101010101010101010101",
+    "workspace_id": "02020202020202020202020202020202",
+    "sequence": 23
+  },
+  "session_id": "03030303030303030303030303030303",
+  "run_id": "04040404040404040404040404040404",
+  "caused_by": "07070707070707070707070707070707",
+  "occurred_at_ms": 1700000000000,
+  "event": {
+    "type": "tool_approval_requested",
+    "tool_call": {
+      "id": "08080808080808080808080808080808",
+      "session_id": "03030303030303030303030303030303",
+      "run_id": "04040404040404040404040404040404",
+      "turn_ordinal": 1,
+      "call_ordinal": 1,
+      "provider_call_id": "call_0",
+      "name": "fetch",
+      "arguments": "{\"url\":\"https://docs.rs/axum/latest/axum/\"}",
+      "state": "awaiting_approval",
+      "is_error": false
+    },
+    "fetch": {
+      "url": "https://docs.rs/axum/latest/axum/",
+      "host": "docs.rs"
+    }
+  }
+}

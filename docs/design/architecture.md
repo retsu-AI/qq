@@ -2246,6 +2246,32 @@ Targets the executable budgets and benchmarks enforce or approach:
 | Release binary / minimal binary | `<= 48,000,000` / `<= 41,000,000` bytes |
 | Harness-attributable evaluation failures | `< 0.5%` |
 
+## Turn file checkpoints
+
+A file-changing model turn is identified by `(run_id, turn_ordinal)`;
+user prompt selection is separate and session-wide. Before its first
+mutation, the run reuses its undo snapshot as baseline; later baselines
+use the scratch index and reuse a matching preceding checkpoint.
+`ToolResultsProjected` starts an owned asynchronous capture after tools,
+not `AssistantTurnCompleted` (which precedes tools). The next provider
+request does not await capture. The next file-changing tool and run
+settlement join it. Captures use `refs/qq/turns/<session>/<run>-<ordinal>`
+and optional `-base` refs; equal trees write no ref. Ref retention keeps
+the newest 200 model turns plus commits pinned by forks.
+
+`SessionRuntime::command` exposes checkpoint listing, turn diff, rewind
+and fork through ordinary HTTP command routes. Rewind uses the existing
+workspace restore reservation and before-undo snapshot, retaining later
+turns as folded transcript rows and excluding them from model replay.
+Fork copies pre-prompt visible history and provider replay into a new
+session and pins its checkpoint in `refs/qq/pins/`. Its execution root is
+a data-directory worktree; its workspace id and subscriptions remain the
+source catalog's. The host plan key separates execution and configuration
+roots, so a fork loads source configuration rather than worktree config.
+Store schema 66 adds checkpoint, rewind, inherited-history and execution
+root storage; protocol 44 adds the commands, receipts and rewound message
+state.
+
 ## Intentionally Deferred
 
 The repository is pure Rust. It contains none of the following, and none is

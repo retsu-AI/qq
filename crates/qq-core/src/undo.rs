@@ -321,6 +321,15 @@ async fn require_supported_git(directory: &Path) -> Result<(), UndoError> {
 }
 
 async fn record(repository: &Repository, kind: SnapshotKind) -> Result<Snapshot, UndoError> {
+    record_named(repository, kind, None, None).await
+}
+
+async fn record_named(
+    repository: &Repository,
+    kind: SnapshotKind,
+    reference: Option<&str>,
+    previous: Option<&Snapshot>,
+) -> Result<Snapshot, UndoError> {
     let workspace_text = repository
         .workspace
         .to_str()
@@ -338,6 +347,18 @@ async fn record(repository: &Repository, kind: SnapshotKind) -> Result<Snapshot,
     )
     .await?;
     index.remove().await;
+    if let Some(previous) = previous {
+        let previous_tree = git(
+            &repository.workspace,
+            None,
+            "rev-parse",
+            &["rev-parse", &format!("{}^{{tree}}", previous.commit)],
+        )
+        .await?;
+        if tree.trim() == previous_tree.trim() {
+            return Ok(previous.clone());
+        }
+    }
     let head = git(
         &repository.workspace,
         None,
@@ -387,7 +408,9 @@ async fn record(repository: &Repository, kind: SnapshotKind) -> Result<Snapshot,
     )
     .await?;
     let commit = commit.trim().to_owned();
-    let reference = format!("{SNAPSHOT_REF_PREFIX}{name}");
+    let reference = reference
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{SNAPSHOT_REF_PREFIX}{name}"));
     git(
         &repository.workspace,
         None,
@@ -404,6 +427,272 @@ async fn record(repository: &Repository, kind: SnapshotKind) -> Result<Snapshot,
         created_at_ms: created_ms,
         skipped,
     })
+}
+
+pub async fn turn_checkpoint(
+    workspace: &Path,
+    session: qq_protocol::SessionId,
+    run: qq_protocol::RunId,
+    turn: u32,
+    baseline: bool,
+    previous: Option<&Snapshot>,
+) -> Result<Option<Snapshot>, UndoError> {
+    let Some(repository) = discover(workspace).await? else {
+        return Ok(None);
+    };
+    require_supported_git(workspace).await?;
+    let suffix = if baseline { "-base" } else { "" };
+    let reference = if turn == 0 {
+        format!("refs/qq/prompts/{session}/{run}")
+    } else {
+        format!("refs/qq/turns/{session}/{run}-{turn:010}{suffix}")
+    };
+    record_named(
+        &repository,
+        SnapshotKind::Run(run),
+        Some(&reference),
+        previous,
+    )
+    .await
+    .map(Some)
+}
+
+pub async fn retain_baseline(
+    workspace: &Path,
+    session: qq_protocol::SessionId,
+    run: qq_protocol::RunId,
+    turn: u32,
+    commit: &str,
+) -> Result<(), UndoError> {
+    let prefix = format!("refs/qq/turns/{session}/");
+    let refs = git(
+        workspace,
+        None,
+        "for-each-ref",
+        &["for-each-ref", "--format=%(objectname)", &prefix],
+    )
+    .await?;
+    if !refs.lines().any(|existing| existing == commit) {
+        git(
+            workspace,
+            None,
+            "update-ref",
+            &[
+                "update-ref",
+                &format!("{prefix}{run}-{turn:010}-base"),
+                commit,
+            ],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub async fn turn_diff(
+    workspace: &Path,
+    baseline: &str,
+    checkpoint: &str,
+) -> Result<String, UndoError> {
+    git(
+        workspace,
+        None,
+        "diff",
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--relative",
+            baseline,
+            checkpoint,
+            "--",
+            ".",
+        ],
+    )
+    .await
+}
+
+pub async fn restore_commit(workspace: &Path, commit: &str) -> Result<Restored, UndoError> {
+    restore(&Snapshot {
+        name: commit.to_owned(),
+        commit: commit.to_owned(),
+        kind: SnapshotKind::BeforeUndo,
+        workspace: workspace.to_owned(),
+        head: None,
+        created_at_ms: 0,
+        skipped: Vec::new(),
+    })
+    .await
+}
+
+pub async fn fork_worktree(
+    workspace: &Path,
+    root: &Path,
+    session: qq_protocol::SessionId,
+    commit: &str,
+) -> Result<PathBuf, UndoError> {
+    let prefix = git(
+        workspace,
+        None,
+        "rev-parse",
+        &["rev-parse", "--show-prefix"],
+    )
+    .await?;
+    if let Some(parent) = root.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(UndoError::Index)?;
+    }
+    let path = root
+        .to_str()
+        .ok_or_else(|| UndoError::UnrecordablePath(root.to_owned()))?;
+    let branch = format!("qq/fork/{session}");
+    git(
+        workspace,
+        None,
+        "worktree",
+        &["worktree", "add", "-b", &branch, path, commit],
+    )
+    .await?;
+    git(
+        workspace,
+        None,
+        "update-ref",
+        &["update-ref", &format!("refs/qq/pins/{session}"), commit],
+    )
+    .await?;
+    Ok(root.join(prefix.trim()))
+}
+
+pub async fn cleanup_session(
+    workspace: &Path,
+    root: Option<&Path>,
+    session: qq_protocol::SessionId,
+) -> Result<(), UndoError> {
+    if discover(workspace).await?.is_none() {
+        return Ok(());
+    }
+    if let Some(root) = root {
+        let listing = git(
+            workspace,
+            None,
+            "worktree",
+            &["worktree", "list", "--porcelain"],
+        )
+        .await?;
+        let entry = format!("worktree {}", root.display());
+        if listing.lines().any(|line| line == entry) {
+            let path = root
+                .to_str()
+                .ok_or_else(|| UndoError::UnrecordablePath(root.to_owned()))?;
+            git(
+                workspace,
+                None,
+                "worktree",
+                &["worktree", "remove", "--force", path],
+            )
+            .await?;
+        }
+    }
+    let branch = format!("refs/heads/qq/fork/{session}");
+    let pin = format!("refs/qq/pins/{session}");
+    let history = format!("refs/qq/fork-pins/{session}/");
+    let turns = format!("refs/qq/turns/{session}/");
+    let prompts = format!("refs/qq/prompts/{session}/");
+    let refs = git(
+        workspace,
+        None,
+        "for-each-ref",
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            &branch,
+            &pin,
+            &history,
+            &turns,
+            &prompts,
+        ],
+    )
+    .await?;
+    for reference in refs.lines().filter(|reference| {
+        *reference == branch
+            || *reference == pin
+            || reference.starts_with(&history)
+            || reference.starts_with(&turns)
+            || reference.starts_with(&prompts)
+    }) {
+        git(
+            workspace,
+            None,
+            "update-ref",
+            &["update-ref", "-d", reference],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub async fn pin_fork_history(
+    workspace: &Path,
+    session: qq_protocol::SessionId,
+    commits: &[String],
+) -> Result<(), UndoError> {
+    for (index, commit) in commits.iter().enumerate() {
+        git(
+            workspace,
+            None,
+            "update-ref",
+            &[
+                "update-ref",
+                &format!("refs/qq/fork-pins/{session}/{index:010}"),
+                commit,
+            ],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub async fn prune_turns(
+    workspace: &Path,
+    session: qq_protocol::SessionId,
+    retained: &[String],
+) -> Result<(), UndoError> {
+    let prefix = format!("refs/qq/turns/{session}/");
+    let refs = git(
+        workspace,
+        None,
+        "for-each-ref",
+        &["for-each-ref", "--format=%(refname) %(objectname)", &prefix],
+    )
+    .await?;
+    let pins = git(
+        workspace,
+        None,
+        "for-each-ref",
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/qq/pins/",
+            "refs/qq/fork-pins/",
+        ],
+    )
+    .await?;
+    for line in refs.lines() {
+        let Some((reference, commit)) = line.split_once(' ') else {
+            continue;
+        };
+        if !retained.iter().any(|kept| kept == commit) && !pins.lines().any(|pin| pin == commit) {
+            git(
+                workspace,
+                None,
+                "update-ref",
+                &["update-ref", "-d", reference],
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn all_snapshots(directory: &Path) -> Result<Vec<Snapshot>, UndoError> {

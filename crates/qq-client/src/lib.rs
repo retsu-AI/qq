@@ -105,7 +105,19 @@ impl SessionClient {
                 command_id,
                 command,
             },
-            MAX_ERROR_BODY_BYTES,
+            MAX_ERROR_BODY_BYTES.max(2 * 1024 * 1024),
+        )
+        .await
+    }
+
+    pub async fn fork(
+        &self,
+        session_id: SessionId,
+        turn: Option<u64>,
+    ) -> Result<CommandReceipt, ClientError> {
+        self.command(
+            fresh_command_id()?,
+            SessionCommand::ForkSession { session_id, turn },
         )
         .await
     }

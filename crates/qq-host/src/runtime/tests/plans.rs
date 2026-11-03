@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn fork_plan_keeps_source_configuration_instructions_and_skills_with_distinct_execution_root() {
+    let fixture = RuntimeFixture::new();
+    let fork = fixture.path("fork");
+    fs::create_dir_all(&fork).unwrap();
+    fs::create_dir_all(fixture.path("work/.qq/skills/source")).unwrap();
+    fs::create_dir_all(fork.join(".qq/skills/fork")).unwrap();
+    fs::write(fixture.path("work/AGENTS.md"), "Source instructions").unwrap();
+    fs::write(fork.join("AGENTS.md"), "Fork instructions").unwrap();
+    fs::write(
+        fixture.path("work/.qq/skills/source/SKILL.md"),
+        "---\ndescription: source skill\n---\nSource guidance",
+    )
+    .unwrap();
+    fs::write(
+        fork.join(".qq/skills/fork/SKILL.md"),
+        "---\ndescription: fork skill\n---\nFork guidance",
+    )
+    .unwrap();
+    fs::write(fork.join(".qq/config.ron"), "invalid worktree config").unwrap();
+    let factory = fixture.factory();
+    let request=fixture.request(r#"(version:1,model:"custom/test-model",providers:{"custom":Custom(connection:(base_url:"http://localhost/v1",api:OpenAiChatCompletions,auth:NoAuth),models:{"test-model":(name:"Test model")})})"#);
+    let source = factory.plan_for(&request).unwrap();
+    let (forked, _) = factory
+        .plan_in_execution_root(&request, &AgentProfileId::default(), None, Some(&fork))
+        .unwrap();
+    assert_eq!(forked.workspace_path(), fork);
+    assert_ne!(source.workspace_path(), forked.workspace_path());
+    assert_eq!(source.instruction_hash(), forked.instruction_hash());
+    assert_eq!(source.skills().digest(), forked.skills().digest());
+    assert!(
+        forked
+            .skills()
+            .entries()
+            .iter()
+            .any(|entry| entry.name == "source")
+    );
+    assert!(
+        !forked
+            .skills()
+            .entries()
+            .iter()
+            .any(|entry| entry.name == "fork")
+    );
+    assert_eq!(forked.resolved_model().route, "custom/test-model");
+}
+
+#[test]
 fn configured_static_exposure_names_match_the_compiled_catalog() {
     let fixture = RuntimeFixture::new();
     let skill = fixture.path("work/.qq/skills/example/SKILL.md");

@@ -47,7 +47,7 @@ pub(crate) enum Block {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Hit {
     Tool(ToolCallId),
-    Receipt(RunId),
+    Receipt(RunId, u32),
     Session(SessionId),
 }
 

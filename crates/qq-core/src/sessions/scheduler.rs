@@ -23,6 +23,9 @@ async fn expire_idle_sessions(inner: &SessionRuntimeInner, retention: Duration) 
     loop {
         match inner.store.expire_idle_sessions(cutoff, after, now).await {
             Ok(expired) => {
+                if let Err(error) = fork::cleanup(inner, false).await {
+                    tracing::warn!(%error, "could not reclaim expired session resources");
+                }
                 for cursor in expired.cursors {
                     inner.notify(cursor);
                 }

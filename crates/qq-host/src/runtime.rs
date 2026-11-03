@@ -1100,6 +1100,7 @@ impl RuntimeFactory {
             .map(|(plan, _)| plan)
     }
 
+    #[cfg(test)]
     fn plan_for_profile_with_progress(
         &self,
         request: &LoadRequest,
@@ -1124,11 +1125,24 @@ impl RuntimeFactory {
         profile: &AgentProfileId,
         progress: Option<&qq_core::RuntimeLoadProgress>,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
+        self.plan_in_execution_root(request, profile, progress, None)
+    }
+
+    fn plan_in_execution_root(
+        &self,
+        request: &LoadRequest,
+        profile: &AgentProfileId,
+        progress: Option<&qq_core::RuntimeLoadProgress>,
+        execution_root: Option<&Path>,
+    ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
         preparation_phase(progress, qq_core::RuntimeLoadStage::CanonicalizingWorkspace)?;
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(request.cwd())?;
         let configuration_workspace = qq_config::canonical_working_directory(request.cwd())?;
-        let workspace = configuration_workspace.clone();
+        let workspace = match execution_root {
+            Some(root) => qq_config::canonical_working_directory(root)?,
+            None => configuration_workspace.clone(),
+        };
         let key = PlanKey {
             configuration_workspace,
             workspace: workspace.clone(),
@@ -1349,6 +1363,7 @@ impl RuntimeFactory {
                 .with_network_policy(network)
                 .with_output_ceiling(output_ceiling)
                 .with_provenance(provenance)
+                .with_configuration_workspace(request.cwd().to_owned())
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone())
                 .with_global_config_dir(self.inner.config.paths().global_dir().to_owned());
@@ -1994,6 +2009,17 @@ impl RuntimeLoader for RuntimeFactory {
         request: RuntimeLoadRequest,
         progress: qq_core::RuntimeLoadProgress,
     ) -> RuntimeLoadFuture {
+        let execution_root = request.workspace.clone();
+        self.load_in_execution_root(request, execution_root, progress)
+    }
+
+    fn load_in_execution_root(
+        &self,
+        request: RuntimeLoadRequest,
+        execution_root: String,
+        progress: qq_core::RuntimeLoadProgress,
+    ) -> RuntimeLoadFuture {
+        let execution_root = Some(PathBuf::from(execution_root));
         let factory = self.clone();
         Box::pin(async move {
             if progress.is_cancelled() {
@@ -2039,8 +2065,14 @@ impl RuntimeLoader for RuntimeFactory {
                     overrides = overrides.with_organization(organization);
                 }
                 load = load.with_overrides(overrides);
-                let plan =
-                    factory.plan_for_profile_with_progress(&load, &request.profile, &progress)?;
+                let plan = factory
+                    .plan_in_execution_root(
+                        &load,
+                        &request.profile,
+                        Some(&progress),
+                        execution_root.as_deref(),
+                    )?
+                    .0;
                 Ok::<_, RuntimeBuildError>(LoadedRuntime::new(plan))
             })
             .await;

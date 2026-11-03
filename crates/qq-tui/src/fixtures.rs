@@ -129,6 +129,7 @@ pub fn run(id: RunId, session_id: SessionId, status: RunStatus) -> RunSnapshot {
 pub fn session_snapshot(summary: SessionSummary) -> SessionSnapshot {
     SessionSnapshot {
         approval_previews: Vec::new(),
+        fork_prompt: None,
         goal: None,
         side_questions: Vec::new(),
         summary,

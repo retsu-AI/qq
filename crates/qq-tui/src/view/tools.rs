@@ -597,7 +597,10 @@ pub(super) fn render_tool_blocks(
                     .iter()
                     .map(|call| (Block::Tool(call.id), row..row + 1)),
             );
-            marks.hits.push((row, Hit::Receipt(routine[0].run_id)));
+            marks.hits.push((
+                row,
+                Hit::Receipt(routine[0].run_id, routine[0].turn_ordinal),
+            ));
             folded = routine;
         }
     }

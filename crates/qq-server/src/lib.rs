@@ -923,6 +923,10 @@ async fn session_command(
         | SessionCommand::SetSessionEffort { .. }
         | SessionCommand::DeleteSession { .. }
         | SessionCommand::PruneSessions { .. }
+        | SessionCommand::ListCheckpoints { .. }
+        | SessionCommand::TurnDiff { .. }
+        | SessionCommand::RewindSession { .. }
+        | SessionCommand::ForkSession { .. }
         | SessionCommand::UndoWorkspace { .. }
         | SessionCommand::CompactSession { .. }
         | SessionCommand::RollbackCompaction { .. }
@@ -2569,6 +2573,21 @@ mod tests {
             },
             SessionCommandKind::DeleteSession => SessionCommand::DeleteSession { session_id },
             SessionCommandKind::PruneSessions => SessionCommand::PruneSessions { workspace_id },
+            SessionCommandKind::ListCheckpoints => SessionCommand::ListCheckpoints { session_id },
+            SessionCommandKind::TurnDiff => SessionCommand::TurnDiff {
+                session_id,
+                run_id,
+                turn_ordinal: 1,
+            },
+            SessionCommandKind::RewindSession => SessionCommand::RewindSession {
+                session_id,
+                run_id,
+                turn_ordinal: 1,
+            },
+            SessionCommandKind::ForkSession => SessionCommand::ForkSession {
+                session_id,
+                turn: Some(2),
+            },
             SessionCommandKind::UndoWorkspace => SessionCommand::UndoWorkspace {
                 workspace_id,
                 snapshot: None,

@@ -1,0 +1,7 @@
+{
+  "command_id": "7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+  "command": {
+    "type": "cancel_side_question",
+    "side_question_id": "04040404040404040404040404040404"
+  }
+}

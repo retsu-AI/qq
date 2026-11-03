@@ -642,13 +642,30 @@ pub(super) async fn execute_run(
         return;
     }
     let load_progress = RuntimeLoadProgress::default();
-    let mut load = inner.loader.load_with_progress(
+    let session = claimed.identity.session_id;
+    let configuration_workspace = inner.store.call(store::Priority::AwaitControl, move |connection| {
+        Ok(connection.query_row("SELECT w.path FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.id=?1",[session.to_string()],|row|row.get::<_,String>(0))?)
+    }).await;
+    let configuration_workspace = match configuration_workspace {
+        Ok(path) => path,
+        Err(error) => {
+            finish_reserved_run(
+                &inner,
+                &claimed,
+                persistence_failure("failed to resolve configuration workspace", &error),
+            )
+            .await;
+            return;
+        }
+    };
+    let mut load = inner.loader.load_in_execution_root(
         RuntimeLoadRequest {
             reasoning_effort: claimed.reasoning_effort,
-            workspace: claimed.workspace.clone(),
+            workspace: configuration_workspace,
             model: claimed.model.clone(),
             profile: claimed.profile.clone(),
         },
+        claimed.workspace.clone(),
         load_progress.clone(),
     );
     let loaded = tokio::select! {
@@ -1646,6 +1663,10 @@ async fn execute_started_run(
     let mut current_occupancy_basis = Some(initial_occupancy_basis);
     let mut pending_tool_call: Option<ToolCallId> = None;
     let mut pending_tool_output = String::new();
+    if !internal {
+        checkpoints::capture_prompt(&inner, &claimed);
+    }
+    let mut turn_baseline = None;
     let mut snapshot_taken = false;
     let mut summary_text = String::new();
     let mut summary_continues_truncated_turn = false;
@@ -2501,17 +2522,80 @@ async fn execute_started_run(
                 if internal {
                     continue;
                 }
-                if may_change_files && !snapshot_taken {
-                    snapshot_taken = true;
+                if may_change_files && turn_baseline.is_none() {
                     let mut stop = cancellation.clone();
-                    let cancelled = tokio::select! {
-                        biased;
-                        _ = stop.wait_for(|cancelled| *cancelled) => true,
-                        () = tool_cancellation.cancelled() => true,
-                        () = snapshot_workspace(&inner.store, &claimed, inner.retention) => false,
+                    let baseline = async {
+                        checkpoints::barrier(&inner, claimed.identity.run_id).await;
+                        let run = claimed.identity.run_id;
+                        let turn = inner
+                            .store
+                            .call(store::Priority::AwaitControl, move |connection| {
+                                Ok(connection.query_row(
+                                    "SELECT turn_ordinal FROM tool_calls WHERE id=?1 AND run_id=?2",
+                                    params![id.to_string(), run.to_string()],
+                                    |row| row.get::<_, u32>(0),
+                                )?)
+                            })
+                            .await;
+                        let turn = match turn {
+                            Ok(turn) => turn,
+                            Err(error) => {
+                                tracing::error!(%error,"could not identify mutating tool turn");
+                                inner.failed.send_replace(true);
+                                tool_cancellation.cancel();
+                                return;
+                            }
+                        };
+                        if !snapshot_taken {
+                            snapshot_taken = true;
+                            turn_baseline =
+                                snapshot_workspace(&inner.store, &claimed, inner.retention).await;
+                        } else {
+                            let session = claimed.identity.session_id;
+                            let previous = inner
+                                .store
+                                .call(store::Priority::AwaitControl, move |connection| {
+                                    Ok(checkpoints::list(connection, session)?
+                                        .into_iter()
+                                        .rfind(|point| !point.rewound)
+                                        .map(|point| crate::undo::Snapshot {
+                                            name: point.checkpoint.clone(),
+                                            commit: point.checkpoint,
+                                            kind: crate::undo::SnapshotKind::BeforeUndo,
+                                            workspace: PathBuf::new(),
+                                            head: None,
+                                            created_at_ms: 0,
+                                            skipped: Vec::new(),
+                                        }))
+                                })
+                                .await
+                                .ok()
+                                .flatten();
+                            turn_baseline = crate::undo::turn_checkpoint(
+                                Path::new(&claimed.workspace),
+                                claimed.identity.session_id,
+                                claimed.identity.run_id,
+                                turn,
+                                true,
+                                previous.as_ref(),
+                            )
+                            .await
+                            .ok()
+                            .flatten();
+                        }
+                        if let Some(baseline) = &turn_baseline {
+                            inner
+                                .turn_baselines
+                                .lock()
+                                .expect("turn baselines")
+                                .insert(run, (turn, baseline.clone()));
+                        }
                     };
-                    if cancelled {
-                        continue;
+                    tokio::select! {
+                        biased;
+                        _=stop.wait_for(|cancelled|*cancelled)=>continue,
+                        ()=tool_cancellation.cancelled()=>continue,
+                        ()=baseline=>{}
                     }
                 }
                 match inner.store.start_tool_call(&claimed, id).await {
@@ -2615,6 +2699,14 @@ async fn execute_started_run(
                     )
                     .await;
                     return;
+                }
+                if let Some(baseline) = turn_baseline.take() {
+                    inner
+                        .turn_baselines
+                        .lock()
+                        .expect("turn baselines")
+                        .remove(&claimed.identity.run_id);
+                    checkpoints::capture(&inner, &claimed, turn_ordinal, baseline);
                 }
             }
             RunInput::Event(Some(RuntimeEvent::ToolCallFinished {
@@ -3204,7 +3296,11 @@ async fn execute_started_run(
     }
 }
 
-async fn snapshot_workspace(store: &Store, claimed: &ClaimedRun, retention: Option<Duration>) {
+async fn snapshot_workspace(
+    store: &Store,
+    claimed: &ClaimedRun,
+    retention: Option<Duration>,
+) -> Option<crate::undo::Snapshot> {
     let workspace = Path::new(&claimed.workspace);
     let run = claimed.identity.run_id;
     if let Some(qq_protocol::RunOrigin::Delegated { owner_run_id, .. }) = claimed.origin {
@@ -3234,16 +3330,18 @@ async fn snapshot_workspace(store: &Store, claimed: &ClaimedRun, retention: Opti
                     && matches!(snapshot.kind, crate::undo::SnapshotKind::Run(owner) if owners.contains(&owner))
             })
         {
-            return;
+            return crate::undo::turn_checkpoint(workspace,claimed.identity.session_id,run,1,true,None).await.ok().flatten();
         }
     }
     match crate::undo::snapshot(workspace, crate::undo::SnapshotKind::Run(run), retention).await {
         Ok(Some(snapshot)) => {
             tracing::debug!(%run, commit = %snapshot.commit, "workspace snapshot recorded");
+            Some(snapshot)
         }
-        Ok(None) => {}
+        Ok(None) => None,
         Err(error) => {
             tracing::warn!(%run, %error, "could not snapshot the workspace; qq undo cannot restore this run");
+            None
         }
     }
 }
@@ -3421,6 +3519,7 @@ async fn finish_run_accounted(
         inner.failed.send_replace(true);
         return;
     }
+    checkpoints::settle(inner, claimed, !matches!(outcome, RunOutcome::Completed)).await;
     if matches!(&outcome, RunOutcome::BudgetExhausted { exhaustion }
         if exhaustion.limit == qq_protocol::BudgetLimitKind::Duration)
         && approvals::expire_goal_hold(inner, claimed, false)

@@ -589,7 +589,7 @@ impl plan::CompiledAgentPlan {
                    let selected_guidance = match parsed_invocation.guidance {
                        None => None,
                        Some(request) => match workspace::prepare_guidance(
-                           workspace.clone(),
+                           plan.guidance_workspace.clone(),
                            Arc::clone(&guidance_roots),
                            Arc::clone(&skills),
                            cancelled.clone(),
@@ -2692,6 +2692,7 @@ impl RunState {
                     let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal, spills, audit_hook, tool_tasks, output: _, limits, deadline, base_specs, static_filter, .. } = env;
                     let limits = *limits;
                     let workspace = &plan.workspace;
+                    let guidance_workspace = &plan.guidance_workspace;
                     let catalog = &plan.catalog;
                     let _model = &plan.runtime.model;
                     let skills = &plan.skills;
@@ -2718,6 +2719,7 @@ impl RunState {
                             tokio::sync::mpsc::Sender<String>,
                         >, child_limits: Result<runtime::ChildBudget, BudgetLimitKind>, offered: bool| {
                             let workspace = (*workspace).clone();
+                            let guidance_workspace = (*guidance_workspace).clone();
                             let file_state = Arc::clone(file_state);
                             let cancelled = cancelled.clone();
                             let catalog = Arc::clone(catalog);
@@ -2909,7 +2911,7 @@ impl RunState {
                                     None if host == Some(catalog::ToolHost::LoadSkill) => {
                                         match serde_json::from_str::<workspace::skills::LoadSkillArgs>(&call.arguments) {
                                             Ok(arguments) => match workspace::load_disclosed_skill(
-                                                workspace,
+                                                guidance_workspace,
                                                 guidance_roots,
                                                 skills,
                                                 cancelled,

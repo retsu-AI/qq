@@ -442,6 +442,24 @@ pub enum SessionCommand {
     PruneSessions {
         workspace_id: WorkspaceId,
     },
+    ListCheckpoints {
+        session_id: SessionId,
+    },
+    TurnDiff {
+        session_id: SessionId,
+        run_id: RunId,
+        turn_ordinal: u32,
+    },
+    RewindSession {
+        session_id: SessionId,
+        run_id: RunId,
+        turn_ordinal: u32,
+    },
+    ForkSession {
+        session_id: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<u64>,
+    },
     UndoWorkspace {
         workspace_id: WorkspaceId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -478,6 +496,10 @@ impl SessionCommand {
             Self::SetSessionEffort { .. } => SessionCommandKind::SetSessionEffort,
             Self::DeleteSession { .. } => SessionCommandKind::DeleteSession,
             Self::PruneSessions { .. } => SessionCommandKind::PruneSessions,
+            Self::ListCheckpoints { .. } => SessionCommandKind::ListCheckpoints,
+            Self::TurnDiff { .. } => SessionCommandKind::TurnDiff,
+            Self::RewindSession { .. } => SessionCommandKind::RewindSession,
+            Self::ForkSession { .. } => SessionCommandKind::ForkSession,
             Self::UndoWorkspace { .. } => SessionCommandKind::UndoWorkspace,
             Self::CompactSession { .. } => SessionCommandKind::CompactSession,
             Self::RollbackCompaction { .. } => SessionCommandKind::RollbackCompaction,
@@ -505,13 +527,17 @@ pub enum SessionCommandKind {
     SetSessionEffort,
     DeleteSession,
     PruneSessions,
+    ListCheckpoints,
+    TurnDiff,
+    RewindSession,
+    ForkSession,
     UndoWorkspace,
     CompactSession,
     RollbackCompaction,
 }
 
 impl SessionCommandKind {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 24] = [
         Self::AcknowledgeCheckInterruption,
         Self::SetGoal,
         Self::GoalControl,
@@ -529,6 +555,10 @@ impl SessionCommandKind {
         Self::SetSessionEffort,
         Self::DeleteSession,
         Self::PruneSessions,
+        Self::ListCheckpoints,
+        Self::TurnDiff,
+        Self::RewindSession,
+        Self::ForkSession,
         Self::UndoWorkspace,
         Self::CompactSession,
         Self::RollbackCompaction,
@@ -547,6 +577,7 @@ impl SessionCommandKind {
             | Self::SetSessionModel
             | Self::SetSessionProfile
             | Self::SetSessionEffort
+            | Self::ForkSession
             | Self::CompactSession => true,
             Self::AcknowledgeCheckInterruption
             | Self::GoalControl
@@ -556,6 +587,9 @@ impl SessionCommandKind {
             | Self::DeleteSession
             | Self::PruneSessions
             | Self::UndoWorkspace
+            | Self::ListCheckpoints
+            | Self::TurnDiff
+            | Self::RewindSession
             | Self::RollbackCompaction => false,
         }
     }
@@ -580,6 +614,10 @@ impl SessionCommandKind {
             Self::SetSessionEffort => "/v1/sessions/effort",
             Self::DeleteSession => "/v1/sessions/delete",
             Self::PruneSessions => "/v1/sessions/prune",
+            Self::ListCheckpoints => "/v1/sessions/checkpoints",
+            Self::TurnDiff => "/v1/sessions/turn-diff",
+            Self::RewindSession => "/v1/sessions/rewind",
+            Self::ForkSession => "/v1/sessions/fork",
             Self::UndoWorkspace => "/v1/workspaces/undo",
             Self::CompactSession => "/v1/sessions/compact",
             Self::RollbackCompaction => "/v1/sessions/compact/rollback",
@@ -690,6 +728,28 @@ pub enum CommandOutcome {
         workspace_id: WorkspaceId,
         deleted: u32,
     },
+    CheckpointsListed {
+        session_id: SessionId,
+        checkpoints: Vec<TurnCheckpoint>,
+        prompts: Vec<ForkPrompt>,
+    },
+    TurnDiff {
+        diff: String,
+        truncated: bool,
+    },
+    SessionRewound {
+        session_id: SessionId,
+        run_id: RunId,
+        turn_ordinal: u32,
+        before: String,
+    },
+    SessionForked {
+        session_id: SessionId,
+        source_session_id: SessionId,
+        turn: u64,
+        prompt: String,
+        execution_root: String,
+    },
     WorkspaceUndone {
         workspace_id: WorkspaceId,
         snapshot: String,
@@ -706,6 +766,25 @@ pub enum CommandOutcome {
         session_id: SessionId,
         remaining: u16,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnCheckpoint {
+    pub run_id: RunId,
+    pub turn_ordinal: u32,
+    pub prompt_ordinal: u64,
+    pub baseline: String,
+    pub checkpoint: String,
+    pub rewound: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkPrompt {
+    pub turn: u64,
+    pub message_id: MessageId,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1073,6 +1152,7 @@ pub enum MessageState {
     Cancelled,
     Failed,
     Interrupted,
+    Rewound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1712,6 +1792,8 @@ pub struct PendingApprovalPreview {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approval_previews: Vec<PendingApprovalPreview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1906,6 +1988,11 @@ pub enum SessionEvent {
         usage: Option<TokenUsage>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         estimated_cost_usd_nanos: Option<u64>,
+    },
+    SessionRewound {
+        run_id: RunId,
+        turn_ordinal: u32,
+        messages: Vec<MessageId>,
     },
     ToolCallRequested {
         tool_call: ToolCallSnapshot,
@@ -3596,7 +3683,7 @@ mod tests {
         invalid["resolved_model"]["version"] = serde_json::json!(0);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
 
-        assert_eq!(crate::PROTOCOL_VERSION, 43);
+        assert_eq!(crate::PROTOCOL_VERSION, 44);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

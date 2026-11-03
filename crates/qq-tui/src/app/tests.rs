@@ -627,6 +627,150 @@ fn session_compacted_events_surface_the_shrink_in_the_status_line() {
 }
 
 #[test]
+fn checkpoints_rewind_and_fork_use_dock_picker_and_preserve_prompt_for_editing() {
+    for (command, fork) in [
+        (Command::RewindSession, false),
+        (Command::ForkSession, true),
+    ] {
+        let mut app = App::new(TuiOptions::default());
+        app.apply_snapshot(snapshot());
+        let focused = app.focused().unwrap();
+        let requests = app.execute(command).into_requests();
+        let [ClientRequest::Command(request)] = requests.as_slice() else {
+            panic!("checkpoint command")
+        };
+        assert_eq!(
+            request.command,
+            SessionCommand::ListCheckpoints {
+                session_id: focused
+            }
+        );
+        app.apply_client_update(ClientUpdate::CommandResult {
+            command_id: request.command_id,
+            result: Ok(qq_protocol::CommandReceipt {
+                command_id: request.command_id,
+                committed_through: fixtures::cursor(2),
+                outcome: CommandOutcome::CheckpointsListed {
+                    session_id: focused,
+                    checkpoints: vec![qq_protocol::TurnCheckpoint {
+                        run_id: RunId::from_bytes([4; 16]),
+                        turn_ordinal: 1,
+                        prompt_ordinal: 1,
+                        baseline: "base".to_owned(),
+                        checkpoint: "head".to_owned(),
+                        rewound: false,
+                    }],
+                    prompts: vec![qq_protocol::ForkPrompt {
+                        turn: 2,
+                        message_id: MessageId::from_bytes([9; 16]),
+                        text: "retry prompt".to_owned(),
+                    }],
+                },
+            }),
+        });
+        assert!(matches!(app.overlay, Some(Overlay::History(_))));
+        let requests = app
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .into_requests();
+        let [ClientRequest::Command(request)] = requests.as_slice() else {
+            panic!("selected action")
+        };
+        if fork {
+            assert_eq!(
+                request.command,
+                SessionCommand::ForkSession {
+                    session_id: focused,
+                    turn: Some(2)
+                }
+            );
+            app.apply_client_update(ClientUpdate::CommandResult {
+                command_id: request.command_id,
+                result: Ok(qq_protocol::CommandReceipt {
+                    command_id: request.command_id,
+                    committed_through: fixtures::cursor(3),
+                    outcome: CommandOutcome::SessionForked {
+                        session_id: SessionId::from_bytes([8; 16]),
+                        source_session_id: focused,
+                        turn: 2,
+                        prompt: "retry prompt".to_owned(),
+                        execution_root: "/data/fork".to_owned(),
+                    },
+                }),
+            });
+            assert_eq!(app.composer.text, "retry prompt");
+        } else {
+            assert!(matches!(
+                request.command,
+                SessionCommand::RewindSession {
+                    turn_ordinal: 1,
+                    ..
+                }
+            ));
+        }
+    }
+}
+
+#[test]
+fn checkpoints_prompt_cursor_uses_session_wide_picker_identity_and_restores_cli_fork_draft() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let focused = app.focused().unwrap();
+    let message = MessageSnapshot {
+        role: MessageRole::User,
+        ..fixtures::message(
+            MessageId::from_bytes([9; 16]),
+            focused,
+            "prompt two hundred and one",
+        )
+    };
+    app.sessions.body_mut(&focused).unwrap().messages = Some(vec![message.clone()]);
+    app.block_cursor = Some(Block::Message(message.id));
+    let requests = app
+        .handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+        .into_requests();
+    let [ClientRequest::Command(request)] = requests.as_slice() else {
+        panic!("lookup prompt")
+    };
+    app.apply_client_update(ClientUpdate::CommandResult {command_id:request.command_id,result:Ok(qq_protocol::CommandReceipt {command_id:request.command_id,committed_through:fixtures::cursor(2),outcome:CommandOutcome::CheckpointsListed {session_id:focused,checkpoints:Vec::new(),prompts:vec![qq_protocol::ForkPrompt {turn:201,message_id:message.id,text:message.output}]}})}).into_requests().iter().for_each(|request| {
+        assert!(matches!(request,ClientRequest::Command(request) if request.command==SessionCommand::ForkSession {session_id:focused,turn:Some(201)}));
+    });
+    let mut snapshot = snapshot();
+    snapshot.cursor = fixtures::cursor(3);
+    snapshot.focused.as_mut().unwrap().fork_prompt = Some("saved CLI fork prompt".to_owned());
+    app.apply_snapshot(snapshot);
+    assert_eq!(app.composer.text, "saved CLI fork prompt");
+}
+
+#[test]
+fn checkpoints_receipt_requests_its_exact_model_turn_diff_and_rewound_blocks_unfold() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let focused = app.focused().unwrap();
+    let mut message = fixtures::message(MessageId::from_bytes([9; 16]), focused, "retained answer");
+    message.state = MessageState::Rewound;
+    app.sessions.body_mut(&focused).unwrap().messages = Some(vec![message.clone()]);
+    app.block_cursor = Some(Block::Message(message.id));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.expanded_rewound.contains(&message.id));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!app.expanded_rewound.contains(&message.id));
+    app.geometry.transcript = Some(crate::selection::Area {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 24,
+    });
+    app.pane_mut()
+        .viewport
+        .update(View::Transcript(Some(focused)), 1, 24, false);
+    app.pane_mut().hits = vec![(0, Hit::Receipt(RunId::from_bytes([4; 16]), 7))];
+    let requests = app.click_transcript(0).unwrap().into_requests();
+    assert!(
+        matches!(requests.as_slice(),[ClientRequest::Command(request)] if request.command==SessionCommand::TurnDiff {session_id:focused,run_id:RunId::from_bytes([4;16]),turn_ordinal:7})
+    );
+}
+
+#[test]
 fn rollback_sends_for_an_idle_session_and_reports_the_receipt() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
@@ -2338,6 +2482,7 @@ fn summary_named(byte: u8, title: &str) -> SessionSummary {
 fn body_for(summary: &SessionSummary, output: &str) -> SessionSnapshot {
     SessionSnapshot {
         approval_previews: Vec::new(),
+        fork_prompt: None,
         goal: None,
         side_questions: Vec::new(),
         summary: summary.clone(),

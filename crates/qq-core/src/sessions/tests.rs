@@ -38,6 +38,7 @@ mod side_questions;
 mod streaming;
 mod undo;
 
+mod checkpoints;
 use std::sync::Mutex as StdMutex;
 
 use async_stream::stream as async_stream;

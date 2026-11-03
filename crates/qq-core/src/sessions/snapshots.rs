@@ -296,7 +296,21 @@ fn load_session_body(
         }
     }
     runs.reverse();
+    let fork_prompt: Option<String> = transaction
+        .query_row(
+            "SELECT prompt FROM fork_history WHERE session_id=?1",
+            [session_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(prompt) = &fork_prompt
+        && !budget.admit(escaped_len(prompt))
+    {
+        return Err(SessionRuntimeError::SnapshotTooLarge);
+    }
     Ok(SessionSnapshot {
+        fork_prompt,
         goal: goals::load_live(transaction, session_id)?.map(Box::new),
         side_questions,
         approval_previews,
