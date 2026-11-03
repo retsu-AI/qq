@@ -6,6 +6,7 @@ mod edit;
 pub(crate) mod fetch;
 pub(crate) mod goal;
 mod lang;
+pub(crate) mod login_environment;
 mod matching;
 #[cfg(not(target_os = "linux"))]
 mod native_exit;

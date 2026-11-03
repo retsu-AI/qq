@@ -214,6 +214,16 @@ pub(crate) struct PreparedLaunch {
 }
 
 impl PreparedLaunch {
+    pub(super) fn replace_command(&mut self, mut command: tokio::process::Command) {
+        if let Some(cwd) = self
+            .command
+            .as_ref()
+            .and_then(|prepared| prepared.as_std().get_current_dir())
+        {
+            command.current_dir(cwd);
+        }
+        self.command = Some(command);
+    }
     pub(crate) async fn spawn(
         &mut self,
         piped_stdin: bool,
@@ -325,6 +335,25 @@ pub(super) fn prepare(
     call_id: Option<ToolCallId>,
     cancelled: &ToolCancellation,
     deadline: Instant,
+) -> Result<PreparedLaunch, PreparationError> {
+    prepare_with_environment(
+        workspace, launch, approvals, producer, call_id, cancelled, deadline, None,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "environment is an optional runtime-owned layer"
+)]
+pub(super) fn prepare_with_environment(
+    workspace: Workspace,
+    launch: OwnedLaunch,
+    approvals: Arc<ApprovedReadImages>,
+    producer: Arc<ProcessProducer>,
+    call_id: Option<ToolCallId>,
+    cancelled: &ToolCancellation,
+    deadline: Instant,
+    login_environment: Option<super::login_environment::Environment>,
 ) -> Result<PreparedLaunch, PreparationError> {
     #[cfg(test)]
     crate::workspace::pause_blocking_preparation(&workspace);
@@ -440,6 +469,9 @@ pub(super) fn prepare(
     if matches!(verdict, ExecutionVerdict::VerifiedRead { .. }) {
         command.env_clear().envs(environment);
     } else {
+        if let Some(environment) = login_environment {
+            command.envs(environment.iter().cloned());
+        }
         let mut logical_cwd = workspace.path().to_path_buf();
         logical_cwd.extend(
             relative
@@ -451,9 +483,10 @@ pub(super) fn prepare(
             .env_remove("OLDPWD")
             .env("TERM", "dumb");
         for (name, value) in PLAIN_OUTPUT_ENV {
-            if std::env::var_os(name).is_none() {
-                command.env(name, value);
-            }
+            command.env(
+                name,
+                std::env::var_os(name).unwrap_or_else(|| OsString::from(value)),
+            );
         }
     }
     command.current_dir(cwd_path);
@@ -811,12 +844,7 @@ mod tests {
         base.sort();
         assert_eq!(explicit(&prepared), base);
         let mut plain = vec!["OLDPWD".to_owned(), "PWD".to_owned(), "TERM".to_owned()];
-        plain.extend(
-            PLAIN_OUTPUT_ENV
-                .iter()
-                .filter(|(name, _)| std::env::var_os(name).is_none())
-                .map(|(name, _)| (*name).to_owned()),
-        );
+        plain.extend(PLAIN_OUTPUT_ENV.iter().map(|(name, _)| (*name).to_owned()));
         plain.sort();
         assert_eq!(
             explicit(&unapproved),

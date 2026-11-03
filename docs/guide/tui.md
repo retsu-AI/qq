@@ -260,6 +260,8 @@ the banner.
   `~/.config/qq/skills/`); text after the name replaces `$ARGUMENTS`.
   `/skills` lists them with their source. Typing after the slash filters by subsequence (`/mdl` finds
   `/models`).
+- `/shell reload` invalidates the runtime's cached login environment;
+  the next shell command captures it again. It does not call a model.
 - `Ctrl-R` searches your prompt history for this session.
 - `/compact` summarizes an idle session's history so a long conversation
   keeps fitting; `/rollback` undoes the newest compaction. Stale read-only

@@ -21,6 +21,7 @@ pub struct ProcessProducer {
     evidence: OnceLock<Arc<ProducerEvidence>>,
     instance: OnceLock<Option<ToolCallId>>,
     capturing: AtomicBool,
+    pub(crate) login_environment: crate::tools::login_environment::LoginEnvironment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +73,7 @@ impl ProcessProducer {
             evidence: OnceLock::new(),
             instance: OnceLock::new(),
             capturing: AtomicBool::new(false),
+            login_environment: crate::tools::login_environment::LoginEnvironment::default(),
         }
     }
 

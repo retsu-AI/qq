@@ -1262,6 +1262,7 @@ pub enum ConfigKey {
     Delegation,
     Audit,
     Goals,
+    Shell,
     ApprovalTimeout,
     MaxActiveRuns,
     Retention,
@@ -1429,6 +1430,20 @@ impl PendingTrust {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShellConfig {
+    pub login_environment: bool,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            login_environment: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigSnapshot {
     organization: Option<String>,
@@ -1437,6 +1452,7 @@ pub struct ConfigSnapshot {
     delegation: DelegationConfig,
     audit: AuditConfig,
     goals: GoalsConfig,
+    shell: ShellConfig,
     approval_timeout: Option<std::time::Duration>,
     max_active_runs: usize,
     retention: Option<std::time::Duration>,
@@ -1459,6 +1475,7 @@ pub struct ClientSnapshot {
     delegation: DelegationConfig,
     audit: AuditConfig,
     goals: GoalsConfig,
+    shell: ShellConfig,
     approval_timeout: Option<std::time::Duration>,
     max_active_runs: usize,
     retention: Option<std::time::Duration>,
@@ -1477,6 +1494,11 @@ impl ClientSnapshot {
     #[must_use]
     pub const fn goals(&self) -> &GoalsConfig {
         &self.goals
+    }
+
+    #[must_use]
+    pub const fn shell(&self) -> &ShellConfig {
+        &self.shell
     }
 
     #[must_use]
@@ -1757,6 +1779,11 @@ impl ConfigSnapshot {
     #[must_use]
     pub const fn goals(&self) -> &GoalsConfig {
         &self.goals
+    }
+
+    #[must_use]
+    pub const fn shell(&self) -> &ShellConfig {
+        &self.shell
     }
 
     #[must_use]

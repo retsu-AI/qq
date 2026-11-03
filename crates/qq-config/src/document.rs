@@ -620,7 +620,7 @@ pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 9] = [
     "goals",
 ];
 
-pub const DOCUMENT_FIELD_NAMES: [&str; 16] = [
+pub const DOCUMENT_FIELD_NAMES: [&str; 17] = [
     "version",
     "organization",
     "model",
@@ -628,6 +628,7 @@ pub const DOCUMENT_FIELD_NAMES: [&str; 16] = [
     "delegation",
     "audit",
     "goals",
+    "shell",
     "approval_timeout_seconds",
     "max_active_runs",
     "retention_days",
@@ -752,6 +753,8 @@ pub(super) struct Document {
     audit: Field<AuditPatch>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     goals: Field<GoalsPatch>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    shell: Field<super::ShellConfig>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     approval_timeout_seconds: Field<u64>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
@@ -897,6 +900,7 @@ impl Document {
             || self.delegation.is_present()
             || self.audit.is_present()
             || self.goals.is_present()
+            || self.shell.is_present()
             || self.reasoning_effort.is_present()
             || self.profiles.is_present()
             || self.providers.is_present()
@@ -922,6 +926,9 @@ impl Document {
         }
         if self.goals.is_present() {
             sections.push("goals");
+        }
+        if self.shell.is_present() {
+            sections.push("shell");
         }
         if self.reasoning_effort.is_present() {
             sections.push("reasoning_effort");
@@ -958,6 +965,8 @@ impl Document {
             #[serde(skip_serializing_if = "Option::is_none")]
             goals: Option<&'a Field<GoalsPatch>>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            shell: Option<&'a Field<super::ShellConfig>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             reasoning_effort: Option<&'a Field<qq_provider::ReasoningEffort>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             profiles: Option<&'a Field<UniqueMap<String, ProfilePatch>>>,
@@ -978,6 +987,7 @@ impl Document {
             delegation: present(&self.delegation),
             audit: present(&self.audit),
             goals: present(&self.goals),
+            shell: present(&self.shell),
             reasoning_effort: present(&self.reasoning_effort),
             profiles: present(&self.profiles),
             providers: present(&self.providers),
@@ -1018,6 +1028,9 @@ impl Document {
         }
         if self.goals.is_present() {
             touched.push(ConfigKey::Goals);
+        }
+        if self.shell.is_present() {
+            touched.push(ConfigKey::Shell);
         }
         if self.max_output_tokens.is_present() {
             touched.push(ConfigKey::MaxOutputTokens);
@@ -1408,6 +1421,7 @@ pub(super) struct MergeState {
     delegation: Option<DelegationPatch>,
     audit: Option<AuditPatch>,
     goals: GoalsConfig,
+    shell: super::ShellConfig,
     approval_timeout_seconds: Option<u64>,
     max_active_runs: usize,
     retention_days: Option<u32>,
@@ -1470,6 +1484,7 @@ impl MergeState {
                 delegation: None,
                 audit: None,
                 goals: GoalsConfig::default(),
+                shell: super::ShellConfig::default(),
                 approval_timeout_seconds: None,
                 max_active_runs: super::default_max_active_runs(),
                 retention_days: None,
@@ -1565,6 +1580,11 @@ impl MergeState {
         if !sensitive {
             return;
         }
+        apply_default(
+            &document.shell,
+            &mut self.shell,
+            super::ShellConfig::default(),
+        );
 
         if apply_optional_string(&document.organization, &mut self.organization) {
             self.provenance.organization = Some(source.clone());
@@ -2117,6 +2137,7 @@ impl MergeState {
         Ok(ClientSnapshot {
             organization: self.organization,
             goals,
+            shell: self.shell,
             model,
             worker_model,
             delegation,
@@ -2151,6 +2172,7 @@ impl ClientSnapshot {
             delegation: self.delegation,
             audit: self.audit,
             goals: self.goals,
+            shell: self.shell,
             approval_timeout: self.approval_timeout,
             max_active_runs: self.max_active_runs,
             retention: self.retention,
