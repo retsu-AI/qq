@@ -895,7 +895,7 @@ pub(super) async fn capture_login_environment(
             deadline,
         )?;
         let mut command = tokio::process::Command::new(&source.shell);
-        command.args(["-lc", "env -0"]);
+        command.args(["-lc", "printf '\\000QQ_LOGIN_ENV\\000'; env -0"]);
         if let Some(home) = &source.home {
             command.env("HOME", home);
         }
@@ -990,6 +990,13 @@ pub(super) async fn capture_login_environment(
 fn parse_login_environment(
     bytes: Vec<u8>,
 ) -> Result<super::login_environment::Environment, LoginCaptureError> {
+    let marker = b"\0QQ_LOGIN_ENV\0";
+    let start = bytes
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .ok_or(LoginCaptureError::Environment)?
+        + marker.len();
+    let bytes = &bytes[start..];
     if bytes.is_empty() || bytes.last() != Some(&0) {
         return Err(LoginCaptureError::Environment);
     }

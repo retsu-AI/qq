@@ -1034,7 +1034,7 @@ async fn structured_tracing(home: &Home) -> Result<(), String> {
 async fn shell_login_environment(home: &Home) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
     let shell = home.root.join("login-shell");
-    tokio::fs::write(&shell, "#!/bin/sh\n[ \"$1\" = '-lc' ] && [ \"$2\" = 'env -0' ] || exit 9\nprintf x >> \"$HOME/login-count\"\nexport QQ_LOGIN_SMOKE=captured TERM=wrong\nenv -0\n").await.map_err(|error| error.to_string())?;
+    tokio::fs::write(&shell, "#!/bin/sh\n[ \"$1\" = '-lc' ] || exit 9\nprintf x >> \"$HOME/login-count\"\nexport QQ_LOGIN_SMOKE=captured TERM=wrong\nprintf '\\000QQ_LOGIN_ENV\\000'\nenv -0\n").await.map_err(|error| error.to_string())?;
     tokio::fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))
         .await
         .map_err(|error| error.to_string())?;

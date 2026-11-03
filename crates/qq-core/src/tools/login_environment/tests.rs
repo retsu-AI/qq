@@ -14,7 +14,12 @@ use crate::{
 fn fixture(root: &Path, body: &str) -> Arc<ProcessProducer> {
     use std::os::unix::fs::PermissionsExt as _;
     let shell = root.join("login");
-    std::fs::write(&shell, format!("#!/bin/sh\n[ \"$1\" = '-lc' ] && [ \"$2\" = 'env -0' ] || exit 9\nprintf x >> \"$HOME/count\"\n{body}\n")).unwrap();
+    let body = body.replace("env -0", "printf '\\000QQ_LOGIN_ENV\\000'; env -0");
+    std::fs::write(
+        &shell,
+        format!("#!/bin/sh\n[ \"$1\" = '-lc' ] || exit 9\nprintf x >> \"$HOME/count\"\n{body}\n"),
+    )
+    .unwrap();
     std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut producer = ProcessProducer::default();
     producer.login_environment = LoginEnvironment::for_source(Source {
@@ -73,6 +78,35 @@ async fn command_with_cancellation(
 pub(super) struct InspectionGate {
     pub(super) entered: tokio::sync::oneshot::Sender<()>,
     pub(super) release: std::sync::mpsc::Receiver<()>,
+}
+
+#[test]
+fn login_environment_fish_watches_effective_xdg_config() {
+    assert_eq!(
+        super::fish_config_path(Path::new("home"), Some("custom".into())),
+        Path::new("custom/fish/config.fish")
+    );
+    assert_eq!(
+        super::fish_config_path(Path::new("home"), None),
+        Path::new("home/.config/fish/config.fish")
+    );
+}
+
+#[tokio::test]
+async fn login_environment_startup_banner_is_not_an_environment_entry() {
+    let root = tempfile::tempdir().unwrap();
+    let producer = fixture(
+        root.path(),
+        "printf 'Welcome!\\n'; export QQ_LOGIN_TEST=captured; env -0",
+    );
+    let workspace = Workspace::open(root.path()).unwrap();
+    let output = command(&workspace, producer, true).await;
+    assert!(!output.is_error, "{}", output.model_text);
+    assert!(
+        output.model_text.contains("captured|dumb|"),
+        "{}",
+        output.model_text
+    );
 }
 
 #[tokio::test]
@@ -326,7 +360,7 @@ async fn login_environment_runtime_reload_refreshes_the_shared_cache() {
     );
     std::fs::write(
         root.path().join("login"),
-        "#!/bin/sh\nprintf x >> \"$HOME/count\"\nexport QQ_LOGIN_TEST=after\nenv -0\n",
+        "#!/bin/sh\nprintf x >> \"$HOME/count\"\nexport QQ_LOGIN_TEST=after\nprintf '\\000QQ_LOGIN_ENV\\000'\nenv -0\n",
     )
     .unwrap();
     assert!(
@@ -503,7 +537,7 @@ async fn login_environment_cancellation_reaps_capture_and_descendant_without_cac
     assert!(crate::tools::shell::process_has_exited(child));
     std::fs::write(
         root.path().join("login"),
-        "#!/bin/sh\nprintf x >> \"$HOME/count\"\nexport QQ_LOGIN_TEST=retried\nenv -0\n",
+        "#!/bin/sh\nprintf x >> \"$HOME/count\"\nexport QQ_LOGIN_TEST=retried\nprintf '\\000QQ_LOGIN_ENV\\000'\nenv -0\n",
     )
     .unwrap();
     let result = command(&workspace, producer, true).await;

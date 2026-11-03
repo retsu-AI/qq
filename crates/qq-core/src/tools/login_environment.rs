@@ -168,6 +168,14 @@ impl LoginEnvironment {
     }
 }
 
+fn fish_config_path(home: &std::path::Path, config: Option<OsString>) -> PathBuf {
+    config
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"))
+        .join("fish/config.fish")
+}
+
 impl Source {
     fn current() -> Option<Self> {
         #[cfg(unix)]
@@ -193,7 +201,7 @@ impl Source {
                     ]
                     .map(|file| home.join(file)),
                 );
-                startup.push(home.join(".config/fish/config.fish"));
+                startup.push(fish_config_path(home, std::env::var_os("XDG_CONFIG_HOME")));
             }
             match name.as_str() {
                 "bash" => startup.extend(["/etc/bash.bashrc", "/etc/bashrc"].map(PathBuf::from)),
