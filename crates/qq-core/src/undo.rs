@@ -355,7 +355,14 @@ async fn record_named(
             &["rev-parse", &format!("{}^{{tree}}", previous.commit)],
         )
         .await?;
-        if tree.trim() == previous_tree.trim() {
+        let current_protected = skipped
+            .iter()
+            .chain(&left_out)
+            .collect::<std::collections::BTreeSet<_>>();
+        let previous_protected = protected(repository, &previous.commit).await?;
+        if tree.trim() == previous_tree.trim()
+            && current_protected == previous_protected.iter().collect()
+        {
             return Ok(previous.clone());
         }
     }
@@ -1594,6 +1601,35 @@ mod tests {
         restore(&restored.before).await.unwrap();
         assert_eq!(read(&root.join(".gitignore")).as_deref(), Some("notes\n"));
         assert_eq!(read(&root.join("notes")).as_deref(), Some("newer\n"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_deduplication_preserves_newly_ignored_paths() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        std::fs::write(root.join(".gitignore"), "local.env\n").unwrap();
+        let session = qq_protocol::SessionId::generate().unwrap();
+        let run = qq_protocol::RunId::generate().unwrap();
+        let first = turn_checkpoint(root, session, run, 1, false, None)
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::write(root.join("local.env"), "user\n").unwrap();
+        let second = turn_checkpoint(root, session, run, 2, false, Some(&first))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(first.commit, second.commit);
+        let third = turn_checkpoint(root, session, run, 3, false, Some(&second))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.commit, third.commit);
+        std::fs::remove_file(root.join(".gitignore")).unwrap();
+        std::fs::write(root.join("local.env"), "newer\n").unwrap();
+        restore(&second).await.unwrap();
+        assert_eq!(read(&root.join("local.env")).as_deref(), Some("newer\n"));
     }
 
     #[tokio::test]
