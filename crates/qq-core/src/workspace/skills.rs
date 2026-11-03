@@ -118,18 +118,6 @@ impl SkillRoot {
         }
     }
 
-    pub(crate) fn pack(pack_id: &str, root: usize, directory: &str, kind: SkillKind) -> Self {
-        Self {
-            directory: directory.to_owned(),
-            kind,
-            nested: matches!(kind, SkillKind::Skill),
-            disclosed: true,
-            tier: TIER_NATIVE,
-            root: Some(root),
-            source_prefix: format!("pack:{pack_id}/"),
-        }
-    }
-
     pub(crate) fn global(root: usize) -> Self {
         Self {
             directory: String::new(),
@@ -162,11 +150,11 @@ impl SkillRoot {
     fn resolve<'a>(
         &self,
         workspace: &'a Workspace,
-        packs: &'a [Workspace],
+        roots: &'a [Workspace],
     ) -> Option<&'a Workspace> {
         match self.root {
             None => Some(workspace),
-            Some(index) => packs.get(index),
+            Some(index) => roots.get(index),
         }
     }
 }
@@ -195,14 +183,14 @@ impl SkillIndex {
 
     pub(crate) fn compile_blocking(
         workspace: &Workspace,
-        packs: &[Workspace],
+        opened_roots: &[Workspace],
         roots: &[SkillRoot],
     ) -> (Self, Vec<SourceFingerprint>) {
         let mut fingerprints = Vec::with_capacity(roots.len());
         let mut found: Vec<(u8, SkillEntry)> = Vec::new();
         let mut truncated = false;
         for root in roots {
-            let Some(opened) = root.resolve(workspace, packs) else {
+            let Some(opened) = root.resolve(workspace, opened_roots) else {
                 continue;
             };
             let fingerprint = SourceFingerprint::capture(if root.directory.is_empty() {
@@ -407,13 +395,10 @@ impl SkillIndex {
     }
 
     pub(crate) fn relative_source(entry: &SkillEntry) -> &str {
-        if let Some(rest) = entry.source.strip_prefix(GLOBAL_SOURCE_PREFIX) {
-            return rest;
-        }
-        match entry.source.strip_prefix("pack:") {
-            Some(rest) => rest.split_once('/').map_or(rest, |(_, path)| path),
-            None => entry.source.as_str(),
-        }
+        entry
+            .source
+            .strip_prefix(GLOBAL_SOURCE_PREFIX)
+            .unwrap_or(&entry.source)
     }
 
     pub(crate) fn resolve_disclosed(&self, name: &str) -> Option<&SkillEntry> {
@@ -743,12 +728,11 @@ mod tests {
             .iter()
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect();
+        let mut refs = refs;
+        refs.push((".qq/skills/zz-native/SKILL.md", "n\n"));
         let (_dir, workspace) = workspace_with(&refs);
-        let (_p, pack) = workspace_with(&[("skills/zz-native/SKILL.md", "n\n")]);
-        let mut roots = SkillRoot::workspace_defaults();
-        roots.push(SkillRoot::pack("kit", 0, "skills", SkillKind::Skill));
         let (index, _) =
-            SkillIndex::compile_blocking(&workspace, std::slice::from_ref(&pack), &roots);
+            SkillIndex::compile_blocking(&workspace, &[], &SkillRoot::workspace_defaults());
         assert_eq!(index.len(), MAX_INDEXED_SKILLS);
         assert!(index.truncated());
         assert!(index.resolve_disclosed("zz-native").is_some());

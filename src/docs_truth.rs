@@ -839,7 +839,6 @@ mod tests {
     enum SampleFile {
         Config,
         Managed,
-        Pack,
         Tui,
     }
 
@@ -848,7 +847,6 @@ mod tests {
             match info.strip_prefix("ron")?.trim() {
                 "" | "config.ron" => Some(Self::Config),
                 "managed.ron" => Some(Self::Managed),
-                "pack.ron" => Some(Self::Pack),
                 "tui.ron" => Some(Self::Tui),
                 other => panic!("unknown RON sample file `{other}` in a ```ron fence"),
             }
@@ -907,25 +905,6 @@ mod tests {
                         self.managed.join("managed.ron")
                     };
                     Self::write(&path, sample);
-                    let mut rest = sample;
-                    while let Some(at) = rest.find(": Pack(path: \"") {
-                        let id = rest[..at].rsplit('"').nth(1).unwrap_or_default();
-                        let tail = &rest[at + ": Pack(path: \"".len()..];
-                        let directory = &tail[..tail.find('"').unwrap_or(0)];
-                        Self::write(
-                            &path.parent().unwrap().join(directory).join("pack.ron"),
-                            &format!("(schema: 1, id: \"{id}\", version: \"1\")"),
-                        );
-                        rest = tail;
-                    }
-                }
-                SampleFile::Pack => {
-                    let id = sample
-                        .split_once("id: \"")
-                        .and_then(|(_, rest)| rest.split_once('"'))
-                        .map(|(id, _)| id)
-                        .ok_or("pack.ron sample has no `id: \"…\"`")?;
-                    Self::write(&self.global.join(format!("packs/{id}/pack.ron")), sample);
                 }
                 SampleFile::Tui => {
                     Self::write(&self.global.join("tui.ron"), sample);
@@ -994,18 +973,7 @@ mod tests {
                 let document = if body.starts_with('(') {
                     body.to_owned()
                 } else {
-                    match context {
-                        SampleFile::Pack => {
-                            failures.push(format!(
-                                "  {name}:{}: a pack.ron fragment cannot be loaded; show the whole manifest",
-                                fence.line
-                            ));
-                            continue;
-                        }
-                        SampleFile::Config | SampleFile::Managed | SampleFile::Tui => {
-                            format!("(\n    version: 1,\n{body}\n)")
-                        }
-                    }
+                    format!("(\n    version: 1,\n{body}\n)")
                 };
                 match SampleRoot::new().load(context, &document) {
                     Ok(_) => loaded += 1,
@@ -1018,7 +986,7 @@ mod tests {
         assert!(
             failures.is_empty(),
             "these guide RON samples do not load; fix the sample, or title the fence \
-             (```ron managed.ron, ```ron pack.ron, ```ron tui.ron) if it belongs to \
+             (```ron managed.ron, ```ron tui.ron) if it belongs to \
              another file:\n{}",
             failures.join("\n")
         );
@@ -1617,7 +1585,6 @@ mod tests {
             "Queue",
             "Compaction",
             "Profile",
-            "Pack",
             "Roster",
             "Role",
             "Approval mode",

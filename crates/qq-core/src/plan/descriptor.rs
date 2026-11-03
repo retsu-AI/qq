@@ -6,9 +6,9 @@ use sha2::{Digest, Sha256};
 
 use super::PlanCompileError;
 
-pub const DESCRIPTOR_VERSION: u16 = 16;
+pub const DESCRIPTOR_VERSION: u16 = 17;
 
-const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v16\0";
+const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v17\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "name")]
@@ -95,19 +95,6 @@ pub struct ToolCatalogDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PackDescriptor {
-    pub id: String,
-    pub version: String,
-    pub manifest_digest: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persona_hash: Option<ContentHash>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_allow: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_deny: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillIndexDescriptor {
     pub digest: ContentHash,
     pub indexed: usize,
@@ -131,8 +118,6 @@ pub struct AgentPlanDescriptor {
     pub provider: ProviderDescriptor,
     pub model: ResolvedModel,
     pub workspace: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub protected_pack_roots: Vec<String>,
     pub prompt_version: PromptVersion,
     pub instruction_hash: qq_protocol::InstructionHash,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,8 +140,6 @@ pub struct AgentPlanDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
     pub skills: SkillIndexDescriptor,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pack: Option<PackDescriptor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerDescriptor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -25,7 +25,7 @@ straight away and which are [held](#held-call) for you.
 | What | Kept in | Survives quitting QQ |
 | --- | --- | --- |
 | workspaces, sessions, runs, turns, messages, tool calls and their output, compaction summaries | the sessions database, `sessions.sqlite3` in your data directory | yes |
-| profiles, packs, the roster, `policy` | your config files and the project's `.qq/config.ron` | yes |
+| profiles, the roster, `policy` | your config files and the project's `.qq/config.ron` | yes |
 | which project files you trusted | `trust.ron` in your data directory | yes |
 | credentials | the OS keyring (details in [Providers](providers.md#where-credentials-go)) | yes |
 | drafts queued with `Ctrl-Enter` | the TUI's memory | no |
@@ -107,13 +107,6 @@ reasoning effort, and similar), chosen with `/profile` or
 `qq run --profile NAME`. Anything a profile leaves out comes from the
 top-level configuration. Not to be confused with a
 [credential profile](providers.md#profiles). See [`profiles`](configuration.md#profiles).
-
-### Pack
-
-A directory with a `pack.ron` that bundles profiles, a persona prompt,
-skills, commands, and MCP servers, so a setup can be shared. A project's
-packs load only once you [trust](#trust) each `pack.ron`; editing one
-disables it until you run `qq trust` again. See [`packs`](configuration.md#packs).
 
 ### Roster
 

@@ -16,8 +16,8 @@ mod sessions;
 pub use capabilities::{
     AgentProfileSummary, CAPABILITIES_VERSION, CapabilitiesRequest, DelegationCapabilities,
     DelegationRole, DelegationRoster, DelegationRosterEntry, EventCapabilities, LimitCapabilities,
-    PackSummary, ServerCapabilities, SkillCapabilities, SkillSummary, SteeringCapabilities,
-    ToolCapabilities, ToolHostSummary, WorkspaceToolCapabilities, child_reasoning_effort,
+    ServerCapabilities, SkillCapabilities, SkillSummary, SteeringCapabilities, ToolCapabilities,
+    ToolHostSummary, WorkspaceToolCapabilities, child_reasoning_effort,
 };
 pub use goals::{
     CheckInterruption, DEFAULT_GOAL_RUN_MODEL_TURNS, GoalAchievementClaim, GoalBlockedReason,
@@ -79,7 +79,7 @@ pub use workspaces::{
     MAX_WORKSPACE_PAGE, WorkspaceCatalog, WorkspaceCatalogCursor, WorkspaceCatalogRequest,
 };
 
-pub const PROTOCOL_VERSION: u16 = 42;
+pub const PROTOCOL_VERSION: u16 = 43;
 
 pub const SNAPSHOT_REQUIRED_SSE_EVENT: &str = "snapshot_required";
 

@@ -5025,7 +5025,7 @@ fn the_rule_carries_run_activity_and_notices_in_priority_order() {
 }
 
 #[test]
-fn profile_picker_lists_mode_pack_and_the_active_profile() {
+fn profile_picker_lists_mode_and_the_active_profile() {
     let mut app = app_with_messages(0);
     let mut capabilities = fixtures::steering_capabilities();
     capabilities.profiles = Some(vec![
@@ -5033,16 +5033,11 @@ fn profile_picker_lists_mode_pack_and_the_active_profile() {
             id: qq_protocol::AgentProfileId::default(),
             model: Some("openai/gpt-test".to_owned()),
             approval_mode: qq_protocol::ApprovalMode::Auto,
-            pack: None,
         },
         qq_protocol::AgentProfileSummary {
             id: qq_protocol::AgentProfileId::new("reviewer").unwrap(),
             model: None,
             approval_mode: qq_protocol::ApprovalMode::ReadOnly,
-            pack: Some(qq_protocol::PackSummary {
-                id: "review-kit".to_owned(),
-                version: "1.0.0".to_owned(),
-            }),
         },
     ]);
     app.apply_client_update(ClientUpdate::Capabilities(std::sync::Arc::new(
@@ -5062,7 +5057,7 @@ fn profile_picker_lists_mode_pack_and_the_active_profile() {
     );
     let reviewer_row = rows.iter().find(|row| row.contains("reviewer")).unwrap();
     assert!(
-        reviewer_row.contains("read_only") && reviewer_row.contains("pack review-kit@1.0.0"),
+        reviewer_row.contains("read_only") && !reviewer_row.contains("active"),
         "{reviewer_row}"
     );
 }
@@ -5146,7 +5141,7 @@ fn skills_picker_groups_commands_before_skills_with_sources() {
                 qq_protocol::SkillSummary {
                     name: "audit".to_owned(),
                     kind: qq_protocol::GuidanceKind::Skill,
-                    source: "pack:review-kit/skills/audit/SKILL.md".to_owned(),
+                    source: ".qq/skills/audit/SKILL.md".to_owned(),
                     description: String::new(),
                     disclosed: false,
                 },
@@ -5168,10 +5163,7 @@ fn skills_picker_groups_commands_before_skills_with_sources() {
     let audit = text.find("/audit").unwrap();
     assert!(commands < ship && ship < skills && skills < audit, "{text}");
     assert!(text.contains("Ship the current branch."), "{text}");
-    assert!(
-        text.contains("pack:review-kit/skills/audit/SKILL.md"),
-        "{text}"
-    );
+    assert!(text.contains(".qq/skills/audit/SKILL.md"), "{text}");
     let audit_row = rows.iter().find(|row| row.contains("/audit")).unwrap();
     assert!(audit_row.contains("explicit only"), "{audit_row}");
     assert!(!text.contains("MCP:"), "{text}");

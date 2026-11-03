@@ -16,8 +16,8 @@ use qq_core::{
     RuntimeLoadRequest, RuntimeLoader, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions,
     SpawnModelValidationFuture, WorkerRuntimeLoadFuture, WorkspacePolicyAuthority,
     plan::{
-        AgentProfile, CompiledAgentPlan, CredentialReference, HostSnapshot, PackSelection,
-        PlanCompileError, ProviderDescriptor, SourceFingerprint,
+        AgentProfile, CompiledAgentPlan, CredentialReference, HostSnapshot, PlanCompileError,
+        ProviderDescriptor, SourceFingerprint,
     },
 };
 use qq_protocol::{
@@ -830,10 +830,9 @@ impl RuntimeFactory {
             || !snapshot.delegation().roster().is_empty()
             || snapshot.audit().mode() != qq_config::AuditMode::Off
             || !snapshot.profiles().is_empty()
-            || !snapshot.packs().is_empty()
         {
             return Err(invalid(
-                "organizations, MCP, worker routes, delegation, audit, profiles, and packs are not allowed",
+                "organizations, MCP, worker routes, delegation, audit, and profiles are not allowed",
             ));
         }
         Ok(())
@@ -849,7 +848,6 @@ impl RuntimeFactory {
         profiles.push(AgentProfileSummary {
             id: AgentProfileId::default(),
             model: Some(default_route.clone()),
-            pack: None,
             approval_mode: ApprovalMode::default(),
         });
         for (name, profile) in snapshot.profiles() {
@@ -868,10 +866,6 @@ impl RuntimeFactory {
                         .model()
                         .map_or_else(|| default_route.clone(), str::to_owned),
                 ),
-                pack: profile.pack().map(|reference| qq_protocol::PackSummary {
-                    id: reference.pack().to_owned(),
-                    version: reference.version().to_owned(),
-                }),
                 approval_mode: profile
                     .approval_mode()
                     .map_or(ApprovalMode::default(), |mode| match mode {
@@ -1184,45 +1178,6 @@ impl RuntimeFactory {
         let snapshot = self.load(request)?;
         let mut configuration_sources = vec![snapshot.sources().clone()];
         let selected_profile = snapshot.profile(profile_id.as_str());
-        let pack_selection = match selected_profile.as_ref().and_then(|p| p.pack()) {
-            None => None,
-            Some(reference) => {
-                let pack = &snapshot.packs()[reference.pack()];
-                if let Some(minimum) = pack.requires().protocol
-                    && minimum > qq_protocol::PROTOCOL_VERSION
-                {
-                    return Err(RuntimeBuildError::PackRequiresNewerProtocol {
-                        pack: reference.pack().to_owned(),
-                        required: minimum,
-                        supported: qq_protocol::PROTOCOL_VERSION,
-                    });
-                }
-                let profile = reference.profile();
-                let relative = |path: &Path| {
-                    path.strip_prefix(reference.directory())
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .expect("pack paths were validated to stay inside the pack")
-                };
-                Some((
-                    PackSelection {
-                        id: reference.pack().to_owned(),
-                        version: reference.version().to_owned(),
-                        manifest_digest: reference.manifest_digest().to_owned(),
-                        directory: reference.directory().to_owned(),
-                        persona: profile.prompt().map(relative),
-                        skill_roots: profile.skill_roots().iter().map(|p| relative(p)).collect(),
-                        command_roots: profile
-                            .command_roots()
-                            .iter()
-                            .map(|p| relative(p))
-                            .collect(),
-                        tool_allow: profile.tools().allow.clone(),
-                        tool_deny: profile.tools().deny.clone(),
-                    },
-                    profile.mcp().map(<[String]>::to_vec),
-                ))
-            }
-        };
         let snapshot = match selected_profile {
             None => return Err(RuntimeBuildError::UnknownProfile(profile_id.clone())),
             Some(profile) if profile == qq_config::AgentProfileConfig::default() => snapshot,
@@ -1396,45 +1351,12 @@ impl RuntimeFactory {
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone())
-                .with_global_config_dir(self.inner.config.paths().global_dir().to_owned())
-                .with_protected_pack_roots(
-                    snapshot
-                        .packs()
-                        .values()
-                        .map(|pack| match pack.directory().strip_prefix(request.cwd()) {
-                            Ok(relative) => workspace.join(relative),
-                            Err(_) => pack.directory().to_owned(),
-                        })
-                        .collect(),
-                );
+                .with_global_config_dir(self.inner.config.paths().global_dir().to_owned());
         if let Some(effort) = snapshot.reasoning_effort() {
             profile = profile.with_reasoning_effort(effort);
         }
-        let mcp_subset = match pack_selection {
-            Some((selection, subset)) => {
-                profile = profile.with_pack(selection);
-                subset
-            }
-            None => None,
-        };
         if let Some(names) = snapshot.policy().exposed_tools() {
-            let names = names
-                .iter()
-                .filter(|name| {
-                    let server = name
-                        .strip_prefix("mcp__")
-                        .and_then(|rest| rest.split_once("__"))
-                        .map(|(server, _)| server);
-                    !server.is_some_and(|server| {
-                        snapshot.mcp_servers().contains_key(server)
-                            && mcp_subset
-                                .as_ref()
-                                .is_some_and(|subset| !subset.iter().any(|name| name == server))
-                    })
-                })
-                .cloned()
-                .collect();
-            profile = profile.with_exposed_tools(names);
+            profile = profile.with_exposed_tools(names.to_vec());
         }
         profile = profile.with_side_question_denies(snapshot.policy().deny_tools().to_vec());
         let mut bindings = LiveBindings {
@@ -1443,12 +1365,11 @@ impl RuntimeFactory {
             runtime: crate::plan::RuntimeSwitches { output_ceiling },
         };
         preparation_phase(progress, qq_core::RuntimeLoadStage::LoadingTools)?;
-        if let Some(wired) = self.inner.mcp.registry_for_snapshot(
-            &self.inner.credentials,
-            epoch,
-            &snapshot,
-            mcp_subset.as_deref(),
-        )? {
+        if let Some(wired) =
+            self.inner
+                .mcp
+                .registry_for_snapshot(&self.inner.credentials, epoch, &snapshot)?
+        {
             bindings.mcp = Some(Arc::clone(&wired.registry));
             profile = profile
                 .with_host(HostSnapshot::capture_blocking(wired.registry))
@@ -2964,14 +2885,6 @@ pub enum RuntimeBuildError {
     PlanCacheShutDown,
     #[error("agent profile {0} is not declared by the workspace configuration")]
     UnknownProfile(AgentProfileId),
-    #[error(
-        "agent pack {pack} requires protocol version {required}; this build supports {supported}"
-    )]
-    PackRequiresNewerProtocol {
-        pack: String,
-        required: u16,
-        supported: u16,
-    },
     #[error(transparent)]
     Plan(#[from] PlanCompileError),
     #[error(transparent)]
@@ -3024,7 +2937,6 @@ impl RuntimeBuildError {
             | Self::McpBridge(crate::McpBuildError::Configuration(_))
             | Self::UnknownModel { .. }
             | Self::UnknownProfile(_)
-            | Self::PackRequiresNewerProtocol { .. }
             | Self::UnsupportedReasoningEffort(_)
             | Self::ReasoningEffortNotAdvertised { .. }
             | Self::InvalidTuiQaProfile { .. } => RunFailureKind::Configuration,

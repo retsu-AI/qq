@@ -512,7 +512,7 @@ impl plan::CompiledAgentPlan {
             });
         let catalog = Arc::clone(&plan.catalog);
         let skills = Arc::clone(&plan.skills);
-        let pack_roots = Arc::clone(&plan.pack_roots);
+        let guidance_roots = Arc::clone(&plan.guidance_roots);
         let context_sources = Arc::clone(&plan.runtime.context_sources);
         let context_cache = Arc::clone(&plan.runtime.context_cache);
         let profile_name = plan.descriptor().profile.as_str().to_owned();
@@ -590,7 +590,7 @@ impl plan::CompiledAgentPlan {
                        None => None,
                        Some(request) => match workspace::prepare_guidance(
                            workspace.clone(),
-                           Arc::clone(&pack_roots),
+                           Arc::clone(&guidance_roots),
                            Arc::clone(&skills),
                            cancelled.clone(),
                            request,
@@ -2695,7 +2695,7 @@ impl RunState {
                     let catalog = &plan.catalog;
                     let _model = &plan.runtime.model;
                     let skills = &plan.skills;
-                    let pack_roots = &plan.pack_roots;
+                    let guidance_roots = &plan.guidance_roots;
                     let hosts = &plan.hosts;
                     let delegation = &plan.runtime.delegation;
                     let shell_policy = &plan.runtime.shell;
@@ -2722,7 +2722,7 @@ impl RunState {
                             let cancelled = cancelled.clone();
                             let catalog = Arc::clone(catalog);
                             let skills = Arc::clone(skills);
-                            let pack_roots = Arc::clone(pack_roots);
+                            let guidance_roots = Arc::clone(guidance_roots);
                             let hosts = Arc::clone(hosts);
                             let spawner = spawner.clone();
                             let tool_tasks = tool_tasks.clone();
@@ -2910,7 +2910,7 @@ impl RunState {
                                         match serde_json::from_str::<workspace::skills::LoadSkillArgs>(&call.arguments) {
                                             Ok(arguments) => match workspace::load_disclosed_skill(
                                                 workspace,
-                                                pack_roots,
+                                                guidance_roots,
                                                 skills,
                                                 cancelled,
                                                 arguments.name.trim().to_owned(),

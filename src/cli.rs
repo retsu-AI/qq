@@ -258,8 +258,8 @@ pub struct RunArgs {
     #[arg(long, value_enum)]
     pub approval: Option<RunApproval>,
 
-    /// Agent profile to run as: a name under `profiles` in the configuration
-    /// or one declared by a trusted agent pack. Defaults to `default`.
+    /// Agent profile to run as: a name under `profiles` in the configuration.
+    /// Defaults to `default`.
     #[arg(long, value_name = "NAME")]
     pub profile: Option<String>,
 
@@ -594,7 +594,7 @@ pub enum ConfigCommand {
     /// Explain the source of one effective field.
     Explain {
         #[arg(
-            help = "Field name: model, worker_model, organization, delegation, audit, approval_timeout, retention, reasoning_effort, max_output_tokens, pack.ID, profile.NAME, provider.NAME, tui.theme, or tui.bindings.ACTION."
+            help = "Field name: model, worker_model, organization, delegation, audit, approval_timeout, retention, reasoning_effort, max_output_tokens, profile.NAME, provider.NAME, tui.theme, or tui.bindings.ACTION."
         )]
         field: String,
     },

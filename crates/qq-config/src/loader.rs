@@ -105,25 +105,14 @@ pub(super) fn load_for_client(
     let mut report = LoadReport {
         sources: vec![compiled_report],
         pending: Vec::new(),
-        loaded_packs: 0,
-        project_root: directories.first().cloned().unwrap_or_else(|| cwd.clone()),
     };
     let mut seen = BTreeSet::new();
-
-    for pack in crate::pack::discover(
-        &loader.paths.global_dir.join("packs"),
-        SourceKind::Global,
-        probes,
-        &mut report.loaded_packs,
-    )? {
-        merged.admit_pack(pack);
-    }
 
     if let Some(organization) = organization
         && let Some((document, source)) =
             remote::load_cached_if_enrolled(&loader.paths, &organization, probes)?
     {
-        apply_document(document, source, &trust, &mut merged, &mut report, probes)?;
+        apply_document(document, source, &trust, &mut merged, &mut report)?;
     }
 
     for candidate in discover_layer_directory(
@@ -140,21 +129,10 @@ pub(super) fn load_for_client(
             &trust,
             &mut merged,
             &mut report,
-            probes,
         )?;
     }
 
     for directory in directories {
-        for pack in crate::pack::discover(
-            &directory.join(".qq").join("packs"),
-            SourceKind::Project,
-            probes,
-            &mut report.loaded_packs,
-        )? {
-            if let Some(pack) = withhold_untrusted_pack(pack, &trust, &mut report.pending) {
-                merged.admit_pack(pack);
-            }
-        }
         if let Some(candidate) =
             discover_file(directory.join("qq.ron"), SourceKind::Project, false, probes)?
         {
@@ -165,7 +143,6 @@ pub(super) fn load_for_client(
                 &trust,
                 &mut merged,
                 &mut report,
-                probes,
             )?;
         }
         for candidate in discover_layer_directory(
@@ -182,7 +159,6 @@ pub(super) fn load_for_client(
                 &trust,
                 &mut merged,
                 &mut report,
-                probes,
             )?;
         }
     }
@@ -202,7 +178,6 @@ pub(super) fn load_for_client(
             &trust,
             &mut merged,
             &mut report,
-            probes,
         )?;
     }
 
@@ -219,7 +194,6 @@ pub(super) fn load_for_client(
             &trust,
             &mut merged,
             &mut report,
-            probes,
         )?;
     }
 
@@ -249,19 +223,11 @@ pub(super) fn load_for_client(
             &trust,
             &mut merged,
             &mut report,
-            probes,
         )?;
     }
 
     if let Some(mdm) = mdm {
-        apply_document(
-            mdm.document,
-            mdm.source,
-            &trust,
-            &mut merged,
-            &mut report,
-            probes,
-        )?;
+        apply_document(mdm.document, mdm.source, &trust, &mut merged, &mut report)?;
     }
 
     if !report.pending.is_empty() && !request.ignore_untrusted_project_config {
@@ -460,21 +426,7 @@ fn scan_pending_trust(
     probes: &mut Probes,
 ) -> Result<Vec<PendingTrust>, ConfigError> {
     let mut pending = Vec::new();
-    let mut loaded_packs = 0_usize;
-    let directories = project_directories(cwd, probes);
-    let project_root = directories
-        .first()
-        .cloned()
-        .unwrap_or_else(|| cwd.to_owned());
-    for directory in directories {
-        for pack in crate::pack::discover(
-            &directory.join(".qq").join("packs"),
-            SourceKind::Project,
-            probes,
-            &mut loaded_packs,
-        )? {
-            withhold_untrusted_pack(pack, trust, &mut pending);
-        }
+    for directory in project_directories(cwd, probes) {
         let mut candidates = Vec::new();
         if let Some(candidate) =
             discover_file(directory.join("qq.ron"), SourceKind::Project, false, probes)?
@@ -498,15 +450,6 @@ fn scan_pending_trust(
             let pending_digest = document
                 .sensitive_digest()?
                 .filter(|digest| !trust.contains(path, digest));
-            for pack in explicit_project_packs(
-                &document,
-                &source,
-                &project_root,
-                probes,
-                &mut loaded_packs,
-            )? {
-                withhold_untrusted_pack(pack, trust, &mut pending);
-            }
             if let Some(digest) = pending_digest {
                 let sections = document.sensitive_sections();
                 pending.push(PendingTrust::new(source, digest, sections));
@@ -683,8 +626,6 @@ pub(super) struct FileCandidate {
 struct LoadReport {
     sources: Vec<SourceReport>,
     pending: Vec<PendingTrust>,
-    loaded_packs: usize,
-    project_root: PathBuf,
 }
 
 fn apply_candidate(
@@ -694,7 +635,6 @@ fn apply_candidate(
     trust: &TrustState,
     merged: &mut MergeState,
     report: &mut LoadReport,
-    probes: &mut Probes,
 ) -> Result<(), ConfigError> {
     if !seen.insert(candidate.path.clone()) {
         return Err(ConfigError::DuplicateSource {
@@ -713,7 +653,7 @@ fn apply_candidate(
                 .expect("global file sources always have a path"),
         )?;
     }
-    apply_document(document, source, trust, merged, report, probes)
+    apply_document(document, source, trust, merged, report)
 }
 
 fn apply_document(
@@ -722,7 +662,6 @@ fn apply_document(
     trust: &TrustState,
     merged: &mut MergeState,
     report: &mut LoadReport,
-    probes: &mut Probes,
 ) -> Result<(), ConfigError> {
     let pending_digest = if source.kind() == SourceKind::Project {
         document
@@ -733,19 +672,6 @@ fn apply_document(
     };
     let sensitive = pending_digest.is_none();
     merged.apply_document(&document, &source, sensitive);
-    if sensitive {
-        apply_explicit_packs(&document, &source, trust, merged, report, probes)?;
-    } else {
-        for pack in explicit_project_packs(
-            &document,
-            &source,
-            &report.project_root,
-            probes,
-            &mut report.loaded_packs,
-        )? {
-            withhold_untrusted_pack(pack, trust, &mut report.pending);
-        }
-    }
     let status = if let Some(digest) = pending_digest {
         report.pending.push(PendingTrust::new(
             source.clone(),
@@ -760,231 +686,6 @@ fn apply_document(
         .sources
         .push(SourceReport::new(source, status, document.touched()));
     Ok(())
-}
-
-fn apply_explicit_packs(
-    document: &Document,
-    source: &SourceIdentity,
-    trust: &TrustState,
-    merged: &mut MergeState,
-    report: &mut LoadReport,
-    probes: &mut Probes,
-) -> Result<(), ConfigError> {
-    use crate::document::{Field, PackPatch};
-    match document.packs() {
-        Field::Missing => Ok(()),
-        Field::Clear => {
-            merged.clear_packs();
-            Ok(())
-        }
-        Field::Set(patches) => {
-            for (id, patch) in &patches.0 {
-                match patch {
-                    PackPatch::Remove => merged.remove_pack(id),
-                    PackPatch::Pack { path } => {
-                        let resolved = if source.kind() == SourceKind::Project {
-                            match project_pack_directory(id, path, source, &report.project_root)? {
-                                Some(directory) => directory,
-                                None => {
-                                    return Err(ConfigError::PackMissing {
-                                        id: id.clone(),
-                                        path: resolve_explicit_pack(id, path, source)?,
-                                    });
-                                }
-                            }
-                        } else {
-                            resolve_explicit_pack(id, path, source)?
-                        };
-                        let manifest = resolved.join(crate::pack::PACK_MANIFEST_FILE);
-                        probes.record(&manifest);
-                        if !manifest.is_file() {
-                            return Err(ConfigError::PackMissing {
-                                id: id.clone(),
-                                path: resolved,
-                            });
-                        }
-                        let pack = crate::pack::load_explicit(
-                            &resolved,
-                            id,
-                            source.kind(),
-                            probes,
-                            &mut report.loaded_packs,
-                        )?;
-                        if let Some(pack) =
-                            withhold_untrusted_pack(pack, trust, &mut report.pending)
-                        {
-                            merged.admit_pack(pack);
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
-    }
-}
-
-fn explicit_project_packs(
-    document: &Document,
-    source: &SourceIdentity,
-    project_root: &Path,
-    probes: &mut Probes,
-    loaded: &mut usize,
-) -> Result<Vec<crate::AgentPack>, ConfigError> {
-    use crate::document::{Field, PackPatch};
-    let mut packs = Vec::new();
-    if source.kind() != SourceKind::Project {
-        return Ok(packs);
-    }
-    let Field::Set(patches) = document.packs() else {
-        return Ok(packs);
-    };
-    for (id, patch) in &patches.0 {
-        let PackPatch::Pack { path } = patch else {
-            continue;
-        };
-        if *loaded >= crate::pack::MAX_PACKS {
-            return Err(ConfigError::TooManyPacks {
-                limit: crate::pack::MAX_PACKS,
-            });
-        }
-        let Some(directory) = project_pack_directory(id, path, source, project_root)? else {
-            *loaded += 1;
-            continue;
-        };
-        let manifest = directory.join(crate::pack::PACK_MANIFEST_FILE);
-        probes.record(&manifest);
-        if manifest.is_file() {
-            packs.push(crate::pack::load_explicit(
-                &directory,
-                id,
-                source.kind(),
-                probes,
-                loaded,
-            )?);
-        } else {
-            *loaded += 1;
-        }
-    }
-    Ok(packs)
-}
-
-fn project_pack_directory(
-    id: &str,
-    path: &str,
-    source: &SourceIdentity,
-    project_root: &Path,
-) -> Result<Option<PathBuf>, ConfigError> {
-    let outside = || ConfigError::InvalidPack {
-        origin: source.clone(),
-        message: format!(
-            "pack {id:?} path {path:?} leaves the project; use a path relative to this file, and declare packs outside the repository in your global configuration"
-        ),
-    };
-    let resolved = resolve_explicit_pack(id, path, source)?;
-    let mut normalized = PathBuf::new();
-    for component in resolved.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            std::path::Component::CurDir => {}
-            std::path::Component::Prefix(prefix) => match prefix.kind() {
-                std::path::Prefix::Disk(drive) => {
-                    normalized.push(format!(r"\\?\{}:", char::from(drive.to_ascii_uppercase())))
-                }
-                std::path::Prefix::UNC(server, share) => {
-                    let mut verbatim = std::ffi::OsString::from(r"\\?\UNC\");
-                    verbatim.push(server);
-                    verbatim.push(r"\");
-                    verbatim.push(share);
-                    normalized.push(verbatim);
-                }
-                _ => normalized.push(prefix.as_os_str()),
-            },
-            other => normalized.push(other),
-        }
-    }
-    let Ok(beneath) = normalized.strip_prefix(project_root) else {
-        return Err(outside());
-    };
-    let mut current = project_root.to_owned();
-    for component in beneath
-        .components()
-        .chain(std::iter::once(std::path::Component::Normal(
-            crate::pack::PACK_MANIFEST_FILE.as_ref(),
-        )))
-    {
-        current.push(component);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(ConfigError::SymlinkSource { path: current });
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if current.file_name() == Some(crate::pack::PACK_MANIFEST_FILE.as_ref()) {
-                    break;
-                }
-                return Ok(None);
-            }
-            Err(error) => {
-                return Err(ConfigError::Io {
-                    path: current,
-                    error,
-                });
-            }
-        }
-    }
-    Ok(Some(normalized))
-}
-
-fn resolve_explicit_pack(
-    id: &str,
-    path: &str,
-    source: &SourceIdentity,
-) -> Result<PathBuf, ConfigError> {
-    let path = Path::new(path);
-    if path.is_absolute() {
-        Ok(path.to_owned())
-    } else if let Some(declaring) = source.path().and_then(Path::parent) {
-        Ok(declaring.join(path))
-    } else {
-        Err(ConfigError::InvalidPack {
-            origin: source.clone(),
-            message: format!(
-                "pack {id:?} path must be absolute in a {:?} source",
-                source.kind()
-            ),
-        })
-    }
-}
-
-fn withhold_untrusted_pack(
-    pack: crate::AgentPack,
-    trust: &TrustState,
-    pending: &mut Vec<PendingTrust>,
-) -> Option<crate::AgentPack> {
-    if pack.source().kind() != SourceKind::Project {
-        return Some(pack);
-    }
-    let path = pack
-        .source()
-        .path()
-        .expect("pack sources always have a manifest path");
-    let digest = pack.manifest_digest();
-    if trust.contains(path, digest) {
-        return Some(pack);
-    }
-    let listed = pending
-        .iter()
-        .any(|item| item.source().path() == Some(path) && item.digest() == digest);
-    if !listed {
-        pending.push(PendingTrust::new(
-            pack.source().clone(),
-            digest.to_owned(),
-            pack.sensitive_sections(),
-        ));
-    }
-    None
 }
 
 pub fn canonical_working_directory(path: &Path) -> Result<PathBuf, ConfigError> {

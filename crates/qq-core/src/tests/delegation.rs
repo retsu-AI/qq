@@ -683,7 +683,6 @@ fn subagent_prompts_say_a_parent_is_waiting_and_read_children_drop_the_implement
             },
             &instructions,
             None,
-            None,
         )
     };
     let root = render(None);
@@ -728,7 +727,6 @@ fn delegation_authority_guidance_matches_the_spawn_schema() {
             runtime::PromptSections::default(),
             &instructions,
             None,
-            None,
         );
         assert_eq!(prompt.contains("authority: write"), write_children);
         assert_eq!(
@@ -753,7 +751,6 @@ fn delegation_guidance_asks_for_a_question_a_purpose_and_an_answer_shape() {
         &specs,
         runtime::PromptSections::default(),
         &instructions,
-        None,
         None,
     );
     assert!(prompt.contains(
@@ -785,7 +782,6 @@ fn read_only_root_states_authority_and_has_no_action_obligation() {
         },
         &instructions,
         None,
-        None,
     );
     assert!(!prompt.contains("- Do the work. Decide what done looks like"));
     assert!(prompt.contains("This run cannot change files or run commands"));
@@ -801,7 +797,6 @@ fn agent_prompt_advertises_fetch_only_when_declared() {
         &specs,
         runtime::PromptSections::default(),
         &instructions,
-        None,
         None,
     );
     assert_eq!(
@@ -821,7 +816,6 @@ fn agent_prompt_advertises_fetch_only_when_declared() {
         runtime::PromptSections::default(),
         &instructions,
         None,
-        None,
     );
     assert!(!prompt.contains("fetch reads one public"));
     assert!(!prompt.contains("Prefer fetch over shell"));
@@ -835,7 +829,6 @@ fn agent_prompt_teaches_delegation_only_when_spawn_agent_is_declared() {
         runtime::PromptSections::default(),
         &instructions,
         None,
-        None,
     );
     assert!(!without.contains("spawn_agent"));
     assert!(!without.contains("Delegation:"));
@@ -846,7 +839,6 @@ fn agent_prompt_teaches_delegation_only_when_spawn_agent_is_declared() {
         &specs,
         runtime::PromptSections::default(),
         &instructions,
-        None,
         None,
     );
     assert!(with.contains("spawn_agent"));
@@ -1051,7 +1043,6 @@ fn roster_prompt_names_the_current_model_and_each_route_with_relative_cost() {
             ..runtime::PromptSections::default()
         },
         &instructions,
-        None,
         None,
     );
     assert!(prompt.contains("Delegation:"));

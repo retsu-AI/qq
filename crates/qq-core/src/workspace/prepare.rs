@@ -197,7 +197,7 @@ pub(crate) async fn prepare_workspace(
 
 pub(crate) async fn prepare_guidance(
     workspace: Workspace,
-    packs: Arc<[Workspace]>,
+    roots: Arc<[Workspace]>,
     index: Arc<super::skills::SkillIndex>,
     cancelled: RunCancellation,
     request: GuidanceRequest,
@@ -217,7 +217,7 @@ pub(crate) async fn prepare_guidance(
             return Err(WorkspacePreparationError::Cancelled);
         }
         Ok(super::guidance::load(
-            &workspace, &packs, &index, request, &cancelled,
+            &workspace, &roots, &index, request, &cancelled,
         )?)
     })
     .await
@@ -226,7 +226,7 @@ pub(crate) async fn prepare_guidance(
 
 pub(crate) async fn load_disclosed_skill(
     workspace: Workspace,
-    packs: Arc<[Workspace]>,
+    roots: Arc<[Workspace]>,
     index: Arc<super::skills::SkillIndex>,
     cancelled: RunCancellation,
     name: String,
@@ -251,7 +251,7 @@ pub(crate) async fn load_disclosed_skill(
         };
         Ok(super::guidance::load_entry(
             &workspace,
-            &packs,
+            &roots,
             entry,
             &super::guidance::bounded_arguments(arguments.trim()),
             &cancelled,

@@ -128,7 +128,7 @@ A successful control exits 0 even when the resulting goal is paused.
 | `sources` | every file consulted in precedence order, and `pending trust:` lines |
 | `check` | `configuration is valid (model: …)` or the first error; exit 1 on error |
 | `show` | the merged configuration with secrets redacted, then TUI settings |
-| `explain FIELD` | which source set `FIELD`: `model`, `organization`, `worker_model`, `delegation`, `audit`, `approval_timeout`, `retention`, `reasoning_effort`, `max_output_tokens`, `goals.FIELD`, `policy.goals.FIELD`, `provider.NAME`, `profile.NAME`, `pack.ID`, `tui.theme`, `tui.bindings.ACTION` |
+| `explain FIELD` | which source set `FIELD`: `model`, `organization`, `worker_model`, `delegation`, `audit`, `approval_timeout`, `retention`, `reasoning_effort`, `max_output_tokens`, `goals.FIELD`, `policy.goals.FIELD`, `provider.NAME`, `profile.NAME`, `tui.theme`, `tui.bindings.ACTION` |
 
 ## `qq auth …`
 
@@ -215,7 +215,7 @@ path so you can edit it or rerun with `--force`.
 ## `qq org …`
 
 Organization manifests: a RON document fetched over HTTPS and layered
-between global packs and your global config.
+beneath your global config.
 
 | Subcommand | Effect |
 | --- | --- |

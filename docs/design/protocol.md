@@ -60,12 +60,14 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 42
+PROTOCOL_VERSION = 43
 ```
 
-Descriptor 16 adds sorted workspace-relative configured pack roots to the
-compiled authority identity. Only descriptor 16 encodes; process evidence
-from an earlier descriptor is unresolved.
+Version 43 removes agent packs. `AgentProfileSummary.pack` is gone and a
+skill's `source` is never `pack:<id>/…`. Descriptor 17 drops the `pack`
+section and `protected_pack_roots`. Only descriptor 17 encodes; process
+evidence from an earlier descriptor is unresolved. A configuration that
+still declares `packs` fails to load naming the key.
 
 Version 42 adds `undo_workspace` (`POST /v1/workspaces/undo`) and its
 `workspace_undone` outcome, so any client can restore a run's snapshot through
@@ -175,7 +177,7 @@ its path onto the client machine. Listing neither registers a directory nor
 changes permissions.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v42/`; the `v41` directory (N−1) is
+`crates/qq-protocol/tests/fixtures/v43/`; the `v42` directory (N−1) is
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -696,12 +698,12 @@ optional-bodied:
 ```
 
 Response `ServerCapabilities` (abridged; see
-`crates/qq-protocol/tests/fixtures/v42/capabilities.json` for the full golden):
+`crates/qq-protocol/tests/fixtures/v43/capabilities.json` for the full golden):
 
 ```json
 {
   "version": 1,
-  "protocol_version": 42,
+  "protocol_version": 43,
   "server_version": "0.1.0",
   "input_parts": ["text", "workspace_file"],
   "commands": ["resolve_workspace", "create_session", "submit_prompt", "steer_run", "..."],
@@ -727,8 +729,7 @@ Response `ServerCapabilities` (abridged; see
   "approval_modes": ["read_only", "ask", "auto", "full"],
   "profiles": [
     { "id": "default", "model": "openai/gpt-5.6", "approval_mode": "auto" },
-    { "id": "review", "model": "anthropic/claude-x", "approval_mode": "read_only",
-      "pack": { "id": "review-kit", "version": "1.2.0" } }
+    { "id": "review", "model": "anthropic/claude-x", "approval_mode": "read_only" }
   ],
   "tools": {
     "max_catalog_tools": 512, "max_tool_schema_bytes": 16384,
@@ -746,7 +747,7 @@ Response `ServerCapabilities` (abridged; see
         { "name": "deploy", "kind": "command", "source": ".qq/commands/deploy.md",
           "description": "Ship the current branch.", "disclosed": true },
         { "name": "audit", "kind": "skill",
-          "source": "pack:review-kit/skills/audit/SKILL.md", "disclosed": false }
+          "source": ".qq/skills/audit/SKILL.md", "disclosed": false }
       ]
     }
   },
@@ -784,7 +785,7 @@ digest, whether requests carry every schema (`full`) or an index plus
 tool count, and readiness, how many declared tools were excluded, and the skill
 index. `skills.entries` (additive; absent from older servers) lists every
 indexed document with its slash `name`, `kind` (`command` or `skill`),
-workspace-relative or `pack:<id>/…` `source`, front-matter `description`, and
+workspace-relative or `global:skills/…` `source`, front-matter `description`, and
 whether the model may load it itself (`disclosed`); it is bounded by
 `tools.max_indexed_skills` entries with descriptions of at most 512 bytes, so a
 client can offer slash completion and a listing without reading the workspace.
@@ -2037,7 +2038,7 @@ bound held when the provider stopped reporting usage.
 `RunSnapshot.plan`. `digest` is the SHA-256 of the secret-free
 `AgentPlanDescriptor` the run was compiled from (provider shape, model,
 workspace, prompt version, instructions, tool catalog with its host
-generations and exclusions, skill index, agent pack, MCP declarations, retry
+generations and exclusions, skill index, MCP declarations, retry
 policy, configuration sources, profile); two runs with equal digests were
 admitted with behaviorally identical plans. `credential_epoch` is the opaque
 credential-store generation that authorized the plan; it moves on rotation
@@ -2215,7 +2216,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v42/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v43/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.

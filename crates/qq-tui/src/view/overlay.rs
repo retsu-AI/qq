@@ -378,9 +378,6 @@ pub(super) fn profile_picker(app: &App, width: usize, height: usize) -> Vec<Line
             if let Some(model) = &row.model {
                 line.push(format!("  {model}"), muted());
             }
-            if let Some(pack) = &row.pack {
-                line.push(format!("  pack {pack}"), accent());
-            }
             if row.id == *current {
                 line.push("  active", accent());
             }

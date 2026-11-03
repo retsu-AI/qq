@@ -41,7 +41,7 @@ The binary has multiple process modes:
   index, server discovery, and the workspace beneath the canonical `PATH`.
   It admits only the selected loopback-HTTP `Custom` provider with `NoAuth`
   and no static headers, and omits authentication probes for every unselected
-  provider. MCP, additional agent routes, delegation, audit, profiles, packs,
+  provider. MCP, additional agent routes, delegation, audit, and profiles
   are rejected rather than disabled. The ordinary
   no-flag path uses the user-scoped system directories. This fixture demonstrates TUI behavior only; it is not
   evidence for a real provider integration.
@@ -243,7 +243,7 @@ xtask/
   returns config-owned TUI values; the root translates them into `qq-tui`
   settings. A user-global file (`config.ron`, `config.d/*.ron`, `tui.ron`,
   `themes/*.ron`) may be a leaf symlink to a regular file; project, explicit,
-  managed, pack, and trust sources still reject symbolic links (ADR-0035).
+  managed, and trust sources still reject symbolic links (ADR-0035).
   Two loads share one merge: `load` yields a `ConfigSnapshot` and is what
   every headless path and plan compilation use, failing fast with
   `ModelRequired`; `load_for_client` yields a `ClientSnapshot` whose model is
@@ -482,7 +482,7 @@ capability-scoped workspace with its instruction file already read, the
 compiled `ToolCatalog` (built-ins, the `spawn_agent`, `search_history`,
 `select_tools`, and `load_skill` declarations, and every admitted external tool
 with its serialized schema and digest), the compiled `SkillIndex`, the
-sub-agent routes, the external tool hosts, the selected agent pack, and the
+sub-agent routes, the external tool hosts, and the
 context sources. Durable session runs execute directly
 from the plan and perform no canonicalization, directory open, instruction
 read, or host catalog request before the first provider request; only an
@@ -494,7 +494,7 @@ plan stale so the next load recompiles.
 
 The plan also carries the plan-constant part of the system prompt (ADR-0024):
 the header with the tool list, the progressive-exposure index, the skill
-index, the workspace instructions, and the pack persona, as a `PromptPrefix`
+index, and the workspace instructions, as a `PromptPrefix`
 per capability set (which optional static tools the run may use, whether it
 may load guidance, strict read-only or unattended authority, and whether it is
 a model-spawned child with read or write authority) together with the SHA-256 state of those bytes. The common set is
@@ -537,8 +537,7 @@ build identity, provider `id`/API/sanitized endpoint/auth scheme/credential
 *reference* (environment name, stored name, profile, inline, ambient chain)
 and static header *names*, the resolved model, workspace root, prompt version,
 instruction hash and source, the tool catalog (digest, exposure, admitted
-names, host generations, typed exclusions), the skill index, the selected pack
-(identifier, version, manifest digest, persona hash, tool policy), spawn
+names, host generations, typed exclusions), the skill index, spawn
 routes, MCP `allow` lists, MCP server declarations (transport, sanitized
 target, credential *reference*, and the configured tool-set `pin`),
 configuration source labels, and every registered context source (name,
@@ -605,8 +604,8 @@ The root's `PlanCache` holds one generation per (canonical workspace, model
 selection, explicit configuration) key and revalidates it on every load with a
 fixed list of `stat` calls: every path the configuration loader probed
 (`ConfigSnapshot::sources`, captured before discovery and reads), the credential index file, the workspace's
-`AGENTS.md`/`CLAUDE.md`, the skill roots the index was compiled from, and the
-selected pack's manifest and persona, plus one in-memory generation compare
+`AGENTS.md`/`CLAUDE.md`, and the skill roots the index was compiled from,
+plus one in-memory generation compare
 per external tool host. A warm lookup performs no configuration parsing,
 credential I/O, directory listing, or host round trip. Any observable change recompiles; an
 identical digest, epoch, and live bindings keep the live generation, otherwise the new
@@ -650,7 +649,7 @@ declares. `qq-config` does not depend on `qq-protocol`; the root translates.
 
 The catalog is compiled once per plan by `qq-core::catalog` from the static
 built-ins and every `ExternalToolHost` the root attached. Static tools are
-trusted; profile/pack policy and optional `policy.exposed_tools` may remove
+trusted; optional `policy.exposed_tools` may remove
 them before catalog construction. Exposure lists intersect across config
 layers, and grant no execution authority. External tools are validated by name shape
 (`mcp__<server>__<tool>`, `ext__<host>__<tool>`), deduplicated against the
@@ -697,49 +696,16 @@ like a mutation whatever its name or hints; a name the catalog does not hold is
 a tool error before any policy runs.
 
 Skills are compiled into a `SkillIndex` beside the catalog. Native `.qq/`
-roots, pack roots, the global `<config>/skills` root, and `.agents/skills`
+roots, the global `<config>/skills` root, and `.agents/skills`
 are *disclosed*: their names and front-matter descriptions appear in the
 system prompt, which tells the model to `load_skill` a matching skill before
 acting, and `load_skill` reads the body on demand. `.claude/` roots are
 indexed for explicit `/name` invocation only. A name keeps only its
-highest-precedence tier (workspace and pack, then global, then compatibility),
+highest-precedence tier (workspace, then global, then compatibility),
 so an `.agents/skills` copy of a `.qq/skills` skill is dropped. The index is
 bounded (64 entries, about 8 KiB rendered) and its roots and indexed
 documents are fingerprinted into the plan, so a new skill or an edited front
 matter recompiles on the next load, not on the next run.
-
-### Agent Packs
-
-An agent pack is a directory with a `pack.ron` manifest (`PACK_SCHEMA_VERSION
-= 1`) declaring an identifier, version, optional persona file, skill and
-command roots, a tool allow/deny policy, per-profile MCP subsets, and the
-minimum protocol version it requires. `qq-config` discovers packs from
-`<global>/packs/<id>/` and `.qq/packs/<id>/` root-to-leaf, plus explicit
-`packs:` entries; at most 32 manifests are read per load, later layers win
-by identifier, and every manifest error is a typed configuration failure
-that names the pack. A project pack (discovered under `.qq/packs/` or named
-by a project file) is its own trust subject: it is admitted only when a
-trust record covers its canonical manifest path and the SHA-256 of its
-bytes, independent of whether the directory's configuration is trusted.
-Manifests named by a still-pending project file are listed in the same
-pending set, so one review covers both. Because those manifests are read
-before consent, a project entry must resolve lexically beneath the VCS root
-(else `cwd`) through no symbolic link, manifest leaf included; any other
-path is `InvalidPack` or `SymlinkSource` and is never opened. The 32-entry
-bound counts every entry inspected (packs, directories without a
-manifest, stray files), and discovery rejects a linked `packs/` directory
-or `pack.ron` before recording it. Pack profiles merge beneath the configuration's
-own `profiles` in the same flat namespace and a name declared by both is a
-conflict, not a silent override.
-
-The root translates a selected pack into a `PackSelection` and the plan
-compiles it: the persona (bounded to `MAX_PERSONA_BYTES`) prepends the system
-prompt, pack skill roots join the disclosed index as `pack:<id>/...`, the tool
-policy filters the catalog before exposure is decided, and the MCP subset
-restricts which servers the wired host contributes. The descriptor's `pack`
-section and `AgentProfileSummary.pack` name the identifier and version; a pack
-that requires a newer protocol fails plan compilation with a configuration
-error rather than degrading.
 
 ### Context Sources
 
@@ -1435,8 +1401,8 @@ run is granted the parent's whole remainder, so overlapping children could
 overspend it.
 
 The parent controls its background children with two tools, declared exactly
-when `spawn_agent` is: they follow it through `exposed_tools` and a pack's
-tool policy and are not policy names of their own, so the three come and go
+when `spawn_agent` is: they follow it through `exposed_tools` and are not
+policy names of their own, so the three come and go
 together. Both name a child by the session id its receipt gave,
 run in request order after the spawns before them in a turn, and return no
 answer themselves: answers reach the parent only through the delivery above,
@@ -2207,7 +2173,6 @@ Application configuration types must not leak into `qq-core`.
 
 | Lane | Interface | Load time | Hot-path behavior | Trust/isolation |
 | --- | --- | --- | --- | --- |
-| Agent packs | Declarative versioned manifest | Discovery/startup | Immutable prompt/profile data | Hash and trust source; no code execution |
 | Providers | Rust provider compiler/stream seam | Startup or explicit refresh | Direct provider handle | Compile-time trusted adapter; secrets resolved outside core |
 | Native tools | Static Rust registration | Build/startup | Direct dispatch | Fully trusted; capability-scoped execution |
 | General tools | MCP and the embedded `ExternalToolHost` | Startup catalog; call on demand | One selected adapter call | MCP process/HTTP boundary or trusted embedder |

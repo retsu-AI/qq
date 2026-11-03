@@ -1707,25 +1707,15 @@ mod directory_identity_race_tests {
 
     #[test]
     fn real_git_directory_swaps_before_open_cannot_redirect_write_or_edit() {
-        assert_trust_swaps(".git", "config", false);
+        assert_trust_swaps(".git", "config");
     }
 
     #[test]
     fn real_qq_directory_swaps_before_open_cannot_redirect_write_or_edit() {
-        assert_trust_swaps(".qq", "config.ron", false);
+        assert_trust_swaps(".qq", "config.ron");
     }
 
-    #[test]
-    fn real_configured_pack_swaps_before_open_cannot_redirect_write_or_edit() {
-        assert_trust_swaps("vendor/reviewer", "config", true);
-    }
-
-    #[test]
-    fn real_configured_pack_parent_swaps_cannot_hide_protected_children() {
-        assert_trust_swaps("vendor", "reviewer/config", true);
-    }
-
-    fn assert_trust_swaps(protected: &str, filename: &str, pack: bool) {
+    fn assert_trust_swaps(protected: &str, filename: &str) {
         for (name, arguments) in [
             (
                 "write_file",
@@ -1746,12 +1736,7 @@ mod directory_identity_race_tests {
                 std::fs::create_dir_all(file.parent().unwrap()).unwrap();
                 std::fs::write(file, "trusted").unwrap();
             }
-            let mut workspace = Workspace::open(directory.path()).unwrap();
-            if pack {
-                workspace = workspace
-                    .with_protected_pack_roots(&[directory.path().join("vendor/reviewer")])
-                    .unwrap();
-            }
+            let workspace = Workspace::open(directory.path()).unwrap();
             let root = directory.path().to_owned();
             let protected_path = protected.to_owned();
             workspace.on_write_path_checked(move || {

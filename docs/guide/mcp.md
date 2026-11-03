@@ -108,9 +108,6 @@ before.
   server that needs *your* credential: `Stored("name")` resolves only on
   the machine where `qq auth set name` ran, so committing it breaks every
   other clone.
-- **A pack** (`.qq/packs/<id>/pack.ron`) when the server belongs to an
-  agent persona; a pack profile's `mcp: [...]` selects which of the pack's
-  servers that profile may use.
 
 ## Credentials for HTTP servers
 

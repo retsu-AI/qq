@@ -36,6 +36,10 @@ rewrite the diff while you review.
      `crates/qq-protocol/tests/fixtures/` regenerated.
    - Docs: does the change make `docs/guide/` or `docs/design/` wrong?
    - Secrets, `target/`, or local config committed.
+   - The QQ-specific invariants in `checklist.md` beside this skill, for
+     each area the diff touches (persistence, concurrency, bounds, plan,
+     protocol, provider, tools, errors). Put the relevant sections in the
+     sub-agent's brief.
 4. **Verify findings.** Open every cited `file:line`, yours and the
    sub-agent's. Drop any finding you cannot point at in the code.
 

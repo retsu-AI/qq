@@ -170,8 +170,8 @@ on the `trial` record and every session snapshot.
 
 ### Profiles
 
-`--profile NAME` selects a profile from configuration or a trusted pack; it
-sets the model, approval mode, and tool catalog for the run and fails
+`--profile NAME` selects a profile from configuration; it
+sets the model, approval mode, and reasoning effort for the run and fails
 before starting when the name is unknown.
 
 ## `qq serve` — a persistent server

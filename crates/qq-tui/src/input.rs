@@ -40,7 +40,6 @@ pub(crate) struct ProfileRow {
     pub id: AgentProfileId,
     pub model: Option<String>,
     pub approval_mode: ApprovalMode,
-    pub pack: Option<String>,
 }
 
 impl PickerItem for ProfileRow {
@@ -48,9 +47,6 @@ impl PickerItem for ProfileRow {
         out.push(self.id.as_str());
         if let Some(model) = &self.model {
             out.push(model);
-        }
-        if let Some(pack) = &self.pack {
-            out.push(pack);
         }
     }
 }

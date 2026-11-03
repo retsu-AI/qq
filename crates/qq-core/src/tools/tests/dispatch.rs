@@ -358,7 +358,6 @@ fn dispatch_protects_policy_and_git_trust_files_without_blocking_ordinary_writes
         ".qq/config.ron",
         ".qq/config.d/policy.ron",
         ".qq/task-publication.lock",
-        ".qq/packs/untrusted/pack.ron",
         "qq.ron",
         ".git",
         "nested/.git/config",
