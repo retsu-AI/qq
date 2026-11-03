@@ -116,6 +116,7 @@ pub struct TuiModelState {
     pub unauthenticated_providers: Vec<ProviderRemedy>,
     pub approval_timeout: Option<std::time::Duration>,
     pub retention: Option<std::time::Duration>,
+    pub max_active_runs: usize,
 }
 
 #[derive(Clone)]
@@ -336,6 +337,7 @@ impl RuntimeFactory {
             unauthenticated_providers,
             approval_timeout: snapshot.approval_timeout(),
             retention: snapshot.retention(),
+            max_active_runs: snapshot.max_active_runs(),
         }
     }
 
@@ -1346,7 +1348,7 @@ impl RuntimeFactory {
             .collect();
         let delegation = delegation_roster(&snapshot, snapshot.model());
         let audit = audit_policy(snapshot.audit());
-        let shell = shell_policy(snapshot.policy());
+        let shell = shell_policy(snapshot.policy(), snapshot.shell());
         let network = network_policy(snapshot.policy());
         let mut profile =
             AgentProfile::new(provider, descriptor, resolved_model, workspace.to_owned())
@@ -2134,10 +2136,12 @@ impl RuntimeHandler {
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
         retention: Option<std::time::Duration>,
+        max_active_runs: usize,
     ) -> Result<Self, RuntimeHandlerError> {
         factory.validate_isolated_tui_qa_state()?;
         let database_path = factory.inner.config.session_database_path()?;
         let options = SessionRuntimeOptions::new(database_path)
+            .with_max_active_runs(max_active_runs)
             .with_approval_timeout(approval_timeout)
             .with_retention(retention);
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
@@ -2150,7 +2154,13 @@ impl RuntimeHandler {
         approval_timeout: Option<std::time::Duration>,
         retention: Option<std::time::Duration>,
     ) -> Result<Self, RuntimeHandlerError> {
-        Self::open_owned(factory, approval_timeout, retention).await
+        Self::open_owned(
+            factory,
+            approval_timeout,
+            retention,
+            qq_config::default_max_active_runs(),
+        )
+        .await
     }
 
     pub fn sessions(&self) -> &SessionRuntime {
@@ -2496,8 +2506,12 @@ fn network_policy(policy: &qq_config::EffectivePolicy) -> qq_core::NetworkPolicy
     }
 }
 
-fn shell_policy(policy: &qq_config::EffectivePolicy) -> qq_core::ShellPolicy {
+fn shell_policy(
+    policy: &qq_config::EffectivePolicy,
+    shell: &qq_config::ShellConfig,
+) -> qq_core::ShellPolicy {
     qq_core::ShellPolicy {
+        login_environment: shell.login_environment,
         deny_prefixes: policy.deny_shell_prefixes().to_vec().into(),
         builtin_preference: match policy.builtin_preference() {
             qq_config::BuiltinPreference::Off => qq_core::BuiltinPreference::Off,

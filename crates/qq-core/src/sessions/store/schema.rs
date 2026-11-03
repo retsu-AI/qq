@@ -1951,36 +1951,20 @@ fn retire_goals(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if has_column(connection, "runs", "check_acknowledgment_pending")? {
         connection.execute_batch("ALTER TABLE runs DROP COLUMN check_acknowledgment_pending;")?;
     }
-    connection.execute_batch(
-        "CREATE TEMP TABLE retired_checks AS
-           SELECT id, session_id FROM runs
-           WHERE kind='goal_check' AND status='queued' AND outcome_json IS NULL;
-         UPDATE sessions SET
-             queued_prompts=MAX(0,queued_prompts-(SELECT COUNT(*) FROM retired_checks c WHERE c.session_id=sessions.id)),
-             preparing_run_id=CASE WHEN preparing_run_id IN (SELECT id FROM retired_checks) THEN NULL ELSE preparing_run_id END
-           WHERE id IN (SELECT session_id FROM retired_checks);
-         UPDATE sessions SET status=CASE
-             WHEN active_run_id IS NOT NULL THEN 'running'
-             WHEN queued_prompts>0 THEN 'queued'
-             ELSE 'idle' END
-           WHERE id IN (SELECT session_id FROM retired_checks);
-         UPDATE messages SET state='interrupted'
-           WHERE state='queued' AND run_id IN (SELECT id FROM retired_checks);
-         UPDATE runs SET status='interrupted',outcome_json='{\"type\":\"interrupted\"}',
-             finished_at_ms=CAST(strftime('%s','now') AS INTEGER)*1000
-           WHERE id IN (SELECT id FROM retired_checks);
-         DROP TABLE retired_checks;",
-    )?;
     connection.execute_batch(&format!(
         "UPDATE runs SET origin_json={user_prompt}
-          WHERE json_valid(origin_json) AND json_extract(origin_json,'$.type') IN ('goal','goal_check');
-         UPDATE runs SET kind='prompt' WHERE kind='goal_check';
+          WHERE json_valid(origin_json) AND json_extract(origin_json,'$.type') IN ('goal','goal_check');"
+    ))?;
+    retire_queued_checks(connection)?;
+    crate::sessions::completions::migrate(connection)?;
+    connection.execute_batch(
+        "UPDATE runs SET kind='prompt' WHERE kind='goal_check';
          DELETE FROM commands WHERE json_valid(request_json)
            AND json_extract(request_json,'$.type') IN ('set_goal','goal_control','acknowledge_check_interruption');
          UPDATE metadata SET value=(SELECT COUNT(*) FROM commands) WHERE key='command_count';
          DROP INDEX IF EXISTS session_goals_live;
-         DROP TABLE IF EXISTS session_goals;"
-    ))?;
+         DROP TABLE IF EXISTS session_goals;",
+    )?;
     for column in [
         "goal_id",
         "goal_revision",
@@ -2005,6 +1989,46 @@ fn retire_goals(connection: &Connection) -> Result<(), SessionRuntimeError> {
             "ALTER TABLE model_turns RENAME COLUMN goal_notice TO boundary_notices;",
         )?;
     }
+    Ok(())
+}
+
+fn retire_queued_checks(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    let mut statement = connection.prepare(
+        "SELECT r.id,r.session_id,s.workspace_id FROM runs r JOIN sessions s ON s.id=r.session_id
+          WHERE r.kind='goal_check' AND r.status='queued' AND r.outcome_json IS NULL",
+    )?;
+    let checks = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if checks.is_empty() {
+        return Ok(());
+    }
+    let store_id: String = connection.query_row(
+        "SELECT value FROM metadata WHERE key='store_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    let store_id = store_id.parse().map_err(|_| SessionRuntimeError::CODEC)?;
+    let now = crate::sessions::codec::now_ms();
+    for (run, session, workspace) in checks {
+        crate::sessions::settlement::finish_queued_run_with_outcome(
+            connection,
+            store_id,
+            crate::sessions::codec::parse_id(&workspace)?,
+            crate::sessions::codec::parse_id(&session)?,
+            crate::sessions::codec::parse_id(&run)?,
+            qq_protocol::RunOutcome::Interrupted,
+            now,
+        )?;
+    }
+    crate::sessions::feed::take_staged();
     Ok(())
 }
 

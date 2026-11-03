@@ -484,6 +484,12 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    #[cfg(unix)]
+    Scenario {
+        name: "shell-login-environment",
+        proves: "the real CLI captures login environment once across commands, and /shell reload completes without a provider request",
+        run: |home| Box::pin(shell_login_environment(home)),
+    },
     Scenario {
         name: "run-command-deadlines",
         proves: "shell and exec accept build deadlines over ten minutes and return their native results through qq run",
@@ -1011,6 +1017,77 @@ async fn structured_tracing(home: &Home) -> Result<(), String> {
             "missing {name} close"
         );
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn shell_login_environment(home: &Home) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let shell = home.root.join("login-shell");
+    tokio::fs::write(&shell, "#!/bin/sh\n[ \"$1\" = '-lc' ] || exit 9\nprintf x >> \"$HOME/login-count\"\nexport QQ_LOGIN_SMOKE=captured TERM=wrong\nprintf '\\000QQ_LOGIN_ENV\\000'\nenv -0\n").await.map_err(|error| error.to_string())?;
+    tokio::fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))
+        .await
+        .map_err(|error| error.to_string())?;
+    let provider = home
+        .provider(vec![
+            Reply::Tool(
+                "shell",
+                serde_json::json!({"command": "printf '%s|%s' \"$QQ_LOGIN_SMOKE\" \"$TERM\""}),
+            ),
+            Reply::Tool(
+                "shell",
+                serde_json::json!({"command": "printf '%s|%s' \"$QQ_LOGIN_SMOKE\" \"$TERM\""}),
+            ),
+            Reply::Text("finished"),
+        ])
+        .await
+        .map_err(|error| error.to_string())?;
+    let output = home
+        .command(&provider.base_url)
+        .env("SHELL", &shell)
+        .args(["run", "--format", "jsonl", "run both commands"])
+        .output()
+        .await
+        .map_err(|error| error.to_string())?;
+    ensure!(
+        output.status.success(),
+        "login run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = jsonl(&String::from_utf8_lossy(&output.stdout))?;
+    let calls = records
+        .iter()
+        .filter(|record| record["envelope"]["event"]["type"] == "tool_call_finished")
+        .map(|record| &record["envelope"]["event"]["tool_call"])
+        .collect::<Vec<_>>();
+    ensure!(calls.len() == 2 && calls.iter().all(|call| call["is_error"] == false && call.to_string().contains("captured|dumb")), "login results: {calls:?}");
+    ensure!(
+        tokio::fs::read(home.root.join("login-count"))
+            .await
+            .map_err(|error| error.to_string())?
+            == b"x",
+        "login shell was not invoked once"
+    );
+    ensure!(
+        provider.requests()?.len() == 3,
+        "expected two calls and an answer"
+    );
+    let reload = home
+        .run(
+            &provider.base_url,
+            &["run", "--format", "jsonl", "/shell reload"],
+        )
+        .await?;
+    ensure!(
+        reload.status == Some(0)
+            && reload
+                .stdout
+                .contains("Login shell environment invalidated"),
+        "reload failed: {} {}",
+        reload.stderr,
+        reload.stdout
+    );
+    ensure!(provider.requests()?.len() == 3, "reload called a provider");
     Ok(())
 }
 

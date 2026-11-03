@@ -2032,8 +2032,7 @@ async fn a_schema_65_store_with_goal_state_opens_and_replays_without_goals() {
                      '{queued_check}', 'queued', 'goal_check', 1, '{goal_origin}');
                  UPDATE sessions SET queued_prompts = queued_prompts + 1, status = 'queued';
                  UPDATE model_turns SET goal_notice = '{notices}', work_disposition = 'committed';
-                 UPDATE runs SET completion_json = json_set(completion_json, '$.event.origin', json('{goal_origin}'))
-                  WHERE completion_json IS NOT NULL;
+                 UPDATE runs SET completion_json = NULL, completion_sequence = 0;
                  UPDATE events SET envelope_json = json_set(envelope_json, '$.event.origin', json('{goal_origin}'))
                   WHERE json_extract(envelope_json, '$.event.type') IN ('run_started', 'run_finished');
                  UPDATE events SET envelope_json = json_set(envelope_json,
@@ -2069,7 +2068,7 @@ async fn a_schema_65_store_with_goal_state_opens_and_replays_without_goals() {
             .unwrap();
         connection
             .execute(
-                "UPDATE metadata SET value='65' WHERE key='schema_version'",
+                "UPDATE metadata SET value='61' WHERE key='schema_version'",
                 [],
             )
             .unwrap();
@@ -2142,7 +2141,20 @@ async fn a_schema_65_store_with_goal_state_opens_and_replays_without_goals() {
         .completed_runs(session_id, start, snapshot.cursor)
         .await
         .unwrap();
-    assert_eq!(completions.len(), 1, "the receipt survives");
+    assert_eq!(
+        completions.len(),
+        2,
+        "the goal run and the retired check both have receipts"
+    );
+    for run in completions.iter().map(|completion| completion.run.id) {
+        assert!(
+            runtime
+                .run_result(workspace_id, session_id, run)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
     let follow_up = try_submit(&runtime, session_id, "after the upgrade")
         .await
         .unwrap();

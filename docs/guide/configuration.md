@@ -76,6 +76,7 @@ repository should not commit; this repository's `.gitignore` excludes
 | `max_output_tokens` | integer | `16384` | cap on generated tokens per model turn; a model's own limit applies if lower. One exception: when a turn is cut at this cap with nothing visible (all hidden reasoning) or right after a complete tool call, that one retry is sent with the cap doubled, up to the model's limit and never past a managed `policy.max_output_tokens`, at most once per run. Use `policy.max_output_tokens` for a hard ceiling; run budgets still bound spend |
 | `reasoning_effort` | `none` `minimal` `low` `medium` `high` `xhigh` `max` `default` | provider default | effort hint for reasoning models that accept one. `default` lets the provider choose. Any other value outside the model's known accepted set (catalog or discovery) fails at plan time naming the accepted ones; with no known set, a rejected value fails at the provider ([providers](providers.md)) |
 | `approval_timeout_seconds` | `1`–`86400` | absent | server-side bound on how long a held call waits for you before it is denied. Absent is **no deadline**: the prompt waits for you, the run's own deadline, or cancellation. Not trust-gated: it can only shorten a wait. `qq serve` and `qq daemon` read it from global and managed configuration only; `qq run` and the TUI also read the project's |
+| `max_active_runs` | `1`–`65536` | available CPU parallelism, minimum `8` | admission slots per root/child-depth pool, fixed when the runtime starts; approval and `ask_user` waits release their slot and answered runs reacquire ahead of queued new runs. `qq doctor` reports the effective value. `qq serve` and `qq daemon` read global and managed configuration; `qq run` and the TUI also read the project's |
 | `retention_days` | `1`–`3650` | absent | delete idle sessions, and `qq undo` snapshots, untouched for this many days. Absent keeps everything. Checked when the server starts and every hour while it runs; a session with a run in progress or queued is kept. User and managed configuration only: a project file that sets it fails to load |
 | `providers` | map | built-ins | provider declarations; [below](#providers) |
 | `mcp` | map | empty | MCP servers; [MCP servers](mcp.md) |
@@ -135,6 +136,25 @@ providers: {
 
 Provider kinds: `OpenAi`, `OpenAiCodex`, `Anthropic`, `Google`, `XAi`,
 `LiteLlm`, `AmazonBedrock`, `AmazonBedrockMantle`, `Custom`.
+
+### Shell environment
+
+On Linux and macOS, the first shell tool call captures your `$SHELL` login
+environment once (a five-second limit); later commands reuse it under QQ's
+working-directory and plain-output settings. Login values override inherited
+values, but QQ's `PWD`, removal of `OLDPWD`, `TERM=dumb`, and inherited or default
+`NO_COLOR`/`PAGER`/`GIT_PAGER` take precedence over the login shell. An unset or
+empty `$SHELL` skips capture. Standard startup-file mtimes
+trigger refresh. Use `/shell reload` after changing other sourced files; the
+next shell call captures again. Capture failures produce one notice and
+commands still run with QQ's inherited environment. Windows uses the native
+inherited environment without a POSIX login-shell probe. `exec` is unchanged.
+
+To opt out in a configuration layer:
+
+```ron
+(version: 1, shell: (login_environment: false))
+```
 
 ### Secret references
 

@@ -25,14 +25,21 @@ pub enum BuiltinPreference {
 #[serde(deny_unknown_fields)]
 pub struct ShellPolicy {
     pub builtin_preference: BuiltinPreference,
+    #[serde(default = "login_environment_default")]
+    pub login_environment: bool,
     #[serde(default)]
     pub deny_prefixes: Arc<[String]>,
+}
+
+const fn login_environment_default() -> bool {
+    true
 }
 
 impl Default for ShellPolicy {
     fn default() -> Self {
         Self {
             builtin_preference: BuiltinPreference::default(),
+            login_environment: true,
             deny_prefixes: Arc::from([]),
         }
     }

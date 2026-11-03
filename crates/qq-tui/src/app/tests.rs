@@ -788,6 +788,29 @@ fn checkpoints_receipt_requests_its_exact_model_turn_diff_and_rewound_blocks_unf
 }
 
 #[test]
+fn shell_login_environment_reload_submits_a_builtin_without_protocol_changes() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let focused = app.focused().unwrap();
+    app.composer.text = "/shell reload".to_owned();
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    let [ClientRequest::Command(request)] = requests.as_slice() else {
+        panic!("expected reload request")
+    };
+    assert!(
+        matches!(&request.command, SessionCommand::SubmitPrompt { session_id, input, .. } if *session_id == focused && input.iter().any(|part| matches!(part, qq_protocol::InputPart::Text { text } if text == "/shell reload")))
+    );
+    app.composer.text = "/shell invalid".to_owned();
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    assert!(requests.is_empty());
+    assert_eq!(app.status.as_deref(), Some("use /shell reload"));
+}
+
+#[test]
 fn rollback_sends_for_an_idle_session_and_reports_the_receipt() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
@@ -925,6 +948,7 @@ fn slash_autocomplete_filters_selects_and_executes_commands() {
             .into_iter()
             .filter(|name| crate::commands::retired_replacement(name).is_none())
             .collect();
+        reserved.push("/shell");
         reserved.sort_unstable();
         let mut here: Vec<String> = app
             .filtered_slash_commands()
@@ -4464,7 +4488,7 @@ fn capabilities_with_skills() -> std::sync::Arc<qq_protocol::ServerCapabilities>
 }
 
 fn listed_slash_commands() -> usize {
-    qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS.len() - crate::commands::RETIRED_SLASH.len()
+    qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS.len() - crate::commands::RETIRED_SLASH.len() + 1
 }
 
 #[test]

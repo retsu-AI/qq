@@ -128,6 +128,13 @@ impl ToolGate for SessionToolGate {
                 }
                 approval::PolicyDecision::AskUser { question } => {
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
+                    let admission = inner
+                        .admissions
+                        .lock()
+                        .expect("run admissions lock")
+                        .get(&claimed.identity.run_id)
+                        .cloned();
+                    let hold = admission.as_ref().map(|admission| admission.suspend());
                     match inner
                         .store
                         .request_tool_approval(
@@ -155,10 +162,15 @@ impl ToolGate for SessionToolGate {
                                 "The run stopped before this question was answered.").await;
                         }
                         result = &mut resolved => result.is_err(),
-                        () = sleep_until_or_never(deadline) => true,
+                        () = probe::PROBE.polled(probe::Checkpoint::ApprovalWaiting(claimed.identity.session_id), sleep_until_or_never(deadline)) => true,
                     };
                     inner.remove_approval(call.id);
-                    conclude(&inner, &claimed, call.id, timed_out).await
+                    let decision = conclude(&inner, &claimed, call.id, timed_out).await;
+                    drop(hold);
+                    if let Some(admission) = admission {
+                        admission.reacquire().await;
+                    }
+                    decision
                 }
                 approval::PolicyDecision::RequireApproval => {
                     #[cfg(not(feature = "tool-fetch"))]
@@ -183,6 +195,13 @@ impl ToolGate for SessionToolGate {
                     };
                     let edit = approval::edit_preview(&call.name, &call.arguments);
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
+                    let admission = inner
+                        .admissions
+                        .lock()
+                        .expect("run admissions lock")
+                        .get(&claimed.identity.run_id)
+                        .cloned();
+                    let hold = admission.as_ref().map(|admission| admission.suspend());
                     match inner
                         .store
                         .request_tool_approval(
@@ -212,10 +231,15 @@ impl ToolGate for SessionToolGate {
                                 "The run stopped before this approval was resolved.").await;
                         }
                         result = &mut resolved => result.is_err(),
-                        () = sleep_until_or_never(deadline) => true,
+                        () = probe::PROBE.polled(probe::Checkpoint::ApprovalWaiting(claimed.identity.session_id), sleep_until_or_never(deadline)) => true,
                     };
                     inner.remove_approval(call.id);
-                    conclude(&inner, &claimed, call.id, timed_out).await
+                    let decision = conclude(&inner, &claimed, call.id, timed_out).await;
+                    drop(hold);
+                    if let Some(admission) = admission {
+                        admission.reacquire().await;
+                    }
+                    decision
                 }
             }
         })

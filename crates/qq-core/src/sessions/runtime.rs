@@ -298,12 +298,18 @@ impl SessionRuntimeOptions {
     pub fn new(database_path: PathBuf) -> Self {
         Self {
             database_path,
-            max_active_runs: 8,
+            max_active_runs: thread::available_parallelism().map_or(8, |count| count.get().max(8)),
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             retention: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_max_active_runs(mut self, limit: usize) -> Self {
+        self.max_active_runs = limit;
+        self
     }
 
     #[must_use]
@@ -328,6 +334,7 @@ pub(super) struct SessionRuntimeInner {
     pub(super) store: Store,
     pub(super) loader: Arc<dyn RuntimeLoader>,
     pub(super) permits: Arc<Semaphore>,
+    pub(super) admissions: Mutex<HashMap<RunId, Arc<scheduler::RunAdmission>>>,
     pub(super) side_permits: Arc<Semaphore>,
     pub(super) side_tasks: AtomicUsize,
     pub(super) restores: AtomicUsize,
@@ -416,6 +423,7 @@ impl SessionRuntime {
             store,
             loader,
             permits: Arc::new(Semaphore::new(options.max_active_runs)),
+            admissions: Mutex::new(HashMap::new()),
             side_permits: Arc::new(Semaphore::new(side_limit)),
             side_tasks: AtomicUsize::new(0),
             restores: AtomicUsize::new(0),
@@ -1021,6 +1029,14 @@ impl SessionRuntimeInner {
             return;
         };
         if let Some(pending) = approvals.remove(&tool_call_id) {
+            if let Some(admission) = self
+                .admissions
+                .lock()
+                .expect("run admissions lock")
+                .get(&pending.run_id)
+            {
+                admission.resume();
+            }
             let _ = pending.signal.send(());
         }
     }

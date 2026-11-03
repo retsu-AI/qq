@@ -12,6 +12,25 @@ use super::*;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn shell_login_environment_can_be_disabled() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        "(version: 1, shell: (login_environment: false))",
+    );
+    let snapshot = tree.loader().load(&tree.request()).unwrap();
+    assert!(!snapshot.shell().login_environment);
+    tree.write("global/config.ron", "(version: 1)");
+    assert!(
+        tree.loader()
+            .load(&tree.request())
+            .unwrap()
+            .shell()
+            .login_environment
+    );
+}
+
 struct TestMdmReader {
     reads: Arc<AtomicUsize>,
     content: String,
@@ -89,6 +108,61 @@ impl TempTree {
 impl Drop for TempTree {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn max_active_runs_configuration_is_accepted() {
+    let tree = TempTree::new();
+    let result = tree.loader().load(
+        &tree
+            .request()
+            .with_explicit_content("(version: 1, max_active_runs: 2)"),
+    );
+    assert_eq!(result.unwrap().max_active_runs(), 2);
+}
+
+#[test]
+fn max_active_runs_defaults_layers_clears_and_rejects_invalid_limits() {
+    let tree = TempTree::new();
+    let loader = tree.loader();
+    let expected = std::thread::available_parallelism().map_or(8, |count| count.get().max(8));
+    assert_eq!(
+        loader
+            .load_for_client(&LoadRequest::new(tree.path("work")))
+            .unwrap()
+            .max_active_runs(),
+        expected
+    );
+    tree.write("global/config.ron", "(version: 1, max_active_runs: 2)");
+    assert_eq!(loader.load(&tree.request()).unwrap().max_active_runs(), 2);
+    assert_eq!(
+        loader
+            .load(
+                &tree
+                    .request()
+                    .with_explicit_content("(version: 1, max_active_runs: 3)")
+            )
+            .unwrap()
+            .max_active_runs(),
+        3
+    );
+    let cleared = loader
+        .load(
+            &tree
+                .request()
+                .with_explicit_content("(version: 1, max_active_runs: Clear)"),
+        )
+        .unwrap();
+    assert_eq!(cleared.max_active_runs(), expected);
+    assert_eq!(
+        cleared.provenance().max_active_runs().unwrap().kind(),
+        SourceKind::Compiled
+    );
+    for limit in [0, 65537] {
+        assert!(
+            matches!(loader.load(&tree.request().with_explicit_content(format!("(version: 1, max_active_runs: {limit})"))), Err(ConfigError::InvalidMaxActiveRuns(value)) if value == limit)
+        );
     }
 }
 
@@ -2996,8 +3070,10 @@ fn published_document_field_names_match_the_struct_and_all_parse() {
                     .to_owned()
             }
             "audit" => "(mode: off, max_revisions: 1, role: strong)".to_owned(),
+            "shell" => "(login_environment: false)".to_owned(),
             "approval_delegate" => "on".to_owned(),
             "approval_timeout_seconds" => "60".to_owned(),
+            "max_active_runs" => "2".to_owned(),
             "retention_days" => "30".to_owned(),
             "reasoning_effort" => "low".to_owned(),
             "max_output_tokens" => "1000".to_owned(),

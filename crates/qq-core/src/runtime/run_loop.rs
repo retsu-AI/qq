@@ -562,7 +562,16 @@ impl plan::CompiledAgentPlan {
                        yield TurnStep::Stop; return;
                    }
 
-                   let parsed_invocation = match if allow_guidance && !slash_is_literal {
+                   let shell_command = messages.last().and_then(|message| match message.content() {
+                       [ContentBlock::Text { text }] if message.role() == Role::User && allow_guidance && !slash_is_literal => text.strip_prefix("/shell").filter(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace)),
+                       _ => None,
+                   });
+                   let shell_reload = shell_command.is_some_and(|arguments| arguments.trim() == "reload");
+                   if shell_command.is_some() && !shell_reload {
+                       yield TurnStep::Emit(RuntimeEvent::Failed { kind: RunFailureKind::InvalidCommand, message: "use /shell reload".to_owned() });
+                       yield TurnStep::Stop; return;
+                   }
+                   let parsed_invocation = match if allow_guidance && !slash_is_literal && !shell_reload {
                        workspace::parse_invocation(Arc::make_mut(&mut messages).as_mut_slice())
                    } else {
                        Ok(workspace::ParsedInvocation {
@@ -721,6 +730,36 @@ impl plan::CompiledAgentPlan {
                            }),
                            context_sources: context_records,
                        }));
+                   if shell_reload {
+                       plan.runtime.process_producer.login_environment.reload();
+                       yield TurnStep::Emit(RuntimeEvent::Prepared {
+                           turn_ordinal: 1,
+                           identity: prompt_identity,
+                           static_prefix: PreparedStaticPrefix::new(system_prompt_hash, None),
+                           weight: PreparedRequestWeight {
+                               max_output_tokens: 0,
+                               system_bytes: 0,
+                               tool_schema_bytes: 0,
+                               reducible_message_bytes: 0,
+                               irreducible_message_bytes: 0,
+                               compatible_input_tokens: None,
+                           },
+                       });
+                       let text = "Login shell environment invalidated; the next shell command will capture it again.".to_owned();
+                       yield TurnStep::Emit(RuntimeEvent::OutputTextDelta { text: text.clone() });
+                       yield TurnStep::Emit(RuntimeEvent::AssistantTurnCompleted {
+                           turn_ordinal: 1,
+                           message: Message::assistant(text),
+                           usage: None,
+                           calls: Vec::new(),
+                           truncated: false,
+                           notice: None,
+                           boundary_notices: Vec::new(),
+                           reserved_boundary_notices: 0,
+                       });
+                       yield TurnStep::Emit(RuntimeEvent::Completed { final_output: None });
+                       yield TurnStep::Stop; return;
+                   }
                    let reducible_messages = messages.len().saturating_sub(1);
                    let reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
                    let irreducible_message_bytes =

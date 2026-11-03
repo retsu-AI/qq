@@ -962,6 +962,14 @@ One durable run follows a guarded loop:
    resulting messages and events before publishing them.
 7. Repeat until completion, cancellation, compaction, or failure.
 
+Run admission uses `max_active_runs` slots per root/child-depth pool, configured
+at runtime startup and defaulting to available CPU parallelism with a minimum
+of eight. An approval or `ask_user` hold releases its slot without settling the
+run. Answered runs register a permit acquisition ahead of queued new runs;
+continuation waits for admission, including when steering replaces the hold.
+The blocking file-tool pool uses the same CPU-derived minimum-eight capacity;
+Windows process-exit confirmation has twice that capacity.
+
 This ordering makes persisted state authoritative and allows clients to resume
 an event stream without losing output. Each completed model turn also commits
 the run's cumulative usage and estimated cost.

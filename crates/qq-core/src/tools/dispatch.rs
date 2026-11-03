@@ -222,6 +222,10 @@ impl ToolTaskLease {
     pub(crate) fn process_reaped(&mut self) {
         self.process_pending = false;
     }
+
+    pub(super) fn process_pending(&self) -> bool {
+        self.process_pending
+    }
 }
 
 struct RecordGuard {

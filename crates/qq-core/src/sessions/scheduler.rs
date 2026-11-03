@@ -6,6 +6,89 @@ use super::{
 };
 use tracing::Instrument as _;
 
+use std::task::{Context, Poll};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit};
+
+type AdmissionFuture =
+    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>;
+
+enum AdmissionState {
+    Active { _permit: OwnedSemaphorePermit },
+    Waiting,
+    Resuming(AdmissionFuture),
+}
+
+pub(super) struct RunAdmission {
+    pool: Arc<Semaphore>,
+    state: Mutex<AdmissionState>,
+    schedule: mpsc::Sender<()>,
+}
+
+impl RunAdmission {
+    fn new(pool: Arc<Semaphore>, permit: OwnedSemaphorePermit, schedule: mpsc::Sender<()>) -> Self {
+        Self {
+            pool,
+            state: Mutex::new(AdmissionState::Active { _permit: permit }),
+            schedule,
+        }
+    }
+
+    pub(super) fn suspend(self: &Arc<Self>) -> AdmissionHold {
+        *self.state.lock().expect("run admission lock") = AdmissionState::Waiting;
+        let _ = self.schedule.try_send(());
+        AdmissionHold(Arc::clone(self))
+    }
+
+    pub(super) fn resume(&self) {
+        let mut state = self.state.lock().expect("run admission lock");
+        if matches!(*state, AdmissionState::Waiting) {
+            let mut future: AdmissionFuture = Box::pin(Arc::clone(&self.pool).acquire_owned());
+            let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+            *state = match future.as_mut().poll(&mut context) {
+                Poll::Ready(Ok(permit)) => AdmissionState::Active { _permit: permit },
+                Poll::Ready(Err(_)) => unreachable!("admission pools are never closed"),
+                Poll::Pending => AdmissionState::Resuming(future),
+            };
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_resuming(&self) -> bool {
+        matches!(
+            *self.state.lock().expect("run admission lock"),
+            AdmissionState::Resuming(_)
+        )
+    }
+
+    fn poll_ready(&self, context: &mut Context<'_>) -> Poll<()> {
+        let mut state = self.state.lock().expect("run admission lock");
+        match &mut *state {
+            AdmissionState::Resuming(future) => match future.as_mut().poll(context) {
+                Poll::Ready(Ok(permit)) => {
+                    *state = AdmissionState::Active { _permit: permit };
+                    Poll::Ready(())
+                }
+                Poll::Ready(Err(_)) => unreachable!("admission pools are never closed"),
+                Poll::Pending => Poll::Pending,
+            },
+            AdmissionState::Active { .. } => Poll::Ready(()),
+            AdmissionState::Waiting => Poll::Ready(()),
+        }
+    }
+
+    pub(super) async fn reacquire(&self) {
+        self.resume();
+        std::future::poll_fn(|context| self.poll_ready(context)).await;
+    }
+}
+
+pub(super) struct AdmissionHold(Arc<RunAdmission>);
+
+impl Drop for AdmissionHold {
+    fn drop(&mut self) {
+        self.0.resume();
+    }
+}
 struct SchedulerStopGuard(watch::Sender<bool>);
 
 impl Drop for SchedulerStopGuard {
@@ -106,6 +189,16 @@ pub(super) async fn schedule_runs(
                         break 'scheduler;
                     }
                 };
+                let admission = Arc::new(RunAdmission::new(
+                    Arc::clone(pool),
+                    permit,
+                    inner.schedule.clone(),
+                ));
+                inner
+                    .admissions
+                    .lock()
+                    .expect("run admissions lock")
+                    .insert(claimed.identity.run_id, Arc::clone(&admission));
                 let task_inner = Arc::clone(&inner);
                 let panic_claimed = claimed.panic_settlement_claim();
 
@@ -113,11 +206,48 @@ pub(super) async fn schedule_runs(
                 tokio::spawn(
                     async move {
                         let resources = RunResources::for_run(claimed.identity.run_id);
-                        let execution = AssertUnwindSafe(supervise_reserved_run(
+                        let run_id = claimed.identity.run_id;
+                        let deadline = claimed
+                            .limits
+                            .max_duration_ms
+                            .map(|ms| tokio::time::Instant::now() + Duration::from_millis(ms));
+                        let (cancel, mut cancelled) = watch::channel(false);
+                        let mut failed = task_inner.failed.subscribe();
+                        let mut shutdown = task_inner.shutdown.subscribe();
+                        let control = async move {
+                            tokio::select! {
+                                _ = cancelled.wait_for(|cancelled| *cancelled) => {},
+                                _ = failed.wait_for(|failed| *failed) => {},
+                                _ = shutdown.wait_for(|shutdown| *shutdown) => {},
+                            }
+                        };
+                        tokio::pin!(control);
+                        let mut stopped = false;
+                        let supervised = supervise_reserved_run(
                             Arc::clone(&task_inner),
                             claimed,
                             resources.clone(),
-                        ))
+                            cancel,
+                        );
+                        tokio::pin!(supervised);
+                        let execution = AssertUnwindSafe(std::future::poll_fn(|context| {
+                            if !stopped && control.as_mut().poll(context).is_ready() {
+                                stopped = true;
+                            }
+                            let cancelled = stopped;
+                            let expired = deadline
+                                .is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
+                            if !cancelled
+                                && !expired
+                                && !*task_inner.failed.borrow()
+                                && !*task_inner.shutdown.borrow()
+                                && admission.poll_ready(context).is_pending()
+                            {
+                                probe::PROBE.passed(probe::Checkpoint::AdmissionWaiting(run_id));
+                                return Poll::Pending;
+                            }
+                            supervised.as_mut().poll(context)
+                        }))
                         .catch_unwind()
                         .await;
                         if execution.is_err() {
@@ -142,7 +272,12 @@ pub(super) async fn schedule_runs(
                                 }
                             }
                         }
-                        drop(permit);
+                        task_inner
+                            .admissions
+                            .lock()
+                            .expect("run admissions lock")
+                            .remove(&run_id);
+                        drop(admission);
                         task_inner
                             .settlements
                             .send_modify(|generation| *generation = generation.wrapping_add(1));
@@ -161,8 +296,9 @@ async fn supervise_reserved_run(
     inner: Arc<SessionRuntimeInner>,
     claimed: ClaimedRun,
     resources: RunResources,
+    cancel: watch::Sender<bool>,
 ) {
-    let (cancel, cancel_receiver) = watch::channel(false);
+    let cancel_receiver = cancel.subscribe();
     let registered = match inner.cancellations.lock() {
         Ok(mut cancellations) => {
             cancellations.insert(claimed.identity.run_id, cancel.clone());

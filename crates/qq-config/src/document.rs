@@ -615,14 +615,16 @@ pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 8] = [
     "deny_hosts",
 ];
 
-pub const DOCUMENT_FIELD_NAMES: [&str; 14] = [
+pub const DOCUMENT_FIELD_NAMES: [&str; 16] = [
     "version",
     "organization",
     "model",
     "worker_model",
     "delegation",
     "audit",
+    "shell",
     "approval_timeout_seconds",
+    "max_active_runs",
     "retention_days",
     "reasoning_effort",
     "max_output_tokens",
@@ -747,7 +749,11 @@ pub(super) struct Document {
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     audit: Field<AuditPatch>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
+    shell: Field<super::ShellConfig>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
     approval_timeout_seconds: Field<u64>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    max_active_runs: Field<usize>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     retention_days: Field<u32>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
@@ -848,6 +854,11 @@ impl Document {
                 origin: origin.clone(),
             });
         }
+        if let Field::Set(limit) = self.max_active_runs
+            && !(1..=65536).contains(&limit)
+        {
+            return Err(ConfigError::InvalidMaxActiveRuns(limit));
+        }
         if self.retention_days.is_present()
             && matches!(origin.kind(), SourceKind::Project | SourceKind::Remote)
         {
@@ -880,6 +891,7 @@ impl Document {
             || self.worker_model.is_present()
             || self.delegation.is_present()
             || self.audit.is_present()
+            || self.shell.is_present()
             || self.reasoning_effort.is_present()
             || self.profiles.is_present()
             || self.providers.is_present()
@@ -902,6 +914,9 @@ impl Document {
         }
         if self.audit.is_present() {
             sections.push("audit");
+        }
+        if self.shell.is_present() {
+            sections.push("shell");
         }
         if self.reasoning_effort.is_present() {
             sections.push("reasoning_effort");
@@ -936,6 +951,8 @@ impl Document {
             #[serde(skip_serializing_if = "Option::is_none")]
             audit: Option<&'a Field<AuditPatch>>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            shell: Option<&'a Field<super::ShellConfig>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             reasoning_effort: Option<&'a Field<qq_provider::ReasoningEffort>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             profiles: Option<&'a Field<UniqueMap<String, ProfilePatch>>>,
@@ -955,6 +972,7 @@ impl Document {
             worker_model: self.worker_model.is_present().then_some(&self.worker_model),
             delegation: present(&self.delegation),
             audit: present(&self.audit),
+            shell: present(&self.shell),
             reasoning_effort: present(&self.reasoning_effort),
             profiles: present(&self.profiles),
             providers: present(&self.providers),
@@ -993,11 +1011,17 @@ impl Document {
         if self.audit.is_present() {
             touched.push(ConfigKey::Audit);
         }
+        if self.shell.is_present() {
+            touched.push(ConfigKey::Shell);
+        }
         if self.max_output_tokens.is_present() {
             touched.push(ConfigKey::MaxOutputTokens);
         }
         if self.approval_timeout_seconds.is_present() {
             touched.push(ConfigKey::ApprovalTimeout);
+        }
+        if self.max_active_runs.is_present() {
+            touched.push(ConfigKey::MaxActiveRuns);
         }
         if self.retention_days.is_present() {
             touched.push(ConfigKey::Retention);
@@ -1377,7 +1401,9 @@ pub(super) struct MergeState {
     worker_model: Option<String>,
     delegation: Option<DelegationPatch>,
     audit: Option<AuditPatch>,
+    shell: super::ShellConfig,
     approval_timeout_seconds: Option<u64>,
+    max_active_runs: usize,
     retention_days: Option<u32>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
@@ -1412,6 +1438,7 @@ impl MergeState {
             .collect::<BTreeMap<_, _>>();
         let provenance = ConfigProvenance {
             max_output_tokens: Some(source.clone()),
+            max_active_runs: Some(source.clone()),
             providers: providers
                 .keys()
                 .cloned()
@@ -1424,6 +1451,7 @@ impl MergeState {
             super::SourceStatus::Applied,
             vec![
                 ConfigKey::MaxOutputTokens,
+                ConfigKey::MaxActiveRuns,
                 ConfigKey::Providers,
                 ConfigKey::Policy,
             ],
@@ -1435,7 +1463,9 @@ impl MergeState {
                 worker_model: None,
                 delegation: None,
                 audit: None,
+                shell: super::ShellConfig::default(),
                 approval_timeout_seconds: None,
+                max_active_runs: super::default_max_active_runs(),
                 retention_days: None,
                 reasoning_effort: None,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -1468,6 +1498,21 @@ impl MergeState {
                     SourceKind::Compiled,
                     "compiled defaults",
                 ));
+            }
+        }
+        apply_default(
+            &document.max_active_runs,
+            &mut self.max_active_runs,
+            super::default_max_active_runs(),
+        );
+        match document.max_active_runs {
+            Field::Missing => {}
+            Field::Set(_) => self.provenance.max_active_runs = Some(source.clone()),
+            Field::Clear => {
+                self.provenance.max_active_runs = Some(SourceIdentity::virtual_source(
+                    SourceKind::Compiled,
+                    "compiled defaults",
+                ))
             }
         }
         match document.approval_timeout_seconds {
@@ -1514,6 +1559,11 @@ impl MergeState {
         if !sensitive {
             return;
         }
+        apply_default(
+            &document.shell,
+            &mut self.shell,
+            super::ShellConfig::default(),
+        );
 
         if apply_optional_string(&document.organization, &mut self.organization) {
             self.provenance.organization = Some(source.clone());
@@ -2049,11 +2099,13 @@ impl MergeState {
         };
         Ok(ClientSnapshot {
             organization: self.organization,
+            shell: self.shell,
             model,
             worker_model,
             delegation,
             audit,
             approval_timeout,
+            max_active_runs: self.max_active_runs,
             retention,
             reasoning_effort: self.reasoning_effort,
             max_output_tokens: self.max_output_tokens,
@@ -2081,7 +2133,9 @@ impl ClientSnapshot {
             worker_model: self.worker_model,
             delegation: self.delegation,
             audit: self.audit,
+            shell: self.shell,
             approval_timeout: self.approval_timeout,
+            max_active_runs: self.max_active_runs,
             retention: self.retention,
             reasoning_effort: self.reasoning_effort,
             max_output_tokens: self.max_output_tokens,

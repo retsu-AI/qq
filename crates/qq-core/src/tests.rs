@@ -30,6 +30,33 @@ use sha2::{Digest, Sha256};
 use super::*;
 
 #[tokio::test]
+async fn shell_login_environment_reload_never_calls_the_provider() {
+    let root = tempfile::tempdir().unwrap();
+    let request = Arc::new(Mutex::new(None));
+    let runtime = Runtime::new(
+        ScriptedProvider {
+            request: request.clone(),
+            fails: true,
+        },
+        "test",
+        256,
+    )
+    .unwrap()
+    .with_context_window(Some(1));
+    let events = runtime
+        .run_in_workspace(RunCommand::new("/shell reload"), root.path().to_owned())
+        .collect::<Vec<_>>()
+        .await;
+    assert!(request.lock().unwrap().is_none());
+    assert!(events.iter().any(|event| matches!(event, RunEvent::OutputTextDelta { text } if text == "Login shell environment invalidated; the next shell command will capture it again.")));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, RunEvent::Completed))
+    );
+}
+
+#[tokio::test]
 async fn public_terminal_paths_release_the_internal_stream_before_yielding() {
     struct Dropped(Arc<AtomicBool>);
     impl Drop for Dropped {

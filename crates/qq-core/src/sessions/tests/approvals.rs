@@ -1,6 +1,439 @@
 use super::*;
 use crate::test_support::within;
 
+struct AdmissionLoader {
+    question: bool,
+    starts: mpsc::Sender<(String, usize)>,
+}
+
+impl RuntimeLoader for AdmissionLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        load_provider(
+            AdmissionProvider {
+                question: self.question,
+                starts: self.starts.clone(),
+                turn: AtomicUsize::new(0),
+            },
+            &request,
+        )
+    }
+}
+
+struct AdmissionProvider {
+    question: bool,
+    starts: mpsc::Sender<(String, usize)>,
+    turn: AtomicUsize,
+}
+
+impl Provider for AdmissionProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let prompt = request_texts(&request)[0].clone();
+        let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+        self.starts.try_send((prompt.clone(), turn)).unwrap();
+        if prompt.starts_with("held") && turn == 0 {
+            provider_script(
+                tool_call(
+                    "hold",
+                    if self.question {
+                        "ask_user"
+                    } else {
+                        "__test_mutate"
+                    },
+                    if self.question { ASK_ARGUMENTS } else { "{}" },
+                )
+                .into_iter()
+                .chain([completed(None)]),
+            )
+        } else {
+            Box::pin(stream::pending())
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_holds_release_slots_and_answers_resume_before_new_runs() {
+    for question in [false, true] {
+        let (starts, mut started) = mpsc::channel(16);
+        let mut fixture = SessionFixture::open_with(
+            Arc::new(AdmissionLoader { question, starts }),
+            ApprovalMode::Ask,
+            |options| options.max_active_runs = 2,
+        )
+        .await;
+        let first = fixture.submit("held first").await;
+        assert_eq!(
+            within(started.recv()).await.unwrap().unwrap(),
+            ("held first".into(), 0)
+        );
+        let (_, first_hold) = collect_until_approval_requested(&mut fixture.events).await;
+        let second_session = create_session_with_mode(
+            &fixture.runtime,
+            fixture.workspace_id,
+            None,
+            ApprovalMode::Ask,
+        )
+        .await;
+        let CommandOutcome::SessionCreated {
+            session_id: second_session,
+        } = second_session.outcome
+        else {
+            panic!("session")
+        };
+        submit_prompt_to(&fixture.runtime, second_session, "held second").await;
+        assert_eq!(
+            within(started.recv()).await.unwrap().unwrap(),
+            ("held second".into(), 0)
+        );
+        collect_until_approval_requested(&mut fixture.events).await;
+        let third_session = create_session(&fixture.runtime, fixture.workspace_id, None).await;
+        let CommandOutcome::SessionCreated {
+            session_id: third_session,
+        } = third_session.outcome
+        else {
+            panic!("session")
+        };
+        submit_prompt_to(&fixture.runtime, third_session, "third").await;
+        assert_eq!(
+            within(started.recv()).await.unwrap().unwrap(),
+            ("third".into(), 0)
+        );
+        let occupied = within(Arc::clone(&fixture.runtime.inner.permits).acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        let fourth_session = create_session(&fixture.runtime, fixture.workspace_id, None).await;
+        let CommandOutcome::SessionCreated {
+            session_id: fourth_session,
+        } = fourth_session.outcome
+        else {
+            panic!("session")
+        };
+        submit_prompt_to(&fixture.runtime, fourth_session, "fourth").await;
+        respond_approval(
+            &fixture.runtime,
+            first,
+            first_hold.id,
+            if question {
+                ApprovalDecision::Answer {
+                    answers: vec!["qq-core".into(), "capacity".into()],
+                }
+            } else {
+                ApprovalDecision::ApproveOnce
+            },
+        )
+        .await
+        .unwrap();
+        drop(occupied);
+        fixture.runtime.request_schedule();
+        assert_eq!(
+            within(started.recv()).await.unwrap().unwrap(),
+            ("held first".into(), 1)
+        );
+        assert!(matches!(
+            started.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        fixture.runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn admission_approval_timeout_is_persisted_before_reacquiring_a_slot() {
+    for question in [false, true] {
+        let (starts, mut started) = mpsc::channel(8);
+        let mut fixture = SessionFixture::open_with(
+            Arc::new(AdmissionLoader { question, starts }),
+            ApprovalMode::Ask,
+            |options| {
+                options.max_active_runs = 1;
+                options.approval_timeout = Some(Duration::from_secs(60));
+            },
+        )
+        .await;
+        let waiting = probe::PROBE.observe(probe::Checkpoint::ApprovalWaiting(fixture.session_id));
+        let held = fixture.submit("held timeout").await;
+        within(started.recv()).await.unwrap().unwrap();
+        let (_, hold) = collect_until_approval_requested(&mut fixture.events).await;
+        let occupied = within(Arc::clone(&fixture.runtime.inner.permits).acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        within(waiting).await.unwrap().unwrap();
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(61)).await;
+        let observed = within(collect_until(&mut fixture.events, |event| {
+            matches!(event, SessionEvent::ToolApprovalResolved {
+                tool_call,
+                resolution: ApprovalResolution::DeniedTimeout,
+            } if tool_call.id == hold.id)
+        }))
+        .await;
+        tokio::time::resume();
+        observed.unwrap();
+        assert!(matches!(
+            respond_approval(
+                &fixture.runtime,
+                held,
+                hold.id,
+                if question {
+                    ApprovalDecision::Answer {
+                        answers: vec!["qq-core".into(), "late".into()],
+                    }
+                } else {
+                    ApprovalDecision::ApproveOnce
+                },
+            )
+            .await
+            .unwrap()
+            .outcome,
+            CommandOutcome::ToolApprovalResolved {
+                resolution: ApprovalResolution::DeniedTimeout,
+                ..
+            }
+        ));
+        assert!(matches!(
+            started.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        drop(occupied);
+        assert_eq!(
+            within(started.recv()).await.unwrap().unwrap(),
+            ("held timeout".into(), 1)
+        );
+        fixture.runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn admission_reacquisition_can_be_cancelled_without_a_free_slot() {
+    for question in [false, true] {
+        let (starts, mut started) = mpsc::channel(8);
+        let mut fixture = SessionFixture::open_with(
+            Arc::new(AdmissionLoader { question, starts }),
+            ApprovalMode::Ask,
+            |options| options.max_active_runs = 1,
+        )
+        .await;
+        let held = fixture.submit("held first").await;
+        within(started.recv()).await.unwrap().unwrap();
+        let (_, hold) = collect_until_approval_requested(&mut fixture.events).await;
+        let created = create_session(&fixture.runtime, fixture.workspace_id, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        submit_prompt_to(&fixture.runtime, session_id, "occupant").await;
+        assert_eq!(
+            within(started.recv()).await.unwrap().unwrap(),
+            ("occupant".into(), 0)
+        );
+        respond_approval(
+            &fixture.runtime,
+            held,
+            hold.id,
+            if question {
+                ApprovalDecision::Answer {
+                    answers: vec!["qq-core".into(), "cancel".into()],
+                }
+            } else {
+                ApprovalDecision::ApproveOnce
+            },
+        )
+        .await
+        .unwrap();
+        fixture
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::CancelRun { run_id: held },
+            )
+            .await
+            .unwrap();
+        let observed = collect_until_run_finished(&mut fixture.events, held).await;
+        assert!(matches!(
+            observed.last().unwrap().event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Cancelled,
+                ..
+            }
+        ));
+        assert!(matches!(
+            started.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        fixture.runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn admission_deadline_expires_while_answer_waits_for_a_slot() {
+    let (starts, mut started) = mpsc::channel(8);
+    let mut fixture = SessionFixture::open_with(
+        Arc::new(AdmissionLoader {
+            question: false,
+            starts,
+        }),
+        ApprovalMode::Ask,
+        |options| options.max_active_runs = 1,
+    )
+    .await;
+    let held = fixture
+        .submit(Prompt::text("held deadline").limits(RunLimits {
+            max_duration_ms: Some(10000),
+            ..RunLimits::default()
+        }))
+        .await;
+    within(started.recv()).await.unwrap().unwrap();
+    let (_, hold) = collect_until_approval_requested(&mut fixture.events).await;
+    let created = create_session(&fixture.runtime, fixture.workspace_id, None).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("session")
+    };
+    submit_prompt_to(&fixture.runtime, session_id, "occupant").await;
+    within(started.recv()).await.unwrap().unwrap();
+    respond_approval(
+        &fixture.runtime,
+        held,
+        hold.id,
+        ApprovalDecision::ApproveOnce,
+    )
+    .await
+    .unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    let observed = collect_until_run_finished(&mut fixture.events, held).await;
+    assert!(matches!(
+        observed.last().unwrap().event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::BudgetExhausted { .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        started.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    tokio::time::resume();
+    fixture.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn admission_steering_cannot_bypass_reacquisition() {
+    let (starts, mut started) = mpsc::channel(8);
+    let mut fixture = SessionFixture::open_with(
+        Arc::new(AdmissionLoader {
+            question: false,
+            starts,
+        }),
+        ApprovalMode::Ask,
+        |options| options.max_active_runs = 1,
+    )
+    .await;
+    let held = fixture.submit("held first").await;
+    within(started.recv()).await.unwrap().unwrap();
+    collect_until_approval_requested(&mut fixture.events).await;
+    let occupied = Arc::clone(&fixture.runtime.inner.permits)
+        .acquire_owned()
+        .await
+        .unwrap();
+    fixture
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SteerRun {
+                run_id: held,
+                input: vec![InputPart::text("change approach")],
+                interrupt: true,
+            },
+        )
+        .await
+        .unwrap();
+    within(async {
+        loop {
+            let resuming = fixture
+                .runtime
+                .inner
+                .admissions
+                .lock()
+                .unwrap()
+                .get(&held)
+                .unwrap()
+                .is_resuming();
+            if resuming {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        started.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    drop(occupied);
+    assert_eq!(
+        within(started.recv()).await.unwrap().unwrap(),
+        ("held first".into(), 1)
+    );
+    fixture.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn admission_interrupted_hold_can_be_cancelled_while_reacquisition_is_parked() {
+    let (starts, mut started) = mpsc::channel(8);
+    let mut fixture = SessionFixture::open_with(
+        Arc::new(AdmissionLoader {
+            question: false,
+            starts,
+        }),
+        ApprovalMode::Ask,
+        |options| options.max_active_runs = 1,
+    )
+    .await;
+    let held = fixture.submit("held first").await;
+    within(started.recv()).await.unwrap().unwrap();
+    collect_until_approval_requested(&mut fixture.events).await;
+    let occupied = Arc::clone(&fixture.runtime.inner.permits)
+        .acquire_owned()
+        .await
+        .unwrap();
+    let parked = probe::PROBE.observe(probe::Checkpoint::AdmissionWaiting(held));
+    fixture
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SteerRun {
+                run_id: held,
+                input: vec![InputPart::text("change approach")],
+                interrupt: true,
+            },
+        )
+        .await
+        .unwrap();
+    within(parked).await.unwrap().unwrap();
+    fixture
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelRun { run_id: held },
+        )
+        .await
+        .unwrap();
+    let observed = within(collect_until_run_finished(&mut fixture.events, held))
+        .await
+        .unwrap();
+    assert!(matches!(
+        finished_outcome(&observed, held),
+        Some(RunOutcome::Cancelled)
+    ));
+    assert!(matches!(
+        started.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    drop(occupied);
+    fixture.runtime.shutdown().await.unwrap();
+}
+
 fn assert_no_human_permission_request(events: &[SessionEventEnvelope]) {
     assert!(
         !events

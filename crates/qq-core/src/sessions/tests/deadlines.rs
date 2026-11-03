@@ -728,7 +728,10 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     tokio::time::advance(Duration::from_millis(100)).await;
     let progress = progress.lock().unwrap().clone().unwrap();
     progress.cancelled().await;
-    assert_eq!(runtime.idle_run_permits(), 7);
+    assert_eq!(
+        runtime.idle_run_permits(),
+        runtime.inner.max_active_runs - 1
+    );
     assert!(
         runtime
             .store()
