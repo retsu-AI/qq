@@ -360,6 +360,23 @@ impl MetadataFile {
         }
     }
 
+    fn endpoint(&self) -> Result<(SocketAddr, String), ServerError> {
+        if self.format_version != METADATA_FORMAT_VERSION {
+            return Err(ServerError::MetadataVersionMismatch {
+                expected: METADATA_FORMAT_VERSION,
+                found: self.format_version,
+            });
+        }
+        let address = self
+            .address
+            .parse::<SocketAddr>()
+            .map_err(|_| ServerError::MetadataCorrupt)?;
+        if !address.ip().is_loopback() || address.port() == 0 {
+            return Err(ServerError::MetadataCorrupt);
+        }
+        Ok((address, self.token.clone()))
+    }
+
     fn into_connection(self) -> Result<ServerConnection, ServerError> {
         if self.format_version != METADATA_FORMAT_VERSION {
             return Err(ServerError::MetadataVersionMismatch {
@@ -1326,11 +1343,13 @@ async fn discover_at_endpoint(
     let client = probe_client().map_err(|()| ServerError::ExistingServerUnavailable)?;
 
     for attempt in 0..DISCOVERY_RETRIES {
-        let connection = match connection_for_discovery(read_connection(paths)) {
-            Ok(Some(connection)) => connection,
-            Ok(None) => return Ok(None),
+        let Some(metadata) = read_advertised(paths)? else {
+            return Ok(None);
+        };
+        let connection = match metadata.clone().into_connection() {
+            Ok(connection) => connection,
             Err(ServerError::ProtocolMismatch { expected, found }) => {
-                if other_protocol_answers(&client, paths, health_path).await? {
+                if other_protocol_answers(&client, &metadata, health_path).await? {
                     return Err(ServerError::ProtocolMismatch { expected, found });
                 }
                 if attempt + 1 < DISCOVERY_RETRIES {
@@ -1360,12 +1379,10 @@ async fn discover_at_endpoint(
 
 async fn other_protocol_answers(
     client: &reqwest::Client,
-    paths: &ServerPaths,
+    metadata: &MetadataFile,
     health_path: &str,
 ) -> Result<bool, ServerError> {
-    let Some((address, token)) = advertised_endpoint(paths)? else {
-        return Ok(false);
-    };
+    let (address, token) = metadata.endpoint()?;
     Ok(client
         .get(format!("http://{address}{health_path}"))
         .bearer_auth(token)
@@ -1376,38 +1393,21 @@ async fn other_protocol_answers(
 }
 
 fn advertised_endpoint(paths: &ServerPaths) -> Result<Option<(SocketAddr, String)>, ServerError> {
-    let metadata = match read_metadata_file(paths) {
-        Ok(Some(metadata)) => metadata,
-        Ok(None) => return Ok(None),
-        Err(ServerError::StateIo { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-    if metadata.format_version != METADATA_FORMAT_VERSION {
-        return Err(ServerError::MetadataVersionMismatch {
-            expected: METADATA_FORMAT_VERSION,
-            found: metadata.format_version,
-        });
-    }
-    let address = metadata
-        .address
-        .parse::<SocketAddr>()
-        .map_err(|_| ServerError::MetadataCorrupt)?;
-    if !address.ip().is_loopback() || address.port() == 0 {
-        return Err(ServerError::MetadataCorrupt);
-    }
-    Ok(Some((address, metadata.token)))
+    read_advertised(paths)?
+        .map(|metadata| metadata.endpoint())
+        .transpose()
 }
 
-fn connection_for_discovery(
-    connection: Result<Option<ServerConnection>, ServerError>,
-) -> Result<Option<ServerConnection>, ServerError> {
-    match connection {
+fn read_advertised(paths: &ServerPaths) -> Result<Option<MetadataFile>, ServerError> {
+    removed_as_absent(read_metadata_file(paths))
+}
+
+fn removed_as_absent<T>(read: Result<Option<T>, ServerError>) -> Result<Option<T>, ServerError> {
+    match read {
         Err(ServerError::StateIo { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
             Ok(None)
         }
-        connection => connection,
+        read => read,
     }
 }
 
@@ -2945,13 +2945,39 @@ mod tests {
 
     #[test]
     fn discovery_treats_removed_metadata_as_no_server() {
-        let result = connection_for_discovery(Err(ServerError::StateIo {
+        let result = removed_as_absent::<MetadataFile>(Err(ServerError::StateIo {
             action: "open metadata in",
             source: io::Error::from(io::ErrorKind::NotFound),
         }))
         .unwrap();
 
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_mismatch_is_confirmed_against_the_metadata_that_reported_it() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let current = start_test_server(paths.clone(), unavailable_handler()).await;
+        let dead_listener = TcpListener::bind(DEFAULT_BIND_ADDRESS).await.unwrap();
+        let dead_address = dead_listener.local_addr().unwrap();
+        drop(dead_listener);
+        let mut stale = MetadataFile::new(current.connection());
+        stale.address = dead_address.to_string();
+        stale.protocol_version = PROTOCOL_VERSION + 1;
+
+        let probe = probe_client().unwrap();
+        assert!(
+            !other_protocol_answers(&probe, &stale, "/v1/health")
+                .await
+                .unwrap(),
+            "the stale snapshot's server is gone; the current server in the file must not confirm it"
+        );
+        assert_eq!(
+            discover_at(&paths).await.unwrap().as_ref(),
+            Some(current.connection())
+        );
+        current.shutdown().await.unwrap();
     }
 
     #[tokio::test]
