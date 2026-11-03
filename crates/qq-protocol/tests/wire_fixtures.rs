@@ -1619,6 +1619,7 @@ fn pending_approval_snapshot_matches_its_golden() {
     let call = ToolCallId::from_bytes([9; 16]);
     summary.pending_holds = vec![qq_protocol::PendingHold { tool_call_id: call }];
     let body = qq_protocol::SessionSnapshot {
+        execution_root: None,
         fork_prompt: None,
         approval_previews: vec![qq_protocol::PendingApprovalPreview {
             tool_call_id: call,

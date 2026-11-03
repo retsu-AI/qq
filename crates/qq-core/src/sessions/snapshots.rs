@@ -310,6 +310,11 @@ fn load_session_body(
         return Err(SessionRuntimeError::SnapshotTooLarge);
     }
     Ok(SessionSnapshot {
+        execution_root: transaction.query_row(
+            "SELECT execution_root FROM sessions WHERE id=?1",
+            [session_id.to_string()],
+            |row| row.get(0),
+        )?,
         fork_prompt,
         goal: goals::load_live(transaction, session_id)?.map(Box::new),
         side_questions,

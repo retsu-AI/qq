@@ -2388,7 +2388,7 @@ impl App {
         self.reset_history_browse();
         self.slash.select(0);
         self.esc_armed_at = None;
-        if self.workspace_root.is_some() && has_mention_syntax(&text) {
+        if self.mention_root(Some(session_id)).is_some() && has_mention_syntax(&text) {
             return Effects::resolve_mentions(
                 self.start_resolution(),
                 PendingSubmit {
@@ -2422,7 +2422,7 @@ impl App {
         if self.status_level == NoticeLevel::Error && self.status_session_id == Some(session_id) {
             self.status = None;
         }
-        if self.workspace_root.is_some() && has_mention_syntax(&prompt) {
+        if self.mention_root(Some(session_id)).is_some() && has_mention_syntax(&prompt) {
             return Effects::resolve_mentions(
                 self.start_resolution(),
                 PendingSubmit {
@@ -3260,8 +3260,16 @@ impl App {
         }
     }
 
+    pub(crate) fn mention_root(&self, session: Option<SessionId>) -> Option<std::path::PathBuf> {
+        session
+            .and_then(|session| self.sessions.get(&session))
+            .and_then(|view| view.execution_root.as_ref())
+            .map(std::path::PathBuf::from)
+            .or_else(|| self.workspace_root.clone())
+    }
+
     fn request_mention_completion(&mut self) -> Effects {
-        if self.workspace_root.is_none() {
+        if self.mention_root(self.focused()).is_none() {
             return Effects::redraw(Redraw::Immediate);
         }
         let Some((_, token)) = self.composer.mention_token() else {

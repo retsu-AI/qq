@@ -1055,8 +1055,8 @@ async fn checkpoints_retention_keeps_two_hundred_and_fork_pin() {
             connection.execute("INSERT INTO turn_checkpoints(session_id,run_id,turn_ordinal,prompt_ordinal,baseline,checkpoint) SELECT session_id,run_id,?2,prompt_ordinal,baseline,checkpoint FROM turn_checkpoints WHERE run_id=?1 AND turn_ordinal=1",params![run.to_string(),turn])?;
         }
         let points=super::super::checkpoints::list(connection,session)?;
-        assert_eq!(points.len(),201);
-        assert!(points.iter().any(|point|point.turn_ordinal==1));
+        assert_eq!(points.len(),200);
+        assert!(!points.iter().any(|point|point.turn_ordinal==1));
         assert!(!points.iter().any(|point|point.turn_ordinal==2));
         assert!(points.iter().any(|point|point.turn_ordinal==202));
         Ok(())

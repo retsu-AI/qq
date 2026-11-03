@@ -627,6 +627,23 @@ fn session_compacted_events_surface_the_shrink_in_the_status_line() {
 }
 
 #[test]
+fn fork_snapshot_mentions_use_execution_root_when_reopened() {
+    let mut app = App::new(TuiOptions {
+        workspace_root: Some("source".into()),
+        ..TuiOptions::default()
+    });
+    let mut body = snapshot();
+    let session = body.focused.as_ref().unwrap().summary.id;
+    body.focused.as_mut().unwrap().execution_root = Some("isolated-fork".to_owned());
+    app.apply_snapshot(body);
+    assert_eq!(
+        app.mention_root(Some(session)),
+        Some("isolated-fork".into())
+    );
+    assert_eq!(app.mention_root(None), Some("source".into()));
+}
+
+#[test]
 fn checkpoints_rewind_and_fork_use_dock_picker_and_preserve_prompt_for_editing() {
     for (command, fork) in [
         (Command::RewindSession, false),
@@ -2483,6 +2500,7 @@ fn summary_named(byte: u8, title: &str) -> SessionSummary {
 fn body_for(summary: &SessionSummary, output: &str) -> SessionSnapshot {
     SessionSnapshot {
         approval_previews: Vec::new(),
+        execution_root: None,
         fork_prompt: None,
         goal: None,
         side_questions: Vec::new(),

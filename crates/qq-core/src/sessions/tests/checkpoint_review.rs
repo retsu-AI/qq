@@ -2,6 +2,59 @@ use super::*;
 use crate::undo::test_support;
 
 #[tokio::test]
+async fn checkpoints_fork_uses_prompt_baseline_outside_turn_window() {
+    let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![vec![], vec![]]).await;
+    test_support::repository(&harness.workspace_path);
+    std::fs::write(
+        harness.workspace_path.join(".gitignore"),
+        "sessions.sqlite3*\nworktrees/\n",
+    )
+    .unwrap();
+    let first = submit_prompt(&harness, "first").await;
+    collect_until_run_finished(&mut harness.events, first).await;
+    let second = submit_prompt(&harness, "second").await;
+    collect_until_run_finished(&mut harness.events, second).await;
+    harness.runtime.inner.store.call_write(store::Priority::AwaitControl,move |connection| {
+        for turn in 2..=201 {
+            connection.execute("INSERT INTO turn_checkpoints SELECT session_id,run_id,?2,prompt_ordinal,baseline,checkpoint,rewound FROM turn_checkpoints WHERE run_id=?1 AND turn_ordinal=1",params![second.to_string(),turn])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let outcome = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::ForkSession {
+                session_id: harness.session_id,
+                turn: Some(1),
+            },
+        )
+        .await
+        .unwrap()
+        .outcome;
+    let CommandOutcome::SessionForked {
+        session_id: fork,
+        execution_root,
+        ..
+    } = outcome
+    else {
+        panic!("fork")
+    };
+    assert!(
+        harness
+            .runtime
+            .capture_side_context(fork)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&execution_root).join("tracked.txt")).unwrap(),
+        "base\n"
+    );
+}
+
+#[tokio::test]
 async fn checkpoints_fork_preserves_cancelled_steering_and_independent_workspace_owners() {
     let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![vec![], vec![]]).await;
     test_support::repository(&harness.workspace_path);

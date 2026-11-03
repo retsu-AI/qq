@@ -443,18 +443,25 @@ impl SessionRuntime {
                         checkpoints
                             .iter()
                             .find(|point| point.prompt_ordinal == ordinal)
-                    })
-                    .ok_or(SessionRuntimeError::RunNotFound)?;
-                let pin_run = point.run_id;
-                let pin_turn = point.turn_ordinal;
-                let commit = if point.prompt_ordinal < ordinal {
-                    point.checkpoint.clone()
-                } else {
-                    point.baseline.clone()
+                    });
+                let baseline = self.inner.store.call(store::Priority::Control, move |connection| {
+                    Ok(connection.query_row("SELECT run_id,baseline FROM prompt_baselines WHERE session_id=?1 AND prompt_ordinal=?2",params![session.to_string(),ordinal],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).optional()?)
+                }).await?;
+                let (pin_run, pin_turn, commit) = match baseline {
+                    Some((run, commit)) => (parse_id::<RunId>(&run)?, 0, commit),
+                    None => {
+                        let point = point.ok_or(SessionRuntimeError::RunNotFound)?;
+                        (
+                            point.run_id,
+                            point.turn_ordinal,
+                            if point.prompt_ordinal < ordinal {
+                                point.checkpoint.clone()
+                            } else {
+                                point.baseline.clone()
+                            },
+                        )
+                    }
                 };
-                let commit = self.inner.store.call(store::Priority::Control, move |connection| {
-                    Ok(connection.query_row("SELECT baseline FROM prompt_baselines WHERE session_id=?1 AND prompt_ordinal=?2",params![session.to_string(),ordinal],|row|row.get::<_,String>(0)).optional()?)
-                }).await?.unwrap_or(commit);
                 let prompt_text = self
                     .inner
                     .store

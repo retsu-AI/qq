@@ -382,6 +382,7 @@ fn store_activity_is_blocked_while_a_human_is_asked_and_the_worst_session_wins()
 
     let snapshot = SessionSnapshot {
         approval_previews: Vec::new(),
+        execution_root: None,
         fork_prompt: None,
         goal: None,
         side_questions: Vec::new(),
@@ -739,6 +740,7 @@ fn internal_summary_completion_notifies_once_in_both_terminal_orders() {
                 store.install_session_snapshot(
                     qq_protocol::SessionSnapshot {
                         approval_previews: Vec::new(),
+                        execution_root: None,
                         fork_prompt: None,
                         goal: None,
                         side_questions: Vec::new(),
@@ -915,6 +917,7 @@ fn observed_turn_prices_survive_older_snapshot_replay_once() {
     running.active_run_id = Some(run_id);
     let snapshot = qq_protocol::SessionSnapshot {
         approval_previews: Vec::new(),
+        execution_root: None,
         fork_prompt: None,
         goal: None,
         side_questions: Vec::new(),
@@ -1133,6 +1136,7 @@ fn terminal_cost_uses_the_run_snapshot_instead_of_the_session_delta() {
         );
         let snapshot = qq_protocol::SessionSnapshot {
             approval_previews: Vec::new(),
+        execution_root: None,
         fork_prompt: None,
                         goal: None,
             side_questions: Vec::new(), summary: idle, messages: vec![message(8, session_id, prompt, "answer")],
@@ -1910,6 +1914,7 @@ fn a_body_the_snapshot_budget_starved_stays_cold_instead_of_empty() {
     let session_id = SessionId::from_bytes([7; 16]);
     let starved = SessionSnapshot {
         approval_previews: Vec::new(),
+        execution_root: None,
         fork_prompt: None,
         goal: None,
         side_questions: Vec::new(),

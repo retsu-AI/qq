@@ -370,7 +370,11 @@ where
                         ));
                         continue;
                     }
-                    let root = app.workspace_root.clone();
+                    let session = match submit.target {
+                        crate::effect::SubmitTarget::Prompt { session_id }
+                        | crate::effect::SubmitTarget::Steer { session_id, .. } => session_id,
+                    };
+                    let root = app.mention_root(Some(session));
                     let permits = std::sync::Arc::clone(&permits);
                     jobs.push(Box::pin(async move {
                         let permit = permits.acquire_owned().await;
@@ -464,7 +468,7 @@ where
         }
         if let Some(CompletionRequest { id, query, recent }) =
             pending_completion.take_when_available(jobs.len())
-            && let Some(root) = app.workspace_root.clone()
+            && let Some(root) = app.mention_root(app.focused())
         {
             let permits = std::sync::Arc::clone(&permits);
             jobs.push(Box::pin(async move {

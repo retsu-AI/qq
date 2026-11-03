@@ -1795,6 +1795,8 @@ pub struct PendingApprovalPreview {
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approval_previews: Vec<PendingApprovalPreview>,
