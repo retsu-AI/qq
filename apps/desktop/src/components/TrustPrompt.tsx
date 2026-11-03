@@ -60,15 +60,7 @@ export function TrustPrompt({ project, pending }: { project: ProjectState; pendi
                 </button>
               </header>
               <ul className="space-y-1 px-4 py-3">
-                {file.declarations.map((line, index) => (
-                  <li key={index} className="flex gap-2 font-mono text-ui selectable">
-                    <span className="text-faint">•</span>
-                    <span className="min-w-0 break-words">{line}</span>
-                  </li>
-                ))}
-                {file.declarations.length === 0 && (
-                  <li className="text-ui text-muted">Sets {file.sections.join(", ")}</li>
-                )}
+                <li className="text-ui text-muted">Sets {file.sections.join(", ")}</li>
               </ul>
             </section>
           ))}

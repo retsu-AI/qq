@@ -18,16 +18,12 @@ use std::{
 
 use qq_client::{
     ClientPort, ClientRequest, ClientUpdate, ConnectionState, InitialSession, TuiClient,
-    state::{
-        ApprovalPreview, ModelOption, NoticeLevel, ReduceContext, SessionStore, StateEffect,
-        body_request,
-    },
+    state::{ModelOption, NoticeLevel, ReduceContext, SessionStore, StateEffect, body_request},
 };
 use qq_protocol::{
-    ApprovalDecision, ApprovalGrant, ApprovalMode, CommandId, CommandOutcome, CommandRequest,
-    Correlation, InputPart, ModelSelection, RunLimits, ServerCapabilities, SessionCommand,
-    SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionId, ToolCallId,
-    ToolCallSnapshot, WorkspaceId, WorkspaceSnapshot,
+    ApprovalDecision, ApprovalMode, CommandId, CommandOutcome, CommandRequest, Correlation,
+    InputPart, ModelSelection, RunLimits, ServerCapabilities, SessionCommand, SessionCommandKind,
+    SessionEvent, SessionEventEnvelope, SessionId, ToolCallId, WorkspaceId, WorkspaceSnapshot,
 };
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
@@ -44,8 +40,6 @@ const EMIT_INTERVAL: Duration = Duration::from_millis(33);
 const NOTICE_TTL: Duration = Duration::from_secs(6);
 /// Events kept to replay onto a body snapshot that arrives late.
 const MAX_RECENT_EVENTS: usize = 512;
-/// The server's per-grant byte cap (`qq_core::MAX_GRANT_BYTES`).
-const MAX_GRANT_BYTES: usize = 256;
 const MAX_COMMANDS: usize = 64;
 
 type SubmissionReply = oneshot::Sender<Result<(), String>>;
@@ -64,7 +58,6 @@ pub enum SubmitMode {
 pub enum SessionOption {
     Profile(qq_protocol::AgentProfileId),
     Effort(Option<qq_protocol::ReasoningEffort>),
-    Delegate(Option<qq_protocol::ApprovalDelegate>),
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -146,8 +139,6 @@ pub enum UiCommand {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApprovalChoice {
     Once,
-    Session,
-    Workspace,
     Deny,
     Answer { answers: Vec<String> },
 }
@@ -417,6 +408,7 @@ impl Project {
                     self.error = None;
                 }
             }
+            ClientUpdate::Startup(_) => {}
             ClientUpdate::Snapshot(snapshot) => self.apply_snapshot(client, snapshot),
             ClientUpdate::ResetSnapshot(snapshot) => {
                 self.workspace_id = None;
@@ -789,6 +781,7 @@ impl Project {
                         session_id,
                         objective,
                         check,
+                        check_approval: None,
                         budget: Box::new(budget),
                         expected,
                         replace,
@@ -857,10 +850,6 @@ impl Project {
                     SessionOption::Effort(effort) => {
                         SessionCommand::SetSessionEffort { session_id, effort }
                     }
-                    SessionOption::Delegate(delegate) => SessionCommand::SetApprovalDelegate {
-                        session_id,
-                        delegate,
-                    },
                 };
                 self.command(client, command, PendingIntent::Other);
             }
@@ -1044,11 +1033,8 @@ impl Project {
         else {
             return;
         };
-        let grant = || approval_grant(call, session.approval_previews.get(&tool_call_id));
         let decision = match choice {
             ApprovalChoice::Once => ApprovalDecision::ApproveOnce,
-            ApprovalChoice::Session => ApprovalDecision::ApproveForSession { grant: grant() },
-            ApprovalChoice::Workspace => ApprovalDecision::ApproveForWorkspace { grant: grant() },
             ApprovalChoice::Deny => ApprovalDecision::Deny,
             ApprovalChoice::Answer { answers } => ApprovalDecision::Answer { answers },
         };
@@ -1250,50 +1236,6 @@ fn validate_submission(connection: ConnectionDto, input: &[InputPart]) -> Result
     qq_protocol::validate_input(input).map_err(|error| error.to_string())
 }
 
-/// The approve-for-session/workspace grant for a held call: shell calls
-/// allowlist their exact command as a prefix, fetch calls the host the server
-/// judged, everything else the tool. Mirrors the TUI's derivation.
-pub fn approval_grant(call: &ToolCallSnapshot, preview: Option<&ApprovalPreview>) -> ApprovalGrant {
-    if let Some(fetch) = preview.and_then(|preview| preview.fetch.as_ref()) {
-        return ApprovalGrant::Host {
-            host: fetch.host.clone(),
-        };
-    }
-    if call.name == "shell"
-        && let Ok(arguments) = serde_json::from_str::<serde_json::Value>(&call.arguments)
-        && let Some(command) = arguments.get("command").and_then(|value| value.as_str())
-        && !command.trim().is_empty()
-    {
-        return ApprovalGrant::ShellPrefix {
-            prefix: command.to_owned(),
-        };
-    }
-    ApprovalGrant::Tool {
-        name: call.name.clone(),
-    }
-}
-
-fn grant_value(grant: &ApprovalGrant) -> &str {
-    match grant {
-        ApprovalGrant::Tool { name } => name,
-        ApprovalGrant::ShellPrefix { prefix } => prefix,
-        ApprovalGrant::Host { host } => host,
-    }
-}
-
-pub fn grant_recordable(grant: &ApprovalGrant) -> bool {
-    let value = grant_value(grant).trim();
-    !value.is_empty() && value.len() <= MAX_GRANT_BYTES
-}
-
-pub fn grant_label(grant: &ApprovalGrant) -> String {
-    match grant {
-        ApprovalGrant::Tool { name } => format!("the {name} tool"),
-        ApprovalGrant::ShellPrefix { prefix } => format!("commands starting with `{prefix}`"),
-        ApprovalGrant::Host { host } => format!("requests to {host}"),
-    }
-}
-
 #[cfg(test)]
 mod submission_tests {
     use super::*;
@@ -1478,14 +1420,9 @@ mod submission_tests {
             serde_json::from_str::<SessionOption>(r#"{"type":"effort","value":"unbounded"}"#)
                 .is_err()
         );
-        for value in ["on", "off", "by_mode"] {
-            assert!(
-                serde_json::from_value::<SessionOption>(
-                    serde_json::json!({"type":"delegate","value":value})
-                )
-                .is_ok()
-            );
-        }
+        assert!(
+            serde_json::from_str::<SessionOption>(r#"{"type":"delegate","value":"on"}"#).is_err()
+        );
     }
 
     #[test]
@@ -1534,7 +1471,7 @@ mod submission_tests {
             None,
         );
         let event: SessionEventEnvelope = serde_json::from_str(include_str!(
-            "../../../../crates/qq-protocol/tests/fixtures/v32/event_prompt_queued.json"
+            "../../../../crates/qq-protocol/tests/fixtures/v43/event_prompt_queued.json"
         ))
         .unwrap();
         let SessionEvent::PromptQueued {
@@ -1622,6 +1559,7 @@ mod submission_tests {
                     tool_calls: vec![],
                     has_older_tool_calls: false,
                     has_older_messages: false,
+                    approval_previews: vec![],
                 }),
                 included: vec![],
                 has_older_sessions: false,

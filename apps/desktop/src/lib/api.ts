@@ -112,7 +112,7 @@ export const api = {
   setSessionOption: (
     projectId: string,
     sessionId: string,
-    type: "profile" | "effort" | "delegate",
+    type: "profile" | "effort",
     value: string | null,
   ) =>
     invoke<void>("set_session_option", {

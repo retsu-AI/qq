@@ -953,14 +953,7 @@ function ModePicker({
   );
 }
 
-const DELEGATES: Array<{ value: string; label: string; hint: string }> = [
-  { value: "", label: "Configured default", hint: "From your QQ configuration" },
-  { value: "by_mode", label: "By approval mode", hint: "The mode decides who reviews" },
-  { value: "off", label: "Me only", hint: "Every held call waits for you" },
-  { value: "on", label: "Reviewer first", hint: "A reviewer answers before you" },
-];
-
-/** Profile and approval delegate: settings that are changed rarely. */
+/** The session's profile: a setting that is changed rarely. */
 function SessionOptions({
   project,
   transcript,
@@ -971,37 +964,24 @@ function SessionOptions({
   const profiles = project.profiles.includes(transcript.profile)
     ? project.profiles
     : [transcript.profile, ...project.profiles];
-  const delegate = transcript.approval_delegate ?? "";
-  const options: Array<DropdownOption<string>> = [
-    ...profiles.map((profile) => ({
-      value: `profile:${profile}`,
-      label: profile,
-      group: "Profile (next run)",
-      selected: profile === transcript.profile,
-    })),
-    ...DELEGATES.map((option) => ({
-      value: `delegate:${option.value}`,
-      label: option.label,
-      hint: option.hint,
-      group: "Who approves held calls",
-      selected: option.value === delegate,
-    })),
-  ];
+  const options: Array<DropdownOption<string>> = profiles.map((profile) => ({
+    value: profile,
+    label: profile,
+    group: "Profile (next run)",
+    selected: profile === transcript.profile,
+  }));
   return (
     <Dropdown
       label="Session options"
-      title={`Profile: ${transcript.profile} · Approvals: ${
-        DELEGATES.find((option) => option.value === delegate)?.label ?? delegate
-      }`}
+      title={`Profile: ${transcript.profile}`}
       value={null}
       options={options}
-      onChange={(value) => {
-        const [type, choice] = [value.slice(0, value.indexOf(":")), value.slice(value.indexOf(":") + 1)];
+      onChange={(profile) => {
         void api.setSessionOption(
           project.project_id,
           transcript.session_id,
-          type === "profile" ? "profile" : "delegate",
-          choice || null,
+          "profile",
+          profile,
         );
       }}
     >

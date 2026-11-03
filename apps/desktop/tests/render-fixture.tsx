@@ -91,7 +91,6 @@ const project: ProjectState = {
     approval_mode: "ask",
     profile: "default",
     reasoning_effort: null,
-    approval_delegate: null,
     context_tokens: 2048,
     context_window: 128000,
     cost_usd_nanos: 0,
@@ -350,9 +349,6 @@ if (new URLSearchParams(location.search).has("approval"))
       edit: null,
       question: null,
       fetch: null,
-      escalation: null,
-      grantable: true,
-      grant_label: "echo fixture",
     },
   });
 function Fixture() {

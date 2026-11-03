@@ -198,8 +198,6 @@ pub struct TranscriptDto {
     pub profile: qq_protocol::AgentProfileId,
     #[cfg_attr(test, ts(type = "string | null"))]
     pub reasoning_effort: Option<qq_protocol::ReasoningEffort>,
-    #[cfg_attr(test, ts(type = "string | null"))]
-    pub approval_delegate: Option<qq_protocol::ApprovalDelegate>,
     #[cfg_attr(test, ts(type = "number | null"))]
     pub context_tokens: Option<u64>,
     pub context_window: Option<u32>,
@@ -298,10 +296,6 @@ pub struct ApprovalDto {
         ts(type = "{ host: string; url: string; method?: string } | null")
     )]
     pub fetch: Option<serde_json::Value>,
-    pub escalation: Option<String>,
-    /// Whether "for session"/"for workspace" grants can be offered.
-    pub grantable: bool,
-    pub grant_label: String,
 }
 
 /// A path as people read it, without Windows' verbatim `\\?\` prefix. Only
@@ -382,7 +376,6 @@ pub fn transcript(store: &SessionStore, id: SessionId) -> Option<TranscriptDto> 
         approval_mode: summary.approval_mode,
         profile: summary.profile.clone(),
         reasoning_effort: summary.reasoning_effort,
-        approval_delegate: summary.approval_delegate,
         context_tokens: summary.context_tokens,
         context_window: view.context_window,
         cost_usd_nanos: summary.estimated_cost_usd_nanos,
@@ -511,7 +504,6 @@ fn tool_item(store: &SessionStore, view: &SessionView, call: &ToolCallSnapshot) 
     let timing = view.tool_timing.get(&call.id);
     let approval = (call.state == ToolCallState::AwaitingApproval).then(|| {
         let preview = view.approval_previews.get(&call.id);
-        let grant = crate::project::approval_grant(call, preview);
         ApprovalDto {
             shell: preview
                 .and_then(|preview| preview.shell.as_ref())
@@ -525,11 +517,6 @@ fn tool_item(store: &SessionStore, view: &SessionView, call: &ToolCallSnapshot) 
             fetch: preview
                 .and_then(|preview| preview.fetch.as_ref())
                 .and_then(|fetch| serde_json::to_value(fetch).ok()),
-            escalation: preview
-                .and_then(|preview| preview.escalated.as_ref())
-                .map(|escalated| escalated.reason.clone()),
-            grantable: crate::project::grant_recordable(&grant),
-            grant_label: crate::project::grant_label(&grant),
         }
     });
     let diff = call.display.as_ref().map(|display| match display {

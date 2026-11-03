@@ -64,8 +64,6 @@ export interface Question {
 
 export type ApprovalChoice =
   | { type: "once" }
-  | { type: "session" }
-  | { type: "workspace" }
   | { type: "deny" }
   | { type: "answer"; answers: string[] };
 
@@ -84,7 +82,6 @@ export interface Provider {
 export interface PendingFile {
   path: string;
   sections: string[];
-  declarations: string[];
 }
 
 export interface BrowserSignIn {

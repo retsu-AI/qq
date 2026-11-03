@@ -80,12 +80,11 @@ While an agent works, choose how the next message is delivered:
 - Stop cancels the run. Escape in the composer also stops it.
 
 Existing sessions have profile, model, effort and approval controls. Profile,
-model and effort apply to the next claimed run. Approval delegate applies to the
-next held tool call; Human only disables the reviewer override. Configured default
-restores configuration behavior. Only advertised effort values are offered.
+model and effort apply to the next claimed run. Only advertised effort values
+are offered.
 
 Approval cards show the requested action and its preview. Use the buttons or
-Y (once), S (session), W (workspace), N (deny) when a card is selected and no
+Y (approve once) and N (deny) when a card is selected and no
 dialog or editable control owns focus. Multiple cards do not all respond to one
 shortcut. Answer question cards using their own controls.
 

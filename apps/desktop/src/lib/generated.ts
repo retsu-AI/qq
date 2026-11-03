@@ -72,7 +72,7 @@ main_path: string, main_name: string, };
 
 export type GoalDefaultsDto = { duration_ms: number, max_duration_ms: number, default_runs: number, max_runs: number, check_timeout_ms: number, };
 
-export type TranscriptDto = { session_id: string, title: string, loading: boolean, status: SessionStatus, activity: RunActivity | null, active_run_id: string | null, model: string | null, approval_mode: ApprovalMode, profile: string, reasoning_effort: string | null, approval_delegate: string | null, context_tokens: number | null, context_window: number | null, cost_usd_nanos: number | null, queued_prompts: number, items: Array<ItemDto>, 
+export type TranscriptDto = { session_id: string, title: string, loading: boolean, status: SessionStatus, activity: RunActivity | null, active_run_id: string | null, model: string | null, approval_mode: ApprovalMode, profile: string, reasoning_effort: string | null, context_tokens: number | null, context_window: number | null, cost_usd_nanos: number | null, queued_prompts: number, items: Array<ItemDto>, 
 /**
  * Oldest first; the server keeps a bounded recent window.
  */
@@ -92,9 +92,5 @@ child_session: string | null, };
 
 export type DiffDto = { path: string, diff: string, };
 
-export type ApprovalDto = { shell: ShellPreview | null, edit: { path: string; diff: string } | null, question: { questions: Question[] } | null, fetch: { host: string; url: string; method?: string } | null, escalation: string | null, 
-/**
- * Whether "for session"/"for workspace" grants can be offered.
- */
-grantable: boolean, grant_label: string, };
+export type ApprovalDto = { shell: ShellPreview | null, edit: { path: string; diff: string } | null, question: { questions: Question[] } | null, fetch: { host: string; url: string; method?: string } | null, };
 

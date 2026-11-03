@@ -35,9 +35,6 @@ pub struct PendingFileDto {
     pub path: String,
     /// The sensitive keys it sets (`model`, `mcp`, `policy.allow_tools`, …).
     pub sections: Vec<&'static str>,
-    /// One line per route, provider, MCP server, grant group, or pack list,
-    /// worded exactly as `qq trust` and the TUI word them.
-    pub declarations: Vec<String>,
 }
 
 fn request(workspace: &Path) -> Result<LoadRequest, TrustError> {
@@ -53,11 +50,6 @@ fn describe(pending: &PendingTrust) -> PendingFileDto {
             .path()
             .map_or_else(|| source.label().to_owned(), crate::view::display_path),
         sections: pending.sections().to_vec(),
-        declarations: pending
-            .declarations()
-            .iter()
-            .map(ToString::to_string)
-            .collect(),
     }
 }
 

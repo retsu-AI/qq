@@ -14,7 +14,7 @@ import { Diff } from "./Diff";
 
 /**
  * A held tool call. Keyboard (when focus is not in a text field):
- * Y approve once · S for session · W for workspace · N deny.
+ * Y approve once · N deny.
  */
 export function ApprovalCard({
   tool,
@@ -58,7 +58,6 @@ export function ApprovalCard({
           ) ||
           selected !== card.current ||
           approval.shell?.verdict === "forbidden",
-        grantable: approval.grantable,
       });
       if (decision) {
         event.preventDefault();
@@ -142,11 +141,6 @@ export function ApprovalCard({
             {tool.name} {toolSubject(tool.name, tool.arguments)}
           </div>
         )}
-        {approval.escalation && (
-          <p className="text-small text-muted">
-            Reviewer: {approval.escalation}
-          </p>
-        )}
       </div>
 
       <div className="flex flex-wrap items-center gap-2 border-t border-warn/20 px-4 py-2.5">
@@ -158,24 +152,6 @@ export function ApprovalCard({
         >
           Approve
         </ActionButton>
-        {approval.grantable && !forbidden && (
-          <>
-            <ActionButton
-              disabled={sent}
-              onClick={() => respond({ type: "session" })}
-              hint="S"
-            >
-              Always this session
-            </ActionButton>
-            <ActionButton
-              disabled={sent}
-              onClick={() => respond({ type: "workspace" })}
-              hint="W"
-            >
-              Always in workspace
-            </ActionButton>
-          </>
-        )}
         <div className="flex-1" />
         <ActionButton
           danger
@@ -186,11 +162,6 @@ export function ApprovalCard({
           Deny
         </ActionButton>
       </div>
-      {approval.grantable && !forbidden && (
-        <p className="px-4 pb-2.5 text-small text-faint">
-          "Always" allows {approval.grant_label}.
-        </p>
-      )}
     </div>
   );
 }
