@@ -175,7 +175,10 @@ or `Esc` returns to the 8-row preview without deciding.
 `Esc` denies, like `n`, except while a note is being typed, when it drops the
 note and leaves the prompt open, or while the full diff is open, when it
 closes the diff.
-`Alt-A` / `Alt-D` answer the oldest waiting call in *another* session.
+`Alt-A` / `Alt-D` answer the oldest waiting call in *another* session, but
+only while that session's row is on screen (in the sessions column or as an
+agent lane). Otherwise, and always for a question from `ask_user`, they focus
+that session so you can read the call and answer it there.
 `/attention` lists everything waiting across the workspace. Details in
 [Permissions and trust](permissions.md#the-approval-prompt).
 
