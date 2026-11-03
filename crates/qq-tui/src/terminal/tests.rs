@@ -569,7 +569,7 @@ async fn loop_upgrades_completed_code_to_highlighted_off_the_render_path() {
             }
         }
     }
-    harness.quit();
+    harness.close_input();
     task.await.expect("loop task").expect("loop exits cleanly");
     assert!(plain_seen, "a plain frame should have been drawn first");
     assert!(highlighted_seen, "the highlighted frame never arrived");

@@ -2546,8 +2546,8 @@ pub(super) fn record_checkpoint_receipt(
         transaction.execute("INSERT OR IGNORE INTO rewound_turns SELECT r.id,0 FROM runs r JOIN messages m ON m.id=r.user_message_id WHERE r.session_id=?1 AND m.ordinal>?2",params![session_id.to_string(),prompt_ordinal])?;
         transaction.execute("UPDATE turn_checkpoints SET rewound=1 WHERE session_id=?1 AND (prompt_ordinal>?2 OR (prompt_ordinal=?2 AND turn_ordinal>?3))",params![session_id.to_string(),prompt_ordinal,turn_ordinal])?;
         transaction.execute(
-            "DELETE FROM session_compactions WHERE session_id=?1",
-            [session_id.to_string()],
+            "DELETE FROM session_compactions WHERE session_id=?1 AND cutoff_ordinal>=?2",
+            params![session_id.to_string(), prompt_ordinal],
         )?;
         transaction.execute(
             "DELETE FROM session_files WHERE session_id=?1",

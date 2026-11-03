@@ -9,29 +9,34 @@ pub(super) async fn cleanup(
         .acquire()
         .await
         .map_err(|_| SessionRuntimeError::Unavailable)?;
-    let resources = inner.store.call_write(store::Priority::AwaitControl, move |connection| {
+    loop {
+        let resources = inner.store.call_write(store::Priority::AwaitControl, move |connection| {
         if recover {
             connection.execute("UPDATE fork_resources SET state='deleting' WHERE state='creating' AND NOT EXISTS(SELECT 1 FROM sessions WHERE id=fork_resources.session_id)", [])?;
         }
-        let mut statement = connection.prepare("SELECT session_id,workspace,root FROM fork_resources f WHERE state='deleting' AND (root IS NULL OR NOT EXISTS(SELECT 1 FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE w.path=f.root OR substr(w.path,1,length(f.root)+1)=f.root||'/' OR COALESCE(s.execution_root,w.path)=f.root OR substr(COALESCE(s.execution_root,w.path),1,length(f.root)+1)=f.root||'/'))")?;
+        let mut statement = connection.prepare("SELECT session_id,workspace,root FROM fork_resources f WHERE state='deleting' AND (root IS NULL OR (NOT EXISTS(SELECT 1 FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE w.path=f.root OR substr(w.path,1,length(f.root)+1)=f.root||'/' OR COALESCE(s.execution_root,w.path)=f.root OR substr(COALESCE(s.execution_root,w.path),1,length(f.root)+1)=f.root||'/') AND NOT EXISTS(SELECT 1 FROM fork_resources dependent WHERE dependent.session_id!=f.session_id AND (dependent.workspace=f.root OR substr(dependent.workspace,1,length(f.root)+1)=f.root||'/'))))")?;
         Ok(statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?)))?.collect::<Result<Vec<_>,_>>()?)
     }).await?;
-    for (session, workspace, root) in resources {
-        let id = parse_id(&session)?;
-        crate::undo::cleanup_session(Path::new(&workspace), root.as_deref().map(Path::new), id)
-            .await
-            .map_err(|error| SessionRuntimeError::UndoFailed(error.into()))?;
-        inner
-            .store
-            .call_write(store::Priority::AwaitControl, move |connection| {
-                connection.execute(
-                    "DELETE FROM fork_resources WHERE session_id=?1 AND state='deleting'",
-                    [session],
-                )?;
-                Ok(())
-            })
-            .await?;
-        probe::PROBE.passed(probe::Checkpoint::SessionResourcesCleaned(id));
+        if resources.is_empty() {
+            break;
+        }
+        for (session, workspace, root) in resources {
+            let id = parse_id(&session)?;
+            crate::undo::cleanup_session(Path::new(&workspace), root.as_deref().map(Path::new), id)
+                .await
+                .map_err(|error| SessionRuntimeError::UndoFailed(error.into()))?;
+            inner
+                .store
+                .call_write(store::Priority::AwaitControl, move |connection| {
+                    connection.execute(
+                        "DELETE FROM fork_resources WHERE session_id=?1 AND state='deleting'",
+                        [session],
+                    )?;
+                    Ok(())
+                })
+                .await?;
+            probe::PROBE.passed(probe::Checkpoint::SessionResourcesCleaned(id));
+        }
     }
     Ok(())
 }
