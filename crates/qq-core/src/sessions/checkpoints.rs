@@ -498,6 +498,8 @@ impl SessionRuntime {
                 if let Some(error) = probe::FAULTS.take(probe::StoreFault::ForkCreated(session)) { return Err(error); }
                 self.inner.store.call_write(store::Priority::AwaitControl,move |connection| {
                     let transaction=store::begin_unit(connection)?;
+                    let count:u32=transaction.query_row("SELECT COUNT(*) FROM sessions WHERE workspace_id=?1",[workspace.to_string()],|row|row.get(0))?;
+                    if count>=MAX_SESSIONS_PER_WORKSPACE {return Err(SessionRuntimeError::SessionLimitReached)}
                     transaction.execute("UPDATE fork_resources SET state='ready' WHERE session_id=?1",[fork.to_string()])?;
                     transaction.execute("INSERT INTO sessions(id,workspace_id,title,status,model,max_output_tokens,organization,approval_mode,created_at_ms,updated_at_ms,profile,model_is_fallback,reasoning_effort,execution_root) SELECT ?1,workspace_id,title,'idle',model,max_output_tokens,organization,approval_mode,?2,?2,profile,model_is_fallback,reasoning_effort,?3 FROM sessions WHERE id=?4",params![fork.to_string(),now_ms(),root,session.to_string()])?;
                     let connection=&transaction;

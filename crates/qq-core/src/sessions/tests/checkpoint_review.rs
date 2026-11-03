@@ -2,6 +2,67 @@ use super::*;
 use crate::undo::test_support;
 
 #[tokio::test]
+async fn checkpoints_rewind_keeps_safe_summaries_and_removes_crossing_run_summaries() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::Full,
+        vec![vec![
+            (
+                "edit_file",
+                r#"{"edits":[{"path":"tracked.txt","old":"base\n","new":"one\n"}]}"#.to_owned(),
+            ),
+            (
+                "edit_file",
+                r#"{"edits":[{"path":"tracked.txt","old":"one\n","new":"two\n"}]}"#.to_owned(),
+            ),
+        ]],
+    )
+    .await;
+    test_support::repository(&harness.workspace_path);
+    std::fs::write(
+        harness.workspace_path.join(".gitignore"),
+        "sessions.sqlite3*\n",
+    )
+    .unwrap();
+    let run = submit_prompt(&harness, "first").await;
+    collect_until_run_finished(&mut harness.events, run).await;
+    let session = harness.session_id;
+    harness.runtime.inner.store.call_write(store::Priority::AwaitControl,move |connection| {
+        let ordinal:u64=connection.query_row("SELECT ordinal FROM messages WHERE id=(SELECT user_message_id FROM runs WHERE id=?1)",[run.to_string()],|row|row.get(0))?;
+        for (summary,scope,turn,cutoff) in [("safe session",None,None,ordinal-1),("safe run",Some(run.to_string()),Some(1),0),("crossing run",Some(run.to_string()),Some(2),0)] {
+            connection.execute("INSERT INTO session_compactions(session_id,run_id,summary,cutoff_ordinal,before_bytes,after_bytes,created_at_ms,scope_run_id,turn_cutoff) VALUES (?1,?2,?3,?4,10,1,1,?5,?6)",params![session.to_string(),RunId::generate().unwrap().to_string(),summary,cutoff,scope,turn])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::RewindSession {
+                session_id: session,
+                run_id: run,
+                turn_ordinal: 1,
+            },
+        )
+        .await
+        .unwrap();
+    let summaries = harness
+        .runtime
+        .inner
+        .store
+        .call(store::Priority::AwaitControl, move |connection| {
+            let mut statement = connection.prepare(
+                "SELECT summary FROM session_compactions WHERE session_id=?1 ORDER BY summary",
+            )?;
+            Ok(statement
+                .query_map([session.to_string()], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(summaries, vec!["safe run", "safe session"]);
+}
+
+#[tokio::test]
 async fn checkpoints_fork_uses_prompt_baseline_outside_turn_window() {
     let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![vec![], vec![]]).await;
     test_support::repository(&harness.workspace_path);
