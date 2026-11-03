@@ -9,7 +9,7 @@ mod prepare;
 pub mod skills;
 
 pub use access::WorkspacePathError;
-#[cfg(windows)]
+#[cfg(not(target_os = "linux"))]
 pub(crate) use access::blocking_capacity;
 pub(crate) use access::{Workspace, WriteTarget, blocking_permits};
 #[cfg(test)]
