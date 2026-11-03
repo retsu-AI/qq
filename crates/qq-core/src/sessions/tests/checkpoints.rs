@@ -755,6 +755,19 @@ async fn checkpoints_three_turn_diffs_exclude_external_edits_rewind_undo_and_for
         std::fs::read_to_string(harness.workspace_path.join("tracked.txt")).unwrap(),
         "one\n"
     );
+    assert_eq!(
+        harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::ForkSession {
+                    session_id: harness.session_id,
+                    turn: Some(3)
+                }
+            )
+            .await,
+        Err(SessionRuntimeError::RunNotFound)
+    );
     checkpoint_command(
         &harness.runtime,
         SessionCommand::UndoWorkspace {

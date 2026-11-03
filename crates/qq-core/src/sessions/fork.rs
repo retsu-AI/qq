@@ -13,7 +13,7 @@ pub(super) async fn cleanup(
         if recover {
             connection.execute("UPDATE fork_resources SET state='deleting' WHERE state='creating' AND NOT EXISTS(SELECT 1 FROM sessions WHERE id=fork_resources.session_id)", [])?;
         }
-        let mut statement = connection.prepare(&format!("SELECT session_id,workspace,root FROM fork_resources f WHERE state='deleting' AND (root IS NULL OR NOT EXISTS(SELECT 1 FROM sessions s WHERE s.execution_root IS NOT NULL AND {}))",commands::paths_overlap_sql("s.execution_root", "f.root")))?;
+        let mut statement = connection.prepare("SELECT session_id,workspace,root FROM fork_resources f WHERE state='deleting' AND (root IS NULL OR NOT EXISTS(SELECT 1 FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE COALESCE(s.execution_root,w.path)=f.root OR substr(COALESCE(s.execution_root,w.path),1,length(f.root)+1)=f.root||'/'))")?;
         Ok(statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?)))?.collect::<Result<Vec<_>,_>>()?)
     }).await?;
     for (session, workspace, root) in resources {

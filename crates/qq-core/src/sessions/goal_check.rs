@@ -849,9 +849,13 @@ pub(super) async fn execute(
         if crate::approval::fixed_stop(&check.command).is_some() {
             break Completion::Forbidden;
         }
+        let configuration_workspace = match inner.configuration_workspace(&claimed).await {
+            Ok(path) => path,
+            Err(_) => break Completion::Policy(GoalCheckPolicyError::Unavailable),
+        };
         let policy = match inner.policy_authority.as_ref() {
             Some(authority) => {
-                authority.validate_goal_check(Path::new(&claimed.workspace), &check.command)
+                authority.validate_goal_check(Path::new(&configuration_workspace), &check.command)
             }
             None => Box::pin(std::future::ready(Err(GoalCheckPolicyError::Unavailable))),
         };

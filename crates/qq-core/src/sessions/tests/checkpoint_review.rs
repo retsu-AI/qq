@@ -2,6 +2,96 @@ use super::*;
 use crate::undo::test_support;
 
 #[tokio::test]
+async fn checkpoints_fork_preserves_cancelled_steering_and_independent_workspace_owners() {
+    let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![vec![], vec![]]).await;
+    test_support::repository(&harness.workspace_path);
+    std::fs::write(
+        harness.workspace_path.join(".gitignore"),
+        "sessions.sqlite3*\nworktrees/\n",
+    )
+    .unwrap();
+    let first = submit_prompt(&harness, "first").await;
+    collect_until_run_finished(&mut harness.events, first).await;
+    harness.runtime.inner.store.call_write(store::Priority::AwaitControl,move |connection| {
+        connection.execute("INSERT INTO messages(id,session_id,run_id,ordinal,turn_ordinal,role,state,output,created_at_ms,steering) SELECT ?1,session_id,run_id,(SELECT MAX(ordinal)+1 FROM messages),1,'user','cancelled','never applied',1,1 FROM messages WHERE run_id=?2 AND steering=0 AND role='user'",params![MessageId::generate().unwrap().to_string(),first.to_string()])?;Ok(())
+    }).await.unwrap();
+    let second = submit_prompt(&harness, "second").await;
+    collect_until_run_finished(&mut harness.events, second).await;
+    let outcome = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::ForkSession {
+                session_id: harness.session_id,
+                turn: Some(2),
+            },
+        )
+        .await
+        .unwrap()
+        .outcome;
+    let CommandOutcome::SessionForked {
+        session_id: fork,
+        execution_root,
+        ..
+    } = outcome
+    else {
+        panic!("fork")
+    };
+    assert!(
+        !format!(
+            "{:?}",
+            harness.runtime.capture_side_context(fork).await.unwrap()
+        )
+        .contains("never applied")
+    );
+    let (workspace, _) = resolve_workspace(&harness.runtime, Path::new(&execution_root)).await;
+    let CommandOutcome::SessionCreated {
+        session_id: independent,
+    } = create_session(&harness.runtime, workspace, None)
+        .await
+        .outcome
+    else {
+        panic!("session")
+    };
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::DeleteSession { session_id: fork },
+        )
+        .await
+        .unwrap();
+    assert!(Path::new(&execution_root).exists());
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::DeleteSession {
+                session_id: independent,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!Path::new(&execution_root).exists());
+}
+
+#[tokio::test]
+async fn checkpoints_concurrent_retries_replay_receipts() {
+    let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![vec![]]).await;
+    let run = submit_prompt(&harness, "first").await;
+    collect_until_run_finished(&mut harness.events, run).await;
+    let id = CommandId::generate().unwrap();
+    let command = SessionCommand::ListCheckpoints {
+        session_id: harness.session_id,
+    };
+    let (a, b) = tokio::join!(
+        harness.runtime.command(id, command.clone()),
+        harness.runtime.command(id, command)
+    );
+    assert_eq!(a.unwrap(), b.unwrap());
+}
+
+#[tokio::test]
 async fn checkpoints_rewind_excludes_deliveries_and_compaction_and_blocks_new_prompts() {
     let mut harness = scripted_runs_harness(
         ApprovalMode::Full,

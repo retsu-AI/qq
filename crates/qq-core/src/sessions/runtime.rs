@@ -1213,6 +1213,22 @@ impl SessionRuntime {
 }
 
 impl SessionRuntimeInner {
+    pub(super) async fn configuration_workspace(
+        &self,
+        claimed: &ClaimedRun,
+    ) -> Result<String, SessionRuntimeError> {
+        let workspace = claimed.identity.workspace_id;
+        self.store
+            .call(store::Priority::AwaitControl, move |connection| {
+                Ok(connection.query_row(
+                    "SELECT path FROM workspaces WHERE id=?1",
+                    [workspace.to_string()],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+    }
+
     pub(super) async fn resolve_goal_policy(
         &self,
         workspace: &Path,

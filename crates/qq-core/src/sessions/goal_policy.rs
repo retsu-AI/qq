@@ -340,6 +340,7 @@ pub(super) async fn refresh(
                 + Duration::from_millis(goal.budget.deadline_ms.saturating_sub(now_ms()))
         })
     });
+    let workspace = inner.configuration_workspace(claimed).await?;
     let policy = tokio::select! {
         biased;
         _ = cancellation.changed() => return Ok(false),
@@ -349,7 +350,7 @@ pub(super) async fn refresh(
                 None => std::future::pending().await,
             }
         } => return Ok(true),
-        result = inner.resolve_goal_policy(Path::new(&claimed.workspace)) => result,
+        result = inner.resolve_goal_policy(Path::new(&workspace)) => result,
     };
     let identity = claimed.identity;
     let store_id = inner.store.store_id();

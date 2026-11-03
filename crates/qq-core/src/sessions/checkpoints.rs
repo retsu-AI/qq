@@ -36,7 +36,7 @@ pub(super) fn prompts(
     connection: &Connection,
     session: SessionId,
 ) -> Result<Vec<qq_protocol::ForkPrompt>, SessionRuntimeError> {
-    let mut statement = connection.prepare_cached("SELECT id,output,turn FROM (SELECT id,substr(output,1,2048) AS output,row_number() OVER (ORDER BY ordinal) AS turn FROM messages WHERE session_id=?1 AND role='user' AND steering=0) ORDER BY turn DESC LIMIT 200")?;
+    let mut statement = connection.prepare_cached("SELECT id,output,turn FROM (SELECT id,run_id,substr(output,1,2048) AS output,row_number() OVER (ORDER BY ordinal) AS turn FROM messages WHERE session_id=?1 AND role='user' AND steering=0) selected WHERE NOT EXISTS(SELECT 1 FROM rewound_turns z WHERE z.run_id=selected.run_id AND z.turn_ordinal=0) ORDER BY turn DESC LIMIT 200")?;
     let rows = statement
         .query_map([session.to_string()], |row| {
             Ok((
@@ -515,6 +515,7 @@ impl SessionRuntime {
                         let id=MessageId::generate().map_err(|_|SessionRuntimeError::Unavailable)?;
                         let role=match message.role {MessageRole::User=>"user",MessageRole::Assistant=>"assistant"};
                         connection.execute("INSERT INTO messages(id,session_id,run_id,ordinal,turn_ordinal,role,state,output,refusal,created_at_ms,steering,truncated) VALUES (?1,?2,?3,?4,?5,?6,'complete',?7,?8,?9,?10,?11)",params![id.to_string(),fork.to_string(),run.to_string(),message_ordinal,message.turn_ordinal,role,message.output,message.refusal,message.created_at_ms,message.steering,message.truncated])?;
+                        connection.execute("UPDATE messages SET state=(SELECT state FROM messages WHERE id=?1) WHERE id=?2",params![source_id,id.to_string()])?;
                         connection.execute("INSERT INTO message_attachments SELECT ?2,ordinal,?3,path,digest,blob_key,window_start,window_end,window_total FROM message_attachments WHERE message_id=?1",params![source_id,id.to_string(),fork.to_string()])?;
                         connection.execute("UPDATE messages SET input_json=(SELECT input_json FROM messages WHERE id=?1) WHERE id=?2",params![source_id,id.to_string()])?;
                         if message.role==MessageRole::User&&!message.steering {

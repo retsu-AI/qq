@@ -2485,6 +2485,9 @@ pub(super) fn record_checkpoint_command(
     outcome: CommandOutcome,
 ) -> Result<CommandReceipt, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    if let Some(receipt) = recorded_receipt(&transaction, command_id, command)? {
+        return Ok(receipt);
+    }
     let receipt = record_checkpoint_receipt(
         &transaction,
         store_id,
