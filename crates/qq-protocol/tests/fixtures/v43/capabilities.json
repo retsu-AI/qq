@@ -7,6 +7,9 @@
     "workspace_file"
   ],
   "commands": [
+    "acknowledge_check_interruption",
+    "set_goal",
+    "goal_control",
     "cancel_side_question",
     "submit_side_question",
     "resolve_workspace",

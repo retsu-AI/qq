@@ -2016,15 +2016,21 @@ async fn a_schema_65_store_with_goal_state_opens_and_replays_without_goals() {
                  ALTER TABLE runs ADD COLUMN goal_revision INTEGER;
                  ALTER TABLE runs ADD COLUMN goal_snapshot_json TEXT;
                  ALTER TABLE runs ADD COLUMN goal_initial_notice TEXT;
-                 ALTER TABLE runs ADD COLUMN goal_request_pending INTEGER NOT NULL DEFAULT 0;
-                 ALTER TABLE runs ADD COLUMN goal_helper_admitted INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE runs ADD COLUMN goal_request_pending INTEGER NOT NULL DEFAULT 0 CHECK(goal_request_pending IN (0,1));
+                 ALTER TABLE runs ADD COLUMN goal_helper_admitted INTEGER NOT NULL DEFAULT 0 CHECK(goal_helper_admitted IN (0,1));
                  ALTER TABLE runs ADD COLUMN goal_paid_owner_run_id TEXT REFERENCES runs(id);
-                 ALTER TABLE runs ADD COLUMN check_acknowledgment_pending INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE runs ADD COLUMN check_acknowledgment_pending INTEGER NOT NULL DEFAULT 0 CHECK(check_acknowledgment_pending IN (0,1) AND (check_acknowledgment_pending=0 OR kind='goal_check'));
                  CREATE INDEX runs_pending_check_ack ON runs(session_id) WHERE check_acknowledgment_pending=1;
                  ALTER TABLE session_compactions ADD COLUMN goal_notice TEXT;
-                 ALTER TABLE model_turns ADD COLUMN work_disposition TEXT;
+                 ALTER TABLE model_turns ADD COLUMN work_disposition TEXT CHECK(work_disposition IN ('committed','rejected_before_work','uncertain'));
                  INSERT INTO session_goals VALUES ('{goal_id}', '{session_id}', 1, 1, '{{}}');
                  UPDATE runs SET origin_json = '{goal_origin}', goal_id = '{goal_id}', goal_revision = 1;
+                 UPDATE runs SET kind = 'goal_check', check_acknowledgment_pending = 1;
+                 INSERT INTO runs(id, session_id, command_id, user_message_id, assistant_message_id,
+                     status, kind, created_at_ms, origin_json)
+                   VALUES ('{queued_check}', '{session_id}', '{queued_check}', '{queued_check}',
+                     '{queued_check}', 'queued', 'goal_check', 1, '{goal_origin}');
+                 UPDATE sessions SET queued_prompts = queued_prompts + 1, status = 'queued';
                  UPDATE model_turns SET goal_notice = '{notices}', work_disposition = 'committed';
                  UPDATE runs SET completion_json = json_set(completion_json, '$.event.origin', json('{goal_origin}'))
                   WHERE completion_json IS NOT NULL;
@@ -2038,6 +2044,7 @@ async fn a_schema_65_store_with_goal_state_opens_and_replays_without_goals() {
                  UPDATE metadata SET value = (SELECT COUNT(*) FROM commands) WHERE key = 'command_count';",
                 session_id = session_id,
                 command = "52".repeat(16),
+                queued_check = "53".repeat(16),
             ))
             .unwrap();
         let sequence: u64 = connection
@@ -2079,11 +2086,21 @@ async fn a_schema_65_store_with_goal_state_opens_and_replays_without_goals() {
         .await
         .unwrap();
     let focused = snapshot.focused.as_ref().unwrap();
-    assert_eq!(
-        focused.runs[0].origin,
-        Some(qq_protocol::RunOrigin::UserPrompt {}),
+    assert!(
+        focused
+            .runs
+            .iter()
+            .all(|run| run.origin == Some(qq_protocol::RunOrigin::UserPrompt {})),
         "a goal run is kept as an ordinary prompt run"
     );
+    let queued_check: RunId = "53".repeat(16).parse().unwrap();
+    let settled = focused
+        .runs
+        .iter()
+        .find(|run| run.id == queued_check)
+        .unwrap();
+    assert_eq!(settled.status, RunStatus::Interrupted);
+    assert_eq!(focused.summary.status, SessionStatus::Idle);
     let start = EventCursor {
         store_id,
         workspace_id,

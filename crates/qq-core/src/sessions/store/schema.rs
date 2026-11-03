@@ -1856,6 +1856,30 @@ fn retire_goals(connection: &Connection) -> Result<(), SessionRuntimeError> {
                 AND json_type({column},'$.event.run.goal') IS NOT NULL;"
         ))?;
     }
+    connection.execute_batch("DROP INDEX IF EXISTS runs_pending_check_ack;")?;
+    if has_column(connection, "runs", "check_acknowledgment_pending")? {
+        connection.execute_batch("ALTER TABLE runs DROP COLUMN check_acknowledgment_pending;")?;
+    }
+    connection.execute_batch(
+        "CREATE TEMP TABLE retired_checks AS
+           SELECT id, session_id FROM runs
+           WHERE kind='goal_check' AND status='queued' AND outcome_json IS NULL;
+         UPDATE sessions SET
+             queued_prompts=MAX(0,queued_prompts-(SELECT COUNT(*) FROM retired_checks c WHERE c.session_id=sessions.id)),
+             preparing_run_id=CASE WHEN preparing_run_id IN (SELECT id FROM retired_checks) THEN NULL ELSE preparing_run_id END
+           WHERE id IN (SELECT session_id FROM retired_checks);
+         UPDATE sessions SET status=CASE
+             WHEN active_run_id IS NOT NULL THEN 'running'
+             WHEN queued_prompts>0 THEN 'queued'
+             ELSE 'idle' END
+           WHERE id IN (SELECT session_id FROM retired_checks);
+         UPDATE messages SET state='interrupted'
+           WHERE state='queued' AND run_id IN (SELECT id FROM retired_checks);
+         UPDATE runs SET status='interrupted',outcome_json='{\"type\":\"interrupted\"}',
+             finished_at_ms=CAST(strftime('%s','now') AS INTEGER)*1000
+           WHERE id IN (SELECT id FROM retired_checks);
+         DROP TABLE retired_checks;",
+    )?;
     connection.execute_batch(&format!(
         "UPDATE runs SET origin_json={user_prompt}
           WHERE json_valid(origin_json) AND json_extract(origin_json,'$.type') IN ('goal','goal_check');
@@ -1863,7 +1887,6 @@ fn retire_goals(connection: &Connection) -> Result<(), SessionRuntimeError> {
          DELETE FROM commands WHERE json_valid(request_json)
            AND json_extract(request_json,'$.type') IN ('set_goal','goal_control','acknowledge_check_interruption');
          UPDATE metadata SET value=(SELECT COUNT(*) FROM commands) WHERE key='command_count';
-         DROP INDEX IF EXISTS runs_pending_check_ack;
          DROP INDEX IF EXISTS session_goals_live;
          DROP TABLE IF EXISTS session_goals;"
     ))?;
@@ -1875,7 +1898,6 @@ fn retire_goals(connection: &Connection) -> Result<(), SessionRuntimeError> {
         "goal_request_pending",
         "goal_helper_admitted",
         "goal_paid_owner_run_id",
-        "check_acknowledgment_pending",
     ] {
         if has_column(connection, "runs", column)? {
             connection.execute_batch(&format!("ALTER TABLE runs DROP COLUMN {column};"))?;

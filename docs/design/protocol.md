@@ -59,16 +59,10 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 43
+PROTOCOL_VERSION = 44
 ```
 
-Version 43 removes agent packs. `AgentProfileSummary.pack` is gone and a
-skill's `source` is never `pack:<id>/…`. Descriptor 17 drops the `pack`
-section and `protected_pack_roots`. Only descriptor 17 encodes; process
-evidence from an earlier descriptor is unresolved. A configuration that
-still declares `packs` fails to load naming the key.
-
-Version 43 also removes session goals, which versions 33, 34, 35 and 40
+Version 44 removes session goals, which versions 33, 34, 35 and 40
 added. Gone from the wire: the goal snapshot, budget, check and status types;
 `SessionSnapshot.goal`, `RunSnapshot.goal` and
 `WorkspaceSnapshot.check_interruption`; the `goal` and `goal_check` run
@@ -84,6 +78,12 @@ prompt runs, deletes goal commands, drops the `session_goals` table and the
 goal columns on runs, compactions and model turns, and renames
 `model_turns.goal_notice` to `boundary_notices`. The plan descriptor stays at
 17.
+
+Version 43 removes agent packs. `AgentProfileSummary.pack` is gone and a
+skill's `source` is never `pack:<id>/…`. Descriptor 17 drops the `pack`
+section and `protected_pack_roots`. Only descriptor 17 encodes; process
+evidence from an earlier descriptor is unresolved. A configuration that
+still declares `packs` fails to load naming the key.
 
 Version 42 adds `undo_workspace` (`POST /v1/workspaces/undo`) and its
 `workspace_undone` outcome, so any client can restore a run's snapshot through
@@ -151,7 +151,7 @@ its path onto the client machine. Listing neither registers a directory nor
 changes permissions.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v43/`; the `v42` directory (N−1) is
+`crates/qq-protocol/tests/fixtures/v44/`; the `v43` directory (N−1) is
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -647,12 +647,12 @@ optional-bodied:
 ```
 
 Response `ServerCapabilities` (abridged; see
-`crates/qq-protocol/tests/fixtures/v43/capabilities.json` for the full golden):
+`crates/qq-protocol/tests/fixtures/v44/capabilities.json` for the full golden):
 
 ```json
 {
   "version": 1,
-  "protocol_version": 43,
+  "protocol_version": 44,
   "server_version": "0.1.0",
   "input_parts": ["text", "workspace_file"],
   "commands": ["resolve_workspace", "create_session", "submit_prompt", "steer_run", "..."],
@@ -2163,7 +2163,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v43/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v44/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.

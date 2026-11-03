@@ -70,7 +70,7 @@ pub use workspaces::{
     MAX_WORKSPACE_PAGE, WorkspaceCatalog, WorkspaceCatalogCursor, WorkspaceCatalogRequest,
 };
 
-pub const PROTOCOL_VERSION: u16 = 43;
+pub const PROTOCOL_VERSION: u16 = 44;
 
 pub const SNAPSHOT_REQUIRED_SSE_EVENT: &str = "snapshot_required";
 

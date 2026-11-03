@@ -12,22 +12,22 @@ use wasm_bindgen_test::wasm_bindgen_test as test;
 use super::*;
 
 const EVENT_FIXTURES: [&str; 12] = [
-    include_str!("../../../qq-protocol/tests/fixtures/v42/event_prompt_queued.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v42/event_run_started.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v42/event_steering_queued.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v42/event_steering_applied.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v42/event_steering_superseded.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v42/event_run_interrupted.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v42/event_run_finished_failed.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v42/event_run_output_truncated.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v43/event_prompt_queued.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v43/event_run_started.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v43/event_steering_queued.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v43/event_steering_applied.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v43/event_steering_superseded.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v43/event_run_interrupted.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v43/event_run_finished_failed.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v43/event_run_output_truncated.json"),
     include_str!(
-        "../../../qq-protocol/tests/fixtures/v42/event_run_finished_output_truncated.json"
+        "../../../qq-protocol/tests/fixtures/v43/event_run_finished_output_truncated.json"
     ),
     include_str!(
-        "../../../qq-protocol/tests/fixtures/v42/event_assistant_message_started_truncated.json"
+        "../../../qq-protocol/tests/fixtures/v43/event_assistant_message_started_truncated.json"
     ),
-    include_str!("../../../qq-protocol/tests/fixtures/v42/event_run_audit_started.json"),
-    include_str!("../../../qq-protocol/tests/fixtures/v42/event_run_audit_completed.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v43/event_run_audit_started.json"),
+    include_str!("../../../qq-protocol/tests/fixtures/v43/event_run_audit_completed.json"),
 ];
 
 const REPLAY_GOLDEN: &str = include_str!("../../tests/fixtures/state_replay_v17.json");
@@ -1578,7 +1578,7 @@ fn the_output_truncation_notice_names_the_cap_when_capabilities_are_known() {
         }]
     );
     let mut capabilities: qq_protocol::ServerCapabilities = serde_json::from_str(include_str!(
-        "../../../qq-protocol/tests/fixtures/v43/capabilities.json"
+        "../../../qq-protocol/tests/fixtures/v44/capabilities.json"
     ))
     .expect("capabilities fixture decodes");
     capabilities.limits.max_output_continuations = 4;

@@ -188,7 +188,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 43);
+    assert_eq!(PROTOCOL_VERSION, 44);
     let catalog_cursor = qq_protocol::WorkspaceCatalogCursor {
         store_id: StoreId::from_bytes([1; 16]),
         workspace_id: WorkspaceId::from_bytes([2; 16]),
@@ -1251,11 +1251,7 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
 
 #[test]
 fn historical_fixtures_still_decode() {
-    const REMOVED_IN_43: [&str; 3] = [
-        "\"acknowledge_check_interruption\"",
-        "\"set_goal\"",
-        "\"goal_control\"",
-    ];
+    const REMOVED_IN_44: [&str; 2] = ["goal", "check_interruption"];
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     for version in retained_versions(&root) {
         let directory = fixture_dir(version);
@@ -1272,10 +1268,39 @@ fn historical_fixtures_still_decode() {
         for path in entries {
             let name = path.file_stem().unwrap().to_str().unwrap();
             let stored = fs::read_to_string(&path).unwrap();
-            if REMOVED_IN_43.iter().any(|removed| stored.contains(removed)) {
+            if REMOVED_IN_44.iter().any(|removed| stored.contains(removed)) {
+                if name.starts_with("event_")
+                    && let Ok(envelope) = serde_json::from_str::<SessionEventEnvelope>(&stored)
+                {
+                    assert_eq!(
+                        envelope.event,
+                        SessionEvent::Retired,
+                        "{}: a recorded goal event replays as retired",
+                        path.display()
+                    );
+                    continue;
+                }
+                let decodes = match name {
+                    "capabilities" => serde_json::from_str::<ServerCapabilities>(&stored).is_ok(),
+                    _ if name.starts_with("command_") => {
+                        serde_json::from_str::<CommandRequest>(&stored).is_ok()
+                    }
+                    _ if name.starts_with("receipt_") => {
+                        serde_json::from_str::<CommandReceipt>(&stored).is_ok()
+                    }
+                    _ if name.starts_with("outcome_") => {
+                        serde_json::from_str::<RunOutcome>(&stored).is_ok()
+                    }
+                    _ if name.starts_with("snapshot_") => {
+                        serde_json::from_str::<RunSnapshot>(&stored).is_ok()
+                            || serde_json::from_str::<qq_protocol::WorkspaceSnapshot>(&stored)
+                                .is_ok()
+                    }
+                    _ => serde_json::from_str::<SessionEventEnvelope>(&stored).is_ok(),
+                };
                 assert!(
-                    serde_json::from_str::<ServerCapabilities>(&stored).is_err(),
-                    "{}: a removed goal command kind must not decode",
+                    !decodes,
+                    "{}: goal vocabulary removed in 44 must not decode",
                     path.display()
                 );
                 continue;

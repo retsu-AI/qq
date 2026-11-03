@@ -117,7 +117,7 @@ provider request. Neither is the explicit `none` level (which disables reasoning
 only on models that advertise it). Anthropic uses
 `output_config.effort`, never an OpenAI reasoning field.
 
-The current contracts are protocol 43, capabilities 1, plan descriptor 17,
+The current contracts are protocol 44, capabilities 1, plan descriptor 17,
 and session-store schema 66. Upgrade clients and restart long-running servers
 together: clients refuse a different server protocol. Store migration is
 forward-only; older binaries cannot open upgraded stores. Before upgrading,

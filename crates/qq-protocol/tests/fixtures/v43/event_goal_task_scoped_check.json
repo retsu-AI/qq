@@ -1,0 +1,56 @@
+{
+  "cursor": {
+    "store_id": "01010101010101010101010101010101",
+    "workspace_id": "02020202020202020202020202020202",
+    "sequence": 80
+  },
+  "session_id": "03030303030303030303030303030303",
+  "caused_by": "07070707070707070707070707070707",
+  "occurred_at_ms": 1700000000000,
+  "event": {
+    "type": "goal_updated",
+    "goal": {
+      "session_id": "03030303030303030303030303030303",
+      "goal_id": "61616161616161616161616161616161",
+      "revision": 3,
+      "objective": "Implement billing migration",
+      "check": {
+        "command": "cargo test -p billing",
+        "timeout_ms": 1000
+      },
+      "check_authorization": "task_scoped",
+      "budget": {
+        "max_goal_runs": 200,
+        "deadline_ms": 1800000000000,
+        "per_run": {
+          "max_model_turns": 256
+        }
+      },
+      "checklist": [],
+      "notes": "",
+      "status": {
+        "type": "active"
+      },
+      "counters": {
+        "runs": 0,
+        "usage": {
+          "input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 0
+        },
+        "estimated_cost_usd_nanos": 0,
+        "audits": 0,
+        "check_failures": 0,
+        "no_progress_streak": 0,
+        "failure_streak": 0
+      },
+      "next_run_at_ms": 1700000000000,
+      "wait": null,
+      "audit_pending": false,
+      "audit_revision": null,
+      "pending_run_id": null,
+      "check_output": null
+    }
+  }
+}

@@ -1,15 +1,12 @@
 {
   "version": 1,
-  "protocol_version": 42,
+  "protocol_version": 44,
   "server_version": "0.1.0",
   "input_parts": [
     "text",
     "workspace_file"
   ],
   "commands": [
-    "acknowledge_check_interruption",
-    "set_goal",
-    "goal_control",
     "cancel_side_question",
     "submit_side_question",
     "resolve_workspace",
@@ -84,11 +81,7 @@
     {
       "id": "review",
       "model": "anthropic/claude-x",
-      "approval_mode": "read_only",
-      "pack": {
-        "id": "review-kit",
-        "version": "1.2.0"
-      }
+      "approval_mode": "read_only"
     }
   ],
   "tools": {
@@ -131,7 +124,7 @@
         {
           "name": "audit",
           "kind": "skill",
-          "source": "pack:review-kit/skills/audit/SKILL.md",
+          "source": ".qq/skills/audit/SKILL.md",
           "disclosed": false
         }
       ]
