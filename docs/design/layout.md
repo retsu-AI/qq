@@ -12,7 +12,7 @@ each pane is described in [`transcript.md`](./transcript.md) and
 1. **Width selects layout, never features.** Every action is reachable at
    every size. A wider terminal shows more at once; it never unlocks anything.
 2. **Height selects density, never structure.** A short terminal gives the
-   composer fewer rows and collapses detail budgets; it does not remove panes.
+   composer and the dock panel fewer rows; it does not remove panes.
 3. **The screen is the application.** Panes tile the whole terminal at every
    size; nothing is centred or capped at a reading measure. Transcript content
    fills its pane less a 2-column margin on each side (`layout::MARGIN`), and
@@ -83,7 +83,10 @@ The frame builds the dock first, at the transcript pane's width less the
 margin on each side, and passes its row count to `compute_layout` as
 `chrome_rows`. The composer's row cap (`max_composer_rows`: 4 at Compact or
 under 30 rows, else 8) applies before the panel is sized, and a panel takes
-at most half of what the rule, composer, drafts and status line leave. At
+at most half of what the rule, composer, drafts and status line leave. The
+switcher also takes the rule (`○ switch ─── N sessions`, or `M of N` while
+filtering) and the composer row, where its query is typed; the draft is
+kept and comes back when it closes. At
 80 × 24 a full compact composer leaves 18 body rows (24 − rule − 4 −
 status). The transcript itself opens with one blank padding row
 ([`transcript.md`](./transcript.md) § Spacing).

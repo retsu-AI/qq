@@ -9,10 +9,9 @@
 
 
 
-  ─────────────────────────────────────────────────── 7 sessions  ◐ 2  ◇ 2  ^G
-   SWITCH type to search, Enter opens, Tab agents, Ctrl-A all agents, Ctrl-D…
-    search: all sessions
 
+
+  ○ switch ──────────────────────────────────────────────────────── 7 sessions
       ● Refactor            now
     ▎ ○ Session 0       ↳1  now   Drafted the checklist.
           Drafted the checklist.
@@ -20,5 +19,6 @@
       ◐ Survey callers      now   Found twelve call sites across three crates
       ● Migrate             now
       ○ Scratch             now
-  ┃ Ask QQ…
+      ○ Notes               now
+  ┃ type to search sessions…
     enter open   tab agents   ^A all agents   ^D delete   esc back

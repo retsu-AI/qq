@@ -8,10 +8,14 @@ use crate::{
     picker::{Picker, PickerItem},
 };
 
-struct PickerChrome<'a> {
+struct PickerHeader<'a> {
     title: &'a str,
     hint: &'a str,
     placeholder: &'a str,
+}
+
+struct PickerChrome<'a> {
+    header: Option<PickerHeader<'a>>,
     question: Option<Line>,
     empty: &'a str,
     windowed: bool,
@@ -25,23 +29,29 @@ fn picker_frame<T: PickerItem>(
     mut row: impl FnMut(&T, bool, &mut Vec<Line>),
 ) -> Vec<Line> {
     let PickerChrome {
-        title,
-        hint,
-        placeholder,
+        header,
         question,
         empty,
         windowed,
     } = chrome;
-    let chrome_rows = 2 + usize::from(question.is_some());
     let mut lines = Vec::with_capacity(height);
-    if height > chrome_rows {
-        lines.push(section(title, hint));
+    let header_rows = if header.is_some() { 2 } else { 0 };
+    let chrome_rows = header_rows + usize::from(question.is_some());
+    if let Some(PickerHeader {
+        title,
+        hint,
+        placeholder,
+    }) = header
+    {
+        if height > chrome_rows {
+            lines.push(section(title, hint));
+        }
+        lines.push(search_line(&picker.query, placeholder));
     }
-    lines.push(search_line(&picker.query, placeholder));
     if let Some(question) = question {
         lines.push(truncate_line(question, width));
     }
-    if height > chrome_rows + PICKER_SPACER_MIN_RESULTS {
+    if header_rows > 0 && height > chrome_rows + PICKER_SPACER_MIN_RESULTS {
         lines.push(Line::default());
     }
     if picker.filtered().len() == 0 {
@@ -124,10 +134,7 @@ fn last_line(text: &str) -> &str {
 
 pub(super) fn session_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(Overlay::Sessions {
-        picker,
-        scope,
-        confirm,
-        ..
+        picker, confirm, ..
     }) = &app.overlay
     else {
         return fit_height(Vec::new(), height);
@@ -164,13 +171,7 @@ pub(super) fn session_picker(app: &App, width: usize, height: usize) -> Vec<Line
     picker_frame(
         picker,
         PickerChrome {
-            title: if scope.is_some() { "AGENTS" } else { "SWITCH" },
-            hint: if confirm.is_some() {
-                "y confirms, n or Esc cancels"
-            } else {
-                "type to search, Enter opens, Tab agents, Ctrl-A all agents, Ctrl-D deletes, Esc closes"
-            },
-            placeholder: "all sessions",
+            header: None,
             question,
             empty: &empty,
             windowed: true,
@@ -231,6 +232,58 @@ pub(super) fn session_picker(app: &App, width: usize, height: usize) -> Vec<Line
     )
 }
 
+pub(super) fn switcher_rule(app: &App, width: usize) -> Option<Line> {
+    let Some(Overlay::Sessions { picker, scope, .. }) = &app.overlay else {
+        return None;
+    };
+    let mut left = Line::styled("○ ", faint());
+    left.push(
+        if scope.is_some() {
+            "agents "
+        } else {
+            "switch "
+        },
+        normal(),
+    );
+    let total = picker.items().len();
+    let shown = picker.filtered().len();
+    let count = if picker.query.is_empty() {
+        let agents = scope.is_some();
+        let listed = picker
+            .items()
+            .iter()
+            .filter(|row| row.is_agent() == agents)
+            .count();
+        if agents {
+            count_noun(listed, "agent", "agents")
+        } else {
+            count_noun(listed, "session", "sessions")
+        }
+    } else {
+        format!("{shown} of {total}")
+    };
+    let right = format!(" {count}");
+    let mut rule = truncate_line(left, width.saturating_sub(text_width(&right) + 1));
+    let fill = width.saturating_sub(rule.width() + text_width(&right));
+    rule.push("─".repeat(fill), faint());
+    rule.push(right, faint());
+    Some(truncate_line(rule, width))
+}
+
+pub(super) fn switcher_query(app: &App, width: usize) -> Option<(Line, usize)> {
+    let Some(Overlay::Sessions { picker, .. }) = &app.overlay else {
+        return None;
+    };
+    let mut line = Line::styled("┃ ", accent());
+    if picker.query.is_empty() {
+        line.push("type to search sessions…", faint());
+        return Some((truncate_line(line, width), 2));
+    }
+    line.push(picker.query.clone(), normal());
+    let column = (2 + text_width(&picker.query)).min(width.saturating_sub(1));
+    Some((truncate_line(line, width), column))
+}
+
 pub(super) fn model_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(Overlay::Models(picker)) = &app.overlay else {
         return fit_height(Vec::new(), height);
@@ -240,15 +293,17 @@ pub(super) fn model_picker(app: &App, width: usize, height: usize) -> Vec<Line> 
     picker_frame(
         picker,
         PickerChrome {
-            title: "MODELS",
-            hint: if unauthenticated_only {
-                "no provider has a credential yet; Esc closes"
-            } else if app.focused().is_some() {
-                "type to search, Enter sets the session model, Ctrl-N creates a session, Esc closes"
-            } else {
-                "type to search, Up/Down select, Enter creates session, Esc closes"
-            },
-            placeholder: "all models",
+            header: Some(PickerHeader {
+                title: "MODELS",
+                hint: if unauthenticated_only {
+                    "no provider has a credential yet; Esc closes"
+                } else if app.focused().is_some() {
+                    "type to search, Enter sets the session model, Ctrl-N creates a session, Esc closes"
+                } else {
+                    "type to search, Up/Down select, Enter creates session, Esc closes"
+                },
+                placeholder: "all models",
+            }),
             question: None,
             empty: "  No matching models.",
             windowed: false,
@@ -295,13 +350,15 @@ pub(super) fn profile_picker(app: &App, width: usize, height: usize) -> Vec<Line
     picker_frame(
         picker,
         PickerChrome {
-            title: "PROFILES",
-            hint: if focused.is_some() {
-                "type to search, Enter sets the session profile, Esc closes"
-            } else {
-                "type to search, Enter sets the profile for new sessions, Esc closes"
-            },
-            placeholder: "all profiles",
+            header: Some(PickerHeader {
+                title: "PROFILES",
+                hint: if focused.is_some() {
+                    "type to search, Enter sets the session profile, Esc closes"
+                } else {
+                    "type to search, Enter sets the profile for new sessions, Esc closes"
+                },
+                placeholder: "all profiles",
+            }),
             question: None,
             empty: "  No matching profiles.",
             windowed: false,
@@ -340,13 +397,15 @@ pub(super) fn approval_mode_picker(app: &App, width: usize, height: usize) -> Ve
     picker_frame(
         picker,
         PickerChrome {
-            title: "APPROVAL MODE",
-            hint: if app.focused().is_some() {
-                "type to search, Enter sets the session's mode, Esc closes"
-            } else {
-                "type to search, Enter sets the mode for new sessions, Esc closes"
-            },
-            placeholder: "all modes",
+            header: Some(PickerHeader {
+                title: "APPROVAL MODE",
+                hint: if app.focused().is_some() {
+                    "type to search, Enter sets the session's mode, Esc closes"
+                } else {
+                    "type to search, Enter sets the mode for new sessions, Esc closes"
+                },
+                placeholder: "all modes",
+            }),
             question: None,
             empty: "  No matching modes.",
             windowed: false,
@@ -377,26 +436,28 @@ pub(super) fn effort_picker(app: &App, width: usize, height: usize) -> Vec<Line>
     picker_frame(
         picker,
         PickerChrome {
-            title: "EFFORT",
-            hint: match (app.focused().is_some(), advertised) {
-                (true, true) => {
-                    "levels this model advertises; Enter sets the session's effort, Esc closes"
-                }
-                (true, false) => {
-                    "model advertises no ladder, showing every level; Enter sets the session's effort, Esc closes"
-                }
-                (false, true) => {
-                    "levels the default model advertises; Enter sets the effort for new sessions, Esc closes"
-                }
-                (false, false) => {
-                    "type to search, Enter sets the effort for new sessions, Esc closes"
-                }
-            },
-            placeholder: if advertised {
-                "advertised effort levels"
-            } else {
-                "all effort levels"
-            },
+            header: Some(PickerHeader {
+                title: "EFFORT",
+                hint: match (app.focused().is_some(), advertised) {
+                    (true, true) => {
+                        "levels this model advertises; Enter sets the session's effort, Esc closes"
+                    }
+                    (true, false) => {
+                        "model advertises no ladder, showing every level; Enter sets the session's effort, Esc closes"
+                    }
+                    (false, true) => {
+                        "levels the default model advertises; Enter sets the effort for new sessions, Esc closes"
+                    }
+                    (false, false) => {
+                        "type to search, Enter sets the effort for new sessions, Esc closes"
+                    }
+                },
+                placeholder: if advertised {
+                    "advertised effort levels"
+                } else {
+                    "all effort levels"
+                },
+            }),
             question: None,
             empty: "  No matching effort levels.",
             windowed: false,
@@ -431,9 +492,11 @@ pub(super) fn skill_picker(app: &App, width: usize, height: usize) -> Vec<Line> 
     picker_frame(
         picker,
         PickerChrome {
-            title: "SKILLS",
-            hint: "type to search, Enter inserts a command or runs a skill, Esc closes",
-            placeholder: "all commands and skills",
+            header: Some(PickerHeader {
+                title: "SKILLS",
+                hint: "type to search, Enter inserts a command or runs a skill, Esc closes",
+                placeholder: "all commands and skills",
+            }),
             question: host_warning,
             empty: "  No matching commands or skills.",
             windowed: false,
@@ -477,9 +540,11 @@ pub(super) fn theme_picker(app: &App, width: usize, height: usize) -> Vec<Line> 
     picker_frame(
         picker,
         PickerChrome {
-            title: "THEMES",
-            hint: "Up/Down preview live, Enter keeps, Esc restores the previous theme",
-            placeholder: "all themes",
+            header: Some(PickerHeader {
+                title: "THEMES",
+                hint: "Up/Down preview live, Enter keeps, Esc restores the previous theme",
+                placeholder: "all themes",
+            }),
             question: None,
             empty: "  No matching themes.",
             windowed: false,
@@ -522,13 +587,15 @@ pub(super) fn command_picker(app: &App, width: usize, height: usize) -> Vec<Line
     picker_frame(
         picker,
         PickerChrome {
-            title: if help { "HELP" } else { "COMMANDS" },
-            hint: if help {
-                "every key and command; type to filter, Enter runs, Esc closes"
-            } else {
-                "type to search, Enter runs the command, Esc closes"
-            },
-            placeholder: "all commands",
+            header: Some(PickerHeader {
+                title: if help { "HELP" } else { "COMMANDS" },
+                hint: if help {
+                    "every key and command; type to filter, Enter runs, Esc closes"
+                } else {
+                    "type to search, Enter runs the command, Esc closes"
+                },
+                placeholder: "all commands",
+            }),
             question: None,
             empty: "  No matching commands.",
             windowed: false,
@@ -1029,9 +1096,11 @@ pub(super) fn history_picker(app: &App, width: usize, height: usize) -> Vec<Line
     picker_frame(
         picker,
         PickerChrome {
-            title: "HISTORY",
-            hint: "type to search, Enter edits the prompt, Esc closes",
-            placeholder: "recent prompts",
+            header: Some(PickerHeader {
+                title: "HISTORY",
+                hint: "type to search, Enter edits the prompt, Esc closes",
+                placeholder: "recent prompts",
+            }),
             question: None,
             empty: "  No matching prompts.",
             windowed: false,

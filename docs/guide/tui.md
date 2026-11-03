@@ -72,6 +72,8 @@ bottom.
 - **Panel**: approvals, questions, `/goal`, and every picker (`Ctrl-T`,
   `/models`, `/theme`, …) open here, between the rule and the composer, and
   take at most half the screen. `Esc` closes them with your draft intact.
+  The switcher (`Ctrl-T`) takes the rule and the composer too: the rule
+  reads `○ switch ─── 8 sessions` and you type the search on the `┃` rail.
 - **Composer**: type and press `Enter`. `Shift-Enter` or `Alt-Enter` inserts
   a newline. `Alt-E` or `/editor` opens the draft in `$EDITOR`. The `┃`
   rail is dim for a read-only session, the accent color for `ask` and
@@ -390,8 +392,8 @@ folded or not) and reasoning, ignoring case; the row shows `2 of 5` or `no
 matches`. The nearest match at or below the top of the view is chosen first.
 `Enter` or `Down` moves to the next match and `Shift-Enter` or `Up` to the
 previous one, wrapping at either end. A match inside a folded tool call or
-reasoning opens it and scrolls it into view, with a long result windowed at
-the matching row; moving to another match folds it again. `Esc` closes find
+reasoning opens it in place and scrolls the matching row into view; moving
+to another match folds it again. `Esc` closes find
 and leaves the current match open. While find is open, the wheel,
 `PageUp` / `PageDown` and `End` still scroll, and `Ctrl-C` closes find
 rather than copying the match.
