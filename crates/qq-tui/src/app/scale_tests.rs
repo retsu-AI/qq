@@ -50,7 +50,6 @@ fn app(answers: u8) -> App {
         ..fixtures::workspace_snapshot()
     }));
     app.layout.rail = crate::view::PanePref::Hidden;
-    app.layout.inspector = crate::view::PanePref::Hidden;
     app.sessions
         .get_mut(&fixtures::SESSION)
         .unwrap()
@@ -237,7 +236,7 @@ fn find_ignores_case_beyond_ascii_and_clears_the_cursor_without_a_match() {
 }
 
 #[test]
-fn paging_past_an_expanded_calls_window_edge_never_scrolls_the_transcript() {
+fn page_keys_scroll_the_transcript_even_with_an_open_call_selected() {
     let mut app = app(30);
     let mut renderer = FrameRenderer::default();
     draw(&mut app, &mut renderer);
@@ -246,18 +245,13 @@ fn paging_past_an_expanded_calls_window_edge_never_scrolls_the_transcript() {
     app.handle_key(key(KeyCode::Enter));
     draw(&mut app, &mut renderer);
     let before = app.viewport().offset();
-    for _ in 0..8 {
-        app.handle_key(key(KeyCode::PageUp));
-        draw(&mut app, &mut renderer);
-    }
-    assert_eq!(app.tool_scroll.get(&call), Some(&0));
-    assert_eq!(app.viewport().offset(), before);
-    for _ in 0..8 {
-        app.handle_key(key(KeyCode::PageDown));
-        draw(&mut app, &mut renderer);
-    }
-    assert_eq!(app.tool_scroll.get(&call), Some(&32));
-    assert_eq!(app.viewport().offset(), before);
+    app.handle_key(key(KeyCode::PageUp));
+    draw(&mut app, &mut renderer);
+    let up = app.viewport().offset();
+    assert!(up > before, "PageUp scrolls the transcript");
+    app.handle_key(key(KeyCode::PageDown));
+    draw(&mut app, &mut renderer);
+    assert!(app.viewport().offset() < up, "PageDown scrolls it back");
 }
 
 #[test]
@@ -268,13 +262,11 @@ fn find_shows_the_match_inside_a_call_the_user_already_expanded_and_leaves_it_op
     let call = ToolCallId::from_bytes([3; 16]);
     app.block_cursor = Some(Block::Tool(call));
     app.handle_key(key(KeyCode::Enter));
-    let text = draw(&mut app, &mut renderer).join("\n");
-    assert!(text.contains("33–40 of 40"), "opens at the tail: {text}");
+    draw(&mut app, &mut renderer);
     app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
     type_text(&mut app, "needle-in-tool");
     let text = draw(&mut app, &mut renderer).join("\n");
     assert!(text.contains("needle-in-tool-output"), "{text}");
-    assert!(text.contains("17–24 of 40"), "{text}");
     app.handle_key(key(KeyCode::Esc));
     assert!(
         app.expanded_tool_calls.contains(&call),
@@ -391,7 +383,7 @@ fn find_reveals_a_match_in_running_output_above_its_live_tail() {
     type_text(&mut app, "live-needle");
     let text = draw(&mut app, &mut renderer).join("\n");
     assert!(text.contains("│ live-needle"), "{text}");
-    assert!(text.contains("of 26 · PgUp PgDn"), "{text}");
+    assert!(!text.contains("PgUp"), "{text}");
 }
 
 #[test]
@@ -448,32 +440,6 @@ fn output_that_lands_with_the_run_finishing_still_counts_as_new() {
 }
 
 #[test]
-fn inspector_pages_step_by_the_rows_it_can_show() {
-    let mut app = app(1);
-    app.layout.inspector = crate::view::PanePref::Shown;
-    let call = ToolCallId::from_bytes([3; 16]);
-    let mut renderer = FrameRenderer::default();
-    renderer.frame_and_commit(&mut app, 200, 12);
-    app.block_cursor = Some(Block::Tool(call));
-    app.handle_key(key(KeyCode::Enter));
-    let frame = renderer.frame_and_commit(&mut app, 200, 12);
-    let text: String = frame
-        .iter()
-        .flat_map(|line| &line.spans)
-        .map(|span| span.text.as_str())
-        .collect();
-    let window = app.tool_window;
-    assert!(window < 8, "a short inspector shrinks the window: {window}");
-    assert!(
-        text.contains(&format!("{}–40 of 40", 41 - window)),
-        "{text}"
-    );
-    assert!(!text.contains("rows more"), "nothing is clipped: {text}");
-    app.handle_key(key(KeyCode::PageUp));
-    assert_eq!(app.tool_scroll.get(&call), Some(&(40 - 2 * window)));
-}
-
-#[test]
 fn find_reveals_an_early_error_in_a_failed_command() {
     let mut app = app(1);
     let session = app.sessions.get_mut(&fixtures::SESSION).unwrap();
@@ -491,7 +457,6 @@ fn find_reveals_an_early_error_in_a_failed_command() {
     type_text(&mut app, "E0308");
     let text = draw(&mut app, &mut renderer).join("\n");
     assert!(text.contains("│ error[E0308]: mismatched types"), "{text}");
-    assert!(text.contains("1–8 of 21"), "{text}");
 }
 
 #[test]
@@ -586,46 +551,32 @@ fn end_with_a_draft_moves_the_caret_and_ctrl_end_still_returns_to_the_tail() {
 }
 
 #[test]
-fn an_expanded_call_scrolls_inside_its_own_block_and_keeps_the_answer_on_screen() {
+fn an_open_call_shows_its_whole_output_and_folding_it_returns_the_answer() {
     let mut app = app(1);
     let mut renderer = FrameRenderer::default();
     draw(&mut app, &mut renderer);
     let call = ToolCallId::from_bytes([3; 16]);
     app.block_cursor = Some(Block::Tool(call));
     app.handle_key(key(KeyCode::Enter));
-    let rows = draw(&mut app, &mut renderer);
-    let text = rows.join("\n");
-    assert!(text.contains("33–40 of 40 · PgUp PgDn"), "{text}");
-    assert!(
-        text.contains("out 19") && !text.contains("out 11\n"),
-        "{text}"
-    );
-    assert!(
-        text.contains("answer 0 paragraph"),
-        "the answer stays: {text}"
-    );
-
-    app.handle_key(key(KeyCode::PageUp));
-    let rows = draw(&mut app, &mut renderer);
-    let text = rows.join("\n");
-    assert!(text.contains("25–32 of 40"), "{text}");
-    assert_eq!(app.viewport().offset(), 0, "the transcript did not scroll");
-    assert!(text.contains("answer 0 paragraph"), "{text}");
-
-    for _ in 0..5 {
-        app.handle_key(key(KeyCode::PageUp));
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..8 {
+        for row in draw(&mut app, &mut renderer) {
+            if let Some(line) = row.trim_start().strip_prefix("│ out ") {
+                seen.insert(line.to_owned());
+            }
+        }
+        app.handle_key(key(KeyCode::PageDown));
     }
-    let text = draw(&mut app, &mut renderer).join("\n");
-    assert!(text.contains("1–8 of 40"), "clamped at the top: {text}");
     assert_eq!(
-        app.viewport().offset(),
-        0,
-        "paging past the window's top does not scroll the transcript"
+        seen.len(),
+        20,
+        "every output row is reachable by scrolling: {seen:?}"
     );
+    assert!(!draw(&mut app, &mut renderer).join("\n").contains("PgUp"));
 
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
     app.handle_key(key(KeyCode::Enter));
-    app.handle_key(key(KeyCode::PageUp));
     let text = draw(&mut app, &mut renderer).join("\n");
-    assert!(!text.contains(" of 40"), "collapsed again: {text}");
-    assert!(app.tool_scroll.is_empty(), "the window position is dropped");
+    assert!(!text.contains("│ out 05"), "folded again: {text}");
+    assert!(text.contains("answer 0 paragraph"), "{text}");
 }

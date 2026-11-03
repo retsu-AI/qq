@@ -15,6 +15,7 @@ pub(crate) struct PaneUpdate {
     pub viewport: Viewport,
     pub live_message_ranges: HashMap<MessageId, Range<usize>>,
     pub blocks: Vec<(Block, Range<usize>)>,
+    pub hits: Vec<(usize, Hit)>,
 }
 
 pub(super) struct LiveMarkdown {
@@ -294,6 +295,7 @@ pub(super) struct VirtualBody<'a> {
     preserve_tail_anchor: bool,
     live_message_ranges: Vec<(MessageId, Range<usize>)>,
     blocks: Vec<(Block, Range<usize>)>,
+    hits: Vec<(usize, Hit)>,
 }
 
 impl<'a> VirtualBody<'a> {
@@ -375,6 +377,10 @@ impl<'a> VirtualBody<'a> {
                 range.end += row_offset;
             }
         }
+        for (row, _) in &mut other.hits {
+            *row += row_offset;
+        }
+        self.hits.append(&mut other.hits);
         if self.blocks.is_empty() {
             std::mem::swap(&mut self.blocks, &mut other.blocks);
         }
@@ -396,6 +402,9 @@ impl<'a> VirtualBody<'a> {
         {
             range.start += 1;
             range.end += 1;
+        }
+        for (row, _) in &mut self.hits {
+            *row += 1;
         }
         self.rows += 1;
         self.segments
@@ -510,9 +519,8 @@ impl TranscriptCache {
         pane: &TranscriptPane,
         width: usize,
         height: usize,
-        inline_detail: bool,
     ) -> (Vec<Line>, PaneUpdate) {
-        let view = shown_view(app, pane, inline_detail);
+        let view = shown_view(app, pane);
         let session_id = view.session();
         let mut viewport = pane.viewport.clone();
         let workspace_rows = match view {
@@ -532,18 +540,12 @@ impl TranscriptCache {
                     viewport,
                     live_message_ranges: HashMap::new(),
                     blocks: Vec::new(),
+                    hits: Vec::new(),
                 },
             );
         }
         let content_width = width;
-        let mut body = self.threadline(
-            highlighter,
-            app,
-            session_id,
-            pane,
-            content_width,
-            inline_detail,
-        );
+        let mut body = self.threadline(highlighter, app, session_id, pane, content_width);
         body.pad_top();
         let counts_output = pane.output_arrived && !pane.relayout;
         viewport.note_layout(width, counts_output);
@@ -567,6 +569,7 @@ impl TranscriptCache {
         let live_message_ranges = body.live_message_ranges.iter().cloned().collect();
         let rows = body.viewport(app, height, offset);
         let blocks = std::mem::take(&mut body.blocks);
+        let hits = std::mem::take(&mut body.hits);
         drop(body);
         (
             fit_height(rows, height),
@@ -574,15 +577,9 @@ impl TranscriptCache {
                 viewport,
                 live_message_ranges,
                 blocks,
+                hits,
             },
         )
-    }
-
-    pub(super) fn tool_row(&self, call: &ToolCallSnapshot) -> Option<&ToolRow> {
-        self.tool_rows
-            .get(&call.id)
-            .filter(|(key, _)| *key == ToolRowKey::of(call))
-            .map(|(_, row)| row)
     }
 
     pub(super) fn recycle_blocks(&mut self, blocks: Vec<(Block, Range<usize>)>) {
@@ -848,9 +845,8 @@ impl TranscriptCache {
         session_id: Option<SessionId>,
         pane: &TranscriptPane,
         width: usize,
-        inline_detail: bool,
     ) -> VirtualBody<'a> {
-        let transcript = self.transcript(highlighter, app, session_id, pane, width, inline_detail);
+        let transcript = self.transcript(highlighter, app, session_id, pane, width);
         let mut body = VirtualBody::default();
         body.extend_virtual(transcript);
         if let Some(focused) = session_id {
@@ -869,7 +865,11 @@ impl TranscriptCache {
                 .collect();
             if !children.is_empty() {
                 body.push_line(Line::default());
-                body.extend_owned(agent_lanes(app, &children, width));
+                let (lanes, lane_hits) = agent_lanes(app, &children, width);
+                let start = body.rows;
+                body.hits
+                    .extend(lane_hits.into_iter().map(|(row, hit)| (row + start, hit)));
+                body.extend_owned(lanes);
             }
         }
         body
@@ -882,7 +882,6 @@ impl TranscriptCache {
         session_id: Option<SessionId>,
         pane: &TranscriptPane,
         width: usize,
-        inline_detail: bool,
     ) -> VirtualBody<'a> {
         let preserve_tail_anchor = self.prepare_markdown(highlighter, app, session_id, pane, width);
         let mut blocks = std::mem::take(&mut self.spare_blocks);
@@ -928,7 +927,7 @@ impl TranscriptCache {
                 muted(),
             ));
         }
-        self.append_messages(&mut body, app, session, messages, width, inline_detail);
+        self.append_messages(&mut body, app, session, messages, width);
         for prompt in app.pending_prompts(session_id) {
             if !body.is_empty() {
                 body.push_line(Line::default());
@@ -963,7 +962,6 @@ impl TranscriptCache {
         session: &SessionView,
         messages: &[MessageSnapshot],
         width: usize,
-        inline_detail: bool,
     ) {
         let indices = messages.len().saturating_sub(MAX_VISIBLE_MESSAGES)..messages.len();
         let tool_calls = session.tool_calls.as_deref().unwrap_or_default();
@@ -1000,18 +998,16 @@ impl TranscriptCache {
                     now_ms: app.now_ms,
                 },
                 expanded: app.expanded_tool_calls.contains(&call.id),
-                inline_detail,
                 inline_diff: newest_edit == Some(call.id),
                 fold: !app.receipts_open,
                 selected: app.block_cursor == Some(Block::Tool(call.id)),
-                scroll: app.tool_scroll.get(&call.id).copied(),
-                window: EXPANDED_WINDOW_ROWS,
+                live_truncated: session.live_tool_output_truncated.contains(&call.id),
             }
         };
         let turns = TurnIndex::build(messages, tool_calls);
         let render_tools = |body: &mut VirtualBody<'a>, calls: &[&ToolCallSnapshot]| {
             let start = body.rows;
-            let first = body.blocks.len();
+            let mut marks = ToolMarks::default();
             let lines = render_tool_blocks(
                 calls,
                 &session.live_tool_output,
@@ -1019,12 +1015,16 @@ impl TranscriptCache {
                 app.animation_tick,
                 width,
                 &|call_id, width| child_rows(app, call_id, width),
-                &mut body.blocks,
+                &mut marks,
             );
-            for (_, range) in &mut body.blocks[first..] {
-                range.start += start;
-                range.end += start;
-            }
+            body.blocks.extend(
+                marks
+                    .blocks
+                    .into_iter()
+                    .map(|(block, range)| (block, range.start + start..range.end + start)),
+            );
+            body.hits
+                .extend(marks.hits.into_iter().map(|(row, hit)| (row + start, hit)));
             body.extend_owned(lines);
         };
         for index in indices {
@@ -1283,17 +1283,13 @@ fn push_environment(body: &mut VirtualBody<'_>, app: &App, width: usize) {
     }
 }
 
-pub(super) fn shown_view(app: &App, pane: &TranscriptPane, inline_detail: bool) -> View {
+pub(super) fn shown_view(app: &App, pane: &TranscriptPane) -> View {
     match pane.view {
         View::Transcript(Some(session_id)) if !app.sessions.contains_key(&session_id) => {
             View::Transcript(None)
         }
         View::Goal(session_id) if !app.sessions.contains_key(&session_id) => View::Transcript(None),
         View::Goal(session_id) => View::Transcript(Some(session_id)),
-        View::Attention | View::Changes if !inline_detail => View::Transcript(
-            app.view_return()
-                .filter(|session_id| app.sessions.contains_key(session_id)),
-        ),
         view => view,
     }
 }
@@ -1338,7 +1334,11 @@ pub(super) fn banner(app: &App, width: usize) -> Vec<Line> {
 
 const FOLDED_LANES: usize = 6;
 
-pub(super) fn agent_lanes(app: &App, children: &[SessionId], width: usize) -> Vec<Line> {
+pub(super) fn agent_lanes(
+    app: &App,
+    children: &[SessionId],
+    width: usize,
+) -> (Vec<Line>, Vec<(usize, Hit)>) {
     let urgency = |id: &SessionId| match app.sessions[id].group() {
         qq_client::state::Group::NeedsYou => 0,
         qq_client::state::Group::Working => 1,
@@ -1376,6 +1376,7 @@ pub(super) fn agent_lanes(app: &App, children: &[SessionId], width: usize) -> Ve
         }
     }
     let mut rows = vec![truncate_line(header, width)];
+    let mut hits = Vec::new();
     let mut shown: Vec<SessionId> = children.to_vec();
     let folded = shown.len() > FOLDED_LANES;
     if folded {
@@ -1402,6 +1403,7 @@ pub(super) fn agent_lanes(app: &App, children: &[SessionId], width: usize) -> Ve
             let room = width.saturating_sub(line.width());
             line.push(fit_text(&activity, room), muted());
         }
+        hits.push((rows.len(), Hit::Session(*child)));
         rows.push(truncate_line(line, width));
     }
     if folded {
@@ -1412,7 +1414,7 @@ pub(super) fn agent_lanes(app: &App, children: &[SessionId], width: usize) -> Ve
         }
         rows.push(truncate_line(line, width));
     }
-    rows
+    (rows, hits)
 }
 
 pub(super) fn find_message(app: &App, message_id: MessageId) -> Option<&MessageSnapshot> {

@@ -237,8 +237,8 @@ cost grows with the bounded visible transcript (`MAX_VISIBLE_MESSAGES`), not
 the session. Stepping to a match sets `TranscriptPane::reveal` with the
 query; the next frame scrolls to the first row of the block that contains
 the query, or to the block when no single row does (`Viewport::reveal`). A match in a folded
-call or reasoning row opens it, positions an expanded result's window on the
-matched row, and folds it again when find moves to another match. While
+call or reasoning row opens it in place and folds it again when find moves
+to another match. While
 find is open, any event that changes the focused transcript marks the
 matches stale; after the next frame is laid out, `FrameRenderer::draw`
 re-runs the query (`App::refresh_find`) and lays the frame out once more, so the
@@ -395,7 +395,7 @@ the call's cached `ToolRow` (verb, subject, metric) plus the live clock:
 - A shell or exec call that exits non-zero is `✕` with `exit N`, and keeps
   a `faint` `│` tail of at most three rows (`MAX_TOOL_ERROR_ROWS`) under it.
 - **Turn receipt.** Receipts are closed by default; `Ctrl-O` opens or closes
-  them all. Once every call in a group has settled and at least three
+  them all, and clicking a receipt row opens them (`Hit::Receipt`). Once every call in a group has settled and at least three
   (`TOOL_FOLD_THRESHOLD`) are routine, those calls (completed, not failed, not edits, not
   expanded or selected) collapse into one `faint` row; edits and failures
   keep their own rows under it:
@@ -419,7 +419,11 @@ the call's cached `ToolRow` (verb, subject, metric) plus the live clock:
   ```
 
   The header tallies lanes by state (`◐ n  ◇ n  ● n  ✕ n`); each lane is
-  its agent's glyph, title, and live activity, or `done · N calls`.
+  its agent's glyph, title, and live activity, or `done · N calls`. A
+  lane waiting on approval names what it wants from the pending preview
+  (`wants to run rm -rf build`, `wants to edit src/lib.rs`, `wants to fetch
+  docs.rs`), falling back to the tool kind (`wants to run a command`) when
+  no preview has arrived. Clicking a lane focuses that agent.
 - **Error rows are graded, not uniform** (`ToolErrorKind`, tool-layer D9).
   The kind comes from the built-in tool name and result's leading error
   code (`ToolErrorKind::of`); external-tool errors remain failures regardless
@@ -448,36 +452,45 @@ terminal background. Fenced code in answers keeps its `surface` panel
 ```
   ● Read     crates/qq-tui/src/file_0.rs  20 lines
   │ fn main() {}
+  ⋮ (all 20 rows)
   │ fn main() {}
-  │ fn main() {}
-  │ fn main() {}
-  │ fn main() {}
-  │ fn main() {}
-  │ fn main() {}
-  │ fn main() {}
-  │ 1–8 of 20 · PgUp PgDn
+  ╰ Read crates/qq-tui/src/file_0.rs  · click or Enter folds
   ● Edited   crates/qq-tui/src/file_1.rs  6 B
   │ edited
   ● Ran      cargo test -p crate_2
   │ test result: ok. 12 passed
 ```
 
-- **Expanded results** (read heads, command tails, MCP `key: value`
-  argument rows, then the result) keep up to 64 KiB of output. Up to nine
-  rows show whole; longer results show a window of `EXPANDED_WINDOW_ROWS`
-  (8) rows in `muted` with a `faint` `1–8 of 40 · PgUp PgDn` position row.
-  A read
-  opens at its head and a command at its tail; while the call is under the
-  block cursor, `PageUp` / `PageDown` move the window by a page
-  (`App::tool_scroll`) and never fall through to the transcript, so a long
-  result never pushes the answer off screen. In the inspector the window
-  shrinks to the rows the pane can show (`workspace::inspector_window`), and
-  paging steps by that size (`App::tool_window`). An expanded running
-  command windows its whole buffered live output the same way. Argument rows and result are
-  separated by one blank rail row when both exist.
+- **Open in place.** A click on a tool row's header (`Hit::Tool`, laid out
+  per frame in `TranscriptPane::hits`), or `Enter` on the block cursor,
+  opens the call where it is: there is no side pane and no full-screen
+  view. The body (`tools::tool_open_lines`) is every row the client holds,
+  up to 64 KiB of the result, wrapped by character to the column rather
+  than cut, in `muted`; it scrolls with the transcript, and `PageUp` /
+  `PageDown` always move the transcript. Opening reveals the header
+  (`TranscriptPane::reveal`) so a click never scrolls the row away. A read
+  shows the file text, an edit its whole diff (`overlay::whole_diff_lines`,
+  continuation rows indented under the gutter), an MCP call every
+  `key: value` argument wrapped whole and then its result, and a command
+  its output, led by `$ command` only when the header row had to shorten
+  the command. Sections are separated by one blank rail row. Tabs become
+  four spaces and control characters are dropped.
+- **What was cut is named.** The server bounds a result before the client
+  sees it (shell 16 KiB, read 32 KiB, …) and marks the cut with a
+  `…[qq: N bytes / M lines omitted; …]…` line. Open, that line reads
+  `⋯ M lines omitted · stored for read_tool_result` (or `· not stored`) in
+  `faint` italic, so the gap is explicit rather than silent. A body past
+  64 KiB ends in `⋯ N KB more not drawn`. A running command's open body is
+  its live buffer; when that buffer has dropped its head
+  (`MAX_LIVE_TOOL_OUTPUT_BYTES`), a `⋯ earlier output scrolled away` row
+  leads it.
+- **Folding back.** A body of `OPEN_FOOTER_MIN_ROWS` (12) rows or more
+  ends in `╰ Verb subject · click or Enter folds`, which is also a
+  `Hit::Tool`, so a long output can be folded from its bottom. Clicks on
+  output rows stay text selection.
 - **Error tails** keep their `error` or `warning` foreground. Collapsed, a
-  failure shows its last three rows; expanded, its whole output goes into the
-  same scrollable window as any other result, in that color.
+  failure shows its last three rows; open, its whole output in that
+  color.
 - **Diffs** show line numbers in `faint` and `+`/`-` signs and text in the
   diff colors, the same rows the approval panel draws
   (`overlay::dock_diff_lines`).

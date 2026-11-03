@@ -132,14 +132,6 @@ impl BenchHarness {
         self.app.layout.rail = crate::view::PanePref::Hidden;
     }
 
-    pub fn show_inspector(&mut self) {
-        self.app.layout.inspector = crate::view::PanePref::Shown;
-    }
-
-    pub fn hide_inspector(&mut self) {
-        self.app.layout.inspector = crate::view::PanePref::Hidden;
-    }
-
     pub fn warm_session(&mut self, index: u8, messages: u8) {
         let body = SessionSnapshot {
             approval_previews: Vec::new(),

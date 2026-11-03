@@ -44,12 +44,20 @@ pub(crate) enum Block {
     Reasoning(RunId),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hit {
+    Tool(ToolCallId),
+    Receipt(RunId),
+    Session(SessionId),
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct TranscriptPane {
     pub view: View,
     pub viewport: Viewport,
     pub live_message_ranges: HashMap<MessageId, Range<usize>>,
     pub blocks: Vec<(Block, Range<usize>)>,
+    pub hits: Vec<(usize, Hit)>,
     pub reveal: Option<(Block, String)>,
     pub relayout: bool,
     pub output_arrived: bool,

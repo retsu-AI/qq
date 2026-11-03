@@ -28,7 +28,6 @@ pub(crate) enum Command {
     CursorDown,
     ToggleReasoning,
     ToggleSidebar,
-    ToggleInspector,
     ToggleMouse,
     ShowAttention,
     ShowChanges,
@@ -117,7 +116,7 @@ pub(crate) fn retired_replacement(name: &str) -> Option<&'static str> {
         .map(|(_, replacement)| *replacement)
 }
 
-pub(crate) const COMMANDS: [CommandSpec; 46] = [
+pub(crate) const COMMANDS: [CommandSpec; 45] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -346,13 +345,6 @@ pub(crate) const COMMANDS: [CommandSpec; 46] = [
         ["Alt-R"]
     ),
     spec!(ToggleSidebar, "toggle the rail", View, [], ["Ctrl-\\"]),
-    spec!(
-        ToggleInspector,
-        "toggle the inspector pane",
-        View,
-        [],
-        ["Alt-I"]
-    ),
     spec!(ToggleMouse, "toggle mouse capture", View, ["/mouse"], []),
     spec!(
         ShowAttention,

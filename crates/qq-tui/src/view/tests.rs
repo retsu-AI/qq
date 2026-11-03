@@ -12,7 +12,7 @@ use crate::{
     ClientRequest, ClientUpdate, ModelOption, TuiOptions,
     commands::Command,
     fixtures::{self, SESSION},
-    render::{code_keyword, success, surface, surface_color},
+    render::{border, code_keyword, success, surface, surface_color},
     theme::Palette,
     view::markdown::{code_panel_row, tests::style_of},
 };
@@ -1085,7 +1085,7 @@ fn error_rows_grade_by_kind_and_corrections_fold_into_their_retry() {
 }
 
 #[test]
-fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
+fn correction_details_open_in_place_and_outcomes_name_the_code() {
     let corrected = tool_call_snapshot(
         1,
         "read_file",
@@ -1094,40 +1094,21 @@ fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
         Some("invalid_ranges: fix the range"),
         true,
     );
-    let row = ToolRow::derive(&corrected);
-    let context = ToolRowContext {
-        row: &row,
-        clock: RowClock {
-            timing: qq_client::state::ToolCallTiming::default(),
-            now_ms: 0,
-        },
-        expanded: true,
-        inline_detail: false,
-        inline_diff: false,
-        fold: false,
-        selected: false,
-        scroll: None,
-        window: EXPANDED_WINDOW_ROWS,
-    };
-    let transcript = tools::render_tool_calls(
-        &[&corrected],
-        &HashMap::new(),
-        &|_| context,
-        0,
-        120,
-        &|_, _| Vec::new(),
-    );
-    assert!(
-        !squashed_rows(&transcript)
-            .iter()
-            .any(|row| row.contains("fix the range"))
-    );
-    let inspector = tools::tool_expanded_lines(&corrected, context, 120);
-    assert!(
-        squashed_rows(&inspector)
-            .iter()
-            .any(|row| row.contains("fix the range"))
-    );
+    for (detail, shown) in [(SimpleDetail::Rows, false), (SimpleDetail::Expanded, true)] {
+        let rows = squashed_rows(&render_tool_calls_simple(
+            &[&corrected],
+            &HashMap::new(),
+            detail,
+            0,
+            120,
+            &|_, _| Vec::new(),
+        ));
+        assert_eq!(
+            rows.iter().any(|row| row.contains("fix the range")),
+            shown,
+            "{detail:?}: {rows:?}"
+        );
+    }
     for (name, result, label) in [
         ("edit_file", "edit 1: stale_file: changed", "stale_file"),
         ("exec", "exec exit=101 elapsed=1 bytes=0", "exit 101"),
@@ -1265,33 +1246,33 @@ fn denied_and_interrupted_keep_their_reason_and_outcomes_expand_to_full_output()
         !rows.iter().any(|row| row.contains("mismatched types")),
         "{rows:?}"
     );
-    let row = ToolRow::derive(&outcome);
-    for inline_detail in [false, true] {
-        let context = ToolRowContext {
-            row: &row,
-            clock: RowClock {
-                timing: qq_client::state::ToolCallTiming::default(),
-                now_ms: 0,
-            },
-            expanded: true,
-            inline_detail,
-            inline_diff: false,
-            fold: false,
-            selected: false,
-            scroll: None,
-            window: EXPANDED_WINDOW_ROWS,
-        };
-        let lines = squashed_rows(&tools::tool_expanded_lines(&outcome, context, 120));
-        assert!(
-            lines.iter().any(|line| line.contains("mismatched types"))
-                && lines.iter().any(|line| line.contains("src/lib.rs:3:5")),
-            "{lines:?}"
-        );
-    }
+    let lines = squashed_rows(&open_lines(&outcome, 120));
+    assert!(
+        lines.iter().any(|line| line.contains("mismatched types"))
+            && lines.iter().any(|line| line.contains("src/lib.rs:3:5")),
+        "{lines:?}"
+    );
+}
+
+fn open_lines(call: &ToolCallSnapshot, width: usize) -> Vec<Line> {
+    let row = ToolRow::derive(call);
+    let context = ToolRowContext {
+        row: &row,
+        clock: RowClock {
+            timing: qq_client::state::ToolCallTiming::default(),
+            now_ms: 0,
+        },
+        expanded: true,
+        inline_diff: false,
+        fold: false,
+        selected: false,
+        live_truncated: false,
+    };
+    tools::tool_open_lines(call, context, None, width)
 }
 
 #[test]
-fn expanded_outcomes_window_the_whole_tail_without_repeating_the_exit() {
+fn an_open_outcome_shows_every_diagnostic_without_repeating_the_exit() {
     let diagnostics: String = (1..=10).map(|n| format!("diagnostic {n}\n")).collect();
     let result = format!("exec exit=101 elapsed=2.0 bytes=90\n{diagnostics}");
     let call = tool_call_snapshot(1, "exec", "{}", ToolCallState::Failed, Some(&result), true);
@@ -1305,40 +1286,9 @@ fn expanded_outcomes_window_the_whole_tail_without_repeating_the_exit() {
     ));
     assert_eq!(rows[0].matches("101").count(), 1, "{rows:?}");
 
-    let row = ToolRow::derive(&call);
-    let context = ToolRowContext {
-        row: &row,
-        clock: RowClock {
-            timing: qq_client::state::ToolCallTiming {
-                started_at_ms: Some(1_000),
-                finished_at_ms: Some(3_000),
-                ..qq_client::state::ToolCallTiming::default()
-            },
-            now_ms: 3_000,
-        },
-        expanded: true,
-        inline_detail: true,
-        inline_diff: false,
-        fold: false,
-        selected: false,
-        scroll: None,
-        window: EXPANDED_WINDOW_ROWS,
-    };
-    let lines = squashed_rows(&tools::tool_expanded_lines(&call, context, 120));
-    assert_eq!(
-        lines,
-        [
-            "│ diagnostic 3",
-            "│ diagnostic 4",
-            "│ diagnostic 5",
-            "│ diagnostic 6",
-            "│ diagnostic 7",
-            "│ diagnostic 8",
-            "│ diagnostic 9",
-            "│ diagnostic 10",
-            "│ 3–10 of 10 · PgUp PgDn",
-        ]
-    );
+    let lines = squashed_rows(&open_lines(&call, 120));
+    let expected: Vec<String> = (1..=10).map(|n| format!("│ diagnostic {n}")).collect();
+    assert_eq!(lines, expected);
     assert!(!lines.iter().any(|line| line.contains("exit")), "{lines:?}");
 }
 
@@ -1557,16 +1507,15 @@ fn expanding_a_read_shows_the_head_of_the_file_and_never_its_json() {
         KeyCode::Enter,
         KeyModifiers::NONE,
     )));
-    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 40));
     let text = rows
         .iter()
         .map(|row| row.trim_end())
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("line 1\n"), "head first: {text}");
-    assert!(text.contains("line 8\n"), "{text}");
-    assert!(!text.contains("line 20"), "bounded: {text}");
-    assert!(text.contains("1–8 of 20 · PgUp PgDn"), "{text}");
+    assert!(text.contains("line 20\n"), "every line, no window: {text}");
+    assert!(!text.contains("PgUp"), "{text}");
     assert!(
         !text.contains("\"path\""),
         "known tools show no JSON: {text}"
@@ -1746,12 +1695,10 @@ fn tool_metrics_sit_two_columns_after_the_subject_at_every_width() {
             now_ms: 3_400,
         },
         expanded: false,
-        inline_detail: true,
         inline_diff: false,
         fold: false,
         selected: false,
-        scroll: None,
-        window: EXPANDED_WINDOW_ROWS,
+        live_truncated: false,
     };
     let row = frame_rows(&[tool_summary_line(&running, lookup(&running), 0, 72)]).remove(0);
     assert_eq!(
@@ -1783,12 +1730,10 @@ fn narrow_tool_rows_drop_the_duration_then_the_metric_before_the_verb() {
             now_ms: 3_400,
         },
         expanded: false,
-        inline_detail: true,
         inline_diff: false,
         fold: false,
         selected: false,
-        scroll: None,
-        window: EXPANDED_WINDOW_ROWS,
+        live_truncated: false,
     };
     let at = |width| squash(&frame_rows(&[tool_summary_line(&call, lookup(&call), 0, width)])[0]);
     assert_eq!(at(60), "● Read crates/qq-client/src/sse.rs 3 lines 1.4s");
@@ -2734,18 +2679,9 @@ fn the_sidebar_stays_hidden_with_one_session_and_scales_with_width() {
         "one session: nothing to list"
     );
     let rail_width = |width, prefs, sessions| {
-        layout::compute_layout(
-            width,
-            24,
-            2,
-            prefs,
-            layout::LayoutDemand {
-                sessions,
-                inspector_content: false,
-            },
-        )
-        .rail
-        .map_or(0, |rail| rail.width)
+        layout::compute_layout(width, 24, 2, prefs, sessions)
+            .rail
+            .map_or(0, |rail| rail.width)
     };
     let auto = LayoutPrefs::default();
     assert_eq!(rail_width(100, auto, 2), layout::RAIL_REGULAR_WIDTH);
@@ -2756,7 +2692,6 @@ fn the_sidebar_stays_hidden_with_one_session_and_scales_with_width() {
             80,
             LayoutPrefs {
                 rail: PanePref::Shown,
-                inspector: PanePref::Auto,
                 flush: false,
             },
             1
@@ -3849,14 +3784,12 @@ fn expanded_call_rows(call: &ToolCallSnapshot, width: usize) -> Vec<Line> {
             now_ms: 43_454_000,
         },
         expanded: true,
-        inline_detail: true,
         inline_diff: false,
         fold: false,
         selected: false,
-        scroll: None,
-        window: EXPANDED_WINDOW_ROWS,
+        live_truncated: false,
     };
-    tool_expanded_lines(call, context, width)
+    tool_open_lines(call, context, None, width)
 }
 
 fn is_rail_row(line: &Line) -> bool {
@@ -4025,7 +3958,195 @@ fn overlong_detail_rows_are_truncated_to_the_width_with_an_ellipsis() {
 }
 
 #[test]
-fn every_expanded_result_is_a_window_of_its_rows_plus_one_position_row() {
+fn an_open_command_shows_its_full_text_whenever_the_header_metric_cut_it() {
+    let command = "x".repeat(60);
+    let call = tool_call_snapshot(
+        1,
+        "shell",
+        &format!(r#"{{"command":"{command}"}}"#),
+        ToolCallState::Completed,
+        Some("shell exit=0\nok\n"),
+        false,
+    );
+    let rows = squashed_rows(&open_lines(&call, 76));
+    assert_eq!(
+        rows.iter()
+            .take_while(|row| row.trim_end() != "│")
+            .map(|row| row.matches('x').count())
+            .sum::<usize>(),
+        60,
+        "the exit metric shortened the header, so the body repeats the command: {rows:#?}"
+    );
+    let rows = squashed_rows(&open_lines(&call, 120));
+    assert_eq!(
+        rows,
+        ["│ ok"],
+        "a command the header shows whole is not repeated"
+    );
+}
+
+#[test]
+fn a_wide_line_number_keeps_every_character_of_a_wrapped_diff_line() {
+    let text = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN";
+    let mut edit = tool_call_snapshot(
+        1,
+        "edit_file",
+        r#"{"path":"src/lib.rs"}"#,
+        ToolCallState::Completed,
+        Some("edit ok files=1 edits=1"),
+        false,
+    );
+    edit.display = Some(ToolCallDisplay::Diff {
+        path: "src/lib.rs".to_owned(),
+        diff: format!("@@ -10000 +10000 @@\n+{text}\n"),
+    });
+    let lines = open_lines(&edit, 40);
+    assert!(lines.iter().all(|line| line.width() <= 40), "{lines:?}");
+    let rows = frame_rows(&lines);
+    assert!(!rows.iter().any(|row| row.ends_with('…')), "{rows:#?}");
+    let shown: String = rows
+        .iter()
+        .map(|row| {
+            row.trim_start_matches("│ ")
+                .trim_start_matches("10000 +")
+                .trim()
+        })
+        .collect();
+    assert_eq!(shown, text, "{rows:#?}");
+}
+
+#[test]
+fn a_running_command_says_when_its_live_buffer_dropped_multibyte_output() {
+    let mut session =
+        qq_client::state::SessionView::summary_only(fixtures::session_summary(SESSION), None, 0);
+    let call = ToolCallId::from_bytes([9; 16]);
+    session.append_live_tool_output(call, &format!("{}\n\n", "€".repeat(2000)));
+    let kept = &session.live_tool_output[&call];
+    assert!(
+        kept.len() < qq_client::state::MAX_LIVE_TOOL_OUTPUT_BYTES,
+        "the cut lands on a char boundary below the cap: {}",
+        kept.len()
+    );
+    assert!(session.live_tool_output_truncated.contains(&call));
+
+    let mut running = tool_call_snapshot(
+        1,
+        "shell",
+        r#"{"command":"emit"}"#,
+        ToolCallState::Running,
+        None,
+        false,
+    );
+    running.id = call;
+    let row = ToolRow::derive(&running);
+    let context = ToolRowContext {
+        row: &row,
+        clock: RowClock {
+            timing: qq_client::state::ToolCallTiming::default(),
+            now_ms: 0,
+        },
+        expanded: true,
+        inline_diff: false,
+        fold: false,
+        selected: false,
+        live_truncated: session.live_tool_output_truncated.contains(&call),
+    };
+    let live = tools::LiveOutput {
+        text: kept,
+        truncated: context.live_truncated,
+    };
+    let rows = frame_rows(&tools::tool_open_lines(&running, context, Some(live), 100));
+    assert!(
+        rows[0].contains("earlier output scrolled away"),
+        "{rows:#?}"
+    );
+    session.finish_live_tool_output(call);
+    assert!(session.live_tool_output_truncated.is_empty());
+}
+
+#[test]
+fn an_open_result_names_what_qq_cut_and_an_open_edit_shows_its_whole_diff() {
+    let result = "shell exit=0\nhead\n…[qq: 9,120 bytes / 312 lines omitted; full output t:shell:abcd1234:00ff00ff; read_tool_result offset=2]…\ntail\n";
+    let call = tool_call_snapshot(
+        1,
+        "shell",
+        r#"{"command":"cargo test"}"#,
+        ToolCallState::Completed,
+        Some(result),
+        false,
+    );
+    let rows = squashed_rows(&open_lines(&call, 100));
+    assert_eq!(
+        rows,
+        [
+            "│ head",
+            "│ ⋯ 312 lines omitted · stored for read_tool_result",
+            "│ tail"
+        ]
+    );
+    let lost = tool_call_snapshot(
+        2,
+        "shell",
+        r#"{"command":"cargo test"}"#,
+        ToolCallState::Completed,
+        Some("shell exit=0\nhead\n…[qq: 10 bytes / 3 lines omitted; not stored]…\ntail\n"),
+        false,
+    );
+    assert!(
+        squashed_rows(&open_lines(&lost, 100))
+            .contains(&"│ ⋯ 3 lines omitted · not stored".to_owned())
+    );
+
+    let diff: String = std::iter::once("@@ -1,20 +1,20 @@\n".to_owned())
+        .chain((1..=20).map(|n| format!("-old {n}\n+new {n}\n")))
+        .collect();
+    let mut edit = tool_call_snapshot(
+        3,
+        "edit_file",
+        r#"{"path":"src/lib.rs"}"#,
+        ToolCallState::Completed,
+        Some("edit ok files=1 edits=1"),
+        false,
+    );
+    edit.display = Some(ToolCallDisplay::Diff {
+        path: "src/lib.rs".to_owned(),
+        diff,
+    });
+    let rows = squashed_rows(&open_lines(&edit, 100));
+    assert_eq!(
+        rows.len(),
+        40,
+        "every diff line, no `more lines` cap: {rows:#?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("more line")),
+        "{rows:#?}"
+    );
+    assert_eq!(rows[39], "│ 20 + new 20");
+
+    let wide = format!("@@ -1 +1 @@\n+{}\n", "w".repeat(90));
+    edit.display = Some(ToolCallDisplay::Diff {
+        path: "src/lib.rs".to_owned(),
+        diff: wide,
+    });
+    let lines = open_lines(&edit, 40);
+    let rows = frame_rows(&lines);
+    assert!(
+        rows.len() > 2,
+        "a wide diff line wraps under its gutter: {rows:#?}"
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.matches('w').count())
+            .sum::<usize>(),
+        90
+    );
+    assert!(rows[1].starts_with("│         w"), "{rows:#?}");
+    assert!(lines.iter().all(|line| line.width() <= 40));
+}
+
+#[test]
+fn an_open_result_shows_every_row_and_arguments_whole() {
     let body = (1..=40)
         .map(|n| format!("line {n}"))
         .collect::<Vec<_>>()
@@ -4039,15 +4160,11 @@ fn every_expanded_result_is_a_window_of_its_rows_plus_one_position_row() {
         false,
     );
     let lines = expanded_call_rows(&read, 80);
-    assert_eq!(
-        lines.len(),
-        EXPANDED_WINDOW_ROWS + 1,
-        "window + position row"
-    );
-    let text = frame_text(&lines);
-    assert!(text.contains(&format!("line {EXPANDED_WINDOW_ROWS}")));
-    assert!(!text.contains(&format!("line {}", EXPANDED_WINDOW_ROWS + 1)));
-    assert!(text.contains("1–8 of 40"), "{text}");
+    assert_eq!(lines.len(), 40, "every row, no window");
+    let rows = frame_rows(&lines);
+    assert_eq!(rows[0], "│ line 1");
+    assert_eq!(rows[39], "│ line 40");
+    assert!(!frame_text(&lines).contains("PgUp"));
 
     let run = tool_call_snapshot(
         2,
@@ -4057,17 +4174,38 @@ fn every_expanded_result_is_a_window_of_its_rows_plus_one_position_row() {
         Some(&body),
         false,
     );
-    let lines = expanded_call_rows(&run, 80);
-    assert_eq!(lines.len(), EXPANDED_WINDOW_ROWS + 1);
-    let text = frame_text(&lines);
-    assert!(
-        text.contains("line 40"),
-        "a command opens at its tail: {text}"
+    let rows = frame_rows(&expanded_call_rows(&run, 80));
+    assert_eq!(
+        rows[0], "│ line 1",
+        "a command that fits its row is not repeated"
     );
-    assert!(text.contains("33–40 of 40"), "{text}");
+    assert_eq!(rows.len(), 40);
+    let command = format!("cargo test {}", "--feature-x ".repeat(10));
+    let long = tool_call_snapshot(
+        5,
+        "shell",
+        &format!(r#"{{"command":"{command}"}}"#),
+        ToolCallState::Completed,
+        Some("ok"),
+        false,
+    );
+    let rows = frame_rows(&expanded_call_rows(&long, 60));
+    let shown: String = rows
+        .iter()
+        .take_while(|row| row.trim_end() != "│")
+        .map(|row| row.trim_start_matches("│ "))
+        .collect();
+    assert_eq!(
+        shown.replace(' ', ""),
+        format!("${command}").replace(' ', ""),
+        "a command cut in the header opens whole: {rows:#?}"
+    );
+    assert_eq!(rows.last().map(String::as_str), Some("│ ok"));
 
+    let long = "v".repeat(150);
     let arguments = (0..12)
         .map(|n| format!("\"k{n}\":\"v{n}\""))
+        .chain([format!("\"long\":\"{long}\"")])
         .collect::<Vec<_>>()
         .join(",");
     let mcp = tool_call_snapshot(
@@ -4081,49 +4219,23 @@ fn every_expanded_result_is_a_window_of_its_rows_plus_one_position_row() {
     let lines = expanded_call_rows(&mcp, 80);
     assert!(lines.iter().all(is_rail_row), "{lines:?}");
     let rows = frame_rows(&lines);
-    assert_eq!(
-        lines.len(),
-        EXPANDED_WINDOW_ROWS + 1,
-        "arguments and result share one window: {rows:#?}"
-    );
     assert_eq!(rows[0], "│ k0: v0");
-    assert!(
-        rows[EXPANDED_WINDOW_ROWS].contains("1–8 of 11"),
-        "{rows:#?}"
-    );
-    let mut scrolled = tool_call_snapshot(
-        3,
-        "mcp__srv__tool",
-        &format!("{{{arguments}}}"),
-        ToolCallState::Completed,
-        Some("ok"),
-        false,
-    );
-    scrolled.id = ToolCallId::from_bytes([30; 16]);
-    let row = ToolRow::derive(&scrolled);
-    let context = ToolRowContext {
-        row: &row,
-        clock: RowClock {
-            timing: qq_client::state::ToolCallTiming::default(),
-            now_ms: 0,
-        },
-        expanded: true,
-        inline_detail: true,
-        inline_diff: false,
-        fold: false,
-        selected: false,
-        scroll: Some(usize::MAX),
-        window: EXPANDED_WINDOW_ROWS,
-    };
-    let rows = frame_rows(&tools::tool_expanded_lines(&scrolled, context, 80));
-    assert_eq!(rows[MAX_TOOL_ARGUMENT_ROWS - 3], "│ …");
+    assert!(rows.contains(&"│ k11: v11".to_owned()), "{rows:#?}");
+    let start = rows
+        .iter()
+        .position(|row| row.starts_with("│ long: v"))
+        .unwrap();
+    let shown: usize = rows[start..]
+        .iter()
+        .map(|row| row.matches('v').count())
+        .sum();
     assert_eq!(
-        rows[MAX_TOOL_ARGUMENT_ROWS - 2].trim_end(),
-        "│",
-        "separator"
+        shown,
+        long.len(),
+        "a long argument wraps instead of being cut: {rows:#?}"
     );
-    assert_eq!(rows[MAX_TOOL_ARGUMENT_ROWS - 1], "│ ok");
-    assert!(rows[MAX_TOOL_ARGUMENT_ROWS].contains("4–11 of 11"));
+    assert_eq!(rows.last().map(String::as_str), Some("│ ok"));
+    assert!(lines.iter().all(|line| line.width() <= 80));
 
     let quiet = tool_call_snapshot(
         4,
@@ -4242,6 +4354,44 @@ fn the_rule_names_a_sibling_needing_approval_below_the_sidebar_width() {
         lane.contains("◇ Deploy helper") && lane.contains("wants to run a command"),
         "{lane}"
     );
+}
+
+#[test]
+fn a_lane_waiting_on_approval_names_the_command_it_wants_to_run() {
+    let (mut app, _, child_id, _, call_id) = app_with_child_awaiting_approval();
+    app.sessions
+        .get_mut(&child_id)
+        .unwrap()
+        .approval_previews
+        .insert(
+            call_id,
+            qq_protocol::ApprovalPreview {
+                shell: Some(qq_protocol::ShellCommandPreview {
+                    command: "rm -rf build".to_owned(),
+                    cwd: None,
+                    verdict: None,
+                    reasons: Vec::new(),
+                }),
+                edit: None,
+                question: None,
+                fetch: None,
+            },
+        );
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 90, 24));
+    let lane = rows
+        .iter()
+        .find(|row| row.contains("Deploy helper"))
+        .unwrap_or_else(|| panic!("lane in {rows:#?}"));
+    assert!(lane.contains("wants to run rm -rf build"), "{lane}");
+}
+
+#[test]
+fn clicking_an_agent_lane_focuses_that_agent() {
+    let (mut app, parent, child_id, _, _) = app_with_child_awaiting_approval();
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 90, 24);
+    assert_eq!(app.focused(), Some(parent));
+    click(&mut app, 6, row_of(&frame, "◇ Deploy helper"));
+    assert_eq!(app.focused(), Some(child_id));
 }
 
 #[test]
@@ -5112,138 +5262,6 @@ fn app_with_expandable_read() -> (App, ToolCallId) {
     (app, id)
 }
 
-fn transcript_and_inspector(app: &App, frame: &[Line]) -> (String, String) {
-    let width = frame.iter().map(Line::width).max().unwrap_or_default();
-    let layout = layout::compute_layout(
-        width,
-        frame.len(),
-        3,
-        app.layout,
-        layout::LayoutDemand {
-            sessions: app.sessions.listed_count(),
-            inspector_content: super::inspector_content(app),
-        },
-    );
-    let split = layout.inspector.map_or(width, |inspector| inspector.x);
-    let rows = frame_rows(frame);
-    let mut transcript = Vec::new();
-    let mut inspector = Vec::new();
-    for row in &rows[..layout.body.height] {
-        transcript.push(squash(&row.chars().take(split).collect::<String>()));
-        inspector.push(squash(&row.chars().skip(split).collect::<String>()));
-    }
-    (transcript.join("\n"), inspector.join("\n"))
-}
-
-#[test]
-fn the_inspector_shows_only_when_toggled_on_and_the_toggle_cycles_it() {
-    let (mut app, _) = app_with_expandable_read();
-    let mut renderer = FrameRenderer::default();
-    for (width, height) in [(120, 40), (200, 60)] {
-        let frame = renderer.frame_and_commit(&mut app, width, height);
-        assert!(
-            !frame_text(&frame).contains("INSPECTOR"),
-            "Auto never opens the inspector at {width}"
-        );
-    }
-    let toggle = TerminalEvent::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
-    app.handle_terminal_event(toggle.clone());
-    assert_eq!(app.layout.inspector, PanePref::Shown, "one press shows it");
-    let wide = renderer.frame_and_commit(&mut app, 200, 60);
-    let (_, inspector) = transcript_and_inspector(&app, &wide);
-    assert!(inspector.contains("INSPECTOR"), "{inspector}");
-    assert!(
-        inspector.contains("Nothing expanded — Ctrl-Up selects a tool row, Enter expands it"),
-        "empty hint names the real chord: {inspector}"
-    );
-    for row in &wide[..wide.len() - 3] {
-        assert_eq!(
-            row.width(),
-            200,
-            "{:?}",
-            frame_rows(std::slice::from_ref(row))
-        );
-    }
-
-    app.handle_terminal_event(toggle.clone());
-    assert_eq!(app.layout.inspector, PanePref::Hidden);
-    assert!(!frame_text(&renderer.frame_and_commit(&mut app, 200, 60)).contains("INSPECTOR"));
-    app.handle_terminal_event(toggle.clone());
-    assert_eq!(app.layout.inspector, PanePref::Shown);
-    assert!(
-        frame_text(&renderer.frame_and_commit(&mut app, 150, 40)).contains("INSPECTOR"),
-        "pinned: shown below Wide when the width can carve one"
-    );
-    app.handle_terminal_event(toggle);
-    assert_eq!(app.layout.inspector, PanePref::Hidden);
-}
-
-#[test]
-fn auto_opens_the_inspector_with_content_and_the_first_alt_i_hides_what_is_shown() {
-    let (mut app, call) = app_with_expandable_read();
-    let mut renderer = FrameRenderer::default();
-    assert!(!frame_text(&renderer.frame_and_commit(&mut app, 200, 60)).contains("INSPECTOR"));
-
-    app.expanded_tool_calls.insert(call);
-    let wide = renderer.frame_and_commit(&mut app, 200, 60);
-    let (_, inspector) = transcript_and_inspector(&app, &wide);
-    assert!(inspector.contains("INSPECTOR"), "{inspector}");
-    assert!(
-        !frame_text(&renderer.frame_and_commit(&mut app, 120, 40)).contains("INSPECTOR"),
-        "no room below 140 columns"
-    );
-
-    renderer.frame_and_commit(&mut app, 200, 60);
-    let toggle = TerminalEvent::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
-    app.handle_terminal_event(toggle.clone());
-    assert_eq!(app.layout.inspector, PanePref::Hidden, "one press hides it");
-    assert!(!frame_text(&renderer.frame_and_commit(&mut app, 200, 60)).contains("INSPECTOR"));
-
-    app.layout.inspector = PanePref::Auto;
-    app.expanded_tool_calls.clear();
-    app.execute(crate::commands::Command::ShowAttention);
-    let wide = renderer.frame_and_commit(&mut app, 200, 60);
-    assert!(
-        !frame_text(&wide).contains("INSPECTOR"),
-        "a workspace list stays in the scrollable main pane"
-    );
-    assert!(frame_text(&wide).contains("NEEDS YOU"));
-}
-
-#[test]
-fn auto_keeps_an_expansion_inline_when_the_inspector_could_not_show_all_of_it() {
-    let (mut app, call) = app_with_expandable_read();
-    app.expanded_tool_calls.insert(call);
-    let session_id = app.focused().unwrap();
-    let mut later = app.sessions[&session_id].tool_calls.as_ref().unwrap()[0].clone();
-    later.id = ToolCallId::from_bytes([8; 16]);
-    later.call_ordinal += 1;
-    later.arguments = r#"{"path":"later.txt"}"#.to_owned();
-    app.expanded_tool_calls.insert(later.id);
-    app.sessions
-        .get_mut(&session_id)
-        .unwrap()
-        .tool_calls
-        .as_mut()
-        .unwrap()
-        .push(later);
-    let mut renderer = FrameRenderer::default();
-    let tall = frame_text(&renderer.frame_and_commit(&mut app, 200, 60));
-    assert!(tall.contains("INSPECTOR"), "{tall}");
-    let short = frame_rows(&renderer.frame_and_commit(&mut app, 200, 12));
-    assert!(
-        !short.iter().any(|row| row.contains("INSPECTOR")),
-        "{short:#?}"
-    );
-    assert!(
-        !short.iter().any(|row| row.contains("rows more")),
-        "nothing is cut where it cannot scroll: {short:#?}"
-    );
-    app.layout.inspector = PanePref::Shown;
-    let pinned = frame_text(&renderer.frame_and_commit(&mut app, 200, 12));
-    assert!(pinned.contains("INSPECTOR"), "a pin still wins: {pinned}");
-}
-
 #[test]
 fn two_routine_calls_keep_their_rows_and_three_fold_into_a_receipt() {
     let read = |byte| {
@@ -5278,178 +5296,153 @@ fn two_routine_calls_keep_their_rows_and_three_fold_into_a_receipt() {
     assert_eq!(rows, ["● 3 calls · read 3"]);
 }
 
-#[test]
-fn expanded_detail_moves_between_the_transcript_and_the_inspector_as_it_toggles() {
-    let (mut app, call) = app_with_expandable_read();
-    app.expanded_tool_calls.insert(call);
-    app.layout.inspector = PanePref::Shown;
-    let mut renderer = FrameRenderer::default();
+fn click(app: &mut App, column: u16, row: u16) {
+    for kind in [
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+    ] {
+        app.handle_terminal_event(TerminalEvent::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }));
+    }
+}
 
-    let wide = renderer.frame_and_commit(&mut app, 200, 60);
-    let (transcript, inspector) = transcript_and_inspector(&app, &wide);
-    assert!(
-        transcript.contains("● Read note.txt 20 lines"),
-        "{transcript}"
-    );
-    assert!(
-        !transcript.contains("line 1\n"),
-        "detail left the prose column: {transcript}"
-    );
-    assert!(
-        inspector.contains("● Read note.txt 20 lines"),
-        "{inspector}"
-    );
-    assert!(inspector.contains("line 1\n"), "{inspector}");
-    assert!(
-        inspector.contains(&format!("line {EXPANDED_WINDOW_ROWS}"))
-            && inspector.contains("1–8 of 20"),
-        "same window as inline: {inspector}"
-    );
-
-    app.execute(Command::ToggleInspector);
-    let hidden = renderer.frame_and_commit(&mut app, 200, 60);
-    let (transcript, inspector) = transcript_and_inspector(&app, &hidden);
-    assert!(inspector.trim().is_empty(), "{inspector}");
-    assert!(
-        transcript.contains("● Read note.txt 20 lines"),
-        "{transcript}"
-    );
-    assert!(
-        transcript.contains("line 1\n"),
-        "detail back inline: {transcript}"
-    );
-    assert!(transcript.contains("1–8 of 20"), "{transcript}");
-
-    app.execute(Command::ToggleInspector);
-    let shown = renderer.frame_and_commit(&mut app, 200, 60);
-    let (transcript, inspector) = transcript_and_inspector(&app, &shown);
-    assert!(!transcript.contains("line 1\n"), "{transcript}");
-    assert!(inspector.contains("line 1\n"), "{inspector}");
-
-    app.expanded_tool_calls.clear();
-    let collapsed = renderer.frame_and_commit(&mut app, 200, 60);
-    let (_, inspector) = transcript_and_inspector(&app, &collapsed);
-    assert!(inspector.contains("Nothing expanded"), "{inspector}");
-    assert!(!inspector.contains("line 1"), "{inspector}");
+fn row_of(frame: &[Line], needle: &str) -> u16 {
+    let at = frame_rows(frame)
+        .iter()
+        .position(|row| row.contains(needle))
+        .unwrap_or_else(|| panic!("{needle} not on screen: {:#?}", frame_rows(frame)));
+    u16::try_from(at).unwrap()
 }
 
 #[test]
-fn the_inspector_bounds_its_rows_to_the_pane_height() {
+fn clicking_a_tool_row_opens_every_line_in_place_and_clicking_again_folds_it() {
     let (mut app, call) = app_with_expandable_read();
-    app.expanded_tool_calls.insert(call);
-    let session_id = app.focused().unwrap();
-    let mut second = app.sessions[&session_id].tool_calls.as_ref().unwrap()[0].clone();
-    second.id = ToolCallId::from_bytes([8; 16]);
-    second.call_ordinal += 1;
-    app.expanded_tool_calls.insert(second.id);
-    app.sessions
-        .get_mut(&session_id)
-        .unwrap()
-        .tool_calls
-        .as_mut()
-        .unwrap()
-        .push(second);
-    app.layout.inspector = PanePref::Shown;
-    let frame = FrameRenderer::default().frame_and_commit(&mut app, 200, 12);
-    let (_, inspector) = transcript_and_inspector(&app, &frame);
-    let rows: Vec<&str> = inspector.lines().collect();
-    assert_eq!(rows.len(), 9, "{inspector}");
-    assert!(
-        rows.iter().any(|row| row.contains("rows more")),
-        "overflow is counted, not clipped silently: {inspector}"
-    );
-    assert!(rows.iter().any(|row| row.contains("line 1")), "{inspector}");
-    assert_eq!(
-        rows.iter().filter(|row| row.contains("line 1")).count(),
-        1,
-        "the second detail is counted, not drawn: {inspector}"
-    );
-    for row in &frame[..frame.len() - 3] {
-        assert_eq!(row.width(), 200);
-    }
+    let mut renderer = FrameRenderer::default();
+    let frame = renderer.frame_and_commit(&mut app, 200, 60);
+    assert!(!frame_text(&frame).contains("INSPECTOR"));
+    click(&mut app, 6, row_of(&frame, "Read     note.txt"));
+    assert!(app.expanded_tool_calls.contains(&call));
+    assert_eq!(app.block_cursor, Some(Block::Tool(call)));
 
-    let second = ToolCallId::from_bytes([8; 16]);
-    {
-        let calls = app
-            .sessions
-            .get_mut(&session_id)
-            .unwrap()
-            .tool_calls
-            .as_mut()
-            .unwrap();
-        calls[1].arguments = r#"{"path":"later.txt"}"#.to_owned();
-    }
-    let detail_after = |inspector: &str, path: &str| {
-        let rows: Vec<&str> = inspector.lines().collect();
-        rows.iter()
-            .position(|row| row.contains(path))
-            .and_then(|at| rows.get(at + 1))
-            .is_some_and(|row| row.contains("line 1"))
-    };
-    let frame = FrameRenderer::default().frame_and_commit(&mut app, 200, 12);
-    let (_, inspector) = transcript_and_inspector(&app, &frame);
-    assert!(
-        !detail_after(&inspector, "later.txt"),
-        "oldest first, so the later call's detail is cut: {inspector}"
-    );
-    app.block_cursor = Some(Block::Tool(second));
-    let frame = FrameRenderer::default().frame_and_commit(&mut app, 200, 12);
-    let (_, inspector) = transcript_and_inspector(&app, &frame);
-    let summaries: Vec<&str> = inspector
-        .lines()
-        .filter(|row| row.contains("Read "))
+    let open = renderer.frame_and_commit(&mut app, 200, 60);
+    let rows: Vec<String> = squashed_rows(&open)
+        .iter()
+        .map(|row| row.trim().to_owned())
         .collect();
+    let header = rows
+        .iter()
+        .position(|row| row.contains("Read note.txt"))
+        .unwrap();
+    let expected: Vec<String> = (1..=20).map(|n| format!("│ line {n}")).collect();
+    assert_eq!(rows[header + 1..header + 21], expected[..], "{rows:#?}");
     assert!(
-        summaries
-            .first()
-            .is_some_and(|row| row.contains("later.txt")),
-        "the selected expansion leads, so it is never pushed out: {inspector}"
+        rows[header + 21].starts_with("╰ Read note.txt"),
+        "a long body ends in a row that folds it: {rows:#?}"
     );
-    assert!(detail_after(&inspector, "later.txt"), "{inspector}");
+    assert!(!frame_text(&open).contains("PgUp"));
+    for row in &open[..open.len() - 3] {
+        assert!(row.width() <= 200);
+    }
+
+    click(&mut app, 6, row_of(&open, "╰ Read"));
+    assert!(
+        !app.expanded_tool_calls.contains(&call),
+        "the footer folds it"
+    );
+    let closed = renderer.frame_and_commit(&mut app, 200, 60);
+    assert!(!frame_text(&closed).contains("line 20"));
+
+    click(&mut app, 6, row_of(&closed, "Read     note.txt"));
+    let open = renderer.frame_and_commit(&mut app, 200, 60);
+    click(&mut app, 8, row_of(&open, "line 7"));
+    assert!(
+        app.expanded_tool_calls.contains(&call),
+        "a click on the output itself selects text and leaves it open"
+    );
 }
 
 #[test]
-fn workspace_views_render_in_the_inspector_when_it_is_shown_and_inline_otherwise() {
-    let (mut app, _) = app_with_expandable_read();
-    let session_id = app.focused().unwrap();
-    app.layout.inspector = PanePref::Shown;
+fn opening_a_tool_row_reveals_it_and_page_keys_scroll_the_transcript() {
+    let (mut app, call) = app_with_expandable_read();
     let mut renderer = FrameRenderer::default();
-    app.execute(Command::ShowAttention);
-    assert_eq!(app.view(), View::Attention);
-
-    let wide = renderer.frame_and_commit(&mut app, 200, 60);
-    let (transcript, inspector) = transcript_and_inspector(&app, &wide);
-    assert!(inspector.contains("NEEDS YOU"), "{inspector}");
-    assert!(inspector.contains("Nothing needs you"), "{inspector}");
-    assert!(!transcript.contains("NEEDS YOU"), "{transcript}");
-    assert!(
-        transcript.contains("● Read note.txt 20 lines"),
-        "{transcript}"
-    );
-    assert!(
-        transcript.contains("row 0"),
-        "the replaced session's prose: {transcript}"
-    );
-
-    let regular = renderer.frame_and_commit(&mut app, 120, 40);
-    let (transcript, inspector) = transcript_and_inspector(&app, &regular);
-    assert!(inspector.trim().is_empty());
-    assert!(transcript.contains("NEEDS YOU"), "{transcript}");
-    assert!(!transcript.contains("row 0"), "{transcript}");
-
-    app.execute(Command::ShowChanges);
-    let wide = renderer.frame_and_commit(&mut app, 200, 60);
-    let (transcript, inspector) = transcript_and_inspector(&app, &wide);
-    assert!(inspector.contains("CHANGES"), "{inspector}");
-    assert!(transcript.contains("row 0"), "{transcript}");
+    renderer.frame_and_commit(&mut app, 100, 16);
+    app.block_cursor = Some(Block::Tool(call));
     app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
-        KeyCode::Esc,
+        KeyCode::Enter,
         KeyModifiers::NONE,
     )));
-    assert_eq!(app.focused(), Some(session_id));
-    let back = renderer.frame_and_commit(&mut app, 200, 60);
-    let (_, inspector) = transcript_and_inspector(&app, &back);
-    assert!(inspector.contains("Nothing expanded"), "{inspector}");
+    let open = squashed_rows(&renderer.frame_and_commit(&mut app, 100, 16));
+    assert!(
+        open.iter().any(|row| row.contains("Read note.txt")),
+        "the opened row stays on screen: {open:#?}"
+    );
+    let offset = app.viewport().offset();
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::PageDown,
+        KeyModifiers::NONE,
+    )));
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::PageUp,
+        KeyModifiers::NONE,
+    )));
+    renderer.frame_and_commit(&mut app, 100, 16);
+    assert_ne!(
+        app.viewport().offset(),
+        offset,
+        "pages move the transcript, not a window inside the call"
+    );
+}
+
+#[test]
+fn clicking_a_folded_receipt_opens_the_turn_and_alt_i_is_unbound() {
+    let mut app = app_with_messages(1);
+    let session_id = app.focused().unwrap();
+    let reads: Vec<ToolCallSnapshot> = (0..3)
+        .map(|byte| {
+            tool_call_snapshot(
+                byte + 10,
+                "read_file",
+                r#"{"path":"a.rs"}"#,
+                ToolCallState::Completed,
+                Some("a\n"),
+                false,
+            )
+        })
+        .collect();
+    app.sessions.get_mut(&session_id).unwrap().tool_calls = Some(reads);
+    app.receipts_open = false;
+    let mut renderer = FrameRenderer::default();
+    let frame = renderer.frame_and_commit(&mut app, 120, 40);
+    click(&mut app, 6, row_of(&frame, "3 calls"));
+    assert!(app.receipts_open);
+    let frame = squashed_rows(&renderer.frame_and_commit(&mut app, 120, 40));
+    assert_eq!(
+        frame.iter().filter(|row| row.contains("Read a.rs")).count(),
+        3,
+        "{frame:#?}"
+    );
+    assert!(
+        !crate::commands::COMMANDS
+            .iter()
+            .any(|spec| spec.chords.contains(&"Alt-I")),
+        "the inspector toggle is gone"
+    );
+}
+
+#[test]
+fn workspace_views_take_the_main_pane_at_every_width() {
+    let (mut app, _) = app_with_expandable_read();
+    let mut renderer = FrameRenderer::default();
+    app.execute(Command::ShowAttention);
+    for (width, height) in [(120, 40), (200, 60), (320, 90)] {
+        let text = frame_text(&renderer.frame_and_commit(&mut app, width, height));
+        assert!(text.contains("NEEDS YOU"), "{width}: {text}");
+        assert!(!text.contains("row 0"), "{width}: {text}");
+    }
 }
 
 #[test]
@@ -5479,21 +5472,19 @@ fn a_tool_row_reuses_its_panel_across_frames_and_relays_out_on_a_new_width() {
             now_ms,
         },
         expanded: true,
-        inline_detail: true,
         inline_diff: false,
         fold: false,
         selected: false,
-        scroll: None,
-        window: EXPANDED_WINDOW_ROWS,
+        live_truncated: false,
     };
-    let first = tool_expanded_lines(&call, context(43_454_000), 80);
-    let second = tool_expanded_lines(&call, context(43_455_000), 80);
+    let first = tool_open_lines(&call, context(43_454_000), None, 80);
+    let second = tool_open_lines(&call, context(43_455_000), None, 80);
     assert_eq!(first, second);
     assert!(first.iter().all(is_rail_row), "{first:?}");
-    let narrow = tool_expanded_lines(&call, context(43_455_000), 7);
+    let narrow = tool_open_lines(&call, context(43_455_000), None, 7);
     assert!(narrow.iter().all(|line| line.width() <= 7), "{narrow:?}");
     assert_ne!(narrow, first, "a new width relays the panel out");
-    let back = tool_expanded_lines(&call, context(43_456_000), 80);
+    let back = tool_open_lines(&call, context(43_456_000), None, 80);
     assert_eq!(back, first);
 }
 

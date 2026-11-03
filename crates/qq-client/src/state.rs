@@ -536,6 +536,10 @@ impl SessionStore {
                     .iter()
                     .any(|call| call.id == *id && call.state == ToolCallState::Running)
             });
+            view.live_tool_output_truncated = previous.live_tool_output_truncated;
+            let live = &view.live_tool_output;
+            view.live_tool_output_truncated
+                .retain(|id| live.contains_key(id));
         }
         view.approval_previews = snapshot
             .approval_previews
@@ -858,6 +862,7 @@ pub struct SessionView {
     pub prompt_history: VecDeque<String>,
     pub drafts: VecDeque<String>,
     pub live_tool_output: HashMap<ToolCallId, String>,
+    pub live_tool_output_truncated: BTreeSet<ToolCallId>,
     pub approval_previews: HashMap<ToolCallId, ApprovalPreview>,
     pub tool_timing: HashMap<ToolCallId, ToolCallTiming>,
     pub unread: u32,
@@ -936,6 +941,7 @@ impl SessionView {
             prompt_history: VecDeque::new(),
             drafts: VecDeque::new(),
             live_tool_output: HashMap::new(),
+            live_tool_output_truncated: BTreeSet::new(),
             approval_previews: HashMap::new(),
             tool_timing: HashMap::new(),
             unread: 0,
@@ -1022,7 +1028,13 @@ impl SessionView {
                 start += 1;
             }
             buffer.drain(..start);
+            self.live_tool_output_truncated.insert(tool_call_id);
         }
+    }
+
+    pub fn finish_live_tool_output(&mut self, tool_call_id: ToolCallId) {
+        self.live_tool_output.remove(&tool_call_id);
+        self.live_tool_output_truncated.remove(&tool_call_id);
     }
 
     pub fn record_prompt(&mut self, prompt: &str) {
@@ -1044,6 +1056,7 @@ impl SessionView {
         self.tool_calls = None;
         self.side_questions = Vec::new();
         self.live_tool_output.clear();
+        self.live_tool_output_truncated.clear();
         self.approval_previews.clear();
         self.tool_timing.clear();
     }

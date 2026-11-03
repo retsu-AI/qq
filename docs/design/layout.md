@@ -52,7 +52,7 @@ invalidates its timer.
 
 The breakpoints are `view::layout::{REGULAR_MIN_WIDTH, WIDE_MIN_WIDTH,
 ULTRA_MIN_WIDTH}`; the column widths are `RAIL_REGULAR_WIDTH` and
-`RAIL_WIDE_WIDTH`. The inspector appears only with content (§ Inspector). The layout produces one transcript
+`RAIL_WIDE_WIDTH`. The layout produces one transcript
 slot at every tier (`compute_layout` in `view/layout.rs`).
 
 Below 32 × 9 the frame is a "terminal is too small" notice.
@@ -63,8 +63,7 @@ There is no header row: the transcript starts on row 0. The last rows are
 the **dock**, from top to bottom: the rule, a panel when one is open
 (approval, question, goal summary or form, goal-check choices, or a picker),
 queued drafts, the composer, and the status line. The **body** is everything
-above the dock, and the panes divide it left to right: transcript pane,
-inspector when shown. The sessions column is the one exception: it runs the
+above the dock, and the transcript pane fills it. The sessions column is the one exception: it runs the
 full terminal height, beside the dock as well as the body. At 80 × 24, with
 an approval open in the dock (`approval-80x24`):
 
@@ -90,10 +89,10 @@ status). The transcript itself opens with one blank padding row
 ([`transcript.md`](./transcript.md) § Spacing).
 
 The sessions column is 32 columns at Regular and 42 from Wide up, and gives
-way when it would leave the transcript narrower than 32 columns. The
-inspector is carved only from pane width past 100 transcript columns
-(`INSPECTOR_TRANSCRIPT_MIN`), so the transcript never narrows below that to
-make room for it; it is 40–80 columns.
+way when it would leave the transcript narrower than 32 columns. There is
+no detail column: a tool call opens in place in the transcript
+([`transcript.md`](./transcript.md) § Tool Detail), and `/attention` and
+`/changes` take the transcript pane.
 
 Rows carry the 2-column margin as a count (`Line::indent`); the renderer
 emits one cursor move per row rather than a run of spaces, and the
@@ -133,65 +132,15 @@ on screen.
 
 ## Preferences
 
-`LayoutPrefs { rail, inspector, flush }`, the first two each a
-`PanePref::{Auto, Shown, Hidden}`.
+`LayoutPrefs { rail, flush }`, `rail` a `PanePref::{Auto, Shown, Hidden}`.
 For the sessions column, `Auto` follows the tier and session count; its
 toggle (`Ctrl-\` by default) moves `Auto` or `Shown` to `Hidden` and `Hidden`
 to `Shown`, so the first press hides the column the user is reaching to
-dismiss. The inspector's `Auto` shows it only while
-`LayoutDemand::inspector_content` holds; its toggle (`Alt-I`) reads
-whether the last frame showed it (`App::inspector_shown`) and pins the
-opposite, `Hidden` or `Shown`, so the first press always flips what is on
-screen. `flush` is set while mouse capture is off (`/mouse`): it removes
+dismiss. `flush` is set while mouse capture is off (`/mouse`): it removes
 the sessions column and the transcript slot's margin inset whatever the
 other preferences say, so the terminal's native selection of a full row
 copies clean text. The preferences are runtime state, not configuration;
 they reset per launch.
-
-## Inspector
-
-The inspector (`view/workspace.rs::inspector_pane`) is the focused pane's
-detail column: 40–80 columns carved only from pane width past 100 transcript
-columns, so opening it never narrows the transcript below that. `Shown`
-shows it at any width that can carve one (140 columns and up with no
-sessions column). `Auto` shows it at the same widths only while it has
-content: the focused session has an expanded tool call
-(`view::inspector_content`). `/attention` and `/changes` stay in the main
-pane under `Auto`, where they scroll, and `Auto` also keeps expanded calls
-inline when their rows would not fit the inspector's height: the inspector
-does not scroll, so `Auto` never moves anything there that it would cut. Otherwise its columns
-go back to the transcript. `Hidden` keeps it off.
-
-What it holds, top to bottom under a `│ INSPECTOR` header:
-
-- When the focused pane is on a workspace view (`/attention`, `/changes`),
-  that view's body. The transcript pane beside it keeps showing the session
-  the view replaced, so the list is read in context; Esc still returns to
-  that session. Without an inspector the view takes the pane, as before.
-- Otherwise, every expanded tool call of the pane's session in call order,
-  starting from the one under the block cursor so it is never cut off,
-  each as its summary row followed by its expanded body (timing line,
-  result head or tail, diff, arguments for unknown tools), with one blank
-  row between calls. The transcript then shows only the summary rows: the
-  expansion moved, it did not duplicate. Below Wide, or with the inspector
-  hidden, the same body renders inline under the row.
-- When nothing is expanded and no view is up (only reachable when pinned
-  with `Shown`), a muted hint naming the cursor chord (`Nothing expanded —
-  Ctrl-Up selects a tool row, Enter expands it`).
-
-Inline and inspector detail come from one path: `tools::tool_expanded_lines`
-(and `tool_summary_line`, `attention_body`, `changes_body`) take a width and
-return rows; only the caller and the width differ. The transcript decides
-whether to emit a body from `ToolRowContext::inline_detail`, which the frame
-sets from `Layout.inspector`, so toggling the inspector re-lays the tool
-rows on the next frame; completed-message layouts are untouched by the
-toggle. The inspector reads derived tool rows from the transcript cache and
-derives one itself only when the transcript did not lay that call out this
-frame (an overlay is up), so it never repeats JSON parsing.
-
-Rows are bounded by the pane: content past the height is cut with a `… N
-rows more` line and no row is built beyond what fits. The inspector follows
-the focused pane and does not scroll.
 
 ## Sessions column
 
@@ -282,12 +231,11 @@ raise per-frame streaming work.
 
 `crates/qq-tui/tests/goldens/` pins every review scene at 80 × 24, 120 × 40,
 200 × 60, 320 × 90, and 480 × 120 (the `sessions-*` scene shows the Compact
-rule counts and both column densities; `tools-expanded-*` shows detail
-inline, and a view test asserts the inspector shows the same rows once
-toggled on). The goldens follow the v0.1.11 design. `cargo test -p qq-tui
+rule counts and both column densities; `tools-expanded-*` shows calls
+opened in place, every row and the fold row). The goldens follow the v0.1.11 design. `cargo test -p qq-tui
 --test gallery -- --ignored` writes them as ANSI for a real terminal.
 The render bench (`cargo bench -p qq-tui --bench render`) includes
-`compact_80x24`, `wide_160x48_full`, `tool_calls_32_expanded_inspector`, and
+`compact_80x24`, `wide_160x48_full`, `tool_calls_32_expanded`, and
 `resize_ultra_480x120` alongside the legacy 160 × 48 scenes, which hold the
-sessions column and inspector off so they measure one transcript column at a
-fixed geometry across changes.
+sessions column off so they measure one transcript column at a fixed
+geometry across changes.

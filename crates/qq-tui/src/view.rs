@@ -28,11 +28,11 @@ use crate::{
     app::{App, SessionView, terminal_safe_character},
     input::{Mode, SessionConfirm, approval_mode_label, effort_label},
     render::{
-        ColorOutput, Line, Style, accent, border, brand, failure, faint, info, muted, normal,
-        selection, success, surface, text_width, warning, write_line,
+        ColorOutput, Line, Style, accent, brand, failure, faint, info, muted, normal, selection,
+        success, surface, text_width, warning, write_line,
     },
     theme,
-    viewport::{Block, MAX_PANES, TranscriptPane, View, Viewport},
+    viewport::{Block, Hit, MAX_PANES, TranscriptPane, View, Viewport},
 };
 use chrome::*;
 pub(crate) use chrome::{ComposerMode, CursorPosition};
@@ -44,11 +44,8 @@ use layout::{Tier, TranscriptSlot, compute_layout};
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
 use overlay::*;
 use sidebar::*;
+pub(crate) use tools::tool_copy_text;
 use tools::*;
-pub(crate) use tools::{
-    EXPANDED_WINDOW_ROWS, expanded_panel_match, expanded_panel_rows, expanded_window_start,
-    tool_copy_text,
-};
 use transcript::*;
 use workspace::*;
 pub(crate) use wrap::preview;
@@ -108,25 +105,6 @@ pub(crate) fn rail_visible(width: usize, prefs: LayoutPrefs, sessions: usize) ->
     layout::rail_width(width, prefs, sessions) > 0
 }
 
-fn inspector_content(app: &App) -> bool {
-    match app.pane().view {
-        View::Transcript(Some(session_id)) => app
-            .sessions
-            .get(&session_id)
-            .and_then(|session| session.tool_calls.as_deref())
-            .is_some_and(|calls| {
-                calls
-                    .iter()
-                    .any(|call| app.expanded_tool_calls.contains(&call.id))
-            }),
-        View::Transcript(None)
-        | View::Attention
-        | View::Changes
-        | View::Goal(_)
-        | View::SideQuestions(_) => false,
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct FrameRenderer {
     previous: Vec<Line>,
@@ -141,8 +119,6 @@ pub(crate) struct FrameRenderer {
     transcript_area: Option<crate::selection::Area>,
     rail_area: Option<crate::selection::Area>,
     rail_rows: Vec<(usize, SessionId)>,
-    inspector_shown: bool,
-    tool_window: usize,
     refreshed_find: bool,
     shapes: Vec<crate::selection::RowShape>,
     shapes_ready: bool,
@@ -170,8 +146,6 @@ impl FrameRenderer {
         app.geometry.transcript = self.transcript_area;
         app.geometry.rail = self.rail_area;
         app.geometry.rail_rows.clone_from(&self.rail_rows);
-        app.inspector_shown = self.inspector_shown;
-        app.tool_window = self.tool_window.max(1);
         for (index, update) in self.pane_updates.drain(..) {
             if let Some(pane) = app.panes.get_mut(index) {
                 pane.viewport = update.viewport;
@@ -179,6 +153,7 @@ impl FrameRenderer {
                 pane.relayout = false;
                 pane.output_arrived = false;
                 pane.live_message_ranges = update.live_message_ranges;
+                pane.hits = update.hits;
                 let previous = std::mem::replace(&mut pane.blocks, update.blocks);
                 self.cache.recycle_blocks(previous);
             }
@@ -282,7 +257,6 @@ impl FrameRenderer {
         self.transcript_area = None;
         self.rail_area = None;
         self.rail_rows.clear();
-        self.inspector_shown = false;
         self.shapes_ready = false;
         if self.theme_generation != app.theme_generation {
             self.theme_generation = app.theme_generation;
@@ -328,44 +302,14 @@ impl FrameRenderer {
             dock_width,
             rail_width == 0 && Tier::of(width) == Tier::Compact,
         ));
-        let demand = layout::LayoutDemand {
-            sessions: app.sessions.listed_count(),
-            inspector_content: inspector_content(app),
-        };
-        let mut layout = compute_layout(width, height, dock.len(), app.layout, demand);
-        let tool_window = if layout.inspector.is_some() {
-            inspector_window(layout.body.height)
-        } else {
-            EXPANDED_WINDOW_ROWS
-        };
-        let mut inspector_rows = layout.inspector.map(|inspector| {
-            inspector_rows(app, &self.cache, app.pane(), inspector.width, tool_window)
-        });
-        if app.layout.inspector == layout::PanePref::Auto
-            && inspector_rows
-                .as_ref()
-                .is_some_and(|rows| rows.len() + 1 > layout.body.height)
-        {
-            layout = compute_layout(
-                width,
-                height,
-                dock.len(),
-                app.layout,
-                layout::LayoutDemand {
-                    inspector_content: false,
-                    ..demand
-                },
-            );
-            inspector_rows = None;
-        }
+        let layout = compute_layout(
+            width,
+            height,
+            dock.len(),
+            app.layout,
+            app.sessions.listed_count(),
+        );
         let body_height = layout.body.height;
-        self.inspector_shown = layout.inspector.is_some();
-        self.tool_window = if self.inspector_shown {
-            tool_window
-        } else {
-            EXPANDED_WINDOW_ROWS
-        };
-        let inline_detail = layout.inspector.is_none();
         let slots = layout.transcripts.len();
         let first_shown = app
             .focused_pane
@@ -373,14 +317,14 @@ impl FrameRenderer {
             .min(app.panes.len().saturating_sub(slots));
         let shown_panes = || app.panes.iter().enumerate().skip(first_shown).take(slots);
         let shown: Vec<Option<SessionId>> = shown_panes()
-            .map(|(_, pane)| shown_view(app, pane, inline_detail).session())
+            .map(|(_, pane)| shown_view(app, pane).session())
             .collect();
         self.cache.retain_visible(app, &shown);
         let mut body: Vec<Line> = Vec::new();
         let mut columns: Vec<(usize, Vec<Line>)> = Vec::with_capacity(slots + 1);
         for ((index, pane), slot) in shown_panes().zip(&layout.transcripts) {
             let slot_width = slot.content_width;
-            let mut rows = self.body(app, index, pane, *slot, body_height, inline_detail);
+            let mut rows = self.body(app, index, pane, *slot, body_height);
             if index == app.focused_pane && mode == Mode::Compose {
                 let menu = mention_autocomplete(app, slot_width, body_height);
                 let menu = if menu.is_empty() {
@@ -390,9 +334,7 @@ impl FrameRenderer {
                 };
                 overlay_slash_autocomplete(&mut rows, menu);
             }
-            if index == app.focused_pane
-                && shown_view(app, pane, inline_detail).transcript().is_some()
-            {
+            if index == app.focused_pane && shown_view(app, pane).transcript().is_some() {
                 self.transcript_area = Some(crate::selection::Area {
                     x: slot.area.x,
                     y: 0,
@@ -406,12 +348,6 @@ impl FrameRenderer {
             } else {
                 columns.push((slot.area.x, fit_height(rows, body_height)));
             }
-        }
-        if let (Some(inspector), Some(rows)) = (layout.inspector, inspector_rows) {
-            columns.push((
-                inspector.x,
-                inspector_pane(rows, inspector.width, body_height),
-            ));
         }
         let unseen = self
             .pane_updates
@@ -500,16 +436,10 @@ impl FrameRenderer {
         pane: &TranscriptPane,
         slot: TranscriptSlot,
         height: usize,
-        inline_detail: bool,
     ) -> Vec<Line> {
-        let (mut lines, update) = self.cache.body(
-            &mut self.highlighter,
-            app,
-            pane,
-            slot.content_width,
-            height,
-            inline_detail,
-        );
+        let (mut lines, update) =
+            self.cache
+                .body(&mut self.highlighter, app, pane, slot.content_width, height);
         if index == app.focused_pane
             && let Some(cursor @ (Block::Message(_) | Block::Code(..))) = app.block_cursor
             && let Some((_, range)) = update.blocks.iter().find(|(block, _)| *block == cursor)
@@ -551,14 +481,8 @@ impl FrameRenderer {
     fn transcript<'a>(&'a mut self, app: &App, width: usize) -> VirtualBody<'a> {
         let pane = app.pane();
         self.cache.retain_visible(app, &[pane.view.session()]);
-        self.cache.transcript(
-            &mut self.highlighter,
-            app,
-            pane.view.session(),
-            pane,
-            width,
-            true,
-        )
+        self.cache
+            .transcript(&mut self.highlighter, app, pane.view.session(), pane, width)
     }
 }
 

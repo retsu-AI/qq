@@ -357,7 +357,7 @@ impl SessionStore {
                         session.approval_previews.remove(&tool_call.id);
                     }
                     if tool_call_state_is_terminal(tool_call.state) {
-                        session.live_tool_output.remove(&tool_call.id);
+                        session.finish_live_tool_output(tool_call.id);
                     }
                     session.live.note_tool_call(tool_call);
                 }

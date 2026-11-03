@@ -202,32 +202,6 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    fn scroll_tool_to_query(&mut self, id: qq_protocol::ToolCallId) {
-        let Some(query) = self.find().map(|find| find.query.to_lowercase()) else {
-            return;
-        };
-        let row = self
-            .view()
-            .transcript()
-            .and_then(|session| self.sessions.get(&session))
-            .and_then(|session| {
-                let call = session
-                    .tool_calls
-                    .as_deref()?
-                    .iter()
-                    .find(|call| call.id == id)?;
-                crate::view::expanded_panel_match(
-                    call,
-                    session.live_tool_output.get(&id).map(String::as_str),
-                    &query,
-                )
-            });
-        if let Some(row) = row {
-            self.tool_scroll
-                .insert(id, row.saturating_sub(self.tool_window / 2));
-        }
-    }
-
     fn show_find_match(&mut self) {
         let target = self
             .find()
@@ -236,7 +210,6 @@ impl App {
             match self.find_opened.take() {
                 Some(Block::Tool(call)) => {
                     self.expanded_tool_calls.remove(&call);
-                    self.tool_scroll.remove(&call);
                 }
                 Some(Block::Reasoning(run)) => {
                     self.open_reasoning.remove(&run);
@@ -251,10 +224,7 @@ impl App {
             return;
         };
         let opened = match target {
-            Block::Tool(call) => {
-                self.scroll_tool_to_query(call);
-                self.expanded_tool_calls.insert(call)
-            }
+            Block::Tool(call) => self.expanded_tool_calls.insert(call),
             Block::Reasoning(run) => self.open_reasoning.insert(run),
             Block::Message(_) | Block::Code(..) => false,
         };

@@ -1,11 +1,5 @@
   │ fn main() {}
   │ fn main() {}
-  │ 1–8 of 20 · PgUp PgDn
-  ● Edited   crates/qq-tui/src/file_1.rs  6 B
-  │ edited
-  ● Ran      cargo test -p crate_2
-  │ test result: ok. 12 passed
-  ● Read     crates/qq-tui/src/file_3.rs  20 lines
   │ fn main() {}
   │ fn main() {}
   │ fn main() {}
@@ -14,7 +8,13 @@
   │ fn main() {}
   │ fn main() {}
   │ fn main() {}
-  │ 1–8 of 20 · PgUp PgDn
+  │ fn main() {}
+  │ fn main() {}
+  │ fn main() {}
+  │ fn main() {}
+  │ fn main() {}
+  │ fn main() {}
+  ╰ Read crates/qq-tui/src/file_3.rs  · click or Enter folds
   ● Edited   crates/qq-tui/src/file_4.rs  6 B
   │ edited
   ● Ran      cargo test -p crate_5

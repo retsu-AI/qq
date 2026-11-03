@@ -4,9 +4,6 @@ pub(crate) const ULTRA_MIN_WIDTH: usize = 240;
 
 pub(crate) const RAIL_REGULAR_WIDTH: usize = 32;
 pub(crate) const RAIL_WIDE_WIDTH: usize = 42;
-pub(crate) const INSPECTOR_MIN_WIDTH: usize = 40;
-pub(crate) const INSPECTOR_MAX_WIDTH: usize = 80;
-pub(crate) const INSPECTOR_TRANSCRIPT_MIN: usize = 100;
 
 pub(crate) const MARGIN: usize = 2;
 
@@ -61,14 +58,7 @@ impl PanePref {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct LayoutPrefs {
     pub rail: PanePref,
-    pub inspector: PanePref,
     pub flush: bool,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct LayoutDemand {
-    pub sessions: usize,
-    pub inspector_content: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -89,11 +79,6 @@ impl Rect {
             height,
         }
     }
-
-    #[cfg(test)]
-    const fn right(self) -> usize {
-        self.x + self.width
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +96,6 @@ pub(crate) struct Layout {
     pub body: Rect,
     pub pane_width: usize,
     pub rail: Option<Rect>,
-    pub inspector: Option<Rect>,
     pub transcripts: Vec<TranscriptSlot>,
     pub max_composer_rows: usize,
 }
@@ -157,32 +141,14 @@ pub(crate) fn compute_layout(
     height: usize,
     chrome_rows: usize,
     prefs: LayoutPrefs,
-    demand: LayoutDemand,
+    sessions: usize,
 ) -> Layout {
     let tier = Tier::of(width);
-    let rail_width = rail_width(width, prefs, demand.sessions);
+    let rail_width = rail_width(width, prefs, sessions);
     let body_height = height.saturating_sub(chrome_rows);
     let body = Rect::new(0, 0, width, body_height);
     let pane_width = width - rail_width;
-    let wanted = match prefs.inspector {
-        PanePref::Shown => true,
-        PanePref::Auto => demand.inspector_content,
-        PanePref::Hidden => false,
-    };
-    let inspector_width = if wanted {
-        let spare = pane_width.saturating_sub(INSPECTOR_TRANSCRIPT_MIN);
-        if spare >= INSPECTOR_MIN_WIDTH {
-            spare.min(INSPECTOR_MAX_WIDTH)
-        } else {
-            0
-        }
-    } else {
-        0
-    };
-    let transcript_width = pane_width - inspector_width;
-    let transcript_area = Rect::new(0, body.y, transcript_width, body_height);
-    let inspector = (inspector_width > 0)
-        .then(|| Rect::new(transcript_width, body.y, inspector_width, body_height));
+    let transcript_area = Rect::new(0, body.y, pane_width, body_height);
     let rail = (rail_width > 0).then(|| Rect::new(pane_width, 0, rail_width, height));
     Layout {
         tier,
@@ -191,7 +157,6 @@ pub(crate) fn compute_layout(
         body,
         pane_width,
         rail,
-        inspector,
         transcripts: vec![transcript_slot(transcript_area, prefs.flush)],
         max_composer_rows: max_composer_rows(width, height),
     }
@@ -215,39 +180,7 @@ mod tests {
     use super::*;
 
     fn layout(width: usize, height: usize, sessions: usize) -> Layout {
-        compute_layout(width, height, 2, LayoutPrefs::default(), demand(sessions))
-    }
-
-    fn demand(sessions: usize) -> LayoutDemand {
-        LayoutDemand {
-            sessions,
-            inspector_content: false,
-        }
-    }
-
-    #[test]
-    fn auto_opens_the_inspector_only_with_content_and_room() {
-        let content = LayoutDemand {
-            sessions: 3,
-            inspector_content: true,
-        };
-        let wide = compute_layout(200, 60, 2, LayoutPrefs::default(), content);
-        assert_eq!(wide.inspector.map(|rect| rect.width), Some(58));
-        assert!(layout(200, 60, 3).inspector.is_none());
-        assert!(
-            compute_layout(120, 40, 2, LayoutPrefs::default(), content)
-                .inspector
-                .is_none()
-        );
-        let hidden = LayoutPrefs {
-            inspector: PanePref::Hidden,
-            ..LayoutPrefs::default()
-        };
-        assert!(
-            compute_layout(200, 60, 2, hidden, content)
-                .inspector
-                .is_none()
-        );
+        compute_layout(width, height, 2, LayoutPrefs::default(), sessions)
     }
 
     #[test]
@@ -266,7 +199,6 @@ mod tests {
             let compact = layout(80, 24, sessions);
             assert_eq!(compact.tier, Tier::Compact);
             assert!(compact.rail.is_none());
-            assert!(compact.inspector.is_none());
             assert_eq!(compact.transcripts[0].area, Rect::new(0, 0, 80, 22));
             assert_eq!(compact.transcripts[0].inset, MARGIN);
             assert_eq!(compact.transcripts[0].content_width, 76);
@@ -290,44 +222,19 @@ mod tests {
 
         let wide = layout(200, 60, 3);
         assert_eq!(wide.rail, Some(Rect::new(158, 0, 42, 60)));
-        assert!(wide.inspector.is_none(), "Auto never opens the inspector");
+        assert_eq!(wide.transcripts[0].area.width, 158);
     }
 
     #[test]
     fn the_rail_never_starves_the_transcript() {
         let prefs = LayoutPrefs {
             rail: PanePref::Shown,
-            inspector: PanePref::Auto,
             flush: false,
         };
-        let tight = compute_layout(70, 24, 2, prefs, demand(3));
+        let tight = compute_layout(70, 24, 2, prefs, 3);
         assert_eq!(tight.rail, Some(Rect::new(38, 0, 32, 24)));
-        let tiny = compute_layout(60, 24, 2, prefs, demand(3));
+        let tiny = compute_layout(60, 24, 2, prefs, 3);
         assert!(tiny.rail.is_none());
-    }
-
-    #[test]
-    fn a_shown_inspector_takes_the_spare_columns_and_caps_its_width() {
-        let prefs = LayoutPrefs {
-            rail: PanePref::Auto,
-            inspector: PanePref::Shown,
-            flush: false,
-        };
-        let wide = compute_layout(200, 60, 2, prefs, demand(3));
-        let inspector = wide.inspector.expect("inspector");
-        assert_eq!(inspector.width, 58);
-        assert_eq!(inspector.x, wide.transcripts[0].area.right());
-        assert_eq!(inspector.right(), wide.pane_width);
-        let ultra = compute_layout(480, 120, 2, prefs, demand(3));
-        assert_eq!(
-            ultra.inspector.expect("inspector").width,
-            INSPECTOR_MAX_WIDTH
-        );
-        assert!(
-            compute_layout(120, 40, 2, prefs, demand(3))
-                .inspector
-                .is_none()
-        );
     }
 
     #[test]
@@ -338,10 +245,9 @@ mod tests {
             2,
             LayoutPrefs {
                 rail: PanePref::Hidden,
-                inspector: PanePref::Hidden,
                 flush: false,
             },
-            demand(3),
+            3,
         );
         assert!(hidden.rail.is_none());
         assert_eq!(hidden.transcripts[0].area.width, 200);
@@ -352,10 +258,9 @@ mod tests {
             2,
             LayoutPrefs {
                 rail: PanePref::Shown,
-                inspector: PanePref::Auto,
                 flush: false,
             },
-            demand(1),
+            1,
         );
         assert_eq!(shown.rail, Some(Rect::new(48, 0, 32, 24)));
     }
@@ -364,10 +269,9 @@ mod tests {
     fn a_flush_layout_drops_the_rail_and_the_inset() {
         let prefs = LayoutPrefs {
             rail: PanePref::Shown,
-            inspector: PanePref::Auto,
             flush: true,
         };
-        let flush = compute_layout(120, 40, 2, prefs, demand(3));
+        let flush = compute_layout(120, 40, 2, prefs, 3);
         assert!(flush.rail.is_none());
         assert_eq!(flush.transcripts[0].inset, 0);
         assert_eq!(flush.transcripts[0].content_width, 120);

@@ -835,18 +835,21 @@ fn word_tokens(text: &str) -> Vec<Range<usize>> {
     tokens
 }
 
-fn diff_line(row: &DiffRow, width: usize) -> Line {
-    let (style, sign) = match row.sign {
+fn diff_style(row: &DiffRow) -> (Style, &'static str) {
+    match row.sign {
         '-' => (failure(), "-"),
         '+' => (success(), "+"),
         _ => (normal(), " "),
-    };
-    let mut line = Line::styled(
-        row.number
-            .map_or_else(|| "      ".to_owned(), |number| format!("{number:>4} ")),
-        faint(),
-    );
-    line.push(format!("{sign}  "), style);
+    }
+}
+
+fn diff_number(row: &DiffRow) -> String {
+    row.number
+        .map_or_else(|| "      ".to_owned(), |number| format!("{number:>4} "))
+}
+
+fn diff_text(row: &DiffRow, style: Style) -> Line {
+    let mut line = Line::default();
     match &row.changed {
         Some(changed) => {
             line.push(&row.text[..changed.start], style);
@@ -854,6 +857,16 @@ fn diff_line(row: &DiffRow, width: usize) -> Line {
             line.push(&row.text[changed.end..], style);
         }
         None => line.push(row.text.as_str(), style),
+    }
+    line
+}
+
+fn diff_line(row: &DiffRow, width: usize) -> Line {
+    let (style, sign) = diff_style(row);
+    let mut line = Line::styled(diff_number(row), faint());
+    line.push(format!("{sign}  "), style);
+    for span in diff_text(row, style).spans {
+        line.push(span.text, span.style);
     }
     truncate_line(line, width)
 }
@@ -873,6 +886,44 @@ pub(super) fn dock_diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<
             ),
             faint(),
         ));
+    }
+    lines
+}
+
+pub(super) fn whole_diff_lines(diff: &str, width: usize) -> Vec<Line> {
+    let rows = diff_rows(diff);
+    let digits = rows
+        .iter()
+        .filter_map(|row| row.number)
+        .max()
+        .map_or(0, |number| number.to_string().len())
+        .max(4);
+    let gutter = digits + 4;
+    let content = width.saturating_sub(gutter).max(1);
+    let mut lines = Vec::new();
+    for row in rows {
+        let (style, sign) = diff_style(&row);
+        for (index, piece) in wrap_line_chars(diff_text(&row, style), content)
+            .into_iter()
+            .enumerate()
+        {
+            let mut line = if index == 0 {
+                let number = row
+                    .number
+                    .map_or_else(String::new, |number| number.to_string());
+                let mut line = Line::styled(format!("{number:>digits$} "), faint());
+                line.push(format!("{sign}  "), style);
+                line
+            } else {
+                Line::styled(" ".repeat(gutter), faint())
+            }
+            .with_chrome(gutter)
+            .joined(piece.join);
+            for span in piece.spans {
+                line.push(span.text, span.style);
+            }
+            lines.push(line);
+        }
     }
     lines
 }
