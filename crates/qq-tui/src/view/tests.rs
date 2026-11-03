@@ -1266,6 +1266,7 @@ fn open_lines(call: &ToolCallSnapshot, width: usize) -> Vec<Line> {
         inline_diff: false,
         fold: false,
         selected: false,
+        live_truncated: false,
     };
     tools::tool_open_lines(call, context, None, width)
 }
@@ -1697,6 +1698,7 @@ fn tool_metrics_sit_two_columns_after_the_subject_at_every_width() {
         inline_diff: false,
         fold: false,
         selected: false,
+        live_truncated: false,
     };
     let row = frame_rows(&[tool_summary_line(&running, lookup(&running), 0, 72)]).remove(0);
     assert_eq!(
@@ -1731,6 +1733,7 @@ fn narrow_tool_rows_drop_the_duration_then_the_metric_before_the_verb() {
         inline_diff: false,
         fold: false,
         selected: false,
+        live_truncated: false,
     };
     let at = |width| squash(&frame_rows(&[tool_summary_line(&call, lookup(&call), 0, width)])[0]);
     assert_eq!(at(60), "● Read crates/qq-client/src/sse.rs 3 lines 1.4s");
@@ -3784,6 +3787,7 @@ fn expanded_call_rows(call: &ToolCallSnapshot, width: usize) -> Vec<Line> {
         inline_diff: false,
         fold: false,
         selected: false,
+        live_truncated: false,
     };
     tool_open_lines(call, context, None, width)
 }
@@ -3951,6 +3955,113 @@ fn overlong_detail_rows_are_truncated_to_the_width_with_an_ellipsis() {
     for line in &lines[1..] {
         assert!(line.width() <= 20, "{line:?}");
     }
+}
+
+#[test]
+fn an_open_command_shows_its_full_text_whenever_the_header_metric_cut_it() {
+    let command = "x".repeat(60);
+    let call = tool_call_snapshot(
+        1,
+        "shell",
+        &format!(r#"{{"command":"{command}"}}"#),
+        ToolCallState::Completed,
+        Some("shell exit=0\nok\n"),
+        false,
+    );
+    let rows = squashed_rows(&open_lines(&call, 76));
+    assert_eq!(
+        rows.iter()
+            .take_while(|row| row.trim_end() != "│")
+            .map(|row| row.matches('x').count())
+            .sum::<usize>(),
+        60,
+        "the exit metric shortened the header, so the body repeats the command: {rows:#?}"
+    );
+    let rows = squashed_rows(&open_lines(&call, 120));
+    assert_eq!(
+        rows,
+        ["│ ok"],
+        "a command the header shows whole is not repeated"
+    );
+}
+
+#[test]
+fn a_wide_line_number_keeps_every_character_of_a_wrapped_diff_line() {
+    let text = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN";
+    let mut edit = tool_call_snapshot(
+        1,
+        "edit_file",
+        r#"{"path":"src/lib.rs"}"#,
+        ToolCallState::Completed,
+        Some("edit ok files=1 edits=1"),
+        false,
+    );
+    edit.display = Some(ToolCallDisplay::Diff {
+        path: "src/lib.rs".to_owned(),
+        diff: format!("@@ -10000 +10000 @@\n+{text}\n"),
+    });
+    let lines = open_lines(&edit, 40);
+    assert!(lines.iter().all(|line| line.width() <= 40), "{lines:?}");
+    let rows = frame_rows(&lines);
+    assert!(!rows.iter().any(|row| row.ends_with('…')), "{rows:#?}");
+    let shown: String = rows
+        .iter()
+        .map(|row| {
+            row.trim_start_matches("│ ")
+                .trim_start_matches("10000 +")
+                .trim()
+        })
+        .collect();
+    assert_eq!(shown, text, "{rows:#?}");
+}
+
+#[test]
+fn a_running_command_says_when_its_live_buffer_dropped_multibyte_output() {
+    let mut session =
+        qq_client::state::SessionView::summary_only(fixtures::session_summary(SESSION), None, 0);
+    let call = ToolCallId::from_bytes([9; 16]);
+    session.append_live_tool_output(call, &format!("{}\n\n", "€".repeat(2000)));
+    let kept = &session.live_tool_output[&call];
+    assert!(
+        kept.len() < qq_client::state::MAX_LIVE_TOOL_OUTPUT_BYTES,
+        "the cut lands on a char boundary below the cap: {}",
+        kept.len()
+    );
+    assert!(session.live_tool_output_truncated.contains(&call));
+
+    let mut running = tool_call_snapshot(
+        1,
+        "shell",
+        r#"{"command":"emit"}"#,
+        ToolCallState::Running,
+        None,
+        false,
+    );
+    running.id = call;
+    let row = ToolRow::derive(&running);
+    let context = ToolRowContext {
+        row: &row,
+        clock: RowClock {
+            timing: qq_client::state::ToolCallTiming::default(),
+            now_ms: 0,
+        },
+        expanded: true,
+        inline_diff: false,
+        fold: false,
+        selected: false,
+        live_truncated: session.live_tool_output_truncated.contains(&call),
+    };
+    let live = tools::LiveOutput {
+        text: kept,
+        truncated: context.live_truncated,
+    };
+    let rows = frame_rows(&tools::tool_open_lines(&running, context, Some(live), 100));
+    assert!(
+        rows[0].contains("earlier output scrolled away"),
+        "{rows:#?}"
+    );
+    session.finish_live_tool_output(call);
+    assert!(session.live_tool_output_truncated.is_empty());
 }
 
 #[test]
@@ -5364,6 +5475,7 @@ fn a_tool_row_reuses_its_panel_across_frames_and_relays_out_on_a_new_width() {
         inline_diff: false,
         fold: false,
         selected: false,
+        live_truncated: false,
     };
     let first = tool_open_lines(&call, context(43_454_000), None, 80);
     let second = tool_open_lines(&call, context(43_455_000), None, 80);

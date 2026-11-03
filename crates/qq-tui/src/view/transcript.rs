@@ -1001,6 +1001,7 @@ impl TranscriptCache {
                 inline_diff: newest_edit == Some(call.id),
                 fold: !app.receipts_open,
                 selected: app.block_cursor == Some(Block::Tool(call.id)),
+                live_truncated: session.live_tool_output_truncated.contains(&call.id),
             }
         };
         let turns = TurnIndex::build(messages, tool_calls);

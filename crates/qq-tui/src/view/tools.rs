@@ -19,6 +19,8 @@ const TAB: &str = "    ";
 pub(super) const TOOL_SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const TRUNCATED_SUFFIX: &str = " · truncated";
 
+type PanelKey = (usize, bool);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolRow {
     pub verb: &'static str,
@@ -29,7 +31,7 @@ pub(crate) struct ToolRow {
     pub truncated: bool,
     pub arguments: Vec<(String, String)>,
     pub diff: Option<String>,
-    panel: RefCell<Option<(usize, Vec<Line>)>>,
+    panel: RefCell<Option<(PanelKey, Vec<Line>)>>,
     inline_diff: RefCell<Option<(usize, Vec<Line>)>>,
 }
 
@@ -503,6 +505,7 @@ pub(crate) struct ToolRowContext<'a> {
     pub inline_diff: bool,
     pub fold: bool,
     pub selected: bool,
+    pub live_truncated: bool,
 }
 
 pub(super) type ChildRows<'a> = &'a dyn Fn(ToolCallId, usize) -> Vec<Line>;
@@ -633,7 +636,11 @@ pub(super) fn render_tool_blocks(
             }
         }
         if context.expanded {
-            let opened = tool_open_lines(call, context, live_output.get(&call.id), width);
+            let live = live_output.get(&call.id).map(|text| LiveOutput {
+                text,
+                truncated: context.live_truncated,
+            });
+            let opened = tool_open_lines(call, context, live, width);
             let footer = opened.len() >= OPEN_FOOTER_MIN_ROWS;
             lines.extend(opened);
             if footer {
@@ -827,34 +834,21 @@ fn verb_for(row: &ToolRow, call: &ToolCallSnapshot) -> String {
     }
 }
 
-pub(super) fn tool_summary_line(
+struct SummaryLayout {
+    verb: String,
+    verb_width: usize,
+    tail: Vec<(String, Style)>,
+    subject_width: usize,
+}
+
+fn summary_layout(
     call: &ToolCallSnapshot,
     context: ToolRowContext<'_>,
-    tick: usize,
     width: usize,
-) -> Line {
+) -> SummaryLayout {
     let row = context.row;
-    let (glyph, glyph_style) = tool_state_glyph(call, tick);
-    let mut line = Line::styled(
-        format!("{glyph} "),
-        if context.selected {
-            accent()
-        } else {
-            glyph_style
-        },
-    )
-    .with_chrome(2);
-    line.kind = RowKind::Tool;
     let verb = verb_for(row, call);
     let verb_width = text_width(&verb).max(TOOL_VERB_WIDTH - 1) + 1;
-    line.push(
-        format!("{verb:<verb_width$}"),
-        if context.selected {
-            normal().bold()
-        } else {
-            normal()
-        },
-    );
     let running = call.state == ToolCallState::Running;
     let mut tail: Vec<(String, Style)> = Vec::new();
     match call.error_kind() {
@@ -901,7 +895,7 @@ pub(super) fn tool_summary_line(
     if let Some(duration) = context.clock.duration(running).filter(|ms| *ms >= 1000) {
         tail.push((format_duration_ms(duration), faint()));
     }
-    let used = line.width();
+    let used = 2 + verb_width;
     let mut tail_width: usize = tail.iter().map(|(text, _)| text_width(text) + 2).sum();
     while used + 6 + tail_width > width {
         let Some(index) = tail.iter().rposition(|(_, style)| *style != failure()) else {
@@ -910,8 +904,48 @@ pub(super) fn tool_summary_line(
         let (text, _) = tail.remove(index);
         tail_width -= text_width(&text) + 2;
     }
+    SummaryLayout {
+        verb,
+        verb_width,
+        tail,
+        subject_width: width.saturating_sub(used + tail_width),
+    }
+}
+
+pub(super) fn tool_summary_line(
+    call: &ToolCallSnapshot,
+    context: ToolRowContext<'_>,
+    tick: usize,
+    width: usize,
+) -> Line {
+    let row = context.row;
+    let (glyph, glyph_style) = tool_state_glyph(call, tick);
+    let mut line = Line::styled(
+        format!("{glyph} "),
+        if context.selected {
+            accent()
+        } else {
+            glyph_style
+        },
+    )
+    .with_chrome(2);
+    line.kind = RowKind::Tool;
+    let SummaryLayout {
+        verb,
+        verb_width,
+        tail,
+        subject_width,
+    } = summary_layout(call, context, width);
+    line.push(
+        format!("{verb:<verb_width$}"),
+        if context.selected {
+            normal().bold()
+        } else {
+            normal()
+        },
+    );
     if let Some(subject) = &row.subject {
-        let available = width.saturating_sub(used + tail_width);
+        let available = subject_width;
         let text = if row.subject_is_path {
             elide_path(subject, available)
         } else {
@@ -1039,25 +1073,28 @@ fn tool_panel_content_width(width: usize) -> usize {
 pub(super) fn tool_open_lines(
     call: &ToolCallSnapshot,
     context: ToolRowContext<'_>,
-    live: Option<&String>,
+    live: Option<LiveOutput<'_>>,
     width: usize,
 ) -> Vec<Line> {
     let row = context.row;
+    let header_cut = row.subject.as_deref().is_some_and(|subject| {
+        text_width(subject) > summary_layout(call, context, width).subject_width
+    });
     let mut cached = row.panel.borrow_mut();
     if !cached
         .as_ref()
-        .is_some_and(|(cached_width, _)| *cached_width == width)
+        .is_some_and(|(key, _)| *key == (width, header_cut))
     {
-        *cached = Some((width, open_body(call, row, width)));
+        *cached = Some(((width, header_cut), open_body(call, row, width, header_cut)));
     }
     let mut lines = cached
         .as_ref()
         .map(|(_, lines)| lines.clone())
         .unwrap_or_default();
     if call.state == ToolCallState::Running
-        && let Some(output) = live
+        && let Some(live) = live
     {
-        lines.extend(open_live_lines(output, width));
+        lines.extend(open_live_lines(live, width));
     }
     lines
 }
@@ -1074,12 +1111,12 @@ pub(super) fn close_row(row: &ToolRow, call: &ToolCallSnapshot, width: usize) ->
     truncate_line(line, width)
 }
 
-fn open_body(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line> {
+fn open_body(call: &ToolCallSnapshot, row: &ToolRow, width: usize, header_cut: bool) -> Vec<Line> {
     let content = width.saturating_sub(2).max(1);
     let mut sections: Vec<Vec<Line>> = Vec::new();
     if matches!(call.name.as_str(), "shell" | "exec")
+        && header_cut
         && let Some(command) = row.subject.as_deref()
-        && text_width(command) + TOOL_VERB_WIDTH + 4 > content
     {
         let mut line = Line::styled("$ ", faint());
         line.push(command, normal());
@@ -1133,11 +1170,18 @@ fn open_body(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line> 
     lines
 }
 
-fn open_live_lines(output: &str, width: usize) -> Vec<Line> {
+#[derive(Debug, Clone, Copy)]
+pub(super) struct LiveOutput<'a> {
+    pub text: &'a str,
+    pub truncated: bool,
+}
+
+fn open_live_lines(live: LiveOutput<'_>, width: usize) -> Vec<Line> {
     let content = width.saturating_sub(2).max(1);
+    let output = live.text;
     let complete = &output[..output.rfind('\n').map_or(0, |index| index + 1)];
     let mut lines = Vec::new();
-    if output.len() >= qq_client::state::MAX_LIVE_TOOL_OUTPUT_BYTES {
+    if live.truncated {
         lines.push(rail_row(
             Line::styled(
                 "⋯ earlier output scrolled away; all of it shows when the command ends",
@@ -1307,6 +1351,7 @@ pub(super) fn render_tool_calls_simple(
         inline_diff: false,
         fold: detail == SimpleDetail::Folded,
         selected: false,
+        live_truncated: false,
     };
     render_tool_calls(calls, live_output, &lookup, tick, width, children)
 }

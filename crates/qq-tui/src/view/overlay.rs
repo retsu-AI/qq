@@ -891,23 +891,33 @@ pub(super) fn dock_diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<
 }
 
 pub(super) fn whole_diff_lines(diff: &str, width: usize) -> Vec<Line> {
-    const GUTTER: usize = 8;
-    let content = width.saturating_sub(GUTTER).max(1);
+    let rows = diff_rows(diff);
+    let digits = rows
+        .iter()
+        .filter_map(|row| row.number)
+        .max()
+        .map_or(0, |number| number.to_string().len())
+        .max(4);
+    let gutter = digits + 4;
+    let content = width.saturating_sub(gutter).max(1);
     let mut lines = Vec::new();
-    for row in diff_rows(diff) {
+    for row in rows {
         let (style, sign) = diff_style(&row);
         for (index, piece) in wrap_line_chars(diff_text(&row, style), content)
             .into_iter()
             .enumerate()
         {
             let mut line = if index == 0 {
-                let mut line = Line::styled(diff_number(&row), faint());
+                let number = row
+                    .number
+                    .map_or_else(String::new, |number| number.to_string());
+                let mut line = Line::styled(format!("{number:>digits$} "), faint());
                 line.push(format!("{sign}  "), style);
                 line
             } else {
-                Line::styled(" ".repeat(GUTTER), faint())
+                Line::styled(" ".repeat(gutter), faint())
             }
-            .with_chrome(GUTTER)
+            .with_chrome(gutter)
             .joined(piece.join);
             for span in piece.spans {
                 line.push(span.text, span.style);
