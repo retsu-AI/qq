@@ -10,6 +10,7 @@ mod commands;
 mod compaction;
 mod context_capacity;
 mod contract;
+mod crash_matrix;
 mod deadlines;
 mod delegation;
 mod execution_context;
