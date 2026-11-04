@@ -71,6 +71,8 @@ impl TurnNotice {
     }
 }
 
+pub(crate) const MAX_TURN_NOTICE_BYTES: usize = 16 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OrderedTurnNotice {
@@ -83,7 +85,7 @@ fn deserialize_notice_text<'de, D: serde::Deserializer<'de>>(
     decoder: D,
 ) -> Result<String, D::Error> {
     let text = <String as serde::Deserialize>::deserialize(decoder)?;
-    if text.len() > crate::tools::goal::MAX_GOAL_RENDER_BYTES
+    if text.len() > MAX_TURN_NOTICE_BYTES
         || !text.starts_with("[QQ runtime notice; not a user instruction]\n")
     {
         return Err(serde::de::Error::custom("invalid framed boundary notice"));
@@ -111,20 +113,8 @@ impl PreparedStaticPrefix {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ModelWorkDisposition {
-    Committed,
-    RejectedBeforeWork,
-    Uncertain,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RuntimeEvent {
-    GoalRequestRejected,
-    GoalRequestAdmitted {
-        cursor: Option<qq_protocol::EventCursor>,
-    },
-    GoalPaidCancelled,
     Started,
     Prepared {
         turn_ordinal: u32,
@@ -152,15 +142,14 @@ pub(crate) enum RuntimeEvent {
         text: String,
     },
     AssistantTurnCompleted {
-        model_work: ModelWorkDisposition,
         turn_ordinal: u32,
         message: Message,
         usage: Option<TokenUsage>,
         calls: Vec<RuntimeToolCall>,
         truncated: bool,
         notice: Option<TurnNotice>,
-        goal_notices: Vec<OrderedTurnNotice>,
-        reserved_goal_notices: usize,
+        boundary_notices: Vec<OrderedTurnNotice>,
+        reserved_boundary_notices: usize,
     },
     ToolCallStarted {
         id: ToolCallId,

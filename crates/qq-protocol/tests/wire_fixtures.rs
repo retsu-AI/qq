@@ -188,7 +188,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 44);
+    assert_eq!(PROTOCOL_VERSION, 45);
     let catalog_cursor = qq_protocol::WorkspaceCatalogCursor {
         store_id: StoreId::from_bytes([1; 16]),
         workspace_id: WorkspaceId::from_bytes([2; 16]),
@@ -680,7 +680,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 message: message(0x20, false, MessageState::Queued),
                 run: Box::new(RunSnapshot {
                     origin: None,
-                    goal: None,
                     id: run_id,
                     session_id,
                     status: RunStatus::Queued,
@@ -1094,7 +1093,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         "snapshot_run_with_plan_identity",
         &RunSnapshot {
             origin: None,
-            goal: None,
             id: run_id,
             session_id,
             status: RunStatus::Completed,
@@ -1336,6 +1334,7 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
 
 #[test]
 fn historical_fixtures_still_decode() {
+    const REMOVED_IN_45: [&str; 2] = ["goal", "check_interruption"];
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     for version in retained_versions(&root) {
         let directory = fixture_dir(version);
@@ -1352,6 +1351,45 @@ fn historical_fixtures_still_decode() {
         for path in entries {
             let name = path.file_stem().unwrap().to_str().unwrap();
             let stored = fs::read_to_string(&path).unwrap();
+            if REMOVED_IN_45.iter().any(|removed| stored.contains(removed)) {
+                if name.starts_with("event_")
+                    && let Ok(envelope) = serde_json::from_str::<SessionEventEnvelope>(&stored)
+                {
+                    assert_eq!(
+                        envelope.event,
+                        SessionEvent::Retired,
+                        "{}: a recorded goal event replays as retired",
+                        path.display()
+                    );
+                    continue;
+                }
+                let decodes = match name {
+                    "capabilities" => serde_json::from_str::<ServerCapabilities>(&stored).is_ok(),
+                    _ if name.starts_with("command_") => {
+                        serde_json::from_str::<CommandRequest>(&stored).is_ok()
+                            || serde_json::from_str::<SessionCommand>(&stored).is_ok()
+                    }
+                    _ if name.starts_with("receipt_") => {
+                        serde_json::from_str::<CommandReceipt>(&stored).is_ok()
+                    }
+                    _ if name.starts_with("outcome_") => {
+                        serde_json::from_str::<RunOutcome>(&stored).is_ok()
+                            || serde_json::from_str::<CommandOutcome>(&stored).is_ok()
+                    }
+                    _ if name.starts_with("snapshot_") => {
+                        serde_json::from_str::<RunSnapshot>(&stored).is_ok()
+                            || serde_json::from_str::<qq_protocol::WorkspaceSnapshot>(&stored)
+                                .is_ok()
+                    }
+                    _ => serde_json::from_str::<SessionEventEnvelope>(&stored).is_ok(),
+                };
+                assert!(
+                    !decodes,
+                    "{}: goal vocabulary removed in 45 must not decode",
+                    path.display()
+                );
+                continue;
+            }
             macro_rules! decode {
                 ($type:ty) => {
                     serde_json::from_str::<$type>(&stored).unwrap_or_else(|error| {
@@ -1366,15 +1404,21 @@ fn historical_fixtures_still_decode() {
                 decode!(qq_protocol::WorkspaceCatalogRequest);
             } else if name.starts_with("workspace_catalog_") {
                 decode!(qq_protocol::WorkspaceCatalog);
-            } else if name == "command_acknowledge_check_interruption" {
-                decode!(SessionCommand);
-            } else if name == "event_check_interruption_changed" {
-                decode!(SessionEvent);
-            } else if name == "outcome_check_interruption_acknowledged" {
-                decode!(CommandOutcome);
-            } else if name == "snapshot_check_interruption" || name == "snapshot_pending_approvals"
-            {
+            } else if name == "snapshot_pending_approvals" || name == "snapshot_fork_prompt" {
                 decode!(qq_protocol::WorkspaceSnapshot);
+            } else if matches!(
+                name,
+                "command_fork"
+                    | "command_list_checkpoints"
+                    | "command_rewind"
+                    | "command_turn_diff"
+            ) {
+                decode!(SessionCommand);
+            } else if matches!(
+                name,
+                "outcome_fork" | "outcome_rewind" | "outcome_turn_diff"
+            ) {
+                decode!(CommandOutcome);
             } else if name.starts_with("command_") {
                 decode!(CommandRequest);
             } else if name.starts_with("receipt_") {
@@ -1428,192 +1472,6 @@ fn model_turn_limits_and_ordinals_accept_the_full_u32_range() {
 }
 
 #[test]
-fn current_goal_commands_receipts_and_origins_match_goldens() {
-    check(
-        "command_goal_pause_for_input",
-        &CommandRequest {
-            command_id: CommandId::from_bytes([0x69; 16]),
-            command: SessionCommand::GoalControl {
-                session_id: SessionId::from_bytes([3; 16]),
-                expected: qq_protocol::GoalIdentity {
-                    goal_id: qq_protocol::GoalId::from_bytes([0x61; 16]),
-                    revision: 3,
-                },
-                action: qq_protocol::GoalControl::PauseForInput {
-                    tool_call_id: ToolCallId::from_bytes([0x70; 16]),
-                },
-            },
-        },
-    );
-    let workspace_id = WorkspaceId::from_bytes([1; 16]);
-    let interrupted = qq_protocol::CheckInterruption {
-        session_id: SessionId::from_bytes([3; 16]),
-        run_id: RunId::from_bytes([4; 16]),
-    };
-    check(
-        "command_acknowledge_check_interruption",
-        &SessionCommand::AcknowledgeCheckInterruption {
-            workspace_id,
-            run_id: interrupted.run_id,
-        },
-    );
-    check(
-        "event_check_interruption_changed",
-        &SessionEvent::CheckInterruptionChanged {
-            interruption: Some(interrupted),
-        },
-    );
-    check(
-        "outcome_check_interruption_acknowledged",
-        &CommandOutcome::CheckInterruptionAcknowledged {
-            workspace_id,
-            run_id: interrupted.run_id,
-        },
-    );
-    let snapshot:qq_protocol::WorkspaceSnapshot = serde_json::from_value(serde_json::json!({
-        "cursor":{"store_id":StoreId::from_bytes([2;16]),"workspace_id":workspace_id,"sequence":7},
-        "workspace":{"id":workspace_id,"path":"/workspace"},"sessions":[],"has_older_sessions":false,"check_interruption":interrupted
-    })).unwrap();
-    check("snapshot_check_interruption", &snapshot);
-    let session_id = SessionId::from_bytes([3; 16]);
-    let goal_id = qq_protocol::GoalId::from_bytes([0x61; 16]);
-    let goal: Box<qq_protocol::GoalSnapshot> = serde_json::from_value(serde_json::json!({
-        "session_id":session_id,"goal_id":goal_id,"revision":3,
-        "objective":"Implement billing migration", "check":null,"check_authorization":null,
-        "budget":{"max_goal_runs":200,"deadline_ms":1_800_000_000_000_u64},
-        "checklist":[],"notes":"", "status":{"type":"active"},
-        "counters":qq_protocol::GoalCounters::default(),"next_run_at_ms":1_700_000_000_000_u64,
-        "wait":null,"audit_pending":false,"audit_revision":null,"pending_run_id":null,"check_output":null
-    })).unwrap();
-    for (name, command_id, command) in [
-        (
-            "command_set_goal",
-            0x62,
-            serde_json::json!({"type":"set_goal","session_id":session_id,
-            "objective":goal.objective,"budget":goal.budget}),
-        ),
-        (
-            "command_set_goal_with_check_approval",
-            0x65,
-            serde_json::json!({"type":"set_goal","session_id":session_id,
-            "objective":goal.objective,"budget":goal.budget,
-            "check":{"command":"cargo test -p billing","timeout_ms":1000},
-            "check_approval":"once"}),
-        ),
-        (
-            "command_goal_approve_once",
-            0x63,
-            serde_json::json!({"type":"goal_control","session_id":session_id,
-            "expected":{"goal_id":goal_id,"revision":3},
-            "action":{"type":"approve_check","scope":"once","command":"cargo test -p billing"}}),
-        ),
-        (
-            "command_goal_approve_for_goal",
-            0x64,
-            serde_json::json!({"type":"goal_control","session_id":session_id,
-            "expected":{"goal_id":goal_id,"revision":3},
-            "action":{"type":"approve_check","scope":"for_goal","command":"cargo test -p billing"}}),
-        ),
-    ] {
-        check(
-            name,
-            &CommandRequest {
-                command_id: CommandId::from_bytes([command_id; 16]),
-                command: serde_json::from_value(command).unwrap(),
-            },
-        );
-    }
-    check(
-        "event_goal_updated",
-        &SessionEventEnvelope {
-            run_id: None,
-            ..envelope(80, SessionEvent::GoalUpdated { goal: goal.clone() })
-        },
-    );
-    let mut task_scoped_goal = goal.clone();
-    task_scoped_goal.check = Some(qq_protocol::GoalCheck {
-        command: "cargo test -p billing".into(),
-        timeout_ms: 1000,
-    });
-    task_scoped_goal.check_authorization = Some(qq_protocol::GoalCheckAuthorization::TaskScoped);
-    check(
-        "event_goal_task_scoped_check",
-        &SessionEventEnvelope {
-            run_id: None,
-            ..envelope(
-                80,
-                SessionEvent::GoalUpdated {
-                    goal: task_scoped_goal.clone(),
-                },
-            )
-        },
-    );
-    check(
-        "receipt_goal_task_scoped_check",
-        &CommandReceipt {
-            command_id: CommandId::from_bytes([0x62; 16]),
-            committed_through: cursor(80),
-            outcome: CommandOutcome::GoalUpdated {
-                session_id,
-                goal: task_scoped_goal,
-            },
-        },
-    );
-    check(
-        "event_goal_cleared",
-        &SessionEventEnvelope {
-            run_id: None,
-            ..envelope(
-                81,
-                SessionEvent::GoalCleared {
-                    session_id,
-                    goal_id,
-                    revision: 4,
-                },
-            )
-        },
-    );
-    check(
-        "receipt_goal_updated",
-        &CommandReceipt {
-            command_id: CommandId::from_bytes([0x62; 16]),
-            committed_through: cursor(80),
-            outcome: CommandOutcome::GoalUpdated {
-                session_id,
-                goal: goal.clone(),
-            },
-        },
-    );
-    let run_id = RunId::from_bytes([0x65; 16]);
-    for (name, origin) in [
-        (
-            "snapshot_goal_bound_prompt",
-            qq_protocol::RunOrigin::UserPrompt {},
-        ),
-        (
-            "snapshot_goal_run",
-            qq_protocol::RunOrigin::Goal {
-                goal_id,
-                revision: 3,
-            },
-        ),
-        (
-            "snapshot_goal_check",
-            qq_protocol::RunOrigin::GoalCheck {
-                goal_id,
-                revision: 3,
-            },
-        ),
-    ] {
-        let run: RunSnapshot =
-            serde_json::from_value(serde_json::json!({"id":run_id,"session_id":session_id,
-            "status":"queued","origin":origin,"goal":{"goal_id":goal_id,"revision":3}}))
-            .unwrap();
-        check(name, &run);
-    }
-}
-
-#[test]
 fn pending_approval_snapshot_matches_its_golden() {
     let mut summary = summary();
     let call = ToolCallId::from_bytes([9; 16]);
@@ -1634,7 +1492,6 @@ fn pending_approval_snapshot_matches_its_golden() {
                 ..qq_protocol::ApprovalPreview::default()
             },
         }],
-        goal: None,
         side_questions: Vec::new(),
         summary: summary.clone(),
         messages: Vec::new(),

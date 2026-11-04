@@ -48,8 +48,8 @@ Read the current values from the source, not from memory: `PROTOCOL_VERSION`
    git diff --stat crates/qq-protocol/tests/fixtures/       # read every changed file
    cargo test -p qq-protocol --test wire_fixtures            # now green
    ```
-   If `PROTOCOL_VERSION` bumped from N to N+1: in `fixtures/`,
-   `fixtures/headless/` and `fixtures/headless-goals/`, copy `vN` to
+   If `PROTOCOL_VERSION` bumped from N to N+1: in `fixtures/` and
+   `fixtures/headless/`, copy `vN` to
    `vN+1` and delete `vN-1` (only the previous version is kept, decode-only),
    update the `assert_eq!(PROTOCOL_VERSION, …)` pins, then regenerate.
 4. **Harbor fixtures.** `benchmarks/harbor/tests/fixtures/*.trace.jsonl`

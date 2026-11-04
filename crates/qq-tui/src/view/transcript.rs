@@ -527,7 +527,7 @@ impl TranscriptCache {
             View::Attention => Some(attention_body(app, width)),
             View::Changes => Some(changes_body(app, width)),
             View::SideQuestions(session_id) => Some(side_questions_body(app, session_id, width)),
-            View::Goal(_) | View::Transcript(_) => None,
+            View::Transcript(_) => None,
         };
         if let Some(rows) = workspace_rows {
             let mut body = VirtualBody::default();
@@ -1299,8 +1299,6 @@ pub(super) fn shown_view(app: &App, pane: &TranscriptPane) -> View {
         View::Transcript(Some(session_id)) if !app.sessions.contains_key(&session_id) => {
             View::Transcript(None)
         }
-        View::Goal(session_id) if !app.sessions.contains_key(&session_id) => View::Transcript(None),
-        View::Goal(session_id) => View::Transcript(Some(session_id)),
         view => view,
     }
 }

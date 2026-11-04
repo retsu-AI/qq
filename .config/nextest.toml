@@ -25,7 +25,7 @@ filter = 'all()'
 setup = 'tmpfs-tmpdir'
 
 [[profile.default.overrides]]
-filter = '(package(qq-core) & test(/^sessions::tests::goal_driver_soak::multi_day_/)) | binary_id(qq-core::soak)'
+filter = 'binary_id(qq-core::soak)'
 test-group = 'soak'
 priority = 100
 
@@ -35,8 +35,6 @@ filter = '''
     test(/^tools::(process_group|windows_job)::/)
     | test(/^tools::shell::(orphan_tests|child_exit|exit_tests|descendants|watcher_tests)::/)
     | test(/^tools::tests::.*(kill|escaped_tree|yield|left_the_group|shell_timeout|shell_cancellation|stops_on_timeout|reaped)/)
-    | test(/^sessions::tests::goal_check::goal_check_process_(cancellation|kills|timeout)/)
-    | test(/^sessions::tests::goal_driver_soak::.*real_process/)
     | test(=tests::tool_loop::a_run_follows_a_yielded_command_and_stops_the_rest_when_it_ends)
 ))
 | binary_id(qq::daemon_lifecycle)
@@ -50,13 +48,10 @@ filter = '''
 (package(qq-core) & (
     test(=sessions::tests::compaction::pruning::a_session_without_a_window_still_sheds_stale_reads_before_the_storage_backstop)
     | test(=tools::tests::read::scan_cap_offsets_remain_readable_until_a_terminal_marker)
-    | test(=sessions::tests::compaction::in_run::maximum_goal_is_verbatim_immediately_after_three_in_run_summaries)
     | test(=tools::tests::shell::cancel_and_timeout_kill_descendants_that_left_the_group)
     | test(=sessions::tests::compaction::in_run::an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verbatim)
-    | test(=sessions::tests::goal_final_slot::goal_final_run_reserves_a_durable_tool_free_handoff_after_early_completion)
     | test(=sessions::tests::feeds::a_lagging_subscriber_catches_up_from_the_store_without_gaps_or_duplicates)
     | test(=sessions::tests::compaction::pruning::history_search_is_scan_bounded_and_newest_first)
-    | test(=sessions::tests::goal_paid_limits::goal_paid_requests_intersect_the_callers_cumulative_remainder)
     | test(=sessions::tests::runs::steering_during_a_slice_report_lands_before_the_continuation_notice)
     | test(=sessions::tests::runs::a_truncated_slice_report_keeps_its_notice_on_replay)
 ))
@@ -101,7 +96,6 @@ default-filter = '''
     test(/^tools::windows_job::tests::/)
     | test(=tools::shell::cmd_text_tests::quoted_redirection_reaches_cmd_unchanged)
     | test(=approval::tests::cmd_separators_and_native_sort_output_are_work)
-    | test(=sessions::tests::approvals::goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied_actions)
     | test(=tools::tests::read::native_zero_row_window_returns_a_budget_error)
     | test(=tools::tests::read::native_unicode_header_preserves_repaired_read_windows)
     | test(=tools::tests::shell::dropped_windows_shell_waiter_kills_the_owned_process_before_drain)
@@ -121,8 +115,7 @@ platform = 'cfg(target_os = "macos")'
 default-filter = '''
 (package(qq-config) | package(qq-auth) | package(qq-server)) & test(/^tests::.*qq_home/)
 | package(qq-core) & (
-    test(=sessions::tests::approvals::goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied_actions)
-    | test(=tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait)
+    test(=tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait)
     | test(=tools::tests::shell::cancel_and_timeout_kill_descendants_that_left_the_group)
     | test(=tools::tests::shell::a_yielded_escaped_tree_dies_when_the_run_ends)
     | test(=tools::tests::shell::commands_see_their_working_directory_in_pwd_and_no_oldpwd)

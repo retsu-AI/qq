@@ -1338,11 +1338,6 @@ impl ProcessGroupGuard {
     }
 
     #[cfg(unix)]
-    pub(crate) fn group(&self) -> Option<rustix::process::Pid> {
-        self.pgid
-    }
-
-    #[cfg(unix)]
     pub(crate) async fn reap_watcher(&mut self) -> std::io::Result<()> {
         if let Some(mut watcher) = self.watcher.take() {
             let _ = watcher.start_kill();

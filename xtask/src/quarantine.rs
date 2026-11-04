@@ -220,7 +220,7 @@ mod tests {
 
     const ENTRY: &str = r#"
 [[quarantine]]
-test = "qq-core sessions::tests::goals::a_flaky_case"
+test = "qq-core sessions::tests::runs::a_flaky_case"
 owner = "zmeyer"
 issue = "ENG-1200"
 added = "2026-11-01"
@@ -249,7 +249,7 @@ expires = "2026-11-15"
             entries[0],
             Entry {
                 line: 2,
-                test: Some("qq-core sessions::tests::goals::a_flaky_case".to_owned()),
+                test: Some("qq-core sessions::tests::runs::a_flaky_case".to_owned()),
                 owner: Some("zmeyer".to_owned()),
                 issue: Some("ENG-1200".to_owned()),
                 added: Some("2026-11-01".to_owned()),
@@ -258,7 +258,7 @@ expires = "2026-11-15"
         );
         assert_eq!(
             filterset(&entries).unwrap(),
-            "(binary_id(=qq-core) & test(=sessions::tests::goals::a_flaky_case)) | (binary_id(=qq-core) & test(=sessions::tests::goals::b))"
+            "(binary_id(=qq-core) & test(=sessions::tests::runs::a_flaky_case)) | (binary_id(=qq-core) & test(=sessions::tests::runs::b))"
         );
     }
 
@@ -391,7 +391,7 @@ expires = "2026-11-15"
                 true
             ),
             [
-                "`sessions::tests::goals::a_flaky_case` is not `<binary-id> <test path>` as `cargo nextest list` prints it"
+                "`sessions::tests::runs::a_flaky_case` is not `<binary-id> <test path>` as `cargo nextest list` prints it"
             ]
         );
         assert_eq!(

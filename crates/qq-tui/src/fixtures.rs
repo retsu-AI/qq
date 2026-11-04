@@ -107,7 +107,6 @@ pub fn tool_call(id: ToolCallId, session_id: SessionId, name: &str) -> ToolCallS
 pub fn run(id: RunId, session_id: SessionId, status: RunStatus) -> RunSnapshot {
     RunSnapshot {
         origin: None,
-        goal: None,
         id,
         session_id,
         status,
@@ -131,7 +130,6 @@ pub fn session_snapshot(summary: SessionSummary) -> SessionSnapshot {
         approval_previews: Vec::new(),
         execution_root: None,
         fork_prompt: None,
-        goal: None,
         side_questions: Vec::new(),
         summary,
         messages: Vec::new(),
@@ -146,7 +144,6 @@ pub fn session_snapshot(summary: SessionSummary) -> SessionSnapshot {
 pub fn workspace_snapshot() -> WorkspaceSnapshot {
     let summary = session_summary(SESSION);
     WorkspaceSnapshot {
-        check_interruption: None,
         included: Vec::new(),
         cursor: cursor(1),
         workspace: WorkspaceSummary {
@@ -239,16 +236,4 @@ pub fn steering_capabilities() -> ServerCapabilities {
         interrupt: true,
         max_pending_per_run: 4,
     })
-}
-
-pub fn goal_snapshot(session: SessionId) -> Box<qq_protocol::GoalSnapshot> {
-    Box::new(serde_json::from_value(serde_json::json!({
-        "session_id":session,"goal_id":qq_protocol::GoalId::from_bytes([0x61;16]),"revision":7,
-        "objective":"Finish the billing migration", "check":{"command":"cargo test -p billing","timeout_ms":5000},
-        "check_authorization":"pending","budget":{"max_goal_runs":10,"deadline_ms":1_800_000_000_000_u64,"max_total_tokens":1000,"max_cost_usd_nanos":1_000_000_000_u64},
-        "checklist":[{"id":1,"text":"verify invoices","state":"done"},{"id":2,"text":"ship migration","state":"in_progress"}],
-        "notes":"Backfill verified", "status":{"type":"active"},"counters":qq_protocol::GoalCounters::default(),
-        "next_run_at_ms":1_700_000_000_000_u64,"wait":null,"audit_pending":true,"audit_revision":7,
-        "pending_run_id":null,"check_output":"exit 7\nmissing invoice"
-    })).unwrap())
 }

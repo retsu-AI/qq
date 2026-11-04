@@ -347,28 +347,6 @@ pub struct Question {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionCommand {
-    AcknowledgeCheckInterruption {
-        workspace_id: WorkspaceId,
-        run_id: RunId,
-    },
-    SetGoal {
-        session_id: SessionId,
-        objective: String,
-        #[serde(default)]
-        check: Option<crate::GoalCheck>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        check_approval: Option<crate::GoalCheckScope>,
-        budget: Box<crate::GoalBudget>,
-        #[serde(default)]
-        expected: Option<crate::GoalIdentity>,
-        #[serde(default)]
-        replace: bool,
-    },
-    GoalControl {
-        session_id: SessionId,
-        expected: crate::GoalIdentity,
-        action: crate::GoalControl,
-    },
     CancelSideQuestion {
         side_question_id: RunId,
     },
@@ -479,11 +457,6 @@ impl SessionCommand {
     #[must_use]
     pub const fn kind(&self) -> SessionCommandKind {
         match self {
-            Self::AcknowledgeCheckInterruption { .. } => {
-                SessionCommandKind::AcknowledgeCheckInterruption
-            }
-            Self::SetGoal { .. } => SessionCommandKind::SetGoal,
-            Self::GoalControl { .. } => SessionCommandKind::GoalControl,
             Self::CancelSideQuestion { .. } => SessionCommandKind::CancelSideQuestion,
             Self::SubmitSideQuestion { .. } => SessionCommandKind::SubmitSideQuestion,
             Self::ResolveWorkspace { .. } => SessionCommandKind::ResolveWorkspace,
@@ -512,9 +485,6 @@ impl SessionCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionCommandKind {
-    AcknowledgeCheckInterruption,
-    SetGoal,
-    GoalControl,
     CancelSideQuestion,
     SubmitSideQuestion,
     ResolveWorkspace,
@@ -539,10 +509,7 @@ pub enum SessionCommandKind {
 }
 
 impl SessionCommandKind {
-    pub const ALL: [Self; 24] = [
-        Self::AcknowledgeCheckInterruption,
-        Self::SetGoal,
-        Self::GoalControl,
+    pub const ALL: [Self; 21] = [
         Self::CancelSideQuestion,
         Self::SubmitSideQuestion,
         Self::ResolveWorkspace,
@@ -569,8 +536,7 @@ impl SessionCommandKind {
     #[must_use]
     pub const fn creates_work(self) -> bool {
         match self {
-            Self::SetGoal
-            | Self::SubmitSideQuestion
+            Self::SubmitSideQuestion
             | Self::ResolveWorkspace
             | Self::CreateSession
             | Self::SubmitPrompt
@@ -581,9 +547,7 @@ impl SessionCommandKind {
             | Self::SetSessionEffort
             | Self::ForkSession
             | Self::CompactSession => true,
-            Self::AcknowledgeCheckInterruption
-            | Self::GoalControl
-            | Self::CancelSideQuestion
+            Self::CancelSideQuestion
             | Self::CancelRun
             | Self::RespondToolApproval
             | Self::DeleteSession
@@ -599,9 +563,6 @@ impl SessionCommandKind {
     #[must_use]
     pub const fn route(self) -> &'static str {
         match self {
-            Self::AcknowledgeCheckInterruption => "/v1/workspaces/check-interruptions/acknowledge",
-            Self::SetGoal => "/v1/sessions/goal",
-            Self::GoalControl => "/v1/sessions/goal/control",
             Self::CancelSideQuestion => "/v1/sessions/side-questions/cancel",
             Self::SubmitSideQuestion => "/v1/sessions/side-questions",
             Self::ResolveWorkspace => "/v1/workspaces/resolve",
@@ -656,19 +617,6 @@ pub struct CommandReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandOutcome {
-    CheckInterruptionAcknowledged {
-        workspace_id: WorkspaceId,
-        run_id: RunId,
-    },
-    GoalUpdated {
-        session_id: SessionId,
-        goal: Box<crate::GoalSnapshot>,
-    },
-    GoalCleared {
-        session_id: SessionId,
-        goal_id: crate::GoalId,
-        revision: u32,
-    },
     SideQuestionCancelled {
         side_question_id: RunId,
     },
@@ -1255,8 +1203,6 @@ pub struct PendingHold {
 pub struct RunSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<RunOrigin>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal: Option<crate::GoalIdentity>,
     pub id: RunId,
     pub session_id: SessionId,
     pub status: RunStatus,
@@ -1299,14 +1245,6 @@ pub enum RunOrigin {
     InRunCompaction {
         owner_run_id: RunId,
     },
-    Goal {
-        goal_id: crate::GoalId,
-        revision: u32,
-    },
-    GoalCheck {
-        goal_id: crate::GoalId,
-        revision: u32,
-    },
 }
 
 impl RunOrigin {
@@ -1317,9 +1255,7 @@ impl RunOrigin {
             Self::AutoCompaction { .. }
             | Self::UserPrompt { .. }
             | Self::Delegated { .. }
-            | Self::ManualCompaction { .. }
-            | Self::Goal { .. }
-            | Self::GoalCheck { .. } => false,
+            | Self::ManualCompaction { .. } => false,
         }
     }
 }
@@ -1800,8 +1736,6 @@ pub struct SessionSnapshot {
     pub fork_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approval_previews: Vec<PendingApprovalPreview>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal: Option<Box<crate::GoalSnapshot>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub side_questions: Vec<SideQuestionSnapshot>,
     pub summary: SessionSummary,
@@ -1817,8 +1751,6 @@ pub struct SessionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSnapshot {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub check_interruption: Option<crate::CheckInterruption>,
     pub cursor: EventCursor,
     pub workspace: WorkspaceSummary,
     pub sessions: Vec<SessionSummary>,
@@ -1884,17 +1816,6 @@ pub struct SessionEventEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
-    CheckInterruptionChanged {
-        interruption: Option<crate::CheckInterruption>,
-    },
-    GoalUpdated {
-        goal: Box<crate::GoalSnapshot>,
-    },
-    GoalCleared {
-        session_id: SessionId,
-        goal_id: crate::GoalId,
-        revision: u32,
-    },
     SideQuestionUpdated {
         side_question: Box<SideQuestionSnapshot>,
     },
@@ -2034,7 +1955,10 @@ pub enum SessionEvent {
         alias = "checkpoint_reviewed",
         alias = "tool_approval_escalated",
         alias = "workspace_grant_promoted",
-        alias = "approval_delegate_set"
+        alias = "approval_delegate_set",
+        alias = "goal_updated",
+        alias = "goal_cleared",
+        alias = "check_interruption_changed"
     )]
     Retired,
     CancellationRequested {
@@ -2130,7 +2054,6 @@ mod tests {
         assert_eq!(
             creating,
             [
-                SessionCommandKind::SetGoal,
                 SessionCommandKind::SubmitSideQuestion,
                 SessionCommandKind::ResolveWorkspace,
                 SessionCommandKind::CreateSession,
@@ -2147,8 +2070,6 @@ mod tests {
         assert_eq!(
             control,
             [
-                SessionCommandKind::AcknowledgeCheckInterruption,
-                SessionCommandKind::GoalControl,
                 SessionCommandKind::CancelSideQuestion,
                 SessionCommandKind::CancelRun,
                 SessionCommandKind::RespondToolApproval,
@@ -3536,7 +3457,6 @@ mod tests {
 
         let run = RunSnapshot {
             origin: None,
-            goal: None,
             id: id(4),
             session_id: id(3),
             status: RunStatus::Completed,
@@ -3691,7 +3611,7 @@ mod tests {
         invalid["resolved_model"]["version"] = serde_json::json!(0);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
 
-        assert_eq!(crate::PROTOCOL_VERSION, 44);
+        assert_eq!(crate::PROTOCOL_VERSION, 45);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
@@ -3797,7 +3717,7 @@ mod tests {
             serde_json::to_value(SessionCommandKind::SetSessionProfile).unwrap(),
             "set_session_profile"
         );
-        assert_eq!(SessionCommandKind::ALL.len(), 24);
+        assert_eq!(SessionCommandKind::ALL.len(), 21);
 
         let create = SessionCommand::CreateSession {
             workspace_id: id(2),
@@ -3993,8 +3913,7 @@ mod tests {
     }
 
     #[test]
-    fn run_origins_round_trip_without_conferring_goal_authority_on_prompts() {
-        let goal_id = crate::GoalId::from_bytes([0x51; 16]);
+    fn run_origins_round_trip_and_reject_unknown_fields() {
         let owner_run_id = RunId::from_bytes([0x52; 16]);
         let origins = [
             RunOrigin::UserPrompt {},
@@ -4009,14 +3928,6 @@ mod tests {
             RunOrigin::ManualCompaction {},
             RunOrigin::AutoCompaction { owner_run_id },
             RunOrigin::InRunCompaction { owner_run_id },
-            RunOrigin::Goal {
-                goal_id,
-                revision: 3,
-            },
-            RunOrigin::GoalCheck {
-                goal_id,
-                revision: 3,
-            },
         ];
         for origin in origins {
             let mut value = serde_json::to_value(origin).unwrap();
@@ -4031,20 +3942,13 @@ mod tests {
             "status":"completed"});
         let historical = serde_json::from_value::<RunSnapshot>(legacy.clone()).unwrap();
         assert_eq!(historical.origin, None);
-        assert_eq!(historical.goal, None);
         assert_eq!(serde_json::to_value(historical).unwrap(), legacy);
         let mut bound = legacy;
         bound["origin"] = serde_json::json!({"type":"user_prompt"});
-        bound["goal"] = serde_json::json!({"goal_id":goal_id,"revision":3});
         let prompt = serde_json::from_value::<RunSnapshot>(bound.clone()).unwrap();
         assert_eq!(prompt.origin, Some(RunOrigin::UserPrompt {}));
-        assert_eq!(
-            prompt.goal,
-            Some(crate::GoalIdentity {
-                goal_id,
-                revision: 3
-            })
-        );
         assert_eq!(serde_json::to_value(prompt).unwrap(), bound);
+        bound["origin"] = serde_json::json!({"type":"goal","goal_id":owner_run_id,"revision":3});
+        assert!(serde_json::from_value::<RunSnapshot>(bound).is_err());
     }
 }

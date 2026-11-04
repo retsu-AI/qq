@@ -153,22 +153,12 @@ impl ToolGate for SessionToolGate {
                             return approval_persistence_failure(error);
                         }
                     }
-                    let goal_deadline = match goal_approval_deadline(&inner, &claimed).await {
-                        Ok(deadline) => deadline,
-                        Err(error) => {
-                            inner.remove_approval(call.id);
-                            return approval_persistence_failure(error);
-                        }
-                    };
-                    let deadline = human_deadline(inner.approval_timeout)
-                        .into_iter()
-                        .chain(goal_deadline)
-                        .min();
+                    let deadline = human_deadline(inner.approval_timeout);
                     let timed_out = tokio::select! {
                         biased;
                         changed = cancellation.changed() => {
                             let _ = changed;
-                            return cancelled_hold(&inner, &claimed, call.id,
+                            return cancelled_hold(&inner,call.id,
                                 "The run stopped before this question was answered.").await;
                         }
                         result = &mut resolved => result.is_err(),
@@ -232,22 +222,12 @@ impl ToolGate for SessionToolGate {
                             return approval_persistence_failure(error);
                         }
                     }
-                    let goal_deadline = match goal_approval_deadline(&inner, &claimed).await {
-                        Ok(deadline) => deadline,
-                        Err(error) => {
-                            inner.remove_approval(call.id);
-                            return approval_persistence_failure(error);
-                        }
-                    };
-                    let deadline = human_deadline(inner.approval_timeout)
-                        .into_iter()
-                        .chain(goal_deadline)
-                        .min();
+                    let deadline = human_deadline(inner.approval_timeout);
                     let timed_out = tokio::select! {
                         biased;
                         changed = cancellation.changed() => {
                             let _ = changed;
-                            return cancelled_hold(&inner, &claimed, call.id,
+                            return cancelled_hold(&inner,call.id,
                                 "The run stopped before this approval was resolved.").await;
                         }
                         result = &mut resolved => result.is_err(),
@@ -268,36 +248,13 @@ impl ToolGate for SessionToolGate {
 
 async fn cancelled_hold(
     inner: &SessionRuntimeInner,
-    claimed: &ClaimedRun,
     call: ToolCallId,
     message: &str,
 ) -> GateDecision {
-    let settled = expire_goal_hold(inner, claimed, true).await;
     inner.remove_approval(call);
-    match settled {
-        Ok(()) => GateDecision::Deny {
-            message: message.to_owned(),
-        },
-        Err(error) => approval_persistence_failure(error),
+    GateDecision::Deny {
+        message: message.to_owned(),
     }
-}
-
-async fn goal_approval_deadline(
-    inner: &SessionRuntimeInner,
-    claimed: &ClaimedRun,
-) -> Result<Option<tokio::time::Instant>, SessionRuntimeError> {
-    if claimed.goal.is_none() && claimed.goal_spend_owner.is_none() {
-        return Ok(None);
-    }
-    let identity = claimed.identity;
-    let at = tokio::time::Instant::now();
-    let timeout = inner
-        .store
-        .call(store::Priority::Output, move |connection| {
-            goal_policy::approval_timeout(connection, identity)
-        })
-        .await?;
-    Ok(timeout.map(|timeout| at + timeout))
 }
 
 fn human_deadline(timeout: Option<Duration>) -> Option<tokio::time::Instant> {
@@ -311,45 +268,19 @@ async fn sleep_until_or_never(deadline: Option<tokio::time::Instant>) {
     }
 }
 
-fn expired_goal_owners(inner: &SessionRuntimeInner) -> Result<Vec<RunId>, SessionRuntimeError> {
-    Ok(inner
-        .goal_deadlines
-        .lock()
-        .map_err(|_| SessionRuntimeError::Unavailable)?
-        .iter()
-        .filter_map(|(run, deadline)| deadline.expired().then_some(*run))
-        .collect())
-}
-
 async fn conclude(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
     call_id: ToolCallId,
     timed_out: bool,
 ) -> GateDecision {
-    let expired_owners = if timed_out {
-        match expired_goal_owners(inner) {
-            Ok(owners) => owners,
-            Err(error) => return approval_persistence_failure(error),
-        }
-    } else {
-        Vec::new()
-    };
     match inner
         .store
-        .conclude_tool_approval(claimed, call_id, timed_out, expired_owners)
+        .conclude_tool_approval(claimed, call_id, timed_out)
         .await
     {
         Ok(ConcludedApproval::Approved) => GateDecision::Execute,
         Ok(ConcludedApproval::Denied { message }) => GateDecision::Deny { message },
-        Ok(ConcludedApproval::GoalStopped { run_ids }) => {
-            for run in run_ids {
-                inner.cancel(run);
-            }
-            GateDecision::Deny {
-                message: approval::TIMEOUT_DENIED_RESULT.to_owned(),
-            }
-        }
         Ok(ConcludedApproval::Answered { result }) => GateDecision::Answered { result },
         Ok(ConcludedApproval::StillWaiting) => GateDecision::Fail {
             kind: RunFailureKind::Server,
@@ -374,39 +305,7 @@ fn approval_persistence_failure(error: SessionRuntimeError) -> GateDecision {
 
 pub(super) enum ConcludedApproval {
     Approved,
-    GoalStopped { run_ids: Vec<RunId> },
     Denied { message: String },
     Answered { result: String },
     StillWaiting,
-}
-
-pub(super) async fn expire_goal_hold(
-    inner: &SessionRuntimeInner,
-    claimed: &ClaimedRun,
-    expired_only: bool,
-) -> Result<(), SessionRuntimeError> {
-    if claimed.goal.is_none() && claimed.goal_spend_owner.is_none() {
-        return Ok(());
-    }
-    let expired_owners = expired_goal_owners(inner)?;
-    let identity = claimed.identity;
-    let store_id = inner.store.store_id();
-    let concluded = inner.store.call(store::Priority::Output, move |connection| {
-        if expired_only && !goal_policy::expired_approval_owner(connection, identity, &expired_owners)? {
-            return Ok(None);
-        }
-        let call: Option<String> = connection.query_row(
-            "SELECT id FROM tool_calls WHERE run_id=?1 AND state='awaiting_approval' ORDER BY turn_ordinal,call_ordinal LIMIT 1",
-            [identity.run_id.to_string()], |row| row.get(0)).optional()?;
-        match call {
-            Some(call) => tool_calls::conclude_tool_approval(connection, store_id, identity, parse_id(&call)?, true, &expired_owners).map(Some),
-            None => Ok(None),
-        }
-    }).await?;
-    if let Some(ConcludedApproval::GoalStopped { run_ids }) = concluded {
-        for run in run_ids {
-            inner.cancel(run);
-        }
-    }
-    Ok(())
 }

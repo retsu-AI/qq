@@ -642,11 +642,6 @@ impl CompiledAgentPlan {
             EffectClass::ReadOnly,
         ));
         static_tools.push(StaticTool::new(
-            tools::goal::spec(),
-            ToolHost::UpdateGoal,
-            EffectClass::ReadOnly,
-        ));
-        static_tools.push(StaticTool::new(
             read_tool_result_spec(),
             ToolHost::ReadToolResult,
             EffectClass::ReadOnly,
@@ -820,7 +815,6 @@ impl CompiledAgentPlan {
             tools: Some(crate::catalog::StaticFilter {
                 spawn_agent: true,
                 search_history: true,
-                update_goal: false,
                 read_tool_result: true,
                 load_skill: true,
                 read_only: false,
@@ -1193,7 +1187,6 @@ mod tests {
                 tools: Some(crate::catalog::StaticFilter {
                     spawn_agent: true,
                     search_history: true,
-                    update_goal: false,
                     read_tool_result: true,
                     load_skill: true,
                     read_only: false,
@@ -1222,7 +1215,6 @@ mod tests {
             tools: Some(crate::catalog::StaticFilter {
                 spawn_agent: true,
                 search_history: true,
-                update_goal: false,
                 read_tool_result: true,
                 load_skill: true,
                 read_only: false,

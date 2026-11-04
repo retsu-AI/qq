@@ -553,7 +553,6 @@ fn assert_capacity_accounting_for_descriptor(descriptor_version: u16) {
             output: None,
         },
         None,
-        &CommandAdmission::default(),
         CommandOrigin::Client,
     )
     .unwrap();
@@ -751,11 +750,6 @@ fn denial_capacity_fixture(
         )
         .unwrap();
     let claimed = ClaimedRun {
-        goal_spend_owner: None,
-        goal: None,
-        goal_initial_notice: None,
-        goal_admission: None,
-        check_deadline: None,
         origin: None,
         identity: RunIdentity {
             workspace_id,
@@ -831,19 +825,13 @@ fn apply_denial_capacity_path(
                 decision: ApprovalDecision::Deny,
             },
             None,
-            &CommandAdmission::default(),
             CommandOrigin::Client,
         )
         .map(|_| ()),
-        DenialCapacityPath::Timeout => conclude_tool_approval(
-            connection,
-            store_id,
-            claimed.identity,
-            tool_call_id,
-            true,
-            &[],
-        )
-        .map(|_| ()),
+        DenialCapacityPath::Timeout => {
+            conclude_tool_approval(connection, store_id, claimed.identity, tool_call_id, true)
+                .map(|_| ())
+        }
     }
 }
 

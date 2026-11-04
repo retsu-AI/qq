@@ -7,7 +7,6 @@
   - Sessions and agents: `/sessions`, `/resume`, `/agents`, `/new`.
   - History: `/compact`, `/rollback`, `/prune`.
   - Settings: `/models`, `/profile`, `/approval`, `/effort`, `/skills`, `/theme`, `/mouse`, `/attention`.
-  - Goals: `/goal`.
   - Side questions: `/btw`, `/ask`, `/btw new`, `/btw cancel`.
   - Other: `/changes`, `/undo`, `/editor`, `/quit`.
 - **Keys:**

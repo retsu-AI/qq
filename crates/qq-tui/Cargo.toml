@@ -16,7 +16,6 @@ qq-core.workspace = true
 qq-protocol.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-time.workspace = true
 tokio = { workspace = true, features = ["io-std", "process"] }
 tree-sitter.workspace = true
 tree-sitter-bash.workspace = true

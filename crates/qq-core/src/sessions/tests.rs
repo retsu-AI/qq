@@ -15,17 +15,6 @@ mod delegation;
 mod execution_context;
 mod feeds;
 mod fixtures;
-mod goal_admission;
-mod goal_check;
-mod goal_check_recovery;
-#[cfg(unix)]
-mod goal_driver_soak;
-mod goal_final_slot;
-mod goal_model_audit;
-mod goal_paid_limits;
-mod goal_review;
-mod goal_upgrade;
-mod goals;
 mod loop_guard;
 mod migrations;
 mod nonblocking;
@@ -68,36 +57,6 @@ fn hold_outcome_read(
         release,
         PROBE.observe(Checkpoint::OutcomeReadPolled(run_id)),
     )
-}
-
-pub(super) struct PinnedCalendar {
-    now: Arc<std::sync::atomic::AtomicU64>,
-    previous: Option<Arc<std::sync::atomic::AtomicU64>>,
-    thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
-}
-
-impl PinnedCalendar {
-    pub(super) fn new(now: u64) -> Self {
-        let now = Arc::new(std::sync::atomic::AtomicU64::new(now));
-        let previous = codec::TEST_EPOCH.with(|slot| slot.replace(Some(Arc::clone(&now))));
-        Self {
-            now,
-            previous,
-            thread_bound: std::marker::PhantomData,
-        }
-    }
-
-    pub(super) fn advance(&self, next: u64) {
-        let previous = self.now.load(std::sync::atomic::Ordering::Acquire);
-        assert!(next >= previous, "the scripted epoch cannot go backwards");
-        self.now.store(next, std::sync::atomic::Ordering::Release);
-    }
-}
-
-impl Drop for PinnedCalendar {
-    fn drop(&mut self) {
-        codec::TEST_EPOCH.with(|slot| slot.replace(self.previous.take()));
-    }
 }
 
 fn test_directory() -> TempDir {

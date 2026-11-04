@@ -56,7 +56,6 @@ async fn run_summarize(
         tools,
         None,
         256,
-        None,
     );
     tokio::pin!(steps);
     let mut result = Err("summarizer ended without a summary".to_owned());
@@ -117,7 +116,6 @@ async fn summary_fold_preserves_the_cumulative_run_text_bound() {
         Arc::from([]),
         None,
         256,
-        None,
     );
     tokio::pin!(steps);
     let mut rejected = false;
@@ -178,7 +176,6 @@ async fn summary_fold_rejects_empty_intermediate_portions_before_more_provider_w
             Arc::from([]),
             None,
             256,
-            None,
         );
         tokio::pin!(steps);
         let mut rejected = false;
@@ -269,7 +266,6 @@ async fn summary_fold_resets_continuations_and_reports_rejected_work() {
         Arc::from([]),
         None,
         256,
-        None,
     );
     tokio::pin!(steps);
     let mut rejected = 0;
@@ -277,12 +273,12 @@ async fn summary_fold_resets_continuations_and_reports_rejected_work() {
     while let Some(step) = steps.next().await {
         match step.unwrap() {
             runtime::SummarizeStep::TurnCompleted {
-                model_work: runtime::ModelWorkDisposition::RejectedBeforeWork,
-                usage,
+                usage: Some(usage),
+                message,
                 ..
-            } => {
+            } if !message.has_content() => {
                 rejected += 1;
-                assert_eq!(usage, Some(TokenUsage::default()));
+                assert_eq!(usage, TokenUsage::default());
             }
             runtime::SummarizeStep::Summary(text) => summary = Some(text),
             _ => {}
@@ -350,7 +346,6 @@ async fn summary_fold_can_split_after_many_completed_continuation_turns() {
         Arc::from([]),
         None,
         256,
-        None,
     );
     tokio::pin!(steps);
     let mut summary = None;
@@ -511,7 +506,6 @@ async fn a_summarizer_run_sends_the_prompt_runs_system_prompt_and_tools_without_
         tools: Some(catalog::StaticFilter {
             spawn_agent: false,
             search_history: false,
-            update_goal: false,
             read_tool_result: false,
             load_skill: true,
             read_only: false,
@@ -652,7 +646,7 @@ async fn summary_fold_request_weights_match_each_replaced_transcript() {
         })
         .collect::<String>();
     assert!(final_input.contains("PREFIX_FRAGMENT SUFFIX_FRAGMENT"));
-    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::AssistantTurnCompleted { model_work: runtime::ModelWorkDisposition::RejectedBeforeWork, usage: Some(usage), .. } if *usage == TokenUsage::default())));
+    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::AssistantTurnCompleted { usage: Some(usage), message, .. } if *usage == TokenUsage::default() && !message.has_content())));
     for (index, (weight, request)) in weights.iter().zip(requests.iter()).enumerate() {
         let boundary = if index == 2 {
             requests[1].messages().len() - 1

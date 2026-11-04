@@ -5,7 +5,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::sessions::{PersistenceFault, SessionRuntimeError};
 
-pub const STORE_SCHEMA_VERSION: u16 = 66;
+pub const STORE_SCHEMA_VERSION: u16 = 67;
 const OLDEST_SUPPORTED_SCHEMA_VERSION: u16 = 25;
 
 const NATIVE_COMMAND_OWNERS: &str = "CREATE TABLE native_command_owners (
@@ -13,9 +13,6 @@ const NATIVE_COMMAND_OWNERS: &str = "CREATE TABLE native_command_owners (
     owner_id TEXT NOT NULL CHECK(length(owner_id)=32),
     result_saved INTEGER NOT NULL DEFAULT 0 CHECK(result_saved IN (0,1))
 ) STRICT";
-
-const GOAL_POLICY_COLUMN: &str = "policy_json TEXT CHECK(policy_json IS NULL OR (json_valid(policy_json) AND length(policy_json)<=8192))";
-const GOAL_SPECIFICATION_COLUMN: &str = "specification_at_ms INTEGER CHECK(specification_at_ms IS NULL OR (specification_at_ms>=0 AND policy_json IS NOT NULL))";
 
 pub const OWNER_LOCK_SUFFIX: &str = ".lock";
 
@@ -309,6 +306,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -362,6 +360,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -414,6 +413,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -465,6 +465,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -515,6 +516,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -564,6 +566,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -621,6 +624,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -680,6 +684,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -746,6 +751,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -797,6 +803,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -851,6 +858,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -895,6 +903,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         connection.execute(
@@ -933,6 +942,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         connection.execute(
@@ -970,6 +980,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         connection.execute(
@@ -1006,6 +1017,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1049,6 +1061,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1087,6 +1100,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1124,6 +1138,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1182,6 +1197,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1244,6 +1260,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1282,6 +1299,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1320,6 +1338,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1358,6 +1377,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1406,6 +1426,7 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1433,50 +1454,25 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
-        transaction.execute_batch(
-            "CREATE TABLE IF NOT EXISTS session_goals (
-                goal_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                revision INTEGER NOT NULL CHECK(revision > 0),
-                live INTEGER NOT NULL CHECK(live IN (0, 1)),
-                payload_json TEXT NOT NULL
-             );
-             CREATE UNIQUE INDEX IF NOT EXISTS session_goals_live
-             ON session_goals(session_id) WHERE live = 1;",
-        )?;
-        for (column, definition) in [
-            ("goal_id", "TEXT"),
-            ("goal_revision", "INTEGER"),
-            ("goal_snapshot_json", "TEXT"),
-            ("origin_json", "TEXT"),
-            ("goal_initial_notice", "TEXT"),
-        ] {
-            if !has_column(&transaction, "runs", column)? {
-                transaction.execute(
-                    &format!("ALTER TABLE runs ADD COLUMN {column} {definition}"),
-                    [],
-                )?;
-            }
+        if !has_column(&transaction, "runs", "origin_json")? {
+            transaction.execute_batch("ALTER TABLE runs ADD COLUMN origin_json TEXT;")?;
         }
-        for table in ["model_turns", "session_compactions"] {
-            if has_table(&transaction, table)? && !has_column(&transaction, table, "goal_notice")? {
-                transaction.execute(
-                    &format!("ALTER TABLE {table} ADD COLUMN goal_notice TEXT"),
-                    [],
-                )?;
-            }
+        if has_table(&transaction, "model_turns")?
+            && !has_column(&transaction, "model_turns", "boundary_notices")?
+        {
+            transaction
+                .execute_batch("ALTER TABLE model_turns ADD COLUMN boundary_notices TEXT;")?;
         }
-        validate_goal_schema(&transaction)?;
         transaction.execute(
             "UPDATE metadata SET value = '51' WHERE key = 'schema_version'",
             [],
         )?;
         transaction.commit()?;
     }
-    validate_goal_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -1494,26 +1490,16 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
-        if !has_column(&transaction, "runs", "goal_request_pending")? {
-            transaction.execute_batch("ALTER TABLE runs ADD COLUMN goal_request_pending INTEGER NOT NULL DEFAULT 0 CHECK(goal_request_pending IN (0,1));")?;
-        }
-        if !has_column(&transaction, "runs", "goal_helper_admitted")? {
-            transaction.execute_batch("ALTER TABLE runs ADD COLUMN goal_helper_admitted INTEGER NOT NULL DEFAULT 0 CHECK(goal_helper_admitted IN (0,1));")?;
-        }
-        if !has_column(&transaction, "model_turns", "work_disposition")? {
-            transaction.execute_batch("ALTER TABLE model_turns ADD COLUMN work_disposition TEXT CHECK(work_disposition IN ('committed','rejected_before_work','uncertain'));")?;
-        }
-        validate_goal_request_schema(&transaction)?;
         transaction.execute(
             "UPDATE metadata SET value='52' WHERE key='schema_version'",
             [],
         )?;
         transaction.commit()?;
     }
-    validate_goal_request_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -1530,23 +1516,16 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
-        if !has_column(&transaction, "runs", "goal_paid_owner_run_id")? {
-            transaction.execute_batch(
-                "ALTER TABLE runs ADD COLUMN goal_paid_owner_run_id TEXT REFERENCES runs(id);",
-            )?;
-        }
-        validate_goal_paid_owner_schema(&transaction)?;
-        restore_pending_paid_owners(&transaction)?;
         transaction.execute(
             "UPDATE metadata SET value='53' WHERE key='schema_version'",
             [],
         )?;
         transaction.commit()?;
     }
-    validate_goal_paid_owner_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -1562,10 +1541,10 @@ pub(in crate::sessions) fn open_database(
                 | "64"
                 | "65"
                 | "66"
+                | "67"
         )
     ) {
         let transaction = connection.transaction()?;
-        restore_unfinished_model_work(&transaction)?;
         transaction.execute(
             "UPDATE metadata SET value='54' WHERE key='schema_version'",
             [],
@@ -1575,10 +1554,22 @@ pub(in crate::sessions) fn open_database(
 
     if !matches!(
         schema_version.as_deref(),
-        Some("55" | "56" | "57" | "58" | "59" | "60" | "61" | "62" | "63" | "64" | "65" | "66")
+        Some(
+            "55" | "56"
+                | "57"
+                | "58"
+                | "59"
+                | "60"
+                | "61"
+                | "62"
+                | "63"
+                | "64"
+                | "65"
+                | "66"
+                | "67"
+        )
     ) {
         let transaction = connection.transaction()?;
-        restore_unfinished_goal_dispatch(&transaction)?;
         transaction.execute(
             "UPDATE metadata SET value='55' WHERE key='schema_version'",
             [],
@@ -1588,7 +1579,7 @@ pub(in crate::sessions) fn open_database(
 
     if !matches!(
         schema_version.as_deref(),
-        Some("56" | "57" | "58" | "59" | "60" | "61" | "62" | "63" | "64" | "65" | "66")
+        Some("56" | "57" | "58" | "59" | "60" | "61" | "62" | "63" | "64" | "65" | "66" | "67")
     ) {
         connection.execute(
             "UPDATE metadata SET value='56' WHERE key='schema_version'",
@@ -1598,46 +1589,27 @@ pub(in crate::sessions) fn open_database(
 
     if !matches!(
         schema_version.as_deref(),
-        Some("57" | "58" | "59" | "60" | "61" | "62" | "63" | "64" | "65" | "66")
+        Some("57" | "58" | "59" | "60" | "61" | "62" | "63" | "64" | "65" | "66" | "67")
     ) {
-        let transaction = connection.transaction()?;
-        if !has_column(&transaction, "runs", "check_acknowledgment_pending")? {
-            transaction.execute_batch("ALTER TABLE runs ADD COLUMN check_acknowledgment_pending INTEGER NOT NULL DEFAULT 0 CHECK(check_acknowledgment_pending IN (0,1) AND (check_acknowledgment_pending=0 OR kind='goal_check'));")?;
-        }
-        transaction.execute_batch("CREATE INDEX IF NOT EXISTS runs_pending_check_ack ON runs(session_id) WHERE check_acknowledgment_pending=1;")?;
-        validate_check_acknowledgment_schema(&transaction)?;
-        transaction.execute_batch("UPDATE runs SET check_acknowledgment_pending=1 WHERE kind='goal_check' AND status='interrupted';
-            UPDATE metadata SET value='57' WHERE key='schema_version';")?;
-        transaction.commit()?;
+        connection.execute(
+            "UPDATE metadata SET value='57' WHERE key='schema_version'",
+            [],
+        )?;
     }
-    validate_check_acknowledgment_schema(&connection)?;
 
     if !matches!(
         schema_version.as_deref(),
-        Some("58" | "59" | "60" | "61" | "62" | "63" | "64" | "65" | "66")
+        Some("58" | "59" | "60" | "61" | "62" | "63" | "64" | "65" | "66" | "67")
     ) {
-        let transaction = connection.transaction()?;
-        if !has_column(&transaction, "session_goals", "policy_json")? {
-            transaction.execute_batch(&format!(
-                "ALTER TABLE session_goals ADD COLUMN {name};",
-                name = GOAL_POLICY_COLUMN
-            ))?;
-        }
-        if !has_column(&transaction, "session_goals", "specification_at_ms")? {
-            transaction.execute_batch(&format!(
-                "ALTER TABLE session_goals ADD COLUMN {name};",
-                name = GOAL_SPECIFICATION_COLUMN
-            ))?;
-        }
-        validate_goal_policy_schema(&transaction)?;
-        transaction.execute_batch("UPDATE metadata SET value='58' WHERE key='schema_version';")?;
-        transaction.commit()?;
+        connection.execute(
+            "UPDATE metadata SET value='58' WHERE key='schema_version'",
+            [],
+        )?;
     }
-    validate_goal_policy_schema(&connection)?;
 
     if !matches!(
         schema_version.as_deref(),
-        Some("59" | "60" | "61" | "62" | "63" | "64" | "65" | "66")
+        Some("59" | "60" | "61" | "62" | "63" | "64" | "65" | "66" | "67")
     ) {
         let transaction = connection.transaction()?;
         if !has_table(&transaction, "native_command_owners")? {
@@ -1662,7 +1634,7 @@ pub(in crate::sessions) fn open_database(
 
     if !matches!(
         schema_version.as_deref(),
-        Some("60" | "61" | "62" | "63" | "64" | "65" | "66")
+        Some("60" | "61" | "62" | "63" | "64" | "65" | "66" | "67")
     ) {
         connection.execute(
             "UPDATE metadata SET value='60' WHERE key='schema_version'",
@@ -1672,7 +1644,7 @@ pub(in crate::sessions) fn open_database(
 
     if !matches!(
         schema_version.as_deref(),
-        Some("61" | "62" | "63" | "64" | "65" | "66")
+        Some("61" | "62" | "63" | "64" | "65" | "66" | "67")
     ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "model_turns", "legacy_checkpoint_required")? {
@@ -1728,7 +1700,7 @@ pub(in crate::sessions) fn open_database(
 
     if !matches!(
         schema_version.as_deref(),
-        Some("62" | "63" | "64" | "65" | "66")
+        Some("62" | "63" | "64" | "65" | "66" | "67")
     ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "runs", "completion_sequence")? {
@@ -1754,7 +1726,10 @@ pub(in crate::sessions) fn open_database(
         return Err(SessionRuntimeError::CONSTRAINT);
     }
 
-    if !matches!(schema_version.as_deref(), Some("63" | "64" | "65" | "66")) {
+    if !matches!(
+        schema_version.as_deref(),
+        Some("63" | "64" | "65" | "66" | "67")
+    ) {
         let transaction = connection.transaction()?;
         if has_tool_calls {
             if !has_column(&transaction, "tool_calls", "approval_escalation_json")? {
@@ -1785,7 +1760,7 @@ pub(in crate::sessions) fn open_database(
         return Err(SessionRuntimeError::CONSTRAINT);
     }
 
-    if !matches!(schema_version.as_deref(), Some("64" | "65" | "66")) {
+    if !matches!(schema_version.as_deref(), Some("64" | "65" | "66" | "67")) {
         let transaction = connection.transaction()?;
         retire_supervised_mode(&transaction)?;
         transaction.execute(
@@ -1795,7 +1770,7 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
 
-    if !matches!(schema_version.as_deref(), Some("65" | "66")) {
+    if !matches!(schema_version.as_deref(), Some("65" | "66" | "67")) {
         let transaction = connection.transaction()?;
         retire_approval_delegate_fields(&transaction)?;
         if has_table(&transaction, "tool_calls")? {
@@ -1830,12 +1805,13 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
 
-    let transaction = connection.transaction()?;
-    if !has_column(&transaction, "sessions", "execution_root")? {
-        transaction.execute_batch("ALTER TABLE sessions ADD COLUMN execution_root TEXT;")?;
-    }
-    transaction.execute_batch(
-        "CREATE TABLE IF NOT EXISTS turn_checkpoints (
+    if schema_version.as_deref() != Some("67") {
+        let transaction = connection.transaction()?;
+        if !has_column(&transaction, "sessions", "execution_root")? {
+            transaction.execute_batch("ALTER TABLE sessions ADD COLUMN execution_root TEXT;")?;
+        }
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS turn_checkpoints (
             session_id TEXT NOT NULL REFERENCES sessions(id),
             run_id TEXT NOT NULL REFERENCES runs(id),
             turn_ordinal INTEGER NOT NULL,
@@ -1872,8 +1848,16 @@ pub(in crate::sessions) fn open_database(
             state TEXT NOT NULL
          );
          UPDATE metadata SET value='66' WHERE key='schema_version';",
-    )?;
-    transaction.commit()?;
+        )?;
+        transaction.commit()?;
+    }
+
+    if schema_version.as_deref() != Some("67") {
+        let transaction = connection.transaction()?;
+        retire_goals(&transaction)?;
+        transaction.execute_batch("UPDATE metadata SET value='67' WHERE key='schema_version';")?;
+        transaction.commit()?;
+    }
 
     debug_assert_eq!(
         connection
@@ -1941,6 +1925,160 @@ fn retire_approval_delegate_fields(connection: &Connection) -> Result<(), Sessio
     Ok(())
 }
 
+fn retire_goals(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    let user_prompt = r#"'{"type":"user_prompt"}'"#;
+    let is_goal =
+        |path: &str| format!("json_extract({{column}},'{path}.type') IN ('goal','goal_check')");
+    for (table, column) in [("events", "envelope_json"), ("runs", "completion_json")] {
+        for (origin, goal) in [
+            ("$.event.origin", None),
+            ("$.event.run.origin", Some("$.event.run.goal")),
+        ] {
+            let matches = is_goal(origin).replace("{column}", column);
+            let removal = goal.map_or(String::new(), |goal| format!(",'{goal}'"));
+            connection.execute_batch(&format!(
+                "UPDATE {table} SET {column}=json_set(json_remove({column}{removal}),'{origin}',json({user_prompt}))
+                  WHERE instr({column},'\"goal')>0 AND json_valid({column}) AND {matches};"
+            ))?;
+        }
+        connection.execute_batch(&format!(
+            "UPDATE {table} SET {column}=json_remove({column},'$.event.run.goal')
+              WHERE instr({column},'\"goal\"')>0 AND json_valid({column})
+                AND json_type({column},'$.event.run.goal') IS NOT NULL;"
+        ))?;
+    }
+    connection.execute_batch("DROP INDEX IF EXISTS runs_pending_check_ack;")?;
+    if has_column(connection, "runs", "check_acknowledgment_pending")? {
+        connection.execute_batch("ALTER TABLE runs DROP COLUMN check_acknowledgment_pending;")?;
+    }
+    credit_unfinished_goal_spend(connection)?;
+    let queued = queued_goal_work(connection)?;
+    connection.execute_batch(&format!(
+        "UPDATE runs SET origin_json={user_prompt}
+          WHERE json_valid(origin_json) AND json_extract(origin_json,'$.type') IN ('goal','goal_check');"
+    ))?;
+    interrupt_queued_goal_work(connection, queued)?;
+    crate::sessions::completions::migrate(connection)?;
+    connection.execute_batch(
+        "UPDATE runs SET kind='prompt' WHERE kind='goal_check';
+         DELETE FROM commands WHERE json_valid(request_json)
+           AND json_extract(request_json,'$.type') IN ('set_goal','goal_control','acknowledge_check_interruption');
+         UPDATE metadata SET value=(SELECT COUNT(*) FROM commands) WHERE key='command_count';
+         DROP INDEX IF EXISTS session_goals_live;
+         DROP TABLE IF EXISTS session_goals;",
+    )?;
+    for column in [
+        "goal_id",
+        "goal_revision",
+        "goal_snapshot_json",
+        "goal_initial_notice",
+        "goal_request_pending",
+        "goal_helper_admitted",
+        "goal_paid_owner_run_id",
+    ] {
+        if has_column(connection, "runs", column)? {
+            connection.execute_batch(&format!("ALTER TABLE runs DROP COLUMN {column};"))?;
+        }
+    }
+    if has_column(connection, "session_compactions", "goal_notice")? {
+        connection.execute_batch("ALTER TABLE session_compactions DROP COLUMN goal_notice;")?;
+    }
+    if has_column(connection, "model_turns", "work_disposition")? {
+        connection.execute_batch("ALTER TABLE model_turns DROP COLUMN work_disposition;")?;
+    }
+    if has_column(connection, "model_turns", "goal_notice")? {
+        connection.execute_batch(
+            "ALTER TABLE model_turns RENAME COLUMN goal_notice TO boundary_notices;",
+        )?;
+    }
+    Ok(())
+}
+
+fn credit_unfinished_goal_spend(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    for column in [
+        "goal_id",
+        "goal_paid_owner_run_id",
+        "goal_request_pending",
+        "goal_helper_admitted",
+    ] {
+        if !has_column(connection, "runs", column)? {
+            return Ok(());
+        }
+    }
+    if !has_column(connection, "model_turns", "work_disposition")? {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "CREATE TEMP TABLE goal_spend AS
+           SELECT session_id, SUM(estimated_cost_usd_nanos) AS cost,
+                  COUNT(*) = COUNT(estimated_cost_usd_nanos) AS known
+           FROM runs
+           WHERE outcome_json IS NULL
+             AND (goal_id IS NOT NULL OR goal_paid_owner_run_id IS NOT NULL)
+             AND (goal_request_pending OR goal_helper_admitted OR EXISTS(
+                 SELECT 1 FROM model_turns WHERE run_id=runs.id
+                   AND work_disposition IN ('committed','uncertain')))
+           GROUP BY session_id;
+         UPDATE sessions SET cost_known=0
+           WHERE id IN (SELECT session_id FROM goal_spend WHERE NOT known);
+         UPDATE sessions SET
+             estimated_cost_usd_nanos=estimated_cost_usd_nanos+(SELECT g.cost FROM goal_spend g WHERE g.session_id=sessions.id)
+           WHERE cost_known=1 AND id IN (SELECT session_id FROM goal_spend g WHERE g.known);
+         DROP TABLE goal_spend;",
+    )?;
+    Ok(())
+}
+
+fn queued_goal_work(
+    connection: &Connection,
+) -> Result<Vec<(String, String, String)>, SessionRuntimeError> {
+    let mut statement = connection.prepare(
+        "SELECT r.id,r.session_id,s.workspace_id FROM runs r JOIN sessions s ON s.id=r.session_id
+          WHERE r.status='queued' AND r.outcome_json IS NULL
+            AND (r.kind='goal_check' OR (json_valid(r.origin_json)
+                 AND json_extract(r.origin_json,'$.type') IN ('goal','goal_check')))",
+    )?;
+    let queued = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(queued)
+}
+
+fn interrupt_queued_goal_work(
+    connection: &Connection,
+    checks: Vec<(String, String, String)>,
+) -> Result<(), SessionRuntimeError> {
+    if checks.is_empty() {
+        return Ok(());
+    }
+    let store_id: String = connection.query_row(
+        "SELECT value FROM metadata WHERE key='store_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    let store_id = store_id.parse().map_err(|_| SessionRuntimeError::CODEC)?;
+    let now = crate::sessions::codec::now_ms();
+    for (run, session, workspace) in checks {
+        crate::sessions::settlement::finish_queued_run_with_outcome(
+            connection,
+            store_id,
+            crate::sessions::codec::parse_id(&workspace)?,
+            crate::sessions::codec::parse_id(&session)?,
+            crate::sessions::codec::parse_id(&run)?,
+            qq_protocol::RunOutcome::Interrupted,
+            now,
+        )?;
+    }
+    crate::sessions::feed::take_staged();
+    Ok(())
+}
+
 fn validate_owned_compaction_index(connection: &Connection) -> Result<(), SessionRuntimeError> {
     let sql: Option<String> = connection
         .query_row(
@@ -1956,71 +2094,6 @@ fn validate_owned_compaction_index(connection: &Connection) -> Result<(), Sessio
         "CREATE INDEX runs_owned_compaction ON runs(auto_compaction_for_run_id) WHERE kind = 'compaction' AND auto_compaction_for_run_id IS NOT NULL".split_whitespace(),
     ) {
         return Err(SessionRuntimeError::CONSTRAINT);
-    }
-    Ok(())
-}
-
-fn validate_goal_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
-    for (column, expected) in [
-        ("goal_id", ("TEXT".to_owned(), false, None, 1)),
-        ("session_id", ("TEXT".to_owned(), true, None, 0)),
-        ("revision", ("INTEGER".to_owned(), true, None, 0)),
-        ("live", ("INTEGER".to_owned(), true, None, 0)),
-        ("payload_json", ("TEXT".to_owned(), true, None, 0)),
-    ] {
-        if column_shape(connection, "session_goals", column)? != expected {
-            return Err(SessionRuntimeError::CONSTRAINT);
-        }
-    }
-    for (name, kind, expected) in [
-        (
-            "session_goals",
-            "table",
-            "CREATE TABLE session_goals ( goal_id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, revision INTEGER NOT NULL CHECK(revision > 0), live INTEGER NOT NULL CHECK(live IN (0, 1)), payload_json TEXT NOT NULL )",
-        ),
-        (
-            "session_goals_live",
-            "index",
-            "CREATE UNIQUE INDEX session_goals_live ON session_goals(session_id) WHERE live = 1",
-        ),
-    ] {
-        let sql: Option<String> = connection.query_row(
-            "SELECT sql FROM sqlite_schema WHERE name = ?1 AND type = ?2 AND tbl_name = 'session_goals'",
-            rusqlite::params![name, kind], |row| row.get(0),
-        ).optional()?;
-        let valid = sql.as_deref().is_some_and(|sql| {
-            let mut actual: String = sql.split_whitespace().collect();
-            if kind == "table" {
-                for definition in [GOAL_POLICY_COLUMN, GOAL_SPECIFICATION_COLUMN] {
-                    let addition =
-                        format!(",{}", definition.split_whitespace().collect::<String>());
-                    actual = actual.replace(&addition, "");
-                }
-            }
-            actual == expected.split_whitespace().collect::<String>()
-        });
-        if !valid {
-            return Err(SessionRuntimeError::CONSTRAINT);
-        }
-    }
-    for (column, kind) in [
-        ("goal_id", "TEXT"),
-        ("goal_revision", "INTEGER"),
-        ("goal_snapshot_json", "TEXT"),
-        ("origin_json", "TEXT"),
-        ("goal_initial_notice", "TEXT"),
-    ] {
-        if column_shape(connection, "runs", column)? != (kind.to_owned(), false, None, 0) {
-            return Err(SessionRuntimeError::CONSTRAINT);
-        }
-    }
-    for table in ["model_turns", "session_compactions"] {
-        if has_table(connection, table)?
-            && column_shape(connection, table, "goal_notice")?
-                != ("TEXT".to_owned(), false, None, 0)
-        {
-            return Err(SessionRuntimeError::CONSTRAINT);
-        }
     }
     Ok(())
 }
@@ -2950,316 +3023,6 @@ fn validate_output_contract_schema(connection: &Connection) -> Result<(), Sessio
         if column_shape(connection, "runs", column)? != ("TEXT".to_owned(), false, None, 0) {
             return Err(SessionRuntimeError::CONSTRAINT);
         }
-    }
-    Ok(())
-}
-
-fn validate_goal_request_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
-    if column_shape(connection, "runs", "goal_request_pending")?
-        != ("INTEGER".to_owned(), true, Some("0".to_owned()), 0)
-        || column_shape(connection, "runs", "goal_helper_admitted")?
-            != ("INTEGER".to_owned(), true, Some("0".to_owned()), 0)
-        || column_shape(connection, "model_turns", "work_disposition")?
-            != ("TEXT".to_owned(), false, None, 0)
-    {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    }
-    Ok(())
-}
-
-fn validate_check_acknowledgment_schema(
-    connection: &Connection,
-) -> Result<(), SessionRuntimeError> {
-    if column_shape(connection, "runs", "check_acknowledgment_pending")?
-        != ("INTEGER".to_owned(), true, Some("0".to_owned()), 0)
-    {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    }
-    let table: String = connection.query_row(
-        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='runs'",
-        [],
-        |row| row.get(0),
-    )?;
-    let compact: String = table.split_whitespace().collect();
-    if !compact.contains("check_acknowledgment_pendingINTEGERNOTNULLDEFAULT0CHECK(check_acknowledgment_pendingIN(0,1)AND(check_acknowledgment_pending=0ORkind='goal_check'))") {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    }
-    let index: Option<String> = connection.query_row(
-        "SELECT sql FROM sqlite_schema WHERE type='index' AND name='runs_pending_check_ack' AND tbl_name='runs'",
-        [], |row| row.get(0),
-    ).optional()?;
-    if !index.as_deref().is_some_and(|sql| sql.split_whitespace().eq(
-        "CREATE INDEX runs_pending_check_ack ON runs(session_id) WHERE check_acknowledgment_pending=1".split_whitespace()
-    )) {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    }
-    Ok(())
-}
-
-fn validate_goal_paid_owner_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
-    if column_shape(connection, "runs", "goal_paid_owner_run_id")?
-        != ("TEXT".to_owned(), false, None, 0)
-    {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    }
-    Ok(())
-}
-
-fn restore_pending_paid_owners(connection: &Connection) -> Result<(), SessionRuntimeError> {
-    use crate::sessions::MAX_CHILD_DEPTH;
-    use qq_protocol::{RunId, RunOrigin};
-    let mut pending = connection.prepare(
-        "SELECT r.id FROM runs r JOIN sessions s ON s.id=r.session_id
-         JOIN messages m ON m.id=r.user_message_id AND m.run_id=r.id
-           AND m.session_id=r.session_id AND m.ordinal=1 AND m.role='user'
-         WHERE r.kind='prompt' AND (r.status IN ('queued','running') OR EXISTS(
-               SELECT 1 FROM runs helper WHERE helper.kind='compaction' AND helper.auto_compaction=1
-                 AND helper.auto_compaction_for_run_id=r.id AND helper.session_id=r.session_id
-                 AND helper.status IN ('queued','running')))
-           AND s.owner_run_id IS NOT NULL AND r.origin_json IS NOT NULL",
-    )?;
-    let mut rows = pending.query([])?;
-    while let Some(row) = rows.next()? {
-        let mut run: String = row.get(0)?;
-        let mut edges = Vec::new();
-        let mut required = 0;
-        let mut expected = None;
-        let mut finished = false;
-        for _ in 0..=MAX_CHILD_DEPTH {
-            let (session,workspace,depth,parent,owner,origin,kind,initial,goal)=connection.query_row(
-                "SELECT r.session_id,s.workspace_id,s.depth,s.parent_id,s.owner_run_id,
-                    r.origin_json,r.kind,EXISTS(SELECT 1 FROM messages m WHERE m.id=r.user_message_id
-                    AND m.run_id=r.id AND m.session_id=r.session_id AND m.ordinal=1 AND m.role='user'),
-                    r.goal_id IS NOT NULL
-                 FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.id=?1",
-                [&run],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,u16>(2)?,
-                    row.get::<_,Option<String>>(3)?,row.get::<_,Option<String>>(4)?,row.get::<_,Option<String>>(5)?,
-                    row.get::<_,String>(6)?,row.get::<_,bool>(7)?,row.get::<_,bool>(8)?)),
-            )?;
-            if kind != "prompt"
-                || depth > MAX_CHILD_DEPTH
-                || expected
-                    .as_ref()
-                    .is_some_and(|expected| expected != &(session, workspace.clone(), depth))
-            {
-                return Err(SessionRuntimeError::CONSTRAINT);
-            }
-            if goal {
-                required = edges.len();
-            }
-            let origin = origin
-                .as_deref()
-                .map(serde_json::from_str::<RunOrigin>)
-                .transpose()?;
-            let Some(RunOrigin::Delegated { owner_run_id, .. }) = origin else {
-                finished = true;
-                break;
-            };
-            let anchor = owner_run_id.to_string();
-            if !initial
-                || depth == 0
-                || owner.as_deref() != Some(anchor.as_str())
-                || run == anchor
-                || edges.iter().any(|(previous, _)| previous == &anchor)
-            {
-                return Err(SessionRuntimeError::CONSTRAINT);
-            }
-            let parent = parent.ok_or(SessionRuntimeError::CONSTRAINT)?;
-            expected = Some((parent, workspace, depth - 1));
-            edges.push((run, anchor.clone()));
-            run = anchor;
-        }
-        if !finished {
-            return Err(SessionRuntimeError::CONSTRAINT);
-        }
-        for (child, owner) in edges.into_iter().take(required) {
-            connection.execute(
-                "UPDATE runs SET goal_paid_owner_run_id=?2 WHERE id=?1",
-                [child, owner],
-            )?;
-        }
-        let seed: String = row.get(0)?;
-        let seed: RunId = seed.parse().map_err(|_| SessionRuntimeError::CONSTRAINT)?;
-        crate::sessions::goals::paid_goal_owners(connection, seed)?;
-    }
-    Ok(())
-}
-
-fn restore_unfinished_model_work(connection: &Connection) -> Result<(), SessionRuntimeError> {
-    let mut statement = connection.prepare(
-        "SELECT t.rowid,t.assistant_content_json,t.usage_json,t.truncated
-         FROM model_turns t JOIN runs r ON r.id=t.run_id
-         WHERE r.outcome_json IS NULL AND t.work_disposition IS NULL ORDER BY t.rowid",
-    )?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        let id: i64 = row.get(0)?;
-        let content = row
-            .get_ref(1)?
-            .as_str()
-            .map_err(|_| SessionRuntimeError::CONSTRAINT)?;
-        let usage = row
-            .get_ref(2)?
-            .as_str_or_null()
-            .map_err(|_| SessionRuntimeError::CONSTRAINT)?;
-        if content.len().saturating_add(usage.map_or(0, str::len)) > 64 * 1024 * 1024 {
-            return Err(SessionRuntimeError::CONSTRAINT);
-        }
-        let truncated: bool = row.get(3)?;
-        let content = serde_json::from_str::<crate::sessions::codec::PersistedTurn>(content)?;
-        let has_content = match content {
-            crate::sessions::codec::PersistedTurn::Legacy(content) => !content.is_empty(),
-            crate::sessions::codec::PersistedTurn::Replay { content, replay } => {
-                !content.is_empty() || !replay.is_empty()
-            }
-        };
-        let usage = usage
-            .map(serde_json::from_str::<qq_protocol::TokenUsage>)
-            .transpose()?;
-        let disposition = if has_content || usage.is_some() || truncated {
-            "committed"
-        } else {
-            "uncertain"
-        };
-        connection.execute(
-            "UPDATE model_turns SET work_disposition=?1 WHERE rowid=?2 AND work_disposition IS NULL",
-            rusqlite::params![disposition, id],
-        )?;
-    }
-    Ok(())
-}
-
-fn restore_unfinished_goal_dispatch(connection: &Connection) -> Result<(), SessionRuntimeError> {
-    use qq_protocol::{RunActivity, SessionEvent, SessionEventEnvelope};
-    connection.execute_batch(
-        "CREATE TEMP TABLE goal_dispatch_repair (
-        id TEXT PRIMARY KEY, session TEXT NOT NULL, workspace TEXT NOT NULL,
-        waiting INTEGER NOT NULL DEFAULT 0, completed INTEGER NOT NULL DEFAULT 0
-    );
-    INSERT INTO goal_dispatch_repair(id,session,workspace)
-    SELECT r.id,r.session_id,s.workspace_id FROM runs r JOIN sessions s ON s.id=r.session_id
-    WHERE r.outcome_json IS NULL AND r.status IN ('queued','running')
-      AND ((r.kind='prompt' AND (r.goal_id IS NOT NULL OR r.goal_paid_owner_run_id IS NOT NULL))
-        OR (r.kind='compaction' AND r.auto_compaction=1 AND EXISTS(
-          SELECT 1 FROM runs owner WHERE owner.id=r.auto_compaction_for_run_id
-            AND owner.session_id=r.session_id AND owner.kind='prompt'
-            AND (owner.goal_id IS NOT NULL OR owner.goal_paid_owner_run_id IS NOT NULL))));",
-    )?;
-    let any_candidates: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM goal_dispatch_repair)",
-        [],
-        |row| row.get(0),
-    )?;
-    if !any_candidates {
-        connection.execute_batch("DROP TABLE goal_dispatch_repair")?;
-        return Ok(());
-    }
-    let oversized: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE length(CAST(envelope_json AS BLOB))>1048576)",
-        [],
-        |row| row.get(0),
-    )?;
-    if oversized {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    }
-    let store_id: Option<String> = connection
-        .query_row(
-            "SELECT value FROM metadata WHERE key='store_id'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let mut statement = connection.prepare(
-        "SELECT e.workspace_id,e.sequence,e.envelope_json,c.id,c.session,c.workspace
-         FROM events e JOIN goal_dispatch_repair c
-           ON json_extract(e.envelope_json,'$.run_id')=c.id
-         WHERE json_extract(e.envelope_json,'$.event.type') IN ('run_activity_changed','model_turn_completed')
-         ORDER BY e.workspace_id,e.sequence",
-    )?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        let workspace: String = row.get(0)?;
-        let sequence: u64 = row.get(1)?;
-        let encoded = row
-            .get_ref(2)?
-            .as_str()
-            .map_err(|_| SessionRuntimeError::CONSTRAINT)?;
-        if encoded.len() > 1024 * 1024 {
-            return Err(SessionRuntimeError::CONSTRAINT);
-        }
-        let run: String = row.get(3)?;
-        let session: String = row.get(4)?;
-        let expected_workspace: String = row.get(5)?;
-        let envelope: SessionEventEnvelope = serde_json::from_str(encoded)?;
-        if workspace != expected_workspace
-            || store_id
-                .as_ref()
-                .is_none_or(|stored| envelope.cursor.store_id.to_string() != *stored)
-            || envelope.cursor.workspace_id.to_string() != workspace
-            || envelope.cursor.sequence != sequence
-            || envelope.session_id.to_string() != session
-            || envelope.run_id.map(|id| id.to_string()).as_deref() != Some(run.as_str())
-        {
-            return Err(SessionRuntimeError::CONSTRAINT);
-        }
-        let column = match envelope.event {
-            SessionEvent::RunActivityChanged { run_id, activity } => {
-                if run_id.to_string() != run {
-                    return Err(SessionRuntimeError::CONSTRAINT);
-                }
-                if activity != RunActivity::WaitingForProvider {
-                    continue;
-                }
-                "waiting"
-            }
-            SessionEvent::ModelTurnCompleted { run_id, .. } => {
-                if run_id.to_string() != run {
-                    return Err(SessionRuntimeError::CONSTRAINT);
-                }
-                "completed"
-            }
-            _ => return Err(SessionRuntimeError::CONSTRAINT),
-        };
-        connection.execute(
-            &format!("UPDATE goal_dispatch_repair SET {column}=?2 WHERE id=?1"),
-            rusqlite::params![run, sequence],
-        )?;
-    }
-    drop(rows);
-    drop(statement);
-    connection.execute_batch(
-        "UPDATE runs SET goal_request_pending=1,usage_json=NULL,estimated_cost_usd_nanos=NULL
-        WHERE id IN (SELECT id FROM goal_dispatch_repair WHERE waiting>completed);
-    UPDATE runs SET goal_request_pending=1,goal_helper_admitted=1
-        WHERE id IN (SELECT id FROM goal_dispatch_repair) AND kind='compaction'
-          AND usage_json IS NULL AND estimated_cost_usd_nanos IS NULL;
-    UPDATE runs SET goal_helper_admitted=1
-        WHERE id IN (SELECT id FROM goal_dispatch_repair) AND routing_json IS NOT NULL
-          AND (usage_json IS NULL OR estimated_cost_usd_nanos IS NULL
-            OR estimated_cost_usd_nanos>0 OR json_extract(usage_json,'$.input_tokens')>0
-            OR json_extract(usage_json,'$.output_tokens')>0);
-    DROP TABLE goal_dispatch_repair;",
-    )?;
-    Ok(())
-}
-
-fn validate_goal_policy_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
-    for (column, kind) in [("policy_json", "TEXT"), ("specification_at_ms", "INTEGER")] {
-        if column_shape(connection, "session_goals", column)? != (kind.to_owned(), false, None, 0) {
-            return Err(SessionRuntimeError::CONSTRAINT);
-        }
-    }
-    let sql: String = connection.query_row(
-        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='session_goals'",
-        [],
-        |row| row.get(0),
-    )?;
-    let compact: String = sql.split_whitespace().collect();
-    if [GOAL_POLICY_COLUMN, GOAL_SPECIFICATION_COLUMN]
-        .into_iter()
-        .any(|definition| !compact.contains(&definition.split_whitespace().collect::<String>()))
-    {
-        return Err(SessionRuntimeError::CONSTRAINT);
     }
     Ok(())
 }

@@ -13,11 +13,11 @@ async fn session_summaries_carry_the_latest_run_activity_while_running() {
     assert_eq!(idle.focused.unwrap().summary.activity, None);
 
     store
-        .append_run_activity(&claimed, RunActivity::Reasoning, false)
+        .append_run_activity(&claimed, RunActivity::Reasoning)
         .await
         .unwrap();
     store
-        .append_run_activity(&claimed, RunActivity::GeneratingResponse, false)
+        .append_run_activity(&claimed, RunActivity::GeneratingResponse)
         .await
         .unwrap();
     let live = store.snapshot(request).await.unwrap();
@@ -42,9 +42,8 @@ async fn measured_occupancy_basis_persists_atomically_and_reloads_with_the_reser
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
+                boundary_notices: Vec::new(),
+                reserved_boundary_notices: 0,
                 turn_ordinal: 1,
                 message: Message::assistant("measured")
                     .with_replay(Arc::from("signed-continuation")),
@@ -604,7 +603,6 @@ fn interrupted_compaction_commits_no_marker_and_can_be_retried() {
         CommandId::from_bytes([9; 16]),
         SessionCommand::CompactSession { session_id },
         None,
-        &CommandAdmission::default(),
         CommandOrigin::Client,
     )
     .unwrap();

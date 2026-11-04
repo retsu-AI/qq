@@ -23,9 +23,7 @@ set a value; `qq config sources` lists every file consulted in order.
 
 Later layers win. Maps (`providers`, `mcp`, `profiles`) merge by
 key; an entry set to `Remove` deletes what an earlier layer declared.
-Sections `delegation` and `audit` replace as a whole. The `goals` section
-merges individual fields, including nested `per_run` fields; `goals: Clear`
-restores compiled defaults under managed ceilings.
+Sections `delegation` and `audit` replace as a whole.
 
 | Order | Layer | Path |
 | ---: | --- | --- |
@@ -58,7 +56,7 @@ An empty or relative `QQ_HOME` is an error. Without it, platform paths stay
 unchanged.
 
 Project layers that declare anything sensitive — `model`, `providers`,
-`mcp`, `profiles`, `delegation`, `audit`, `goals`,
+`mcp`, `profiles`, `delegation`, `audit`,
 `reasoning_effort`, `organization`, or `worker_model` — are loaded only after `qq trust`
 has accepted that exact file content. See
 [Permissions and trust](permissions.md#project-trust).
@@ -79,13 +77,12 @@ repository should not commit; this repository's `.gitignore` excludes
 | `reasoning_effort` | `none` `minimal` `low` `medium` `high` `xhigh` `max` `default` | provider default | effort hint for reasoning models that accept one. `default` lets the provider choose. Any other value outside the model's known accepted set (catalog or discovery) fails at plan time naming the accepted ones; with no known set, a rejected value fails at the provider ([providers](providers.md)) |
 | `approval_timeout_seconds` | `1`–`86400` | absent | server-side bound on how long a held call waits for you before it is denied. Absent is **no deadline**: the prompt waits for you, the run's own deadline, or cancellation. Not trust-gated: it can only shorten a wait. `qq serve` and `qq daemon` read it from global and managed configuration only; `qq run` and the TUI also read the project's |
 | `max_active_runs` | `1`–`65536` | available CPU parallelism, minimum `8` | admission slots per root/child-depth pool, fixed when the runtime starts; approval and `ask_user` waits release their slot and answered runs reacquire ahead of queued new runs. `qq doctor` reports the effective value. `qq serve` and `qq daemon` read global and managed configuration; `qq run` and the TUI also read the project's |
-| `retention_days` | `1`–`3650` | absent | delete idle sessions, and `qq undo` snapshots, untouched for this many days. Absent keeps everything. Checked when the server starts and every hour while it runs; a session with a live goal or pending work is kept. User and managed configuration only: a project file that sets it fails to load |
+| `retention_days` | `1`–`3650` | absent | delete idle sessions, and `qq undo` snapshots, untouched for this many days. Absent keeps everything. Checked when the server starts and every hour while it runs; a session with a run in progress or queued is kept. User and managed configuration only: a project file that sets it fails to load |
 | `providers` | map | built-ins | provider declarations; [below](#providers) |
 | `mcp` | map | empty | MCP servers; [MCP servers](mcp.md) |
 | `profiles` | map | empty | named per-session presets; [below](#profiles) |
 | `delegation` | section | empty | sub-agent roster and bounds; [below](#delegation) |
 | `audit` | section | `off` | final-answer audit; [below](#audit) |
-| `goals` | section | finite defaults | defaults and bounds for durable goals; [below](#goals) |
 | `policy` | section | see below | the tool catalog, and what may never run; [below](#policy) |
 
 ### Model routes
@@ -227,8 +224,7 @@ policy: (
 | `allow_custom_providers` | managed layers only | allow `Custom`/`LiteLlm` declarations; default `true` |
 | `allow_literal_secrets` | managed layers only | allow `Value(...)`; default `false` |
 | `deny_shell_prefixes` | any; accumulates | shell commands refused in every approval mode, Full included, matched at word boundaries (`"git push"` refuses `git push origin main`) |
-| `deny_tools`, `deny_hosts` | managed layers only | `deny_hosts` (exact names or `*.suffix`, for `fetch`) is refused in every approval mode, Full included. `deny_tools` removes tools from side questions, and `shell` in it refuses goal checks |
-| `goals` | managed layers only | goal ceilings; fieldwise minimum across administrators, retained by `goals: Clear` |
+| `deny_tools`, `deny_hosts` | managed layers only | `deny_hosts` (exact names or `*.suffix`, for `fetch`) is refused in every approval mode, Full included. `deny_tools` also removes tools from side questions |
 
 "Managed layers" are `managed.ron`, `managed.d/`, and MDM (rows 8 and 9
 above). Setting a `managed layers only` key anywhere else fails with
@@ -296,47 +292,6 @@ parent's. The deprecated `worker_model` counts as a `balanced` entry.
 Design: [`../design/architecture.md`](../design/architecture.md)
 (§ Concurrency And Multiple Agents and the `spawn_agent` description under
 § Structured Input And Steering).
-
-## `goals`
-
-Goal configuration is expressed in RON:
-
-```ron
-goals: (
-    default_deadline_seconds: 86400,
-    max_deadline_seconds: 604800,
-    default_max_runs: 200,
-    max_runs: 2000,
-    per_run: (max_model_turns: 256),
-    max_backoff_seconds: 1800,
-    check_timeout_seconds: 600,
-    approval_wait_seconds: 600,
-),
-```
-
-Durations and limits must be positive. Deadline duration is at most seven
-days, runs at most 2000, check timeout at most 3600 seconds, and backoff and
-approval wait at most 86400 seconds. Defaults are clamped to effective
-ceilings. `per_run` additionally accepts `max_duration_ms`, `max_tool_calls`,
-`max_total_tokens`, `max_cost_usd_nanos`, `max_input_tokens`,
-`max_output_tokens`, `max_tool_output_bytes`, `max_children` (at most 8),
-and `max_concurrent_children` (at most 3). Omitted run limits inherit;
-`goals: Clear` restores the finite compiled model-turn cap.
-
-Administrators use `policy.goals` with `max_deadline_seconds`, `max_runs`,
-`max_backoff_seconds`, `max_check_timeout_seconds`,
-`max_approval_wait_seconds`, and the same `per_run` limits. These fields
-combine by minimum, including per-run ceilings. An ordinary layer cannot
-declare them or clear them. `qq config show` prints effective defaults and
-ceilings; `qq config explain goals.default_max_runs` and
-`qq config explain policy.goals.max_runs` identify their declaring sources.
-
-Goal-bound work rechecks current workspace ceilings before starting model work
-or a completion check. A lower ceiling or unavailable configuration pauses the
-goal for configuration review; resume validates it again. Provider retries use
-the accepted backoff cap, retaining any later model-requested wait. Unanswered
-tool approvals pause the goal after `approval_wait_seconds`, or sooner at the
-goal deadline or an ordinary approval timeout.
 
 ## `audit`
 

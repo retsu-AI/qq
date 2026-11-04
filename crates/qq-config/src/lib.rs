@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod document;
-mod goals;
 mod loader;
 mod managed;
 mod models;
@@ -20,7 +19,6 @@ mod remote;
 mod theme;
 mod tui;
 
-pub use goals::{GoalCeilings, GoalRunLimits, GoalsConfig};
 pub use loader::canonical_working_directory;
 pub use qq_provider::{SecretLiteral, SecretRef};
 pub use theme::{
@@ -1083,7 +1081,6 @@ impl ModelRoute {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectivePolicy {
-    goal_ceilings: GoalCeilings,
     allowed_providers: Option<Vec<String>>,
     exposed_tools: Option<Vec<String>>,
     denied_providers: Vec<String>,
@@ -1100,7 +1097,6 @@ pub struct EffectivePolicy {
 impl Default for EffectivePolicy {
     fn default() -> Self {
         Self {
-            goal_ceilings: GoalCeilings::default(),
             allowed_providers: None,
             exposed_tools: None,
             denied_providers: Vec::new(),
@@ -1126,11 +1122,6 @@ pub enum BuiltinPreference {
 }
 
 impl EffectivePolicy {
-    #[must_use]
-    pub const fn goal_ceilings(&self) -> &GoalCeilings {
-        &self.goal_ceilings
-    }
-
     #[must_use]
     pub fn exposed_tools(&self) -> Option<&[String]> {
         self.exposed_tools.as_deref()
@@ -1261,7 +1252,6 @@ pub enum ConfigKey {
     WorkerModel,
     Delegation,
     Audit,
-    Goals,
     Shell,
     ApprovalTimeout,
     MaxActiveRuns,
@@ -1311,7 +1301,6 @@ impl SourceReport {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConfigProvenance {
-    goals: BTreeMap<String, SourceIdentity>,
     organization: Option<SourceIdentity>,
     model: Option<SourceIdentity>,
     worker_model: Option<SourceIdentity>,
@@ -1327,11 +1316,6 @@ pub struct ConfigProvenance {
 }
 
 impl ConfigProvenance {
-    #[must_use]
-    pub const fn goals(&self) -> &BTreeMap<String, SourceIdentity> {
-        &self.goals
-    }
-
     #[must_use]
     pub const fn reasoning_effort(&self) -> Option<&SourceIdentity> {
         self.reasoning_effort.as_ref()
@@ -1451,7 +1435,6 @@ pub struct ConfigSnapshot {
     worker_model: Option<ModelRoute>,
     delegation: DelegationConfig,
     audit: AuditConfig,
-    goals: GoalsConfig,
     shell: ShellConfig,
     approval_timeout: Option<std::time::Duration>,
     max_active_runs: usize,
@@ -1474,7 +1457,6 @@ pub struct ClientSnapshot {
     worker_model: Option<ModelRoute>,
     delegation: DelegationConfig,
     audit: AuditConfig,
-    goals: GoalsConfig,
     shell: ShellConfig,
     approval_timeout: Option<std::time::Duration>,
     max_active_runs: usize,
@@ -1491,11 +1473,6 @@ pub struct ClientSnapshot {
 }
 
 impl ClientSnapshot {
-    #[must_use]
-    pub const fn goals(&self) -> &GoalsConfig {
-        &self.goals
-    }
-
     #[must_use]
     pub const fn shell(&self) -> &ShellConfig {
         &self.shell
@@ -1777,11 +1754,6 @@ impl AgentProfileConfig {
 
 impl ConfigSnapshot {
     #[must_use]
-    pub const fn goals(&self) -> &GoalsConfig {
-        &self.goals
-    }
-
-    #[must_use]
     pub const fn shell(&self) -> &ShellConfig {
         &self.shell
     }
@@ -2036,11 +2008,6 @@ pub enum ConfigError {
     InvalidDelegation(String),
     #[error("audit settings are invalid: {0}")]
     InvalidAudit(String),
-    #[error("goal setting {field} is invalid: {reason}")]
-    InvalidGoals {
-        field: &'static str,
-        reason: &'static str,
-    },
     #[error("approval timeout is invalid: {0}")]
     InvalidApprovalTimeout(String),
     #[error("retention_days must be between 1 and {MAX_RETENTION_DAYS}, found {days}")]

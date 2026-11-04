@@ -1,6 +1,3 @@
-mod goal_form;
-pub(crate) use goal_form::{GoalForm, GoalFormRefresh};
-
 use std::collections::BTreeSet;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -207,49 +204,6 @@ impl PickerItem for CommandRow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GoalCheckTarget {
-    pub session_id: SessionId,
-    pub expected: qq_protocol::GoalIdentity,
-    pub workspace_id: qq_protocol::WorkspaceId,
-    pub workspace_path: String,
-    pub command: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct GoalCheckRow {
-    pub scope: Option<qq_protocol::GoalCheckScope>,
-    pub label: &'static str,
-    pub description: &'static str,
-}
-
-impl PickerItem for GoalCheckRow {
-    fn search_text<'a>(&'a self, out: &mut Vec<&'a str>) {
-        out.push(self.label);
-        out.push(self.description);
-    }
-}
-
-pub(crate) const GOAL_CHECK_PAGE_ROWS: usize = 1;
-
-pub(crate) const GOAL_CHECK_ROWS: [GoalCheckRow; 3] = [
-    GoalCheckRow {
-        scope: None,
-        label: "deny",
-        description: "withhold consent; pause an active goal",
-    },
-    GoalCheckRow {
-        scope: Some(qq_protocol::GoalCheckScope::Once),
-        label: "allow once",
-        description: "one start; a failure does not refund it",
-    },
-    GoalCheckRow {
-        scope: Some(qq_protocol::GoalCheckScope::ForGoal),
-        label: "allow repeated checks",
-        description: "this goal and this exact command only",
-    },
-];
-
 pub(crate) const MAX_FIND_QUERY_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -276,12 +230,6 @@ impl Find {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Overlay {
     Find(Find),
-    GoalForm(Box<GoalForm>),
-    GoalCheck {
-        target: GoalCheckTarget,
-        picker: Picker<GoalCheckRow>,
-        detail_row: usize,
-    },
     Models(Picker<ModelRow>),
     Profiles(Picker<ProfileRow>),
     ApprovalModes(Picker<ApprovalModeRow>),
@@ -308,8 +256,6 @@ pub(crate) enum Overlay {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
     Find,
-    GoalForm,
-    GoalCheck,
     Models,
     Profiles,
     ApprovalModes,
@@ -372,8 +318,6 @@ impl Overlay {
     pub(crate) fn mode(&self) -> Mode {
         match self {
             Self::Find(_) => Mode::Find,
-            Self::GoalForm(_) => Mode::GoalForm,
-            Self::GoalCheck { .. } => Mode::GoalCheck,
             Self::Models(_) => Mode::Models,
             Self::Profiles(_) => Mode::Profiles,
             Self::ApprovalModes(_) => Mode::ApprovalModes,
@@ -418,20 +362,6 @@ impl Overlay {
         }
         match self {
             Self::Find(_) => PickerOutcome::Ignored,
-            Self::GoalForm(form) => form.handle_key(key),
-            Self::GoalCheck {
-                picker, detail_row, ..
-            } => match key.code {
-                KeyCode::PageUp => {
-                    *detail_row = detail_row.saturating_sub(GOAL_CHECK_PAGE_ROWS);
-                    PickerOutcome::Changed
-                }
-                KeyCode::PageDown => {
-                    *detail_row = detail_row.saturating_add(GOAL_CHECK_PAGE_ROWS);
-                    PickerOutcome::Changed
-                }
-                _ => dispatch(picker, key),
-            },
             Self::Models(picker) => dispatch(picker, key),
             Self::Profiles(picker) => dispatch(picker, key),
             Self::ApprovalModes(picker) => dispatch(picker, key),
@@ -447,8 +377,6 @@ impl Overlay {
     pub(crate) fn push_query(&mut self, text: &str) -> bool {
         match self {
             Self::Find(find) => find.push_text(text),
-            Self::GoalForm(form) => form.push_text(text),
-            Self::GoalCheck { picker, .. } => picker.push_query(text),
             Self::Models(picker) => picker.push_query(text),
             Self::Profiles(picker) => picker.push_query(text),
             Self::ApprovalModes(picker) => picker.push_query(text),

@@ -14,7 +14,7 @@ use qq_config::{
 use qq_core::{
     LoadedRuntime, PublishedEventStream, RuntimeConfigError, RuntimeLoadError, RuntimeLoadFuture,
     RuntimeLoadRequest, RuntimeLoader, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions,
-    SpawnModelValidationFuture, WorkerRuntimeLoadFuture, WorkspacePolicyAuthority,
+    SpawnModelValidationFuture, WorkerRuntimeLoadFuture,
     plan::{
         AgentProfile, CompiledAgentPlan, CredentialReference, HostSnapshot, PlanCompileError,
         ProviderDescriptor, SourceFingerprint,
@@ -109,7 +109,6 @@ pub struct ProviderRemedy {
 
 #[derive(Clone, Debug)]
 pub struct TuiModelState {
-    pub goals: qq_config::GoalsConfig,
     pub configured_model: ModelSelection,
     pub model: Option<ModelSelection>,
     pub tui_model: ModelSelection,
@@ -135,7 +134,6 @@ struct RuntimeFactoryInner {
     discovery: ModelDiscovery,
     mcp: crate::mcp::McpRegistryCache,
     plans: PlanCache,
-    check_policy_slots: std::sync::OnceLock<Arc<tokio::sync::Semaphore>>,
 }
 
 #[derive(Clone)]
@@ -290,7 +288,6 @@ impl RuntimeFactory {
                 discovery: ModelDiscovery::new()?,
                 mcp: crate::mcp::McpRegistryCache::new(),
                 plans: PlanCache::new(PlanCacheLimits::default()),
-                check_policy_slots: std::sync::OnceLock::new(),
             }),
         })
     }
@@ -333,7 +330,6 @@ impl RuntimeFactory {
             None => ModelSelection::default(),
         };
         TuiModelState {
-            goals: snapshot.goals().clone(),
             configured_model,
             model,
             tui_model,
@@ -2094,139 +2090,6 @@ impl RuntimeLoader for RuntimeFactory {
     }
 }
 
-impl WorkspacePolicyAuthority for RuntimeFactory {
-    fn goal_policy(&self, workspace: &Path) -> qq_core::GoalPolicyFuture {
-        let factory = self.clone();
-        let workspace = workspace.to_owned();
-        Box::pin(async move {
-            let slots = factory
-                .inner
-                .check_policy_slots
-                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
-            let permit = match Arc::clone(slots).acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => return Err(qq_core::GoalPolicyError::Overloaded),
-            };
-            match tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                let load = match factory.request_for_workspace(&workspace, None) {
-                    Ok(load) => load,
-                    Err(error) => {
-                        return Err(qq_core::GoalPolicyError::Configuration(RuntimeLoadError {
-                            kind: error.failure_kind(),
-                            message: error.to_string(),
-                        }));
-                    }
-                };
-                let snapshot = match factory.load_for_client(&load) {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        return Err(qq_core::GoalPolicyError::Configuration(RuntimeLoadError {
-                            kind: error.failure_kind(),
-                            message: error.to_string(),
-                        }));
-                    }
-                };
-                let goals = snapshot.goals();
-                let ceilings = snapshot.policy().goal_ceilings();
-                Ok(qq_core::GoalPolicy {
-                    max_duration_ms: goals.max_deadline_seconds * 1000,
-                    max_goal_runs: goals.max_runs,
-                    per_run: qq_protocol::RunLimits {
-                        max_duration_ms: ceilings.per_run.max_duration_ms,
-                        max_model_turns: ceilings.per_run.max_model_turns,
-                        max_tool_calls: ceilings.per_run.max_tool_calls,
-                        max_total_tokens: ceilings.per_run.max_total_tokens,
-                        max_cost_usd_nanos: ceilings.per_run.max_cost_usd_nanos,
-                        max_input_tokens: ceilings.per_run.max_input_tokens,
-                        max_output_tokens: ceilings.per_run.max_output_tokens,
-                        max_tool_output_bytes: ceilings.per_run.max_tool_output_bytes,
-                        max_children: ceilings.per_run.max_children,
-                        max_concurrent_children: ceilings.per_run.max_concurrent_children,
-                    },
-                    max_backoff_ms: goals.max_backoff_seconds * 1000,
-                    max_check_timeout_ms: ceilings.max_check_timeout_seconds.unwrap_or(3600) * 1000,
-                    approval_wait_ms: goals.approval_wait_seconds * 1000,
-                })
-            })
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => Err(qq_core::GoalPolicyError::Unavailable),
-            }
-        })
-    }
-
-    fn validate_goal_check(
-        &self,
-        workspace: &Path,
-        command: &str,
-    ) -> qq_core::GoalCheckPolicyFuture {
-        if command.len() > 1024 {
-            return Box::pin(std::future::ready(Err(
-                qq_core::GoalCheckPolicyError::ShellDenied,
-            )));
-        }
-        let factory = self.clone();
-        let workspace = workspace.to_owned();
-        let command = command.to_owned();
-        Box::pin(async move {
-            let slots = factory
-                .inner
-                .check_policy_slots
-                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
-            let permit = match Arc::clone(slots).acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => return Err(qq_core::GoalCheckPolicyError::Overloaded),
-            };
-            let validated = tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                let load = match factory.request_for_workspace(&workspace, None) {
-                    Ok(load) => load,
-                    Err(error) => {
-                        return Err(qq_core::GoalCheckPolicyError::Configuration(
-                            RuntimeLoadError {
-                                kind: error.failure_kind(),
-                                message: error.to_string(),
-                            },
-                        ));
-                    }
-                };
-                let snapshot = match factory.load_for_client(&load) {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        return Err(qq_core::GoalCheckPolicyError::Configuration(
-                            RuntimeLoadError {
-                                kind: error.failure_kind(),
-                                message: error.to_string(),
-                            },
-                        ));
-                    }
-                };
-                if snapshot
-                    .policy()
-                    .deny_tools()
-                    .iter()
-                    .any(|name| name == "shell")
-                    || qq_core::goal_check_shell_denied(
-                        &command,
-                        snapshot.policy().deny_shell_prefixes(),
-                    )
-                {
-                    Err(qq_core::GoalCheckPolicyError::ShellDenied)
-                } else {
-                    Ok(())
-                }
-            })
-            .await;
-            match validated {
-                Ok(result) => result,
-                Err(_) => Err(qq_core::GoalCheckPolicyError::Unavailable),
-            }
-        })
-    }
-}
-
 enum ResolvedAuth {
     NoAuth,
     ApiKey(Secret),
@@ -2280,8 +2143,7 @@ impl RuntimeHandler {
         let options = SessionRuntimeOptions::new(database_path)
             .with_max_active_runs(max_active_runs)
             .with_approval_timeout(approval_timeout)
-            .with_retention(retention)
-            .with_policy_authority(Arc::new(factory.clone()));
+            .with_retention(retention);
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
         Ok(Self { durable, factory })
     }
@@ -2523,34 +2385,10 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::CursorStoreMismatch
         | SessionRuntimeError::CursorExpired
         | SessionRuntimeError::CursorWorkspaceMismatch
-        | SessionRuntimeError::GoalConflict { .. }
-        | SessionRuntimeError::GoalNotFound
-        | SessionRuntimeError::GoalImmutable
-        | SessionRuntimeError::GoalCancellationPending
-        | SessionRuntimeError::CheckInterruptionMismatch
-        | SessionRuntimeError::GoalCheckApprovalRequired
-        | SessionRuntimeError::GoalInputNotPending
-        | SessionRuntimeError::GoalCheckMissing
-        | SessionRuntimeError::GoalCheckCommandMismatch
-        | SessionRuntimeError::GoalCheckForbidden
-        | SessionRuntimeError::GoalBudgetSpent
-        | SessionRuntimeError::InvalidGoal(_)
-        | SessionRuntimeError::GoalPolicy(
-            qq_core::GoalPolicyError::Configuration(_) | qq_core::GoalPolicyError::Invalid,
-        )
-        | SessionRuntimeError::GoalCheckPolicy(
-            qq_core::GoalCheckPolicyError::ShellDenied
-            | qq_core::GoalCheckPolicyError::Configuration(_),
-        )
         | SessionRuntimeError::InvalidPageLimit) => {
             ServerHandlerError::InvalidRequest(error.to_string())
         }
         SessionRuntimeError::SideQuestionBusy
-        | SessionRuntimeError::GoalPolicy(
-            qq_core::GoalPolicyError::Unavailable | qq_core::GoalPolicyError::Overloaded,
-        )
-        | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Unavailable)
-        | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Overloaded)
         | SessionRuntimeError::QueueFull
         | SessionRuntimeError::SteeringQueueFull
         | SessionRuntimeError::WorkspaceLimitReached

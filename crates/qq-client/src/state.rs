@@ -549,7 +549,6 @@ impl SessionStore {
             .collect();
         view.live.set_holds(&view.summary.pending_holds);
         view.side_questions = snapshot.side_questions;
-        view.goal = snapshot.goal;
         view.messages = Some(messages);
         view.tool_calls = Some(tool_calls);
         self.insert(session_id, view);
@@ -848,7 +847,6 @@ pub use qq_protocol::ApprovalPreview;
 #[derive(Debug, Clone)]
 pub struct SessionView {
     pub execution_root: Option<String>,
-    pub goal: Option<Box<qq_protocol::GoalSnapshot>>,
     pub side_questions: Vec<qq_protocol::SideQuestionSnapshot>,
     pub summary: SessionSummary,
     pub foreground_run_id: Option<RunId>,
@@ -929,7 +927,6 @@ impl SessionView {
         Self {
             execution_root: None,
             side_questions: Vec::new(),
-            goal: None,
             summary,
             foreground_run_id,
             messages: None,

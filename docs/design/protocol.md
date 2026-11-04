@@ -52,22 +52,32 @@ decode-only and never set); version 13 changes the encoding for the
 `wait_agents` and `cancel_agent` tools that follow `spawn_agent` in the
 catalog (ADR-0054 § 4); version 14 records the public digest of explicitly
 approved self-contained read images (ADR-0060); version 15 records the strict
-model-facing tool-result projection policy (ADR-0061). The goal-capable catalog
-also includes the scoped `update_goal` tool. Descriptor changes do not alter
+model-facing tool-result projection policy (ADR-0061). Descriptor changes do not alter
 the wire envelope version; associated store migrations are documented separately
 below. Historical descriptor JSON remains historical evidence.
 
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 44
+PROTOCOL_VERSION = 45
 ```
 
-Version 43 removes agent packs. `AgentProfileSummary.pack` is gone and a
-skill's `source` is never `pack:<id>/…`. Descriptor 17 drops the `pack`
-section and `protected_pack_roots`. Only descriptor 17 encodes; process
-evidence from an earlier descriptor is unresolved. A configuration that
-still declares `packs` fails to load naming the key.
+Version 45 removes session goals, which versions 33, 34, 35 and 40
+added. Gone from the wire: the goal snapshot, budget, check and status types;
+`SessionSnapshot.goal`, `RunSnapshot.goal` and
+`WorkspaceSnapshot.check_interruption`; the `goal` and `goal_check` run
+origins; the `set_goal`, `goal_control` and `acknowledge_check_interruption`
+commands and their receipts; the `/v1/sessions/goal`,
+`/v1/sessions/goal/control` and `/v1/workspaces/check-interruptions/acknowledge`
+routes; and the headless `goal_run` and `goal` records with their goal-only
+exit codes. Recorded `goal_updated`, `goal_cleared` and
+`check_interruption_changed` events decode as `retired`. Store schema 67 is
+forward-only: it rewrites stored goal and goal-check origins to `user_prompt`
+(on runs, event envelopes and completion receipts), turns goal-check runs into
+prompt runs, deletes goal commands, drops the `session_goals` table and the
+goal columns on runs, compactions and model turns, and renames
+`model_turns.goal_notice` to `boundary_notices`. The plan descriptor stays at
+17.
 
 Version 44 adds `list_checkpoints`, `turn_diff`, `rewind_session` and
 `fork_session` command routes under `/v1/sessions/`. Model turns use
@@ -79,6 +89,12 @@ session-wide user prompt and excludes that prompt from inherited history.
 `session_rewound` event marks retained messages as `rewound`. A session body
 may carry `fork_prompt` until its first new prompt is submitted. Store
 schema 66 adds execution roots, checkpoints, rewind masks and fork history.
+
+Version 43 removes agent packs. `AgentProfileSummary.pack` is gone and a
+skill's `source` is never `pack:<id>/…`. Descriptor 17 drops the `pack`
+section and `protected_pack_roots`. Only descriptor 17 encodes; process
+evidence from an earlier descriptor is unresolved. A configuration that
+still declares `packs` fails to load naming the key.
 
 Version 42 adds `undo_workspace` (`POST /v1/workspaces/undo`) and its
 `workspace_undone` outcome, so any client can restore a run's snapshot through
@@ -97,10 +113,6 @@ approval previews; `SessionSummary.approval_delegate`; the
 `approval_delegate_set` events, which decode as `retired`. Store schema 65
 drops the grant, delegate and native command storage.
 
-Version 40 adds task-scoped Auto goal-check authority, distinct from explicit
-consent to execute a goal check. Since version 41 those checks run in the
-checkout like any Auto command.
-
 Version 38 adds authenticated, store-qualified workspace catalog pages. Clients
 can discover registered roots without interpreting server paths locally;
 continuation cursors reject another store.
@@ -116,47 +128,9 @@ old stores and streams still replay. `delegate: "jev"` on recorded
 `tool_approval_resolved` events still decodes but is never written. A
 version-35 client receives nothing new.
 
-Store schema58 adds private goal policy and specification-time fields, without
-a wire, descriptor or prompt change. New specifications persist their workspace
-ceilings and fixed deadline anchor atomically. Legacy admission time stays
-explicitly unknown; a lower duration ceiling then requires a specification edit.
-Older binaries refuse schema58. These fields are not model-writable goal data.
-
-Version 35 adds foreground goal JSONL records: `goal_run` carries one settled
-runtime-owned prompt/check with its immutable goal binding and durable run
-snapshot; `goal` carries the final goal snapshot and invocation status/exit.
-Paid descendants stay in event records, rather than inflating the count of
-direct goal runs. Ordinary prompt records retain their shapes. Older readers
-must upgrade before accepting these new tags; schema58, descriptor and prompt
-versions are unchanged. Goal controls add `pause_for_input` with the exact
-held ask-user call ID; a stale revision, settled/non-question call or foreign
-paid family is refused. Successful stops persist NeedsUser::Approval and
-cancel sponsored work atomically through existing goal-control admission.
-
-Version 34 adds `acknowledge_check_interruption` at
-`POST /v1/workspaces/check-interruptions/acknowledge`, its receipt and the
-`check_interruption_changed` event. `WorkspaceSnapshot.check_interruption`
-references one interrupted check whose workspace remains held until explicit
-workspace/run-fenced acknowledgment. Acknowledgment leaves a matching goal
-paused, is idempotent and cannot erase a newer hold. Older clients must reconnect
-with protocol34 before receiving the new event or command vocabulary. Store
-schema57 retains uncertain interrupted checks independently of live goals;
-older binaries refuse that store. The plan descriptor and provider prompt are
-unchanged.
-
-Version 33 adds durable goal controls (`set_goal`, `goal_control`), exact
-identity/revision fencing, explicit once/for-goal check authorization, session
-goal snapshots and `goal_updated`/`goal_cleared` events. `RunSnapshot.origin`
-records immutable creation provenance; its separate optional `goal` names the
-claim's goal identity/revision. Start/finish events carry the same optional
-stored origin, including recovery terminals. Historical absence remains unknown.
-A user prompt can bind a goal while retaining user-prompt provenance. The
-`goal` and `goal_check` origin tags are accepted wire vocabulary; queueing and
-executing that work belongs to the goal driver/check runner.
-`GoalSnapshot.achievement_claim`, when present, retains the proposing run,
-claimed revision and evidence. It is a pending proposal, separate from
-verified `achieved` status; specification edits clear it. Absent proposals
-omit the field so existing version-33 goal snapshots retain their encoding.
+Version 33 adds `RunSnapshot.origin`, the run's immutable creation
+provenance. Start/finish events carry the same optional stored origin,
+including recovery terminals. Historical absence remains unknown.
 
 Version 32 adds isolated side-question submission and cancellation commands,
 separate durable side-question snapshots, and replayable side projection updates.
@@ -188,7 +162,7 @@ its path onto the client machine. Listing neither registers a directory nor
 changes permissions.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v44/`; the `v43` directory (N−1) is
+`crates/qq-protocol/tests/fixtures/v45/`; the `v44` directory (N−1) is
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -379,23 +353,14 @@ exact owner-run accounting of internal compaction attempts. Completed, failed
 and cancelled attempts enter their owner's child-spend receipt; manual and
 unrelated compactions do not. Unknown usage or cost remains unknown. Internal
 attempts do not consume the child-count or depth allowance. No wire shape changes.
-Schema 51 adds `session_goals` history with one live goal per session and
-nullable run goal identity/revision, full claim snapshot, and immutable origin
-JSON. Creation records origin; reservation freezes an active goal claim so
-pause and replacement see preparing ownership. Goal-less absence freezes at
-first existing FULL routing, automatic compaction or main-start admission. SQL NULL is uncaptured; JSON null is a captured absence. Re-reservation
-uses the frozen claim. Historical rows retain NULL bindings; synthetic/internal
-compaction claims grant no goal mutation capability.
-The same schema stores the exact initial notice in `runs.goal_initial_notice`,
-ordered boundary notices as a JSON list in `model_turns.goal_notice`, and the
-post-summary atom in `session_compactions.goal_notice`. Each atom is framed
-and at most 16KiB. For goal-bound runs, checkpoint/continuation text shares
-the ordered list; each atom records how many child deliveries preceded it
-since the previous committed turn. Empty reactive retries and child waits
-preserve their live interleaving on replay. Goal-less rows retain NULL and
-use the existing static-notice column. Existing start, turn and marker
-transactions commit the text with the work it describes; historical context
-never regenerates notices from newer goals or the current clock.
+Schema 51 adds immutable run origin JSON and the ordered boundary-notice list
+on model turns (`model_turns.boundary_notices` since schema 67). Each notice
+is framed and at most 16 KiB and records how many child deliveries preceded it
+since the previous committed turn, so empty reactive retries and child waits
+preserve their live interleaving on replay. Turns without boundary notices
+keep NULL and use the existing static-notice column. The turn transaction
+commits the text with the work it describes; historical context never
+regenerates notices from the current clock.
 
 Schema 47 adds nullable `tool_calls.execution_context_json`, bounded to 16 KiB.
 The process executor's receipt commits with its result and finished event;
@@ -426,21 +391,8 @@ Schema 50 adds the replay value `root_stall_report` through a version-only
 migration. Roots receive an action-oriented, authority-neutral notice;
 historical `stall_report` wording remains byte-identical and children retain
 it. Older readers refuse the new store at open before session assembly.
-Schema 52 adds durable request/helper admission evidence and nullable model-turn
-work disposition. Schema 53 binds initial delegated work to its exact paid
-owner run; historical user follow-ups remain unbound. Schema 54 repairs NULL
-work dispositions on unfinished legacy turns using typed stored content, usage
-and truncation evidence. Ambiguous turns remain uncertain; terminal rows and
-aggregates are preserved until ordinary recovery. These store migrations
-do not add another protocol or descriptor change.
-Schema 55 restores unfinished goal dispatch evidence from exact-run ordered
-activity and model-turn completion events. A later provider-wait event keeps
-aggregate spend unknown without losing measured prefix turns. Owned helper
-NULL aggregates retain uncertainty; seeded no-send zero and completed routing
-receipts keep their independently known values. Required events are bounded
-before JSON parsing, checked against run/session/workspace/store identity,
-and decoded as typed envelopes. Invalid evidence rolls back the repair.
-Terminal rows and goal counters change only through ordinary recovery.
+Schemas 52 to 58 added storage for features that have since been removed;
+schema 67 drops it, and those migration steps now only advance the version.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it
@@ -638,7 +590,6 @@ POST /v1/workspaces/resolve
 POST /v1/workspaces/snapshot
 POST /v1/workspaces/undo
 POST /v1/workspaces/list
-POST /v1/workspaces/check-interruptions/acknowledge
 POST /v1/models
 POST /v1/sessions
 POST /v1/sessions/prompts
@@ -652,8 +603,6 @@ POST /v1/sessions/delete
 POST /v1/sessions/prune
 POST /v1/sessions/compact
 POST /v1/sessions/compact/rollback
-POST /v1/sessions/goal
-POST /v1/sessions/goal/control
 POST /v1/runs/steer
 POST /v1/runs/cancel
 POST /v1/tools/approvals
@@ -709,12 +658,12 @@ optional-bodied:
 ```
 
 Response `ServerCapabilities` (abridged; see
-`crates/qq-protocol/tests/fixtures/v44/capabilities.json` for the full golden):
+`crates/qq-protocol/tests/fixtures/v45/capabilities.json` for the full golden):
 
 ```json
 {
   "version": 1,
-  "protocol_version": 44,
+  "protocol_version": 45,
   "server_version": "0.1.0",
   "input_parts": ["text", "workspace_file"],
   "commands": ["resolve_workspace", "create_session", "submit_prompt", "steer_run", "..."],
@@ -1335,11 +1284,9 @@ Restores the workspace's files to a `qq undo` snapshot: the one whose name
 starts with `snapshot`, or the newest run's when it is omitted. Workspaces
 whose paths contain or sit inside this one count as the same workspace for
 the guard below, because the restore covers the whole tree. Refused with
-`400` while any session in those workspaces is not idle, any run is queued or
-running, a goal check awaits acknowledgment, or a live goal is active, since
-an active goal can become due at any time. From acceptance until the restore
-finishes the runtime claims no run and queues no goal in those workspaces,
-and an overlapping undo is refused. Shutdown stops new commands at once and
+`400` while any session in those workspaces is not idle or any run is queued
+or running. From acceptance until the restore finishes the runtime claims no
+run in those workspaces, and an overlapping undo is refused. Shutdown stops new commands at once and
 waits, within its grace period, for an accepted restore to finish. The Git work happens outside the store; a failure
 (an unknown or ambiguous name, a workspace outside Git, a Git error) is a
 `400` (`undo failed: …`, or the busy refusal) and records no receipt, so
@@ -2227,7 +2174,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v44/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v45/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.

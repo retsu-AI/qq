@@ -156,44 +156,6 @@ async fn login_environment_startup_banner_is_not_an_environment_entry() {
 }
 
 #[tokio::test]
-async fn login_environment_goal_deadline_during_inspection_reports_timeout() {
-    use futures_util::FutureExt as _;
-    let root = tempfile::tempdir().unwrap();
-    let producer = fixture(root.path(), "env -0");
-    let workspace = Workspace::open(root.path()).unwrap();
-    let (entered, mut entering) = tokio::sync::oneshot::channel();
-    let (release, released) = std::sync::mpsc::sync_channel(1);
-    *producer.login_environment.inspection.lock().unwrap() = Some(InspectionGate {
-        entered,
-        release: released,
-    });
-    let tasks = ToolTasks::default();
-    let mut lease = tasks.enter();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
-    let mut run = std::pin::pin!(crate::tools::run_goal_check_shell(
-        &workspace,
-        "true".to_owned(),
-        deadline,
-        RunCancellation::new(),
-        producer,
-        &mut lease
-    ));
-    tokio::select! {
-        result=&mut run=>panic!("inspection should be held: {result:?}"),
-        _=&mut entering=>{}
-    }
-    tokio::time::pause();
-    tokio::time::advance(std::time::Duration::from_secs(2)).await;
-    let result = run.as_mut().now_or_never();
-    release.send(()).unwrap();
-    let (outcome, _) = result.expect("deadline must not wait for inspection");
-    assert_eq!(
-        outcome,
-        Some(crate::tools::dispatch::CommandOutcome::TimedOut)
-    );
-}
-
-#[tokio::test]
 async fn login_environment_inspection_timeout_is_bounded() {
     inspection_is_bounded(false).await;
 }

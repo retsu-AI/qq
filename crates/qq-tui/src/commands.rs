@@ -35,7 +35,6 @@ pub(crate) enum Command {
     ShowAttention,
     ShowChanges,
     ShowSideQuestions,
-    ShowGoal,
     FocusParent,
     FocusFirstChild,
     FocusNextSibling,
@@ -119,7 +118,7 @@ pub(crate) fn retired_replacement(name: &str) -> Option<&'static str> {
         .map(|(_, replacement)| *replacement)
 }
 
-pub(crate) const COMMANDS: [CommandSpec; 48] = [
+pub(crate) const COMMANDS: [CommandSpec; 47] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -399,13 +398,6 @@ pub(crate) const COMMANDS: [CommandSpec; 48] = [
         []
     ),
     spec!(Quit, "exit QQ", System, ["/quit", "/exit"], ["Ctrl-C"]),
-    spec!(
-        ShowGoal,
-        "view session goal and progress",
-        View,
-        ["/goal"],
-        []
-    ),
     spec!(
         ShowSideQuestions,
         "ask or view side questions; /btw new starts a thread, /btw cancel stops one",

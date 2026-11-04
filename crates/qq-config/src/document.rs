@@ -12,20 +12,17 @@ use serde::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::goals::GoalsPatch;
-
 use super::{
     AgentProfileConfig, AuditConfig, AuditMode, AwsAuth, BedrockAuth, BuiltinPreference,
     BuiltinProvider, ClientSnapshot, ConfigError, ConfigKey, ConfigProvenance, ConfigSnapshot,
     ConfigSources, Connection, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MCP_CALL_TIMEOUT_SECONDS,
     DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig, DelegationEntry, DelegationRole,
-    EffectivePolicy, GoalCeilings, GoalsConfig, HttpAccess, InputModality,
-    MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH,
-    MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER, MAX_MCP_CALL_TIMEOUT_SECONDS,
-    MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, MAX_RETENTION_DAYS, McpServerConfig,
-    McpTransport, ModelMetadata, ModelPricing, ModelRoute, ProfileApprovalMode, ProviderAccess,
-    ProviderApi, ProviderConfig, ProviderKind, RuntimeOverrides, SecretRef, SourceIdentity,
-    SourceKind, SourceReport,
+    EffectivePolicy, HttpAccess, InputModality, MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS,
+    MAX_DELEGATION_DEPTH, MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER,
+    MAX_MCP_CALL_TIMEOUT_SECONDS, MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES,
+    MAX_RETENTION_DAYS, McpServerConfig, McpTransport, ModelMetadata, ModelPricing, ModelRoute,
+    ProfileApprovalMode, ProviderAccess, ProviderApi, ProviderConfig, ProviderKind,
+    RuntimeOverrides, SecretRef, SourceIdentity, SourceKind, SourceReport,
 };
 
 pub(super) fn deserialize_unique_btree_map<'de, D, K, V>(
@@ -593,7 +590,7 @@ impl McpServerPatch {
     }
 }
 
-pub const POLICY_FIELD_NAMES: [&str; 12] = [
+pub const POLICY_FIELD_NAMES: [&str; 11] = [
     "allowed_providers",
     "exposed_tools",
     "denied_providers",
@@ -605,10 +602,9 @@ pub const POLICY_FIELD_NAMES: [&str; 12] = [
     "deny_tools",
     "deny_shell_prefixes",
     "deny_hosts",
-    "goals",
 ];
 
-pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 9] = [
+pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 8] = [
     "allowed_providers",
     "denied_providers",
     "max_output_tokens",
@@ -617,17 +613,15 @@ pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 9] = [
     "allow_literal_secrets",
     "deny_tools",
     "deny_hosts",
-    "goals",
 ];
 
-pub const DOCUMENT_FIELD_NAMES: [&str; 17] = [
+pub const DOCUMENT_FIELD_NAMES: [&str; 16] = [
     "version",
     "organization",
     "model",
     "worker_model",
     "delegation",
     "audit",
-    "goals",
     "shell",
     "approval_timeout_seconds",
     "max_active_runs",
@@ -640,7 +634,7 @@ pub const DOCUMENT_FIELD_NAMES: [&str; 17] = [
     "policy",
 ];
 
-pub const REMOVED_KEYS: [(&str, &str); 8] = [
+pub const REMOVED_KEYS: [(&str, &str); 9] = [
     (
         "allow_tools",
         "was removed in v0.1.10: Auto and Full run tools without grants and Ask asks every \
@@ -681,6 +675,11 @@ pub const REMOVED_KEYS: [(&str, &str); 8] = [
         "was removed in v0.1.12 with agent packs: move a pack's skills into `.qq/skills/` and \
          its model and approval mode into `profiles`; delete the key",
     ),
+    (
+        "goals",
+        "was removed in v0.1.12 with session goals: give the task in a prompt, for example \
+         `qq run \"do phase 1 of plan.md\"`; delete the key",
+    ),
 ];
 
 fn explain_removed_key(options: &Options, content: &str, message: String) -> String {
@@ -720,7 +719,6 @@ pub(super) struct PolicyPatch {
     deny_tools: Option<Vec<String>>,
     deny_shell_prefixes: Option<Vec<String>>,
     deny_hosts: Option<Vec<String>>,
-    goals: Option<GoalCeilings>,
 }
 
 impl PolicyPatch {
@@ -733,7 +731,6 @@ impl PolicyPatch {
             || self.allow_literal_secrets.is_some()
             || self.deny_tools.is_some()
             || self.deny_hosts.is_some()
-            || self.goals.is_some()
     }
 }
 
@@ -751,8 +748,6 @@ pub(super) struct Document {
     delegation: Field<DelegationPatch>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     audit: Field<AuditPatch>,
-    #[serde(default, skip_serializing_if = "Field::is_missing")]
-    goals: Field<GoalsPatch>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     shell: Field<super::ShellConfig>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
@@ -886,9 +881,6 @@ impl Document {
         }
         if let Some(policy) = &self.policy {
             validate_policy_names(policy, origin)?;
-            if let Some(goals) = policy.goals {
-                goals.validate()?;
-            }
         }
         Ok(())
     }
@@ -899,7 +891,6 @@ impl Document {
             || self.worker_model.is_present()
             || self.delegation.is_present()
             || self.audit.is_present()
-            || self.goals.is_present()
             || self.shell.is_present()
             || self.reasoning_effort.is_present()
             || self.profiles.is_present()
@@ -923,9 +914,6 @@ impl Document {
         }
         if self.audit.is_present() {
             sections.push("audit");
-        }
-        if self.goals.is_present() {
-            sections.push("goals");
         }
         if self.shell.is_present() {
             sections.push("shell");
@@ -963,8 +951,6 @@ impl Document {
             #[serde(skip_serializing_if = "Option::is_none")]
             audit: Option<&'a Field<AuditPatch>>,
             #[serde(skip_serializing_if = "Option::is_none")]
-            goals: Option<&'a Field<GoalsPatch>>,
-            #[serde(skip_serializing_if = "Option::is_none")]
             shell: Option<&'a Field<super::ShellConfig>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             reasoning_effort: Option<&'a Field<qq_provider::ReasoningEffort>>,
@@ -986,7 +972,6 @@ impl Document {
             worker_model: self.worker_model.is_present().then_some(&self.worker_model),
             delegation: present(&self.delegation),
             audit: present(&self.audit),
-            goals: present(&self.goals),
             shell: present(&self.shell),
             reasoning_effort: present(&self.reasoning_effort),
             profiles: present(&self.profiles),
@@ -1025,9 +1010,6 @@ impl Document {
         }
         if self.audit.is_present() {
             touched.push(ConfigKey::Audit);
-        }
-        if self.goals.is_present() {
-            touched.push(ConfigKey::Goals);
         }
         if self.shell.is_present() {
             touched.push(ConfigKey::Shell);
@@ -1249,7 +1231,6 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
                     | "spawn_agent"
                     | "search_history"
                     | "read_tool_result"
-                    | "update_goal"
                     | "select_tools"
                     | "load_skill"
             ) && !name.starts_with("mcp__")
@@ -1420,7 +1401,6 @@ pub(super) struct MergeState {
     worker_model: Option<String>,
     delegation: Option<DelegationPatch>,
     audit: Option<AuditPatch>,
-    goals: GoalsConfig,
     shell: super::ShellConfig,
     approval_timeout_seconds: Option<u64>,
     max_active_runs: usize,
@@ -1483,7 +1463,6 @@ impl MergeState {
                 worker_model: None,
                 delegation: None,
                 audit: None,
-                goals: GoalsConfig::default(),
                 shell: super::ShellConfig::default(),
                 approval_timeout_seconds: None,
                 max_active_runs: super::default_max_active_runs(),
@@ -1595,16 +1574,6 @@ impl MergeState {
         if apply_optional_string(&document.worker_model, &mut self.worker_model) {
             self.provenance.worker_model = Some(source.clone());
         }
-        match &document.goals {
-            Field::Missing => {}
-            Field::Set(patch) => self.goals.apply(patch, source, &mut self.provenance.goals),
-            Field::Clear => {
-                self.goals = GoalsConfig::default();
-                self.provenance
-                    .goals
-                    .retain(|key, _| key.starts_with("policy."));
-            }
-        }
         match &document.delegation {
             Field::Missing => {}
             Field::Set(patch) => {
@@ -1639,7 +1608,7 @@ impl MergeState {
         self.apply_mcp(&document.mcp);
         self.apply_profiles(&document.profiles, source);
         if let Some(policy) = &document.policy {
-            self.compose_policy(policy, source);
+            self.compose_policy(policy);
         }
     }
 
@@ -1906,12 +1875,7 @@ impl MergeState {
         provider
     }
 
-    fn compose_policy(&mut self, patch: &PolicyPatch, source: &SourceIdentity) {
-        if let Some(goals) = patch.goals {
-            self.policy
-                .goal_ceilings
-                .compose(goals, source, &mut self.provenance.goals);
-        }
+    fn compose_policy(&mut self, patch: &PolicyPatch) {
         if let Some(incoming) = &patch.allowed_providers {
             let incoming: BTreeSet<_> = incoming.iter().cloned().collect();
             let combined = match &self.policy.allowed_providers {
@@ -2133,10 +2097,8 @@ impl MergeState {
                 u64::from(days) * 24 * 60 * 60,
             )),
         };
-        let goals = self.goals.finish(self.policy.goal_ceilings)?;
         Ok(ClientSnapshot {
             organization: self.organization,
-            goals,
             shell: self.shell,
             model,
             worker_model,
@@ -2171,7 +2133,6 @@ impl ClientSnapshot {
             worker_model: self.worker_model,
             delegation: self.delegation,
             audit: self.audit,
-            goals: self.goals,
             shell: self.shell,
             approval_timeout: self.approval_timeout,
             max_active_runs: self.max_active_runs,

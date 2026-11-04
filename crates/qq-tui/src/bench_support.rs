@@ -45,7 +45,6 @@ impl BenchHarness {
         };
         let mut app = App::new(options);
         app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
-            check_interruption: None,
             sessions: summaries,
             focused: Some(focused),
             ..fixtures::workspace_snapshot()
@@ -149,7 +148,6 @@ impl BenchHarness {
         self.next_sequence += 1;
         self.app
             .apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
-                check_interruption: None,
                 cursor: fixtures::cursor(sequence),
                 sessions: Vec::new(),
                 focused: None,
@@ -629,10 +627,6 @@ pub const GOLDEN_SIZES: &[(u16, u16)] = &[(80, 24), (120, 40), (200, 60), (320, 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scene {
-    GoalForm,
-    GoalReplace,
-    Goal,
-    GoalCheck,
     MarkdownGallery,
     GoldenPath,
     ToolsExpanded,
@@ -646,11 +640,7 @@ pub enum Scene {
 }
 
 impl Scene {
-    pub const ALL: [Self; 14] = [
-        Self::GoalForm,
-        Self::GoalReplace,
-        Self::Goal,
-        Self::GoalCheck,
+    pub const ALL: [Self; 10] = [
         Self::MarkdownGallery,
         Self::GoldenPath,
         Self::ToolsExpanded,
@@ -666,10 +656,6 @@ impl Scene {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::GoalForm => "goal-form",
-            Self::GoalReplace => "goal-replace",
-            Self::Goal => "goal",
-            Self::GoalCheck => "goal-check",
             Self::MarkdownGallery => "markdown-gallery",
             Self::GoldenPath => "golden-path",
             Self::ToolsExpanded => "tools-expanded",
@@ -694,56 +680,6 @@ impl BenchHarness {
     pub fn scene_with_options(scene: Scene, size: (u16, u16), options: TuiOptions) -> Self {
         let mut harness = Self::with_options(size, 3, 0, options);
         match scene {
-            Scene::GoalForm | Scene::GoalReplace => {
-                if scene == Scene::GoalReplace {
-                    let mut goal = fixtures::goal_snapshot(session_id(0));
-                    goal.status = qq_protocol::GoalStatus::Achieved;
-                    harness.apply(0, SessionEvent::GoalUpdated { goal });
-                }
-                harness
-                    .app
-                    .composer
-                    .replace("/goal finish the migration and verify the workspace".to_owned());
-                harness.app.handle_terminal_event(Event::Key(KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                )));
-                harness.app.handle_terminal_event(Event::Key(KeyEvent::new(
-                    KeyCode::Tab,
-                    KeyModifiers::NONE,
-                )));
-                harness
-                    .app
-                    .handle_terminal_event(Event::Paste("cargo test --workspace".to_owned()));
-                if scene == Scene::GoalReplace {
-                    harness.app.handle_terminal_event(Event::Key(KeyEvent::new(
-                        KeyCode::Enter,
-                        KeyModifiers::NONE,
-                    )));
-                }
-            }
-            Scene::Goal | Scene::GoalCheck => {
-                let mut goal = fixtures::goal_snapshot(session_id(0));
-                goal.status = qq_protocol::GoalStatus::Paused {
-                    reason: qq_protocol::GoalPauseReason::NeedsUser {
-                        cause: qq_protocol::GoalNeedsUser::CheckApproval,
-                    },
-                };
-                goal.check_authorization = Some(qq_protocol::GoalCheckAuthorization::Consumed);
-                goal.counters.runs = 4;
-                goal.counters.audits = 1;
-                goal.counters.check_failures = 1;
-                harness.apply(0, SessionEvent::GoalUpdated { goal });
-                if scene == Scene::GoalCheck {
-                    harness.app.composer.replace("/goal check".to_owned());
-                    harness.app.handle_terminal_event(Event::Key(KeyEvent::new(
-                        KeyCode::Enter,
-                        KeyModifiers::NONE,
-                    )));
-                } else {
-                    harness.app.execute(crate::commands::Command::ShowGoal);
-                }
-            }
             Scene::MarkdownGallery => {
                 harness.completed_turn("show me every markdown element", MARKDOWN_GALLERY);
             }

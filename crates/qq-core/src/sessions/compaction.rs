@@ -162,21 +162,6 @@ pub(super) fn start_auto_compaction(
     if session_started != 1 {
         return Ok(None);
     }
-    goals::freeze_goal_claim(
-        &transaction,
-        original.identity,
-        original.goal.as_deref(),
-        original.goal_initial_notice.as_deref(),
-    )?;
-    if original.goal.is_some() || original.goal_spend_owner.is_some() {
-        transaction.execute(
-            "UPDATE runs SET usage_json=?2, estimated_cost_usd_nanos=0 WHERE id=?1",
-            params![
-                run_id.to_string(),
-                serde_json::to_string(&TokenUsage::default())?
-            ],
-        )?;
-    }
     let summary = load_session_summary(&transaction, original.identity.session_id)?;
     let started = append_event(
         &transaction,
@@ -215,13 +200,6 @@ pub(super) fn start_auto_compaction(
     transaction.commit()?;
     Ok(Some((
         ClaimedRun {
-            goal_spend_owner: original
-                .goal_spend_owner
-                .or_else(|| original.goal.as_ref().map(|goal| goal.goal_id)),
-            goal: None,
-            goal_initial_notice: None,
-            goal_admission: None,
-            check_deadline: None,
             origin: Some(qq_protocol::RunOrigin::AutoCompaction {
                 owner_run_id: original.identity.run_id,
             }),
@@ -550,7 +528,6 @@ pub(super) fn latest_compaction(
 pub(super) struct InRunCompaction {
     pub(super) summary: String,
     pub(super) turn_cutoff: u32,
-    pub(super) goal_notice: Option<String>,
 }
 
 pub(super) fn in_run_compactions(
@@ -561,7 +538,7 @@ pub(super) fn in_run_compactions(
     remaining_notice_bytes: &mut usize,
 ) -> Result<HashMap<String, InRunCompaction>, SessionRuntimeError> {
     let mut statement = connection.prepare_cached(
-        "SELECT c.scope_run_id, c.summary, c.turn_cutoff, c.goal_notice
+        "SELECT c.scope_run_id, c.summary, c.turn_cutoff
          FROM messages m
          JOIN session_compactions c ON c.scope_run_id = m.run_id
          WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
@@ -575,7 +552,6 @@ pub(super) fn in_run_compactions(
         let run_id: String = row.get(0)?;
         let summary: String = row.get(1)?;
         let turn_cutoff: u32 = row.get(2)?;
-        let goal_notice = goals::read_notice_with_budget(row, 3, remaining_notice_bytes)?;
         let summary = with_exact_inputs(
             connection,
             session,
@@ -593,7 +569,6 @@ pub(super) fn in_run_compactions(
             InRunCompaction {
                 summary,
                 turn_cutoff,
-                goal_notice,
             },
         );
     }
@@ -710,49 +685,35 @@ pub(super) fn start_in_run_compaction(
     claimed.identity.run_id = run_id;
     claimed.identity.command_id = command_id;
     claimed.identity.kind = RunKind::Compaction;
-    claimed.goal = None;
-    claimed.goal_spend_owner = prompt_run
-        .goal_spend_owner
-        .or_else(|| prompt_run.goal.as_ref().map(|goal| goal.goal_id));
     claimed.compaction_cutoff_ordinal = inherited_cutoff;
     claimed.messages = inherited_messages;
     claimed.in_run_turn_cutoff = Some((prompt_run.identity.run_id, turn_cutoff));
     Ok(Some((claimed, started)))
 }
 
-pub(super) struct InRunSummaryCommit<'a> {
+pub(super) struct InRunSummaryCommit {
     pub(super) summary: String,
     pub(super) accounting: Option<RunAccounting>,
     pub(super) record_budget: usize,
     pub(super) retained_bytes: u64,
-    pub(super) goal_notice: Option<&'a str>,
 }
 
 pub(super) fn complete_in_run_compaction(
     connection: &mut Connection,
     store_id: StoreId,
     claimed: &ClaimedRun,
-    commit: InRunSummaryCommit<'_>,
+    commit: InRunSummaryCommit,
 ) -> Result<(Vec<SessionEventEnvelope>, Option<String>), SessionRuntimeError> {
     let InRunSummaryCommit {
         summary,
         accounting,
         record_budget,
         retained_bytes,
-        goal_notice,
     } = commit;
     let Some((scope_run_id, turn_cutoff)) = claimed.in_run_turn_cutoff else {
         return Err(SessionRuntimeError::CONSTRAINT);
     };
     let summary = narrative_of(summary);
-    if goal_notice.is_some_and(|text| {
-        text.len() > crate::tools::goal::MAX_GOAL_RENDER_BYTES
-            || !text.starts_with("[QQ runtime notice; not a user instruction]\n")
-    }) {
-        return Err(SessionRuntimeError::InvalidGoal(
-            goals::GoalValidationError::Notice,
-        ));
-    }
     let transaction = store::begin_unit(connection)?;
     if run_is_settled(&transaction, claimed.identity.run_id)? {
         return Ok((Vec::new(), None));
@@ -812,17 +773,22 @@ pub(super) fn complete_in_run_compaction(
         transaction.execute(
             "INSERT INTO session_compactions(
                      session_id, run_id, summary, cutoff_ordinal,
-                     before_bytes, after_bytes, created_at_ms, scope_run_id, turn_cutoff, goal_notice
-                 ) VALUES (?1, ?2, ?3, ?9, ?4, 0, ?5, ?6, ?7, ?8)",
+                     before_bytes, after_bytes, created_at_ms, scope_run_id, turn_cutoff
+                 ) VALUES (?1, ?2, ?3, ?8, ?4, 0, ?5, ?6, ?7)",
             params![
                 session.to_string(),
                 claimed.identity.run_id.to_string(),
                 summary,
                 u64::try_from(before_bytes).unwrap_or(u64::MAX),
                 now,
-                claimed.compaction_cutoff_ordinal.is_none().then(|| scope_run_id.to_string()),
-                claimed.compaction_cutoff_ordinal.is_none().then_some(turn_cutoff),
-                goal_notice,
+                claimed
+                    .compaction_cutoff_ordinal
+                    .is_none()
+                    .then(|| scope_run_id.to_string()),
+                claimed
+                    .compaction_cutoff_ordinal
+                    .is_none()
+                    .then_some(turn_cutoff),
                 claimed.compaction_cutoff_ordinal.unwrap_or(0),
             ],
         )?;

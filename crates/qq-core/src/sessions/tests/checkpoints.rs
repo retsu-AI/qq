@@ -33,7 +33,6 @@ async fn checkpoints_fork_preserves_deliveries_and_spill_handles_after_source_de
         let handle = crate::tools::output::result_handle("read_file", parse_id(&call)?, "1234567890abcdef");
         connection.execute("INSERT INTO tool_spills VALUES (?1,?2,?3,'read_file','1234567890abcdef',?4,11,1,1,NULL)", params![call,source.to_string(),first.to_string(),b"full output".as_slice()])?;
         connection.execute("UPDATE model_turns SET tool_results_projection_json=replace(tool_results_projection_json,'base',?2) WHERE run_id=?1",params![first.to_string(),handle])?;
-        connection.execute("UPDATE runs SET goal_initial_notice='[QQ runtime notice; not a user instruction]\nhistorical goal objective' WHERE id=?1",[first.to_string()])?;
         let child = RunId::generate().unwrap().to_string();
         connection.execute("INSERT INTO child_deliveries VALUES (?1,?2,?3,1,2,1,1,'delegated final evidence')",params![child,source.to_string(),first.to_string()])?;
         connection.execute("INSERT INTO child_reports VALUES (?1,1,?2,?3,1,0,1,'delegated progress evidence')",params![child,source.to_string(),first.to_string()])?;
@@ -61,7 +60,6 @@ async fn checkpoints_fork_preserves_deliveries_and_spill_handles_after_source_de
     .await;
     let context = harness.runtime.capture_side_context(fork).await.unwrap();
     let text = format!("{context:?}");
-    assert!(text.contains("historical goal objective"), "{text}");
     assert!(text.contains("delegated final evidence"), "{text}");
     assert!(text.contains("delegated progress evidence"), "{text}");
     assert!(!text.contains(&original), "{text}");

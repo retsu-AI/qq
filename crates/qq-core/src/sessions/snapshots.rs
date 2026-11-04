@@ -108,10 +108,8 @@ pub(super) fn load_snapshot(
     for body in focused.iter_mut().chain(included.iter_mut()) {
         load_tool_call_tail(&transaction, body, &mut budget)?;
     }
-    let check_interruption = super::goal_check::interruption(&transaction, request.workspace_id)?;
     transaction.commit()?;
     Ok(WorkspaceSnapshot {
-        check_interruption,
         cursor: EventCursor {
             store_id,
             workspace_id: request.workspace_id,
@@ -316,7 +314,6 @@ fn load_session_body(
             |row| row.get(0),
         )?,
         fork_prompt,
-        goal: goals::load_live(transaction, session_id)?.map(Box::new),
         side_questions,
         approval_previews,
         summary,
@@ -491,7 +488,7 @@ pub(super) const ACCOUNTING_ROWS_SQL: &str = "WITH RECURSIVE subtree(root, id, d
      )
      SELECT subtree.root, r.session_id, r.status, r.usage_json, r.estimated_cost_usd_nanos,
             EXISTS(SELECT 1 FROM model_turns turn WHERE turn.run_id = r.id),
-            r.started_at_ms, r.routing_json IS NOT NULL OR r.goal_helper_admitted OR r.goal_request_pending
+            r.started_at_ms, r.routing_json IS NOT NULL
      FROM runs r
      JOIN subtree ON subtree.id = r.session_id
      ORDER BY r.rowid";

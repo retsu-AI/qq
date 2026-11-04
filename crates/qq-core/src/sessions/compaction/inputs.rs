@@ -10,8 +10,7 @@ pub(in crate::sessions) fn with_exact_inputs(
     mut summary: String,
 ) -> Result<String, SessionRuntimeError> {
     let mut roots = connection.prepare_cached(
-        "SELECT p.run_id, p.ordinal,
-                COALESCE(json_extract(r.origin_json, '$.type'), '') IN ('goal', 'goal_check')
+        "SELECT p.run_id, p.ordinal
          FROM messages p JOIN runs r ON r.id = p.run_id
          WHERE p.session_id = ?1 AND p.role = 'user' AND p.steering = 0
            AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=p.run_id AND z.turn_ordinal=0)
@@ -32,15 +31,15 @@ pub(in crate::sessions) fn with_exact_inputs(
         "SELECT id, turn_ordinal, steering, 0 AS answer, ordinal AS position
          FROM messages WHERE run_id = ?1 AND role = 'user'
            AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=messages.run_id AND (z.turn_ordinal=0 OR z.turn_ordinal=messages.turn_ordinal))
-           AND ((steering = 0 AND ?2 = 0 AND ?3 IS NULL
+           AND ((steering = 0 AND ?2 IS NULL
                  AND state IN ('complete', 'cancelled', 'failed', 'interrupted'))
-                OR (steering = 1 AND state = 'complete' AND (?3 IS NULL OR turn_ordinal <= ?4)))
+                OR (steering = 1 AND state = 'complete' AND (?2 IS NULL OR turn_ordinal <= ?3)))
          UNION ALL
          SELECT id, turn_ordinal, 0, 1, call_ordinal FROM tool_calls
          WHERE run_id = ?1 AND name = 'ask_user' AND state = 'completed'
            AND NOT EXISTS (SELECT 1 FROM rewound_turns z WHERE z.run_id=tool_calls.run_id AND (z.turn_ordinal=0 OR z.turn_ordinal=tool_calls.turn_ordinal))
            AND approval_resolution = 'answered' AND is_error = 0 AND result IS NOT NULL
-           AND (?3 IS NULL OR turn_ordinal <= ?3)
+           AND (?2 IS NULL OR turn_ordinal <= ?2)
          ORDER BY turn_ordinal, answer, position",
     )?;
     let mut message = connection.prepare_cached(
@@ -58,7 +57,6 @@ pub(in crate::sessions) fn with_exact_inputs(
     while let Some(root) = roots.next()? {
         let run: String = root.get(0)?;
         let ordinal: u64 = root.get(1)?;
-        let generated: bool = root.get(2)?;
         let mut first_kept = None;
         if let Some(cutoff) = turn_cutoff {
             let mut turns = connection.prepare_cached(
@@ -74,12 +72,7 @@ pub(in crate::sessions) fn with_exact_inputs(
                 }
             }
         }
-        let mut rows = sources.query(params![
-            run,
-            generated,
-            turn_cutoff,
-            first_kept.or(turn_cutoff)
-        ])?;
+        let mut rows = sources.query(params![run, turn_cutoff, first_kept.or(turn_cutoff)])?;
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
             let turn: u32 = row.get(1)?;

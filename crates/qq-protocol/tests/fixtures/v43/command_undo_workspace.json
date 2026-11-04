@@ -1,8 +1,0 @@
-{
-  "command_id": "28282828282828282828282828282828",
-  "command": {
-    "type": "undo_workspace",
-    "workspace_id": "02020202020202020202020202020202",
-    "snapshot": "3f9a"
-  }
-}

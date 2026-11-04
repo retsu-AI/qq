@@ -1,7 +1,8 @@
 # ADR-0049 — A session goal is pursued by the runtime across runs, restarts and days; completion is checked, budgets are enforced, loops are guarded
 
-**Status:** Proposed. Revised 2026-09-28 by the goals plan, before
-acceptance, from a run-chain goal to a session goal. See § Alternatives.
+**Status:** Superseded. Session goals were removed in v0.1.12; a prompt
+carries the task. Revised 2026-09-28 by the goals plan, before acceptance,
+from a run-chain goal to a session goal. See § Alternatives.
 **Date:** 2026-09-28
 **Deciders:** lead; second reviewer required (run loop, store, protocol, tool catalog)
 **Implements:** [`goals.md`](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/goals.md) G0, G2–G5 (was autonomous-core AC7–AC9); [`autonomous-core.md`](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md) AC4 (loop guard). Research: [`goal-pursuit.md`](https://github.com/retsu-AI/qq/blob/2cafa6537e61495f0a7ef022eef9b985ade9dc22/docs/research/goal-pursuit.md), audit [`core-autonomy.md`](https://github.com/retsu-AI/qq/blob/2cafa6537e61495f0a7ef022eef9b985ade9dc22/docs/research/core-autonomy.md) A3, A4

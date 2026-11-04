@@ -35,7 +35,7 @@ Task startup continues with the trusted settings instead of displaying a prompt.
 Trust is stored in your QQ data directory, outside the project.
 
 Sensitive settings are `organization`, `model`, `worker_model`,
-`delegation`, `audit`, `goals`, `reasoning_effort`, `providers`, `mcp`,
+`delegation`, `audit`, `reasoning_effort`, `providers`, `mcp`,
 and `profiles`. A project file that only sets
 `policy.exposed_tools` or `max_output_tokens` loads without trust. Syntax, path boundaries, and managed policy still apply.
 

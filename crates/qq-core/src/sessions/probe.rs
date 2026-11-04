@@ -18,8 +18,6 @@ pub(super) enum Checkpoint {
     ExecutionStop(RunId),
     BufferedToolOutput(ToolCallId),
     DropSettlement(RunId),
-    SummaryAdmission(SessionId),
-    GoalCheckResult(SessionId),
     TurnCapture(RunId, u32),
     WorkspaceReserved(SessionId),
     SessionResourcesCleaned(SessionId),

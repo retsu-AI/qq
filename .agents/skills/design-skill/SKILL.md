@@ -52,11 +52,11 @@ The file is `<name>/SKILL.md`. The directory name is the skill name unless
 front matter sets `name:`: 1–64
 bytes, a lowercase letter, then lowercase letters, digits, `-`, `_`. A
 directory with any other name is skipped without a warning. Reserved names are
-every entry of `qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS` (`goal`, `btw`,
-`ask`, `help`, `commands`, `models`, `profile`, `approval`,
-`effort`, `skills`, `sessions`, `resume`, `agents`, `theme`, `editor`, `new`,
-`clear`, `compact`, `rollback`, `prune`, `mouse`, `attention`, `changes`, `undo`,
-`quit`, `exit`, and the `btw-` variants).
+every entry of `qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS` (`btw`, `ask`,
+`help`, `commands`, `models`, `profile`, `approval`, `effort`, `skills`,
+`sessions`, `resume`, `agents`, `theme`, `editor`, `new`, `clear`, `compact`,
+`rollback`, `prune`, `mouse`, `copy`, `attention`, `changes`, `undo`, `quit`,
+`exit`, and the `btw-` variants).
 
 Start with YAML front matter carrying one interpreted key:
 

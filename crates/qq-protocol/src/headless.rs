@@ -11,8 +11,6 @@ pub enum HeadlessRecord {
     Trial(Box<HeadlessTrial>),
     Event { envelope: Box<SessionEventEnvelope> },
     Outcome(Box<HeadlessOutcome>),
-    GoalRun(Box<HeadlessGoalRun>),
-    Goal(Box<HeadlessGoalOutcome>),
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -21,8 +19,6 @@ pub enum HeadlessRecordRef<'a> {
     Trial(&'a HeadlessTrial),
     Event { envelope: &'a SessionEventEnvelope },
     Outcome(&'a HeadlessOutcome),
-    GoalRun(&'a HeadlessGoalRun),
-    Goal(&'a HeadlessGoalOutcome),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -336,59 +332,5 @@ mod tests {
             }
             .is_well_formed()
         );
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HeadlessGoalRun {
-    pub workspace_id: WorkspaceId,
-    pub session_id: SessionId,
-    pub goal: crate::GoalIdentity,
-    pub run: Box<crate::RunSnapshot>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HeadlessGoalOutcome {
-    pub workspace_id: WorkspaceId,
-    pub goal: Box<crate::GoalSnapshot>,
-    pub status: HeadlessGoalStatus,
-    pub exit_code: u8,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HeadlessGoalStatus {
-    Achieved,
-    Paused,
-    Blocked,
-    BudgetExhausted,
-    Interrupted,
-    HarnessFailure,
-}
-
-impl HeadlessGoalStatus {
-    #[must_use]
-    pub const fn from_goal(status: &crate::GoalStatus) -> Option<Self> {
-        match status {
-            crate::GoalStatus::Active => None,
-            crate::GoalStatus::Achieved => Some(Self::Achieved),
-            crate::GoalStatus::Paused { .. } => Some(Self::Paused),
-            crate::GoalStatus::Blocked { .. } => Some(Self::Blocked),
-            crate::GoalStatus::BudgetExhausted { .. } => Some(Self::BudgetExhausted),
-        }
-    }
-
-    #[must_use]
-    pub const fn code(self) -> u8 {
-        match self {
-            Self::Achieved => 0,
-            Self::Paused => 6,
-            Self::Blocked => 7,
-            Self::BudgetExhausted => 8,
-            Self::Interrupted => 130,
-            Self::HarnessFailure => 4,
-        }
     }
 }

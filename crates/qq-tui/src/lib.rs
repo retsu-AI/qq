@@ -22,7 +22,7 @@ mod theme;
 mod view;
 mod viewport;
 
-pub use app::{GoalDefaults, ModelOption, ProviderRemedy, TuiError, TuiOptions, run};
+pub use app::{ModelOption, ProviderRemedy, TuiError, TuiOptions, run};
 pub use commands::{CommandRow, command_rows, slash_names};
 pub use lazy_port::LazyPort;
 pub use qq_client::{

@@ -88,7 +88,7 @@ headless agent run), `serve` (the foreground server), `config` (inspect and
 validate configuration), `auth` (provider credentials), `mcp` (inspect an MCP
 server's descriptors), `org` (organization manifests), `trust` (approve sensitive project
 configuration), `doctor` (readiness checks), `init` (a starter
-`config.ron`), `daemon` (a background server), `goal` (session goals),
+`config.ron`), `daemon` (a background server),
 `undo` (restore a run's snapshot), and `version` (product and contract
 versions). The
 [CLI guide](../guide/cli.md) documents every command and flag.

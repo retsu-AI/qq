@@ -5,9 +5,7 @@ async fn session_resume_preserves_ask_and_its_unattended_policy_without_an_overr
     let fixture = fixture(MutatingProvider::new).await;
     let mut initial = options(&fixture.workspace);
     initial.approval = HeadlessApproval::Ask;
-    let stored = prepare_session(&fixture.sessions, &initial, SessionIntent::Prompt)
-        .await
-        .unwrap();
+    let stored = prepare_session(&fixture.sessions, &initial).await.unwrap();
     let mut resumed = options(&fixture.workspace);
     resumed.session = Some(stored.session_id);
     resumed.approval = HeadlessApproval::Auto;
@@ -41,7 +39,7 @@ async fn session_resume_preserves_ask_and_its_unattended_policy_without_an_overr
 }
 
 #[tokio::test]
-async fn session_resume_permission_selection_is_shared_by_prompt_and_goal() {
+async fn session_resume_permission_selection_follows_an_explicit_override() {
     let fixture = fixture(|| TextProvider).await;
     for stored_mode in [
         HeadlessApproval::ReadOnly,
@@ -50,104 +48,41 @@ async fn session_resume_permission_selection_is_shared_by_prompt_and_goal() {
         HeadlessApproval::Full,
     ] {
         for explicit in [false, true] {
-            for goal in [false, true] {
-                let mut initial = options(&fixture.workspace);
-                initial.approval = stored_mode;
-                let stored = prepare_session(&fixture.sessions, &initial, SessionIntent::Prompt)
-                    .await
-                    .unwrap();
-                let mut resumed = options(&fixture.workspace);
-                resumed.session = Some(stored.session_id);
-                resumed.approval = if stored_mode == HeadlessApproval::Auto {
-                    HeadlessApproval::Ask
-                } else {
-                    HeadlessApproval::Auto
-                };
-                resumed.approval_explicit = explicit;
-                let request = goal_request();
-                let intent = if goal {
-                    SessionIntent::Goal(&request)
-                } else {
-                    SessionIntent::Prompt
-                };
-                let effective = prepare_session(&fixture.sessions, &resumed, intent)
-                    .await
-                    .unwrap();
-                let expected = if explicit {
-                    resumed.approval
-                } else {
-                    stored_mode
-                };
-                assert_eq!(effective.approval, expected);
-                let snapshot = workspace_snapshot(&fixture).await;
-                let session = snapshot
-                    .sessions
-                    .iter()
-                    .find(|session| session.id == stored.session_id)
-                    .unwrap();
-                assert_eq!(session.approval_mode, approval_mode(expected));
-            }
+            let mut initial = options(&fixture.workspace);
+            initial.approval = stored_mode;
+            let stored = prepare_session(&fixture.sessions, &initial).await.unwrap();
+            let mut resumed = options(&fixture.workspace);
+            resumed.session = Some(stored.session_id);
+            resumed.approval = if stored_mode == HeadlessApproval::Auto {
+                HeadlessApproval::Ask
+            } else {
+                HeadlessApproval::Auto
+            };
+            resumed.approval_explicit = explicit;
+            let effective = prepare_session(&fixture.sessions, &resumed).await.unwrap();
+            let expected = if explicit {
+                resumed.approval
+            } else {
+                stored_mode
+            };
+            assert_eq!(effective.approval, expected);
+            let snapshot = workspace_snapshot(&fixture).await;
+            let session = snapshot
+                .sessions
+                .iter()
+                .find(|session| session.id == stored.session_id)
+                .unwrap();
+            assert_eq!(session.approval_mode, approval_mode(expected));
         }
     }
 }
 
 #[tokio::test]
-async fn goal_resume_preserves_ask_for_unattended_mutations() {
-    let fixture = fixture(MutatingProvider::new).await;
-    let mut initial = options(&fixture.workspace);
-    initial.approval = HeadlessApproval::Ask;
-    let stored = prepare_session(&fixture.sessions, &initial, SessionIntent::Prompt)
-        .await
-        .unwrap();
-    let mut resumed = options(&fixture.workspace);
-    resumed.session = Some(stored.session_id);
-    resumed.approval = HeadlessApproval::Auto;
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let code = run_goal(
-        &fixture.sessions,
-        resumed,
-        goal_request(),
-        std::future::pending(),
-        &mut stdout,
-        &mut stderr,
-    )
-    .await;
-    assert_eq!(
-        code,
-        qq_protocol::HeadlessGoalStatus::BudgetExhausted.code(),
-        "{}",
-        String::from_utf8_lossy(&stderr)
-    );
-    assert!(!fixture.workspace.join("note.txt").exists());
-    assert!(!fixture.workspace.join("shelled.txt").exists());
-    let records = parse_records(&String::from_utf8(stdout).unwrap());
-    let resolutions: Vec<_> = event_records(&records)
-        .into_iter()
-        .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
-        .collect();
-    assert_eq!(resolutions.len(), 2);
-    assert!(
-        resolutions
-            .iter()
-            .all(|record| record["envelope"]["event"]["resolution"] == "denied")
-    );
-    assert_eq!(
-        workspace_snapshot(&fixture).await.sessions[0].approval_mode,
-        ApprovalMode::Ask
-    );
-}
-
-#[tokio::test]
 async fn session_resume_read_only_uses_its_effective_denial_hint() {
     let fixture = fixture(MutatingProvider::new).await;
-    let stored = prepare_session(
-        &fixture.sessions,
-        &options(&fixture.workspace),
-        SessionIntent::Prompt,
-    )
-    .await
-    .unwrap();
+    let stored = prepare_session(&fixture.sessions, &options(&fixture.workspace))
+        .await
+        .unwrap();
     let mut resumed = options(&fixture.workspace);
     resumed.session = Some(stored.session_id);
     resumed.approval = HeadlessApproval::Auto;

@@ -2,7 +2,6 @@ use super::probe::{Checkpoint, PROBE};
 use super::{
     execution::{ModelTurnCommit, RunAccountingAccumulator, cancellation_requested},
     runtime::SessionRuntimeInner,
-    store::Priority,
     *,
 };
 use crate::plan::CompiledAgentPlan;
@@ -80,7 +79,6 @@ async fn compact_in_run(
         RunAccountingAccumulator::new(resolved_model.pricing.clone(), basis);
     let turn_cutoff = request.turn_cutoff;
     let retained_bytes = request.retained_bytes;
-    let goal_notice = request.goal_notice;
     let started = inner
         .store
         .start_in_run_compaction_target(
@@ -144,22 +142,16 @@ async fn compact_in_run(
     } else {
         format!("{IN_RUN_COMPACTION_INSTRUCTION_PREFIX}\n\n{COMPACTION_INSTRUCTION}")
     }));
-    let paid =
-        super::GoalPaidInput::new(&inner.store, &compaction, resolved_model.pricing.as_ref());
     let ceiling = super::context::summarizer_output_tokens(
         resolved_model.max_output_tokens,
         resolved_model.context_window,
     );
-    let paid_output_cap = paid
-        .as_ref()
-        .map(|_| Arc::new(std::sync::atomic::AtomicU32::new(ceiling)));
     let summarize = plan.runtime.summarize(
         messages,
         request.system,
         request.tools,
         Some(Arc::from(prompt_run.identity.session_id.to_string())),
         ceiling,
-        paid_output_cap.clone(),
     );
     tokio::pin!(summarize);
     let reply = loop {
@@ -177,83 +169,15 @@ async fn compact_in_run(
             step = summarize.next() => step,
         };
         match step {
-            Some(Ok(crate::runtime::SummarizeStep::RequestStarting { input_tokens })) => {
+            Some(Ok(crate::runtime::SummarizeStep::RequestStarting)) => {
                 let now = tokio::time::Instant::now();
-                let mut refusal = request
+                let refusal = request
                     .budget
                     .limits_at(now)
                     .and_then(|_| budget.child_budget(now))
                     .err();
-                if refusal.is_none()
-                    && let Some(paid) = paid.as_ref()
-                {
-                    let Some(input_tokens) = input_tokens else {
-                        return Err(Error::Persistence(
-                            "goal summary request is missing its input estimate".to_owned(),
-                        ));
-                    };
-                    let mut proposed = ceiling;
-                    loop {
-                        let now = tokio::time::Instant::now();
-                        let mut caller = match budget.child_budget(now) {
-                            Ok(caller) => caller,
-                            Err(kind) => {
-                                refusal = Some(kind);
-                                break;
-                            }
-                        };
-                        caller.deadline = match (caller.deadline, request.budget.deadline) {
-                            (Some(a), Some(b)) => Some(a.min(b)),
-                            (a, b) => a.or(b),
-                        };
-                        let deadline = async {
-                            match caller.deadline {
-                                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                                None => std::future::pending::<()>().await,
-                            }
-                        };
-                        let admission = tokio::select! {
-                            biased;
-                            _ = cancelled.changed()=>None,
-                            () = deadline=>Some(Ok(super::goal_paid::PaidRequestAdmission::Exhausted(
-                                budget.exhaustion(qq_protocol::BudgetLimitKind::Duration,false,tokio::time::Instant::now())))),
-                            admission=paid.admit_request(proposed,input_tokens,caller)=>Some(admission),
-                        };
-                        match admission {
-                            None | Some(Ok(super::goal_paid::PaidRequestAdmission::Cancelled)) => {
-                                guard.disarm();
-                                settle_cancelled(inner, &compaction).await;
-                                return Err(Error::Unavailable("cancelled".to_owned()));
-                            }
-                            Some(Err(error)) => {
-                                inner.failed.send_replace(true);
-                                return Err(Error::Persistence(error.to_string()));
-                            }
-                            Some(Ok(super::goal_paid::PaidRequestAdmission::Reprepare {
-                                max_output_tokens,
-                            })) => {
-                                proposed = max_output_tokens;
-                            }
-                            Some(Ok(super::goal_paid::PaidRequestAdmission::Allowed {
-                                ..
-                            })) => {
-                                paid_output_cap
-                                    .as_ref()
-                                    .expect("paid summary has a cap")
-                                    .store(proposed, std::sync::atomic::Ordering::Release);
-                                break;
-                            }
-                            Some(Ok(super::goal_paid::PaidRequestAdmission::Exhausted(
-                                exhaustion,
-                            ))) => {
-                                refusal = Some(exhaustion.limit);
-                                break;
-                            }
-                        }
-                    }
-                }
                 if let Some(kind) = refusal {
-                    let mut accounting = observed_accounting.snapshot();
+                    let accounting = observed_accounting.snapshot();
                     let exhaustion = budget.exhaustion(kind, false, tokio::time::Instant::now());
                     guard.disarm();
                     match inner
@@ -276,41 +200,18 @@ async fn compact_in_run(
                             return Err(Error::Persistence(error.to_string()));
                         }
                     }
-                    if paid.is_some() {
-                        let run = compaction.identity.run_id;
-                        let settled=inner.store.call(Priority::Control,move |connection| {
-                            let (usage,cost):(Option<String>,Option<u64>)=connection.query_row(
-                                "SELECT usage_json,estimated_cost_usd_nanos FROM runs WHERE id=?1 AND outcome_json IS NOT NULL",
-                                [run.to_string()],|row|Ok((row.get(0)?,row.get(1)?)))?;
-                            let usage=usage.as_deref().map(serde_json::from_str::<TokenUsage>).transpose()?;
-                            Ok((usage,cost))
-                        }).await;
-                        match settled {
-                            Ok((usage, cost)) => {
-                                accounting.usage = usage;
-                                accounting.estimated_cost_usd_nanos = cost;
-                            }
-                            Err(error) => {
-                                inner.failed.send_replace(true);
-                                return Err(Error::Persistence(error.to_string()));
-                            }
-                        }
-                    }
                     return Err(Error::BudgetExhausted {
                         kind,
                         usage: accounting.usage,
                         estimated_cost_usd_nanos: accounting.estimated_cost_usd_nanos,
                     });
                 }
-                if paid.is_none()
-                    && let Err(error) = inner.store.start_in_run_summary_request(&compaction).await
-                {
+                if let Err(error) = inner.store.start_in_run_summary_request(&compaction).await {
                     inner.failed.send_replace(true);
                     return Err(Error::Persistence(error.to_string()));
                 }
             }
             Some(Ok(crate::runtime::SummarizeStep::TurnCompleted {
-                model_work,
                 ordinal,
                 message,
                 usage,
@@ -330,9 +231,8 @@ async fn compact_in_run(
                     .persist_in_run_summary_turn(
                         &compaction,
                         ModelTurnCommit {
-                            model_work,
-                            goal_notices: Vec::new(),
-                            reserved_goal_notices: 0,
+                            boundary_notices: Vec::new(),
+                            reserved_boundary_notices: 0,
                             turn_ordinal: ordinal,
                             message,
                             calls: Vec::new(),
@@ -454,7 +354,6 @@ async fn compact_in_run(
             Some(accounting),
             record_budget(resolved_model.context_window),
             retained_bytes,
-            goal_notice,
         )
         .await;
     match committed {

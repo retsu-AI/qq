@@ -298,7 +298,6 @@ async fn runtime_factory_can_be_dropped_in_async_context() {
 mod catalog;
 mod clients;
 mod continuation;
-mod goal_policy;
 mod plan_compilation;
 mod plans;
 mod providers;

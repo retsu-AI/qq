@@ -8,7 +8,7 @@ puts the fix next to whatever failed. Its header reports the build and
 compatibility versions, also available from `qq version`:
 
 ```
-qq <version> (<commit> <build date>) · protocol 44 · capabilities 1 · descriptor 17 · store schema 66
+qq <version> (<commit> <build date>) · protocol 45 · capabilities 1 · descriptor 17 · store schema 67
 ok    configuration    2 sources; qq config sources lists them
 ok    project trust    nothing pending
 ok    model            anthropic/claude-sonnet-5
@@ -335,22 +335,6 @@ to a running server. Close the TUI or stop `qq serve`, send the prompt from
 the TUI instead, or run jobs one after another. Concurrent CI jobs on one
 machine each need their own data directory (`XDG_DATA_HOME` on Linux). Two
 machines must not share one data directory.
-
-### Workspace held after an interrupted completion check
-
-When QQ stops while a completion check is running, it cannot confirm what
-the check left behind. After restart, QQ
-holds new workspace work until you resolve the check's uncertain effects.
-Clearing or replacing its goal does not release the hold. The workspace snapshot's
-`check_interruption` identifies the session and exact interrupted run.
-
-After confirming the check and any work it started have stopped, API clients
-can send `acknowledge_check_interruption` with that `workspace_id` and `run_id`
-to `POST /v1/workspaces/check-interruptions/acknowledge`, using the normal
-command envelope and authentication. Repeat for any next hold reported by the
-snapshot. Acknowledgment clears that check's manual hold. Queued workspace
-work resumes once all other holds are cleared; the matching goal stays paused
-until a separate resume and any fresh check authorization.
 
 ## Getting more detail
 

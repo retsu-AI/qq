@@ -534,7 +534,6 @@ pub(crate) fn minimal_call(name: &str) -> Option<&'static str> {
         "exec" => r#"{"program":"git","args":["status"]}"#,
         "ask_user" => r#"{"questions":[{"prompt":"Which one?","options":["a","b"]}]}"#,
         "fetch" => r#"{"url":"https://example.com"}"#,
-        "update_goal" => r#"{"checklist":[{"type":"set_state","id":1,"state":"done"}]}"#,
         SPAWN_AGENT_TOOL => r#"{"task":"Find where the config is loaded"}"#,
         WAIT_AGENTS_TOOL => r#"{"timeout_seconds":60}"#,
         _ => return None,

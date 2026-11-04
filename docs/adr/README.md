@@ -52,7 +52,7 @@ written.
 | 0046 | [Pin an MCP server's advertised tool set in configuration and plan identity; enforce the pin at dispatch, not only at discovery](0046-mcp-tool-set-pinning.md) | Accepted (ENG-939); `DESCRIPTOR_VERSION` 9 → 10 |
 | 0047 | [Explicit Jev consent and a durable held-approval lifecycle](0047-jev-approval-hold-lifecycle.md) | Superseded: Jev removed |
 | 0048 | [A run's bounds reset at its seams, and a stopped unattended run continues itself](0048-run-bounds-reset-at-seams-and-continuation.md) | Proposed (autonomous-core AC2–AC6); extends ADR-0039/0040 |
-| 0049 | [A session goal is pursued by the runtime across runs, restarts and days; completion is checked, budgets are enforced, loops are guarded](0049-durable-run-goal-and-loop-guard.md) | Proposed (goals G0–G5; autonomous-core AC4) |
+| 0049 | [A session goal is pursued by the runtime across runs, restarts and days; completion is checked, budgets are enforced, loops are guarded](0049-durable-run-goal-and-loop-guard.md) | Superseded: session goals removed in v0.1.12; a prompt carries the task |
 | 0050 | [Composition moves from the binary into a `qq-harness` library (shipped as `qq-host`); `qq-core` gets tool features and a tested embedding example](0050-qq-harness-composition-library.md) | Accepted, partly implemented (autonomous-core AC10–AC13); refines ADR-0027 |
 | 0051 | [0ver product versioning; compatibility is carried by contract versions](0051-zerover-product-versioning.md) | Accepted (ENG-969) |
 | 0052 | [Jev approval activation comes from the run's compiled plan](0052-jev-approval-activation-from-plan.md) | Superseded: Jev removed |

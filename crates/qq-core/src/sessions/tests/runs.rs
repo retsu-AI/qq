@@ -2344,109 +2344,93 @@ async fn steering_during_a_slice_report_lands_before_the_continuation_notice() {
 
 #[tokio::test]
 async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
-    for with_goal in [false, true] {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("note.txt"), "tool result\n").unwrap();
-        std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
-        let database = directory.path().join("sessions.sqlite3");
-        let requests = Arc::new(StdMutex::new(Vec::new()));
-        let SessionFixture {
-            directory: _directory,
-            runtime,
-            session_id,
-            mut events,
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("note.txt"), "tool result\n").unwrap();
+    std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
+    let database = directory.path().join("sessions.sqlite3");
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let SessionFixture {
+        directory: _directory,
+        runtime,
+        session_id,
+        mut events,
+        ..
+    } = SessionFixture::open_in(
+        directory,
+        SessionRuntimeOptions::new(database.clone()),
+        Arc::new(TruncatedReportLoader {
+            requests: Arc::clone(&requests),
+            fault: false,
+        }),
+        ApprovalMode::Auto,
+    )
+    .await;
+    let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
+    let observed = collect_until(&mut events, finished_for(run_id)).await;
+    assert!(matches!(
+        observed.last().map(|event| &event.event),
+        Some(SessionEvent::RunFinished {
+            outcome: RunOutcome::Completed,
             ..
-        } = SessionFixture::open_in(
-            directory,
-            SessionRuntimeOptions::new(database.clone()),
-            Arc::new(TruncatedReportLoader {
-                requests: Arc::clone(&requests),
-                fault: false,
-            }),
-            ApprovalMode::Auto,
-        )
-        .await;
-        if with_goal {
-            set_goal(&runtime, serde_json::json!({"session_id":session_id,"objective":"retain reports through goal notices",
-            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000}
-        })).await.unwrap();
-        }
-        let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
-        let observed = collect_until(&mut events, finished_for(run_id)).await;
-        assert!(matches!(
-            observed.last().map(|event| &event.event),
-            Some(SessionEvent::RunFinished {
-                outcome: RunOutcome::Completed,
-                ..
-            })
-        ));
-        let live = requests.lock().unwrap().last().unwrap().messages().to_vec();
-        assert_eq!(
-            live[live.len() - 5..],
-            [
-                Message::user(crate::SLICE_CHECKPOINT_NOTICE),
-                Message::assistant("report part one"),
-                Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE),
-                Message::assistant(" and part two"),
-                Message::user(crate::SLICE_CONTINUATION_NOTICE),
-            ]
-        );
-        assert_eq!(
-            live.iter()
-                .filter(|message| **message == Message::user(crate::SLICE_CHECKPOINT_NOTICE))
-                .count(),
-            1,
-            "the retried report attempt reuses its notice"
-        );
-        runtime
-            .store()
-            .call(Priority::Control, move |connection| {
-                let (typed, ordered):(String,Option<String>)=connection.query_row(
-            "SELECT notice,goal_notice FROM model_turns WHERE run_id=?1 AND notice='report'",
-            [run_id.to_string()],|row|Ok((row.get(0)?,row.get(1)?)))?;
-                assert_eq!(typed, "report");
-                if with_goal {
-                    let notices: Vec<crate::runtime::OrderedTurnNotice> =
-                        serde_json::from_str(&ordered.unwrap()).unwrap();
-                    assert!(
-                        notices
-                            .iter()
-                            .any(|notice| notice.text == crate::SLICE_CHECKPOINT_NOTICE)
-                    );
-                }
-                assert_eq!(
-                    crate::sessions::deliveries::run_latest_report_text(connection, run_id)?,
-                    Some("report part one and part two".to_owned())
-                );
-                Ok(())
-            })
-            .await
-            .unwrap();
-        let answer = runtime
-            .store()
-            .child_answer(run_id, RunOutcome::Cancelled)
-            .await
-            .unwrap();
-        assert!(answer.content.contains("report part one and part two"));
-        let follow_up = queue_prompt(&runtime, session_id, "and then?".to_owned()).await;
-        collect_until(&mut events, finished_for(follow_up)).await;
-        let replayed = requests.lock().unwrap().last().unwrap().messages().to_vec();
-        assert_eq!(&replayed[..live.len()], live.as_slice());
-        if !with_goal {
-            assert_assembly_matches_reference(&database, session_id);
-        }
-        runtime.shutdown().await.unwrap();
-        let connection = Connection::open(&database).unwrap();
-        let replayed_after_reopen =
-            transcript::load_model_context(&connection, session_id, u64::MAX).unwrap();
-        assert_eq!(
-            replayed_after_reopen
-                .iter()
-                .filter(|message| **message == Message::user(crate::SLICE_CHECKPOINT_NOTICE))
-                .count(),
-            1
-        );
-    }
+        })
+    ));
+    let live = requests.lock().unwrap().last().unwrap().messages().to_vec();
+    assert_eq!(
+        live[live.len() - 5..],
+        [
+            Message::user(crate::SLICE_CHECKPOINT_NOTICE),
+            Message::assistant("report part one"),
+            Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE),
+            Message::assistant(" and part two"),
+            Message::user(crate::SLICE_CONTINUATION_NOTICE),
+        ]
+    );
+    assert_eq!(
+        live.iter()
+            .filter(|message| **message == Message::user(crate::SLICE_CHECKPOINT_NOTICE))
+            .count(),
+        1,
+        "the retried report attempt reuses its notice"
+    );
+    runtime
+        .store()
+        .call(Priority::Control, move |connection| {
+            let typed: String = connection.query_row(
+                "SELECT notice FROM model_turns WHERE run_id=?1 AND notice='report'",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )?;
+            assert_eq!(typed, "report");
+            assert_eq!(
+                crate::sessions::deliveries::run_latest_report_text(connection, run_id)?,
+                Some("report part one and part two".to_owned())
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let answer = runtime
+        .store()
+        .child_answer(run_id, RunOutcome::Cancelled)
+        .await
+        .unwrap();
+    assert!(answer.content.contains("report part one and part two"));
+    let follow_up = queue_prompt(&runtime, session_id, "and then?".to_owned()).await;
+    collect_until(&mut events, finished_for(follow_up)).await;
+    let replayed = requests.lock().unwrap().last().unwrap().messages().to_vec();
+    assert_eq!(&replayed[..live.len()], live.as_slice());
+    assert_assembly_matches_reference(&database, session_id);
+    runtime.shutdown().await.unwrap();
+    let connection = Connection::open(&database).unwrap();
+    let replayed_after_reopen =
+        transcript::load_model_context(&connection, session_id, u64::MAX).unwrap();
+    assert_eq!(
+        replayed_after_reopen
+            .iter()
+            .filter(|message| **message == Message::user(crate::SLICE_CHECKPOINT_NOTICE))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

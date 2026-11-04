@@ -56,7 +56,6 @@ use runtime::{
     ToolGateFuture, TurnBlock, render_history_matches, render_tool_result,
 };
 
-pub use approval::goal_check_shell_denied;
 pub use cancellation::RunCancellation;
 pub use context_source::{
     ContextBudget, ContextBundle, ContextCache, ContextFetchFuture, ContextItem, ContextRequest,
@@ -76,15 +75,13 @@ pub use runtime::{
     ReadImageContract, ReadImageFamily, ShellPolicy,
 };
 pub use sessions::{
-    GoalCheckPolicyError, GoalCheckPolicyFuture, GoalPolicy, GoalPolicyError, GoalPolicyFuture,
-    GoalValidationError, LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING,
-    MAX_CONCURRENT_CHILDREN_PER_RUN, MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT,
-    MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS, MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault,
-    PublishedEvent, PublishedEventStream, RunCompletion, RunResult, RuntimeLoadError,
-    RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader,
-    STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime, SessionRuntimeError,
-    SessionRuntimeOptions, SideAnswer, SideQueryLimits, SlashCommandError,
-    SpawnModelValidationFuture, WorkerRuntimeLoadFuture, WorkspacePolicyAuthority, run_cost,
+    LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN,
+    MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT, MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS,
+    MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent, PublishedEventStream,
+    RunCompletion, RunResult, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
+    RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream,
+    SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer, SideQueryLimits,
+    SlashCommandError, SpawnModelValidationFuture, WorkerRuntimeLoadFuture, run_cost,
 };
 pub use workspace::index::{
     IndexBudget, IndexDiff, IndexError, IndexOutcome, IndexStop, IndexedDirectory, IndexedFile,
@@ -578,9 +575,6 @@ pub(crate) struct RunCapabilities {
     execution_started: Option<tokio::time::Instant>,
     pricing: Option<ModelPricing>,
     history: Option<Arc<dyn HistorySearcher>>,
-    goal: Option<sessions::GoalRunInput>,
-    goal_spend_tracking: bool,
-    goal_paid: Option<sessions::GoalPaidInput>,
     spills: Option<Arc<dyn runtime::SpillReader>>,
     steering: Option<runtime::SteeringReceiver>,
     compactor: Option<Arc<dyn runtime::InRunCompactor>>,
@@ -610,9 +604,6 @@ impl RunCapabilities {
             execution_started: None,
             pricing: None,
             history: None,
-            goal: None,
-            goal_spend_tracking: false,
-            goal_paid: None,
             spills: None,
             steering: None,
             compactor: None,
@@ -634,6 +625,7 @@ impl RunCapabilities {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn without_tools(mut self) -> Self {
         self.allow_tools = false;
         self
@@ -673,21 +665,6 @@ impl RunCapabilities {
 
     pub(crate) fn with_history(mut self, history: Arc<dyn HistorySearcher>) -> Self {
         self.history = Some(history);
-        self
-    }
-
-    pub(crate) fn with_goal_paid(mut self, paid: Option<sessions::GoalPaidInput>) -> Self {
-        self.goal_paid = paid;
-        self
-    }
-
-    pub(crate) fn with_goal_spend_tracking(mut self, enabled: bool) -> Self {
-        self.goal_spend_tracking = enabled;
-        self
-    }
-
-    pub(crate) fn with_goal(mut self, goal: Option<sessions::GoalRunInput>) -> Self {
-        self.goal = goal;
         self
     }
 
@@ -774,9 +751,6 @@ impl RunCapabilities {
             execution_started: None,
             pricing: None,
             history: None,
-            goal: None,
-            goal_spend_tracking: false,
-            goal_paid: None,
             spills: None,
             steering: None,
             compactor: None,
@@ -927,7 +901,6 @@ impl Runtime {
         tools: Arc<[ToolSpec]>,
         cache_key: Option<Arc<str>>,
         max_output_tokens: u32,
-        paid_output_cap: Option<Arc<std::sync::atomic::AtomicU32>>,
     ) -> impl Stream<Item = Result<runtime::SummarizeStep, runtime::SummarizeError>> + Send + '_
     {
         stream! {
@@ -939,17 +912,10 @@ impl Runtime {
         let mut continuations: u16 = 0;
         let mut fold = runtime::SummaryFold::new(messages.len().saturating_sub(1));
         let mut rejected_call_turn = false;
-        let static_bytes = paid_output_cap.as_ref().map(|_| {
-            (system.len() as u64).saturating_add(runtime::tool_schema_measurement(&tools).bytes)
-        });
         'requests: loop {
-            let input_tokens = static_bytes.map(|static_bytes|
-                static_bytes.saturating_add(measure_messages(&messages)));
-            yield Ok(runtime::SummarizeStep::RequestStarting { input_tokens });
-            let request_cap = paid_output_cap.as_ref().map_or(max_output_tokens, |cap|
-                cap.load(std::sync::atomic::Ordering::Acquire).min(max_output_tokens));
+            yield Ok(runtime::SummarizeStep::RequestStarting);
             let request =
-                ModelRequest::new(Arc::clone(&self.model), messages.clone(), request_cap)
+                ModelRequest::new(Arc::clone(&self.model), messages.clone(), max_output_tokens)
                     .with_system(Arc::clone(&system));
             let request = match &cache_key {
                 Some(key) => request.with_cache_key(Arc::clone(key)),
@@ -1067,7 +1033,6 @@ impl Runtime {
                         {
                             ordinal += 1;
                             yield Ok(runtime::SummarizeStep::TurnCompleted {
-                                model_work: runtime::ModelWorkDisposition::RejectedBeforeWork,
                                 ordinal,
                                 message: Message::assistant(String::new()),
                                 usage: Some(TokenUsage::default()),
@@ -1111,7 +1076,6 @@ impl Runtime {
                 None => completed,
             };
             yield Ok(runtime::SummarizeStep::TurnCompleted {
-                model_work: runtime::ModelWorkDisposition::Committed,
                 ordinal, message: completed, usage, truncated: truncated.is_some(),
             });
             total_usage = match (total_usage, usage) {
@@ -1576,9 +1540,6 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::ProviderOverflow { .. }
                 | RuntimeEvent::ToolCallStarted { .. }
                 | RuntimeEvent::ToolCallDenied { .. }
-                | RuntimeEvent::GoalRequestAdmitted { .. }
-                | RuntimeEvent::GoalPaidCancelled
-                | RuntimeEvent::GoalRequestRejected
                 | RuntimeEvent::ToolCallUnexecuted { .. }
                 | RuntimeEvent::ToolCallAnswered { .. }
                 | RuntimeEvent::ToolCallOutputDelta { .. }

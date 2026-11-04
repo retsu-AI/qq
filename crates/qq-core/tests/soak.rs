@@ -29,22 +29,6 @@ async fn scripted_smoke_completes_without_duplicate_side_effects() {
     assert_eq!(report.executed_calls, 30);
     assert_eq!(report.durable_calls, 30);
     assert_eq!(report.duplicate_sequences, 0);
-    assert_eq!(report.work_requests_with_goal, 0);
-}
-
-#[tokio::test]
-async fn goal_enabled_soak_measures_real_notices_across_compaction() {
-    let mut script = Script::tools(72, 8_192, Some(16 * 1_024));
-    script.calls_per_turn = [1, 1];
-    script.goal_enabled = true;
-    let report = run(script).await;
-    receipt("goal_enabled_notice", &report);
-    assert_eq!(report.outcome, RunOutcome::Completed);
-    assert_eq!(report.executed_calls, 72);
-    assert_eq!(report.durable_calls, 72);
-    assert_eq!(report.duplicate_sequences, 0);
-    assert_eq!(report.work_requests_with_goal, 72);
-    assert!(report.compactions >= 3);
 }
 
 #[tokio::test]

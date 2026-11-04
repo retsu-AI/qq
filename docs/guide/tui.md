@@ -69,7 +69,7 @@ bottom.
   while running, yellow when it needs you, red after a failure. On the
   right, `◇ N needs you ^G` counts approvals waiting in other sessions, and
   `↓ N new  End` counts rows that arrived below while you read further up.
-- **Panel**: approvals, questions, `/goal`, and every picker (`Ctrl-T`,
+- **Panel**: approvals, questions, and every picker (`Ctrl-T`,
   `/models`, `/theme`, …) open here, between the rule and the composer, and
   take at most half the screen. `Esc` closes them with your draft intact.
   The switcher (`Ctrl-T`) takes the rule and the composer too: the rule
@@ -140,7 +140,7 @@ Each question captures bounded committed session context. Unfinished tool
 exchanges are omitted explicitly. Only built-in `read_file`, `search`, and
 `tree` are available, further restricted by the session's tool policy. Live
 file inspection is not a consistent filesystem snapshot. Side questions,
-answers, and usage never become main-agent prompts, steering, or goal budget.
+answers, and usage never become main-agent prompts or steering.
 
 One query per session may run, for at most 8 model turns. Its execution,
 including waits, is cut off at 120 seconds; the final state appears once the
@@ -242,8 +242,8 @@ before the first session exists. To isolate the agent, see
 [Running unattended](running-unattended.md).
 
 `/undo` restores the newest run's snapshot of this workspace through the
-server, which refuses while any run in the workspace is active, queued or due
-from a goal, and starts none until the restore finishes. `qq undo NAME`
+server, which refuses while any run in the workspace is active or queued,
+and starts none until the restore finishes. `qq undo NAME`
 restores an older one.
 
 It disappears as soon as you send your first prompt and never shows for a
@@ -274,7 +274,7 @@ Click a turn receipt to inspect that model turn's file diff in the dock.
 files and folds later turns as rewound; they remain in the transcript but
 are excluded from future model context. The restore prints a `qq undo NAME`
 that reverses the file restore. Rewind refuses while overlapping work is
-active, queued or due from a goal.
+active or queued.
 
 `/fork` opens a prompt picker. It forks **before** the selected prompt,
 keeps earlier history, opens an isolated worktree at the preceding
@@ -287,55 +287,6 @@ The original session and files are unchanged. Git 2.32+ and a retained
 checkpoint are required. Ignored files and untracked files over 16 MiB are
 not captured. External edits during a tool turn cannot be separated from
 agent edits; edits between turns are excluded from that turn's diff.
-
-## Session goals
-
-`/goal` opens the focused session's durable goal in the dock. It shows the
-objective, status, run/token/cost budgets, UTC deadline, audits, check
-command, notes, waits, checklist, verification state and last check output. Unknown usage and cost remain labelled unknown. Check
-consent distinguishes one execution, repeated checks for this goal, and a used
-one-shot grant that needs renewed consent.
-
-The rule keeps the goal's run allowance and next wake visible while active
-(`goal run 4/10 · next 5m`), and shows the reason when it stops. After a
-user pause, it shows cancellation draining until the pending run settles,
-then `/goal resume`.
-
-The view follows committed snapshots and live updates. Scroll to read long
-check output; `Esc` or `/goal` returns to the transcript. Opening it does not
-start or resume work. An interrupted-check workspace hold stays visible even
-when the original goal is cleared or replaced. Resolve its uncertain effects
-before acknowledging it through the API.
-
-Use `/goal <objective>` to open the creation form, or `/goal edit` to edit the
-current goal. Tab/Shift-Tab or the up/down arrows move between objective,
-optional check command and budget preset. Left/right arrows change the preset:
-configured defaults, focused (up to one hour and 20 runs), or the workspace
-maximum. Editing starts with the existing deadline and limits; changing its
-preset updates deadline/run allowance while keeping its other limits.
-
-Enter submits the form. Replacing an existing goal, including editing an
-achieved one, first shows a confirmation identifying the previous objective;
-only `y` confirms. Enter does not confirm replacement. `n` returns to editing,
-and Esc cancels. PgUp/PgDn scroll long specifications. A check command does
-not grant execution consent. Editing a stopped goal does not resume it.
-
-The form captures the current goal revision. A changed goal must be reopened
-and reviewed. Submission errors retain the draft and refresh authoritative
-state; if the refresh fails, Enter retries the refresh before another explicit
-submission. No conflict silently retries against a newer revision.
-
-Use `/goal pause`, `/goal resume`, or `/goal clear` to control the observed
-goal revision. State changes appear after the server commits them. A conflict
-or failed command is reported without automatically retrying a newer goal.
-If the session body has not loaded, retry after its snapshot arrives.
-
-`/goal check` opens consent for the exact displayed command and workspace.
-Choose **Deny**, **Allow once**, or **Allow repeated checks for this goal**,
-then press Enter. Deny is selected initially; Esc cancels. PgUp/PgDn scroll
-long command details while the choices stay visible. Changing the goal,
-command or workspace invalidates an open panel. Ordinary tool approval settings
-do not grant check consent.
 
 ## Files the agents changed
 
@@ -393,7 +344,6 @@ searchable palette that runs the highlighted command on `Enter`.
 | toggle mouse capture | `/mouse` |  |
 | show everything that needs you | `/attention` |  |
 | show every file agents changed | `/changes` |  |
-| view session goal and progress | `/goal` |  |
 | ask or view side questions; /btw new starts a thread, /btw cancel stops one | `/btw`, `/ask` |  |
 | edit the draft in $EDITOR | `/editor` | `Alt-E` |
 | search prompt history |  | `Ctrl-R` |

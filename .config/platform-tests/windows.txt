@@ -6,7 +6,6 @@ qq-config tests::absent_qq_home_preserves_standard_config_paths
 qq-config tests::qq_home_rejects_empty_and_relative_values
 qq-config tests::qq_home_selects_user_paths_without_changing_managed_policy
 qq-core approval::tests::cmd_separators_and_native_sort_output_are_work
-qq-core sessions::tests::approvals::goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied_actions
 qq-core sessions::tests::delegation::lifecycle::child_cancellation_persistence_failure_prevents_parent_continuation
 qq-core sessions::tests::delegation::lifecycle::child_mutation_drains_before_steering_or_a_replacement_run_can_write
 qq-core sessions::tests::delegation::lifecycle::interrupting_steering_owns_a_child_whose_creation_reply_is_pending

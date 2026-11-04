@@ -152,18 +152,7 @@ pub(super) fn rule_state(app: &App) -> RuleState {
     let Some(session) = app.focused().and_then(|id| app.sessions.get(&id)) else {
         return RuleState::Idle;
     };
-    if app.pending_approval().is_some()
-        || !session.live.awaiting_approval.is_empty()
-        || matches!(app.overlay, Some(crate::input::Overlay::GoalCheck { .. }))
-    {
-        return RuleState::NeedsYou;
-    }
-    if matches!(
-        session.goal.as_deref().map(|goal| &goal.status),
-        Some(qq_protocol::GoalStatus::Paused {
-            reason: qq_protocol::GoalPauseReason::NeedsUser { .. }
-        })
-    ) {
+    if app.pending_approval().is_some() || !session.live.awaiting_approval.is_empty() {
         return RuleState::NeedsYou;
     }
     match session.summary.status {
@@ -188,38 +177,6 @@ pub(super) fn rule_activity(app: &App) -> Option<String> {
             _ => "allow this call?",
         };
         return Some(verb.to_owned());
-    }
-    if let Some(crate::input::Overlay::GoalCheck { target, .. }) = &app.overlay {
-        return Some(format!("run this check in {}?", target.workspace_path));
-    }
-    if let Some(goal) = session.goal.as_deref() {
-        match &goal.status {
-            qq_protocol::GoalStatus::Paused {
-                reason:
-                    qq_protocol::GoalPauseReason::NeedsUser {
-                        cause: qq_protocol::GoalNeedsUser::CheckApproval,
-                    },
-            } => return Some("goal needs check consent".to_owned()),
-            qq_protocol::GoalStatus::Active if session.summary.status != SessionStatus::Running => {
-                return Some(format!(
-                    "goal run {}/{} · next {}",
-                    goal.counters.runs,
-                    goal.budget.max_goal_runs,
-                    goal_duration(goal.next_run_at_ms.saturating_sub(app.goal_now_ms))
-                ));
-            }
-            qq_protocol::GoalStatus::Active => {}
-            status => {
-                let (label, _) = super::workspace::goal_status(status);
-                let safe: String = label.chars().filter_map(terminal_safe_character).collect();
-                if session.summary.status != SessionStatus::Running {
-                    if goal.pending_run_id.is_some() {
-                        return Some(format!("goal {safe} · cancellation draining"));
-                    }
-                    return Some(format!("goal {safe}"));
-                }
-            }
-        }
     }
     match session.summary.status {
         SessionStatus::Queued => Some("queued".to_owned()),
@@ -449,34 +406,13 @@ pub(super) fn dock_footer(app: &App, width: usize, compact: bool) -> Line {
             }
             truncate_line(row, width)
         }
-        Mode::Compose | Mode::Approval | Mode::GoalForm | Mode::GoalCheck => {
-            if app.mode() == Mode::Compose
-                && matches!(app.view(), View::Goal(_))
-                && app.composer.text.is_empty()
-            {
-                let mut row = Line::styled("  ", normal());
-                for span in key_row(&[
-                    ("/goal check", "consent"),
-                    ("/goal pause", ""),
-                    ("esc", "back"),
-                ])
-                .spans
-                {
-                    row.push(span.text, span.style);
-                }
-                return truncate_line(row, width);
-            }
-            status_row(app, width, compact)
-        }
+        Mode::Compose | Mode::Approval => status_row(app, width, compact),
     }
 }
 
-pub(super) fn dock_panel(app: &App, width: usize, limit: usize) -> (Vec<Line>, Option<usize>) {
-    let mut goal_scroll = None;
+pub(super) fn dock_panel(app: &App, width: usize, limit: usize) -> Vec<Line> {
     let rows = match app.mode() {
         Mode::Find => find_panel(app, width),
-        Mode::GoalForm => goal_form(app, width, limit),
-        Mode::GoalCheck => goal_check_picker(app, width, limit),
         Mode::Models => model_picker(app, width, limit),
         Mode::Profiles => profile_picker(app, width, limit),
         Mode::ApprovalModes => approval_mode_picker(app, width, limit),
@@ -487,27 +423,7 @@ pub(super) fn dock_panel(app: &App, width: usize, limit: usize) -> (Vec<Line>, O
         Mode::Commands => command_picker(app, width, limit),
         Mode::History => history_picker(app, width, limit),
         Mode::Approval => approval_block(app, width, limit),
-        Mode::Compose => match app.view() {
-            View::Goal(session_id) => {
-                let rows = goal_panel(app, session_id, width);
-                let start = app.goal_scroll.min(rows.len().saturating_sub(limit));
-                goal_scroll = Some(start);
-                let hidden_below = rows.len().saturating_sub(start + limit);
-                let mut shown: Vec<Line> = rows.into_iter().skip(start).collect();
-                if hidden_below > 0 {
-                    shown.truncate(limit.saturating_sub(1));
-                    shown.push(Line::styled(
-                        format!(
-                            "  … {} · PgDn",
-                            count_noun(hidden_below + 1, "more row", "more rows")
-                        ),
-                        faint(),
-                    ));
-                }
-                shown
-            }
-            _ => Vec::new(),
-        },
+        Mode::Compose => Vec::new(),
     };
     let mut rows: Vec<Line> = rows
         .into_iter()
@@ -517,7 +433,7 @@ pub(super) fn dock_panel(app: &App, width: usize, limit: usize) -> (Vec<Line>, O
         rows.pop();
     }
     rows.truncate(limit);
-    (rows, goal_scroll)
+    rows
 }
 
 pub(super) fn find_panel(app: &App, width: usize) -> Vec<Line> {
@@ -543,214 +459,6 @@ pub(super) fn find_panel(app: &App, width: usize) -> Vec<Line> {
         );
     }
     vec![truncate_line(line, width)]
-}
-
-pub(super) fn goal_panel(app: &App, session_id: SessionId, width: usize) -> Vec<Line> {
-    use qq_protocol::{GoalCheckAuthorization, GoalChecklistState};
-    let hold = app.check_interruption.map(|hold| {
-        let mut line = Line::styled("  ◇ ", warning());
-        line.push(
-            format!(
-                "Workspace held by interrupted check {}; resolve its effects and acknowledge it",
-                hold.run_id
-            ),
-            normal(),
-        );
-        truncate_line(line, width)
-    });
-    let Some(goal) = app
-        .sessions
-        .get(&session_id)
-        .and_then(|view| view.goal.as_deref())
-    else {
-        let mut rows = vec![truncate_line(
-            Line::styled(
-                "  No goal for this session. /goal <objective> opens the form.",
-                faint(),
-            ),
-            width,
-        )];
-        rows.extend(hold);
-        return rows;
-    };
-    let safe =
-        |text: &str| -> String { text.chars().filter_map(terminal_safe_character).collect() };
-    let field = |label: &str, value: String| {
-        let mut line = Line::styled(format!("  {label:<10}"), faint());
-        line.push(value, normal());
-        truncate_line(line, width)
-    };
-    let mut rows = vec![truncate_line(
-        Line::styled(format!("  {}", safe(&goal.objective)), normal().bold()),
-        width,
-    )];
-    rows.push(field(
-        "status",
-        safe(&super::workspace::goal_status(&goal.status).0),
-    ));
-    rows.push(field(
-        "runs",
-        format!("{} / {}", goal.counters.runs, goal.budget.max_goal_runs),
-    ));
-    let tokens = goal.counters.usage.and_then(|usage| {
-        usage
-            .input_tokens
-            .checked_add(usage.cache_read_input_tokens)?
-            .checked_add(usage.cache_write_input_tokens)?
-            .checked_add(usage.output_tokens)
-    });
-    rows.push(field(
-        "tokens",
-        format!(
-            "{} / {}",
-            tokens.map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
-            goal.budget
-                .max_total_tokens
-                .map_or_else(|| "no cap".to_owned(), |value| value.to_string())
-        ),
-    ));
-    rows.push(field(
-        "cost",
-        format!(
-            "{} / {}",
-            goal.counters
-                .estimated_cost_usd_nanos
-                .map_or_else(|| "unknown".to_owned(), format_cost),
-            goal.budget
-                .max_cost_usd_nanos
-                .map_or_else(|| "no cap".to_owned(), format_cost)
-        ),
-    ));
-    rows.push(field("deadline", short_timestamp(goal.budget.deadline_ms)));
-    let mut audits = format!("{}", goal.counters.audits);
-    if goal.counters.check_failures > 0 {
-        audits.push_str(&format!(
-            " · {} failed {}",
-            goal.counters.check_failures,
-            if goal.counters.check_failures == 1 {
-                "check"
-            } else {
-                "checks"
-            }
-        ));
-    }
-    rows.push(field("audits", audits));
-    if let Some(check) = &goal.check {
-        let consent = match goal.check_authorization {
-            Some(GoalCheckAuthorization::Pending) | None => "needs consent",
-            Some(GoalCheckAuthorization::Once) => "one check",
-            Some(GoalCheckAuthorization::Consumed) => "consent used",
-            Some(GoalCheckAuthorization::ForGoal) => "repeated checks",
-            Some(GoalCheckAuthorization::TaskScoped) => "automatic in auto",
-        };
-        rows.push(field(
-            "check",
-            format!(
-                "{} · {} · {consent}",
-                safe(&check.command),
-                format_duration_ms(check.timeout_ms)
-            ),
-        ));
-    } else {
-        rows.push(field("check", "none · independent model audit".to_owned()));
-    }
-    if !goal.notes.trim().is_empty() {
-        rows.push(field("notes", preview(&safe(&goal.notes), width)));
-    }
-    if let Some(wait) = &goal.wait {
-        rows.push(field(
-            "wait",
-            format!(
-                "until {} · {}",
-                super::workspace::goal_timestamp(wait.until_ms),
-                safe(&wait.reason)
-            ),
-        ));
-    }
-    for item in &goal.checklist {
-        let (glyph, style, text) = match item.state {
-            GoalChecklistState::Pending => ("○", faint(), muted()),
-            GoalChecklistState::InProgress => ("◐", info(), normal()),
-            GoalChecklistState::Done => ("●", faint(), muted()),
-            GoalChecklistState::Dropped => ("×", faint(), faint()),
-        };
-        let mut line = Line::styled(format!("  {glyph} "), style);
-        line.push(safe(&item.text), text);
-        rows.push(truncate_line(line, width));
-    }
-    if let Some(output) = &goal.check_output {
-        let parts: Vec<&str> = output
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect();
-        let mut line = Line::styled("  ✕ ", failure());
-        line.push(
-            format!(
-                "last check {}",
-                safe(parts.first().copied().unwrap_or_default())
-            ),
-            muted(),
-        );
-        if let Some(detail) = parts.get(1..).and_then(<[&str]>::last) {
-            let detail = safe(detail);
-            let room = width.saturating_sub(line.width() + 2);
-            let count = detail.chars().count();
-            let shown = if count <= room {
-                detail
-            } else if room == 0 {
-                String::new()
-            } else {
-                let tail: String = detail.chars().skip(count + 1 - room).collect();
-                format!("…{tail}")
-            };
-            line.push(format!("  {shown}"), muted());
-        }
-        rows.push(truncate_line(line, width));
-        if parts.len() > 2 {
-            for detail in &parts[1..parts.len() - 1] {
-                for wrapped in wrap_line_chars(
-                    Line::styled(safe(detail), muted()),
-                    width.saturating_sub(6).max(1),
-                ) {
-                    let mut row = Line::styled("    │ ", faint());
-                    for span in wrapped.spans {
-                        row.push(span.text, span.style);
-                    }
-                    rows.push(truncate_line(row, width));
-                }
-            }
-        }
-    }
-    if goal.audit_pending {
-        let mut line = Line::styled("  ◇ ", warning());
-        line.push("completion claim awaiting verification", normal());
-        rows.push(truncate_line(line, width));
-    }
-    rows.extend(hold);
-    rows
-}
-
-fn short_timestamp(ms: u64) -> String {
-    match time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000) {
-        Ok(time) => format!(
-            "{} {:02}:{:02} UTC",
-            time.date(),
-            time.hour(),
-            time.minute()
-        ),
-        Err(_) => "invalid timestamp".to_owned(),
-    }
-}
-
-pub(super) fn goal_duration(ms: u64) -> String {
-    if ms >= 3_600_000 {
-        format!("{}h", ms / 3_600_000)
-    } else if ms >= 60_000 {
-        format!("{}m", ms / 60_000)
-    } else {
-        format!("{}s", ms / 1000)
-    }
 }
 
 pub(super) fn compact_chord(chord: &str) -> String {
@@ -1038,18 +746,6 @@ pub(super) fn dock_keys(app: &App) -> Option<Vec<(&'static str, &'static str)>> 
             }
             Some(keys)
         }
-        Mode::GoalForm => Some(match &app.overlay {
-            Some(crate::input::Overlay::GoalForm(form)) if form.confirm => {
-                vec![("y", "replace"), ("n", "edit"), ("esc", "back")]
-            }
-            _ => vec![
-                ("tab", "next field"),
-                ("←→", "budget"),
-                ("enter", "create"),
-                ("esc", "back"),
-            ],
-        }),
-        Mode::GoalCheck => Some(vec![("enter", "apply"), ("↑↓", "choose"), ("esc", "back")]),
         Mode::Compose
         | Mode::Find
         | Mode::Models

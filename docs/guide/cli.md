@@ -59,23 +59,9 @@ One unattended agent task. [Headless](headless.md#qq-run--the-agent-unattended).
 | `--output-schema PATH`, `--output-repair-turns N` | none; `2` |
 | `--format text\|jsonl` | `text` |
 | `--trace PATH` | none |
-| `--goal [OBJECTIVE]`, `--replace` | ordinary prompt; explicit goal replacement only |
-| `--check COMMAND`, `--goal-check-approval once\|for-goal` | no goal check or consent |
-| `--goal-deadline DURATION`, `--goal-max-runs N` | workspace goal defaults |
 
 Exit codes: 0 completed · 1 task failed · 2 invalid configuration · 3 timeout
 or budget · 4 harness failure · 5 needs input · 130 interrupted.
-
-`--goal OBJECTIVE` runs the goal driver instead of submitting an ordinary
-prompt. Bare `--goal --session ID` resumes the stored goal. Goal exits are
-0 achieved, 6 paused, 7 blocked, 8 goal budget exhausted, 130 interrupted;
-setup/harness errors retain 2/4. Check consent requires both the exact
-`--check COMMAND` and `--goal-check-approval` scope. `--approval` does not
-grant check consent. `--replace` requires an objective.
-Goal flags conflict with an ordinary prompt; goal mode also rejects
-`--steer-stdin` and `--output-schema`. With an objective, timeout/turn flags
-set per-run limits, while `--max-cost-usd` caps total goal spending. Budget
-changes on bare resume require supplying an objective explicitly.
 
 ## `qq serve [--bind ADDR] [--allow-origin ORIGIN]…`
 
@@ -97,29 +83,6 @@ serves clients until it is stopped.
 | `stop` | ask the daemon to stop and wait until it has closed the store, also when it is already stopping |
 | `restart [--bind ADDR] [--allow-origin ORIGIN]…` | `stop`, then start this binary with `--detach` |
 
-## `qq goal …`
-
-Manage a session goal through an already running `qq serve`. Every operation
-requires `--session ID`; `--workspace PATH` selects its workspace (default:
-current directory). Results are JSON, pretty printed by default; `--json`
-prints compact JSON. Errors exit 1; invalid arguments exit 2.
-
-| Subcommand | Behavior |
-| --- | --- |
-| `set OBJECTIVE` | Create or edit a goal; preserve unspecified check and budget fields when editing |
-| `show` | Print the current goal snapshot, or `null` when absent |
-| `pause`, `resume`, `clear` | Apply the named control to the observed goal revision |
-| `approve-check once\|for-goal --command COMMAND` | Authorize the exact reviewed check separately from ordinary tool approvals |
-
-`set` accepts `--replace` for an explicit replacement, `--check COMMAND` or
-`--clear-check`, `--goal-deadline DURATION` (positive integer plus `s`, `m`,
-`h`, or `d`, at most seven days), `--goal-max-runs N` (1–2000), and
-`--max-cost-usd AMOUNT` (positive decimal, up to nine fractional digits).
-Workspace defaults initialize new and replacement goals; current managed
-limits remain authoritative. An achieved goal requires `--replace`.
-Concurrent changes cause a revision conflict; inspect `show` before retrying.
-A successful control exits 0 even when the resulting goal is paused.
-
 ## `qq config …`
 
 | Subcommand | Prints |
@@ -128,7 +91,7 @@ A successful control exits 0 even when the resulting goal is paused.
 | `sources` | every file consulted in precedence order, and `pending trust:` lines |
 | `check` | `configuration is valid (model: …)` or the first error; exit 1 on error |
 | `show` | the merged configuration with secrets redacted, then TUI settings |
-| `explain FIELD` | which source set `FIELD`: `model`, `organization`, `worker_model`, `delegation`, `audit`, `approval_timeout`, `retention`, `reasoning_effort`, `max_output_tokens`, `goals.FIELD`, `policy.goals.FIELD`, `provider.NAME`, `profile.NAME`, `tui.theme`, `tui.bindings.ACTION` |
+| `explain FIELD` | which source set `FIELD`: `model`, `organization`, `worker_model`, `delegation`, `audit`, `approval_timeout`, `retention`, `reasoning_effort`, `max_output_tokens`, `provider.NAME`, `profile.NAME`, `tui.theme`, `tui.bindings.ACTION` |
 
 ## `qq auth …`
 
@@ -255,7 +218,7 @@ Snapshots need Git 2.32 or newer; with an older Git, `qq undo` refuses.
 
 `qq undo` works on the files directly and does not check for running agents.
 The TUI's `/undo` goes through the server instead, which refuses while a run
-is active, queued or due from a goal.
+is active or queued.
 
 ## `qq fork SESSION [--turn N]`
 

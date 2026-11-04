@@ -291,7 +291,7 @@ impl SessionRuntime {
         let runtime = self.clone();
         tokio::spawn(async move {
             let lifecycle = runtime.inner.lifecycle.read().await;
-            if *runtime.inner.shutdown.borrow() || runtime.inner.draining.load(Ordering::Acquire) {
+            if *runtime.inner.shutdown.borrow() {
                 return Err(SessionRuntimeError::Unavailable);
             }
             let slot = super::runtime::RestoreSlot::new(&runtime.inner);
