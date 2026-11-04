@@ -1,4 +1,4 @@
-use super::probe::{Checkpoint, PROBE};
+use super::probe::{Checkpoint, EffectStage, PROBE};
 use super::*;
 use super::{
     approvals::SessionToolGate,
@@ -2030,6 +2030,7 @@ async fn execute_started_run(
                     .and(current_occupancy_basis.take())
                     .filter(|_| context_shape.provider_identity);
                 let turn_message = current_message.take();
+                let intends_effects = !calls.is_empty();
                 current_turn = turn_ordinal.saturating_add(1);
                 match inner
                     .store
@@ -2053,6 +2054,14 @@ async fn execute_started_run(
                     )
                     .await
                 {
+                    Ok(_) if intends_effects => {
+                        PROBE
+                            .reached(Checkpoint::Effect(
+                                claimed.identity.session_id,
+                                EffectStage::IntentCommitted,
+                            ))
+                            .await;
+                    }
                     Ok(_) => {}
                     Err(error) => {
                         let Ok(teardown) = resources.stop(&mut events).await else {
@@ -2227,7 +2236,14 @@ async fn execute_started_run(
                     }
                 }
                 match inner.store.start_tool_call(&claimed, id).await {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        PROBE
+                            .reached(Checkpoint::Effect(
+                                claimed.identity.session_id,
+                                EffectStage::DispatchCommitted,
+                            ))
+                            .await;
+                    }
                     Err(error) => {
                         let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
@@ -2349,6 +2365,12 @@ async fn execute_started_run(
                 if internal {
                     continue;
                 }
+                PROBE
+                    .reached(Checkpoint::Effect(
+                        claimed.identity.session_id,
+                        EffectStage::ResultReceived,
+                    ))
+                    .await;
                 if let Err(error) = flush_pending_tool_output(
                     &inner,
                     &claimed,
@@ -2386,6 +2408,12 @@ async fn execute_started_run(
                 {
                     Ok(commit) => {
                         resources.tools.forget_finished(id);
+                        PROBE
+                            .reached(Checkpoint::Effect(
+                                claimed.identity.session_id,
+                                EffectStage::ResultCommitted,
+                            ))
+                            .await;
                         if commit.context_exhausted {
                             let Ok(teardown) = resources.stop(&mut events).await else {
                                 inner.failed.send_replace(true);
@@ -3156,6 +3184,12 @@ async fn finish_run_accounted(
         .await
     {
         Ok(events) => {
+            PROBE
+                .reached(Checkpoint::Effect(
+                    claimed.identity.session_id,
+                    EffectStage::RunSettled,
+                ))
+                .await;
             for event in events {
                 inner.notify(event.cursor);
             }
