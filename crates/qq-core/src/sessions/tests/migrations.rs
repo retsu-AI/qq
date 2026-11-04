@@ -2030,7 +2030,18 @@ async fn a_schema_65_store_with_goal_state_opens_and_replays_without_goals() {
                      status, kind, created_at_ms, origin_json)
                    VALUES ('{queued_check}', '{session_id}', '{queued_check}', '{queued_check}',
                      '{queued_check}', 'queued', 'goal_check', 1, '{goal_origin}');
-                 UPDATE sessions SET queued_prompts = queued_prompts + 1, status = 'queued';
+                 INSERT INTO runs(id, session_id, command_id, user_message_id, assistant_message_id,
+                     status, kind, created_at_ms, origin_json)
+                   VALUES ('{queued_goal}', '{session_id}', '{queued_goal}', '{queued_goal}',
+                     '{queued_goal}', 'queued', 'prompt', 1, '{goal_origin}');
+                 INSERT INTO runs(id, session_id, command_id, user_message_id, assistant_message_id,
+                     status, kind, created_at_ms, started_at_ms, origin_json, goal_id, goal_revision,
+                     goal_request_pending, usage_json, estimated_cost_usd_nanos)
+                   SELECT '{running_goal}', '{session_id}', '{running_goal}', '{running_goal}',
+                     '{running_goal}', 'running', 'prompt', 1, 1, '{goal_origin}', '{goal_id}', 1, 1,
+                     usage_json, 500 FROM runs WHERE usage_json IS NOT NULL LIMIT 1;
+                 UPDATE sessions SET queued_prompts = queued_prompts + 2, status = 'running',
+                     active_run_id = '{running_goal}', estimated_cost_usd_nanos = 1000, cost_known = 1;
                  UPDATE model_turns SET goal_notice = '{notices}', work_disposition = 'committed';
                  UPDATE runs SET completion_json = NULL, completion_sequence = 0;
                  UPDATE events SET envelope_json = json_set(envelope_json, '$.event.origin', json('{goal_origin}'))
@@ -2044,6 +2055,8 @@ async fn a_schema_65_store_with_goal_state_opens_and_replays_without_goals() {
                 session_id = session_id,
                 command = "52".repeat(16),
                 queued_check = "53".repeat(16),
+                queued_goal = "54".repeat(16),
+                running_goal = "55".repeat(16),
             ))
             .unwrap();
         let sequence: u64 = connection
@@ -2099,7 +2112,29 @@ async fn a_schema_65_store_with_goal_state_opens_and_replays_without_goals() {
         .find(|run| run.id == queued_check)
         .unwrap();
     assert_eq!(settled.status, RunStatus::Interrupted);
+    for retired in ["54".repeat(16), "55".repeat(16)] {
+        let retired: RunId = retired.parse().unwrap();
+        let run = focused.runs.iter().find(|run| run.id == retired).unwrap();
+        assert_eq!(
+            run.status,
+            RunStatus::Interrupted,
+            "unfinished goal work does not run without its task"
+        );
+    }
     assert_eq!(focused.summary.status, SessionStatus::Idle);
+    let upgraded_cost: (i64, bool) = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT estimated_cost_usd_nanos, cost_known FROM sessions WHERE id=?1",
+            [session_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        upgraded_cost,
+        (1500, true),
+        "the cost of an unfinished goal run stays in the session total"
+    );
     let start = EventCursor {
         store_id,
         workspace_id,
@@ -2141,11 +2176,7 @@ async fn a_schema_65_store_with_goal_state_opens_and_replays_without_goals() {
         .completed_runs(session_id, start, snapshot.cursor)
         .await
         .unwrap();
-    assert_eq!(
-        completions.len(),
-        2,
-        "the goal run and the retired check both have receipts"
-    );
+    assert_eq!(completions.len(), 4, "every settled run has a receipt");
     for run in completions.iter().map(|completion| completion.run.id) {
         assert!(
             runtime

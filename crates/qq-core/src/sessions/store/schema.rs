@@ -1951,11 +1951,13 @@ fn retire_goals(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if has_column(connection, "runs", "check_acknowledgment_pending")? {
         connection.execute_batch("ALTER TABLE runs DROP COLUMN check_acknowledgment_pending;")?;
     }
+    credit_unfinished_goal_spend(connection)?;
+    let queued = queued_goal_work(connection)?;
     connection.execute_batch(&format!(
         "UPDATE runs SET origin_json={user_prompt}
           WHERE json_valid(origin_json) AND json_extract(origin_json,'$.type') IN ('goal','goal_check');"
     ))?;
-    retire_queued_checks(connection)?;
+    interrupt_queued_goal_work(connection, queued)?;
     crate::sessions::completions::migrate(connection)?;
     connection.execute_batch(
         "UPDATE runs SET kind='prompt' WHERE kind='goal_check';
@@ -1992,12 +1994,51 @@ fn retire_goals(connection: &Connection) -> Result<(), SessionRuntimeError> {
     Ok(())
 }
 
-fn retire_queued_checks(connection: &Connection) -> Result<(), SessionRuntimeError> {
+fn credit_unfinished_goal_spend(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    for column in [
+        "goal_id",
+        "goal_paid_owner_run_id",
+        "goal_request_pending",
+        "goal_helper_admitted",
+    ] {
+        if !has_column(connection, "runs", column)? {
+            return Ok(());
+        }
+    }
+    if !has_column(connection, "model_turns", "work_disposition")? {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "CREATE TEMP TABLE goal_spend AS
+           SELECT session_id, SUM(estimated_cost_usd_nanos) AS cost,
+                  COUNT(*) = COUNT(estimated_cost_usd_nanos) AS known
+           FROM runs
+           WHERE outcome_json IS NULL
+             AND (goal_id IS NOT NULL OR goal_paid_owner_run_id IS NOT NULL)
+             AND (goal_request_pending OR goal_helper_admitted OR EXISTS(
+                 SELECT 1 FROM model_turns WHERE run_id=runs.id
+                   AND work_disposition IN ('committed','uncertain')))
+           GROUP BY session_id;
+         UPDATE sessions SET cost_known=0
+           WHERE id IN (SELECT session_id FROM goal_spend WHERE NOT known);
+         UPDATE sessions SET
+             estimated_cost_usd_nanos=estimated_cost_usd_nanos+(SELECT g.cost FROM goal_spend g WHERE g.session_id=sessions.id)
+           WHERE cost_known=1 AND id IN (SELECT session_id FROM goal_spend g WHERE g.known);
+         DROP TABLE goal_spend;",
+    )?;
+    Ok(())
+}
+
+fn queued_goal_work(
+    connection: &Connection,
+) -> Result<Vec<(String, String, String)>, SessionRuntimeError> {
     let mut statement = connection.prepare(
         "SELECT r.id,r.session_id,s.workspace_id FROM runs r JOIN sessions s ON s.id=r.session_id
-          WHERE r.kind='goal_check' AND r.status='queued' AND r.outcome_json IS NULL",
+          WHERE r.status='queued' AND r.outcome_json IS NULL
+            AND (r.kind='goal_check' OR (json_valid(r.origin_json)
+                 AND json_extract(r.origin_json,'$.type') IN ('goal','goal_check')))",
     )?;
-    let checks = statement
+    let queued = statement
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -2006,7 +2047,13 @@ fn retire_queued_checks(connection: &Connection) -> Result<(), SessionRuntimeErr
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    drop(statement);
+    Ok(queued)
+}
+
+fn interrupt_queued_goal_work(
+    connection: &Connection,
+    checks: Vec<(String, String, String)>,
+) -> Result<(), SessionRuntimeError> {
     if checks.is_empty() {
         return Ok(());
     }
