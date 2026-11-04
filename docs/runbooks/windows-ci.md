@@ -7,8 +7,10 @@ one targeted CI job per platform, not a full workspace run.
 
 ## The `platform` jobs
 
-`.github/workflows/ci.yml` runs one `platform (windows-latest)` and one
-`platform (macos-latest)` job. Each job runs
+`.github/workflows/ci.yml` runs one `platform tests (windows-latest)` and one
+`platform tests (macos-latest)` job: on a pull request when
+`.github/scripts/ci-changes.sh` says the change reaches platform code, and
+on every merge queue, `main`, nightly and manual run. Each job runs
 `bash .github/scripts/platform-tests.sh <os>`, which lists the tests the
 nextest `platform` profile selects on that OS
 (`cargo nextest list --profile platform`). If that list differs from
