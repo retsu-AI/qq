@@ -1223,6 +1223,7 @@ impl RuntimeFactory {
                 snapshot
             }
         };
+        let snapshot = with_claude_default_effort(snapshot);
         preparation_phase(progress, qq_core::RuntimeLoadStage::CompilingProvider)?;
         let resolved_model = self.resolved_model_for_snapshot(&snapshot)?;
         let output_ceiling = snapshot
@@ -1794,6 +1795,42 @@ impl RuntimeFactory {
 }
 
 const LEGACY_DEFAULT_MAX_OUTPUT_TOKENS: [u32; 2] = [2_048, 4_096];
+
+const CLAUDE_DEFAULT_REASONING_EFFORT: qq_provider::ReasoningEffort =
+    qq_provider::ReasoningEffort::Medium;
+
+fn with_claude_default_effort(snapshot: ConfigSnapshot) -> ConfigSnapshot {
+    let Some(provider) = snapshot.providers().get(snapshot.model().provider()) else {
+        return snapshot;
+    };
+    let Some(access) = provider.access() else {
+        return snapshot;
+    };
+    let model = snapshot.model().model();
+    let metadata = provider.models().get(model);
+    let api = effective_provider_api(provider, model, access);
+    let claude = anthropic_model_behind_a_gateway(
+        model,
+        metadata.and_then(qq_config::ModelMetadata::canonical_id),
+    );
+    let accepts_effort = matches!(access, ProviderAccess::Http(_))
+        && matches!(
+            api,
+            ProviderApi::OpenAiChatCompletions | ProviderApi::AnthropicMessages
+        )
+        && metadata.is_none_or(|metadata| {
+            metadata.reasoning()
+                && (metadata.reasoning_efforts().is_empty()
+                    || metadata
+                        .reasoning_efforts()
+                        .contains(&CLAUDE_DEFAULT_REASONING_EFFORT))
+        });
+    if claude && accepts_effort {
+        snapshot.with_default_reasoning_effort(CLAUDE_DEFAULT_REASONING_EFFORT)
+    } else {
+        snapshot
+    }
+}
 
 fn anthropic_model_behind_a_gateway(wire_id: &str, canonical_id: Option<&str>) -> bool {
     match canonical_id {

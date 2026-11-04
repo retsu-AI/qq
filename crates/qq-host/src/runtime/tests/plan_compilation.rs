@@ -699,3 +699,68 @@ fn global_skills_come_from_the_configuration_directory() {
     assert_eq!(tidy.source, "global:skills/tidy/SKILL.md");
     assert!(tidy.disclosed);
 }
+
+#[test]
+fn claude_models_default_to_medium_effort_unless_configuration_chooses() {
+    use qq_provider::ReasoningEffort;
+    let fixture = RuntimeFixture::new();
+    let factory = fixture.factory();
+    let effort = |model: &str, api: &str, extra: &str, overrides: RuntimeOverrides| {
+        let request = fixture
+            .request(format!(
+                r#"(
+                    version: 1, model: "gateway/{model}", {extra}
+                    providers: {{ "gateway": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: {api}, auth: NoAuth), models: {{ "{model}": (name: "m", reasoning: true) }}) }},
+                )"#
+            ))
+            .with_overrides(overrides);
+        factory
+            .plan_for(&request)
+            .unwrap()
+            .descriptor()
+            .reasoning_effort
+    };
+    let none = RuntimeOverrides::new;
+    let claude = "us.anthropic.claude-sonnet-5-5";
+
+    assert_eq!(
+        effort(claude, "OpenAiChatCompletions", "", none()),
+        Some(ReasoningEffort::Medium)
+    );
+    assert_eq!(
+        effort("claude-opus-5-5", "AnthropicMessages", "", none()),
+        Some(ReasoningEffort::Medium)
+    );
+    assert_eq!(
+        effort(
+            claude,
+            "OpenAiChatCompletions",
+            "reasoning_effort: high,",
+            none()
+        ),
+        Some(ReasoningEffort::High)
+    );
+    assert_eq!(
+        effort(
+            claude,
+            "OpenAiChatCompletions",
+            "reasoning_effort: default,",
+            none()
+        ),
+        Some(ReasoningEffort::Default)
+    );
+    assert_eq!(
+        effort(
+            claude,
+            "OpenAiChatCompletions",
+            "",
+            none().with_reasoning_effort(ReasoningEffort::Low)
+        ),
+        Some(ReasoningEffort::Low)
+    );
+    assert_eq!(
+        effort("gpt-test", "OpenAiChatCompletions", "", none()),
+        None
+    );
+    assert_eq!(effort(claude, "OpenAiResponses", "", none()), None);
+}

@@ -1764,6 +1764,14 @@ impl ConfigSnapshot {
     }
 
     #[must_use]
+    pub fn with_default_reasoning_effort(mut self, effort: qq_provider::ReasoningEffort) -> Self {
+        if self.provenance.reasoning_effort.is_none() {
+            self.reasoning_effort = Some(effort);
+        }
+        self
+    }
+
+    #[must_use]
     pub const fn approval_timeout(&self) -> Option<std::time::Duration> {
         self.approval_timeout
     }

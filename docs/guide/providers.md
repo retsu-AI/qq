@@ -117,6 +117,12 @@ provider request. Neither is the explicit `none` level (which disables reasoning
 only on models that advertise it). Anthropic uses
 `output_config.effort`, never an OpenAI reasoning field.
 
+With no `reasoning_effort` in any layer or profile, Claude models reached over
+Anthropic Messages or an OpenAI Chat Completions gateway run at `medium`. Left
+to itself, Sonnet 5.5 thinks at length on every turn and returns only a
+signature, so the cost shows up as output tokens with no visible text. Set
+`reasoning_effort: default` to restore the provider's own behavior.
+
 The current contracts are protocol 45, capabilities 1, plan descriptor 17,
 and session-store schema 67. Upgrade clients and restart long-running servers
 together: clients refuse a different server protocol. Store migration is
