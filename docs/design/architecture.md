@@ -1253,7 +1253,10 @@ loop receives `provider_unavailable`, `provider_rate_limited`, or
 `provider_transport` (including a stream that ends after events without a
 terminal event), it commits whatever streamed as a partial assistant turn,
 publishes `run_turn_retrying`, waits under `TurnRecoveryPolicy`, and re-issues
-the turn with a continue notice after any partial text. The exponential delay
+the turn with a continue notice after any partial text. The first request of
+a turn is provider-owned; each re-issue is sent as `RetryOwner::Caller`, so
+the provider sends it once and the turn backoff is the only wait between
+sends. The exponential delay
 starts at 2 s and caps at 60 s; equal jitter chooses between half and all of
 that delay. Server-directed cooldowns, capped at 60 s, remain a minimum with
 jitter above it. Cancellation and the run deadline interrupt the wait. The
@@ -1775,7 +1778,7 @@ Do not add an agent-framework, plugin, tool-host, context, or addon crate.
 | `qq-config` | Parse and merge agent-profile and addon declarations, validate syntax, retain provenance |
 | `qq-auth` | Resolve provider and addon secret references without exposing secret values to config or protocol |
 | `qq-host` | Discover trusted sources, translate external config, compile/cache plans, wire concrete adapters |
-| `qq-provider` | Compile provider recipes; one provider-neutral stream handle plus effective capabilities; sole retry owner |
+| `qq-provider` | Compile provider recipes; one provider-neutral stream handle plus effective capabilities; owns resends of one request |
 | `qq-core` | `CompiledAgentPlan`, descriptor, execution invariants, context-source contracts, tools, run limits, durable outcomes |
 | `qq-mcp` | Bounded MCP capability/catalog snapshots and selected MCP operations |
 | `qq-protocol` | Versioned profile IDs, plan digests, input parts, commands, outcomes, events, capabilities |

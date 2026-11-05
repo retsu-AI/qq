@@ -901,6 +901,7 @@ impl Runtime {
         tools: Arc<[ToolSpec]>,
         cache_key: Option<Arc<str>>,
         max_output_tokens: u32,
+        retry_owner: qq_provider::RetryOwner,
     ) -> impl Stream<Item = Result<runtime::SummarizeStep, runtime::SummarizeError>> + Send + '_
     {
         stream! {
@@ -916,7 +917,8 @@ impl Runtime {
             yield Ok(runtime::SummarizeStep::RequestStarting);
             let request =
                 ModelRequest::new(Arc::clone(&self.model), messages.clone(), max_output_tokens)
-                    .with_system(Arc::clone(&system));
+                    .with_system(Arc::clone(&system))
+                    .with_retry_owner(retry_owner);
             let request = match &cache_key {
                 Some(key) => request.with_cache_key(Arc::clone(key)),
                 None => request,

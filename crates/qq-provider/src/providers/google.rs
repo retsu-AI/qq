@@ -119,7 +119,7 @@ impl Provider for GoogleGenerateContent {
         let endpoint = self.request_endpoint(request.model()).map_err(Arc::new);
         let headers = self.headers.clone();
 
-        with_restart(&self.exchange, move |ledger| {
+        with_restart(&self.exchange, request.retry_owner(), move |ledger| {
             let exchange = exchange.clone();
             let endpoint = endpoint.clone();
             let headers = headers.clone();
