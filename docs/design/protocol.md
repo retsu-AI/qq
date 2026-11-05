@@ -59,8 +59,17 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 45
+PROTOCOL_VERSION = 46
 ```
+
+Version 46 adds `execution` to interrupted tool-call snapshots:
+`may_have_run` when the call was dispatched before the run stopped, so its
+side effects may have happened, and `not_started` when it never ran. The field
+is absent for every other state. It is derived from the stored dispatch
+timestamp when a snapshot is loaded, so session snapshots report it for tool
+calls recorded by older builds and no store migration is needed; events
+replayed from before version 46 carry no `execution`. A version-45 client
+rejects the field.
 
 Version 45 removes session goals, which versions 33, 34, 35 and 40
 added. Gone from the wire: the goal snapshot, budget, check and status types;
@@ -162,7 +171,7 @@ its path onto the client machine. Listing neither registers a directory nor
 changes permissions.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v45/`; the `v44` directory (N−1) is
+`crates/qq-protocol/tests/fixtures/v46/`; the `v45` directory (N−1) is
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -658,12 +667,12 @@ optional-bodied:
 ```
 
 Response `ServerCapabilities` (abridged; see
-`crates/qq-protocol/tests/fixtures/v45/capabilities.json` for the full golden):
+`crates/qq-protocol/tests/fixtures/v46/capabilities.json` for the full golden):
 
 ```json
 {
   "version": 1,
-  "protocol_version": 45,
+  "protocol_version": 46,
   "server_version": "0.1.0",
   "input_parts": ["text", "workspace_file"],
   "commands": ["resolve_workspace", "create_session", "submit_prompt", "steer_run", "..."],
@@ -1857,6 +1866,10 @@ messages use `turn_ordinal` 0.
 Tool state: `requested`, `awaiting_approval`, `running`, `completed`,
 `failed`, `denied`, `interrupted`.
 
+An `interrupted` call also carries `execution`: `may_have_run` if it was
+dispatched before the run stopped, or `not_started` if it never ran. Absent in
+every other state.
+
 `display` is an optional, extensible tagged payload for client rendering
 only (first variant: `diff`, carried by successful `edit_file` and
 `write_file` calls). It is absent unless populated, never enters model
@@ -2174,7 +2187,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v45/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v46/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.

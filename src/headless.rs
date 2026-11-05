@@ -14,7 +14,7 @@ use qq_protocol::{
     ContentHash, HeadlessOutcome, HeadlessRecordRef, HeadlessTrial, InputPart, ModelSelection,
     RunId, RunLimits, RunOutcome, RunPromptIdentity, SessionAccounting, SessionCommand,
     SessionEvent, SessionEventEnvelope, SessionId, SnapshotRequest, SubscribeRequest, TokenUsage,
-    ToolCallState, WorkspaceId,
+    ToolCallState, ToolExecution, WorkspaceId,
 };
 pub use qq_protocol::{HeadlessApproval, HeadlessStatus};
 use sha2::{Digest, Sha256};
@@ -792,7 +792,15 @@ async fn stream_run(
                             let verdict = match tool_call.state {
                                 ToolCallState::Completed => "ok",
                                 ToolCallState::Denied => "denied",
-                                _ => "failed",
+                                ToolCallState::Interrupted => match tool_call.execution {
+                                    Some(ToolExecution::MayHaveRun) => "interrupted; may have run",
+                                    Some(ToolExecution::NotStarted) => "interrupted; not run",
+                                    None => "interrupted",
+                                },
+                                ToolCallState::Failed
+                                | ToolCallState::Requested
+                                | ToolCallState::AwaitingApproval
+                                | ToolCallState::Running => "failed",
                             };
                             let _ = writeln!(stderr, "[tool] {} {verdict}", tool_call.name);
                         }
