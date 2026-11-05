@@ -723,7 +723,7 @@ mod tests {
                 for _ in 0..TUI_CONCURRENT_REQUESTS {
                     let (mut socket, _) = listener.accept().await.unwrap();
                     let mut request = [0_u8; 4096];
-                    socket.read(&mut request).await.unwrap();
+                    assert!(socket.read(&mut request).await.unwrap() > 0);
                     accepted_tx.send(()).await.unwrap();
                     sockets.push(socket);
                 }
