@@ -9,6 +9,10 @@ pub(in crate::sessions) struct StoreStats {
 }
 
 impl Store {
+    pub(in crate::sessions) fn feed_covers(&self, workspace_id: WorkspaceId, after: u64) -> bool {
+        self.inner.feed.warm_page(workspace_id, after, 1).is_some()
+    }
+
     pub(in crate::sessions) fn stats(&self) -> StoreStats {
         StoreStats {
             catch_up_reads: self.inner.catch_up_reads.load(Ordering::Relaxed),
