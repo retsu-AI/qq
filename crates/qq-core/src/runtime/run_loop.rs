@@ -2954,8 +2954,8 @@ impl RunState {
                                 cursor += 1;
                                 continue;
                             }
-                            if serial_suffix {
-                                if let Some(targets) = tools::dispatch::instruction_targets(&call.name, &call.arguments) {
+                            if serial_suffix
+                                && let Some(targets) = tools::dispatch::instruction_targets(&call.name, &call.arguments) {
                                     let preflight_cancelled = RunCancellation::new();
                                     let preflight = discover_instructions(run.instructions.clone(), workspace.clone(), targets, preflight_cancelled.clone());
                                     tokio::pin!(preflight);
@@ -2990,7 +2990,6 @@ impl RunState {
                                         continue;
                                     }
                                 }
-                            }
                             let batch_start = cursor;
                             let read_only = overlaps(&calls[cursor]);
                             let reading = !serial_suffix && read_only;

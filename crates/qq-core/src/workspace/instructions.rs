@@ -152,7 +152,7 @@ enum CandidateMetadata {
         link: MetadataStamp,
         symlink_target: Option<PathBuf>,
         resolved: PathBuf,
-        target: MetadataStamp,
+        target: Box<MetadataStamp>,
     },
 }
 
@@ -220,10 +220,10 @@ impl ScopedInstructions {
             let previous = pending
                 .get(scope)
                 .and_then(|entry| entry.selected.as_deref());
-            if previous != observed.selected.as_deref() {
-                if let Some(notice) = render_notice(scope, previous, observed.selected.as_deref()) {
-                    notices.push(notice);
-                }
+            if previous != observed.selected.as_deref()
+                && let Some(notice) = render_notice(scope, previous, observed.selected.as_deref())
+            {
+                notices.push(notice);
             }
             if observed.selected.is_some() || scope.as_os_str().is_empty() {
                 pending.insert(scope.clone(), observed);
@@ -492,7 +492,7 @@ fn observe_candidate(
         link: metadata_stamp(&link_metadata),
         symlink_target,
         resolved,
-        target: metadata_stamp(&target_metadata),
+        target: Box::new(metadata_stamp(&target_metadata)),
     })
 }
 
@@ -576,7 +576,7 @@ fn read_scoped(
             path: text.clone(),
             source,
         })?;
-    if metadata_stamp(&opened) != *target {
+    if metadata_stamp(&opened) != **target {
         return Err(WorkspaceInstructionError::ReadConflict { path: text });
     }
     let bytes = match read_bounded(&mut file, MAX_INSTRUCTION_FILE_BYTES, target.len) {
@@ -597,7 +597,7 @@ fn read_scoped(
             source,
         })?;
     let reobserved = observe_candidate(workspace, path)?;
-    if metadata_stamp(&finished) != *target || reobserved != *metadata {
+    if metadata_stamp(&finished) != **target || reobserved != *metadata {
         return Err(WorkspaceInstructionError::ReadConflict { path: text });
     }
     let content: Arc<str> = String::from_utf8(bytes)
