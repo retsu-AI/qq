@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "equal-semantics-v1",
+  "tiers": {
+    "default_cli": "Ordinary shipped CLI, full session readiness, default build features; never --help or --version",
+    "embedded_core": "In-process ephemeral core; no durability claim",
+    "durable_library": "In-process session library; SQLite WAL synchronous=FULL; commit before publication"
+  },
+  "provider": {
+    "kind": "deterministic_replay_not_model_quality",
+    "model": "benchmark/model",
+    "network": "none",
+    "text": {"byte": "x", "bytes": 4096, "chunk_bytes": 4096},
+    "tool": {"name": "read_file", "arguments": {"path": "input.txt"}, "final_text": "done"},
+    "coding_tool": {"name": "edit_file", "arguments": {"edits": [{"path": "solution.py", "old": "return a - b", "new": "return a + b"}]}, "final_text": "done"}
+  },
+  "filesystem": {"input.txt": "benchmark\n"},
+  "workloads": [
+    {"id": "cold_startup", "semantics": {"state": "fresh process, fresh store; OS page cache uncontrolled", "end": "tier-specific readiness; compare only identical boundaries", "true_cache_cold": "unsupported without controlled host reset"}},
+    {"id": "warm_startup", "semantics": {"state": "existing store immediately closed and reopened in same process", "end": "scheduler readiness"}},
+    {"id": "streaming", "semantics": {"requests": 1, "text_bytes": 4096, "chunk_bytes": 4096, "expected_text_byte": "x", "end": "terminal observation", "durable_end": "committed terminal observation"}},
+    {"id": "durable_tool_turn", "semantics": {"requests": 2, "tool": "read_file", "path": "input.txt", "expected_result_contains": "benchmark", "end": "second provider turn and committed terminal observation", "durability": "WAL synchronous=FULL"}},
+    {"id": "large_history", "semantics": {"seed_text_bytes": 262144, "chunk_bytes": 4096, "operation": "replay committed event history through known terminal cursor", "replays_per_attempt": 3, "history_context_inference": "not measured"}},
+    {"id": "bounded_fanout", "semantics": {"sessions": 8, "max_active_runs": 2, "text_bytes_per_run": 4096, "admission": "queue all eight; do not substitute subscriber fanout", "end": "all terminal observations"}},
+    {"id": "cancellation", "semantics": {"provider": "pending stream", "trigger": "after provider entered", "start": "CancelRun call", "end": "committed cancelled terminal observation"}},
+    {"id": "slow_subscriber", "semantics": {"subscribers": 2, "text_bytes": 4096, "slow_policy": "attach before prompt; do not poll until fast subscriber observes terminal; then drain", "check": "same terminal cursor and text", "overflow_backpressure": "not measured"}},
+    {"id": "paired_coding_task", "semantics": {"task": "fix add(a,b) in solution.py", "initial_file": "def add(a,b):\n    return a - b\n", "independent_cases": [[1,2,3],[5,3,8],[2,7,9]], "scoring": "independent tests, not provider self-report", "quality": "scripted write-tool plumbing only; not live-model coding ability", "accounting": "all requests, retries, compactions and children; unknown usage/cost stays null"}}
+  ]
+}
