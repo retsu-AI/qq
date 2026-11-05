@@ -48,15 +48,23 @@ configure, and to an organization manifest URL if you enroll one.
 
 Files it reads with tools, output of commands it runs, and at the start of a
 run the root `AGENTS.md` (or `CLAUDE.md` when `AGENTS.md` is absent), capped at
-64 KiB. It is told to look for nested `AGENTS.md` files before changing files
-under them. `@path` in a prompt attaches a file explicitly.
+64 KiB. For native file tools, QQ automatically checks only the ancestors of
+the paths the agent actually names. When a nested instruction is new or has
+changed, QQ returns its complete source, scope, hash, and text before touching
+the target, and the agent reviews it and retries. QQ does not infer paths from
+arbitrary shell or `exec` command text. `@path` in a prompt attaches a file
+explicitly.
 
 <a id="agents-md"></a>
 ### How do I give the agent project instructions?
 
 Write `AGENTS.md` at the repository root: conventions, how to build and
-test, what not to touch. QQ reads it every run. Nested `AGENTS.md` files
-scope instructions to a subtree.
+test, what not to touch. QQ loads it into the stable run prompt. Nested
+`AGENTS.md` files scope instructions to descendants; at any scope, `CLAUDE.md`
+is the fallback only when `AGENTS.md` is absent, and the more-specific scope
+wins. Native file tools discover these rules automatically from explicit
+target paths, including targets in ignored directories and worktrees.
+Instructions guide the agent but do not grant extra tool or approval authority.
 
 ### Why does it ask me before running `cargo test`?
 

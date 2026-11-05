@@ -1048,6 +1048,9 @@ pub(super) fn prunable_stub(
     call_id: &str,
     content: &str,
 ) -> Option<String> {
+    if content.starts_with(crate::workspace::SCOPED_NOTICE_PREFIX) {
+        return None;
+    }
     let (name, arguments) = calls.get(call_id)?;
     if !match effect {
         Some(effect) => effect == EffectClass::ReadOnly,

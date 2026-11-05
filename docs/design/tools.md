@@ -104,46 +104,69 @@ means the call did not run and is not to be retried in another form. Tool
 descriptions say how to use the tool; the prompt holds policy.
 
 The prompt discourages re-reading retained context except changed/new lines
-and pruned stubs, maps shell reads to the built-ins, says root instructions
-are already loaded, and finds nested instruction files with one names search
-(adding `include_ignored=true` for a target in an ignored directory) before
-editing below the root. The last convention shapes the final answer: outcome
-first, a few lines, code cited as `path:line`; in Auto, a next step within
-the request is taken instead of offered. Sub-agents use their own reply
-shape instead. Tool-specific header descriptions and working conventions
-are emitted only for declared tools, including restricted and no-tools profiles.
-A read_file plus write_file profile describes whole-file replacement with its
-current hash, without advertising absent anchor-edit or old-match semantics. The prompt is
-versioned in code, not user-editable configuration for now, so behavior
-changes ship as reviewed diffs rather than config drift. The rendered root
-prompt of an Auto session is pinned in full in
-`crates/qq-core/tests/golden/root_prompt.txt`; `QQ_UPDATE_GOLDENS=1`
-rewrites it. Each provider maps the
-field to its native system/instructions slot; no codec invents its own
-preamble.
+and pruned stubs, maps shell reads to the built-ins, and explains automatic
+scoped instructions. Native `read_file`, `search`, `tree`, `write_file`, and
+`edit_file` admission resolves only instruction scopes that are ancestors of
+the paths the call will actually access; every path in an edit batch is a
+target. If admission finds a new, changed, removed, or reset scope, it defers
+the entire call before reading, walking, or mutating any target and returns the
+complete instruction source, scope, content hash, and body for model review.
+The model must retry the call after reviewing that result. Shell and `exec`
+arguments are not interpreted for scoped paths, because arbitrary command
+contents do not provide a reliable target set.
+
+The last convention shapes the final answer: outcome first, a few lines, code
+cited as `path:line`; in Auto, a next step within the request is taken instead
+of offered. Sub-agents use their own reply shape instead. Tool-specific header
+descriptions and working conventions are emitted only for declared tools,
+including restricted and no-tools profiles. A read_file plus write_file profile
+describes whole-file replacement with its current hash, without advertising
+absent anchor-edit or old-match semantics. The prompt is versioned in code, not
+user-editable configuration for now, so behavior changes ship as reviewed
+diffs rather than config drift. The rendered root prompt of an Auto session is
+pinned in full in `crates/qq-core/tests/golden/root_prompt.txt`;
+`QQ_UPDATE_GOLDENS=1` rewrites it. Each provider maps the field to its native
+system/instructions slot; no codec invents its own preamble.
 
 Before provider work, the same bounded blocking task that opens the workspace
 selects root `AGENTS.md`, or root `CLAUDE.md` only when `AGENTS.md` is absent.
 The selected regular UTF-8 file is capability-resolved, cannot escape through
-a symlink, and is capped at 64 KiB. Because preparation selects at most one
-root file, that individual limit is also the aggregate injected-instruction
-limit. Missing both names is valid. The selected content joins the stable
-system prefix; the prompt tells the model to inspect nested scopes root-to-leaf
-and apply the same filename fallback before changing files below them.
+a symlink, and is capped at 64 KiB. Missing both names is valid. The selected
+content remains in the compiled stable system prefix and root prompt identity.
+
+Each run owns a scoped-instruction metadata cache seeded from that root.
+Admission rechecks candidate metadata at every relevant scope on every native
+file call; a shadowed `CLAUDE.md` is not resolved. Discovery never scans the workspace: explicit targets determine the
+root-to-leaf ancestor chain. At each scope `AGENTS.md` wins and `CLAUDE.md` is
+used only when it is absent. A scope applies only to descendants; sibling
+scopes do not apply, and more-specific instructions take precedence over
+ancestors. Duplicate scopes and unchanged content are not reannounced.
+Changes and removals produce one deferred-call notice. After compaction resets
+the run-local disclosure state, the next relevant call redelivers changed root
+and applicable child instruction bodies before it can proceed. Unix cache
+validation uses identity, length, modification time and change time; other
+platforms conservatively reread and hash selected sources before reuse.
+Instruction text is guidance only and never expands tool or approval
+authority.
+
+The resolver accepts at most 256 targets per call and 64 path components per
+target, retains at most 32 scopes and 256 KiB of instruction bodies per run,
+and caps each source at 64 KiB. A complete disclosure is capped at 80 KiB,
+including provenance; larger disclosures fail explicitly before mutation and
+consume no deduplication state. This leaves room for the other deferred-call
+results inside the durable 96 KiB tool-turn budget. Explicit paths inside ignored directories and
+worktrees work without enabling a workspace scan. Targets and instruction
+sources are capability-resolved; a symlink that escapes the workspace is
+denied. Directory aliases with different lexical and resolved ancestor scopes
+fail explicitly as scope conflicts rather than bypassing either policy.
 
 Every prepared durable run records one all-or-none prompt identity before the
 runtime is polled far enough to contact a provider: the nonzero base-prompt
 version plus a validated SHA-256 hash of the prepared root path and bytes (or
 the empty-selection hash). Historical runs and runs that fail before
-preparation keep no identity. Nested instruction reads stay in the durable tool
-transcript and do not retroactively change the pre-provider identity.
-
-Names discovery includes exact `AGENTS.md` and `CLAUDE.md` basenames despite
-file-level ignores inside visible directories, including contained file links.
-Directory ignores remain in force unless an explicit discovery scope uses
-`include_ignored=true`. Completed-directory scan watermarks skip only fully
-visited subtrees; a depth-limited subtree cannot suppress watermarks in later
-completed directories. Depth exclusions remain explicit in the header.
+preparation keep no identity. Scoped notices are durable tool results, including
+their source, scope and content hash, but do not alter the compiled root prompt
+or retroactively change its pre-provider identity.
 
 ### Explicit Commands And Skills
 

@@ -198,7 +198,7 @@ async fn jsonl_records_have_monotonic_cursors_and_exactly_one_terminal_outcome()
     assert_eq!(outcomes.len(), 1, "exactly one terminal outcome");
     assert_eq!(outcomes[0]["status"], "completed");
     assert_eq!(outcomes[0]["exit_code"], 0);
-    assert_eq!(outcomes[0]["prompt_identity"]["version"], 28);
+    assert_eq!(outcomes[0]["prompt_identity"]["version"], 29);
     assert!(outcomes[0]["prompt_identity"]["system_prompt_hash"].is_string());
     assert!(outcomes[0]["prompt_identity"]["tool_schema_hash"].is_string());
     assert_eq!(

@@ -56,6 +56,8 @@ pub mod bench_support {
         workspace::{FileState, Workspace},
     };
 
+    pub use crate::workspace::scoped_instructions_bench_support::Session as ScopedInstructionsSession;
+
     pub fn run_tool(workspace_root: &Path, name: &str, arguments: &str) -> String {
         let workspace = Workspace::open(workspace_root).expect("workspace must open");
         super::dispatch::execute_blocking(

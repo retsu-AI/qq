@@ -44,7 +44,7 @@ const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ReadFileArgs {
-    path: String,
+    pub(super) path: String,
     #[serde(default)]
     ranges: Vec<String>,
     #[serde(default)]

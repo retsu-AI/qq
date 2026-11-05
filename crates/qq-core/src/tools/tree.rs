@@ -33,7 +33,7 @@ pub(super) const MAX_GLOB_BYTES: usize = 256;
 #[serde(deny_unknown_fields)]
 pub(super) struct TreeArgs {
     #[serde(default = "default_path")]
-    path: String,
+    pub(super) path: String,
     #[serde(default = "default_depth")]
     depth: usize,
     #[serde(default = "default_entries")]

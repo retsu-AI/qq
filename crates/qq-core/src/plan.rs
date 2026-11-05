@@ -1429,7 +1429,7 @@ mod tests {
         );
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "2814afaf56e17b69b3113267aee8fa165d7dbca3373d5a0c9cd96ca66d2c9b8f"
+            "d8b1adc95eccb41c9da8db4b08c3b5f3f020ad9c8f5877ea32f1e5720eafdc17"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v17\0".len()..]).unwrap();
