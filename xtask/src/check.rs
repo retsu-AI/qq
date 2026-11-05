@@ -26,7 +26,7 @@ pub struct CheckArgs {
     #[arg(long)]
     dry_run: bool,
     /// Print the last run's report as a Markdown block for a PR body.
-    #[arg(long, conflicts_with_all = ["full", "packages", "base", "dry_run", "profile", "no_clippy"])]
+    #[arg(long, conflicts_with_all = ["full", "packages", "base", "dry_run", "profile", "no_clippy", "gates", "rerun"])]
     evidence: bool,
     /// nextest profile (`default`, `quick`, `ci`).
     #[arg(long, default_value = "default")]
@@ -34,7 +34,28 @@ pub struct CheckArgs {
     /// Skip Clippy (iteration only; never for the pre-push or merge gate).
     #[arg(long)]
     no_clippy: bool,
+    #[arg(
+        long = "gate",
+        value_name = "GATE",
+        value_parser = GATE_NAMES,
+        help = "Run only these gates (repeatable): fmt, lint, clippy, minimal-clippy, test, minimal-test"
+    )]
+    gates: Vec<String>,
+    #[arg(
+        long,
+        help = "Run the gates even when the last report already passed for this exact tree"
+    )]
+    rerun: bool,
 }
+
+const GATE_NAMES: [&str; 6] = [
+    "fmt",
+    "lint",
+    "clippy",
+    "minimal-clippy",
+    "test",
+    "minimal-test",
+];
 
 #[derive(Debug, Error)]
 pub enum CheckError {
@@ -98,6 +119,8 @@ pub struct Selection {
 const CROSS_CRATE_INPUTS: &[(&str, &str)] = &[
     (".github/scripts/test-pre-push.sh", "xtask"),
     (".github/scripts/test-pr-status.sh", "xtask"),
+    (".github/scripts/ci-changes.sh", "xtask"),
+    (".github/scripts/test-ci-changes.sh", "xtask"),
     (".qq/skills/babysit-pr/pr-status.sh", "xtask"),
     ("docs/guide/", "qq"),
     ("docs/design/protocol.md", "qq"),
@@ -630,17 +653,6 @@ impl Gate {
     }
 }
 
-fn package_args(scope: &Scope) -> Vec<String> {
-    match scope {
-        Scope::Full => vec!["--workspace".to_owned()],
-        Scope::Packages(packages) => packages
-            .iter()
-            .flat_map(|name| ["-p".to_owned(), name.clone()])
-            .collect(),
-        Scope::None => Vec::new(),
-    }
-}
-
 fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_owned()).collect()
 }
@@ -657,7 +669,36 @@ pub fn blocking_filter(full: bool, quarantine: Option<&str>) -> Option<String> {
     }
 }
 
+fn package_filter(scope: &Scope) -> Option<String> {
+    let Scope::Packages(packages) = scope else {
+        return None;
+    };
+    Some(
+        packages
+            .iter()
+            .map(|name| format!("package(={name})"))
+            .collect::<Vec<_>>()
+            .join(" | "),
+    )
+}
+
+pub fn test_filter(scope: &Scope, full: bool, quarantine: Option<&str>) -> Option<String> {
+    match (package_filter(scope), blocking_filter(full, quarantine)) {
+        (Some(packages), Some(blocking)) => Some(format!("({packages}) & ({blocking})")),
+        (Some(packages), None) => Some(packages),
+        (None, blocking) => blocking,
+    }
+}
+
 fn plan(selection: &Selection, args: &CheckArgs, quarantine: Option<&str>) -> Vec<Gate> {
+    let mut gates = all_gates(selection, args, quarantine);
+    if !args.gates.is_empty() {
+        gates.retain(|gate| args.gates.iter().any(|name| name == gate.name));
+    }
+    gates
+}
+
+fn all_gates(selection: &Selection, args: &CheckArgs, quarantine: Option<&str>) -> Vec<Gate> {
     let mut gates = vec![
         Gate::cargo("fmt", strings(&["fmt", "--all", "--", "--check"])),
         Gate {
@@ -669,10 +710,8 @@ fn plan(selection: &Selection, args: &CheckArgs, quarantine: Option<&str>) -> Ve
     if selection.scope == Scope::None {
         return gates;
     }
-    let packages = package_args(&selection.scope);
     if !args.no_clippy {
-        let mut clippy = strings(&["clippy", "--color", "never"]);
-        clippy.extend(packages.clone());
+        let mut clippy = strings(&["clippy", "--color", "never", "--workspace"]);
         clippy.extend(strings(&[
             "--all-targets",
             "--all-features",
@@ -689,9 +728,9 @@ fn plan(selection: &Selection, args: &CheckArgs, quarantine: Option<&str>) -> Ve
         "never",
         "--profile",
         &args.profile,
+        "--workspace",
     ]);
-    test.extend(packages);
-    if let Some(filter) = blocking_filter(args.full, quarantine) {
+    if let Some(filter) = test_filter(&selection.scope, args.full, quarantine) {
         test.extend(["-E".to_owned(), filter]);
     }
     gates.push(Gate::cargo("test", test));
@@ -968,6 +1007,9 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
         print!("{}", evidence_markdown(&report));
         return Ok(());
     }
+    let previous = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Report>(&text).ok());
     if !args.dry_run {
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -1048,6 +1090,21 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
         for gate in &gates {
             println!("  would run {:<16} {}", gate.name, gate.display());
         }
+        return Ok(());
+    }
+    if let Some(previous) = previous.filter(|previous| {
+        !args.rerun
+            && previous.head == head
+            && previous.dirty == dirty
+            && previous.tree_digest == tree_digest
+            && covers(previous, &gates)
+    }) {
+        let json = serde_json::to_string_pretty(&previous).expect("the report always serializes");
+        fs::write(&path, json).map_err(|error| CheckError::Write(path.clone(), error))?;
+        println!(
+            "check: passed; reused the report for this exact tree ({}); --rerun runs it again",
+            short(&head)
+        );
         return Ok(());
     }
     let log_dir = path
@@ -1133,6 +1190,35 @@ fn short(sha: &str) -> &str {
     &sha[..sha.len().min(12)]
 }
 
+fn selection_key(command: &str) -> String {
+    let mut words = Vec::new();
+    let mut profile = false;
+    for word in command.split(' ') {
+        if profile {
+            profile = false;
+            words.push(match word {
+                "default" | "quick" | "ci" => "default",
+                other => other,
+            });
+        } else {
+            profile = word == "--profile";
+            words.push(word);
+        }
+    }
+    words.join(" ")
+}
+
+fn covers(previous: &Report, gates: &[Gate]) -> bool {
+    previous.passed
+        && gates.iter().all(|gate| {
+            let wanted = selection_key(&gate.display());
+            previous
+                .gates
+                .iter()
+                .any(|done| done.passed && selection_key(&done.command) == wanted)
+        })
+}
+
 fn hooks_enabled(root: &Path) -> bool {
     capture(
         ProcessCommand::new("git")
@@ -1191,6 +1277,165 @@ mod tests {
     }
 
     #[test]
+    fn an_affected_test_run_builds_the_workspace_and_filters_to_the_selection() {
+        use super::test_filter;
+        let tui = packages(&["qq", "qq-tui"]);
+        assert_eq!(
+            test_filter(&tui, false, None).as_deref(),
+            Some("(package(=qq) | package(=qq-tui)) & (not group(soak))")
+        );
+        assert_eq!(
+            test_filter(&tui, true, None).as_deref(),
+            Some("package(=qq) | package(=qq-tui)")
+        );
+        assert_eq!(
+            test_filter(&Scope::Full, false, Some("test(=a)")).as_deref(),
+            Some("not (group(soak) | test(=a))")
+        );
+    }
+
+    fn try_parsed(args: &[&str]) -> Result<super::CheckArgs, clap::Error> {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            check: super::CheckArgs,
+        }
+        let mut full = vec!["xtask"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).map(|cli| cli.check)
+    }
+
+    fn parsed(args: &[&str]) -> super::CheckArgs {
+        try_parsed(args).unwrap()
+    }
+
+    fn planned(args: &[&str], scope: Scope) -> Vec<(&'static str, String)> {
+        let selection = super::Selection {
+            scope,
+            reasons: Default::default(),
+            minimal_provider: false,
+        };
+        super::plan(&selection, &parsed(args), None)
+            .into_iter()
+            .map(|gate| (gate.name, gate.display()))
+            .collect()
+    }
+
+    #[test]
+    fn every_affected_compile_uses_the_workspace_feature_set() {
+        let gates = planned(&[], packages(&["qq-tui"]));
+        assert_eq!(
+            gates.iter().map(|gate| gate.0).collect::<Vec<_>>(),
+            ["fmt", "lint", "clippy", "test"]
+        );
+        assert_eq!(
+            gates[2].1,
+            "cargo clippy --color never --workspace --all-targets --all-features -- -D warnings"
+        );
+        assert_eq!(
+            gates[3].1,
+            "cargo nextest run --color never --profile default --workspace -E '(package(=qq-tui)) & (not group(soak))'"
+        );
+    }
+
+    #[test]
+    fn gate_options_select_a_subset_in_the_gate_order() {
+        let gates = planned(&["--gate", "test", "--gate", "fmt"], Scope::Full);
+        assert_eq!(
+            gates.iter().map(|gate| gate.0).collect::<Vec<_>>(),
+            ["fmt", "test"]
+        );
+        assert!(
+            try_parsed(&["--gate", "doc"]).is_err(),
+            "unknown gates are refused"
+        );
+    }
+
+    fn report(passed: bool, gates: &[(&str, &str)]) -> super::Report {
+        super::Report {
+            head: "h".to_owned(),
+            dirty: false,
+            tree_digest: "t".to_owned(),
+            base: "origin/main".to_owned(),
+            changed: Vec::new(),
+            selection: super::Selection {
+                scope: Scope::Full,
+                reasons: Default::default(),
+                minimal_provider: false,
+            },
+            gates: gates
+                .iter()
+                .map(|(name, command)| super::GateReport {
+                    name: (*name).to_owned(),
+                    command: (*command).to_owned(),
+                    passed,
+                    seconds: 1.0,
+                    tests: None,
+                    failures: Vec::new(),
+                    output_tail: String::new(),
+                })
+                .collect(),
+            passed,
+            seconds: 1.0,
+        }
+    }
+
+    #[test]
+    fn a_passing_report_covers_the_same_gates_under_a_profile_with_the_same_selection() {
+        let gates = super::plan(
+            &super::Selection {
+                scope: packages(&["qq-tui"]),
+                reasons: Default::default(),
+                minimal_provider: false,
+            },
+            &parsed(&["--profile", "quick"]),
+            None,
+        );
+        let commands = planned(&["--profile", "ci"], packages(&["qq-tui"]));
+        let named = commands
+            .iter()
+            .map(|(name, command)| (*name, command.as_str()))
+            .collect::<Vec<_>>();
+        assert!(super::covers(&report(true, &named), &gates));
+        assert!(!super::covers(&report(false, &named), &gates));
+        assert!(!super::covers(&report(true, &named[..3]), &gates));
+        let wider = planned(&[], packages(&["qq-tui", "qq"]));
+        let wider = wider
+            .iter()
+            .map(|(name, command)| (*name, command.as_str()))
+            .collect::<Vec<_>>();
+        assert!(!super::covers(&report(true, &wider), &gates));
+        let platform = planned(&["--profile", "platform"], packages(&["qq-tui"]));
+        let platform = platform
+            .iter()
+            .map(|(name, command)| (*name, command.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            !super::covers(&report(true, &platform), &gates),
+            "the platform profile selects only the platform tests"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ci_runs_platform_and_core_jobs_only_for_changes_that_reach_them() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let output = std::process::Command::new("bash")
+            .arg(root.join(".github/scripts/test-ci-changes.sh"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn the_pull_request_gate_leaves_out_soak_and_quarantine_and_full_keeps_soak() {
         use super::blocking_filter;
         assert_eq!(
@@ -1223,6 +1468,8 @@ mod tests {
             vec!["--dry-run"],
             vec!["--profile", "ci"],
             vec!["--no-clippy"],
+            vec!["--gate", "fmt"],
+            vec!["--rerun"],
         ] {
             let mut args = vec!["xtask", "--evidence"];
             args.extend(options);

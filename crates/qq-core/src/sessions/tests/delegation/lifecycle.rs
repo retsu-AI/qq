@@ -662,7 +662,7 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
         } else {
             submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await
         };
-        await_frozen(applying, Duration::from_secs(2))
+        await_frozen(applying, crate::test_support::HANG_GUARD)
             .await
             .unwrap();
         let mut observed = Vec::new();
