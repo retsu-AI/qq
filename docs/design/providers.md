@@ -156,9 +156,10 @@ named. Refresh, storage, and worker failures stay unavailable-class and are
 retried, since the next attempt can succeed.
 
 The ledger records what each attempt proves about delivery: a refused
-connection is unsent; a `408`, `429`, `503`, or `529` answer is a refusal; a
-`500`, `502`, or `504` answer, or a reset or timeout after connecting, may
-have been processed; a `2xx` was accepted. When the policy is exhausted the
+connection is unsent; a `3xx` or `4xx` answer, `503`, or `529` is a refusal;
+any other `5xx` answer, or a reset or timeout after connecting, may have been
+processed; a `2xx` was accepted. A `408` is classified `Unavailable`, like a
+`5xx`, so the run loop retries it as a turn. When the policy is exhausted the
 final error message records the attempts spent and how many of them the
 provider may have processed, for example `(gave up after 4 attempts with
 backoff; the provider may have processed 2)` or `(…; the provider processed

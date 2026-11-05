@@ -661,6 +661,47 @@ async fn a_provider_that_stays_down_costs_one_ledger_plus_one_send_per_turn_retr
             Some(RunEvent::Failed { kind: RunFailureKind::ProviderUnavailable, message })
                 if message.contains("HTTP 503") && message.ends_with("(paused after 5 turn retries)")
         ),
+        "a send past the scripted {sends} reaches a closed listener and ends in a connection error: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_request_timeout_on_a_reissued_turn_is_retried_as_a_turn() {
+    let server = qq_provider::test_support::LoopbackServer::respond_sequence(vec![
+        (503, Some("application/json"), vec![b"{}".to_vec()]),
+        (408, Some("application/json"), vec![b"{}".to_vec()]),
+        (
+            200,
+            Some("text/event-stream"),
+            vec![b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: {\"type\":\"response.completed\"}\n\n".to_vec()],
+        ),
+    ]);
+    let provider = qq_provider::ProviderCompiler::new()
+        .unwrap()
+        .with_attempt_policy(qq_provider::AttemptPolicy::disabled())
+        .compile(qq_provider::ProviderRecipe::http(
+            qq_provider::HttpProviderRecipe::new(
+                qq_provider::EndpointSpec::base(&server.base_url, true),
+                qq_provider::HttpProtocol::OpenAiResponses,
+                qq_provider::HttpAuth::NoAuth,
+            ),
+        ))
+        .unwrap();
+    let runtime = Runtime::with_provider(provider, "test-model", 256)
+        .unwrap()
+        .with_turn_recovery(TurnRecoveryPolicy::new(
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        ));
+
+    let events = runtime
+        .run(RunCommand::new("hello"))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(server.capture_all().len(), 3);
+    assert!(
+        matches!(events.last(), Some(RunEvent::Completed)),
         "{events:?}"
     );
 }

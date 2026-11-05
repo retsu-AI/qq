@@ -1778,7 +1778,7 @@ Do not add an agent-framework, plugin, tool-host, context, or addon crate.
 | `qq-config` | Parse and merge agent-profile and addon declarations, validate syntax, retain provenance |
 | `qq-auth` | Resolve provider and addon secret references without exposing secret values to config or protocol |
 | `qq-host` | Discover trusted sources, translate external config, compile/cache plans, wire concrete adapters |
-| `qq-provider` | Compile provider recipes; one provider-neutral stream handle plus effective capabilities; sole retry owner |
+| `qq-provider` | Compile provider recipes; one provider-neutral stream handle plus effective capabilities; owns resends of one request |
 | `qq-core` | `CompiledAgentPlan`, descriptor, execution invariants, context-source contracts, tools, run limits, durable outcomes |
 | `qq-mcp` | Bounded MCP capability/catalog snapshots and selected MCP operations |
 | `qq-protocol` | Versioned profile IDs, plan digests, input parts, commands, outcomes, events, capabilities |

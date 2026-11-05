@@ -226,7 +226,7 @@ impl AttemptLedger {
         }
     }
 
-    pub(crate) fn may_resend(&self) -> bool {
+    fn may_resend(&self) -> bool {
         self.policy.has_remaining_attempt(self.attempts())
     }
 
@@ -685,11 +685,9 @@ impl HttpExchange {
 }
 
 fn rejection_delivery(status: StatusCode) -> Delivery {
-    match status {
-        StatusCode::INTERNAL_SERVER_ERROR
-        | StatusCode::BAD_GATEWAY
-        | StatusCode::GATEWAY_TIMEOUT => Delivery::Uncertain,
-        _ => Delivery::Refused,
+    match status.as_u16() {
+        300..=499 | 503 | OVERLOADED => Delivery::Refused,
+        _ => Delivery::Uncertain,
     }
 }
 
@@ -1757,6 +1755,11 @@ mod tests {
             serve_scripted(vec![ScriptedResponse::http(
                 "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 3\r\n\r\nbad",
             )]);
+        let (timeout_url, timeout_hits, timeout_server) = serve_scripted(vec![
+            ScriptedResponse::http(
+                "HTTP/1.1 524 A Timeout Occurred\r\nConnection: close\r\nContent-Length: 4\r\n\r\nslow",
+            ),
+        ]);
         let (ok_url, ok_hits, ok_server) = serve_scripted(vec![ScriptedResponse::http(
             "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\n\r\n",
         )]);
@@ -1772,6 +1775,7 @@ mod tests {
             (reset_url, Delivery::Uncertain),
             (busy_url, Delivery::Refused),
             (gateway_url, Delivery::Uncertain),
+            (timeout_url, Delivery::Uncertain),
             (ok_url, Delivery::Accepted),
         ] {
             let ledger = exchange.ledger();
@@ -1784,6 +1788,7 @@ mod tests {
             (reset_hits, reset_server),
             (busy_hits, busy_server),
             (gateway_hits, gateway_server),
+            (timeout_hits, timeout_server),
             (ok_hits, ok_server),
         ] {
             server.join().unwrap();
