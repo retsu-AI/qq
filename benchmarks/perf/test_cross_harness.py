@@ -189,6 +189,16 @@ class CrossHarnessTests(unittest.TestCase):
         self.assertIn("nonfinite JSON number", result["error"])
         self.assertNotIn("receipt", result)
 
+    def test_oversized_integers_remain_individual_failures(self):
+        for value in [10**400, -(10**400), 2**64, -(2**63)-1]:
+            receipt = self.receipt()
+            receipt["measurements"][0]["value"] = value
+            script = f"import sys\nfrom pathlib import Path\nPath(sys.argv[1]).write_text({json.dumps(receipt)!r})\n"
+            result = self.execute_fake(script)
+            self.assertIn("64-bit receipt range", result["error"])
+            self.assertFalse(result["receipt_valid"])
+            self.assertEqual(bench.summarize([result]), [])
+
     def test_timeout_retained_and_reaped(self):
         result = self.execute_fake("while True: pass\n", timeout=.1)
         self.assertIn("timeout", result["error"])

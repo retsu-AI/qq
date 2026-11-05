@@ -69,6 +69,15 @@ def reject_nonfinite(value):
     raise ValueError(f"nonfinite JSON constant: {value}")
 
 
+def bounded_integer(value):
+    if len(value.lstrip("-")) > 20:
+        raise ValueError("JSON integer exceeds 64-bit receipt range")
+    parsed = int(value)
+    if not -(2**63) <= parsed <= 2**64 - 1:
+        raise ValueError("JSON integer exceeds 64-bit receipt range")
+    return parsed
+
+
 def finite_float(value):
     parsed = float(value)
     if not math.isfinite(parsed):
@@ -279,13 +288,13 @@ def attempt_run(entry, adapter, manifest, directory, timeout):
                     pass
     record["wall_ns"] = time.monotonic_ns() - started
     try:
-        receipt = json.loads((directory / "receipt.json").read_text(), parse_constant=reject_nonfinite, parse_float=finite_float)
+        receipt = json.loads((directory / "receipt.json").read_text(), parse_constant=reject_nonfinite, parse_float=finite_float, parse_int=bounded_integer)
         record["receipt"] = receipt
         validate_receipt(receipt, entry["workload"])
         record["receipt_valid"] = True
         if receipt["status"] == "failed" or record.get("exit_code") != 0:
             record["error"] = record["error"] or "adapter failed; inspect receipt and raw outputs"
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, OverflowError, RecursionError) as error:
         record["error"] = record["error"] or f"invalid or missing receipt: {error}"
     record["stdout_sha256"] = digest((directory / "stdout").read_bytes())
     record["stderr_sha256"] = digest((directory / "stderr").read_bytes())
