@@ -531,7 +531,10 @@ fn metadata_identity(metadata: &cap_std::fs::Metadata) -> Option<(u64, u64)> {
 fn metadata_identity(metadata: &cap_std::fs::Metadata) -> Option<(u64, u64)> {
     use cap_primitives::fs::_WindowsByHandle as _;
 
-    metadata.volume_serial_number().zip(metadata.file_index())
+    metadata
+        .volume_serial_number()
+        .map(u64::from)
+        .zip(metadata.file_index())
 }
 
 #[cfg(not(any(unix, windows)))]
