@@ -48,8 +48,10 @@ def source_identity(root):
             manifest.update(b"symlink\0" + os.fsencode(os.readlink(path)))
         elif path.is_file():
             manifest.update(str(path.stat().st_mode).encode() + b"\0" + bytes.fromhex(digest(path.read_bytes())))
+        elif path.is_dir() and (path / ".git").exists():
+            manifest.update(encode(source_identity(path)))
         else:
-            manifest.update(b"missing-or-submodule")
+            manifest.update(b"missing-or-uninitialized-submodule")
     return {"revision": revision, "dirty": bool(status), "status_sha256": digest(status),
             "content_sha256": manifest.hexdigest()}
 
@@ -121,8 +123,8 @@ def validate_receipt(receipt, workload):
     for metric in receipt["measurements"]:
         if type(metric["value"]) not in {int, float} or not math.isfinite(metric["value"]) or metric["value"] < 0:
             raise ValueError("measurement must be finite and nonnegative")
-        if not all(metric.get(k) for k in ["name", "unit", "boundary"]):
-            raise ValueError("measurement needs name, unit and exact boundary")
+        if not all(isinstance(metric.get(k), str) and metric[k].strip() for k in ["name", "unit", "boundary"]):
+            raise ValueError("measurement needs nonempty string name, unit and exact boundary")
     for key in ["provider_requests", "retries", "compactions", "child_requests", "input_tokens", "output_tokens", "cost_usd"]:
         value = receipt["spend"][key]
         if value is not None and (type(value) not in {int, float} or not math.isfinite(value) or value < 0):

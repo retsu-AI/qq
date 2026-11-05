@@ -137,6 +137,40 @@ class CrossHarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "one or two adapters"):
             bench.schedule(self.manifest(), [{"id": "a"}, {"id": "b"}, {"id": "c"}], 1, 0, 42)
 
+    def test_nonstring_measurement_identity_retained_as_failure(self):
+        for field in ["name", "unit", "boundary"]:
+            for invalid in [["turn"], {"turn": True}, 1, "   "]:
+                receipt = self.receipt()
+                receipt["measurements"][0][field] = invalid
+                script = f"import sys\nfrom pathlib import Path\nPath(sys.argv[1]).write_text({json.dumps(receipt)!r})\n"
+                result = self.execute_fake(script)
+                self.assertIn("nonempty string", result["error"])
+                self.assertEqual(bench.summarize([result]), [])
+
+    def test_submodule_dirty_content_mutation_changes_source_identity(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            child, parent = root / "child", root / "parent"
+            for repo in [child, parent]:
+                repo.mkdir()
+                subprocess.run(["git", "init", "-q", str(repo)], check=True)
+                subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+                subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+                (repo / "file").write_text("initial")
+                subprocess.run(["git", "-C", str(repo), "add", "file"], check=True)
+                subprocess.run(["git", "-C", str(repo), "commit", "-qm", "initial"], check=True)
+            subprocess.run(["git", "-c", "protocol.file.allow=always", "-C", str(parent), "submodule", "add", "-q", str(child), "nested"], check=True)
+            subprocess.run(["git", "-C", str(parent), "commit", "-qam", "submodule"], check=True)
+            nested = parent / "nested"
+            (nested / "file").write_text("dirty one")
+            before = bench.source_identity(parent)
+            (nested / "file").write_text("dirty two")
+            after = bench.source_identity(parent)
+            self.assertNotEqual(before["content_sha256"], after["content_sha256"])
+            (nested / "untracked").write_text("also pinned")
+            self.assertNotEqual(after["content_sha256"], bench.source_identity(parent)["content_sha256"])
+
     def test_timeout_retained_and_reaped(self):
         result = self.execute_fake("while True: pass\n", timeout=.1)
         self.assertIn("timeout", result["error"])
