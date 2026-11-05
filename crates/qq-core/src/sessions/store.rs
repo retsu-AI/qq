@@ -43,10 +43,9 @@ pub(super) struct FeedAttachment {
 struct StoreInner {
     control: Sender<WorkerMessage>,
     control_slots: Arc<Semaphore>,
-    control_waiters: Arc<Semaphore>,
+    side_waiters: Arc<Semaphore>,
     output: Sender<WorkerMessage>,
     output_slots: Arc<Semaphore>,
-    output_waiters: Arc<Semaphore>,
     feed: Arc<WorkspaceFeed>,
     catch_up_reads: std::sync::atomic::AtomicU64,
     shutdown: Sender<()>,
@@ -91,10 +90,9 @@ impl Store {
             inner: Arc::new(StoreInner {
                 control: started.control,
                 control_slots: Arc::new(Semaphore::new(CONTROL_QUEUE_CAPACITY)),
-                control_waiters: Arc::new(Semaphore::new(CONTROL_QUEUE_CAPACITY)),
+                side_waiters: Arc::new(Semaphore::new(CONTROL_QUEUE_CAPACITY)),
                 output: started.output,
                 output_slots: Arc::new(Semaphore::new(OUTPUT_QUEUE_CAPACITY)),
-                output_waiters: Arc::new(Semaphore::new(OUTPUT_QUEUE_CAPACITY)),
                 feed,
                 catch_up_reads: std::sync::atomic::AtomicU64::new(0),
                 shutdown: started.shutdown,
@@ -210,7 +208,7 @@ impl Store {
                 }),
             }
         });
-        let acquire = self.admit_waiting(&self.inner.control_slots, &self.inner.control_waiters);
+        let acquire = self.admit_waiting(&self.inner.control_slots, &self.inner.side_waiters);
         let permit = match deadline {
             Some(deadline) => tokio::time::timeout_at(deadline, acquire)
                 .await
@@ -313,12 +311,16 @@ impl Store {
                 },
             ),
             Priority::AwaitControl => Some(
-                self.admit_waiting(&self.inner.control_slots, &self.inner.control_waiters)
-                    .await?,
+                Arc::clone(&self.inner.control_slots)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| SessionRuntimeError::Unavailable)?,
             ),
             Priority::Output => Some(
-                self.admit_waiting(&self.inner.output_slots, &self.inner.output_waiters)
-                    .await?,
+                Arc::clone(&self.inner.output_slots)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| SessionRuntimeError::Unavailable)?,
             ),
         };
         #[cfg(test)]
@@ -2324,71 +2326,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saturation_bounds_waiting_callers_and_reclaims_cancelled_payloads() {
+    async fn saturation_bounds_side_admission_without_rejecting_lifecycle_progress() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path().join("sessions.sqlite3"))
             .await
             .unwrap();
         let (release, blocked) = hold_worker(&store).await;
-        for (priority, capacity) in [
-            (Priority::AwaitControl, CONTROL_QUEUE_CAPACITY),
-            (Priority::Output, OUTPUT_QUEUE_CAPACITY),
-        ] {
-            let mut accepted = Vec::new();
-            for _ in 0..capacity {
-                let mut call =
-                    Box::pin(tokio::task::unconstrained(store.call(priority, |_| Ok(()))));
-                assert!(futures_util::poll!(call.as_mut()).is_pending());
-                accepted.push(call);
-            }
-            let mut waiting = Vec::new();
-            let mut payloads = Vec::new();
-            for _ in 0..capacity {
-                let payload = Arc::new([0_u8; 4096]);
-                payloads.push(Arc::downgrade(&payload));
-                let mut call = Box::pin(tokio::task::unconstrained(store.call(
-                    priority,
-                    move |_| {
-                        drop(payload);
-                        Ok(())
-                    },
-                )));
-                assert!(futures_util::poll!(call.as_mut()).is_pending());
-                waiting.push(call);
-            }
-            for _ in 0..capacity * 4 {
-                let payload = Arc::new([0_u8; 4096]);
-                let retained = Arc::downgrade(&payload);
-                let mut call = Box::pin(tokio::task::unconstrained(store.call(
-                    priority,
-                    move |_| {
-                        drop(payload);
-                        Ok(())
-                    },
-                )));
-                assert_eq!(
-                    futures_util::poll!(call.as_mut()),
-                    std::task::Poll::Ready(Err(SessionRuntimeError::Overloaded))
-                );
-                drop(call);
-                assert!(retained.upgrade().is_none());
-            }
-            if matches!(priority, Priority::AwaitControl) {
-                let mut side = Box::pin(store.enqueue_side_write(None, |_| Ok(())));
-                assert!(matches!(
-                    futures_util::poll!(side.as_mut()),
-                    std::task::Poll::Ready(Err(SessionRuntimeError::Overloaded))
-                ));
-            }
-            drop(waiting);
-            assert!(payloads.iter().all(|payload| payload.upgrade().is_none()));
-            let mut next = Box::pin(store.call(priority, |_| Ok(())));
-            assert!(futures_util::poll!(next.as_mut()).is_pending());
-            drop(next);
-            drop(accepted);
+        let mut accepted = Vec::new();
+        for _ in 0..CONTROL_QUEUE_CAPACITY {
+            let mut call = Box::pin(tokio::task::unconstrained(
+                store.call(Priority::Control, |_| Ok(())),
+            ));
+            assert!(futures_util::poll!(call.as_mut()).is_pending());
+            accepted.push(call);
         }
+        let mut waiting = Vec::new();
+        let mut payloads = Vec::new();
+        for _ in 0..CONTROL_QUEUE_CAPACITY {
+            let payload = Arc::new([0_u8; 4096]);
+            payloads.push(Arc::downgrade(&payload));
+            let mut call = Box::pin(tokio::task::unconstrained(store.enqueue_side_write(
+                None,
+                move |_| {
+                    drop(payload);
+                    Ok(())
+                },
+            )));
+            assert!(futures_util::poll!(call.as_mut()).is_pending());
+            waiting.push(call);
+        }
+        for _ in 0..CONTROL_QUEUE_CAPACITY * 4 {
+            let payload = Arc::new([0_u8; 4096]);
+            let retained = Arc::downgrade(&payload);
+            assert!(matches!(
+                store
+                    .enqueue_side_write(None, move |_| {
+                        drop(payload);
+                        Ok(())
+                    })
+                    .await,
+                Err(SessionRuntimeError::Overloaded)
+            ));
+            assert!(retained.upgrade().is_none());
+        }
+        let mut lifecycle = Vec::new();
+        for _ in 0..CONTROL_QUEUE_CAPACITY * 2 {
+            let mut call = Box::pin(tokio::task::unconstrained(
+                store.call(Priority::AwaitControl, |_| Ok(7)),
+            ));
+            assert!(futures_util::poll!(call.as_mut()).is_pending());
+            lifecycle.push(call);
+        }
+        drop(waiting);
+        assert!(payloads.iter().all(|payload| payload.upgrade().is_none()));
+        assert_eq!(
+            store.inner.side_waiters.available_permits(),
+            CONTROL_QUEUE_CAPACITY
+        );
         release.send(()).unwrap();
         blocked.await.unwrap().unwrap();
+        for call in accepted {
+            call.await.unwrap();
+        }
+        for call in lifecycle {
+            assert_eq!(call.await, Ok(7));
+        }
+        assert_eq!(store.call(Priority::Control, |_| Ok(9)).await, Ok(9));
         store.close().await.unwrap();
     }
 

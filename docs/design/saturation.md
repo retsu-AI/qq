@@ -9,8 +9,9 @@ command did not commit. No throughput or wall-clock target is part of these test
 | Owner / boundary | Count bound | Byte bound | At capacity / recovery |
 | --- | --- | --- | --- |
 | Store control channel (`q-store`) | 256 accepted jobs, plus one executing job shared with output | No aggregate closure-byte meter; requests are validated before enqueue | Client control rejects `Overloaded`; lifecycle control waits |
-| Store lifecycle / side-write admission | 256 queued waiters shared by both, in addition to accepted control jobs | Waiting callers retain their captured inputs; no independent aggregate byte meter | Further waiters reject `Overloaded`; side admission can expire with `SideQuestionTimedOut`; cancellation drops the waiter and its payload |
-| Store output channel / admission | 1024 accepted jobs + 1024 waiters | No aggregate closure-byte meter; output batches are 8 KiB, chunks at most 64 KiB, persisted event JSON at most 1 MiB | Wait for a slot, then reject further waiters with `Overloaded`; cancellation releases unadmitted payloads |
+| Store lifecycle admission | Caller-owned waits; no additional store-owned waiter queue or global waiter count cap | Waiting callers retain captured inputs; no aggregate byte meter | Wait for capacity, never return transient admission overload for already accepted runtime work; cancellation drops the waiter |
+| Store side-write admission | 256 admission waiters, in addition to accepted control jobs | Waiting callers retain their captured inputs; no independent aggregate byte meter | New side admission rejects `Overloaded` beyond the waiter cap; side admission can expire with `SideQuestionTimedOut`; cancellation drops the waiter and its payload |
+| Store output channel / admission | 1024 accepted jobs; caller-owned waits have no separate count cap | No aggregate closure-byte meter; output batches are 8 KiB, chunks at most 64 KiB, persisted event JSON at most 1 MiB | Wait for a slot; cancellation releases unadmitted payloads |
 | Store worker (`q-worker`) | Output group at most 16 jobs; output opportunity after 4 control dispatches | Staged events and replies live until their group commits | Control reads break an output group; joining control writes may occupy up to 4 groups (64 jobs) before queued output gets a turn; no new priority queue |
 | Store close | Admission closes immediately; already accepted work drains | Unadmitted payloads released on error/cancellation | Waiting/new calls get `Unavailable`; accepted jobs return their actual result; close may report `ShutdownTimedOut` if an executing operation will not finish |
 | Scheduler wakeups | 1 coalesced notification | Unit payload | `try_send` may coalesce wakeups; durable queued runs, not notification counts, are the source of work |
@@ -26,9 +27,13 @@ command did not commit. No throughput or wall-clock target is part of these test
 
 These are local bounds, not an RSS guarantee. Caller-created tasks, direct
 client concurrency, sessions with held approvals, HTTP connections uploading
-bodies, and captured closure sizes need their own upstream policies. The store
-now bounds waiting submitters as well as accepted jobs using the existing lane
-capacities, without raising either channel limit. No queue is moved.
+bodies, captured closure sizes, and lifecycle/output admission waits need their
+own upstream policies. Only new side admission gets a waiter refusal ceiling;
+already accepted runtime work must retain its existing wait-to-persist policy.
+Rejecting its settlement on transient overload would permanently fail the
+runtime. This slice bounds sustained offered control/side admission and tests
+release of caller-owned output waits; it does not establish a global waiter or
+RSS bound. No queue is moved or enlarged.
 
 ## Executable evidence
 
@@ -40,11 +45,11 @@ cargo nextest run -p qq --no-default-features --test saturation_recovery
 cargo nextest run -p qq-server -E 'test(/subscription|expired|retried_commands/)'
 ```
 
-- `saturation_bounds_waiting_callers_and_reclaims_cancelled_payloads`: hold the
-  worker, fill each lane and its waiter budget, offer four more budgets of
-  payloads, assert immediate overload and payload release, cancel all waiters,
-  then verify a replacement can wait. The test failed with `Pending` instead of
-  `Overloaded` before the waiter budget was added.
+- `saturation_bounds_side_admission_without_rejecting_lifecycle_progress`: hold
+  the worker, fill control admission and the side waiter budget, offer four more
+  budgets of payloads, assert immediate overload and release, cancel side waiters,
+  and settle 512 lifecycle calls without transient overload. Lifecycle persistence
+  keeps its original backpressure policy instead of poisoning runtime health.
 - `saturation_rejects_sustained_control_load_without_retaining_rejected_payloads`:
   eight lane capacities of rejected work leave occupancy unchanged and release
   every captured payload.
