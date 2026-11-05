@@ -10,7 +10,7 @@ set -euo pipefail
 case "$1 $2" in
 "pr view") cat "$QQ_PR_STATUS_VIEW" ;;
 "api graphql") printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}\n' ;;
-"api "*actions/runs*) printf '{"workflow_runs":[{"head_sha":"first","created_at":"2026-01-01T00:00:05Z","pull_requests":[{"number":7}]},{"head_sha":"abc","created_at":"%s","pull_requests":[{"number":7}]}]}\n' "${QQ_PR_STATUS_PUSHED:-2026-01-01T00:00:00Z}" ;;
+"api "*actions/runs*) printf '{"workflow_runs":[{"head_sha":"first","created_at":"2026-01-01T00:00:05Z","pull_requests":[{"number":7}]},{"head_sha":"abc","created_at":"2026-01-02T00:00:05Z","pull_requests":[{"number":7}]}]}\n' ;;
 "api "*comments*) if [[ -n ${QQ_PR_STATUS_COMMENTS:-} ]]; then cat "$QQ_PR_STATUS_COMMENTS"; else printf '[]\n'; fi ;;
 "api "*) printf '[]\n' ;;
 *) echo "unexpected gh $*" >&2; exit 2 ;;
@@ -65,19 +65,38 @@ expect "a newer run in progress is pending, not failing" '[[],["gate"]]'
 codex_blocker() {
     printf '{"number":7,"url":"https://github.com/o/r/pull/7","state":"OPEN","isDraft":false,"headRefName":"topic","headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[%s]}\n' \
         "${QQ_PR_STATUS_HEAD:-abc}" "$(check gate 100 '"SUCCESS"')" > "$fixture/view.json"
-    PATH="$fixture/bin:$PATH" QQ_PR_STATUS_VIEW="$fixture/view.json" QQ_PR_STATUS_PUSHED="$1" \
+    PATH="$fixture/bin:$PATH" QQ_PR_STATUS_VIEW="$fixture/view.json" \
         bash "$source_root/.qq/skills/babysit-pr/pr-status.sh" 7 >"$fixture/out.json" || true
     jq -r '[.blockers[] | select(test("Codex"))] | join(";")' "$fixture/out.json"
 }
 
-got=$(QQ_PR_STATUS_HEAD=first codex_blocker 2026-01-01T00:00:05Z)
-[[ $got == "pending: Codex review of head" ]] || { echo "the head a PR opened with waits for the automatic review: got $got" >&2; exit 1; }
-got=$(codex_blocker 2026-01-02T00:00:00Z)
-[[ $got == "Codex review of head not requested; comment @codex review" ]] || { echo "a pushed head nobody asked Codex about: got $got" >&2; exit 1; }
-printf '[{"user":{"login":"me"},"body":"@codex review","created_at":"2026-01-02T00:01:00Z"}]\n' > "$fixture/comments.json"
-got=$(QQ_PR_STATUS_COMMENTS="$fixture/comments.json" codex_blocker 2026-01-02T00:00:00Z)
-[[ $got == "pending: Codex review of head" ]] || { echo "a request after the push waits for Codex: got $got" >&2; exit 1; }
-got=$(QQ_PR_STATUS_COMMENTS="$fixture/comments.json" codex_blocker 2026-01-03T00:00:00Z)
-[[ $got == "Codex review of head not requested; comment @codex review" ]] || { echo "a request before the latest push does not cover it: got $got" >&2; exit 1; }
+state() {
+    printf '{"user":{"login":"chatgpt-codex-connector[bot]"},"updated_at":"%s","created_at":"%s","body":"<!-- codex-review-state:v1 {\\"code_review\\":{\\"commit_sha\\":\\"%s\\",\\"status\\":\\"completed\\",\\"has_unresolved_findings\\":false}} -->"}' "$1" "$1" "$2"
+}
+request() {
+    printf '{"user":{"login":"me"},"body":"@codex review","created_at":"%s"}' "$1"
+}
+blocker_with() {
+    printf '[%s]\n' "$(IFS=,; echo "$*")" > "$fixture/comments.json"
+    QQ_PR_STATUS_COMMENTS="$fixture/comments.json" codex_blocker
+}
+expect_codex() {
+    local label=$1 want=$2 got=$3
+    [[ $got == "$want" ]] || { echo "$label: want '$want', got '$got'" >&2; exit 1; }
+}
+not_requested="Codex review of head not requested; comment @codex review"
+
+expect_codex "the head a PR opened with waits for the automatic review" \
+    "pending: Codex review of head" "$(QQ_PR_STATUS_HEAD=first codex_blocker)"
+expect_codex "a pushed head nobody asked about" \
+    "$not_requested" "$(blocker_with "$(state 2026-01-01T00:01:00Z first)")"
+expect_codex "a request Codex has not picked up yet, even before CI starts" \
+    "pending: Codex review of head" \
+    "$(blocker_with "$(state 2026-01-01T00:01:00Z first)" "$(request 2026-01-02T00:00:01Z)")"
+expect_codex "a request Codex already answered for the old head" \
+    "$not_requested" \
+    "$(blocker_with "$(request 2026-01-01T00:00:30Z)" "$(state 2026-01-01T00:01:00Z first)")"
+expect_codex "Codex picked up the current head" \
+    "pending: Codex 👍 on the PR" "$(blocker_with "$(state 2026-01-02T00:01:00Z abc)")"
 
 echo "pr-status fixtures: ok"
