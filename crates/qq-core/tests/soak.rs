@@ -540,6 +540,9 @@ async fn summary_retry_requests_preserve_the_original_inputs() {
             .all(|pair| pair[0] == pair[1]),
         "transcript, model, system, tools, generation and output cap must survive retry unchanged"
     );
+    let mut owners = vec![qq_provider::RetryOwner::Caller; 6];
+    owners[0] = qq_provider::RetryOwner::Provider;
+    assert_eq!(observed.summary_owners, owners);
     assert_eq!(report.executed_calls, report.durable_calls);
     assert_eq!(report.duplicate_sequences, 0);
 }

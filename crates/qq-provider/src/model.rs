@@ -14,6 +14,14 @@ pub struct ModelRequest {
     reasoning_effort: Option<ReasoningEffort>,
     tool_choice: ToolChoice,
     cache_key: Option<Arc<str>>,
+    retry_owner: RetryOwner,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RetryOwner {
+    #[default]
+    Provider,
+    Caller,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -39,7 +47,19 @@ impl ModelRequest {
             reasoning_effort: None,
             tool_choice: ToolChoice::Auto,
             cache_key: None,
+            retry_owner: RetryOwner::Provider,
         }
+    }
+
+    #[must_use]
+    pub const fn with_retry_owner(mut self, owner: RetryOwner) -> Self {
+        self.retry_owner = owner;
+        self
+    }
+
+    #[must_use]
+    pub const fn retry_owner(&self) -> RetryOwner {
+        self.retry_owner
     }
 
     #[must_use]

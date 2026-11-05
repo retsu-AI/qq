@@ -616,3 +616,51 @@ async fn a_retry_sleep_yields_to_cancellation_and_the_deadline() {
         events.last()
     );
 }
+
+#[tokio::test]
+async fn a_provider_that_stays_down_costs_one_ledger_plus_one_send_per_turn_retry() {
+    let provider_attempts = 4_usize;
+    let sends = provider_attempts + usize::from(MAX_TURN_RETRIES);
+    let server = qq_provider::test_support::LoopbackServer::respond_sequence(
+        (0..sends)
+            .map(|_| (503, Some("application/json"), vec![b"{}".to_vec()]))
+            .collect(),
+    );
+    let provider = qq_provider::ProviderCompiler::new()
+        .unwrap()
+        .with_attempt_policy(qq_provider::AttemptPolicy::new(
+            u32::try_from(provider_attempts).unwrap(),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            Duration::from_secs(5),
+        ))
+        .compile(qq_provider::ProviderRecipe::http(
+            qq_provider::HttpProviderRecipe::new(
+                qq_provider::EndpointSpec::base(&server.base_url, true),
+                qq_provider::HttpProtocol::OpenAiResponses,
+                qq_provider::HttpAuth::NoAuth,
+            ),
+        ))
+        .unwrap();
+    let runtime = Runtime::with_provider(provider, "test-model", 256)
+        .unwrap()
+        .with_turn_recovery(TurnRecoveryPolicy::new(
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        ));
+
+    let events = runtime
+        .run(RunCommand::new("hello"))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(server.capture_all().len(), sends);
+    assert!(
+        matches!(
+            events.last(),
+            Some(RunEvent::Failed { kind: RunFailureKind::ProviderUnavailable, message })
+                if message.contains("HTTP 503") && message.ends_with("(paused after 5 turn retries)")
+        ),
+        "{events:?}"
+    );
+}

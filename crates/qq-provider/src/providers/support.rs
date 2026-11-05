@@ -136,7 +136,7 @@ pub(crate) fn api_error<E: DeserializeOwned>(
         },
         _ => ProviderError::Api { status, message },
     };
-    note_attempts(error, rejection.attempts())
+    note_attempts(error, rejection.receipt())
 }
 
 pub(crate) fn names_context_overflow(message: &str) -> bool {

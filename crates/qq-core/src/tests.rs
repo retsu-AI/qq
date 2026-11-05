@@ -1012,6 +1012,7 @@ async fn summarizer_errors_keep_server_cooldown_before_and_after_partial_output(
             Arc::from([]),
             None,
             256,
+            qq_provider::RetryOwner::Provider,
         ));
         let error = loop {
             if let Err(error) = summary.next().await.unwrap() {

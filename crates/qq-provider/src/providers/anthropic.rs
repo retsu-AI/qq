@@ -173,7 +173,7 @@ impl Provider for AnthropicMessages {
         let headers = self.headers.clone();
 
         let origin = self.replay_origin.clone();
-        with_restart(&self.exchange, move |ledger| {
+        with_restart(&self.exchange, request.retry_owner(), move |ledger| {
             let origin = origin.clone();
             let exchange = exchange.clone();
             let endpoint = endpoint.clone();

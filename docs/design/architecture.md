@@ -1253,7 +1253,10 @@ loop receives `provider_unavailable`, `provider_rate_limited`, or
 `provider_transport` (including a stream that ends after events without a
 terminal event), it commits whatever streamed as a partial assistant turn,
 publishes `run_turn_retrying`, waits under `TurnRecoveryPolicy`, and re-issues
-the turn with a continue notice after any partial text. The exponential delay
+the turn with a continue notice after any partial text. The first request of
+a turn is provider-owned; each re-issue is sent as `RetryOwner::Caller`, so
+the provider sends it once and the turn backoff is the only wait between
+sends. The exponential delay
 starts at 2 s and caps at 60 s; equal jitter chooses between half and all of
 that delay. Server-directed cooldowns, capped at 60 s, remain a minimum with
 jitter above it. Cancellation and the run deadline interrupt the wait. The

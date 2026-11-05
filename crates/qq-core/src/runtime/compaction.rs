@@ -110,6 +110,7 @@ pub(crate) struct InRunCompactionRequest {
     pub(crate) tools: Arc<[ToolSpec]>,
     pub(crate) retained_bytes: u64,
     pub(crate) budget: super::ChildBudget,
+    pub(crate) retry_owner: qq_provider::RetryOwner,
 }
 
 pub(crate) struct InRunCompaction {
