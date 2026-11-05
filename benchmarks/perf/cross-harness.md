@@ -58,7 +58,9 @@ startup requires a controlled host reset; **fresh store is not cache cold**.
 The embedded construction boundary is not full durable scheduler readiness.
 No cross-tier comparisons are valid.
 
-Add another out-of-tree adapter to the local config to compare it. An adapter
+Add a second out-of-tree adapter to the local config to compare it. A campaign
+accepts one or two adapters; use separate matched paired campaigns for more.
+An adapter
 must accept the pinned request semantics, implement them faithfully or return
 `unsupported`, and write its receipt to `{output}`. The runner provides
 `{tier}`, `{workload}`, `{output}`, `{request}` and `{workspace}` placeholders.

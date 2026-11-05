@@ -155,6 +155,20 @@ pub(super) async fn run(args: WorkerArgs) -> Result<(), PerfError> {
     Ok(())
 }
 
+async fn temporary_directory() -> Result<tempfile::TempDir, PerfError> {
+    tokio::task::spawn_blocking(tempfile::tempdir)
+        .await
+        .map_err(fixture_error("temporary directory task"))?
+        .map_err(fixture_error("temporary directory"))
+}
+
+async fn remove_temporary_directory(directory: tempfile::TempDir) -> Result<(), PerfError> {
+    tokio::task::spawn_blocking(move || directory.close())
+        .await
+        .map_err(fixture_error("temporary cleanup task"))?
+        .map_err(fixture_error("temporary cleanup"))
+}
+
 async fn embedded(workload: &str, receipt: &mut Receipt) -> Result<(), PerfError> {
     if !matches!(workload, "cold_startup" | "streaming") {
         receipt.unsupported("embedded adapter implements construction and text streaming only; no durable guarantee or matching fixture for this case");
@@ -186,13 +200,23 @@ async fn embedded(workload: &str, receipt: &mut Receipt) -> Result<(), PerfError
         receipt.spend["provider_requests"] = json!(0);
         return Ok(());
     }
-    let directory = tempfile::tempdir().map_err(fixture_error("embedded workspace"))?;
-    tokio::fs::write(directory.path().join("input.txt"), "benchmark\n")
+    let directory = temporary_directory().await?;
+    let operation = embedded_stream(&runtime, directory.path(), receipt, &mut receiver).await;
+    let cleanup = remove_temporary_directory(directory).await;
+    super::merge_operation_cleanup(operation, cleanup)
+}
+
+async fn embedded_stream(
+    runtime: &Runtime,
+    workspace: &std::path::Path,
+    receipt: &mut Receipt,
+    receiver: &mut mpsc::Receiver<super::ProviderMark>,
+) -> Result<(), PerfError> {
+    tokio::fs::write(workspace.join("input.txt"), "benchmark\n")
         .await
         .map_err(fixture_error("seed input"))?;
     let started = Instant::now();
-    let mut events =
-        runtime.run_in_workspace(RunCommand::new("benchmark"), directory.path().to_owned());
+    let mut events = runtime.run_in_workspace(RunCommand::new("benchmark"), workspace.to_owned());
     receipt.counts = json!({"offered":1,"admitted":1,"rejected":0});
     let mut text = String::new();
     let mut completed = false;
@@ -222,7 +246,7 @@ async fn embedded(workload: &str, receipt: &mut Receipt) -> Result<(), PerfError
         text == "x".repeat(4096),
         "output equals 4096 x bytes",
     );
-    receipt.spend["provider_requests"] = json!(drain_requests(&mut receiver));
+    receipt.spend["provider_requests"] = json!(drain_requests(receiver));
     Ok(())
 }
 
@@ -565,8 +589,17 @@ async fn independent_tests(workspace: &std::path::Path) -> Result<Value, PerfErr
 }
 
 async fn fanout(receipt: &mut Receipt) -> Result<(), PerfError> {
-    let directory = tempfile::tempdir().map_err(fixture_error("fanout directory"))?;
-    let workspace = directory.path().join("workspace");
+    let directory = temporary_directory().await?;
+    let operation = fanout_in_directory(directory.path(), receipt).await;
+    let cleanup = remove_temporary_directory(directory).await;
+    super::merge_operation_cleanup(operation, cleanup)
+}
+
+async fn fanout_in_directory(
+    directory: &std::path::Path,
+    receipt: &mut Receipt,
+) -> Result<(), PerfError> {
+    let workspace = directory.join("workspace");
     tokio::fs::create_dir(&workspace)
         .await
         .map_err(fixture_error("fanout workspace"))?;
@@ -577,8 +610,7 @@ async fn fanout(receipt: &mut Receipt) -> Result<(), PerfError> {
     let activity = Arc::new(ActivityCounter::default());
     let runtime = open_session_runtime(
         "fanout open",
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"))
-            .with_max_active_runs(2),
+        SessionRuntimeOptions::new(directory.join("sessions.sqlite3")).with_max_active_runs(2),
         Arc::new(BenchmarkLoader {
             mode: text_mode(4096),
             marks,
@@ -689,7 +721,7 @@ mod tests {
 
     #[tokio::test]
     async fn broken_solution_fails_independent_tests() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = temporary_directory().await.unwrap();
         tokio::fs::write(
             directory.path().join("solution.py"),
             "def add(a,b):\n    return a-b\n",
@@ -699,11 +731,12 @@ mod tests {
         let score = independent_tests(directory.path()).await.unwrap();
         assert_eq!(score["passed"], 0);
         assert_eq!(score["total"], 3);
+        remove_temporary_directory(directory).await.unwrap();
     }
 
     #[tokio::test]
     async fn worker_retains_unsupported_and_refuses_overwrite() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = temporary_directory().await.unwrap();
         let path = directory.path().join("receipt.json");
         let args = || WorkerArgs {
             tier: "default_cli".to_owned(),
@@ -723,5 +756,6 @@ mod tests {
         );
         assert!(run(args()).await.is_err());
         assert_eq!(tokio::fs::read(path).await.unwrap(), before);
+        remove_temporary_directory(directory).await.unwrap();
     }
 }

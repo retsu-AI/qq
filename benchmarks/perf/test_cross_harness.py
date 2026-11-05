@@ -122,6 +122,21 @@ class CrossHarnessTests(unittest.TestCase):
         self.assertFalse(result["receipt_valid"])
         self.assertFalse(bench.spend_accounting([result])[0]["total_spend_comparable"])
 
+    def test_nonfinite_receipts_fail_one_attempt_without_breaking_serialization(self):
+        for value in [float("nan"), float("inf"), float("-inf")]:
+            receipt = self.receipt()
+            receipt["measurements"][0]["value"] = value
+            script = f"import sys\nfrom pathlib import Path\nPath(sys.argv[1]).write_text({json.dumps(receipt)!r})\n"
+            result = self.execute_fake(script)
+            self.assertIn("nonfinite JSON constant", result["error"])
+            self.assertNotIn("receipt", result)
+            self.assertFalse(result["receipt_valid"])
+            json.dumps(result, allow_nan=False)
+
+    def test_three_adapters_rejected_before_recording(self):
+        with self.assertRaisesRegex(ValueError, "one or two adapters"):
+            bench.schedule(self.manifest(), [{"id": "a"}, {"id": "b"}, {"id": "c"}], 1, 0, 42)
+
     def test_timeout_retained_and_reaped(self):
         result = self.execute_fake("while True: pass\n", timeout=.1)
         self.assertIn("timeout", result["error"])

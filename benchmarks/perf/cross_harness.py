@@ -54,7 +54,21 @@ def source_identity(root):
             "content_sha256": manifest.hexdigest()}
 
 
+def validate_adapters(adapters):
+    if not 1 <= len(adapters) <= 2:
+        raise ValueError("campaign needs one or two adapters; use separate paired campaigns for additional adapters")
+    if len({a["id"] for a in adapters}) != len(adapters) or any(not a["id"] for a in adapters):
+        raise ValueError("adapter ids must be nonempty and unique")
+    if {a["id"] for a in adapters} & {"control_a", "control_b"}:
+        raise ValueError("control_a/control_b are reserved arm names")
+
+
+def reject_nonfinite(value):
+    raise ValueError(f"nonfinite JSON constant: {value}")
+
+
 def schedule(manifest, adapters, samples, warmups, seed):
+    validate_adapters(adapters)
     rng = random.Random(seed)
     result = []
     arms = [(a["id"], a["id"]) for a in adapters]
@@ -254,7 +268,7 @@ def attempt_run(entry, adapter, manifest, directory, timeout):
                     pass
     record["wall_ns"] = time.monotonic_ns() - started
     try:
-        receipt = json.loads((directory / "receipt.json").read_text())
+        receipt = json.loads((directory / "receipt.json").read_text(), parse_constant=reject_nonfinite)
         record["receipt"] = receipt
         validate_receipt(receipt, entry["workload"])
         record["receipt_valid"] = True
@@ -278,10 +292,7 @@ def run(args):
     if args.samples < 1 or args.warmups < 0 or args.timeout_seconds <= 0:
         raise ValueError("invalid sample, warmup or timeout count")
     adapters = config["adapters"]
-    if not adapters or len({a["id"] for a in adapters}) != len(adapters):
-        raise ValueError("adapter ids must be nonempty and unique")
-    if {a["id"] for a in adapters} & {"control_a", "control_b"}:
-        raise ValueError("control_a/control_b are reserved arm names")
+    validate_adapters(adapters)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     metadata = {}
