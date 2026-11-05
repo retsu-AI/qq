@@ -10,6 +10,7 @@ set -euo pipefail
 case "$1 $2" in
 "pr view") cat "$QQ_PR_STATUS_VIEW" ;;
 "api graphql") printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}\n' ;;
+"api "*check-suites*) printf '{"check_suites":[{"created_at":"%s"}]}\n' "${QQ_PR_STATUS_PUSHED:-2026-01-01T00:00:00Z}" ;;
 "api "*comments*) if [[ -n ${QQ_PR_STATUS_COMMENTS:-} ]]; then cat "$QQ_PR_STATUS_COMMENTS"; else printf '[]\n'; fi ;;
 "api "*) printf '[]\n' ;;
 *) echo "unexpected gh $*" >&2; exit 2 ;;
@@ -62,9 +63,9 @@ view "$(check gate 100 '"CANCELLED"')" "$(check gate 200 null IN_PROGRESS)"
 expect "a newer run in progress is pending, not failing" '[[],["gate"]]'
 
 codex_blocker() {
-    printf '{"number":7,"url":"https://github.com/o/r/pull/7","state":"OPEN","isDraft":false,"createdAt":"2026-01-01T00:00:00Z","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[%s],"commits":[{"committedDate":"%s"}]}\n' \
-        "$(check gate 100 '"SUCCESS"')" "$1" > "$fixture/view.json"
-    PATH="$fixture/bin:$PATH" QQ_PR_STATUS_VIEW="$fixture/view.json" \
+    printf '{"number":7,"url":"https://github.com/o/r/pull/7","state":"OPEN","isDraft":false,"createdAt":"2026-01-01T00:00:00Z","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[%s]}\n' \
+        "$(check gate 100 '"SUCCESS"')" > "$fixture/view.json"
+    PATH="$fixture/bin:$PATH" QQ_PR_STATUS_VIEW="$fixture/view.json" QQ_PR_STATUS_PUSHED="$1" \
         bash "$source_root/.qq/skills/babysit-pr/pr-status.sh" 7 >"$fixture/out.json" || true
     jq -r '[.blockers[] | select(test("Codex"))] | join(";")' "$fixture/out.json"
 }
@@ -76,5 +77,7 @@ got=$(codex_blocker 2026-01-02T00:00:00Z)
 printf '[{"user":{"login":"me"},"body":"@codex review","created_at":"2026-01-02T00:01:00Z"}]\n' > "$fixture/comments.json"
 got=$(QQ_PR_STATUS_COMMENTS="$fixture/comments.json" codex_blocker 2026-01-02T00:00:00Z)
 [[ $got == "pending: Codex review of head" ]] || { echo "a request after the push waits for Codex: got $got" >&2; exit 1; }
+got=$(QQ_PR_STATUS_COMMENTS="$fixture/comments.json" codex_blocker 2026-01-03T00:00:00Z)
+[[ $got == "Codex review of head not requested; comment @codex review" ]] || { echo "a request before the latest push does not cover it: got $got" >&2; exit 1; }
 
 echo "pr-status fixtures: ok"

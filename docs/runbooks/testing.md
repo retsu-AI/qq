@@ -43,7 +43,8 @@ come from the build cache, so a narrow change still compiles in seconds.
 
 A run whose report already passed for the exact same tree (`HEAD` plus
 the snapshot below) and covers the same gates is reused instead of run
-again, so the pre-push hook after a passing `cargo xtask check` returns at
+again (the `default`, `quick` and `ci` nextest profiles select the same
+tests and count as one; `platform` does not), so the pre-push hook after a passing `cargo xtask check` returns at
 once. `--rerun` forces a fresh run.
 
 If the merge-base with `--base` cannot be found, the command fails rather

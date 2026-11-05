@@ -1190,15 +1190,18 @@ fn short(sha: &str) -> &str {
     &sha[..sha.len().min(12)]
 }
 
-fn without_profile(command: &str) -> String {
+fn selection_key(command: &str) -> String {
     let mut words = Vec::new();
-    let mut skip = false;
+    let mut profile = false;
     for word in command.split(' ') {
-        if skip {
-            skip = false;
-        } else if word == "--profile" {
-            skip = true;
+        if profile {
+            profile = false;
+            words.push(match word {
+                "default" | "quick" | "ci" => "default",
+                other => other,
+            });
         } else {
+            profile = word == "--profile";
             words.push(word);
         }
     }
@@ -1208,11 +1211,11 @@ fn without_profile(command: &str) -> String {
 fn covers(previous: &Report, gates: &[Gate]) -> bool {
     previous.passed
         && gates.iter().all(|gate| {
-            let wanted = without_profile(&gate.display());
+            let wanted = selection_key(&gate.display());
             previous
                 .gates
                 .iter()
-                .any(|done| done.passed && without_profile(&done.command) == wanted)
+                .any(|done| done.passed && selection_key(&done.command) == wanted)
         })
 }
 
@@ -1379,7 +1382,7 @@ mod tests {
     }
 
     #[test]
-    fn a_passing_report_covers_the_same_gates_under_any_nextest_profile() {
+    fn a_passing_report_covers_the_same_gates_under_a_profile_with_the_same_selection() {
         let gates = super::plan(
             &super::Selection {
                 scope: packages(&["qq-tui"]),
@@ -1403,9 +1406,18 @@ mod tests {
             .map(|(name, command)| (*name, command.as_str()))
             .collect::<Vec<_>>();
         assert!(!super::covers(&report(true, &wider), &gates));
+        let platform = planned(&["--profile", "platform"], packages(&["qq-tui"]));
+        let platform = platform
+            .iter()
+            .map(|(name, command)| (*name, command.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            !super::covers(&report(true, &platform), &gates),
+            "the platform profile selects only the platform tests"
+        );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn ci_runs_platform_and_core_jobs_only_for_changes_that_reach_them() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

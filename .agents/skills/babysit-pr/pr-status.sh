@@ -28,7 +28,7 @@ trap 'rm -rf "$tmp"' EXIT
 # per-argument limit if passed to jq on the command line.
 status() {
     local owner repo number
-    gh pr view ${pr:+"$pr"} --json number,url,state,isDraft,createdAt,headRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup,commits \
+    gh pr view ${pr:+"$pr"} --json number,url,state,isDraft,createdAt,headRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup \
         >"$tmp/view.json" || return 2
     # Every later request targets the PR's own repository, not the checkout's.
     IFS=/ read -r owner repo number < <(jq -r '.url | capture("github\\.com/(?<o>[^/]+)/(?<r>[^/]+)/pull/(?<n>[0-9]+)") | "\(.o)/\(.r)/\(.n)"' "$tmp/view.json") || return 2
@@ -44,12 +44,14 @@ status() {
     gh api "repos/$owner/$repo/issues/$number/comments" --paginate | jq -s 'add // []' >"$tmp/all-comments.json" || return 2
     jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | .body]' "$tmp/all-comments.json" >"$tmp/comments.json" || return 2
     jq '[.[] | select(.body | test("@codex review")) | .created_at]' "$tmp/all-comments.json" >"$tmp/requests.json" || return 2
+    gh api "repos/$owner/$repo/commits/$(jq -r .headRefOid "$tmp/view.json")/check-suites" --paginate |
+        jq -s '[add.check_suites[]?.created_at] | min' >"$tmp/pushed.json" || return 2
     gh api "repos/$owner/$repo/issues/$number/reactions" --paginate |
         jq -s '[add[] | select(.user.login == "chatgpt-codex-connector[bot]") | .content]' >"$tmp/reactions.json" || return 2
     jq -n --slurpfile v "$tmp/view.json" --slurpfile t "$tmp/threads.json" --slurpfile c "$tmp/comments.json" \
-        --slurpfile r "$tmp/reactions.json" --slurpfile q "$tmp/requests.json" --argjson require_codex "$codex" '
+        --slurpfile r "$tmp/reactions.json" --slurpfile q "$tmp/requests.json" --slurpfile p "$tmp/pushed.json" --argjson require_codex "$codex" '
         def failing: ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"];
-        $v[0] as $view | $t[0] as $threads | $c[0] as $comments | $r[0] as $reactions | $q[0] as $requests
+        $v[0] as $view | $t[0] as $threads | $c[0] as $comments | $r[0] as $reactions | $q[0] as $requests | ($p[0] // $view.createdAt) as $pushed
         | ($view.statusCheckRollup // []) as $rollup
         | ($rollup | map(. + {run: ((.detailsUrl // .targetUrl // "") | capture("/actions/runs/(?<id>[0-9]+)").id // "0" | tonumber)})) as $all
         | ($all | group_by([.workflowName // "", .name // .context]) | map(max_by(.run))
@@ -63,14 +65,13 @@ status() {
                url: .comments.nodes[0].url, body: (.comments.nodes[0].body | .[0:300])}]) as $open
         | ([$comments[] | capture("codex-review-state:v1 (?<s>\\{.*\\}) -->")? | .s | fromjson] | last) as $state
         | ($state.code_review // {}) as $cr
-        | ((($view.commits // []) | last | .committedDate) // $view.createdAt) as $head_at
         | {
             reviewed_head: ($cr.commit_sha == $view.headRefOid),
             status: ($cr.status // "none"),
             unresolved_findings: ($cr.has_unresolved_findings // false),
             security_unresolved: ($state.security_review.has_unresolved_findings // false),
             thumbs_up: ($reactions | index("+1") != null),
-            requested: (($view.createdAt // "") >= $head_at or any($requests[]; . >= $head_at))
+            requested: ($pushed <= $view.createdAt or any($requests[]; . >= $pushed))
           } as $codex
         | [
             (if $view.state != "OPEN" then "state is \($view.state)" else empty end),

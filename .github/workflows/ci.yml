@@ -136,17 +136,18 @@ jobs:
 
   checks:
     name: fmt, lint, clippy, tests, smoke
-    needs: [static, tests]
+    needs: [changes, static, tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Both halves of the gate passed
         env:
+          CHANGES: ${{ needs.changes.result }}
           STATIC: ${{ needs.static.result }}
           TESTS: ${{ needs.tests.result }}
         run: |
-          echo "static: $STATIC, tests: $TESTS"
-          [[ $STATIC == success && $TESTS == success ]]
+          echo "job selection: $CHANGES, static: $STATIC, tests: $TESTS"
+          [[ $CHANGES == success && $STATIC == success && $TESTS == success ]]
 
   core-profiles:
     name: minimal core profile and embedding
