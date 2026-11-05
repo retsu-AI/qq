@@ -537,6 +537,46 @@ mod tests {
     }
 
     #[test]
+    fn saturation_retention_bounds_are_exact_and_release_evicted_payloads() {
+        for (bytes, retained) in [
+            (1, FEED_CAPACITY),
+            (64 * 1024, 4),
+            (FEED_RETAINED_BYTES + 1, 1),
+        ] {
+            let mut ring = Ring::new();
+            let mut previous = None;
+            for sequence in 1..=(FEED_CAPACITY * 4) as u64 {
+                let template = published(sequence);
+                let event = Arc::new(PublishedEvent {
+                    envelope: template.envelope.clone(),
+                    json: Arc::from("x".repeat(bytes)),
+                });
+                let weak = Arc::downgrade(&event);
+                ring.push(event);
+                assert_eq!(ring.events.len(), retained.min(sequence as usize));
+                assert_eq!(ring.retained_bytes, bytes * ring.events.len());
+                assert!(ring.retained_bytes <= FEED_RETAINED_BYTES || ring.events.len() == 1);
+                if retained == 1
+                    && let Some(previous) = previous
+                {
+                    assert!(std::sync::Weak::upgrade(&previous).is_none());
+                }
+                previous = Some(weak);
+            }
+            let oldest = ring.events.front().unwrap().sequence();
+            assert!(matches!(ring.lookup(oldest - 2), Lookup::Behind));
+            assert!(!ring.covers(oldest - 2));
+            assert!(ring.covers(oldest - 1));
+            assert_eq!(
+                sequences(&ring.page(oldest - 1, u16::MAX)),
+                (oldest..=ring.tail.unwrap()).collect::<Vec<_>>()
+            );
+            drop(ring);
+            assert!(previous.unwrap().upgrade().is_none());
+        }
+    }
+
+    #[test]
     fn a_non_contiguous_publish_discards_the_ring_rather_than_serve_a_hole() {
         let feed = Arc::new(WorkspaceFeed::default());
         let workspace_id = workspace();

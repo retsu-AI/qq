@@ -1456,7 +1456,8 @@ Response `WorkspaceSnapshot`:
 ```
 
 Snapshots are the catch-up mechanism after connect or cursor loss. Live SSE
-then advances the client from `cursor`.
+then advances the client from `cursor`. The [saturation and admission inventory](saturation.md)
+records queue, waiter, byte and cursor-recovery policies with executable tests.
 
 `session_limit` and `message_limit` are count bounds. Body rows are also
 admitted under one byte budget (6 MiB of escaped text plus a fixed per-row
