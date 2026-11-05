@@ -125,7 +125,7 @@ shared driver into a shallow generic-provider abstraction. Shared behavior must
 continue to pass the deletion test: it replaces implementation in at least two
 adapters.
 
-The provider is the single retry owner. Each compiled HTTP provider carries one
+The provider owns resends of one request. Each compiled HTTP provider carries one
 public `AttemptPolicy` (default four attempts, 500 ms base, 8 s cap, 30 s
 backoff budget, full jitter) set through
 `ProviderCompiler::with_attempt_policy`. Every send a logical request costs
@@ -153,9 +153,26 @@ credential configured" and skips): the restart loop already
 waited the full bound once, and resending would wait it again (up to four
 minutes before the first token), so the request fails at once with the cause
 named. Refresh, storage, and worker failures stay unavailable-class and are
-retried, since the next attempt can succeed. When the policy is exhausted the
-final error message records the attempts spent. Nothing above the provider —
-not the core run loop, not the session layer — retries a turn. Operational
+retried, since the next attempt can succeed.
+
+The ledger records what each attempt proves about delivery: a refused
+connection is unsent; a `3xx` or `4xx` answer, `503`, or `529` is a refusal;
+any other `5xx` answer, or a reset or timeout after connecting, may have been
+processed; a `2xx` was accepted. A `408` is classified `Unavailable`, like a
+`5xx`, so the run loop retries it as a turn. When the policy is exhausted the
+final error message records the attempts spent and how many of them the
+provider may have processed, for example `(gave up after 4 attempts with
+backoff; the provider may have processed 2)` or `(…; the provider processed
+none)`. A failed read is never reported as proof the request was unsent.
+
+`ModelRequest::with_retry_owner` says who owns the next resend. The default,
+`RetryOwner::Provider`, gets the ledger above. `RetryOwner::Caller` gets one
+send: any failure, including an empty body, goes straight back to the caller
+with its `Retry-After`. The run loop re-issues a faulted turn or summarizer
+step itself (ADR-0040), so it sends the first request of a turn as
+provider-owned and each re-issue as caller-owned. A provider that stays down
+therefore costs one ledger plus one send per turn retry (4 + 5 = 9 sends
+with the defaults), not one ledger per retry. Operational
 probes use `ProviderCompiler::compile_for_canary`, which disables direct HTTP
 and Mantle adapter retries through the facade. Bedrock's AWS SDK client already
 has SDK retries disabled.

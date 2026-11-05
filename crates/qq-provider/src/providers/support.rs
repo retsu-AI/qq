@@ -136,7 +136,7 @@ pub(crate) fn api_error<E: DeserializeOwned>(
         },
         _ => ProviderError::Api { status, message },
     };
-    note_attempts(error, rejection.attempts())
+    note_attempts(error, rejection.receipt())
 }
 
 pub(crate) fn names_context_overflow(message: &str) -> bool {
@@ -161,7 +161,7 @@ pub(crate) fn status_error_kind(status: u16) -> ProviderErrorKind {
         400 | 404 | 409 | 422 => ProviderErrorKind::InvalidRequest,
         401 | 403 => ProviderErrorKind::Authentication,
         429 => ProviderErrorKind::RateLimited,
-        500..=599 => ProviderErrorKind::Unavailable,
+        408 | 500..=599 => ProviderErrorKind::Unavailable,
         _ => ProviderErrorKind::Response,
     }
 }

@@ -121,7 +121,7 @@ impl Provider for OpenAi {
             .prompt_cache_key
             .then(|| request.cache_key().map(Arc::<str>::from))
             .flatten();
-        with_restart(&self.exchange, move |ledger| {
+        with_restart(&self.exchange, request.retry_owner(), move |ledger| {
             let exchange = exchange.clone();
             let endpoint = endpoint.clone();
             let headers = headers.clone();

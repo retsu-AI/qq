@@ -1154,6 +1154,11 @@ impl RunState {
                                             tools: Arc::clone(&run.tool_specs),
                                             retained_bytes,
                                             budget: allowance,
+                                            retry_owner: if summarizer_retries == 0 {
+                                                qq_provider::RetryOwner::Provider
+                                            } else {
+                                                qq_provider::RetryOwner::Caller
+                                            },
                                         })
                                         .await;
                                     let (kind, message, retry_after) = match attempt {
@@ -1307,7 +1312,12 @@ impl RunState {
                             Arc::clone(model),
                             Arc::clone(messages),
                             request_cap,
-                        );
+                        )
+                        .with_retry_owner(if recovery.turn_retries == 0 {
+                            qq_provider::RetryOwner::Provider
+                        } else {
+                            qq_provider::RetryOwner::Caller
+                        });
                         let request = match cache_key {
                             Some(key) => request.with_cache_key(Arc::clone(key)),
                             None => request,

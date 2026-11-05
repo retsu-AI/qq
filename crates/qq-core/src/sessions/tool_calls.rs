@@ -893,7 +893,7 @@ pub(super) fn load_tool_call(
         .query_row(
             "SELECT r.session_id, t.run_id, t.turn_ordinal, t.call_ordinal,
                     t.provider_call_id, t.name, t.arguments_json, t.state, t.result, t.is_error,
-                    t.display_json
+                    t.display_json, t.started_at_ms IS NOT NULL
              FROM tool_calls t JOIN runs r ON r.id = t.run_id WHERE t.id = ?1",
             [tool_call_id.to_string()],
             |row| {
@@ -909,6 +909,7 @@ pub(super) fn load_tool_call(
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, bool>(9)?,
                     row.get::<_, Option<String>>(10)?,
+                    row.get::<_, bool>(11)?,
                 ))
             },
         )
@@ -926,7 +927,9 @@ pub(super) fn load_tool_call(
                 result,
                 is_error,
                 display,
+                dispatched,
             )| {
+                let state = parse_tool_call_state(&state)?;
                 Ok(ToolCallSnapshot {
                     id: tool_call_id,
                     session_id: parse_id(&session)?,
@@ -936,10 +939,15 @@ pub(super) fn load_tool_call(
                     provider_call_id: provider_id,
                     name,
                     arguments,
-                    state: parse_tool_call_state(&state)?,
+                    state,
                     result,
                     is_error,
                     display: display.as_deref().map(serde_json::from_str).transpose()?,
+                    execution: (state == ToolCallState::Interrupted).then_some(if dispatched {
+                        ToolExecution::MayHaveRun
+                    } else {
+                        ToolExecution::NotStarted
+                    }),
                 })
             },
         )

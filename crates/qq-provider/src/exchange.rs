@@ -5,7 +5,7 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
 use serde::Serialize;
 
 use crate::{
-    ProviderError, ProviderErrorKind, ProviderStream,
+    ProviderError, ProviderErrorKind, ProviderStream, RetryOwner,
     http::{
         ExchangeMessages, ExchangeOutcome, HttpExchange, HttpRejection, SharedLedger,
         is_event_stream_headers, note_attempts, transport_error,
@@ -162,11 +162,15 @@ pub(crate) const fn is_transient(kind: ProviderErrorKind) -> bool {
     )
 }
 
-pub(crate) fn with_restart<F>(exchange: &HttpExchange, attempt: F) -> ProviderStream
+pub(crate) fn with_restart<F>(
+    exchange: &HttpExchange,
+    owner: RetryOwner,
+    attempt: F,
+) -> ProviderStream
 where
     F: Fn(SharedLedger) -> ProviderStream + Send + Sync + 'static,
 {
-    let ledger = exchange.ledger();
+    let ledger = exchange.ledger_for(owner);
     Box::pin(async_stream::stream! {
         loop {
             let mut inner = attempt(ledger.clone());
@@ -178,24 +182,24 @@ where
                         yield Ok(event);
                     }
                     Some(Err(error)) if !yielded && is_transient(error.kind()) => {
-                        let (next_delay, attempts) = {
+                        let (next_delay, receipt) = {
                             let mut ledger = ledger.lock();
-                            (ledger.next_delay(None), ledger.attempts())
+                            (ledger.next_delay(None), ledger.receipt())
                         };
                         match next_delay {
                             Some(delay) => break delay,
                             None => {
-                                yield Err(note_attempts(error, attempts));
+                                yield Err(note_attempts(error, receipt));
                                 return;
                             }
                         }
                     }
                     Some(Err(error)) => {
-                        let attempts = ledger.lock().attempts();
+                        let receipt = ledger.lock().receipt();
                         yield Err(if yielded {
                             error
                         } else {
-                            note_attempts(error, attempts)
+                            note_attempts(error, receipt)
                         });
                         return;
                     }
@@ -357,7 +361,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let scripts = Arc::new(std::sync::Mutex::new(scripts.into_iter()));
         let observed = Arc::clone(&calls);
-        let stream = with_restart(&exchange, move |ledger| {
+        let stream = with_restart(&exchange, RetryOwner::Provider, move |ledger| {
             ledger.lock().begin_attempt();
             calls.fetch_add(1, Ordering::SeqCst);
             let script = scripts
@@ -444,7 +448,7 @@ mod tests {
                 .with_attempt_policy(fast(4)),
             );
             let attempt_exchange = Arc::clone(&exchange);
-            let stream = with_restart(&exchange, move |ledger| {
+            let stream = with_restart(&exchange, RetryOwner::Provider, move |ledger| {
                 let exchange = Arc::clone(&attempt_exchange);
                 let endpoint = endpoint.clone();
                 Box::pin(async_stream::stream! {
@@ -500,7 +504,7 @@ mod tests {
                 .with_attempt_policy(fast(4)),
             );
             let attempt_exchange = Arc::clone(&exchange);
-            let stream = with_restart(&exchange, move |ledger| {
+            let stream = with_restart(&exchange, RetryOwner::Provider, move |ledger| {
                 let exchange = Arc::clone(&attempt_exchange);
                 let endpoint = endpoint.clone();
                 Box::pin(async_stream::stream! {
@@ -625,9 +629,9 @@ mod tests {
         let error = events[0].as_ref().unwrap_err();
         assert_eq!(error.kind(), ProviderErrorKind::Transport);
         assert!(
-            error
-                .to_string()
-                .ends_with("three (gave up after 3 attempts with backoff)"),
+            error.to_string().ends_with(
+                "three (gave up after 3 attempts with backoff; the provider processed none)"
+            ),
             "{error}"
         );
     }
