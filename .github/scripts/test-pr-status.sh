@@ -10,7 +10,7 @@ set -euo pipefail
 case "$1 $2" in
 "pr view") cat "$QQ_PR_STATUS_VIEW" ;;
 "api graphql") printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}\n' ;;
-"api "*check-suites*) printf '{"check_suites":[{"created_at":"%s"}]}\n' "${QQ_PR_STATUS_PUSHED:-2026-01-01T00:00:00Z}" ;;
+"api "*actions/runs*) printf '{"workflow_runs":[{"head_sha":"first","created_at":"2026-01-01T00:00:05Z","pull_requests":[{"number":7}]},{"head_sha":"abc","created_at":"%s","pull_requests":[{"number":7}]}]}\n' "${QQ_PR_STATUS_PUSHED:-2026-01-01T00:00:00Z}" ;;
 "api "*comments*) if [[ -n ${QQ_PR_STATUS_COMMENTS:-} ]]; then cat "$QQ_PR_STATUS_COMMENTS"; else printf '[]\n'; fi ;;
 "api "*) printf '[]\n' ;;
 *) echo "unexpected gh $*" >&2; exit 2 ;;
@@ -63,15 +63,15 @@ view "$(check gate 100 '"CANCELLED"')" "$(check gate 200 null IN_PROGRESS)"
 expect "a newer run in progress is pending, not failing" '[[],["gate"]]'
 
 codex_blocker() {
-    printf '{"number":7,"url":"https://github.com/o/r/pull/7","state":"OPEN","isDraft":false,"createdAt":"2026-01-01T00:00:00Z","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[%s]}\n' \
-        "$(check gate 100 '"SUCCESS"')" > "$fixture/view.json"
+    printf '{"number":7,"url":"https://github.com/o/r/pull/7","state":"OPEN","isDraft":false,"headRefName":"topic","headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[%s]}\n' \
+        "${QQ_PR_STATUS_HEAD:-abc}" "$(check gate 100 '"SUCCESS"')" > "$fixture/view.json"
     PATH="$fixture/bin:$PATH" QQ_PR_STATUS_VIEW="$fixture/view.json" QQ_PR_STATUS_PUSHED="$1" \
         bash "$source_root/.qq/skills/babysit-pr/pr-status.sh" 7 >"$fixture/out.json" || true
     jq -r '[.blockers[] | select(test("Codex"))] | join(";")' "$fixture/out.json"
 }
 
-got=$(codex_blocker 2026-01-01T00:00:00Z)
-[[ $got == "pending: Codex review of head" ]] || { echo "a new PR's own head waits for the automatic review: got $got" >&2; exit 1; }
+got=$(QQ_PR_STATUS_HEAD=first codex_blocker 2026-01-01T00:00:05Z)
+[[ $got == "pending: Codex review of head" ]] || { echo "the head a PR opened with waits for the automatic review: got $got" >&2; exit 1; }
 got=$(codex_blocker 2026-01-02T00:00:00Z)
 [[ $got == "Codex review of head not requested; comment @codex review" ]] || { echo "a pushed head nobody asked Codex about: got $got" >&2; exit 1; }
 printf '[{"user":{"login":"me"},"body":"@codex review","created_at":"2026-01-02T00:01:00Z"}]\n' > "$fixture/comments.json"
