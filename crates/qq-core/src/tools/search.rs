@@ -101,7 +101,7 @@ pub(super) struct SearchArgs {
     #[serde(default = "default_case")]
     case: CaseMode,
     #[serde(default = "default_search_path")]
-    path: String,
+    pub(super) path: String,
     #[serde(default)]
     include: Vec<String>,
     #[serde(default)]

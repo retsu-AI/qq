@@ -109,3 +109,7 @@ harness = false
 [[bench]]
 name = "workspace_index"
 harness = false
+
+[[bench]]
+name = "scoped_instructions"
+harness = false

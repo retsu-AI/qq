@@ -455,30 +455,34 @@ because it lacks the static-prefix identity and measured request byte count.
 Everything about an agent's behavior that does not depend on the prompt is
 compiled once into an immutable, runtime-only `CompiledAgentPlan` owned by
 `qq-core::plan`: the compiled provider handle, the `ResolvedModel`, the opened
-capability-scoped workspace with its instruction file already read, the
+capability-scoped workspace with its root instruction file already read, the
 compiled `ToolCatalog` (built-ins, the `spawn_agent`, `search_history`,
 `select_tools`, and `load_skill` declarations, and every admitted external tool
 with its serialized schema and digest), the compiled `SkillIndex`, the
-sub-agent routes, the external tool hosts, and the
-context sources. Durable session runs execute directly
-from the plan and perform no canonicalization, directory open, instruction
-read, or host catalog request before the first provider request; only an
-explicitly invoked command or skill document is still read per run. External
-tool declarations are frozen into the plan at compile time as a catalog
-generation: a run keeps the catalog it was admitted with, and a host that
-changes its catalog (an MCP `list_changed`, a reconnect, a shutdown) makes the
-plan stale so the next load recompiles.
+sub-agent routes, the external tool hosts, and the context sources. Durable
+session runs execute directly from the plan. Native file-tool admission may
+perform bounded metadata checks and scoped instruction reads for actual target
+ancestors; it never performs a workspace scan. Only an explicitly invoked
+command or skill document is otherwise read per run before provider work.
+External tool declarations are frozen into the plan at compile time as a
+catalog generation: a run keeps the catalog it was admitted with, and a host
+that changes its catalog (an MCP `list_changed`, a reconnect, a shutdown) makes
+the plan stale so the next load recompiles.
 
 The plan also carries the plan-constant part of the system prompt (ADR-0024):
 the header with the tool list, the progressive-exposure index, the skill
-index, and the workspace instructions, as a `PromptPrefix`
-per capability set (which optional static tools the run may use, whether it
-may load guidance, strict read-only or unattended authority, and whether it is
-a model-spawned child with read or write authority) together with the SHA-256 state of those bytes. The common set is
-built at compile; other sets on first use, bounded by the 390 possible keys. A run appends only its suffix — the selected command or skill document,
-context-source blocks, the output contract — and finalizes a clone of the
-prefix hasher over that suffix, so `system_prompt_hash` equals a digest of the
-whole prompt and the prompt body is neither rebuilt nor rehashed per run.
+index, and the root workspace instructions, as a `PromptPrefix` per capability
+set (which optional static tools the run may use, whether it may load guidance,
+strict read-only or unattended authority, and whether it is a model-spawned
+child with read or write authority) together with the SHA-256 state of those
+bytes. The common set is built at compile; other sets on first use, bounded by
+the 390 possible keys. A run appends only its suffix — the selected command or
+skill document, context-source blocks, the output contract — and finalizes a
+clone of the prefix hasher over that suffix, so `system_prompt_hash` equals a
+digest of the whole prompt and the prompt body is neither rebuilt nor rehashed
+per run. Nested workspace instructions remain outside this stable identity:
+the native file tools disclose them in deferred-call results from a bounded
+per-run cache.
 
 Tool visibility follows immutable run authority. Strict read-only runs omit
 mutating, shell, network and all external schemas; external read-only hints

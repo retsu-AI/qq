@@ -1750,13 +1750,15 @@ instructions: `AGENTS.md`, `CLAUDE.md` when `AGENTS.md` is absent, or the empty
 selection. `system_prompt_hash` identifies the exact prepared system text, and
 `tool_schema_hash` identifies the ordered provider tool schemas. When a slash
 command or skill was selected, `selected_guidance` records its kind, name,
-source, optional declared version, and content hash. Nested instructions found
-later remain durable tool evidence but do not retroactively change this
-pre-provider identity. `prompt_identity` is absent for historical runs and
-runs that failed before prompt preparation; version-6 rows may omit the fields
-added in version 7. `catalog_digest` and `exposure` identify the compiled tool
-catalog the run was admitted with and how it was exposed; `context_sources`
-lists every attached `ContextSource` with its outcome (`fetched`,
+source, optional declared version, and content hash. Scoped instructions found
+later do not alter these fields: native file-tool admission returns them as
+complete durable tool results carrying source, descendant scope and content
+hash, and defers the original call for model review and retry. Changes,
+removals, and a disclosure reset after compaction use the same result channel.
+`prompt_identity` is absent for historical runs and runs that failed before
+prompt preparation; version-6 rows may omit the fields added in version 7.
+`catalog_digest` and `exposure` identify the compiled tool catalog the run was
+admitted with and how it was exposed; `context_sources` lists every attached `ContextSource` with its outcome (`fetched`,
 `fetched_truncated`, `cached`, `cached_truncated`, `timed_out`, `unavailable`,
 `refused`, `invalid`), item and byte counts, and the content hash of the block
 appended to the system prompt. All three are absent or empty on rows written

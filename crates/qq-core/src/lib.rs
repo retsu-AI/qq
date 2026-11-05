@@ -1622,6 +1622,7 @@ struct RetainedResult {
     model_text: String,
     is_error: bool,
     spill_handle: Option<String>,
+    instruction_notice: bool,
 }
 
 impl RetainedResult {
@@ -1637,6 +1638,7 @@ impl RetainedResult {
             model_text: output.model_text.clone(),
             is_error: output.is_error,
             spill_handle: output.spill.as_ref().map(|spill| spill.handle(tool, call)),
+            instruction_notice: false,
         }
     }
 
@@ -1649,7 +1651,14 @@ impl RetainedResult {
             model_text: message,
             is_error: true,
             spill_handle: None,
+            instruction_notice: false,
         }
+    }
+
+    fn instruction_notice(message: String) -> Self {
+        let mut result = Self::error(message);
+        result.instruction_notice = true;
+        result
     }
 
     fn interrupted(message: String) -> Self {
@@ -1667,6 +1676,7 @@ impl RetainedResult {
             model_text: result,
             is_error: false,
             spill_handle: None,
+            instruction_notice: false,
         }
     }
 }

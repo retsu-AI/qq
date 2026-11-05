@@ -33,6 +33,35 @@ struct RunScope {
     prompt_identity: Option<Arc<RunPromptIdentity>>,
     call_effects: HashMap<String, catalog::EffectClass>,
     argument_errors: Vec<[u8; 32]>,
+    instructions: workspace::ScopedInstructions,
+    pending_instructions: Option<workspace::ScopedInstructions>,
+}
+
+async fn discover_instructions(
+    mut state: workspace::ScopedInstructions,
+    workspace: workspace::Workspace,
+    targets: Vec<String>,
+    cancelled: RunCancellation,
+) -> Result<
+    (
+        workspace::ScopedInstructions,
+        Result<Option<String>, workspace::WorkspaceInstructionError>,
+    ),
+    String,
+> {
+    let permit = tokio::select! {
+        biased;
+        () = cancelled.cancelled() => return Err("instruction preflight cancelled".to_owned()),
+        permit = workspace::blocking_permits().acquire_owned() => permit
+            .map_err(|error| format!("instruction preflight unavailable: {error}"))?,
+    };
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let notice = state.discover(&workspace, &targets, &cancelled);
+        (state, notice)
+    })
+    .await
+    .map_err(|error| format!("instruction preflight failed: {error}"))
 }
 
 const MAX_ARGUMENT_ERRORS_SEEN: usize = 64;
@@ -823,6 +852,8 @@ impl plan::CompiledAgentPlan {
                        prompt_identity,
                        call_effects,
                        argument_errors: Vec::new(),
+                       instructions: workspace::ScopedInstructions::new(&plan.instructions),
+                       pending_instructions: None,
                    };
                    let window = WindowScope {
                        reducible_message_bytes,
@@ -1232,6 +1263,8 @@ impl RunState {
                                         } else {
                                             live.splice(run_start..run_start + replace_through, [summary]);
                                         }
+                                        run.instructions.reset_disclosures();
+                                        run.pending_instructions = None;
                                         run.live_turns.drain(..replaced_turns);
                                         window.compatible_request = None;
                                         window.model_text_bytes = 0;
@@ -2560,6 +2593,49 @@ impl RunState {
                         let mut results: Vec<Option<RetainedResult>> = vec![None; calls.len()];
                         let mut started_calls = vec![false; calls.len()];
                         let mut tool_scope = ToolScope { interrupted: false };
+                        let targets = calls.iter()
+                            .filter(|call| call.rejection.is_none())
+                            .filter_map(|call| tools::dispatch::instruction_targets(&call.name, &call.arguments))
+                            .flatten().collect::<Vec<_>>();
+                        if !targets.is_empty() {
+                            let state = run.instructions.clone();
+                            let workspace = workspace.clone();
+                            let preflight_cancelled = RunCancellation::new();
+                            let worker_cancelled = preflight_cancelled.clone();
+                            let preflight = discover_instructions(state, workspace, targets, worker_cancelled);
+                            tokio::pin!(preflight);
+                            let checked = tokio::select! {
+                                biased;
+                                () = cancelled.cancelled() => None,
+                                () = interrupt_requested(steering, run.handled_interrupt) => None,
+                                checked = &mut preflight => Some(checked),
+                            };
+                            let notice = match checked {
+                                Some(Ok((state, Ok(notice)))) => {
+                                    run.pending_instructions = Some(state);
+                                    notice
+                                }
+                                Some(Ok((_, Err(error)))) => Some(format!("not executed: {error}")),
+                                Some(Err(error)) => Some(format!("not executed: {error}")),
+                                None => {
+                                    preflight_cancelled.cancel();
+                                    let _ = preflight.await;
+                                    tool_scope.interrupted = true;
+                                    None
+                                }
+                            };
+                            if let Some(notice) = notice {
+                                for (index, call) in calls.iter().enumerate() {
+                                    let message = if index == 0 {
+                                        format!("not executed: {notice}")
+                                    } else {
+                                        "not executed: scoped instruction preflight deferred this tool turn; review the instruction notice and retry".to_owned()
+                                    };
+                                    results[index] = Some(RetainedResult::instruction_notice(message.clone()));
+                                    yield TurnStep::Emit(RuntimeEvent::ToolCallUnexecuted { id: call.id, message, interrupted: false });
+                                }
+                            }
+                        }
                         let bounded_child_spend = limits.max_cost_usd_nanos.is_some()
                             || limits.max_total_tokens.is_some()
                             || limits.max_input_tokens.is_some()
@@ -2878,6 +2954,43 @@ impl RunState {
                                 cursor += 1;
                                 continue;
                             }
+                            if serial_suffix {
+                                if let Some(targets) = tools::dispatch::instruction_targets(&call.name, &call.arguments) {
+                                    let preflight_cancelled = RunCancellation::new();
+                                    let preflight = discover_instructions(run.instructions.clone(), workspace.clone(), targets, preflight_cancelled.clone());
+                                    tokio::pin!(preflight);
+                                    let checked = tokio::select! {
+                                        biased;
+                                        () = cancelled.cancelled() => None,
+                                        () = interrupt_requested(steering, run.handled_interrupt) => None,
+                                        checked = &mut preflight => Some(checked),
+                                    };
+                                    let notice = match checked {
+                                        Some(Ok((state, Ok(notice)))) => {
+                                            run.pending_instructions = Some(state);
+                                            notice
+                                        }
+                                        Some(Ok((_, Err(error)))) => Some(error.to_string()),
+                                        Some(Err(error)) => Some(error),
+                                        None => {
+                                            preflight_cancelled.cancel();
+                                            let _ = preflight.await;
+                                            tool_scope.interrupted = true;
+                                            break;
+                                        }
+                                    };
+                                    if let Some(notice) = notice {
+                                        for (index, remaining) in calls.iter().enumerate().skip(cursor) {
+                                            let message = if index == cursor { format!("not executed: {notice}") } else {
+                                                "not executed: scoped instruction preflight deferred this tool turn; review the instruction notice and retry".to_owned()
+                                            };
+                                            results[index] = Some(RetainedResult::instruction_notice(message.clone()));
+                                            yield TurnStep::Emit(RuntimeEvent::ToolCallUnexecuted { id: remaining.id, message, interrupted: false });
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
                             let batch_start = cursor;
                             let read_only = overlaps(&calls[cursor]);
                             let reading = !serial_suffix && read_only;
@@ -3158,6 +3271,9 @@ impl RunState {
         let ToolOutcomes { turn_ordinal, final_answer_turn, calls, results } = outcomes;
                         let mut output_scope = ResultScope { budget: tools::TurnOutputBudget::for_results(
                             calls.iter().zip(results.iter()).map(|(call, result)| (call.name.as_str(), result.as_ref().expect("all outcomes retained").model_text.as_str()))) };
+                        output_scope.budget.reserve_instructions(results.iter()
+                            .flatten().filter(|result| result.instruction_notice)
+                            .map(|result| result.model_text.len()).sum());
                         let stored = spills.is_some();
                         let result_blocks = calls
                             .iter()
@@ -3173,7 +3289,9 @@ impl RunState {
                                     },
                                     (None, false) => tools::ResultRecall::None,
                                 };
-                                output_scope.budget.admit(&call.name,&mut content, recall);
+                                if !result.instruction_notice {
+                                    output_scope.budget.admit(&call.name,&mut content, recall);
+                                }
                                 run.budget.charge_tool_output(content.len());
                                 ContentBlock::ToolResult {
                                     call_id: call.provider_call_id.clone(),
@@ -3194,6 +3312,9 @@ impl RunState {
                         window.irreducible_message_bytes = window.irreducible_message_bytes
                             .saturating_add(measure_message(&tool_results));
                         Arc::make_mut(messages).push(tool_results);
+                        if let Some(instructions) = run.pending_instructions.take() {
+                            run.instructions = instructions;
+                        }
                         if final_answer_turn {
                             if let Some(kind) = run.budget.exceeded(tokio::time::Instant::now())
                                 && matches!(
