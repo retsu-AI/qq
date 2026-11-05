@@ -1123,7 +1123,7 @@ async fn child_duration_is_reduced_by_preflight_and_prior_children() {
             },
         )
         .await;
-        await_frozen(entered.notified(), Duration::from_secs(2)).await;
+        await_frozen(entered.notified(), crate::test_support::HANG_GUARD).await;
         tokio::time::advance(Duration::from_millis(if expires_during_preflight {
             600
         } else {
