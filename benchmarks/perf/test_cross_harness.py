@@ -90,14 +90,17 @@ class CrossHarnessTests(unittest.TestCase):
         self.assertEqual(result["deltas"], [])
         self.assertIn("boundaries differ", result["incomparable_reason"])
 
-    def execute_fake(self, script, timeout=5):
+    def execute_fake(self, script, timeout=5, workload="streaming"):
         with tempfile.TemporaryDirectory() as root:
             directory = Path(root)
             fake = directory / "fake.py"
             fake.write_text(script)
-            entry = dict(tier="embedded_core", workload="streaming", phase="sample", pair=0, group="aa", arm="control_a", adapter="a")
+            entry = dict(tier="embedded_core", workload=workload, phase="sample", pair=0, group="aa", arm="control_a", adapter="a")
             adapter = {"command": [sys.executable, str(fake), "{output}"]}
-            result = bench.attempt_run(entry, adapter, self.manifest(), directory / "attempt", timeout)
+            manifest = self.manifest()
+            if workload == "paired_coding_task":
+                manifest["workloads"].append({"id": workload, "semantics": {"initial_file": "def add(a,b): return a-b\n"}})
+            result = bench.attempt_run(entry, adapter, manifest, directory / "attempt", timeout)
             self.assertTrue((directory / "attempt" / "attempt.json").is_file())
             self.assertTrue((directory / "attempt" / "stdout").is_file())
             self.assertTrue((directory / "attempt" / "stderr").is_file())
@@ -170,6 +173,21 @@ class CrossHarnessTests(unittest.TestCase):
             self.assertNotEqual(before["content_sha256"], after["content_sha256"])
             (nested / "untracked").write_text("also pinned")
             self.assertNotEqual(after["content_sha256"], bench.source_identity(parent)["content_sha256"])
+
+    def test_invalid_coding_evaluations_remain_individual_failures(self):
+        for invalid in ["nonempty", [1], {}, {"total": 3, "passed": True}, {"total": 3, "passed": 3}]:
+            receipt = self.receipt()
+            receipt["evaluation"] = invalid
+            script = f"import sys\nfrom pathlib import Path\nPath(sys.argv[1]).write_text({json.dumps(receipt)!r})\n"
+            result = self.execute_fake(script, workload="paired_coding_task")
+            self.assertIsNotNone(result["error"])
+            self.assertFalse(result["receipt_valid"])
+            self.assertEqual(bench.summarize([result]), [])
+
+    def test_overflowed_json_number_remains_individual_failure(self):
+        result = self.execute_fake("import sys\nfrom pathlib import Path\nPath(sys.argv[1]).write_text('{\"value\":1e999}')\n")
+        self.assertIn("nonfinite JSON number", result["error"])
+        self.assertNotIn("receipt", result)
 
     def test_timeout_retained_and_reaped(self):
         result = self.execute_fake("while True: pass\n", timeout=.1)

@@ -69,6 +69,13 @@ def reject_nonfinite(value):
     raise ValueError(f"nonfinite JSON constant: {value}")
 
 
+def finite_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("nonfinite JSON number")
+    return parsed
+
+
 def schedule(manifest, adapters, samples, warmups, seed):
     validate_adapters(adapters)
     rng = random.Random(seed)
@@ -116,10 +123,12 @@ def validate_receipt(receipt, workload):
             raise ValueError("successful workload needs measurements")
         if workload == "paired_coding_task":
             evaluation = receipt.get("evaluation")
-            if not evaluation or type(evaluation.get("total")) is not int or evaluation["total"] <= 0:
-                raise ValueError("coding task needs independent test evaluation")
-            if not 0 <= evaluation["passed"] <= evaluation["total"]:
+            if not isinstance(evaluation, dict) or type(evaluation.get("total")) is not int or evaluation["total"] <= 0:
+                raise ValueError("coding task needs independent test evaluation object")
+            if type(evaluation.get("passed")) is not int or not 0 <= evaluation["passed"] <= evaluation["total"]:
                 raise ValueError("invalid independent test score")
+            if not isinstance(evaluation.get("stdout"), str) or not isinstance(evaluation.get("stderr"), str) or type(evaluation.get("exit_code")) is not int:
+                raise ValueError("independent evaluation needs verifier stdout, stderr and exit code")
     for metric in receipt["measurements"]:
         if type(metric["value"]) not in {int, float} or not math.isfinite(metric["value"]) or metric["value"] < 0:
             raise ValueError("measurement must be finite and nonnegative")
@@ -270,7 +279,7 @@ def attempt_run(entry, adapter, manifest, directory, timeout):
                     pass
     record["wall_ns"] = time.monotonic_ns() - started
     try:
-        receipt = json.loads((directory / "receipt.json").read_text(), parse_constant=reject_nonfinite)
+        receipt = json.loads((directory / "receipt.json").read_text(), parse_constant=reject_nonfinite, parse_float=finite_float)
         record["receipt"] = receipt
         validate_receipt(receipt, entry["workload"])
         record["receipt_valid"] = True
