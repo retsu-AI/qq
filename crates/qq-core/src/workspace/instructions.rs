@@ -21,6 +21,8 @@ const MAX_SCOPED_INSTRUCTION_BYTES: usize = 256 * 1024;
 const MAX_SCOPED_NOTICE_BYTES: usize = 80 * 1024;
 const MAX_SCOPES: usize = 32;
 const MAX_TARGETS: usize = 256;
+pub(crate) const SCOPED_NOTICE_PREFIX: &str =
+    "not executed: Scoped workspace instruction changes were discovered.";
 const MAX_TARGET_DEPTH: usize = 64;
 
 #[derive(Debug, Error)]
