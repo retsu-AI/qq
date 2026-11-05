@@ -282,6 +282,27 @@ result is never re-executed after a crash. `recover_interrupted_runs` marks it
 result and decides what to verify. Side effects are not idempotent, so replay
 must never mean re-run.
 
+A call settled `interrupted` records how far it got, as `execution` on its
+snapshot. The boundary is `started_at_ms`, committed in the same transaction
+as `tool_call_started` and before the tool is handed its arguments. When the
+process stops and the store is reopened:
+
+| Process stopped | Stored state | `execution` | Model sees |
+| --- | --- | --- | --- |
+| after the call was requested, before dispatch | `interrupted` | `not_started` | "Tool execution did not start before the run was interrupted." |
+| after dispatch, before the result was committed | `interrupted` | `may_have_run` | "Tool execution was interrupted before a durable result was recorded." |
+| after the result was committed | `completed` or `failed` | absent | the recorded result |
+
+`may_have_run` means QQ cannot tell whether the effect happened: a shell
+command may have written files, an MCP call may have reached its server. QQ
+does not retry it, roll it back, or claim it ran exactly once. The TUI shows
+the row as `may have run`, and `qq run` text output prints
+`[tool] <name> interrupted; may have run`. Reopening the store again changes
+nothing; `tests/crash_matrix.rs` stops the process at each boundary and checks
+the stored events, the effect count, and a second reopen. A running tool that
+steering or cancellation stops while the process stays up commits the result
+it returned as `failed`, with no `execution`.
+
 Tool results can be large. What is persisted is the model-facing text after
 bounding (§ Output Bounding) plus any UI payload; live deltas stream through
 the existing batching path so persistence latency stays off the token hot

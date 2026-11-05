@@ -1227,8 +1227,26 @@ async fn a_question_with_no_client_ends_the_run_as_needs_input() {
     let finished = finished_tool_calls(&records);
     assert_eq!(finished.len(), 1);
     assert_eq!(finished[0]["state"], "interrupted");
+    assert_eq!(finished[0]["execution"], "not_started");
     assert!(
         stderr.contains("no client could answer: Which crate?"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn text_output_says_an_unanswered_question_did_not_run() {
+    let fixture = fixture(|| AskingProvider {
+        turn: Mutex::new(0),
+    })
+    .await;
+    let mut options = options(&fixture.workspace);
+    options.approval = HeadlessApproval::Full;
+    options.format = HeadlessFormat::Text;
+    let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+    assert_eq!(status, HeadlessStatus::NeedsInput);
+    assert!(
+        stderr.contains("[tool] ask_user interrupted; not run\n"),
         "{stderr}"
     );
 }

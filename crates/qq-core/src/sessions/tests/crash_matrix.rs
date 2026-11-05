@@ -126,6 +126,7 @@ struct Recovered {
     recovery_events: Vec<String>,
     run: RunOutcome,
     tool: ToolCallState,
+    execution: Option<ToolExecution>,
     result: String,
     follow_up_saw: String,
     effects_after_follow_up: usize,
@@ -272,6 +273,7 @@ fn crash_at(stage: EffectStage, effect: Effect) -> Recovered {
         recovery_events,
         run,
         tool: call.state,
+        execution: call.execution,
         result: call.result.unwrap(),
         follow_up_saw,
         effects_after_follow_up,
@@ -286,6 +288,7 @@ struct Expected {
     recovery_events: &'static [&'static str],
     run: RunOutcome,
     tool: ToolCallState,
+    execution: Option<ToolExecution>,
     interrupted_result: Option<&'static str>,
 }
 
@@ -299,6 +302,7 @@ fn a_crash_at_each_effect_boundary_recovers_without_repeating_the_effect() {
             recovery_events: &["tool_call_finished", "run_finished"],
             run: RunOutcome::Interrupted,
             tool: ToolCallState::Interrupted,
+            execution: Some(ToolExecution::NotStarted),
             interrupted_result: Some(NOT_STARTED),
         },
         Expected {
@@ -308,6 +312,7 @@ fn a_crash_at_each_effect_boundary_recovers_without_repeating_the_effect() {
             recovery_events: &["tool_call_finished", "run_finished"],
             run: RunOutcome::Interrupted,
             tool: ToolCallState::Interrupted,
+            execution: Some(ToolExecution::MayHaveRun),
             interrupted_result: Some(INTERRUPTED_TOOL_RESULT),
         },
         Expected {
@@ -317,6 +322,7 @@ fn a_crash_at_each_effect_boundary_recovers_without_repeating_the_effect() {
             recovery_events: &["tool_call_finished", "run_finished"],
             run: RunOutcome::Interrupted,
             tool: ToolCallState::Interrupted,
+            execution: Some(ToolExecution::MayHaveRun),
             interrupted_result: Some(INTERRUPTED_TOOL_RESULT),
         },
         Expected {
@@ -326,6 +332,7 @@ fn a_crash_at_each_effect_boundary_recovers_without_repeating_the_effect() {
             recovery_events: &["run_finished"],
             run: RunOutcome::Interrupted,
             tool: ToolCallState::Completed,
+            execution: None,
             interrupted_result: None,
         },
         Expected {
@@ -335,6 +342,7 @@ fn a_crash_at_each_effect_boundary_recovers_without_repeating_the_effect() {
             recovery_events: &[],
             run: RunOutcome::Completed,
             tool: ToolCallState::Completed,
+            execution: None,
             interrupted_result: None,
         },
     ];
@@ -363,6 +371,7 @@ fn a_crash_at_each_effect_boundary_recovers_without_repeating_the_effect() {
             assert_eq!(recovered.second_recovery_events, 0, "{context}");
             assert_eq!(recovered.run, expected.run, "{context}");
             assert_eq!(recovered.tool, expected.tool, "{context}");
+            assert_eq!(recovered.execution, expected.execution, "{context}");
             assert_eq!(recovered.follow_up_saw, recovered.result, "{context}");
             match (expected.interrupted_result, effect) {
                 (Some(result), _) => assert_eq!(recovered.result, result, "{context}"),

@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use super::*;
 use crate::{render::RowKind, viewport::Hit};
 use qq_client::state::ToolCallTiming;
-use qq_protocol::ToolErrorKind;
+use qq_protocol::{ToolErrorKind, ToolExecution};
 
 pub(super) const TOOL_FOLD_THRESHOLD: usize = 3;
 pub(super) const TOOL_MARKER_PREFIX: &str = "…[qq: ";
@@ -888,6 +888,12 @@ fn summary_layout(
                 ToolCallState::AwaitingApproval => tail.push(("waiting".to_owned(), warning())),
                 ToolCallState::Failed | ToolCallState::Denied => {
                     tail.push((tool_state_label(call.state).to_owned(), failure()));
+                }
+                ToolCallState::Interrupted if call.execution == Some(ToolExecution::MayHaveRun) => {
+                    tail.push(("may have run".to_owned(), warning()));
+                }
+                ToolCallState::Interrupted if call.execution == Some(ToolExecution::NotStarted) => {
+                    tail.push(("not run".to_owned(), faint()));
                 }
                 ToolCallState::Requested | ToolCallState::Interrupted => {
                     tail.push((tool_state_label(call.state).to_owned(), faint()));
