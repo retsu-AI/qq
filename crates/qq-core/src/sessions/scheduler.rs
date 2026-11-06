@@ -78,7 +78,9 @@ impl RunAdmission {
 
     pub(super) async fn reacquire(&self) {
         self.resume();
-        std::future::poll_fn(|context| self.poll_ready(context)).await;
+        std::future::poll_fn(|context| self.poll_ready(context))
+            .instrument(tracing::info_span!(target: "qq::diagnostic", "admission", outcome = "ok"))
+            .await;
     }
 }
 
@@ -212,9 +214,23 @@ pub(super) async fn schedule_runs(
                     depth = u64::from(claimed.depth),
                     outcome = tracing::field::Empty,
                 );
-                let mut admission_span = Some(
-                    tracing::info_span!(target: "qq::diagnostic", parent: &run_span, "admission", outcome = tracing::field::Empty),
-                );
+                let mut admission_span = Some(tracing::info_span!(
+                    target: "qq::diagnostic",
+                    parent: &run_span,
+                    "admission",
+                    queue_us = tracing::field::Empty,
+                    outcome = tracing::field::Empty,
+                ));
+                if let (Some(span), Some(queued_at_ms)) = (&admission_span, claimed.queued_at_ms)
+                    && !span.is_disabled()
+                {
+                    span.record(
+                        "queue_us",
+                        super::codec::now_ms()
+                            .saturating_sub(queued_at_ms)
+                            .saturating_mul(1000),
+                    );
+                }
                 tokio::spawn(
                     async move {
                         let resources = RunResources::for_run(claimed.identity.run_id);

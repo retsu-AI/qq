@@ -662,6 +662,7 @@ pub(super) fn settle_panicked_execution(
         {
             let active_run_id: RunId = parse_id(&active_run)?;
             let active_claim = ClaimedRun {
+                queued_at_ms: None,
                 origin: None,
                 identity: RunIdentity {
                     workspace_id: original.identity.workspace_id,
@@ -1104,6 +1105,7 @@ pub(super) fn recover_interrupted_runs(
 
 pub(super) fn recovery_claim(identity: RunIdentity) -> ClaimedRun {
     ClaimedRun {
+        queued_at_ms: None,
         origin: None,
         identity,
         workspace: String::new(),

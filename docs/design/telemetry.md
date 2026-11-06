@@ -23,7 +23,7 @@ by these tables. IDs never appear in it.
 
 | Stage | Measures | Outcomes |
 | --- | --- | --- |
-| `admission` | Wait for an execution permit after the scheduler reserves a run (queue wait) | `ok`, `cancelled` |
+| `admission` | Queue wait. `queue_us` is the time from the durable `PromptQueued` row to the scheduler claiming it with an execution permit (millisecond resolution); the span itself covers any further wait before the run task starts, and an explicit permit reacquisition after an approval hold gets its own `admission` span | `ok`, `cancelled` |
 | `provider` | One provider attempt, from request to its terminal event (provider wait, including HTTP-level retry sleeps inside the adapter) | `completed`, `incomplete`, `interrupted`, `ended` (stream closed with no terminal event), `rejected` (provider refused before doing any work), `uncertain` (transport/5xx: the provider may have processed it), `failed` (response/protocol fault), `abandoned` (the run was cancelled or stopped mid-attempt) |
 | `retry_wait` | Runtime backoff between turn-level retries | `ok`, `cancelled`, `budget_exhausted` |
 | `tool` | One tool call's service time | `ok`, `error` |

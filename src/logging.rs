@@ -614,6 +614,13 @@ mod tests {
         };
         assert!(closed("admission", "outcome", "ok", &runs[0]), "{logs}");
         assert!(
+            records
+                .iter()
+                .any(|record| record["fields"]["message"] == "close"
+                    && record["span"]["name"] == "admission"
+                    && record["span"]["queue_us"].is_u64())
+        );
+        assert!(
             closed("provider", "outcome", "uncertain", &runs[0]),
             "{logs}"
         );
