@@ -1439,8 +1439,8 @@ impl RunState {
                                 () = interrupt => StreamStep::Interrupted,
                                 event = provider_events.next().instrument(provider_span.as_ref().expect("provider attempt is active").clone()) => StreamStep::Event(event),
                             };
-                            if matches!(&event, StreamStep::Interrupted | StreamStep::Event(None | Some(Err(_) | Ok(ProviderEvent::Completed { .. } | ProviderEvent::Incomplete { .. })))) {
-                                if let Some(span) = provider_span.take() {
+                            if matches!(&event, StreamStep::Interrupted | StreamStep::Event(None | Some(Err(_) | Ok(ProviderEvent::Completed { .. } | ProviderEvent::Incomplete { .. }))))
+                                && let Some(span) = provider_span.take() {
                                     let (outcome, usage) = match &event {
                                         StreamStep::Interrupted => ("interrupted", None),
                                         StreamStep::Event(None) => ("ended", None),
@@ -1454,7 +1454,6 @@ impl RunState {
                                         Some(true) => "authoritative",
                                         _ => "missing",
                                     });
-                                }
                             }
                             let event = match event {
                                 StreamStep::Interrupted => {
