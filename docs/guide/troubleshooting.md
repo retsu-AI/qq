@@ -255,7 +255,8 @@ failure at startup instead of first use.
 The named server's credential is the problem, not the network. Either its
 `bearer` reference does not resolve on this machine (`credential
 `linear/default` is not registered; run `qq auth set linear/default``, or an
-unset `Env(...)` variable), or the server answered HTTP 401 or 403 because
+unset `Env(...)` variable), or the server answered HTTP 401 or 403 with a
+`WWW-Authenticate` challenge because
 the token expired, was revoked, or lacks a scope. Run the command the reason
 names, or store a fresh token from the server's login flow with `qq auth set
 NAME --endpoint URL`. The next run picks it up without a restart. `qq doctor`

@@ -1463,13 +1463,18 @@ embedded host above.
   a `tools/list` change mid-run never alters what the model sees or what
   it can execute. A changed generation makes the plan stale, and the next
   run compiles the new listing (a pinned server is quarantined instead).
+  An unpinned admitted call depends on a successful listing and on the
+  server's `list_changed`. Its send is not gated, so only a pin closes the
+  window between the check and the send.
   Hosts that do not override `call_declared` fall back to `call_observed`
   by name.
 - Capability states. Each declared server is `ready`, `needs_auth`,
   `unavailable`, or `quarantined`. `McpUnavailable.kind`
   (`Unreachable` or `NeedsAuth`) separates a credential problem from a
   transport one: an unresolved `bearer` reference, or a streamable-HTTP
-  401/403 at initialize or mid-session (a revoked or expired token), is
+  401/403 carrying a `WWW-Authenticate` challenge (rmcp's `AuthRequired`
+  / `InsufficientScope`) at initialize or mid-session (a revoked or
+  expired token), is
   `NeedsAuth` and calls fail with `McpCallFailure::NeedsAuth`. Readiness
   lists them under `MCP servers need authorization:`, and `qq mcp status`
   prints every server's state and reason. A ready server's tools are

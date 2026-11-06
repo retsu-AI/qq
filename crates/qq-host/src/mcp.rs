@@ -709,7 +709,7 @@ mod tests {
     struct HttpFixture {
         url: String,
         initializations: Arc<AtomicUsize>,
-        revoked: Arc<std::sync::atomic::AtomicBool>,
+        refusal: Arc<std::sync::atomic::AtomicU16>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -719,8 +719,8 @@ mod tests {
             let url = format!("http://{}/mcp", listener.local_addr().unwrap());
             let initializations = Arc::new(AtomicUsize::new(0));
             let initialized = Arc::clone(&initializations);
-            let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let refuse = Arc::clone(&revoked);
+            let refusal = Arc::new(std::sync::atomic::AtomicU16::new(0));
+            let refuse = Arc::clone(&refusal);
             let task = tokio::spawn(async move {
                 loop {
                     let (mut socket, _) = listener.accept().await.unwrap();
@@ -751,8 +751,11 @@ mod tests {
                         assert_ne!(count, 0, "request ended before its body");
                         request.extend_from_slice(&chunk[..count]);
                     }
-                    let (status, body) = if refuse.load(Ordering::SeqCst) {
-                        let response = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm=\"fixture\", error=\"invalid_token\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let refused = refuse.load(Ordering::SeqCst);
+                    let (status, body) = if refused != 0 {
+                        let response = format!(
+                            "HTTP/1.1 {refused} Refused\r\nWWW-Authenticate: Bearer realm=\"fixture\", error=\"invalid_token\", scope=\"write\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
                         socket.write_all(response.as_bytes()).await.unwrap();
                         continue;
                     } else if headers.starts_with("POST ") {
@@ -797,7 +800,7 @@ mod tests {
             Self {
                 url,
                 initializations,
-                revoked,
+                refusal,
                 task,
             }
         }
@@ -1225,7 +1228,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_rejected_or_revoked_bearer_reports_needs_auth_instead_of_unreachable() {
         let server = HttpFixture::new().await;
-        server.revoked.store(true, Ordering::SeqCst);
+        server.refusal.store(401, Ordering::SeqCst);
         let fixture = ConfigFixture::new();
         let snapshot = fixture.snapshot("first", &server.url, "expired-secret");
         let wired = McpRegistryCache::new()
@@ -1246,10 +1249,30 @@ mod tests {
         let message = format!("{:?}", catalog.readiness);
         assert!(!message.contains("expired-secret"), "{message}");
 
-        server.revoked.store(false, Ordering::SeqCst);
+        server.refusal.store(0, Ordering::SeqCst);
         let restored = echo(&wired.registry).await;
         assert!(restored.starts_with("Bearer "), "{restored}");
-        server.revoked.store(true, Ordering::SeqCst);
+        server.refusal.store(403, Ordering::SeqCst);
+        let narrowed = tokio::time::timeout(
+            Duration::from_secs(10),
+            wired.registry.call(
+                "mcp__srv__echo".to_owned(),
+                "{}".to_owned(),
+                RunCancellation::new(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            narrowed,
+            Err(HostCallError::Unavailable(
+                "MCP server \"srv\" refused the bearer's scope (HTTP 403)".to_owned()
+            ))
+        );
+        server.refusal.store(0, Ordering::SeqCst);
+        let restored = echo(&wired.registry).await;
+        assert!(restored.starts_with("Bearer "), "{restored}");
+        server.refusal.store(401, Ordering::SeqCst);
         let revoked = tokio::time::timeout(
             Duration::from_secs(10),
             wired.registry.call(

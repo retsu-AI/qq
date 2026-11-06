@@ -112,7 +112,11 @@ mcp__linear__create_issue changed its declaration after this run was admitted; t
 
 The next run compiles against the new listing. On an unpinned server that
 means the changed declaration is accepted the same way a new server is. On
-a pinned server it means quarantine.
+a pinned server it means quarantine. The check depends on the server's
+`list_changed` notification. A server that changes a tool without sending
+one, or changes it in the instant between the check and the send, is caught
+only on a pinned server, where the send itself is gated on the pinned
+listing.
 
 ## Where to declare it
 
@@ -149,7 +153,7 @@ state and exact reason for each one:
 | State | Meaning | Its tools |
 | --- | --- | --- |
 | `ready` | listed its tools (and they match the pin, if one is set) | declared to the model, directly or through `select_tools` |
-| `needs_auth` | its bearer did not resolve on this machine, or the server answered HTTP 401/403 | none; calls return the reason |
+| `needs_auth` | its bearer did not resolve on this machine, or the server answered HTTP 401/403 with a `WWW-Authenticate` challenge | none; calls return the reason |
 | `unavailable` | it failed to start, connect, or list tools within bounds | none; calls return the reason |
 | `quarantined` | its listing no longer matches `pin` | none; every call is refused |
 
@@ -168,7 +172,7 @@ continues with built-ins and the other servers. Calls to it return a typed
 unavailable error to the model. The next use retries with backoff.
 
 A server whose `Stored(...)` or `Env(...)` bearer does not resolve on this
-machine, or that rejects the bearer with HTTP 401 or 403 (a token that
+machine, or that rejects the bearer with an HTTP 401 or 403 challenge (a token that
 expired or was revoked), is reported separately, so you know what to fix.
 Its `allow` list stays in force and its tool names stay reserved; the
 readiness message names the credential and the fix:

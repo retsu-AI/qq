@@ -652,7 +652,7 @@ impl ServerHandle {
                         let _gate = self.dispatch_gate.lock().expect("dispatch gate poisoned");
                         if self.tools_dirty.load(Ordering::Acquire) {
                             return Err(ListingFault::Unavailable(Fault::unreachable(
-                                "tool listing changed during discovery; retry inspection",
+                                "tool listing changed during discovery; retry",
                             )));
                         }
                         let generation = self.catalog_generation.fetch_add(1, Ordering::AcqRel) + 1;
