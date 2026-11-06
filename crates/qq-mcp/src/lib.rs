@@ -194,6 +194,8 @@ pub enum McpCallFailure {
     Timeout,
     Cancelled,
     Unavailable,
+    NeedsAuth,
+    DeclarationChanged,
     InvalidArguments,
     InvalidResult,
     UnknownTool,
@@ -249,10 +251,93 @@ pub struct McpInspection {
     pub tools: Vec<McpTool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpUnavailableKind {
+    Unreachable,
+    NeedsAuth,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpUnavailable {
     pub server: String,
+    pub kind: McpUnavailableKind,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Fault {
+    kind: McpUnavailableKind,
+    reason: String,
+}
+
+impl Fault {
+    fn unreachable(reason: impl Into<String>) -> Self {
+        Self {
+            kind: McpUnavailableKind::Unreachable,
+            reason: reason.into(),
+        }
+    }
+
+    fn needs_auth(reason: impl Into<String>) -> Self {
+        Self {
+            kind: McpUnavailableKind::NeedsAuth,
+            reason: reason.into(),
+        }
+    }
+
+    fn into_call_outcome(self) -> McpCallOutcome {
+        let failure = match self.kind {
+            McpUnavailableKind::Unreachable => McpCallFailure::Unavailable,
+            McpUnavailableKind::NeedsAuth => McpCallFailure::NeedsAuth,
+        };
+        McpCallOutcome::error(self.reason, failure)
+    }
+}
+
+fn authorization_fault(server: &str, error: &(dyn std::error::Error + 'static)) -> Option<Fault> {
+    use rmcp::transport::streamable_http_client::StreamableHttpError;
+    let mut cause = Some(error);
+    while let Some(current) = cause {
+        if let Some(http) = current.downcast_ref::<StreamableHttpError<reqwest::Error>>() {
+            match http {
+                StreamableHttpError::AuthRequired(_) => {
+                    return Some(Fault::needs_auth(format!(
+                        "MCP server {server:?} requires authorization (HTTP 401); its bearer is missing, expired, or revoked"
+                    )));
+                }
+                StreamableHttpError::InsufficientScope(_) => {
+                    return Some(Fault::needs_auth(format!(
+                        "MCP server {server:?} refused the bearer's scope (HTTP 403)"
+                    )));
+                }
+                _ => {}
+            }
+        }
+        cause = current.source();
+    }
+    None
+}
+
+fn initialize_fault(server: &str, error: &rmcp::service::ClientInitializeError) -> Fault {
+    if let rmcp::service::ClientInitializeError::TransportError {
+        error: transport, ..
+    } = error
+        && let Some(fault) = authorization_fault(server, transport.error.as_ref())
+    {
+        return fault;
+    }
+    Fault::unreachable(format!(
+        "MCP server {server:?} failed to initialize: {error}"
+    ))
+}
+
+fn service_fault(server: &str, error: &ServiceError) -> Option<Fault> {
+    match error {
+        ServiceError::TransportSend(transport) => {
+            authorization_fault(server, transport.error.as_ref())
+        }
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,7 +434,7 @@ struct Listing {
 }
 
 enum ListingFault {
-    Unavailable(String),
+    Unavailable(Fault),
     Quarantined {
         expected: McpToolSetDigest,
         actual: McpToolSetDigest,
@@ -376,17 +461,17 @@ impl ServerHandle {
         self.catalog_generation.fetch_add(1, Ordering::AcqRel);
     }
 
-    async fn client(&self) -> Result<Arc<Client>, String> {
+    async fn client(&self) -> Result<Arc<Client>, Fault> {
         let mut state = self.state.lock().await;
         self.client_locked(&mut state).await
     }
 
-    async fn client_locked(&self, state: &mut ServerState) -> Result<Arc<Client>, String> {
+    async fn client_locked(&self, state: &mut ServerState) -> Result<Arc<Client>, Fault> {
         if self.shut_down.load(Ordering::Acquire) {
-            return Err(format!(
+            return Err(Fault::unreachable(format!(
                 "MCP server {:?} has been shut down",
                 self.settings.name
-            ));
+            )));
         }
         if let Some(client) = &state.client {
             return Ok(Arc::clone(client));
@@ -419,19 +504,19 @@ impl ServerHandle {
             }
             Err(_) => {
                 state.last_failure = Some(Instant::now());
-                Err(format!(
+                Err(Fault::unreachable(format!(
                     "connecting to MCP server {:?} timed out after {} s",
                     self.settings.name,
                     CONNECT_TIMEOUT.as_secs()
-                ))
+                )))
             }
         }
     }
 
-    async fn connect(&self, handler: QqClientHandler) -> Result<Client, String> {
+    async fn connect(&self, handler: QqClientHandler) -> Result<Client, Fault> {
         #[cfg(test)]
         if let Some(connector) = &self.connector {
-            return connector(handler).await;
+            return connector(handler).await.map_err(Fault::unreachable);
         }
         match &self.settings.transport {
             McpTransportSettings::Stdio { command, args, env } => {
@@ -450,33 +535,31 @@ impl ServerHandle {
                     .stderr(std::process::Stdio::null())
                     .spawn()
                     .map_err(|error| {
-                        format!(
+                        Fault::unreachable(format!(
                             "could not start MCP server {:?}: {error}",
                             self.settings.name
-                        )
+                        ))
                     })?;
-                handler.serve(transport).await.map_err(|error| {
-                    format!(
-                        "MCP server {:?} failed to initialize: {error}",
-                        self.settings.name
-                    )
-                })
+                handler
+                    .serve(transport)
+                    .await
+                    .map_err(|error| initialize_fault(&self.settings.name, &error))
             }
             McpTransportSettings::Http { url, bearer } => {
                 let mut config = StreamableHttpClientTransportConfig::with_uri(url.clone());
                 match bearer {
                     McpBearer::None => {}
                     McpBearer::Token(token) => config = config.auth_header(token.clone()),
-                    McpBearer::Unavailable { reason } => return Err(reason.clone()),
+                    McpBearer::Unavailable { reason } => {
+                        return Err(Fault::needs_auth(reason.clone()));
+                    }
                 }
                 let transport =
                     StreamableHttpClientTransport::with_client(reqwest::Client::default(), config);
-                handler.serve(transport).await.map_err(|error| {
-                    format!(
-                        "MCP server {:?} failed to initialize: {error}",
-                        self.settings.name
-                    )
-                })
+                handler
+                    .serve(transport)
+                    .await
+                    .map_err(|error| initialize_fault(&self.settings.name, &error))
             }
         }
     }
@@ -530,36 +613,47 @@ impl ServerHandle {
                         request.cursor = cursor;
                         let page = match client.list_tools(Some(request)).await {
                             Ok(page) => page,
-                            Err(error) => return Err(format!("tool listing failed: {error}")),
+                            Err(error) => {
+                                return Err(service_fault(&self.settings.name, &error)
+                                    .unwrap_or_else(|| {
+                                        self.listing_fault(format!("tool listing failed: {error}"))
+                                    }));
+                            }
                         };
                         if page.tools.len() > MAX_LIST_TOOLS - tools.len() {
-                            return Err("tool listing exceeds the 512-tool limit".to_owned());
+                            return Err(
+                                self.listing_fault("tool listing exceeds the 512-tool limit")
+                            );
                         }
                         for tool in &page.tools {
                             if let Err(error) = serde_json::to_writer(&mut budget, tool) {
                                 if error.is_io() {
-                                    return Err("tool listing exceeds the 1 MiB descriptor limit"
-                                        .to_owned());
+                                    return Err(self.listing_fault(
+                                        "tool listing exceeds the 1 MiB descriptor limit",
+                                    ));
                                 }
-                                return Err(format!("invalid tool descriptor: {error}"));
+                                return Err(
+                                    self.listing_fault(format!("invalid tool descriptor: {error}"))
+                                );
                             }
                         }
                         tools.extend(page.tools);
                         cursor = page.next_cursor;
                         if cursor.is_none() {
-                            return self.namespaced_tools(tools);
+                            return self
+                                .namespaced_tools(tools)
+                                .map_err(|error| self.listing_fault(error));
                         }
                     }
-                    Err("tool listing exceeds the 32-page limit".to_owned())
+                    Err(self.listing_fault("tool listing exceeds the 32-page limit"))
                 };
                 match tokio::time::timeout(LIST_TOOLS_TIMEOUT, fetch).await {
                     Ok(Ok(tools)) => {
                         let _gate = self.dispatch_gate.lock().expect("dispatch gate poisoned");
                         if self.tools_dirty.load(Ordering::Acquire) {
-                            return Err(ListingFault::Unavailable(
-                                "tool listing changed during discovery; retry inspection"
-                                    .to_owned(),
-                            ));
+                            return Err(ListingFault::Unavailable(Fault::unreachable(
+                                "tool listing changed during discovery; retry",
+                            )));
                         }
                         let generation = self.catalog_generation.fetch_add(1, Ordering::AcqRel) + 1;
                         let listing = Arc::new(Listing {
@@ -571,29 +665,32 @@ impl ServerHandle {
                         state.listing = Some(Arc::clone(&listing));
                         listing
                     }
-                    Ok(Err(error)) => {
+                    Ok(Err(fault)) => {
                         state.client = None;
                         state.listing = None;
                         state.last_failure = Some(Instant::now());
-                        return Err(ListingFault::Unavailable(format!(
-                            "listing tools on MCP server {:?} failed: {error}",
-                            self.settings.name
-                        )));
+                        return Err(ListingFault::Unavailable(fault));
                     }
                     Err(_) => {
                         state.client = None;
                         state.listing = None;
                         state.last_failure = Some(Instant::now());
-                        return Err(ListingFault::Unavailable(format!(
-                            "listing tools on MCP server {:?} timed out after {} s",
-                            self.settings.name,
+                        return Err(ListingFault::Unavailable(self.listing_fault(format!(
+                            "timed out after {} s",
                             LIST_TOOLS_TIMEOUT.as_secs()
-                        )));
+                        ))));
                     }
                 }
             }
         };
         Ok(listing)
+    }
+
+    fn listing_fault(&self, problem: impl fmt::Display) -> Fault {
+        Fault::unreachable(format!(
+            "listing tools on MCP server {:?} failed: {problem}",
+            self.settings.name
+        ))
     }
 
     fn namespaced_tools(&self, tools: Vec<rmcp::model::Tool>) -> Result<Vec<McpTool>, String> {
@@ -639,6 +736,7 @@ impl ServerHandle {
         &self,
         tool: &str,
         arguments: &str,
+        admitted: Option<&McpTool>,
         cancelled: CancellationSignal,
     ) -> McpCallOutcome {
         if self.shut_down.load(Ordering::Acquire) {
@@ -652,7 +750,7 @@ impl ServerHandle {
             Err(error) => return McpCallOutcome::error(error, McpCallFailure::InvalidArguments),
         };
         let deadline = tokio::time::Instant::now() + self.settings.call_timeout;
-        let execution = self.execute(tool, arguments);
+        let execution = self.execute(tool, arguments, admitted);
         tokio::select! {
             biased;
             () = cancelled => McpCallOutcome::error(
@@ -674,6 +772,7 @@ impl ServerHandle {
         &self,
         tool: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
+        admitted: Option<&McpTool>,
     ) -> McpCallOutcome {
         if self.shut_down.load(Ordering::Acquire) {
             return McpCallOutcome::error(
@@ -682,12 +781,10 @@ impl ServerHandle {
             );
         }
         let (client, _permit, generation) = loop {
-            let listing = if self.settings.pin.is_some() {
+            let listing = if self.settings.pin.is_some() || admitted.is_some() {
                 match self.listing().await {
                     Ok(listing) => Some(listing),
-                    Err(ListingFault::Unavailable(reason)) => {
-                        return McpCallOutcome::error(reason, McpCallFailure::Unavailable);
-                    }
+                    Err(ListingFault::Unavailable(fault)) => return fault.into_call_outcome(),
                     Err(ListingFault::Quarantined { expected, actual }) => {
                         return McpCallOutcome::error(
                             format!(
@@ -705,7 +802,7 @@ impl ServerHandle {
                 Some(listing) => Arc::clone(&listing.client),
                 None => match self.client().await {
                     Ok(client) => client,
-                    Err(error) => return McpCallOutcome::error(error, McpCallFailure::Unavailable),
+                    Err(fault) => return fault.into_call_outcome(),
                 },
             };
             let Ok(permit) = self.permits.acquire().await else {
@@ -728,18 +825,44 @@ impl ServerHandle {
                     continue;
                 }
                 let name = format!("{MCP_TOOL_PREFIX}{}__{tool}", self.settings.name);
-                if listing
+                let listed = listing
                     .tools
                     .binary_search_by(|entry| entry.spec.name().cmp(&name))
-                    .is_err()
-                {
-                    return McpCallOutcome::error(
-                        "tool is absent from the pinned listing",
-                        McpCallFailure::UnknownTool,
-                    );
+                    .ok()
+                    .map(|index| &listing.tools[index]);
+                match (listed, admitted) {
+                    (Some(listed), Some(admitted)) if listed != admitted => {
+                        return McpCallOutcome::error(
+                            format!(
+                                "{name} changed its declaration after this run was admitted; the run keeps the contract it was admitted with, so the call was not sent. Start a new run to use the new declaration"
+                            ),
+                            McpCallFailure::DeclarationChanged,
+                        );
+                    }
+                    (None, Some(_)) => {
+                        return McpCallOutcome::error(
+                            format!(
+                                "{name} is no longer listed by its server; the call was not sent"
+                            ),
+                            McpCallFailure::DeclarationChanged,
+                        );
+                    }
+                    (None, None) => {
+                        return McpCallOutcome::error(
+                            "tool is absent from the pinned listing",
+                            McpCallFailure::UnknownTool,
+                        );
+                    }
+                    (Some(_), _) => {}
                 }
             }
-            break (client, permit, listing.map(|listing| listing.generation));
+            break (
+                client,
+                permit,
+                listing
+                    .filter(|_| self.settings.pin.is_some())
+                    .map(|listing| listing.generation),
+            );
         };
         let mut params = CallToolRequestParams::new(tool.to_owned());
         params.arguments = arguments;
@@ -768,7 +891,7 @@ impl ServerHandle {
             match dispatched {
                 None => {
                     return McpCallOutcome::error(
-                        "MCP listing changed before dispatch; retry after inspection",
+                        "MCP listing changed before dispatch; the call was not sent",
                         McpCallFailure::Quarantined,
                     );
                 }
@@ -797,9 +920,14 @@ impl ServerHandle {
             },
             Err(error) => {
                 self.invalidate(&client).await;
-                McpCallOutcome::error(
-                    format!("MCP call failed: {error}"),
-                    McpCallFailure::Unavailable,
+                service_fault(&self.settings.name, &error).map_or_else(
+                    || {
+                        McpCallOutcome::error(
+                            format!("MCP call failed: {error}"),
+                            McpCallFailure::Unavailable,
+                        )
+                    },
+                    Fault::into_call_outcome,
                 )
             }
         }
@@ -947,6 +1075,7 @@ impl McpManager {
         let Some(handle) = self.servers.get(server) else {
             return Err(McpUnavailable {
                 server: server.to_owned(),
+                kind: McpUnavailableKind::Unreachable,
                 reason: "server is not configured".to_owned(),
             });
         };
@@ -957,9 +1086,10 @@ impl McpManager {
                 digest: listing.digest,
                 tools: listing.tools.clone(),
             }),
-            Err(ListingFault::Unavailable(reason)) => Err(McpUnavailable {
+            Err(ListingFault::Unavailable(fault)) => Err(McpUnavailable {
                 server: server.to_owned(),
-                reason,
+                kind: fault.kind,
+                reason: fault.reason,
             }),
             Err(ListingFault::Quarantined { .. }) => {
                 unreachable!("raw listing inspection does not enforce pins")
@@ -987,9 +1117,10 @@ impl McpManager {
                         digest: listing.digest,
                     });
                 }
-                Err(ListingFault::Unavailable(reason)) => unavailable.push(McpUnavailable {
+                Err(ListingFault::Unavailable(fault)) => unavailable.push(McpUnavailable {
                     server: name.clone(),
-                    reason,
+                    kind: fault.kind,
+                    reason: fault.reason,
                 }),
                 Err(ListingFault::Quarantined { expected, actual }) => {
                     servers.push(McpServerListing {
@@ -1066,6 +1197,26 @@ impl McpManager {
         arguments: &str,
         cancelled: CancellationSignal,
     ) -> McpCallOutcome {
+        self.dispatch(name, arguments, None, cancelled).await
+    }
+
+    pub async fn call_admitted(
+        &self,
+        admitted: &McpTool,
+        arguments: &str,
+        cancelled: CancellationSignal,
+    ) -> McpCallOutcome {
+        self.dispatch(admitted.spec.name(), arguments, Some(admitted), cancelled)
+            .await
+    }
+
+    async fn dispatch(
+        &self,
+        name: &str,
+        arguments: &str,
+        admitted: Option<&McpTool>,
+        cancelled: CancellationSignal,
+    ) -> McpCallOutcome {
         let Some((server, tool)) = name
             .strip_prefix(MCP_TOOL_PREFIX)
             .and_then(|rest| rest.split_once("__"))
@@ -1087,7 +1238,7 @@ impl McpManager {
                 McpCallFailure::UnknownTool,
             );
         }
-        handle.call(tool, arguments, cancelled).await
+        handle.call(tool, arguments, admitted, cancelled).await
     }
 }
 

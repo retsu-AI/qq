@@ -48,6 +48,10 @@ impl ExternalToolHost for WiredMcpRegistry {
         match fetched {
             Ok(catalog) => HostCatalog {
                 generation: catalog.generation,
+                readiness: match readiness_message(&catalog) {
+                    None => HostReadiness::Ready,
+                    Some(message) => HostReadiness::Degraded { message },
+                },
                 tools: catalog
                     .tools
                     .into_iter()
@@ -61,39 +65,6 @@ impl ExternalToolHost for WiredMcpRegistry {
                         },
                     })
                     .collect(),
-                readiness: if catalog.unavailable.is_empty() && catalog.quarantined.is_empty() {
-                    HostReadiness::Ready
-                } else {
-                    let mut message = String::new();
-                    if !catalog.unavailable.is_empty() {
-                        message.push_str("unavailable MCP servers: ");
-                        for (index, unavailable) in catalog.unavailable.iter().enumerate() {
-                            if index > 0 {
-                                message.push_str("; ");
-                            }
-                            message.push_str(&unavailable.server);
-                            message.push_str(" (");
-                            message.push_str(&unavailable.reason);
-                            message.push(')');
-                        }
-                    }
-                    if !catalog.quarantined.is_empty() {
-                        if !message.is_empty() {
-                            message.push_str("; ");
-                        }
-                        message.push_str("quarantined MCP servers: ");
-                        for (index, quarantine) in catalog.quarantined.iter().enumerate() {
-                            if index > 0 {
-                                message.push_str("; ");
-                            }
-                            message.push_str(&format!(
-                                "{} (tool set digests to {} but the configured pin is {})",
-                                quarantine.server, quarantine.actual, quarantine.expected
-                            ));
-                        }
-                    }
-                    HostReadiness::Degraded { message }
-                },
             },
             Err(_) => HostCatalog {
                 generation: self.manager.generation(),
@@ -135,28 +106,30 @@ impl ExternalToolHost for WiredMcpRegistry {
         HostCallObservation::Observed(Box::pin(async move {
             let signal = Box::pin(async move { cancelled.cancelled().await });
             let outcome = manager.call(&name, &arguments, signal).await;
-            match outcome.failure {
-                None => Ok(ObservedHostToolResult {
-                    result: HostToolResult {
-                        content: outcome.content,
-                        is_error: outcome.is_error,
-                    },
-                    result_digest: outcome.result_digest,
-                }),
-                Some(McpCallFailure::Timeout) => Err(HostCallError::Timeout),
-                Some(McpCallFailure::Cancelled) => Err(HostCallError::Cancelled),
-                Some(McpCallFailure::Unavailable) => {
-                    Err(HostCallError::Unavailable(outcome.content))
-                }
-                Some(McpCallFailure::InvalidArguments | McpCallFailure::Quarantined) => {
-                    Err(HostCallError::Refused(outcome.content))
-                }
-                Some(McpCallFailure::InvalidResult) => {
-                    Err(HostCallError::InvalidResult(outcome.content))
-                }
-                Some(McpCallFailure::UnknownTool) => Err(HostCallError::UnknownTool(name)),
-                Some(McpCallFailure::ShutDown) => Err(HostCallError::ShutDown),
-            }
+            observed(outcome, name)
+        }))
+    }
+
+    fn call_declared(
+        &self,
+        declared: &HostTool,
+        arguments: String,
+        cancelled: RunCancellation,
+    ) -> HostCallObservation {
+        let manager = Arc::clone(&self.manager);
+        let admitted = qq_mcp::McpTool {
+            spec: declared.spec.clone(),
+            hints: qq_mcp::McpToolHints {
+                read_only: declared.hints.read_only,
+                destructive: declared.hints.destructive,
+                idempotent: declared.hints.idempotent,
+                open_world: declared.hints.open_world,
+            },
+        };
+        HostCallObservation::Observed(Box::pin(async move {
+            let signal = Box::pin(async move { cancelled.cancelled().await });
+            let outcome = manager.call_admitted(&admitted, &arguments, signal).await;
+            observed(outcome, admitted.spec.name().to_owned())
         }))
     }
 
@@ -172,6 +145,72 @@ impl ExternalToolHost for WiredMcpRegistry {
         let manager = Arc::clone(&self.manager);
         Box::pin(async move { manager.shutdown().await })
     }
+}
+
+fn observed(
+    outcome: qq_mcp::McpCallOutcome,
+    name: String,
+) -> Result<ObservedHostToolResult, HostCallError> {
+    match outcome.failure {
+        None => Ok(ObservedHostToolResult {
+            result: HostToolResult {
+                content: outcome.content,
+                is_error: outcome.is_error,
+            },
+            result_digest: outcome.result_digest,
+        }),
+        Some(McpCallFailure::Timeout) => Err(HostCallError::Timeout),
+        Some(McpCallFailure::Cancelled) => Err(HostCallError::Cancelled),
+        Some(McpCallFailure::Unavailable | McpCallFailure::NeedsAuth) => {
+            Err(HostCallError::Unavailable(outcome.content))
+        }
+        Some(
+            McpCallFailure::InvalidArguments
+            | McpCallFailure::Quarantined
+            | McpCallFailure::DeclarationChanged,
+        ) => Err(HostCallError::Refused(outcome.content)),
+        Some(McpCallFailure::InvalidResult) => Err(HostCallError::InvalidResult(outcome.content)),
+        Some(McpCallFailure::UnknownTool) => Err(HostCallError::UnknownTool(name)),
+        Some(McpCallFailure::ShutDown) => Err(HostCallError::ShutDown),
+    }
+}
+
+fn readiness_message(catalog: &qq_mcp::McpCatalog) -> Option<String> {
+    let mut sections = Vec::new();
+    for (kind, heading) in [
+        (
+            qq_mcp::McpUnavailableKind::NeedsAuth,
+            "MCP servers need authorization: ",
+        ),
+        (
+            qq_mcp::McpUnavailableKind::Unreachable,
+            "unavailable MCP servers: ",
+        ),
+    ] {
+        let entries = catalog
+            .unavailable
+            .iter()
+            .filter(|unavailable| unavailable.kind == kind)
+            .map(|unavailable| format!("{} ({})", unavailable.server, unavailable.reason))
+            .collect::<Vec<_>>();
+        if !entries.is_empty() {
+            sections.push(format!("{heading}{}", entries.join("; ")));
+        }
+    }
+    if !catalog.quarantined.is_empty() {
+        let entries = catalog
+            .quarantined
+            .iter()
+            .map(|quarantine| {
+                format!(
+                    "{} (tool set digests to {} but the configured pin is {})",
+                    quarantine.server, quarantine.actual, quarantine.expected
+                )
+            })
+            .collect::<Vec<_>>();
+        sections.push(format!("quarantined MCP servers: {}", entries.join("; ")));
+    }
+    (!sections.is_empty()).then(|| sections.join("; "))
 }
 
 pub struct WiredMcp {
@@ -286,20 +325,143 @@ impl McpRegistryCache {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum McpSettingsError {
+    #[error(transparent)]
+    Configuration(#[from] qq_config::ConfigError),
+    #[error(transparent)]
+    Credentials(#[from] AuthError),
+    #[error("MCP server {0:?} is not configured")]
+    NotConfigured(String),
+}
+
 pub fn inspection_settings(
     name: &str,
     request: &qq_config::LoadRequest,
-) -> Result<McpServerSettings, Box<dyn std::error::Error>> {
+) -> Result<McpServerSettings, McpSettingsError> {
     let loader = qq_config::ConfigLoader::system()?;
     let snapshot = loader.load_for_client(request)?;
     let server = snapshot
         .mcp_servers()
         .get(name)
-        .ok_or_else(|| std::io::Error::other(format!("MCP server {name:?} is not configured")))?;
+        .ok_or_else(|| McpSettingsError::NotConfigured(name.to_owned()))?;
     let credentials = CredentialStore::system()?;
     let mut settings = resolve_server(name, server, &credentials);
     settings.eager = false;
     Ok(settings)
+}
+
+pub fn status_settings(
+    request: &qq_config::LoadRequest,
+) -> Result<Vec<McpServerSettings>, McpSettingsError> {
+    let loader = qq_config::ConfigLoader::system()?;
+    let snapshot = loader.load_for_client(request)?;
+    let credentials = CredentialStore::system()?;
+    Ok(snapshot
+        .mcp_servers()
+        .iter()
+        .map(|(name, server)| {
+            let mut settings = resolve_server(name, server, &credentials);
+            settings.eager = false;
+            settings
+        })
+        .collect())
+}
+
+pub async fn server_status(
+    settings: Vec<McpServerSettings>,
+) -> Result<serde_json::Value, std::io::Error> {
+    tokio::select! {
+        biased;
+        signal = tokio::signal::ctrl_c() => Err(std::io::Error::other(match signal {
+            Ok(()) => "MCP status cancelled".to_owned(),
+            Err(error) => format!("cannot listen for interruption: {error}"),
+        })),
+        result = status_report(settings) => result,
+    }
+}
+
+async fn status_report(
+    settings: Vec<McpServerSettings>,
+) -> Result<serde_json::Value, std::io::Error> {
+    let pins = settings
+        .iter()
+        .map(|settings| (settings.name.clone(), settings.pin))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let manager = McpManager::new(settings).map_err(std::io::Error::other)?;
+    let catalog = tokio::time::timeout(CATALOG_SNAPSHOT_TIMEOUT, manager.catalog()).await;
+    manager.shutdown().await;
+    let catalog = catalog.map_err(|_| {
+        std::io::Error::other(format!(
+            "MCP status timed out after {} s",
+            CATALOG_SNAPSHOT_TIMEOUT.as_secs()
+        ))
+    })?;
+    let servers = pins
+        .iter()
+        .map(|(name, pin)| server_row(&catalog, name, *pin))
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({ "warning": INSPECTION_WARNING, "servers": servers }))
+}
+
+fn server_row(
+    catalog: &qq_mcp::McpCatalog,
+    name: &str,
+    pin: Option<qq_mcp::McpToolSetDigest>,
+) -> serde_json::Value {
+    let pin = pin.map(|pin| pin.to_string());
+    if let Some(unavailable) = catalog
+        .unavailable
+        .iter()
+        .find(|unavailable| unavailable.server == name)
+    {
+        let state = match unavailable.kind {
+            qq_mcp::McpUnavailableKind::NeedsAuth => "needs_auth",
+            qq_mcp::McpUnavailableKind::Unreachable => "unavailable",
+        };
+        return serde_json::json!({
+            "server": name,
+            "state": state,
+            "reason": unavailable.reason,
+            "configured_pin": pin,
+        });
+    }
+    if let Some(quarantine) = catalog
+        .quarantined
+        .iter()
+        .find(|quarantine| quarantine.server == name)
+    {
+        return serde_json::json!({
+            "server": name,
+            "state": "quarantined",
+            "reason": format!(
+                "tool set digests to {} but the configured pin is {}; review it with `qq mcp inspect {name}` before changing the pin",
+                quarantine.actual, quarantine.expected
+            ),
+            "configured_pin": pin,
+            "digest": quarantine.actual.to_string(),
+        });
+    }
+    let prefix = format!("{}{name}__", qq_mcp::MCP_TOOL_PREFIX);
+    let tools = catalog
+        .tools
+        .iter()
+        .filter(|tool| tool.spec.name().starts_with(&prefix))
+        .map(|tool| tool.spec.name())
+        .collect::<Vec<_>>();
+    let digest = catalog
+        .servers
+        .iter()
+        .find(|listing| listing.server == name)
+        .map(|listing| listing.digest.to_string());
+    serde_json::json!({
+        "server": name,
+        "state": "ready",
+        "reason": null,
+        "configured_pin": pin,
+        "digest": digest,
+        "tools": tools,
+    })
 }
 
 pub async fn inspect_server(
@@ -557,6 +719,7 @@ mod tests {
     struct HttpFixture {
         url: String,
         initializations: Arc<AtomicUsize>,
+        refusal: Arc<std::sync::atomic::AtomicU16>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -566,6 +729,8 @@ mod tests {
             let url = format!("http://{}/mcp", listener.local_addr().unwrap());
             let initializations = Arc::new(AtomicUsize::new(0));
             let initialized = Arc::clone(&initializations);
+            let refusal = Arc::new(std::sync::atomic::AtomicU16::new(0));
+            let refuse = Arc::clone(&refusal);
             let task = tokio::spawn(async move {
                 loop {
                     let (mut socket, _) = listener.accept().await.unwrap();
@@ -596,7 +761,14 @@ mod tests {
                         assert_ne!(count, 0, "request ended before its body");
                         request.extend_from_slice(&chunk[..count]);
                     }
-                    let (status, body) = if headers.starts_with("POST ") {
+                    let refused = refuse.load(Ordering::SeqCst);
+                    let (status, body) = if refused != 0 {
+                        let response = format!(
+                            "HTTP/1.1 {refused} Refused\r\nWWW-Authenticate: Bearer realm=\"fixture\", error=\"invalid_token\", scope=\"write\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        socket.write_all(response.as_bytes()).await.unwrap();
+                        continue;
+                    } else if headers.starts_with("POST ") {
                         let message: serde_json::Value = serde_json::from_slice(
                             &request[header_end..header_end + content_length],
                         )
@@ -638,6 +810,7 @@ mod tests {
             Self {
                 url,
                 initializations,
+                refusal,
                 task,
             }
         }
@@ -945,7 +1118,7 @@ mod tests {
         };
         assert_eq!(
             message,
-            "unavailable MCP servers: linear (credential `linear/default` is not registered; run `qq auth set linear/default`)"
+            "MCP servers need authorization: linear (credential `linear/default` is not registered; run `qq auth set linear/default`)"
         );
         assert_eq!(
             catalog
@@ -1060,6 +1233,153 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rejected_or_revoked_bearer_reports_needs_auth_instead_of_unreachable() {
+        let server = HttpFixture::new().await;
+        server.refusal.store(401, Ordering::SeqCst);
+        let fixture = ConfigFixture::new();
+        let snapshot = fixture.snapshot("first", &server.url, "expired-secret");
+        let wired = McpRegistryCache::new()
+            .registry_for_snapshot(&fixture.credentials, CredentialEpoch::NONE, &snapshot)
+            .unwrap()
+            .unwrap();
+        let registry = Arc::clone(&wired.registry);
+        let catalog = tokio::task::spawn_blocking(move || registry.catalog_blocking())
+            .await
+            .unwrap();
+        assert_eq!(
+            catalog.readiness,
+            HostReadiness::Degraded {
+                message: "MCP servers need authorization: srv (MCP server \"srv\" requires authorization (HTTP 401); its bearer is missing, expired, or revoked)".to_owned(),
+            }
+        );
+        assert!(catalog.tools.is_empty());
+        let message = format!("{:?}", catalog.readiness);
+        assert!(!message.contains("expired-secret"), "{message}");
+
+        server.refusal.store(0, Ordering::SeqCst);
+        let restored = echo(&wired.registry).await;
+        assert!(restored.starts_with("Bearer "), "{restored}");
+        server.refusal.store(403, Ordering::SeqCst);
+        let narrowed = tokio::time::timeout(
+            Duration::from_secs(10),
+            wired.registry.call(
+                "mcp__srv__echo".to_owned(),
+                "{}".to_owned(),
+                RunCancellation::new(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            narrowed,
+            Err(HostCallError::Unavailable(
+                "MCP server \"srv\" refused the bearer's scope (HTTP 403)".to_owned()
+            ))
+        );
+        server.refusal.store(0, Ordering::SeqCst);
+        let restored = echo(&wired.registry).await;
+        assert!(restored.starts_with("Bearer "), "{restored}");
+        server.refusal.store(401, Ordering::SeqCst);
+        let revoked = tokio::time::timeout(
+            Duration::from_secs(10),
+            wired.registry.call(
+                "mcp__srv__echo".to_owned(),
+                "{}".to_owned(),
+                RunCancellation::new(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            revoked,
+            Err(HostCallError::Unavailable(
+                "MCP server \"srv\" requires authorization (HTTP 401); its bearer is missing, expired, or revoked".to_owned()
+            ))
+        );
+        wired.registry.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn status_names_each_server_state_and_exact_reason() {
+        let server = HttpFixture::new().await;
+        let mut ready = McpServerSettings::new(
+            "ready",
+            McpTransportSettings::Http {
+                url: server.url.clone(),
+                bearer: qq_mcp::McpBearer::None,
+            },
+        );
+        ready.allow = vec!["echo".to_owned()];
+        let mut drifted = McpServerSettings::new(
+            "drifted",
+            McpTransportSettings::Http {
+                url: server.url.clone(),
+                bearer: qq_mcp::McpBearer::None,
+            },
+        );
+        drifted.pin = Some("ab".repeat(32).parse().unwrap());
+        let locked = McpServerSettings::new(
+            "locked",
+            McpTransportSettings::Http {
+                url: server.url.clone(),
+                bearer: qq_mcp::McpBearer::Unavailable {
+                    reason: "credential `locked/default` is not registered; run `qq auth set locked/default`".to_owned(),
+                },
+            },
+        );
+        let gone = McpServerSettings::new(
+            "gone",
+            McpTransportSettings::Stdio {
+                command: "qq-mcp-test-no-such-binary".to_owned(),
+                args: Vec::new(),
+                env: Vec::new(),
+            },
+        );
+        let report = tokio::time::timeout(
+            Duration::from_secs(30),
+            super::status_report(vec![ready, drifted, locked, gone]),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let rows = report["servers"].as_array().unwrap();
+        let row = |name: &str| rows.iter().find(|row| row["server"] == name).unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["server"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["drifted", "gone", "locked", "ready"]
+        );
+        assert_eq!(row("ready")["state"], "ready");
+        assert_eq!(row("ready")["tools"], json!(["mcp__ready__echo"]));
+        assert!(row("ready")["reason"].is_null());
+        assert_eq!(row("drifted")["state"], "quarantined");
+        let digest = row("drifted")["digest"].as_str().unwrap();
+        assert_eq!(
+            row("drifted")["reason"],
+            format!(
+                "tool set digests to {digest} but the configured pin is {}; review it with `qq mcp inspect drifted` before changing the pin",
+                "ab".repeat(32)
+            )
+        );
+        assert_eq!(row("locked")["state"], "needs_auth");
+        assert_eq!(
+            row("locked")["reason"],
+            "credential `locked/default` is not registered; run `qq auth set locked/default`"
+        );
+        assert_eq!(row("gone")["state"], "unavailable");
+        assert!(
+            row("gone")["reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("could not start MCP server \"gone\": "),
+            "{}",
+            row("gone")["reason"]
+        );
+        assert!(report["warning"].as_str().unwrap().contains("Untrusted"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

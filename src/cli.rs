@@ -175,6 +175,10 @@ pub enum McpCommand {
     /// This starts the configured process or contacts its endpoint; no tool is
     /// called and no configuration is changed.
     Inspect { name: String },
+    #[command(
+        about = "Connect to every declared server and print its state (ready, needs_auth, unavailable, quarantined) and exact reason as JSON. No tool is called."
+    )]
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -1040,6 +1044,14 @@ mod tests {
             }) if name == "linear"
         ));
         assert!(Cli::try_parse_from(["qq", "mcp", "inspect"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["qq", "mcp", "status"])
+                .unwrap()
+                .command,
+            Some(Command::Mcp {
+                command: McpCommand::Status
+            })
+        ));
         assert!(Cli::try_parse_from(["qq", "mcp"]).is_err());
         assert!(matches!(
             Cli::try_parse_from([

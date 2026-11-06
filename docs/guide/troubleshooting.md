@@ -176,7 +176,7 @@ local, uncommitted fragment ([MCP › Where to declare it](mcp.md#where-to-decla
 
 For a provider this fails the run. For an MCP server's `bearer` it only
 degrades that server: the run proceeds and the catalog reports
-`unavailable MCP servers: NAME (credential `…` is not registered; run `qq
+`MCP servers need authorization: NAME (credential `…` is not registered; run `qq
 auth set …`)` (see below); `qq doctor` warns about it under `mcp`.
 
 ### `credential `…` is registered in OS keyring, but its secret is missing`
@@ -243,15 +243,32 @@ is the operating system's reason. The run continues with other tools.
 
 ### `unavailable MCP servers: …`
 
-The named server did not start, connect, or authenticate; the reason follows
-its name in parentheses. The run continues without it, and calls to its
-tools return an unavailable error to the model. For a stdio server check the
-`command` is on `PATH`; for HTTP check the `url`. When the reason names a
-credential (`credential `linear/default` is not registered; run `qq auth set
-linear/default``, or the environment variable for `Env(...)`), run the
-command it names — the next run picks the credential up without a restart.
-`qq doctor` reports the same finding under `mcp`; `eager: true` surfaces a
-connection failure at startup instead of first use.
+The named server did not start, connect, or list its tools; the reason
+follows its name in parentheses. The run continues without it, and calls to
+its tools return an unavailable error to the model. For a stdio server check
+the `command` is on `PATH`; for HTTP check the `url`. `qq mcp status` prints
+the state and reason for every server. `eager: true` surfaces a connection
+failure at startup instead of first use.
+
+### `MCP servers need authorization: …`
+
+The named server's credential is the problem, not the network. Either its
+`bearer` reference does not resolve on this machine (`credential
+`linear/default` is not registered; run `qq auth set linear/default``, or an
+unset `Env(...)` variable), or the server answered HTTP 401 or 403 with a
+`WWW-Authenticate` challenge because
+the token expired, was revoked, or lacks a scope. Run the command the reason
+names, or store a fresh token from the server's login flow with `qq auth set
+NAME --endpoint URL`. The next run picks it up without a restart. `qq doctor`
+reports unresolved references under `mcp`.
+
+### `… changed its declaration after this run was admitted; the run keeps the contract it was admitted with, so the call was not sent. Start a new run to use the new declaration`
+
+An MCP server changed or removed a tool while a run was using it. The run
+keeps the declaration it started with, so QQ refused the call and did not
+send it. Start a new run to use the new declaration. If the server is pinned,
+the new run reports it as quarantined until you review it with
+`qq mcp inspect NAME` and update the pin.
 
 ### `provider returned HTTP 400: Invalid JSON payload received. Unknown name "additionalProperties"…`
 

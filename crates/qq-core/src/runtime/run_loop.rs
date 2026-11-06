@@ -2909,9 +2909,11 @@ impl RunState {
                                             ),
                                         )
                                     }
-                                    None if let Some(catalog::ToolHost::External { host: index }) = host => {
-                                        let outcome = match hosts[index].call_observed(
-                                            call.name.clone(), call.arguments.clone(), cancelled,
+                                    None if let Some(entry) = catalog.lookup(&call.name)
+                                        && let catalog::ToolHost::External { host: index } = entry.host => {
+                                        let declared = hosts::HostTool { spec: entry.spec.clone(), hints: entry.hints };
+                                        let outcome = match hosts[index].call_declared(
+                                            &declared, call.arguments.clone(), cancelled,
                                         ) {
                                             hosts::HostCallObservation::Rendered(future) => future.await.map(|result| (result, None)),
                                             hosts::HostCallObservation::Observed(future) => future.await.map(|observed| (observed.result, observed.result_digest)),
