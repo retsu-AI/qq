@@ -148,6 +148,18 @@ async fn run(cli: cli::Cli) -> Result<ExitCode, Box<dyn Error>> {
             let report = mcp::inspect_server(settings).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Some(cli::Command::Mcp {
+            command: cli::McpCommand::Status,
+        }) => {
+            let request = overrides.load_request()?;
+            let settings = tokio::task::spawn_blocking(move || {
+                mcp::status_settings(&request).map_err(|error| error.to_string())
+            })
+            .await?
+            .map_err(io::Error::other)?;
+            let report = mcp::server_status(settings).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Some(cli::Command::Org { command }) => organization_command(command)?,
         Some(cli::Command::Trust) => trust_command(&overrides)?,
         Some(cli::Command::Doctor(args)) => {

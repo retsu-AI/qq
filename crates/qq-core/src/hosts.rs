@@ -119,6 +119,15 @@ pub trait ExternalToolHost: Send + Sync {
 
     fn readiness(&self) -> HostReadiness;
 
+    fn call_declared(
+        &self,
+        declared: &HostTool,
+        arguments: String,
+        cancelled: RunCancellation,
+    ) -> HostCallObservation {
+        self.call_observed(declared.spec.name().to_owned(), arguments, cancelled)
+    }
+
     fn shutdown(&self) -> HostShutdownFuture;
 }
 

@@ -95,8 +95,24 @@ also taken whole or not at all: a listing with a malformed or duplicate tool
 name, more than 512 tools, more than 1 MiB of descriptors, or more than 32
 pages is unavailable rather than partially pinned. The pin is part of the
 compiled plan's identity, so a run records which tool set it was admitted
-against and changing a pin recompiles the plan. Unpinned servers behave as
-before.
+against and changing a pin recompiles the plan.
+
+## A tool that changes during a run
+
+Every run keeps the tool declarations it was admitted with, pinned or not.
+If a server's `tools/list` changes while a run is in progress, the model keeps
+seeing the original schemas, and each call is checked against the server's
+current listing before it is sent. A tool whose name, description, schema, or
+hints changed, or that the server no longer lists, is refused and never
+reaches the server:
+
+```text
+mcp__linear__create_issue changed its declaration after this run was admitted; the run keeps the contract it was admitted with, so the call was not sent. Start a new run to use the new declaration
+```
+
+The next run compiles against the new listing. On an unpinned server that
+means the changed declaration is accepted the same way a new server is. On
+a pinned server it means quarantine.
 
 ## Where to declare it
 
@@ -127,29 +143,53 @@ under `ask` each call asks; under `auto` and `full` they run without asking.
 
 ## When a server is unavailable
 
+Every declared server is in one of these states. `qq mcp status` prints the
+state and exact reason for each one:
+
+| State | Meaning | Its tools |
+| --- | --- | --- |
+| `ready` | listed its tools (and they match the pin, if one is set) | declared to the model, directly or through `select_tools` |
+| `needs_auth` | its bearer did not resolve on this machine, or the server answered HTTP 401/403 | none; calls return the reason |
+| `unavailable` | it failed to start, connect, or list tools within bounds | none; calls return the reason |
+| `quarantined` | its listing no longer matches `pin` | none; every call is refused |
+
+```sh
+qq mcp status
+```
+
+connects to every declared server, calls no tool, and prints JSON with
+`server`, `state`, `reason`, `configured_pin`, `digest`, and, for `ready`
+servers, the tool names. Tool descriptions are not printed. Use
+`qq mcp inspect NAME` to review them as untrusted text.
+
 A server that fails to start or connect contributes no tools; the tool
 catalog reports `unavailable MCP servers: NAME (reason)` and the run
 continues with built-ins and the other servers. Calls to it return a typed
 unavailable error to the model. The next use retries with backoff.
 
 A server whose `Stored(...)` or `Env(...)` bearer does not resolve on this
-machine degrades the same way rather than failing the run. Its `allow`
-list stays in force and its tool names stay reserved; the readiness
-message names the credential and the fix:
+machine, or that rejects the bearer with HTTP 401 or 403 (a token that
+expired or was revoked), is reported separately, so you know what to fix.
+Its `allow` list stays in force and its tool names stay reserved; the
+readiness message names the credential and the fix:
 
 ```text
-unavailable MCP servers: linear (credential `linear/default` is not registered; run `qq auth set linear/default`)
+MCP servers need authorization: linear (credential `linear/default` is not registered; run `qq auth set linear/default`)
 ```
 
 Run the command named, and the next run picks the credential up without a
 restart: the tool registry is keyed by the credential store's epoch, which
-`qq auth set` advances. `qq doctor` reports the same finding under `mcp`
+`qq auth set` advances. QQ does not run an OAuth flow for MCP servers. Get
+the token from the server's own login flow and store it with
+`qq auth set NAME --endpoint URL`, which keeps it in the OS keyring. `qq doctor` reports the same finding under `mcp`
 as a warning. The TUI shows the same reason as a warning on the composer
 rule when it connects (once per distinct message) and under the search row
 of `/skills`. Inline `Value(...)` bearers are unaffected.
 
 ## Inspecting
 
+- `qq mcp status` connects to every declared server and prints each one's
+  state and reason as JSON without calling anything.
 - `qq mcp inspect NAME` connects to one server and prints its tool
   descriptors and digest as JSON without calling anything.
 - `qq config show` lists declared servers with redacted bearers.

@@ -637,6 +637,70 @@ async fn stdio_spawn_failures_become_call_errors_over_the_real_transport() {
 }
 
 #[tokio::test]
+async fn an_admitted_contract_refuses_a_changed_or_removed_declaration_without_a_pin() {
+    let fixture = Fixture::new(&["echo", "fail"]);
+    let manager = manager_with(vec![(settings("srv"), fixture.connector())]);
+    let admitted = manager.catalog().await;
+    let echo = admitted
+        .tools
+        .iter()
+        .find(|tool| tool.spec.name() == "mcp__srv__echo")
+        .unwrap()
+        .clone();
+    let fail = admitted
+        .tools
+        .iter()
+        .find(|tool| tool.spec.name() == "mcp__srv__fail")
+        .unwrap()
+        .clone();
+    let unchanged = manager
+        .call_admitted(&echo, r#"{"text":"same"}"#, not_cancelled())
+        .await;
+    assert_eq!(unchanged.failure, None);
+    assert_eq!(unchanged.content, "same");
+
+    {
+        let mut tools = fixture.server.tools.lock().unwrap();
+        tools[0].description = Some("now does something else".into());
+        tools.pop();
+    }
+    fixture.notify_tool_list_changed().await;
+    poll_until(async || !manager.catalog_is_current(admitted.generation)).await;
+    let calls_before = fixture.server.tool_calls.load(Ordering::SeqCst);
+
+    let changed = manager
+        .call_admitted(&echo, r#"{"text":"drifted"}"#, not_cancelled())
+        .await;
+    assert_eq!(changed.failure, Some(McpCallFailure::DeclarationChanged));
+    assert_eq!(
+        changed.content,
+        "mcp__srv__echo changed its declaration after this run was admitted; the run keeps the contract it was admitted with, so the call was not sent. Start a new run to use the new declaration"
+    );
+    let removed = manager.call_admitted(&fail, "{}", not_cancelled()).await;
+    assert_eq!(removed.failure, Some(McpCallFailure::DeclarationChanged));
+    assert_eq!(
+        removed.content,
+        "mcp__srv__fail is no longer listed by its server; the call was not sent"
+    );
+    assert_eq!(
+        fixture.server.tool_calls.load(Ordering::SeqCst),
+        calls_before,
+        "a changed contract never reaches the server"
+    );
+
+    let fresh = manager.catalog().await;
+    assert!(
+        fresh.quarantined.is_empty(),
+        "an unpinned server is not quarantined"
+    );
+    let next_run = manager
+        .call_admitted(&fresh.tools[0], r#"{"text":"new run"}"#, not_cancelled())
+        .await;
+    assert_eq!(next_run.failure, None);
+    assert_eq!(next_run.content, "new run");
+}
+
+#[tokio::test]
 async fn an_unresolvable_bearer_keeps_the_server_declared_but_unavailable() {
     let reason = "credential `linear/default` is not registered; run `qq auth set linear/default`";
     let mut degraded = settings("linear");
@@ -664,6 +728,7 @@ async fn an_unresolvable_bearer_keeps_the_server_declared_but_unavailable() {
         catalog.unavailable,
         [McpUnavailable {
             server: "linear".to_owned(),
+            kind: McpUnavailableKind::NeedsAuth,
             reason: reason.to_owned(),
         }]
     );
@@ -680,7 +745,7 @@ async fn an_unresolvable_bearer_keeps_the_server_declared_but_unavailable() {
     let outcome = manager
         .call("mcp__linear__create_issue", "{}", not_cancelled())
         .await;
-    assert_eq!(outcome.failure, Some(McpCallFailure::Unavailable));
+    assert_eq!(outcome.failure, Some(McpCallFailure::NeedsAuth));
     assert!(outcome.is_error);
     assert_eq!(outcome.content, reason);
 

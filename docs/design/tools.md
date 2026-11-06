@@ -1452,6 +1452,35 @@ embedded host above.
   as JSON with an explicit warning that the descriptors are untrusted input
   and that the digest grants nothing. A pin attests to the advertised
   metadata only, never to the server's implementation.
+- Admitted contracts hold for the whole run, pinned or not. The run loop
+  dispatches external calls through `ExternalToolHost::call_declared` with
+  the `HostTool` from the plan's compiled catalog, and the MCP registry
+  forwards it to `McpManager::call_admitted`. That call resolves the
+  server's current listing and refuses with `DeclarationChanged` (surfaced
+  as `Refused`) when the listed tool differs from the admitted one in
+  name, description, schema, or hints, or is no longer listed. Nothing is
+  sent. The model's declarations come from the same compiled catalog, so
+  a `tools/list` change mid-run never alters what the model sees or what
+  it can execute. A changed generation makes the plan stale, and the next
+  run compiles the new listing (a pinned server is quarantined instead).
+  Hosts that do not override `call_declared` fall back to `call_observed`
+  by name.
+- Capability states. Each declared server is `ready`, `needs_auth`,
+  `unavailable`, or `quarantined`. `McpUnavailable.kind`
+  (`Unreachable` or `NeedsAuth`) separates a credential problem from a
+  transport one: an unresolved `bearer` reference, or a streamable-HTTP
+  401/403 at initialize or mid-session (a revoked or expired token), is
+  `NeedsAuth` and calls fail with `McpCallFailure::NeedsAuth`. Readiness
+  lists them under `MCP servers need authorization:`, and `qq mcp status`
+  prints every server's state and reason. A ready server's tools are
+  either exposed (declared in full) or discoverable (listed in the
+  progressive index until `select_tools` pins them). Tools hidden by
+  `exposed_tools` or by read-only filtering are neither. Visibility never
+  grants execution: an unoffered external call is refused before it
+  reaches the host, and an offered one still goes through approval, the
+  pin, the admitted-contract check, and the server's concurrency bound.
+  QQ has no MCP OAuth client. Tokens come from the server's own flow and
+  are stored with `qq auth set`.
 
 MCP tools execute outside the workspace, so Ask asks before each call and
 Read-only denies them.
@@ -1516,7 +1545,7 @@ registry is built, not by `qq-mcp`. A reference that does not resolve on
 this machine (`Stored` not registered, `Env` unset, an endpoint binding
 that does not match) becomes `McpBearer::Unavailable { reason }`: the
 server stays declared with its `allow` list, never connects, and reports as
-`unavailable MCP servers: NAME (reason)` alongside connection failures,
+`MCP servers need authorization: NAME (reason)`,
 so one missing credential degrades one server rather than failing plan
 compilation for the workspace. The registry cache key includes the
 credential epoch, so `qq auth set` is picked up by the next compile.

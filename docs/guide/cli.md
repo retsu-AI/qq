@@ -116,6 +116,18 @@ untrusted, and `tools` with each `name`, `description`, `input_schema`, and
 takes ([MCP servers](mcp.md#pinning-a-servers-tools)). Exit 1 when the
 server is not configured, cannot be reached, or does not answer within 45 s.
 
+## `qq mcp status`
+
+Connect to every declared MCP server (starting their processes or contacting
+their endpoints, each with its own credential), list their tools, and print
+one JSON object with a `warning` and `servers`. Each server has a `server`
+name, a `state` (`ready`, `needs_auth`, `unavailable`, or `quarantined`), the
+exact `reason` (`null` when ready), `configured_pin`, the observed `digest`
+when it listed, and for ready servers the `tools` names. Descriptions are
+not printed; use `qq mcp inspect NAME` to review them. No tool is called
+and nothing is written. Exit 1 only when configuration does not load or the
+whole check exceeds 45 s. An unhealthy server is reported, not an error.
+
 ## `qq trust`
 
 Accept the sensitive sections of the project configuration found from the
