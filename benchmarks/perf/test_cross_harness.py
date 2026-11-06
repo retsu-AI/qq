@@ -186,7 +186,7 @@ class CrossHarnessTests(unittest.TestCase):
 
     def test_overflowed_json_number_remains_individual_failure(self):
         result = self.execute_fake("import sys\nfrom pathlib import Path\nPath(sys.argv[1]).write_text('{\"value\":1e999}')\n")
-        self.assertIn("nonfinite JSON number", result["error"])
+        self.assertIn("finite 64-bit receipt magnitude", result["error"])
         self.assertNotIn("receipt", result)
 
     def test_oversized_integers_remain_individual_failures(self):
@@ -198,6 +198,22 @@ class CrossHarnessTests(unittest.TestCase):
             self.assertIn("64-bit receipt range", result["error"])
             self.assertFalse(result["receipt_valid"])
             self.assertEqual(bench.summarize([result]), [])
+
+    def test_extreme_finite_floats_and_nested_receipts_are_failed_attempts(self):
+        for values in [[1e308, 1e308], [1e307, 1e308]]:
+            receipt = self.receipt()
+            receipt["measurements"] = [dict(receipt["measurements"][0], value=value) for value in values]
+            script = f"import sys\nfrom pathlib import Path\nPath(sys.argv[1]).write_text({json.dumps(receipt)!r})\n"
+            result = self.execute_fake(script)
+            self.assertIn("64-bit receipt magnitude", result["error"])
+            json.dumps(result, allow_nan=False)
+        for depth in [33, 64, 950]:
+            raw = '{"nested":' + '[' * depth + '0' + ']' * depth + '}'
+            script = f"import sys\nfrom pathlib import Path\nPath(sys.argv[1]).write_text({raw!r})\n"
+            result = self.execute_fake(script)
+            self.assertIsNotNone(result["error"])
+            self.assertNotIn("receipt", result)
+            json.dumps(result, allow_nan=False)
 
     def test_timeout_retained_and_reaped(self):
         result = self.execute_fake("while True: pass\n", timeout=.1)

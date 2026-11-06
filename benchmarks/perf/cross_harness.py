@@ -80,9 +80,27 @@ def bounded_integer(value):
 
 def finite_float(value):
     parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError("nonfinite JSON number")
+    if not math.isfinite(parsed) or abs(parsed) > 2**64 - 1:
+        raise ValueError("JSON float exceeds finite 64-bit receipt magnitude")
     return parsed
+
+
+def parse_receipt(path):
+    with path.open("rb") as stream:
+        data = stream.read(16 * 1024 * 1024 + 1)
+    if len(data) > 16 * 1024 * 1024:
+        raise ValueError("receipt exceeds 16 MiB; raw file retained")
+    receipt = json.loads(data, parse_constant=reject_nonfinite, parse_float=finite_float, parse_int=bounded_integer)
+    pending = [(receipt, 0)]
+    while pending:
+        value, depth = pending.pop()
+        if depth > 32:
+            raise ValueError("receipt exceeds nesting depth 32; raw file retained")
+        if isinstance(value, dict):
+            pending.extend((child, depth + 1) for child in value.values())
+        elif isinstance(value, list):
+            pending.extend((child, depth + 1) for child in value)
+    return receipt
 
 
 def schedule(manifest, adapters, samples, warmups, seed):
@@ -288,7 +306,7 @@ def attempt_run(entry, adapter, manifest, directory, timeout):
                     pass
     record["wall_ns"] = time.monotonic_ns() - started
     try:
-        receipt = json.loads((directory / "receipt.json").read_text(), parse_constant=reject_nonfinite, parse_float=finite_float, parse_int=bounded_integer)
+        receipt = parse_receipt(directory / "receipt.json")
         record["receipt"] = receipt
         validate_receipt(receipt, entry["workload"])
         record["receipt_valid"] = True
