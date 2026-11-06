@@ -400,6 +400,7 @@ async fn settle_unstartable_reservation(
     if fail_runtime {
         inner.failed.send_replace(true);
     }
+    let run_span = super::execution::record_run_outcome(&outcome);
     match inner.store.finish_reserved_run(claimed, outcome).await {
         Ok(events) => {
             for event in events {
@@ -407,6 +408,7 @@ async fn settle_unstartable_reservation(
             }
         }
         Err(_) => {
+            run_span.record("outcome", "error");
             inner.failed.send_replace(true);
         }
     }

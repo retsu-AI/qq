@@ -1260,11 +1260,28 @@ pub(super) async fn cancellation_requested(
     result
 }
 
+pub(super) fn record_run_outcome(outcome: &RunOutcome) -> tracing::Span {
+    let run_span = tracing::Span::current();
+    run_span.record(
+        "outcome",
+        match outcome {
+            RunOutcome::Completed => "completed",
+            RunOutcome::Cancelled => "cancelled",
+            RunOutcome::Interrupted => "interrupted",
+            RunOutcome::Failed { .. } => "failed",
+            RunOutcome::BudgetExhausted { .. } => "budget_exhausted",
+            RunOutcome::Paused { .. } => "paused",
+        },
+    );
+    run_span
+}
+
 async fn finish_reserved_run(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
     outcome: RunOutcome,
 ) {
+    let run_span = record_run_outcome(&outcome);
     match inner.store.finish_reserved_run(claimed, outcome).await {
         Ok(events) => {
             for event in events {
@@ -1276,6 +1293,7 @@ async fn finish_reserved_run(
             clear_run_registration(inner, claimed.identity.run_id);
         }
         Err(_) => {
+            run_span.record("outcome", "error");
             inner.failed.send_replace(true);
         }
     }
@@ -1294,6 +1312,7 @@ async fn finish_prepared_run(
     audit: &PreparedRunAudit,
     outcome: RunOutcome,
 ) {
+    record_run_outcome(&outcome);
     match inner
         .store
         .finish_prepared_run(claimed, audit.clone(), outcome)
@@ -3168,18 +3187,7 @@ async fn finish_run_accounted(
     accounting: Option<RunAccounting>,
     mut teardown: TeardownComplete,
 ) {
-    let run_span = tracing::Span::current();
-    run_span.record(
-        "outcome",
-        match &outcome {
-            RunOutcome::Completed => "completed",
-            RunOutcome::Cancelled => "cancelled",
-            RunOutcome::Interrupted => "interrupted",
-            RunOutcome::Failed { .. } => "failed",
-            RunOutcome::BudgetExhausted { .. } => "budget_exhausted",
-            RunOutcome::Paused { .. } => "paused",
-        },
-    );
+    let run_span = record_run_outcome(&outcome);
     if persist_finished_results(inner, claimed, &mut teardown)
         .await
         .is_err()
