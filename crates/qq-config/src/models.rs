@@ -415,6 +415,30 @@ const MODELS: &[ModelDefinition] = &[
     model! { catalogs: XAI_API, wire: "grok-4.3", canonical: "xai/grok-4.3", name: "Grok 4.3", reasoning: true, efforts: XAI_EFFORTS, limits: 131_072 / 32_768, pricing: None, api: ProviderApi::OpenAiChatCompletions },
 ];
 
+#[must_use]
+pub fn builtin_reasoning_efforts(model: &str) -> Option<&'static [ReasoningEffort]> {
+    let model = model
+        .strip_prefix("us.")
+        .or_else(|| model.strip_prefix("eu."))
+        .or_else(|| model.strip_prefix("apac."))
+        .or_else(|| model.strip_prefix("global."))
+        .unwrap_or(model);
+    let model = model
+        .strip_prefix("anthropic.")
+        .or_else(|| model.strip_prefix("anthropic/"))
+        .unwrap_or(model);
+    MODELS
+        .iter()
+        .find(|definition| {
+            definition.catalogs & ANTHROPIC_API != 0
+                && (definition.wire_id == model
+                    || model
+                        .strip_prefix(definition.wire_id)
+                        .is_some_and(|suffix| suffix.starts_with('-')))
+        })
+        .map(|definition| definition.efforts)
+}
+
 pub(crate) fn gateway_context_window(model: &str) -> Option<u32> {
     let original = model;
     let model = model

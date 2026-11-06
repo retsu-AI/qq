@@ -203,6 +203,7 @@ struct Slot {
     generation: CompiledGeneration,
     digest: AgentPlanDigest,
     epoch: CredentialEpoch,
+    discovery_epoch: u64,
 }
 
 struct State {
@@ -246,6 +247,18 @@ impl PlanCache {
     where
         F: FnOnce() -> Result<CompiledGeneration, E>,
     {
+        self.load_with_discovery_epoch(key, 0, compile)
+    }
+
+    pub fn load_with_discovery_epoch<E, F>(
+        &self,
+        key: &PlanKey,
+        discovery_epoch: u64,
+        compile: F,
+    ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), PlanCacheError<E>>
+    where
+        F: FnOnce() -> Result<CompiledGeneration, E>,
+    {
         let flight = {
             let mut in_flight = self
                 .inner
@@ -263,7 +276,7 @@ impl PlanCache {
         };
         let outcome = {
             let _flight = flight.lock().map_err(|_| PlanCacheError::Poisoned)?;
-            self.load_under_flight(key, compile)
+            self.load_under_flight(key, discovery_epoch, compile)
         };
         if let Ok(mut in_flight) = self.inner.in_flight.lock()
             && Arc::strong_count(&flight) == 2
@@ -279,6 +292,7 @@ impl PlanCache {
     fn load_under_flight<E, F>(
         &self,
         key: &PlanKey,
+        discovery_epoch: u64,
         compile: F,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), PlanCacheError<E>>
     where
@@ -295,11 +309,12 @@ impl PlanCache {
             }
             if let Some(index) = state.slots.iter().position(|slot| slot.key == *key) {
                 let slot = &state.slots[index];
-                let current = slot
-                    .generation
-                    .sources
-                    .iter()
-                    .all(SourceFingerprint::is_current)
+                let current = slot.discovery_epoch == discovery_epoch
+                    && slot
+                        .generation
+                        .sources
+                        .iter()
+                        .all(SourceFingerprint::is_current)
                     && slot
                         .generation
                         .configuration_sources
@@ -340,7 +355,7 @@ impl PlanCache {
                 let growth = generation
                     .estimated_bytes()
                     .saturating_sub(slot.generation.estimated_bytes());
-                admit(&mut state, self.inner.limits, growth, Some(key))?;
+                admit(&mut state, self.inner.limits, growth, Some(key), true)?;
                 let index = state
                     .slots
                     .iter()
@@ -350,6 +365,7 @@ impl PlanCache {
                     .slots
                     .remove(index)
                     .expect("a located slot must exist");
+                slot.discovery_epoch = discovery_epoch;
                 slot.generation.sources = generation.sources;
                 slot.generation.configuration_sources = generation.configuration_sources;
                 let plan = Arc::clone(&slot.generation.plan);
@@ -363,6 +379,7 @@ impl PlanCache {
             self.inner.limits,
             generation.estimated_bytes(),
             Some(key),
+            false,
         )?;
         if let Some(index) = state.slots.iter().position(|slot| slot.key == *key) {
             let old = state
@@ -379,6 +396,7 @@ impl PlanCache {
             generation,
             digest,
             epoch,
+            discovery_epoch,
         });
         Ok((plan, PlanLookup::Compiled))
     }
@@ -444,6 +462,7 @@ fn admit<E>(
     limits: PlanCacheLimits,
     requested_bytes: usize,
     replacing: Option<&PlanKey>,
+    reuses_generation: bool,
 ) -> Result<(), PlanCacheError<E>> {
     release_settled(state);
     let superseded_entries = state.superseded.len();
@@ -454,7 +473,9 @@ fn admit<E>(
         .sum();
     loop {
         let counted = |slot: &Slot| {
-            replacing != Some(&slot.key) || Arc::strong_count(&slot.generation.plan) > 1
+            reuses_generation
+                || replacing != Some(&slot.key)
+                || Arc::strong_count(&slot.generation.plan) > 1
         };
         let (entries, used_bytes) = state.slots.iter().filter(|slot| counted(slot)).fold(
             (superseded_entries, superseded_bytes),
@@ -465,7 +486,7 @@ fn admit<E>(
                 )
             },
         );
-        let fits = entries < limits.max_entries
+        let fits = entries.saturating_add(usize::from(!reuses_generation)) <= limits.max_entries
             && used_bytes.saturating_add(requested_bytes) <= limits.max_bytes;
         if fits {
             return Ok(());
@@ -530,6 +551,32 @@ mod tests {
             reasoning_effort: None,
             ignore_untrusted_project_config: false,
         }
+    }
+
+    #[test]
+    fn discovery_revalidation_reuses_pinned_generations_at_capacity() {
+        let directory = canonical_temp();
+        let cache = PlanCache::new(PlanCacheLimits {
+            max_entries: 1,
+            max_bytes: usize::MAX,
+        });
+        let key = key(directory.path(), "m");
+        let (first, _) = cache
+            .load::<std::convert::Infallible, _>(&key, || Ok(compile(directory.path(), "m")))
+            .unwrap();
+        let (next, lookup) = cache
+            .load_with_discovery_epoch::<std::convert::Infallible, _>(&key, 1, || {
+                Ok(compile(directory.path(), "m"))
+            })
+            .unwrap();
+        assert_eq!(lookup, PlanLookup::Revalidated);
+        assert!(Arc::ptr_eq(&first, &next));
+        let (_, lookup) = cache
+            .load_with_discovery_epoch::<std::convert::Infallible, _>(&key, 1, || {
+                panic!("must not compile")
+            })
+            .unwrap();
+        assert_eq!(lookup, PlanLookup::Hit);
     }
 
     fn compile(workspace: &Path, model: &str) -> CompiledGeneration {

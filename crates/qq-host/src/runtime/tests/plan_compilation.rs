@@ -699,3 +699,225 @@ fn global_skills_come_from_the_configuration_directory() {
     assert_eq!(tidy.source, "global:skills/tidy/SKILL.md");
     assert!(tidy.disclosed);
 }
+
+#[test]
+fn claude_models_default_to_medium_effort_unless_configuration_chooses() {
+    use qq_provider::ReasoningEffort;
+    let fixture = RuntimeFixture::new();
+    let factory = fixture.factory();
+    let effort = |model: &str, api: &str, extra: &str, overrides: RuntimeOverrides| {
+        let request = fixture
+            .request(format!(
+                r#"(
+                    version: 1, model: "gateway/{model}", {extra}
+                    providers: {{ "gateway": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: {api}, auth: NoAuth), models: {{ "{model}": (name: "m", reasoning: true) }}) }},
+                )"#
+            ))
+            .with_overrides(overrides);
+        factory
+            .plan_for(&request)
+            .unwrap()
+            .descriptor()
+            .reasoning_effort
+    };
+    let none = RuntimeOverrides::new;
+    for model in [
+        "claude-haiku-4-5",
+        "claude-sonnet-4-5",
+        "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    ] {
+        for api in ["AnthropicMessages", "OpenAiChatCompletions"] {
+            assert_eq!(effort(model, api, "", none()), None, "{model}/{api}");
+        }
+    }
+    let claude = "us.anthropic.claude-sonnet-5-5";
+
+    assert_eq!(
+        effort(claude, "OpenAiChatCompletions", "", none()),
+        Some(ReasoningEffort::Medium)
+    );
+    assert_eq!(
+        effort("claude-opus-5-5", "AnthropicMessages", "", none()),
+        Some(ReasoningEffort::Medium)
+    );
+    assert_eq!(
+        effort(
+            claude,
+            "OpenAiChatCompletions",
+            "reasoning_effort: high,",
+            none()
+        ),
+        Some(ReasoningEffort::High)
+    );
+    assert_eq!(
+        effort(
+            claude,
+            "OpenAiChatCompletions",
+            "reasoning_effort: default,",
+            none()
+        ),
+        Some(ReasoningEffort::Default)
+    );
+    assert_eq!(
+        effort(
+            claude,
+            "OpenAiChatCompletions",
+            "",
+            none().with_reasoning_effort(ReasoningEffort::Low)
+        ),
+        Some(ReasoningEffort::Low)
+    );
+    assert_eq!(
+        effort("gpt-test", "OpenAiChatCompletions", "", none()),
+        None
+    );
+    assert_eq!(effort(claude, "OpenAiResponses", "", none()), None);
+}
+
+#[test]
+fn claude_default_effort_respects_discovered_ladders() {
+    use std::io::{Read as _, Write as _};
+
+    use qq_provider::ReasoningEffort;
+
+    for (levels, expected) in [
+        ("[]", None),
+        (r#"[{"effort":"low"},{"effort":"high"}]"#, None),
+        (
+            r#"[{"effort":"medium"},{"effort":"high"}]"#,
+            Some(ReasoningEffort::Medium),
+        ),
+    ] {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let body =
+            format!(r#"{{"data":[{{"id":"claude-test","supported_reasoning_levels":{levels}}}]}}"#);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let length = stream.read(&mut request).unwrap();
+            assert!(
+                std::str::from_utf8(&request[..length])
+                    .unwrap()
+                    .starts_with("GET /v1/models HTTP/1.1\r\n")
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let request = fixture.request(format!(
+            r#"(
+                version: 1, model: "gateway/claude-test",
+                providers: {{ "gateway": Custom(connection: (base_url: "http://{address}/v1", api: OpenAiChatCompletions, auth: NoAuth)) }},
+            )"#
+        ));
+        assert_eq!(
+            factory
+                .plan_for(&request)
+                .unwrap()
+                .descriptor()
+                .reasoning_effort,
+            Some(ReasoningEffort::Medium)
+        );
+        let snapshot = factory.load(&request).unwrap();
+        let discovered = factory.inner.discovery.discover(
+            "gateway",
+            &snapshot.providers()["gateway"],
+            &factory.inner.credentials,
+        );
+        server.join().unwrap();
+        assert!(discovered.is_some());
+        assert_eq!(
+            factory
+                .plan_for(&request)
+                .unwrap()
+                .descriptor()
+                .reasoning_effort,
+            expected,
+            "{levels}"
+        );
+        let parent_request = fixture.request(format!(
+            r#"(
+                version: 1, model: "gateway/claude-parent",
+                delegation: (roster: [(route: "gateway/claude-test", role: strong)], default_role: strong),
+                providers: {{ "gateway": Custom(connection: (base_url: "http://{address}/v1", api: OpenAiChatCompletions, auth: NoAuth)) }},
+            )"#
+        ));
+        let parent = factory.plan_for(&parent_request).unwrap();
+        let entry = &parent.descriptor().delegation.roster[0];
+        let child_effort =
+            qq_protocol::child_reasoning_effort(entry, parent.descriptor().reasoning_effort);
+        let fitted = match levels {
+            "[]" => ReasoningEffort::Default,
+            r#"[{"effort":"low"},{"effort":"high"}]"# => ReasoningEffort::Low,
+            _ => ReasoningEffort::Medium,
+        };
+        assert_eq!(child_effort, Some(fitted));
+        let child = parent_request.with_overrides(
+            RuntimeOverrides::new()
+                .with_model(entry.route.clone())
+                .with_reasoning_effort(child_effort.unwrap()),
+        );
+        assert_eq!(
+            factory
+                .plan_for(&child)
+                .unwrap()
+                .descriptor()
+                .reasoning_effort,
+            Some(fitted)
+        );
+        let explicit = request
+            .with_overrides(RuntimeOverrides::new().with_reasoning_effort(ReasoningEffort::Medium));
+        assert_eq!(factory.plan_for(&explicit).is_ok(), expected.is_some());
+    }
+}
+
+#[test]
+fn claude_default_effort_does_not_break_delegated_child_apis() {
+    use qq_provider::ReasoningEffort;
+
+    for child in [
+        r#"Custom(connection: (base_url: "http://127.0.0.1:1/v1", api: GoogleGenerateContent, auth: NoAuth), models: { "child": (name: "Child", reasoning: true) })"#,
+        r#"AmazonBedrock(region: "us-east-1", auth: Aws(DefaultChain), models: { "child": (name: "Child", reasoning: true) })"#,
+    ] {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let request = fixture.request(format!(
+            r#"(
+                version: 1, model: "gateway/claude-test",
+                delegation: (roster: [(route: "child/child", role: strong)], default_role: strong),
+                providers: {{
+                    "gateway": Custom(connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiChatCompletions, auth: NoAuth), models: {{ "claude-test": (name: "Claude", reasoning: true) }}),
+                    "child": {child},
+                }},
+            )"#
+        ));
+        let parent = factory.plan_for(&request).unwrap();
+        assert_eq!(
+            parent.descriptor().reasoning_effort,
+            Some(ReasoningEffort::Medium)
+        );
+        let entry = &parent.descriptor().delegation.roster[0];
+        let effort =
+            qq_protocol::child_reasoning_effort(entry, parent.descriptor().reasoning_effort);
+        assert_eq!(effort, Some(ReasoningEffort::Default));
+        let child_request = request.with_overrides(
+            RuntimeOverrides::new()
+                .with_model(entry.route.clone())
+                .with_reasoning_effort(effort.unwrap()),
+        );
+        assert_eq!(
+            factory
+                .plan_for(&child_request)
+                .unwrap()
+                .descriptor()
+                .reasoning_effort,
+            Some(ReasoningEffort::Default)
+        );
+    }
+}

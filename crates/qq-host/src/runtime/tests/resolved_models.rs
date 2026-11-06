@@ -783,7 +783,7 @@ fn delegation_roster_uses_effective_gateway_limits_without_inventing_other_metad
             )"#
         );
         let snapshot = factory.load(&fixture.request(&config)).unwrap();
-        let roster = delegation_roster(&snapshot, snapshot.model());
+        let roster = delegation_roster(&snapshot, snapshot.model(), |_| None);
         assert_eq!(roster.roster[0].context_window, expected, "{model}");
         assert_eq!(roster.roster[0].max_output_tokens, None);
         assert_eq!(roster.roster[0].relative_cost_permille, None);
@@ -842,7 +842,7 @@ fn delegation_roster_carries_catalog_metadata_and_relative_cost() {
                 )"#,
         ))
         .unwrap();
-    let roster = delegation_roster(&snapshot, snapshot.model());
+    let roster = delegation_roster(&snapshot, snapshot.model(), |_| None);
     assert_eq!(roster.default_role, qq_protocol::DelegationRole::Fast);
     assert_eq!(roster.max_depth, 2);
     assert!(!roster.write_children);
@@ -929,7 +929,7 @@ fn a_derived_roster_effort_is_fitted_to_the_child_route() {
                 )"#,
         ))
         .unwrap();
-    let roster = delegation_roster(&snapshot, snapshot.model());
+    let roster = delegation_roster(&snapshot, snapshot.model(), |_| None);
     let efforts: Vec<_> = roster.roster.iter().map(|entry| entry.effort).collect();
     assert_eq!(
         efforts,
@@ -940,6 +940,29 @@ fn a_derived_roster_effort_is_fitted_to_the_child_route() {
             None,
             Some(ReasoningEffort::Medium),
         ]
+    );
+}
+
+#[test]
+fn strong_children_preserve_explicit_provider_default_effort() {
+    let fixture = RuntimeFixture::new();
+    let factory = fixture.factory();
+    let request = fixture.request(r#"(
+        version: 1, model: "custom/claude-sonnet-5-5", reasoning_effort: default,
+        delegation: (roster: [(route: "custom/claude-opus-4-6", role: strong)], default_role: strong),
+        providers: { "custom": Custom(
+            connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiChatCompletions, auth: NoAuth),
+            models: { "claude-sonnet-5-5": (name: "Parent", reasoning: true), "claude-opus-4-6": (name: "Child", reasoning: true) },
+        ) },
+    )"#);
+    let plan = factory.plan_for(&request).unwrap();
+    assert_eq!(
+        plan.descriptor().reasoning_effort,
+        Some(qq_provider::ReasoningEffort::Default)
+    );
+    assert_eq!(
+        plan.descriptor().delegation.roster[0].effort,
+        Some(qq_provider::ReasoningEffort::Default)
     );
 }
 

@@ -20,6 +20,7 @@ mod theme;
 mod tui;
 
 pub use loader::canonical_working_directory;
+pub use models::builtin_reasoning_efforts;
 pub use qq_provider::{SecretLiteral, SecretRef};
 pub use theme::{
     AnsiColor, COMPILED_THEMES, DEFAULT_THEME, Rgb, SyntaxRole, TERMINAL_THEME,
@@ -1761,6 +1762,14 @@ impl ConfigSnapshot {
     #[must_use]
     pub const fn reasoning_effort(&self) -> Option<qq_provider::ReasoningEffort> {
         self.reasoning_effort
+    }
+
+    #[must_use]
+    pub fn with_default_reasoning_effort(mut self, effort: qq_provider::ReasoningEffort) -> Self {
+        if self.provenance.reasoning_effort.is_none() {
+            self.reasoning_effort = Some(effort);
+        }
+        self
     }
 
     #[must_use]

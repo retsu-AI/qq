@@ -3,7 +3,10 @@ use std::{
     io::Read,
     net::IpAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -38,6 +41,7 @@ pub(crate) struct ModelDiscovery {
     cache: Mutex<VecDeque<CacheEntry>>,
     fetch_gates: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     cache_key: [u8; 32],
+    epoch: AtomicU64,
 }
 
 #[derive(PartialEq, Eq)]
@@ -71,7 +75,12 @@ impl ModelDiscovery {
             cache: Mutex::new(VecDeque::new()),
             fetch_gates: Mutex::new(BTreeMap::new()),
             cache_key,
+            epoch: AtomicU64::new(0),
         })
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
     }
 
     pub(crate) fn discover(
@@ -138,6 +147,7 @@ impl ModelDiscovery {
             while cache.len() > MAX_CACHE_ENTRIES {
                 cache.pop_front();
             }
+            self.epoch.fetch_add(1, Ordering::Release);
         }
         models
     }
