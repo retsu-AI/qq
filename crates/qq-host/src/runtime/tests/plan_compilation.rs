@@ -721,6 +721,15 @@ fn claude_models_default_to_medium_effort_unless_configuration_chooses() {
             .reasoning_effort
     };
     let none = RuntimeOverrides::new;
+    for model in [
+        "claude-haiku-4-5",
+        "claude-sonnet-4-5",
+        "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    ] {
+        for api in ["AnthropicMessages", "OpenAiChatCompletions"] {
+            assert_eq!(effort(model, api, "", none()), None, "{model}/{api}");
+        }
+    }
     let claude = "us.anthropic.claude-sonnet-5-5";
 
     assert_eq!(

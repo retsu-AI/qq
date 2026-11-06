@@ -1828,12 +1828,18 @@ fn with_claude_default_effort(
         && metadata.is_none_or(qq_config::ModelMetadata::reasoning)
         && live_efforts.map_or_else(
             || {
-                metadata.is_none_or(|metadata| {
-                    metadata.reasoning_efforts().is_empty()
-                        || metadata
-                            .reasoning_efforts()
-                            .contains(&CLAUDE_DEFAULT_REASONING_EFFORT)
-                })
+                let configured = metadata
+                    .map(qq_config::ModelMetadata::reasoning_efforts)
+                    .filter(|levels| !levels.is_empty());
+                configured
+                    .or_else(|| {
+                        qq_config::builtin_reasoning_efforts(
+                            metadata
+                                .and_then(qq_config::ModelMetadata::canonical_id)
+                                .unwrap_or(model),
+                        )
+                    })
+                    .is_none_or(|levels| levels.contains(&CLAUDE_DEFAULT_REASONING_EFFORT))
             },
             |levels| levels.contains(&CLAUDE_DEFAULT_REASONING_EFFORT),
         );
@@ -2542,15 +2548,24 @@ fn delegation_roster(
                 {
                     use qq_provider::ReasoningEffort;
                     let live_efforts = discovered_efforts(entry.route());
-                    let ladder = live_efforts.as_deref().unwrap_or_else(|| {
-                        metadata.map_or(&[], qq_config::ModelMetadata::reasoning_efforts)
+                    let static_efforts = metadata
+                        .map(qq_config::ModelMetadata::reasoning_efforts)
+                        .filter(|levels| !levels.is_empty());
+                    let known_efforts = static_efforts.or_else(|| {
+                        qq_config::builtin_reasoning_efforts(
+                            metadata
+                                .and_then(qq_config::ModelMetadata::canonical_id)
+                                .unwrap_or(entry.route().model()),
+                        )
                     });
+                    let effective_efforts = live_efforts.as_deref().or(known_efforts);
+                    let ladder = effective_efforts.unwrap_or(&[]);
                     let rank = |effort: ReasoningEffort| {
                         ReasoningEffort::ALL
                             .iter()
                             .position(|level| *level == effort)
                     };
-                    roster_entry.effort = if live_efforts.as_ref().is_some_and(Vec::is_empty)
+                    roster_entry.effort = if effective_efforts.is_some_and(<[_]>::is_empty)
                         || metadata.is_some_and(|metadata| !metadata.reasoning())
                     {
                         Some(ReasoningEffort::Default)

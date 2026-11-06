@@ -20,6 +20,7 @@ mod theme;
 mod tui;
 
 pub use loader::canonical_working_directory;
+pub use models::builtin_reasoning_efforts;
 pub use qq_provider::{SecretLiteral, SecretRef};
 pub use theme::{
     AnsiColor, COMPILED_THEMES, DEFAULT_THEME, Rgb, SyntaxRole, TERMINAL_THEME,
