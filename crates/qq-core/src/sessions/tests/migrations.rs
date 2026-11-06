@@ -92,6 +92,27 @@ fn malformed_version_eighteen_context_basis_schema_is_rejected() {
     }
 }
 
+#[test]
+fn opened_store_commits_under_full_synchronous_after_fresh_and_existing_open() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    for _ in 0..2 {
+        let (connection, _) = open_database(&path).unwrap();
+        let synchronous: i64 = connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 2);
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, STORE_SCHEMA_VERSION.to_string());
+    }
+}
+
 #[tokio::test]
 async fn every_persistence_fault_variant_is_reachable() {
     let (directory, store, claimed) = claimed_store_fixture().await;

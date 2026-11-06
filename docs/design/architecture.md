@@ -1640,7 +1640,12 @@ The store must preserve at least:
 Schema migrations are part of the binary. They start at schema 25, the store
 v0.0.1 shipped; an older store fails to open with `UnsupportedStoreSchema`
 instead of migrating. Chat history must survive process
-restarts, and a failed write must not be presented to clients as durable. Do
+restarts, and a failed write must not be presented to clients as durable.
+Migration steps before the last commit under WAL `synchronous=NORMAL`; the
+final step and every later write run under `synchronous=FULL`, so the final
+commit's fsync makes the whole chain durable before the store reports ready.
+A power loss mid-chain only rolls back to an earlier schema version, which the
+next open migrates again. Do
 not introduce an external database until measurements show SQLite is the
 bottleneck.
 
