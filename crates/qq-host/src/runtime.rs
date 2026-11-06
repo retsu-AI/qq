@@ -2565,7 +2565,8 @@ fn delegation_roster(
                             .iter()
                             .position(|level| *level == effort)
                     };
-                    roster_entry.effort = if effective_efforts.is_some_and(<[_]>::is_empty)
+                    roster_entry.effort = if derived == ReasoningEffort::Default
+                        || effective_efforts.is_some_and(<[_]>::is_empty)
                         || metadata.is_some_and(|metadata| !metadata.reasoning())
                     {
                         Some(ReasoningEffort::Default)

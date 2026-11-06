@@ -944,6 +944,29 @@ fn a_derived_roster_effort_is_fitted_to_the_child_route() {
 }
 
 #[test]
+fn strong_children_preserve_explicit_provider_default_effort() {
+    let fixture = RuntimeFixture::new();
+    let factory = fixture.factory();
+    let request = fixture.request(r#"(
+        version: 1, model: "custom/claude-sonnet-5-5", reasoning_effort: default,
+        delegation: (roster: [(route: "custom/claude-opus-4-6", role: strong)], default_role: strong),
+        providers: { "custom": Custom(
+            connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiChatCompletions, auth: NoAuth),
+            models: { "claude-sonnet-5-5": (name: "Parent", reasoning: true), "claude-opus-4-6": (name: "Child", reasoning: true) },
+        ) },
+    )"#);
+    let plan = factory.plan_for(&request).unwrap();
+    assert_eq!(
+        plan.descriptor().reasoning_effort,
+        Some(qq_provider::ReasoningEffort::Default)
+    );
+    assert_eq!(
+        plan.descriptor().delegation.roster[0].effort,
+        Some(qq_provider::ReasoningEffort::Default)
+    );
+}
+
+#[test]
 fn resolved_model_rejects_output_limits_the_codec_cannot_represent() {
     let fixture = RuntimeFixture::new();
     let factory = fixture.factory();
