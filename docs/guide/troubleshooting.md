@@ -262,7 +262,7 @@ names, or store a fresh token from the server's login flow with `qq auth set
 NAME --endpoint URL`. The next run picks it up without a restart. `qq doctor`
 reports unresolved references under `mcp`.
 
-### `… changed its declaration after this run was admitted …`
+### `… changed its declaration after this run was admitted; the run keeps the contract it was admitted with, so the call was not sent. Start a new run to use the new declaration`
 
 An MCP server changed or removed a tool while a run was using it. The run
 keeps the declaration it started with, so QQ refused the call and did not
