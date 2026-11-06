@@ -325,16 +325,26 @@ impl McpRegistryCache {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum McpSettingsError {
+    #[error(transparent)]
+    Configuration(#[from] qq_config::ConfigError),
+    #[error(transparent)]
+    Credentials(#[from] AuthError),
+    #[error("MCP server {0:?} is not configured")]
+    NotConfigured(String),
+}
+
 pub fn inspection_settings(
     name: &str,
     request: &qq_config::LoadRequest,
-) -> Result<McpServerSettings, Box<dyn std::error::Error>> {
+) -> Result<McpServerSettings, McpSettingsError> {
     let loader = qq_config::ConfigLoader::system()?;
     let snapshot = loader.load_for_client(request)?;
     let server = snapshot
         .mcp_servers()
         .get(name)
-        .ok_or_else(|| std::io::Error::other(format!("MCP server {name:?} is not configured")))?;
+        .ok_or_else(|| McpSettingsError::NotConfigured(name.to_owned()))?;
     let credentials = CredentialStore::system()?;
     let mut settings = resolve_server(name, server, &credentials);
     settings.eager = false;
@@ -343,7 +353,7 @@ pub fn inspection_settings(
 
 pub fn status_settings(
     request: &qq_config::LoadRequest,
-) -> Result<Vec<McpServerSettings>, Box<dyn std::error::Error>> {
+) -> Result<Vec<McpServerSettings>, McpSettingsError> {
     let loader = qq_config::ConfigLoader::system()?;
     let snapshot = loader.load_for_client(request)?;
     let credentials = CredentialStore::system()?;
