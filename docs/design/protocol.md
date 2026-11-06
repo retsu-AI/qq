@@ -59,8 +59,17 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 45
+PROTOCOL_VERSION = 46
 ```
+
+Version 46 adds `execution` to interrupted tool-call snapshots:
+`may_have_run` when the call was dispatched before the run stopped, so its
+side effects may have happened, and `not_started` when it never ran. The field
+is absent for every other state. It is derived from the stored dispatch
+timestamp when a snapshot is loaded, so session snapshots report it for tool
+calls recorded by older builds and no store migration is needed; events
+replayed from before version 46 carry no `execution`. A version-45 client
+rejects the field.
 
 Version 45 removes session goals, which versions 33, 34, 35 and 40
 added. Gone from the wire: the goal snapshot, budget, check and status types;
@@ -162,7 +171,7 @@ its path onto the client machine. Listing neither registers a directory nor
 changes permissions.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v45/`; the `v44` directory (N−1) is
+`crates/qq-protocol/tests/fixtures/v46/`; the `v45` directory (N−1) is
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -658,12 +667,12 @@ optional-bodied:
 ```
 
 Response `ServerCapabilities` (abridged; see
-`crates/qq-protocol/tests/fixtures/v45/capabilities.json` for the full golden):
+`crates/qq-protocol/tests/fixtures/v46/capabilities.json` for the full golden):
 
 ```json
 {
   "version": 1,
-  "protocol_version": 45,
+  "protocol_version": 46,
   "server_version": "0.1.0",
   "input_parts": ["text", "workspace_file"],
   "commands": ["resolve_workspace", "create_session", "submit_prompt", "steer_run", "..."],
@@ -1447,7 +1456,8 @@ Response `WorkspaceSnapshot`:
 ```
 
 Snapshots are the catch-up mechanism after connect or cursor loss. Live SSE
-then advances the client from `cursor`.
+then advances the client from `cursor`. The [saturation and admission inventory](saturation.md)
+records queue, waiter, byte and cursor-recovery policies with executable tests.
 
 `session_limit` and `message_limit` are count bounds. Body rows are also
 admitted under one byte budget (6 MiB of escaped text plus a fixed per-row
@@ -1741,13 +1751,15 @@ instructions: `AGENTS.md`, `CLAUDE.md` when `AGENTS.md` is absent, or the empty
 selection. `system_prompt_hash` identifies the exact prepared system text, and
 `tool_schema_hash` identifies the ordered provider tool schemas. When a slash
 command or skill was selected, `selected_guidance` records its kind, name,
-source, optional declared version, and content hash. Nested instructions found
-later remain durable tool evidence but do not retroactively change this
-pre-provider identity. `prompt_identity` is absent for historical runs and
-runs that failed before prompt preparation; version-6 rows may omit the fields
-added in version 7. `catalog_digest` and `exposure` identify the compiled tool
-catalog the run was admitted with and how it was exposed; `context_sources`
-lists every attached `ContextSource` with its outcome (`fetched`,
+source, optional declared version, and content hash. Scoped instructions found
+later do not alter these fields: native file-tool admission returns them as
+complete durable tool results carrying source, descendant scope and content
+hash, and defers the original call for model review and retry. Changes,
+removals, and a disclosure reset after compaction use the same result channel.
+`prompt_identity` is absent for historical runs and runs that failed before
+prompt preparation; version-6 rows may omit the fields added in version 7.
+`catalog_digest` and `exposure` identify the compiled tool catalog the run was
+admitted with and how it was exposed; `context_sources` lists every attached `ContextSource` with its outcome (`fetched`,
 `fetched_truncated`, `cached`, `cached_truncated`, `timed_out`, `unavailable`,
 `refused`, `invalid`), item and byte counts, and the content hash of the block
 appended to the system prompt. All three are absent or empty on rows written
@@ -1856,6 +1868,10 @@ messages use `turn_ordinal` 0.
 
 Tool state: `requested`, `awaiting_approval`, `running`, `completed`,
 `failed`, `denied`, `interrupted`.
+
+An `interrupted` call also carries `execution`: `may_have_run` if it was
+dispatched before the run stopped, or `not_started` if it never ran. Absent in
+every other state.
 
 `display` is an optional, extensible tagged payload for client rendering
 only (first variant: `diff`, carried by successful `edit_file` and
@@ -2174,7 +2190,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v45/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v46/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.

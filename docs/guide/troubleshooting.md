@@ -8,7 +8,7 @@ puts the fix next to whatever failed. Its header reports the build and
 compatibility versions, also available from `qq version`:
 
 ```
-qq <version> (<commit> <build date>) · protocol 45 · capabilities 1 · descriptor 17 · store schema 67
+qq <version> (<commit> <build date>) · protocol 46 · capabilities 1 · descriptor 17 · store schema 67
 ok    configuration    2 sources; qq config sources lists them
 ok    project trust    nothing pending
 ok    model            anthropic/claude-sonnet-5
@@ -44,9 +44,12 @@ stdout and stderr under the QQ state directory's `logs/qq-N.jsonl` (on Linux,
 state directory use the platform local-data directory.
 With `QQ_HOME` set, logs instead go to `<QQ_HOME>/data/logs`.
 
-Run, turn, provider, tool, store and command startup spans record numeric
-ordinals and timing, not prompts, model output, arguments/results, paths,
-credentials or arbitrary provider errors. Dependency tracing is excluded. This is a lossy diagnostic,
+Run, admission, turn, provider, retry-wait, tool, store, publish, render and
+command startup spans record numeric ordinals, run/command IDs, fixed outcome
+labels and timing, not prompts, model output, arguments/results, paths,
+credentials or arbitrary provider errors. On normal exit the last line is a
+`summary` with per-stage counts and times and `dropped_records`; see the
+[stage dictionary](../design/telemetry.md). Dependency tracing is excluded. This is a lossy diagnostic,
 not an audit: queue pressure drops whole records, each file stops at 8 MiB,
 and abrupt termination can lose queued records. Sixteen exclusive files cap
 retention at 128 MiB. When all slots exist, remove old diagnostic files from

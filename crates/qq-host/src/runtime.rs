@@ -1154,6 +1154,7 @@ impl RuntimeFactory {
             explicit_config_path: request.explicit_path().map(Path::to_owned),
             explicit_config_content: request.explicit_content().map(str::to_owned),
             reasoning_effort: request.overrides().reasoning_effort(),
+            discovery_epoch: self.inner.discovery.epoch(),
             ignore_untrusted_project_config: request.ignores_untrusted_project_config(),
         };
         let lookup = self.inner.plans.load(&key, || {
@@ -1223,7 +1224,32 @@ impl RuntimeFactory {
                 snapshot
             }
         };
-        let snapshot = with_claude_default_effort(snapshot);
+        let live_efforts = snapshot
+            .providers()
+            .get(snapshot.model().provider())
+            .and_then(|provider| {
+                if provider
+                    .models()
+                    .get(snapshot.model().model())
+                    .is_some_and(|metadata| metadata.explicitly_configured())
+                {
+                    return None;
+                }
+                self.inner
+                    .discovery
+                    .cached(
+                        snapshot.model().provider(),
+                        provider,
+                        &self.inner.credentials,
+                    )
+                    .and_then(|models| {
+                        models
+                            .iter()
+                            .find(|model| model.id == snapshot.model().model())
+                            .and_then(|model| model.efforts.clone())
+                    })
+            });
+        let snapshot = with_claude_default_effort(snapshot, live_efforts.as_deref());
         preparation_phase(progress, qq_core::RuntimeLoadStage::CompilingProvider)?;
         let resolved_model = self.resolved_model_for_snapshot(&snapshot)?;
         let output_ceiling = snapshot
@@ -1272,31 +1298,6 @@ impl RuntimeFactory {
                 snapshot.model().as_str().to_owned(),
             ));
         }
-        let live_efforts = snapshot
-            .providers()
-            .get(snapshot.model().provider())
-            .and_then(|provider| {
-                if provider
-                    .models()
-                    .get(snapshot.model().model())
-                    .is_some_and(|metadata| metadata.explicitly_configured())
-                {
-                    return None;
-                }
-                self.inner
-                    .discovery
-                    .cached(
-                        snapshot.model().provider(),
-                        provider,
-                        &self.inner.credentials,
-                    )
-                    .and_then(|models| {
-                        models
-                            .iter()
-                            .find(|model| model.id == snapshot.model().model())
-                            .and_then(|model| model.efforts.clone())
-                    })
-            });
         if let Some(effort) = snapshot
             .reasoning_effort()
             .filter(|effort| *effort != qq_provider::ReasoningEffort::Default)
@@ -1799,7 +1800,10 @@ const LEGACY_DEFAULT_MAX_OUTPUT_TOKENS: [u32; 2] = [2_048, 4_096];
 const CLAUDE_DEFAULT_REASONING_EFFORT: qq_provider::ReasoningEffort =
     qq_provider::ReasoningEffort::Medium;
 
-fn with_claude_default_effort(snapshot: ConfigSnapshot) -> ConfigSnapshot {
+fn with_claude_default_effort(
+    snapshot: ConfigSnapshot,
+    live_efforts: Option<&[qq_provider::ReasoningEffort]>,
+) -> ConfigSnapshot {
     let Some(provider) = snapshot.providers().get(snapshot.model().provider()) else {
         return snapshot;
     };
@@ -1818,13 +1822,18 @@ fn with_claude_default_effort(snapshot: ConfigSnapshot) -> ConfigSnapshot {
             api,
             ProviderApi::OpenAiChatCompletions | ProviderApi::AnthropicMessages
         )
-        && metadata.is_none_or(|metadata| {
-            metadata.reasoning()
-                && (metadata.reasoning_efforts().is_empty()
-                    || metadata
-                        .reasoning_efforts()
-                        .contains(&CLAUDE_DEFAULT_REASONING_EFFORT))
-        });
+        && metadata.is_none_or(qq_config::ModelMetadata::reasoning)
+        && live_efforts.map_or_else(
+            || {
+                metadata.is_none_or(|metadata| {
+                    metadata.reasoning_efforts().is_empty()
+                        || metadata
+                            .reasoning_efforts()
+                            .contains(&CLAUDE_DEFAULT_REASONING_EFFORT)
+                })
+            },
+            |levels| levels.contains(&CLAUDE_DEFAULT_REASONING_EFFORT),
+        );
     if claude && accepts_effort {
         snapshot.with_default_reasoning_effort(CLAUDE_DEFAULT_REASONING_EFFORT)
     } else {
@@ -2501,6 +2510,28 @@ fn delegation_roster(
                         _ => None,
                     },
                 };
+                if roster_entry.effort.is_none()
+                    && snapshot
+                        .providers()
+                        .get(entry.route().provider())
+                        .is_some_and(|provider| {
+                            provider.access().is_some_and(|access| {
+                                !matches!(access, ProviderAccess::Http(_))
+                                    || !matches!(
+                                        effective_provider_api(
+                                            provider,
+                                            entry.route().model(),
+                                            access
+                                        ),
+                                        ProviderApi::OpenAiResponses
+                                            | ProviderApi::OpenAiChatCompletions
+                                            | ProviderApi::AnthropicMessages
+                                    )
+                            })
+                        })
+                {
+                    roster_entry.effort = Some(qq_provider::ReasoningEffort::Default);
+                }
                 if roster_entry.effort.is_none()
                     && let Some(derived) =
                         qq_protocol::child_reasoning_effort(&roster_entry, parent_effort)

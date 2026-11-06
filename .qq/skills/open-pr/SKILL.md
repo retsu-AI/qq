@@ -26,7 +26,8 @@ reviewed with `review-diff`.
 3. **Gate.** Rebase onto the latest `origin/main`, then run
    `cargo xtask check` once on the committed tree. If
    `git config core.hooksPath` prints `.githooks`, the pre-push hook runs
-   it for you in step 4. On failure, read `target/qq-check/last.json`,
+   it for you in step 4; after a passing run on the same tree the hook
+   reuses that report instead of running the gates again. On failure, read `target/qq-check/last.json`,
    run its rerun command while you fix the cause, commit, and gate again.
 4. **Push.** `git push -u origin HEAD`. Never `--force`. A rejected push
    means someone else pushed: fetch and rebase, or ask.
@@ -55,8 +56,9 @@ reviewed with `review-diff`.
    `cargo xtask check --evidence` prints the gate result for the current
    commit if you want to paste it.
 6. **Confirm.** `gh pr view --json url,isDraft,headRefOid` shows the URL,
-   `isDraft: false`, and the head you pushed. Codex reviews new PRs on its
-   own.
+   `isDraft: false`, and the head you pushed. Codex reviews a new PR's
+   first head on its own; after any later push, comment `@codex review`
+   at once rather than waiting for CI.
 
 Opening a PR does not start babysitting. If the user also asked for green
 CI, review fixes, or a merge, load `babysit-pr` next.

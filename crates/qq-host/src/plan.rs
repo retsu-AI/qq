@@ -34,6 +34,7 @@ pub struct PlanKey {
     pub explicit_config_path: Option<PathBuf>,
     pub explicit_config_content: Option<String>,
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
+    pub discovery_epoch: u64,
     pub ignore_untrusted_project_config: bool,
 }
 
@@ -528,6 +529,7 @@ mod tests {
             explicit_config_path: None,
             explicit_config_content: None,
             reasoning_effort: None,
+            discovery_epoch: 0,
             ignore_untrusted_project_config: false,
         }
     }

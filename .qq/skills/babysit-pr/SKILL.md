@@ -33,8 +33,9 @@ with no unresolved findings and reacted 👍. A clean receipt without the
 ## Loop
 
 1. Run the script. If it is ready, stop and report.
-2. Fix blockers in this order. Push all fixes for one pass together, then
-   go back to step 1 with `--wait`.
+2. Fix blockers in this order. Push all fixes for one pass together,
+   comment `@codex review` right after the push (Codex reviews only the
+   PR's first head on its own), then go back to step 1 with `--wait`.
    - **Conflicts.** `git fetch origin && git merge origin/main`, resolve,
      rerun the affected tests, commit, and push. PRs squash on merge, so a
      merge commit costs nothing and needs no force-push.
@@ -59,9 +60,10 @@ with no unresolved findings and reacted 👍. A clean receipt without the
      CI on the new head. Otherwise rerun once with
      `gh run rerun <run-id> --failed`. If the same failure comes back, it
      is real: fix it or report it.
-   - **Codex.** New commits trigger a new review. If the status says
-     failed or nothing happens after a push, comment `@codex review` once.
-     Codex findings are review threads; handle them as above.
+   - **Codex.** A pushed head is reviewed only after an `@codex review`
+     comment newer than the push; the status says "not requested" until
+     then. If it says failed, comment once more. Codex findings are review
+     threads; handle them as above.
 3. Stop and report when only a person can unblock it: an approval, a
    product decision, a failure you cannot reproduce, or the 30-minute
    wait running out twice.

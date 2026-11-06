@@ -25,8 +25,8 @@ use qq_protocol::{
     RunSnapshot, RunStatus, SessionAccounting, SessionCommand, SessionEvent, SessionEventEnvelope,
     SessionId, SessionPurpose, SessionSnapshot, SessionStatus, SessionSummary, ShellCommandPreview,
     SnapshotRequest, SpawnOrigin, StoreId, SubscribeRequest, TextChannel, TokenUsage,
-    ToolCallDisplay, ToolCallId, ToolCallSnapshot, ToolCallState, WorkspaceId, WorkspaceSnapshot,
-    WorkspaceSummary, validate_input,
+    ToolCallDisplay, ToolCallId, ToolCallSnapshot, ToolCallState, ToolExecution, WorkspaceId,
+    WorkspaceSnapshot, WorkspaceSummary, validate_input,
 };
 use qq_provider::{ContentBlock, Message, Role};
 use rusqlite::{Connection, OptionalExtension, params};

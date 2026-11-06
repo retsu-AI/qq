@@ -81,6 +81,7 @@ pub(super) struct ClaimedRun {
     pub(super) file_state: Vec<(String, String)>,
     pub(super) pending_steering: Vec<crate::runtime::SteeringMessage>,
     pub(super) output: Option<Arc<crate::output::CompiledOutputSchema>>,
+    pub(super) queued_at_ms: Option<u64>,
 }
 
 impl ClaimedRun {
@@ -117,6 +118,7 @@ impl ClaimedRun {
             root_run_id: self.root_run_id,
             purpose: self.purpose,
             output: None,
+            queued_at_ms: None,
         }
     }
 }
@@ -372,7 +374,7 @@ pub(super) fn reserve_next_run_recoverable(
                                   WHERE session_id = s.id
                                     AND role = 'user' AND steering = 0
                                     AND state IN ('complete', 'cancelled', 'failed', 'interrupted')), 0),
-                    s.model_is_fallback, r.origin_json
+                    s.model_is_fallback, r.origin_json, r.created_at_ms
              FROM runs r
              JOIN sessions s ON s.id = r.session_id
              JOIN workspaces w ON w.id = s.workspace_id
@@ -418,6 +420,7 @@ pub(super) fn reserve_next_run_recoverable(
                     row.get::<_, bool>(25)?,
                     row.get::<_, bool>(26)?,
                     row.get::<_, Option<String>>(27)?,
+                    row.get::<_, u64>(28)?,
                 ))
             },
         )
@@ -451,6 +454,7 @@ pub(super) fn reserve_next_run_recoverable(
         context_compaction_remaining,
         model_is_fallback,
         origin_json,
+        queued_at_ms,
     )) = row
     else {
         return Ok(None);
@@ -620,6 +624,7 @@ pub(super) fn reserve_next_run_recoverable(
         .transpose()?;
     transaction.commit()?;
     Ok(Some(ClaimedRun {
+        queued_at_ms: Some(queued_at_ms),
         origin,
         identity: RunIdentity {
             workspace_id,

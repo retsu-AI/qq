@@ -81,6 +81,67 @@ fn assembly_pruning_stubs_old_read_only_results_and_preserves_errors() {
 }
 
 #[test]
+fn pruning_preserves_complete_scoped_disclosures_from_native_read_tools() {
+    let directory = test_directory();
+    std::fs::create_dir(directory.path().join("child")).unwrap();
+    std::fs::write(
+        directory.path().join("child/AGENTS.md"),
+        "child guidance\n".repeat(500),
+    )
+    .unwrap();
+    let workspace = crate::workspace::Workspace::open(directory.path()).unwrap();
+    let mut instructions = crate::workspace::ScopedInstructions::new(
+        &crate::workspace::WorkspaceInstructions::empty(),
+    );
+    let notice = format!(
+        "not executed: {}",
+        instructions
+            .discover(
+                &workspace,
+                &["child/file".to_owned()],
+                &RunCancellation::new()
+            )
+            .unwrap()
+            .unwrap()
+    );
+    for name in ["read_file", "search", "tree"] {
+        let mut context = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::tool_call(
+                    "scope".to_owned(),
+                    name.to_owned(),
+                    &serde_json::json!({"path":"child/file"}),
+                )],
+            ),
+            Message::tool_results(vec![ContentBlock::ToolResult {
+                call_id: "scope".to_owned(),
+                content: notice.clone(),
+                is_error: true,
+            }]),
+        ];
+        context.extend((0..CONTEXT_PRUNE_KEEP_TURNS + 1).map(|_| Message::assistant("later")));
+        assert!(
+            !prune_stale_tool_results(&mut context, &HashMap::new()),
+            "{name}"
+        );
+        assert!(
+            matches!(context[1].content(), [ContentBlock::ToolResult {content, is_error:true, ..}] if content == &notice)
+        );
+    }
+    assert_eq!(
+        instructions
+            .discover(
+                &workspace,
+                &["child/file".to_owned()],
+                &RunCancellation::new()
+            )
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn pruning_stubs_keep_a_result_header_line() {
     let call = |id: &str, name: &str| {
         ContentBlock::tool_call(
@@ -750,6 +811,7 @@ fn denial_capacity_fixture(
         )
         .unwrap();
     let claimed = ClaimedRun {
+        queued_at_ms: None,
         origin: None,
         identity: RunIdentity {
             workspace_id,

@@ -517,7 +517,7 @@ const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "structured-tracing",
-        proves: "QQ_LOG is opt-in; JSON spans cover run/turn/provider/tool/store without content",
+        proves: "QQ_LOG is opt-in; JSON spans cover run/admission/turn/provider/tool/store/publish and a stage summary without content",
         run: |home| Box::pin(structured_tracing(home)),
     },
     Scenario {
@@ -1002,7 +1002,22 @@ async fn structured_tracing(home: &Home) -> Result<(), String> {
         "diagnostic content leak"
     );
     let records = jsonl(&logs)?;
-    for name in ["run", "turn", "provider", "tool", "store"] {
+    ensure!(
+        records
+            .iter()
+            .any(|record| record["fields"]["message"] == "summary"
+                && record["dropped_records"].is_u64()),
+        "missing stage summary: {logs}"
+    );
+    for name in [
+        "run",
+        "admission",
+        "turn",
+        "provider",
+        "tool",
+        "store",
+        "publish",
+    ] {
         ensure!(
             records.iter().any(
                 |record| record["span"]["name"] == name && record["fields"]["message"] == "new"

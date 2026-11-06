@@ -12,7 +12,8 @@ merge gate runs. Agents follow the procedure in the `qq-mode` skill
 | Before every push | `cargo xtask check` | 10 s – 2 min warm, by blast radius |
 | User-visible behavior | `cargo xtask smoke` | ~2 s after the build |
 | A feature smoke does not cover | the `verify-qq` skill | minutes |
-| Merge (CI merge queue) | `cargo xtask check --full` (adds the soak tests) plus platform jobs | ~3–5 min |
+| Pull request CI | static and test halves in parallel, platform jobs when the change reaches them | ~3–4 min |
+| Merge (CI merge queue) | `cargo xtask check --full` (adds the soak tests) plus every platform job | ~5–7 min |
 
 ### `cargo xtask check`
 
@@ -30,10 +31,21 @@ Runs only what your change can affect:
 3. Gates, cheapest first, stopping at the first failure:
    1. `cargo fmt --all -- --check`
    2. `cargo xtask lint`
-   3. `cargo clippy -p … --all-targets --all-features -D warnings`
-   4. `cargo nextest run -p … -E 'not (group(soak) | <quarantine>)'`
+   3. `cargo clippy --workspace --all-targets --all-features -D warnings`
+   4. `cargo nextest run --workspace -E '(package(=…) | …) & not (group(soak) | <quarantine>)'`
    5. the minimal `qq-provider` profile (Clippy and tests), when any
       `qq-provider` file changed
+
+Clippy and the test build always compile the whole workspace, so every
+run, CI, and the merge queue share one feature set and one set of build
+artifacts; the selection only decides which tests run. Unchanged crates
+come from the build cache, so a narrow change still compiles in seconds.
+
+A run whose report already passed for the exact same tree (`HEAD` plus
+the snapshot below) and covers the same gates is reused instead of run
+again (the `default`, `quick` and `ci` nextest profiles select the same
+tests and count as one; `platform` does not), so the pre-push hook after a passing `cargo xtask check` returns at
+once. `--rerun` forces a fresh run.
 
 If the merge-base with `--base` cannot be found, the command fails rather
 than checking only the working tree. Fetch the base, or pass `--full`.
@@ -47,11 +59,6 @@ unless `--full` is given, and always leaves out tests listed in
 snapshot of index, working-tree diffs, and untracked file contents, not only
 the dirty flag. A tree change during the gate invalidates the run.
 
-An affected run builds a subset of packages, so Cargo's feature
-unification can differ from a `--workspace` build. A rare feature-only
-breakage passes the affected gate and fails the full gate in the merge
-queue.
-
 Flags:
 
 | Flag | Effect |
@@ -61,6 +68,8 @@ Flags:
 | `--full` | runs the merge gate, soak tests included |
 | `--profile quick` | stops at the first failing test |
 | `--no-clippy` | skips Clippy (iteration only) |
+| `--gate G` | runs only gate `G` (repeatable: `fmt`, `lint`, `clippy`, `minimal-clippy`, `test`, `minimal-test`); CI runs the static and test gates as separate jobs |
+| `--rerun` | runs the gates even when the last report passed for this tree |
 | `--evidence` | prints the last report as Markdown for a PR body; fails if the report is for another commit or tree state |
 
 ### Reading failures
@@ -240,24 +249,33 @@ it when `/dev/shm` is missing, unwritable, mounted `noexec`, or has under
 
 | Job | Runs on | What it does |
 | --- | --- | --- |
-| `fmt, lint, clippy, tests, smoke` (`checks`) | every run | pull requests: `cargo xtask check --profile ci --base origin/<base>` (soak tests excluded); merge queue, `main`, nightly and manual runs: `cargo xtask check --profile ci --full` (soak included); then `cargo xtask smoke`. Summary carries the evidence block; failures upload `target/qq-check/`, JUnit and `target/qq-smoke/` |
-| `minimal core profile and embedding` (`core-profiles`) | merge queue, `main`, nightly, manual, `ci:full` | `qq-core --no-default-features` tests and Clippy, the `htmd` dependency check, and the embedding example, in parallel with `checks` |
-| `quarantined tests under stress (<os>, non-blocking)` (`quarantine`) | every run, on Linux, Windows and macOS, non-blocking | stress-runs `.config/quarantine.toml` 100 times on each OS, so a platform-only entry still runs where it compiles; skips the build when the list is empty |
-| `devcontainer smoke` | when `.devcontainer/`, `Dockerfile*`, `rust-toolchain.toml` or `Cargo.lock` changed, and on every non-PR run and `ci:full` | builds `.devcontainer/` and runs three smoke scenarios inside it. `devcontainer inputs changed` decides |
-| `qq-client on wasm32` | merge queue, `main`, nightly, manual, `ci:full` | wasm32 build and test build |
-| `platform tests (windows-latest)`, `platform tests (macos-latest)` | merge queue, `main`, nightly, manual, `ci:full` | the nextest `platform` profile, checked against `.config/platform-tests/<os>.txt`, then run-in-place smoke, `qq-core` Clippy and the embedding example ([Windows CI](windows-ci.md)) |
-| `undo on Git 2.39 (debian:bookworm)` | merge queue, `main`, nightly, manual, `ci:full` | the `undo` core tests and the `run-then-undo` smoke on old Git |
+| `select jobs` (`changes`) | every run | `.github/scripts/ci-changes.sh` decides which of the jobs below a pull request needs; every other event runs them all |
+| `fmt, lint, clippy` (`static`) | every run | `cargo xtask check --gate fmt --gate lint --gate clippy --gate minimal-clippy`, plus the install script and turn-recorder fixtures |
+| `tests and smoke` (`tests`) | every run | `cargo xtask check --gate test --gate minimal-test` (pull requests leave out the soak group; merge queue, `main`, nightly and manual runs pass `--full`), then `cargo xtask smoke --reuse-test-build` on the binary the test build produced. Failures upload `target/qq-check/`, JUnit and `target/qq-smoke/` |
+| `fmt, lint, clippy, tests, smoke` (`checks`) | every run | passes only when `static` and `tests` both passed; this is the required check |
+| `minimal core profile and embedding` (`core-profiles`) | `qq-core`, `qq-provider`, `qq-protocol` or `qq-reasoning` changed; every non-PR run | `qq-core --no-default-features` tests and Clippy, the `htmd` dependency check, and the embedding example |
+| `quarantined tests under stress (<os>, non-blocking)` (`quarantine`) | `.config/quarantine.toml` lists a test | stress-runs the list 100 times on Linux, Windows and macOS, so a platform-only entry still runs where it compiles |
+| `devcontainer smoke` | `.devcontainer/`, `Dockerfile*`, `rust-toolchain.toml` or `Cargo.lock` changed; every non-PR run | builds `.devcontainer/` and runs three smoke scenarios inside it |
+| `qq-client on wasm32` | `qq-client`, `qq-protocol` or `qq-reasoning` changed; every non-PR run | wasm32 build and test build |
+| `platform tests (windows-latest)`, `platform tests (macos-latest)` | the shell and process tools, workspace, undo, `qq-auth`, `qq-config`, `qq-server`, the daemon, integration tests or smoke changed, or a changed Rust file has a platform `cfg`; every non-PR run | the nextest `platform` profile, checked against `.config/platform-tests/<os>.txt`, then run-in-place smoke, `qq-core` Clippy and the embedding example ([Windows CI](windows-ci.md)) |
+| `undo on Git 2.39 (debian:bookworm)` | `qq-core` or smoke changed; every non-PR run | the `undo` core tests and the `run-then-undo` smoke on old Git |
 | `release build size` | `main` | reports the release binary size |
 
-Add the label `ci:full` to a pull request that touches process, shell,
-platform or CI code so the platform jobs run before the merge queue.
+Changes to `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`,
+`.config/` or the CI workflow select every job. A selected-out job reports
+`skipped`, which satisfies its required check; the merge queue runs every
+job regardless. No label is needed.
+
+Only runs on `main` save build caches; pull requests and the merge queue
+restore `main`'s. That keeps pull request caches from evicting `main`'s
+under the repository's 10 GB cache limit.
 
 Required checks for the merge queue: `fmt, lint, clippy, tests, smoke`,
 `minimal core profile and embedding`, `qq-client on wasm32`,
 `platform tests (windows-latest)`, `platform tests (macos-latest)` and
 `undo on Git 2.39 (debian:bookworm)`. Do not require `devcontainer smoke`
-(it is skipped on most pull requests) or the quarantine job. Without a
-merge queue, the full gate runs only after merge on `main`.
+or the quarantine job. Without a merge queue, the full gate runs only
+after merge on `main`.
 
 ## Local hook
 

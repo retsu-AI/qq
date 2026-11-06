@@ -200,6 +200,7 @@ pub(super) fn start_auto_compaction(
     transaction.commit()?;
     Ok(Some((
         ClaimedRun {
+            queued_at_ms: None,
             origin: Some(qq_protocol::RunOrigin::AutoCompaction {
                 owner_run_id: original.identity.run_id,
             }),

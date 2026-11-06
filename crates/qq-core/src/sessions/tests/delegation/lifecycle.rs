@@ -403,6 +403,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let parent_run = RunId::generate().unwrap();
     let parent = ClaimedRun {
+        queued_at_ms: None,
         origin: None,
         identity: RunIdentity {
             workspace_id,
@@ -662,7 +663,7 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
         } else {
             submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await
         };
-        await_frozen(applying, Duration::from_secs(2))
+        await_frozen(applying, crate::test_support::HANG_GUARD)
             .await
             .unwrap();
         let mut observed = Vec::new();

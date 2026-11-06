@@ -1119,6 +1119,13 @@ pub enum ToolCallState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ToolExecution {
+    NotStarted,
+    MayHaveRun,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TextChannel {
     Output,
     Refusal,
@@ -1527,6 +1534,8 @@ pub struct ToolCallSnapshot {
     pub is_error: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<ToolCallDisplay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ToolExecution>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2258,6 +2267,7 @@ mod tests {
                 result: Some("QQ".to_owned()),
                 is_error: false,
                 display: None,
+                execution: None,
             },
         };
 
@@ -2579,6 +2589,7 @@ mod tests {
             result: Some(result.to_owned()),
             is_error,
             display: None,
+            execution: None,
         };
         assert_eq!(
             call(ToolCallState::Failed, "invalid_ranges: x", true).error_kind(),
@@ -2616,6 +2627,7 @@ mod tests {
                 path: "src/lib.rs".to_owned(),
                 diff: "- old\n+ new\n".to_owned(),
             }),
+            execution: None,
         };
 
         let encoded = serde_json::to_value(&tool_call).unwrap();
@@ -2675,6 +2687,7 @@ mod tests {
             result: None,
             is_error: false,
             display: None,
+            execution: None,
         };
         let requested = SessionEvent::ToolApprovalRequested {
             tool_call: tool_call.clone(),
@@ -3611,7 +3624,7 @@ mod tests {
         invalid["resolved_model"]["version"] = serde_json::json!(0);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
 
-        assert_eq!(crate::PROTOCOL_VERSION, 45);
+        assert_eq!(crate::PROTOCOL_VERSION, 46);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

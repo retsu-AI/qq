@@ -18,6 +18,10 @@ Repository automation for QQ is available through `cargo xtask`.
   startup, RSS, runtime, replay, tool, streaming, and isolated load profiles.
 - `cargo xtask perf check ...` rejects compatible candidate reports that exceed
   the checked-in regression budgets.
+- `python3 benchmarks/perf/cross_harness.py ...` records seeded paired attempts
+  and A/A controls using `workloads-v1.json` and out-of-tree adapter commands.
+  `cargo xtask perf cross-worker ...` is the QQ receipt adapter.
+  See `benchmarks/perf/cross-harness.md` for the contract and reproducible commands.
   (`perf` also has hidden `load-worker`, `r4-worker`, and `feed-worker`
   subcommands that `baseline` spawns as isolated processes. They run only as
   an optimized build on Linux, so invoke them directly through

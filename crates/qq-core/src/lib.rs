@@ -901,6 +901,7 @@ impl Runtime {
         tools: Arc<[ToolSpec]>,
         cache_key: Option<Arc<str>>,
         max_output_tokens: u32,
+        retry_owner: qq_provider::RetryOwner,
     ) -> impl Stream<Item = Result<runtime::SummarizeStep, runtime::SummarizeError>> + Send + '_
     {
         stream! {
@@ -916,7 +917,8 @@ impl Runtime {
             yield Ok(runtime::SummarizeStep::RequestStarting);
             let request =
                 ModelRequest::new(Arc::clone(&self.model), messages.clone(), max_output_tokens)
-                    .with_system(Arc::clone(&system));
+                    .with_system(Arc::clone(&system))
+                    .with_retry_owner(retry_owner);
             let request = match &cache_key {
                 Some(key) => request.with_cache_key(Arc::clone(key)),
                 None => request,
@@ -1620,6 +1622,7 @@ struct RetainedResult {
     model_text: String,
     is_error: bool,
     spill_handle: Option<String>,
+    instruction_notice: bool,
 }
 
 impl RetainedResult {
@@ -1635,6 +1638,7 @@ impl RetainedResult {
             model_text: output.model_text.clone(),
             is_error: output.is_error,
             spill_handle: output.spill.as_ref().map(|spill| spill.handle(tool, call)),
+            instruction_notice: false,
         }
     }
 
@@ -1647,7 +1651,14 @@ impl RetainedResult {
             model_text: message,
             is_error: true,
             spill_handle: None,
+            instruction_notice: false,
         }
+    }
+
+    fn instruction_notice(message: String) -> Self {
+        let mut result = Self::error(message);
+        result.instruction_notice = true;
+        result
     }
 
     fn interrupted(message: String) -> Self {
@@ -1665,6 +1676,7 @@ impl RetainedResult {
             model_text: result,
             is_error: false,
             spill_handle: None,
+            instruction_notice: false,
         }
     }
 }

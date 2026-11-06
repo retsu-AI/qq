@@ -1,4 +1,4 @@
-use super::probe::{Checkpoint, PROBE};
+use super::probe::{Checkpoint, EffectStage, PROBE};
 use super::*;
 use super::{
     approvals::SessionToolGate,
@@ -1260,11 +1260,28 @@ pub(super) async fn cancellation_requested(
     result
 }
 
+pub(super) fn record_run_outcome(outcome: &RunOutcome) -> tracing::Span {
+    let run_span = tracing::Span::current();
+    run_span.record(
+        "outcome",
+        match outcome {
+            RunOutcome::Completed => "completed",
+            RunOutcome::Cancelled => "cancelled",
+            RunOutcome::Interrupted => "interrupted",
+            RunOutcome::Failed { .. } => "failed",
+            RunOutcome::BudgetExhausted { .. } => "budget_exhausted",
+            RunOutcome::Paused { .. } => "paused",
+        },
+    );
+    run_span
+}
+
 async fn finish_reserved_run(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
     outcome: RunOutcome,
 ) {
+    let run_span = record_run_outcome(&outcome);
     match inner.store.finish_reserved_run(claimed, outcome).await {
         Ok(events) => {
             for event in events {
@@ -1276,6 +1293,7 @@ async fn finish_reserved_run(
             clear_run_registration(inner, claimed.identity.run_id);
         }
         Err(_) => {
+            run_span.record("outcome", "error");
             inner.failed.send_replace(true);
         }
     }
@@ -1294,6 +1312,7 @@ async fn finish_prepared_run(
     audit: &PreparedRunAudit,
     outcome: RunOutcome,
 ) {
+    record_run_outcome(&outcome);
     match inner
         .store
         .finish_prepared_run(claimed, audit.clone(), outcome)
@@ -2030,6 +2049,7 @@ async fn execute_started_run(
                     .and(current_occupancy_basis.take())
                     .filter(|_| context_shape.provider_identity);
                 let turn_message = current_message.take();
+                let intends_effects = !calls.is_empty();
                 current_turn = turn_ordinal.saturating_add(1);
                 match inner
                     .store
@@ -2053,6 +2073,14 @@ async fn execute_started_run(
                     )
                     .await
                 {
+                    Ok(_) if intends_effects => {
+                        PROBE
+                            .reached(Checkpoint::Effect(
+                                claimed.identity.session_id,
+                                EffectStage::IntentCommitted,
+                            ))
+                            .await;
+                    }
                     Ok(_) => {}
                     Err(error) => {
                         let Ok(teardown) = resources.stop(&mut events).await else {
@@ -2227,7 +2255,14 @@ async fn execute_started_run(
                     }
                 }
                 match inner.store.start_tool_call(&claimed, id).await {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        PROBE
+                            .reached(Checkpoint::Effect(
+                                claimed.identity.session_id,
+                                EffectStage::DispatchCommitted,
+                            ))
+                            .await;
+                    }
                     Err(error) => {
                         let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
@@ -2349,6 +2384,12 @@ async fn execute_started_run(
                 if internal {
                     continue;
                 }
+                PROBE
+                    .reached(Checkpoint::Effect(
+                        claimed.identity.session_id,
+                        EffectStage::ResultReceived,
+                    ))
+                    .await;
                 if let Err(error) = flush_pending_tool_output(
                     &inner,
                     &claimed,
@@ -2386,6 +2427,12 @@ async fn execute_started_run(
                 {
                     Ok(commit) => {
                         resources.tools.forget_finished(id);
+                        PROBE
+                            .reached(Checkpoint::Effect(
+                                claimed.identity.session_id,
+                                EffectStage::ResultCommitted,
+                            ))
+                            .await;
                         if commit.context_exhausted {
                             let Ok(teardown) = resources.stop(&mut events).await else {
                                 inner.failed.send_replace(true);
@@ -3140,10 +3187,12 @@ async fn finish_run_accounted(
     accounting: Option<RunAccounting>,
     mut teardown: TeardownComplete,
 ) {
+    let run_span = record_run_outcome(&outcome);
     if persist_finished_results(inner, claimed, &mut teardown)
         .await
         .is_err()
     {
+        run_span.record("outcome", "error");
         inner.failed.send_replace(true);
         return;
     }
@@ -3156,6 +3205,12 @@ async fn finish_run_accounted(
         .await
     {
         Ok(events) => {
+            PROBE
+                .reached(Checkpoint::Effect(
+                    claimed.identity.session_id,
+                    EffectStage::RunSettled,
+                ))
+                .await;
             for event in events {
                 inner.notify(event.cursor);
             }
@@ -3165,6 +3220,7 @@ async fn finish_run_accounted(
             clear_run_registration(inner, claimed.identity.run_id);
         }
         Err(_) => {
+            run_span.record("outcome", "error");
             inner.failed.send_replace(true);
         }
     }

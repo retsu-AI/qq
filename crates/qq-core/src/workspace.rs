@@ -24,8 +24,11 @@ pub(crate) use guidance::{
     valid_name as valid_slash_name,
 };
 pub use instructions::WorkspaceInstructionError;
+#[doc(hidden)]
+pub use instructions::bench_support as scoped_instructions_bench_support;
 pub(crate) use instructions::{
-    WorkspaceInstructions, load_with_sources as load_instructions_with_sources,
+    SCOPED_NOTICE_PREFIX, ScopedInstructions, WorkspaceInstructions,
+    load_with_sources as load_instructions_with_sources,
 };
 #[cfg(test)]
 pub(crate) use prepare::test_pause_after_workspace_open;

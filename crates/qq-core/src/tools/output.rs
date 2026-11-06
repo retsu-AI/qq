@@ -728,6 +728,13 @@ impl TurnOutputBudget {
         }
     }
 
+    pub(crate) fn reserve_instructions(&mut self, bytes: usize) {
+        self.remaining = self.remaining.saturating_sub(bytes);
+        self.protected = self
+            .protected
+            .min(self.remaining.saturating_sub(self.replies));
+    }
+
     pub(crate) fn admit(
         &mut self,
         tool: &str,

@@ -71,8 +71,9 @@ leaves no metadata behind.
 ## Diagnostic tracing
 
 The binary optionally installs metadata-only `QQ_LOG=info` JSON tracing under
-its state directory (local-data fallback on platforms without one). Core emits `qq::diagnostic` run/turn/provider/tool/store
-spans without payload content; other targets are rejected. Async polling is
+its state directory (local-data fallback on platforms without one). Core emits `qq::diagnostic` run/admission/turn/provider/retry-wait/tool/store/publish
+spans (and the TUI a render span) without payload content, plus a per-stage
+summary line ([telemetry](telemetry.md)); other targets are rejected. Async polling is
 instrumented rather than holding entered guards across yields. A bounded lossy
 queue hands complete records to a dedicated file writer, drained off-executor
 on normal shutdown. Exclusive bounded files avoid cross-process deletion.
@@ -455,30 +456,34 @@ because it lacks the static-prefix identity and measured request byte count.
 Everything about an agent's behavior that does not depend on the prompt is
 compiled once into an immutable, runtime-only `CompiledAgentPlan` owned by
 `qq-core::plan`: the compiled provider handle, the `ResolvedModel`, the opened
-capability-scoped workspace with its instruction file already read, the
+capability-scoped workspace with its root instruction file already read, the
 compiled `ToolCatalog` (built-ins, the `spawn_agent`, `search_history`,
 `select_tools`, and `load_skill` declarations, and every admitted external tool
 with its serialized schema and digest), the compiled `SkillIndex`, the
-sub-agent routes, the external tool hosts, and the
-context sources. Durable session runs execute directly
-from the plan and perform no canonicalization, directory open, instruction
-read, or host catalog request before the first provider request; only an
-explicitly invoked command or skill document is still read per run. External
-tool declarations are frozen into the plan at compile time as a catalog
-generation: a run keeps the catalog it was admitted with, and a host that
-changes its catalog (an MCP `list_changed`, a reconnect, a shutdown) makes the
-plan stale so the next load recompiles.
+sub-agent routes, the external tool hosts, and the context sources. Durable
+session runs execute directly from the plan. Native file-tool admission may
+perform bounded metadata checks and scoped instruction reads for actual target
+ancestors; it never performs a workspace scan. Only an explicitly invoked
+command or skill document is otherwise read per run before provider work.
+External tool declarations are frozen into the plan at compile time as a
+catalog generation: a run keeps the catalog it was admitted with, and a host
+that changes its catalog (an MCP `list_changed`, a reconnect, a shutdown) makes
+the plan stale so the next load recompiles.
 
 The plan also carries the plan-constant part of the system prompt (ADR-0024):
 the header with the tool list, the progressive-exposure index, the skill
-index, and the workspace instructions, as a `PromptPrefix`
-per capability set (which optional static tools the run may use, whether it
-may load guidance, strict read-only or unattended authority, and whether it is
-a model-spawned child with read or write authority) together with the SHA-256 state of those bytes. The common set is
-built at compile; other sets on first use, bounded by the 390 possible keys. A run appends only its suffix — the selected command or skill document,
-context-source blocks, the output contract — and finalizes a clone of the
-prefix hasher over that suffix, so `system_prompt_hash` equals a digest of the
-whole prompt and the prompt body is neither rebuilt nor rehashed per run.
+index, and the root workspace instructions, as a `PromptPrefix` per capability
+set (which optional static tools the run may use, whether it may load guidance,
+strict read-only or unattended authority, and whether it is a model-spawned
+child with read or write authority) together with the SHA-256 state of those
+bytes. The common set is built at compile; other sets on first use, bounded by
+the 390 possible keys. A run appends only its suffix — the selected command or
+skill document, context-source blocks, the output contract — and finalizes a
+clone of the prefix hasher over that suffix, so `system_prompt_hash` equals a
+digest of the whole prompt and the prompt body is neither rebuilt nor rehashed
+per run. Nested workspace instructions remain outside this stable identity:
+the native file tools disclose them in deferred-call results from a bounded
+per-run cache.
 
 Tool visibility follows immutable run authority. Strict read-only runs omit
 mutating, shell, network and all external schemas; external read-only hints
@@ -1253,7 +1258,10 @@ loop receives `provider_unavailable`, `provider_rate_limited`, or
 `provider_transport` (including a stream that ends after events without a
 terminal event), it commits whatever streamed as a partial assistant turn,
 publishes `run_turn_retrying`, waits under `TurnRecoveryPolicy`, and re-issues
-the turn with a continue notice after any partial text. The exponential delay
+the turn with a continue notice after any partial text. The first request of
+a turn is provider-owned; each re-issue is sent as `RetryOwner::Caller`, so
+the provider sends it once and the turn backoff is the only wait between
+sends. The exponential delay
 starts at 2 s and caps at 60 s; equal jitter chooses between half and all of
 that delay. Server-directed cooldowns, capped at 60 s, remain a minimum with
 jitter above it. Cancellation and the run deadline interrupt the wait. The
@@ -1633,7 +1641,12 @@ The store must preserve at least:
 Schema migrations are part of the binary. They start at schema 25, the store
 v0.0.1 shipped; an older store fails to open with `UnsupportedStoreSchema`
 instead of migrating. Chat history must survive process
-restarts, and a failed write must not be presented to clients as durable. Do
+restarts, and a failed write must not be presented to clients as durable.
+Migration steps before the last commit under WAL `synchronous=NORMAL`; the
+final step and every later write run under `synchronous=FULL`, so the final
+commit's fsync makes the whole chain durable before the store reports ready.
+A power loss mid-chain only rolls back to an earlier schema version, which the
+next open migrates again. Do
 not introduce an external database until measurements show SQLite is the
 bottleneck.
 
@@ -1775,7 +1788,7 @@ Do not add an agent-framework, plugin, tool-host, context, or addon crate.
 | `qq-config` | Parse and merge agent-profile and addon declarations, validate syntax, retain provenance |
 | `qq-auth` | Resolve provider and addon secret references without exposing secret values to config or protocol |
 | `qq-host` | Discover trusted sources, translate external config, compile/cache plans, wire concrete adapters |
-| `qq-provider` | Compile provider recipes; one provider-neutral stream handle plus effective capabilities; sole retry owner |
+| `qq-provider` | Compile provider recipes; one provider-neutral stream handle plus effective capabilities; owns resends of one request |
 | `qq-core` | `CompiledAgentPlan`, descriptor, execution invariants, context-source contracts, tools, run limits, durable outcomes |
 | `qq-mcp` | Bounded MCP capability/catalog snapshots and selected MCP operations |
 | `qq-protocol` | Versioned profile IDs, plan digests, input parts, commands, outcomes, events, capabilities |

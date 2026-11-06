@@ -269,7 +269,7 @@ async fn run_tui_client(
                         request,
                         Arc::clone(&request_permits),
                         updates.clone(),
-                    );
+                    ).await;
                 }
                 event = events.next() => match event {
                     Some(Ok(event)) => {
@@ -588,7 +588,7 @@ async fn recover_tui_client(
     Some((client, workspace_id, snapshot))
 }
 
-fn dispatch_tui_request(
+async fn dispatch_tui_request(
     client: SessionClient,
     workspace: PathBuf,
     workspace_id: WorkspaceId,
@@ -607,7 +607,7 @@ fn dispatch_tui_request(
             )),
             ClientRequest::Capabilities | ClientRequest::Models(_) => return,
         };
-        let _ = updates.try_send(update);
+        let _ = updates.send(update).await;
         return;
     };
     tokio::spawn(async move {
@@ -664,7 +664,37 @@ async fn send_bootstrap_failure(updates: &mpsc::Sender<ClientUpdate>, error: Cli
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashSet, net::SocketAddr};
+
+    use qq_protocol::{CommandRequest, PROTOCOL_VERSION, ServerInfo, SessionId, StoreId};
+    use tokio::{io::AsyncReadExt, sync::Notify};
+
     use super::*;
+
+    fn command_request(byte: u8) -> ClientRequest {
+        ClientRequest::Command(CommandRequest {
+            command_id: CommandId::from_bytes([byte; 16]),
+            command: SessionCommand::DeleteSession {
+                session_id: SessionId::from_bytes([byte; 16]),
+            },
+        })
+    }
+
+    fn test_client(address: SocketAddr) -> SessionClient {
+        let connection = Connection::new(
+            &format!("http://{address}"),
+            "test".to_owned(),
+            ServerInfo {
+                protocol_version: PROTOCOL_VERSION,
+                version: "test".to_owned(),
+                pid: 1,
+                server_id: StoreId::from_bytes([0xAA; 16]),
+                display_name: "test".to_owned(),
+            },
+        )
+        .unwrap();
+        SessionClient::new(connection).unwrap()
+    }
 
     #[test]
     fn stream_connection_state_distinguishes_initial_and_reconnect_attempts() {
@@ -677,6 +707,135 @@ mod tests {
                 ConnectionState::Live,
                 ConnectionState::Replaying,
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn saturation_dispatch_reports_the_correlated_request_at_the_concurrency_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (accepted_tx, mut accepted_rx) = mpsc::channel(TUI_CONCURRENT_REQUESTS);
+        let release = Arc::new(Notify::new());
+        let server = {
+            let release = Arc::clone(&release);
+            tokio::spawn(async move {
+                let mut sockets = Vec::new();
+                for _ in 0..TUI_CONCURRENT_REQUESTS {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = [0_u8; 4096];
+                    assert!(socket.read(&mut request).await.unwrap() > 0);
+                    accepted_tx.send(()).await.unwrap();
+                    sockets.push(socket);
+                }
+                release.notified().await;
+            })
+        };
+        let client = test_client(address);
+        let permits = Arc::new(Semaphore::new(TUI_CONCURRENT_REQUESTS));
+        let (updates, mut received) = mpsc::channel(TUI_UPDATE_CAPACITY);
+
+        for byte in 1..=TUI_CONCURRENT_REQUESTS as u8 {
+            dispatch_tui_request(
+                client.clone(),
+                PathBuf::from("workspace"),
+                WorkspaceId::from_bytes([1; 16]),
+                command_request(byte),
+                Arc::clone(&permits),
+                updates.clone(),
+            )
+            .await;
+        }
+        for _ in 0..TUI_CONCURRENT_REQUESTS {
+            accepted_rx.recv().await.unwrap();
+        }
+
+        let rejected_id = CommandId::from_bytes([9; 16]);
+        dispatch_tui_request(
+            client,
+            PathBuf::from("workspace"),
+            WorkspaceId::from_bytes([1; 16]),
+            command_request(9),
+            permits,
+            updates,
+        )
+        .await;
+
+        assert_eq!(
+            received.recv().await,
+            Some(ClientUpdate::CommandResult {
+                command_id: rejected_id,
+                result: Err(TuiClientFailure::new("too many client requests are active")),
+            })
+        );
+
+        release.notify_one();
+        server.await.unwrap();
+        let mut completed = HashSet::new();
+        for _ in 0..TUI_CONCURRENT_REQUESTS {
+            let Some(ClientUpdate::CommandResult { command_id, .. }) = received.recv().await else {
+                panic!("expected a command result")
+            };
+            completed.insert(command_id);
+        }
+        assert_eq!(completed.len(), TUI_CONCURRENT_REQUESTS);
+        assert!(!completed.contains(&rejected_id));
+    }
+
+    #[tokio::test]
+    async fn saturation_request_and_update_queues_preserve_control_progress() {
+        let (request_tx, request_rx) = mpsc::channel(TUI_REQUEST_CAPACITY);
+        let (update_tx, update_rx) = mpsc::channel(TUI_UPDATE_CAPACITY);
+        let mut client = TuiClient {
+            requests: request_tx,
+            updates: update_rx,
+        };
+        for _ in 0..TUI_UPDATE_CAPACITY {
+            update_tx
+                .send(ClientUpdate::Connection(ConnectionState::Live))
+                .await
+                .unwrap();
+        }
+        for byte in 1..=TUI_REQUEST_CAPACITY as u8 {
+            client.try_send(command_request(byte)).unwrap();
+        }
+
+        let queue_failure = client.try_send(command_request(65)).unwrap_err();
+        assert_eq!(queue_failure.message(), "client request queue is full");
+        assert_eq!(request_rx.len(), TUI_REQUEST_CAPACITY);
+
+        let permits = Arc::new(Semaphore::new(TUI_CONCURRENT_REQUESTS));
+        let _active = Arc::clone(&permits)
+            .acquire_many_owned(TUI_CONCURRENT_REQUESTS as u32)
+            .await
+            .unwrap();
+        let control_id = CommandId::from_bytes([0xEE; 16]);
+        let mut dispatch = Box::pin(dispatch_tui_request(
+            test_client("127.0.0.1:1".parse().unwrap()),
+            PathBuf::from("workspace"),
+            WorkspaceId::from_bytes([1; 16]),
+            command_request(0xEE),
+            permits,
+            update_tx,
+        ));
+        assert!(futures_util::poll!(dispatch.as_mut()).is_pending());
+        assert_eq!(
+            client.recv().await,
+            Some(ClientUpdate::Connection(ConnectionState::Live))
+        );
+        dispatch.await;
+
+        for _ in 1..TUI_UPDATE_CAPACITY {
+            assert_eq!(
+                client.recv().await,
+                Some(ClientUpdate::Connection(ConnectionState::Live))
+            );
+        }
+        assert_eq!(
+            client.recv().await,
+            Some(ClientUpdate::CommandResult {
+                command_id: control_id,
+                result: Err(TuiClientFailure::new("too many client requests are active")),
+            })
         );
     }
 }

@@ -690,6 +690,33 @@ pub(crate) fn test_executions_started() -> usize {
     TEST_EXECUTIONS_STARTED.load(Ordering::Acquire)
 }
 
+pub(crate) fn instruction_targets(name: &str, arguments: &str) -> Option<Vec<String>> {
+    match BuiltInTool::from_name(name)? {
+        BuiltInTool::ReadFile => {
+            deserialize_read_only::<super::read::ReadFileArgs>(name, arguments)
+                .ok()
+                .map(|(args, _)| vec![args.path])
+        }
+        BuiltInTool::Search => deserialize_read_only::<super::search::SearchArgs>(name, arguments)
+            .ok()
+            .map(|(args, _)| vec![args.path]),
+        BuiltInTool::Tree => deserialize_read_only::<super::tree::TreeArgs>(name, arguments)
+            .ok()
+            .map(|(args, _)| vec![args.path]),
+        BuiltInTool::WriteFile => deserialize::<super::write::WriteFileArgs>(arguments)
+            .ok()
+            .map(|args| vec![args.path]),
+        BuiltInTool::EditFile => deserialize::<super::edit::EditFileArgs>(arguments)
+            .ok()
+            .map(|args| args.edits.into_iter().map(|edit| edit.path).collect()),
+        BuiltInTool::Shell | BuiltInTool::Exec | BuiltInTool::AskUser => None,
+        #[cfg(feature = "tool-fetch")]
+        BuiltInTool::Fetch => None,
+        #[cfg(test)]
+        BuiltInTool::TestDelay | BuiltInTool::TestMutate | BuiltInTool::TestShell => None,
+    }
+}
+
 #[inline]
 pub(super) fn execute_blocking(
     workspace: &Workspace,

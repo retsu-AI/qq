@@ -429,6 +429,89 @@ async fn a_lagging_subscriber_catches_up_from_the_store_without_gaps_or_duplicat
 }
 
 #[tokio::test]
+async fn saturation_byte_lag_replays_exact_commits_or_terminates_with_snapshot_required() {
+    for expire_journal in [false, true] {
+        let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![Vec::new(); 4]).await;
+        let mut slow = harness
+            .runtime
+            .subscribe_published(SubscribeRequest {
+                workspace_id: harness.workspace_id,
+                after: EventCursor {
+                    store_id: harness.runtime.store_id(),
+                    workspace_id: harness.workspace_id,
+                    sequence: 0,
+                },
+            })
+            .unwrap();
+        let first = slow.next().await.unwrap().unwrap();
+        let mut last = first.envelope.cursor;
+        for _ in 0..4 {
+            submit_prompt(&harness, &"x".repeat(96 * 1024)).await;
+            last = collect_through_finished(&mut harness.events)
+                .await
+                .last()
+                .unwrap()
+                .cursor;
+        }
+        assert!(last.sequence < feed::FEED_CAPACITY as u64);
+        assert!(
+            !harness
+                .runtime
+                .store()
+                .feed_covers(harness.workspace_id, first.envelope.cursor.sequence,)
+        );
+        if expire_journal {
+            harness
+                .runtime
+                .store()
+                .call(Priority::Control, |connection| {
+                    prune(connection, EVENT_JOURNAL_BYTES, 1)
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                slow.next().await.unwrap().unwrap_err(),
+                SessionRuntimeError::CursorExpired
+            );
+            assert!(slow.next().await.is_none());
+            let snapshot = harness
+                .runtime
+                .snapshot(SnapshotRequest::new(
+                    harness.workspace_id,
+                    Some(harness.session_id),
+                    32,
+                    32,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(snapshot.cursor, last);
+        } else {
+            let expected = harness
+                .runtime
+                .store()
+                .published_events_after(
+                    harness.workspace_id,
+                    first.envelope.cursor.sequence,
+                    MAX_REPLAY_EVENTS,
+                )
+                .await
+                .unwrap();
+            assert_eq!(expected.last().unwrap().envelope.cursor, last);
+            let mut after = first.envelope.cursor.sequence;
+            for event in expected {
+                let observed = slow.next().await.unwrap().unwrap();
+                assert_eq!(observed.envelope.cursor.sequence, after + 1);
+                assert_eq!(observed.json, event.json);
+                after += 1;
+            }
+            assert_eq!(after, last.sequence);
+        }
+        drop(slow);
+        harness.runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
     for (tool, arguments, expected) in [
         ("__test_mutate", "{}", approval::ToolClass::Mutating),

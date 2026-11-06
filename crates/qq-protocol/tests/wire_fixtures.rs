@@ -188,7 +188,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 45);
+    assert_eq!(PROTOCOL_VERSION, 46);
     let catalog_cursor = qq_protocol::WorkspaceCatalogCursor {
         store_id: StoreId::from_bytes([1; 16]),
         workspace_id: WorkspaceId::from_bytes([2; 16]),
@@ -763,6 +763,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     result: None,
                     is_error: false,
                     display: None,
+                    execution: None,
                 },
                 shell: Some(Box::new(ShellCommandPreview {
                     command: "rm -r target".to_owned(),
@@ -815,6 +816,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     result: None,
                     is_error: false,
                     display: None,
+                    execution: None,
                 },
                 shell: None,
                 edit: None,
@@ -847,6 +849,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     result: None,
                     is_error: false,
                     display: None,
+                    execution: None,
                 },
                 shell: None,
                 edit: None,
@@ -897,6 +900,32 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             SessionEvent::RunInterrupted {
                 run_id,
                 turn_ordinal: 3,
+            },
+        ),
+    );
+    check(
+        "event_tool_call_finished_may_have_run",
+        &envelope(
+            18,
+            SessionEvent::ToolCallFinished {
+                tool_call: ToolCallSnapshot {
+                    id: ToolCallId::from_bytes([9; 16]),
+                    session_id,
+                    run_id,
+                    turn_ordinal: 2,
+                    call_ordinal: 1,
+                    provider_call_id: "call_1".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments: r#"{"command":"cargo publish"}"#.to_owned(),
+                    state: ToolCallState::Interrupted,
+                    result: Some(
+                        "Tool execution was interrupted before a durable result was recorded."
+                            .to_owned(),
+                    ),
+                    is_error: true,
+                    display: None,
+                    execution: Some(qq_protocol::ToolExecution::MayHaveRun),
+                },
             },
         ),
     );

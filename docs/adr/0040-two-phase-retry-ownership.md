@@ -56,7 +56,11 @@ request the next turn — exists and is tested.
    (default 2 s doubling to 60 s), minute-scale because the provider's own
    ledger has already been spent on anything that reaches the run. A
    three-hour run survives many isolated blips; a provider that is down
-   pauses the run in about two minutes.
+   pauses the run in about two minutes. *Amended 2026-11-04:* the turn's
+   first request still gets the provider's ledger, but each re-issue is
+   sent `RetryOwner::Caller` and gets one send, so a down provider costs
+   4 + 5 sends per turn rather than 4 × 6 (`providers.md` § Shared HTTP
+   Execution).
 
 4. **Exhaustion is `Paused`, not `Failed`.** A new terminal outcome
    `RunOutcome::Paused { pause: RunPause { kind, message, turn_ordinal,

@@ -106,6 +106,7 @@ pub struct Observations {
     pub summary_prefix_served: bool,
     pub summary_requests: usize,
     pub summary_inputs: Vec<String>,
+    pub summary_owners: Vec<qq_provider::RetryOwner>,
     pub calls: Vec<u64>,
     pub turn_gaps_ns: Vec<u64>,
     last_work_entry: Option<Instant>,
@@ -132,7 +133,13 @@ impl Provider for ScriptedProvider {
             if self.script.summary_faults > 0
                 && observed.summary_inputs.len() <= usize::from(qq_protocol::MAX_TURN_RETRIES)
             {
-                observed.summary_inputs.push(format!("{request:?}"));
+                observed.summary_owners.push(request.retry_owner());
+                observed.summary_inputs.push(format!(
+                    "{:?}",
+                    request
+                        .clone()
+                        .with_retry_owner(qq_provider::RetryOwner::Provider)
+                ));
             }
             if let Some(prefix) = self.script.summary_prefix
                 && !observed.summary_prefix_served

@@ -56,6 +56,7 @@ async fn run_summarize(
         tools,
         None,
         256,
+        qq_provider::RetryOwner::Provider,
     );
     tokio::pin!(steps);
     let mut result = Err("summarizer ended without a summary".to_owned());
@@ -116,6 +117,7 @@ async fn summary_fold_preserves_the_cumulative_run_text_bound() {
         Arc::from([]),
         None,
         256,
+        qq_provider::RetryOwner::Provider,
     );
     tokio::pin!(steps);
     let mut rejected = false;
@@ -176,6 +178,7 @@ async fn summary_fold_rejects_empty_intermediate_portions_before_more_provider_w
             Arc::from([]),
             None,
             256,
+            qq_provider::RetryOwner::Provider,
         );
         tokio::pin!(steps);
         let mut rejected = false;
@@ -266,6 +269,7 @@ async fn summary_fold_resets_continuations_and_reports_rejected_work() {
         Arc::from([]),
         None,
         256,
+        qq_provider::RetryOwner::Provider,
     );
     tokio::pin!(steps);
     let mut rejected = 0;
@@ -346,6 +350,7 @@ async fn summary_fold_can_split_after_many_completed_continuation_turns() {
         Arc::from([]),
         None,
         256,
+        qq_provider::RetryOwner::Provider,
     );
     tokio::pin!(steps);
     let mut summary = None;

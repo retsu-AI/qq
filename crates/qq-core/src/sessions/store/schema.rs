@@ -95,7 +95,7 @@ pub(in crate::sessions) fn open_database(
     }
     connection.execute_batch(
         "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = FULL;
+             PRAGMA synchronous = NORMAL;
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;
              CREATE TEMP TABLE IF NOT EXISTS restoring_paths (
@@ -1852,6 +1852,7 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
 
+    connection.pragma_update(None, "synchronous", "FULL")?;
     if schema_version.as_deref() != Some("67") {
         let transaction = connection.transaction()?;
         retire_goals(&transaction)?;

@@ -62,7 +62,7 @@ pub use sessions::{
     SessionEventEnvelope, SessionPurpose, SessionSnapshot, SessionStatus, SessionSummary,
     ShellCommandPreview, ShellVerdict, SideQuestionSnapshot, SideQuestionState, SnapshotRequest,
     SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallSnapshot,
-    ToolCallState, ToolErrorKind, ToolExposure, TurnCheckpoint, WorkspaceSnapshot,
+    ToolCallState, ToolErrorKind, ToolExecution, ToolExposure, TurnCheckpoint, WorkspaceSnapshot,
     WorkspaceSummary,
 };
 
@@ -71,7 +71,7 @@ pub use workspaces::{
     MAX_WORKSPACE_PAGE, WorkspaceCatalog, WorkspaceCatalogCursor, WorkspaceCatalogRequest,
 };
 
-pub const PROTOCOL_VERSION: u16 = 45;
+pub const PROTOCOL_VERSION: u16 = 46;
 
 pub const SNAPSHOT_REQUIRED_SSE_EVENT: &str = "snapshot_required";
 

@@ -2,7 +2,7 @@ use crossterm::event::{Event as TerminalEvent, KeyCode, KeyEvent, KeyModifiers};
 use qq_protocol::{
     AccountingTotal, CommandRequest, ModelSelection, RunId, SessionAccounting, SessionCommand,
     SessionEvent, SessionEventEnvelope, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
-    WorkspaceSnapshot,
+    ToolExecution, WorkspaceSnapshot,
 };
 
 use qq_client::state::{Group, ToolCallTiming};
@@ -1751,6 +1751,48 @@ fn narrow_tool_rows_drop_the_duration_then_the_metric_before_the_verb() {
     assert!(
         (0..40).all(|width| tool_summary_line(&call, lookup(&call), 0, width).width() <= width)
     );
+}
+
+#[test]
+fn an_interrupted_row_says_whether_the_call_may_have_run() {
+    let interrupted = |byte, execution| ToolCallSnapshot {
+        execution,
+        ..tool_call_snapshot(
+            byte,
+            "shell",
+            r#"{"command":"cargo publish"}"#,
+            ToolCallState::Interrupted,
+            Some("Tool execution was interrupted before a durable result was recorded."),
+            true,
+        )
+    };
+    let calls = [
+        interrupted(1, Some(ToolExecution::MayHaveRun)),
+        interrupted(2, Some(ToolExecution::NotStarted)),
+        interrupted(3, None),
+    ];
+    let rows: HashMap<ToolCallId, ToolRow> = calls
+        .iter()
+        .map(|call| (call.id, ToolRow::derive(call)))
+        .collect();
+    let at = |call: &ToolCallSnapshot| {
+        let context = ToolRowContext {
+            row: &rows[&call.id],
+            clock: RowClock {
+                timing: qq_client::state::ToolCallTiming::default(),
+                now_ms: 0,
+            },
+            expanded: false,
+            inline_diff: false,
+            fold: false,
+            selected: false,
+            live_truncated: false,
+        };
+        squash(&frame_rows(&[tool_summary_line(call, context, 0, 80)])[0])
+    };
+    assert_eq!(at(&calls[0]), "◌ Ran cargo publish may have run");
+    assert_eq!(at(&calls[1]), "◌ Ran cargo publish not run");
+    assert_eq!(at(&calls[2]), "◌ Ran cargo publish interrupted");
 }
 
 #[test]

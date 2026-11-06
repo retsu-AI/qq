@@ -28,7 +28,7 @@ trap 'rm -rf "$tmp"' EXIT
 # per-argument limit if passed to jq on the command line.
 status() {
     local owner repo number
-    gh pr view ${pr:+"$pr"} --json number,url,state,isDraft,headRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup \
+    gh pr view ${pr:+"$pr"} --json number,url,state,isDraft,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup \
         >"$tmp/view.json" || return 2
     # Every later request targets the PR's own repository, not the checkout's.
     IFS=/ read -r owner repo number < <(jq -r '.url | capture("github\\.com/(?<o>[^/]+)/(?<r>[^/]+)/pull/(?<n>[0-9]+)") | "\(.o)/\(.r)/\(.n)"' "$tmp/view.json") || return 2
@@ -41,14 +41,21 @@ status() {
               nodes { id isResolved path line
                 comments(first: 1) { nodes { databaseId author { login } url body } } } } } } }' |
         jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]]' >"$tmp/threads.json" || return 2
-    gh api "repos/$owner/$repo/issues/$number/comments" --paginate |
-        jq -s '[add[] | select(.user.login == "chatgpt-codex-connector[bot]") | .body]' >"$tmp/comments.json" || return 2
+    gh api "repos/$owner/$repo/issues/$number/comments" --paginate | jq -s 'add // []' >"$tmp/all-comments.json" || return 2
+    jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | .body]' "$tmp/all-comments.json" >"$tmp/comments.json" || return 2
+    jq '[.[] | select(.body | test("@codex review")) | .created_at]' "$tmp/all-comments.json" >"$tmp/requests.json" || return 2
+    gh api "repos/$owner/$repo/actions/runs?event=pull_request&branch=$(jq -r .headRefName "$tmp/view.json")&per_page=100" --paginate |
+        jq -s --argjson n "$number" --arg head "$(jq -r .headRefOid "$tmp/view.json")" '
+            [.[].workflow_runs[] | select(any(.pull_requests[]; .number == $n))] as $runs
+            | {opened: (($runs | min_by(.created_at) | .head_sha) // $head)}' >"$tmp/pushes.json" || return 2
+    jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]" and (.body | test("codex-review-state:v1"))) | .updated_at] | max' \
+        "$tmp/all-comments.json" >"$tmp/state-updated.json" || return 2
     gh api "repos/$owner/$repo/issues/$number/reactions" --paginate |
         jq -s '[add[] | select(.user.login == "chatgpt-codex-connector[bot]") | .content]' >"$tmp/reactions.json" || return 2
     jq -n --slurpfile v "$tmp/view.json" --slurpfile t "$tmp/threads.json" --slurpfile c "$tmp/comments.json" \
-        --slurpfile r "$tmp/reactions.json" --argjson require_codex "$codex" '
+        --slurpfile r "$tmp/reactions.json" --slurpfile q "$tmp/requests.json" --slurpfile p "$tmp/pushes.json" --slurpfile u "$tmp/state-updated.json" --argjson require_codex "$codex" '
         def failing: ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"];
-        $v[0] as $view | $t[0] as $threads | $c[0] as $comments | $r[0] as $reactions
+        $v[0] as $view | $t[0] as $threads | $c[0] as $comments | $r[0] as $reactions | $q[0] as $requests | $p[0] as $pushes | $u[0] as $state_updated
         | ($view.statusCheckRollup // []) as $rollup
         | ($rollup | map(. + {run: ((.detailsUrl // .targetUrl // "") | capture("/actions/runs/(?<id>[0-9]+)").id // "0" | tonumber)})) as $all
         | ($all | group_by([.workflowName // "", .name // .context]) | map(max_by(.run))
@@ -67,7 +74,9 @@ status() {
             status: ($cr.status // "none"),
             unresolved_findings: ($cr.has_unresolved_findings // false),
             security_unresolved: ($state.security_review.has_unresolved_findings // false),
-            thumbs_up: ($reactions | index("+1") != null)
+            thumbs_up: ($reactions | index("+1") != null),
+            requested: ($cr.commit_sha == $view.headRefOid or $pushes.opened == $view.headRefOid
+                or any($requests[]; . > ($state_updated // "")))
           } as $codex
         | [
             (if $view.state != "OPEN" then "state is \($view.state)" else empty end),
@@ -80,6 +89,7 @@ status() {
             (if ($open | length) > 0 then "\($open | length) unresolved review thread(s)" else empty end),
             (if $require_codex then
                 (if $codex.status == "failed" then "Codex review failed; comment @codex review"
+                 elif ($codex.reviewed_head | not) and ($codex.requested | not) then "Codex review of head not requested; comment @codex review"
                  elif ($codex.reviewed_head | not) or $codex.status != "completed" then "pending: Codex review of head"
                  elif $codex.unresolved_findings then "Codex findings unresolved on head"
                  elif ($codex.thumbs_up | not) then "pending: Codex 👍 on the PR"

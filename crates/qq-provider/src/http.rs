@@ -8,7 +8,7 @@ use reqwest::{
 };
 
 use crate::{
-    ProviderError,
+    ProviderError, RetryOwner,
     credentials::{StaticAuth, sensitive_bearer_value, sensitive_header_value},
     limits::ByteCounter,
     request_auth::RequestAuthorizer,
@@ -164,11 +164,25 @@ impl AttemptPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    Unsent,
+    Refused,
+    Uncertain,
+    Accepted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AttemptReceipt {
+    attempts: u32,
+    possibly_processed: u32,
+}
+
 #[derive(Debug)]
 pub(crate) struct AttemptLedger {
     policy: AttemptPolicy,
     slept: Duration,
-    attempts: u32,
+    deliveries: Vec<Delivery>,
 }
 
 impl AttemptLedger {
@@ -176,17 +190,44 @@ impl AttemptLedger {
         Self {
             policy,
             slept: Duration::ZERO,
-            attempts: 0,
+            deliveries: Vec::new(),
         }
     }
 
     pub(crate) fn begin_attempt(&mut self) -> u32 {
-        self.attempts = self.attempts.saturating_add(1);
-        self.attempts
+        self.deliveries.push(Delivery::Unsent);
+        self.attempts()
     }
 
-    pub(crate) const fn attempts(&self) -> u32 {
-        self.attempts
+    pub(crate) fn record(&mut self, delivery: Delivery) {
+        if let Some(current) = self.deliveries.last_mut() {
+            *current = delivery;
+        }
+    }
+
+    pub(crate) fn attempts(&self) -> u32 {
+        u32::try_from(self.deliveries.len()).unwrap_or(u32::MAX)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deliveries(&self) -> &[Delivery] {
+        &self.deliveries
+    }
+
+    pub(crate) fn receipt(&self) -> AttemptReceipt {
+        let possibly_processed = self
+            .deliveries
+            .iter()
+            .filter(|delivery| matches!(delivery, Delivery::Uncertain | Delivery::Accepted))
+            .count();
+        AttemptReceipt {
+            attempts: self.attempts(),
+            possibly_processed: u32::try_from(possibly_processed).unwrap_or(u32::MAX),
+        }
+    }
+
+    fn may_resend(&self) -> bool {
+        self.policy.has_remaining_attempt(self.attempts())
     }
 
     pub(crate) fn next_delay(&mut self, retry_after: Option<Duration>) -> Option<Duration> {
@@ -194,10 +235,10 @@ impl AttemptLedger {
     }
 
     fn next_delay_with(&mut self, retry_after: Option<Duration>, random: u32) -> Option<Duration> {
-        if !self.policy.has_remaining_attempt(self.attempts) {
+        if !self.may_resend() {
             return None;
         }
-        let retry_index = self.attempts.saturating_sub(1);
+        let retry_index = self.attempts().saturating_sub(1);
         let delay = self
             .policy
             .delay_before_retry(retry_index, retry_after, random);
@@ -225,11 +266,20 @@ impl SharedLedger {
     }
 }
 
-pub(crate) fn note_attempts(error: ProviderError, attempts: u32) -> ProviderError {
-    if attempts <= 1 {
-        return error;
-    }
-    let suffix = format!(" (gave up after {attempts} attempts with backoff)");
+pub(crate) fn note_attempts(error: ProviderError, receipt: AttemptReceipt) -> ProviderError {
+    let AttemptReceipt {
+        attempts,
+        possibly_processed,
+    } = receipt;
+    let suffix = match (attempts, possibly_processed) {
+        (0 | 1, _) => return error,
+        (_, 0) => format!(
+            " (gave up after {attempts} attempts with backoff; the provider processed none)"
+        ),
+        (_, processed) => format!(
+            " (gave up after {attempts} attempts with backoff; the provider may have processed {processed})"
+        ),
+    };
     match error {
         ProviderError::Configuration(message) => ProviderError::Configuration(message + &suffix),
         ProviderError::CredentialsUnavailable(message) => {
@@ -463,7 +513,7 @@ pub(crate) struct HttpRejection {
     retry_after: Option<Duration>,
     body: Vec<u8>,
     redactions: Arc<[String]>,
-    attempts: u32,
+    receipt: AttemptReceipt,
 }
 
 impl HttpExchange {
@@ -508,6 +558,13 @@ impl HttpExchange {
         SharedLedger::new(self.attempts)
     }
 
+    pub(crate) fn ledger_for(&self, owner: RetryOwner) -> SharedLedger {
+        match owner {
+            RetryOwner::Provider => self.ledger(),
+            RetryOwner::Caller => SharedLedger::new(AttemptPolicy::disabled()),
+        }
+    }
+
     pub(crate) fn request(&self, method: reqwest::Method, url: Url) -> reqwest::RequestBuilder {
         self.client.request(method, url)
     }
@@ -526,11 +583,14 @@ impl HttpExchange {
         let mut request = request;
 
         loop {
-            let attempts = ledger.lock().begin_attempt();
-            let next_request = if self.attempts.has_remaining_attempt(attempts) {
-                request.try_clone()
-            } else {
-                None
+            let next_request = {
+                let mut ledger = ledger.lock();
+                ledger.begin_attempt();
+                if ledger.may_resend() {
+                    request.try_clone()
+                } else {
+                    None
+                }
             };
 
             let dynamic = self.authorizer.authorize(&mut request).await?;
@@ -546,10 +606,19 @@ impl HttpExchange {
             let response = match self.client.execute(request).await {
                 Ok(response) => response,
                 Err(error) => {
+                    let delivery = if error.is_connect() || error.is_builder() {
+                        Delivery::Unsent
+                    } else {
+                        Delivery::Uncertain
+                    };
                     let transport = transport_error(error, redactions.as_ref());
-                    let Some((next, delay)) = next_request.zip(ledger.lock().next_delay(None))
-                    else {
-                        return Err(note_attempts(transport, ledger.lock().attempts()));
+                    let (delay, receipt) = {
+                        let mut ledger = ledger.lock();
+                        ledger.record(delivery);
+                        (ledger.next_delay(None), ledger.receipt())
+                    };
+                    let Some((next, delay)) = next_request.zip(delay) else {
+                        return Err(note_attempts(transport, receipt));
                     };
                     tokio::time::sleep(delay).await;
                     request = next;
@@ -559,6 +628,7 @@ impl HttpExchange {
 
             let status = response.status();
             if status.is_success() {
+                ledger.lock().record(Delivery::Accepted);
                 let headers = response.headers().clone();
                 let chunks = response.bytes_stream();
                 let body_redactions = Arc::clone(&redactions);
@@ -586,26 +656,38 @@ impl HttpExchange {
 
             let retry_after = retry_after_delay(response.headers());
             let body = read_error_body(response).await;
+            let retryable = is_retryable_status(status);
+            let (delay, receipt) = {
+                let mut ledger = ledger.lock();
+                ledger.record(rejection_delivery(status));
+                let receipt = ledger.receipt();
+                (
+                    retryable.then(|| ledger.next_delay(retry_after)).flatten(),
+                    receipt,
+                )
+            };
             let rejection = HttpRejection {
                 retry_after,
                 status,
                 body,
                 redactions,
-                attempts: ledger.lock().attempts(),
+                receipt,
             };
 
-            if !is_retryable_status(status) {
-                return Ok(ExchangeOutcome::Rejected(rejection));
-            }
-
-            let Some((next, delay)) = next_request.zip(ledger.lock().next_delay(retry_after))
-            else {
+            let Some((next, delay)) = next_request.zip(delay) else {
                 return Ok(ExchangeOutcome::Rejected(rejection));
             };
 
             tokio::time::sleep(delay).await;
             request = next;
         }
+    }
+}
+
+fn rejection_delivery(status: StatusCode) -> Delivery {
+    match status.as_u16() {
+        300..=499 | 503 | OVERLOADED => Delivery::Refused,
+        _ => Delivery::Uncertain,
     }
 }
 
@@ -642,8 +724,8 @@ impl HttpRejection {
         &self.redactions
     }
 
-    pub(crate) const fn attempts(&self) -> u32 {
-        self.attempts
+    pub(crate) const fn receipt(&self) -> AttemptReceipt {
+        self.receipt
     }
 }
 
@@ -1658,6 +1740,126 @@ mod tests {
         assert_eq!(rejection.body(), b"rejected");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn exchange_records_what_each_attempt_proves_about_delivery() {
+        let refused = TcpListener::bind("127.0.0.1:0").unwrap();
+        let refused_url = format!("http://{}/response", refused.local_addr().unwrap());
+        drop(refused);
+        let (reset_url, reset_hits, reset_server) = serve_scripted(vec![ScriptedResponse::Drop]);
+        let (busy_url, busy_hits, busy_server) = serve_scripted(vec![ScriptedResponse::http(
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nConnection: close\r\nContent-Length: 4\r\n\r\nwait",
+        )]);
+        let (gateway_url, gateway_hits, gateway_server) =
+            serve_scripted(vec![ScriptedResponse::http(
+                "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 3\r\n\r\nbad",
+            )]);
+        let (timeout_url, timeout_hits, timeout_server) = serve_scripted(vec![
+            ScriptedResponse::http(
+                "HTTP/1.1 524 A Timeout Occurred\r\nConnection: close\r\nContent-Length: 4\r\n\r\nslow",
+            ),
+        ]);
+        let (ok_url, ok_hits, ok_server) = serve_scripted(vec![ScriptedResponse::http(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\n\r\n",
+        )]);
+        let exchange = exchange_with_retry(
+            RequestAuthorizer::default(),
+            Vec::new(),
+            AttemptPolicy::disabled(),
+        );
+        let client = build_direct_client().unwrap();
+
+        for (url, expected) in [
+            (refused_url, Delivery::Unsent),
+            (reset_url, Delivery::Uncertain),
+            (busy_url, Delivery::Refused),
+            (gateway_url, Delivery::Uncertain),
+            (timeout_url, Delivery::Uncertain),
+            (ok_url, Delivery::Accepted),
+        ] {
+            let ledger = exchange.ledger();
+            let request = client.post(&url).body("{}").build().unwrap();
+            let _ = exchange.execute(request, 1_024, messages(), &ledger).await;
+            assert_eq!(ledger.lock().deliveries(), [expected], "{url}");
+        }
+
+        for (hits, server) in [
+            (reset_hits, reset_server),
+            (busy_hits, busy_server),
+            (gateway_hits, gateway_server),
+            (timeout_hits, timeout_server),
+            (ok_hits, ok_server),
+        ] {
+            server.join().unwrap();
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_failure_says_whether_the_provider_may_have_processed_it() {
+        let refused = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/response", refused.local_addr().unwrap());
+        drop(refused);
+        let request = build_direct_client().unwrap().post(&url).build().unwrap();
+        let Err(error) = exchange(RequestAuthorizer::default(), Vec::new())
+            .execute_fresh(request, usize::MAX, messages())
+            .await
+        else {
+            panic!("a refused connection must fail");
+        };
+        assert!(
+            error
+                .to_string()
+                .ends_with(" (gave up after 3 attempts with backoff; the provider processed none)"),
+            "{error}"
+        );
+
+        let (url, hits, server) = serve_scripted(vec![
+            ScriptedResponse::Drop,
+            ScriptedResponse::http(
+                "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 4\r\n\r\nbusy",
+            ),
+            ScriptedResponse::Drop,
+        ]);
+        let request = build_direct_client().unwrap().post(&url).build().unwrap();
+        let Err(error) = exchange(RequestAuthorizer::default(), Vec::new())
+            .execute_fresh(request, usize::MAX, messages())
+            .await
+        else {
+            panic!("a reset on the last attempt must fail");
+        };
+        server.join().unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        assert!(
+            error.to_string().ends_with(
+                " (gave up after 3 attempts with backoff; the provider may have processed 2)"
+            ),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_caller_owned_ledger_sends_exactly_once() {
+        let (url, hits, server) = serve_scripted(vec![ScriptedResponse::http(
+            "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 4\r\n\r\nbusy",
+        )]);
+        let exchange = exchange(RequestAuthorizer::default(), Vec::new());
+        let ledger = exchange.ledger_for(RetryOwner::Caller);
+        let request = build_direct_client().unwrap().post(&url).build().unwrap();
+
+        let outcome = exchange
+            .execute(request, usize::MAX, messages(), &ledger)
+            .await
+            .unwrap();
+
+        let ExchangeOutcome::Rejected(rejection) = outcome else {
+            panic!("a caller-owned 503 must be handed back");
+        };
+        assert_eq!(rejection.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(ledger.lock().deliveries(), [Delivery::Refused]);
+        server.join().unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

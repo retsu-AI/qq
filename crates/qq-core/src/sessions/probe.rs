@@ -21,6 +21,16 @@ pub(super) enum Checkpoint {
     TurnCapture(RunId, u32),
     WorkspaceReserved(SessionId),
     SessionResourcesCleaned(SessionId),
+    Effect(SessionId, EffectStage),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EffectStage {
+    IntentCommitted,
+    DispatchCommitted,
+    ResultReceived,
+    ResultCommitted,
+    RunSettled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-
-    types: [opened, synchronize, reopened, labeled]
   merge_group:
   schedule:
     - cron: '17 6 * * *'
@@ -35,8 +33,76 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  checks:
-    name: fmt, lint, clippy, tests, smoke
+  changes:
+    name: select jobs
+    runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.select.outputs.core }}
+      wasm: ${{ steps.select.outputs.wasm }}
+      platform: ${{ steps.select.outputs.platform }}
+      old_git: ${{ steps.select.outputs.old_git }}
+      devcontainer: ${{ steps.select.outputs.devcontainer }}
+      quarantine: ${{ steps.quarantine.outputs.listed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: select
+        name: Select the jobs this change can affect
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [[ $EVENT == pull_request ]]; then
+            bash .github/scripts/ci-changes.sh "$BASE" | tee -a "$GITHUB_OUTPUT"
+          else
+            bash .github/scripts/ci-changes.sh all | tee -a "$GITHUB_OUTPUT"
+          fi
+      - id: quarantine
+        name: Is anything quarantined
+        run: |
+          if grep -q '^\[\[quarantine\]\]' .config/quarantine.toml; then
+            echo listed=true >> "$GITHUB_OUTPUT"
+          else
+            echo listed=false >> "$GITHUB_OUTPUT"
+          fi
+
+  static:
+    name: fmt, lint, clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Turn recorder CLI regressions
+        run: |
+          python3 .github/scripts/test-record-turn-overhead.py
+          python3 .github/scripts/test-turn-fixture.py
+          python3 -m unittest discover -s benchmarks/perf -p test_cross_harness.py
+      - name: install.sh against a local fixture release
+        run: bash tests/install_sh.sh
+      - name: Static gates
+        env:
+          SCOPE: ${{ github.event_name == 'pull_request' && format('--base origin/{0}', github.base_ref) || '--full' }}
+        run: cargo xtask check --profile ci $SCOPE --gate fmt --gate lint --gate clippy --gate minimal-clippy
+      - name: Evidence
+        if: always()
+        run: cargo xtask check --evidence >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: qq-check-static-${{ github.run_id }}
+          path: target/qq-check/
+          retention-days: 7
+
+  tests:
+    name: tests and smoke
     runs-on: ubuntu-latest
     env:
       NEXTEST_TEST_THREADS: '8'
@@ -45,23 +111,17 @@ jobs:
         with:
           fetch-depth: 0
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: Turn recorder CLI regressions
-        run: |
-          python3 .github/scripts/test-record-turn-overhead.py
-          python3 .github/scripts/test-turn-fixture.py
-      - name: install.sh against a local fixture release
-        run: bash tests/install_sh.sh
-      - name: Affected gate (pull request)
-        if: github.event_name == 'pull_request'
-        run: cargo xtask check --profile ci --base "origin/${{ github.base_ref }}"
-      - name: Full gate with soak tests (merge queue, main, nightly, manual)
-        if: github.event_name != 'pull_request'
-        run: cargo xtask check --profile ci --full
+      - name: Tests (pull requests leave out the soak group)
+        env:
+          SCOPE: ${{ github.event_name == 'pull_request' && format('--base origin/{0}', github.base_ref) || '--full' }}
+        run: cargo xtask check --profile ci $SCOPE --gate test --gate minimal-test
       - name: Smoke the real binary
-        run: cargo xtask smoke ${{ github.event_name != 'pull_request' && '--reuse-test-build' || '' }}
+        run: cargo xtask smoke --reuse-test-build
       - name: Evidence
         if: always()
         run: cargo xtask check --evidence >> "$GITHUB_STEP_SUMMARY" || true
@@ -75,9 +135,25 @@ jobs:
             target/qq-smoke/
           retention-days: 7
 
+  checks:
+    name: fmt, lint, clippy, tests, smoke
+    needs: [changes, static, tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Both halves of the gate passed
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          STATIC: ${{ needs.static.result }}
+          TESTS: ${{ needs.tests.result }}
+        run: |
+          echo "job selection: $CHANGES, static: $STATIC, tests: $TESTS"
+          [[ $CHANGES == success && $STATIC == success && $TESTS == success ]]
+
   core-profiles:
     name: minimal core profile and embedding
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -85,6 +161,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: core-profiles
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -102,6 +179,8 @@ jobs:
 
   quarantine:
     name: quarantined tests under stress (${{ matrix.os }}, non-blocking)
+    needs: changes
+    if: needs.changes.outputs.quarantine == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -114,30 +193,20 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - name: Skip when nothing is quarantined
-        id: list
-        run: |
-          if grep -q '^\[\[quarantine\]\]' .config/quarantine.toml; then
-            echo listed=true >> "$GITHUB_OUTPUT"
-          else
-            echo 'quarantine list is empty' | tee -a "$GITHUB_STEP_SUMMARY"
-          fi
       - uses: Swatinem/rust-cache@v2
-        if: steps.list.outputs.listed == 'true'
         with:
           key: quarantine-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
-        if: steps.list.outputs.listed == 'true'
         with:
           tool: cargo-nextest
       - name: GNU timeout and setsid for the process-group tests
-        if: steps.list.outputs.listed == 'true' && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: |
           brew install coreutils util-linux >/dev/null
           echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
           echo "$(brew --prefix util-linux)/bin" >> "$GITHUB_PATH"
       - name: Stress the quarantined tests
-        if: steps.list.outputs.listed == 'true'
         run: |
           filter=$(cargo xtask quarantine)
           if [[ -z $filter ]]; then
@@ -146,35 +215,10 @@ jobs:
           fi
           cargo nextest run --locked --workspace --profile ci --no-tests=warn -E "$filter" --stress-count 100
 
-  devcontainer-changes:
-    name: devcontainer inputs changed
-    runs-on: ubuntu-latest
-    outputs:
-      changed: ${{ steps.diff.outputs.changed }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: diff
-        name: Compare devcontainer inputs with the base
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-        run: |
-          if [[ $EVENT != pull_request ]]; then
-            echo changed=true >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if git diff --quiet "$(git merge-base "$BASE" HEAD)" HEAD -- .devcontainer/ 'Dockerfile*' rust-toolchain.toml Cargo.lock; then
-            echo changed=false >> "$GITHUB_OUTPUT"
-          else
-            echo changed=true >> "$GITHUB_OUTPUT"
-          fi
-
   devcontainer:
     name: devcontainer smoke
-    needs: devcontainer-changes
-    if: needs.devcontainer-changes.outputs.changed == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    needs: changes
+    if: needs.changes.outputs.devcontainer == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -188,7 +232,8 @@ jobs:
 
   client-wasm:
     name: qq-client on wasm32
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    needs: changes
+    if: needs.changes.outputs.wasm == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -196,28 +241,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-wasm
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
         run: cargo build --locked -p qq-client --target wasm32-unknown-unknown --no-default-features --features wasm
       - name: Test build
         run: cargo check --locked -p qq-client --target wasm32-unknown-unknown --no-default-features --features wasm --tests
 
-  platform:
-    name: platform tests (${{ matrix.os }})
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            platform: windows
-          - os: macos-latest
-            platform: macos
-    runs-on: ${{ matrix.os }}
+  platform-windows:
+    name: platform tests (windows-latest)
+    needs: changes
+    if: needs.changes.outputs.platform == 'true'
+    runs-on: windows-latest
     timeout-minutes: 40
+    env:
+      PLATFORM: windows
+      RUNNER_LABEL: windows-latest
     defaults:
       run:
         shell: bash
-    steps:
+    steps: &platform-steps
       - uses: actions/checkout@v4
       - name: Record active toolchain
         run: |
@@ -225,9 +267,17 @@ jobs:
           cargo --version
       - uses: Swatinem/rust-cache@v2
         with:
-          key: platform-${{ matrix.os }}
+          key: platform-${{ env.RUNNER_LABEL }}
           cache-on-failure: true
-      - uses: taiki-e/install-action@v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - id: nextest
+        uses: taiki-e/install-action@v2
+        continue-on-error: true
+        with:
+          tool: cargo-nextest
+      - name: Retry the nextest install
+        if: steps.nextest.outcome == 'failure'
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
       - name: GNU timeout and setsid for the process-group tests
@@ -239,8 +289,8 @@ jobs:
       - name: Confirm timeout and setsid
         if: runner.os == 'macOS'
         run: command -v timeout setsid
-      - name: Platform tests (selection must equal .config/platform-tests/${{ matrix.platform }}.txt)
-        run: bash .github/scripts/platform-tests.sh ${{ matrix.platform }}
+      - name: Platform tests (selection must equal .config/platform-tests/<os>.txt)
+        run: bash .github/scripts/platform-tests.sh "$PLATFORM"
       - name: Commands run in the checkout as the user
         if: ${{ !cancelled() }}
         run: cargo xtask smoke --reuse-test-build --only run-in-place --only run-then-undo --only run-command-deadlines --only permission-dispatch
@@ -253,15 +303,30 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: platform-${{ matrix.platform }}-${{ github.run_id }}
+          name: platform-${{ env.PLATFORM }}-${{ github.run_id }}
           path: |
             target/nextest/platform/junit.xml
             target/qq-smoke/
           retention-days: 7
 
+  platform-macos:
+    name: platform tests (macos-latest)
+    needs: changes
+    if: needs.changes.outputs.platform == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 40
+    env:
+      PLATFORM: macos
+      RUNNER_LABEL: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps: *platform-steps
+
   old-git:
     name: undo on Git 2.39 (debian:bookworm)
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    needs: changes
+    if: needs.changes.outputs.old_git == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container: debian:bookworm
@@ -279,6 +344,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: old-git
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest

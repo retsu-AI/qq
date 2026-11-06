@@ -78,7 +78,9 @@ impl RunAdmission {
 
     pub(super) async fn reacquire(&self) {
         self.resume();
-        std::future::poll_fn(|context| self.poll_ready(context)).await;
+        std::future::poll_fn(|context| self.poll_ready(context))
+            .instrument(tracing::info_span!(target: "qq::diagnostic", "admission", outcome = "ok"))
+            .await;
     }
 }
 
@@ -202,7 +204,33 @@ pub(super) async fn schedule_runs(
                 let task_inner = Arc::clone(&inner);
                 let panic_claimed = claimed.panic_settlement_claim();
 
-                let run_span = tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = crate::runtime::next_diagnostic_run());
+                let run_span = tracing::info_span!(
+                    target: "qq::diagnostic",
+                    "run",
+                    run_ordinal = crate::runtime::next_diagnostic_run(),
+                    run_id = %claimed.identity.run_id,
+                    command_id = %claimed.identity.command_id,
+                    root_run_id = %claimed.root_run_id,
+                    depth = u64::from(claimed.depth),
+                    outcome = tracing::field::Empty,
+                );
+                let mut admission_span = Some(tracing::info_span!(
+                    target: "qq::diagnostic",
+                    parent: &run_span,
+                    "admission",
+                    queue_us = tracing::field::Empty,
+                    outcome = tracing::field::Empty,
+                ));
+                if let (Some(span), Some(queued_at_ms)) = (&admission_span, claimed.queued_at_ms)
+                    && !span.is_disabled()
+                {
+                    span.record(
+                        "queue_us",
+                        super::codec::now_ms()
+                            .saturating_sub(queued_at_ms)
+                            .saturating_mul(1000),
+                    );
+                }
                 tokio::spawn(
                     async move {
                         let resources = RunResources::for_run(claimed.identity.run_id);
@@ -245,6 +273,16 @@ pub(super) async fn schedule_runs(
                             {
                                 probe::PROBE.passed(probe::Checkpoint::AdmissionWaiting(run_id));
                                 return Poll::Pending;
+                            }
+                            if let Some(span) = admission_span.take() {
+                                span.record(
+                                    "outcome",
+                                    if cancelled || expired {
+                                        "cancelled"
+                                    } else {
+                                        "ok"
+                                    },
+                                );
                             }
                             supervised.as_mut().poll(context)
                         }))
@@ -362,6 +400,7 @@ async fn settle_unstartable_reservation(
     if fail_runtime {
         inner.failed.send_replace(true);
     }
+    let run_span = super::execution::record_run_outcome(&outcome);
     match inner.store.finish_reserved_run(claimed, outcome).await {
         Ok(events) => {
             for event in events {
@@ -369,6 +408,7 @@ async fn settle_unstartable_reservation(
             }
         }
         Err(_) => {
+            run_span.record("outcome", "error");
             inner.failed.send_replace(true);
         }
     }

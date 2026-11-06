@@ -152,6 +152,7 @@ async fn compact_in_run(
         request.tools,
         Some(Arc::from(prompt_run.identity.session_id.to_string())),
         ceiling,
+        request.retry_owner,
     );
     tokio::pin!(summarize);
     let reply = loop {
