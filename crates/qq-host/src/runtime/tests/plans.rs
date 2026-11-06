@@ -164,7 +164,6 @@ fn source_changes_during_plan_admission_do_not_certify_stale_configuration() {
         explicit_config_path: None,
         explicit_config_content: None,
         reasoning_effort: None,
-        discovery_epoch: factory.inner.discovery.epoch(),
         ignore_untrusted_project_config: false,
     };
     let (first, _) = factory

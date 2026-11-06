@@ -882,7 +882,9 @@ impl RuntimeFactory {
         workspace: &str,
     ) -> Result<qq_protocol::DelegationRoster, RuntimeBuildError> {
         let snapshot = self.snapshot_for_selection(workspace, &ModelSelection::default())?;
-        Ok(delegation_roster(&snapshot, snapshot.model()))
+        Ok(delegation_roster(&snapshot, snapshot.model(), |route| {
+            self.discovered_efforts(&snapshot, route)
+        }))
     }
 
     pub fn models_for(
@@ -1154,12 +1156,14 @@ impl RuntimeFactory {
             explicit_config_path: request.explicit_path().map(Path::to_owned),
             explicit_config_content: request.explicit_content().map(str::to_owned),
             reasoning_effort: request.overrides().reasoning_effort(),
-            discovery_epoch: self.inner.discovery.epoch(),
             ignore_untrusted_project_config: request.ignores_untrusted_project_config(),
         };
-        let lookup = self.inner.plans.load(&key, || {
-            self.compile_generation(request, profile, &workspace, progress)
-        });
+        let lookup =
+            self.inner
+                .plans
+                .load_with_discovery_epoch(&key, self.inner.discovery.epoch(), || {
+                    self.compile_generation(request, profile, &workspace, progress)
+                });
         match lookup {
             Ok((plan, lookup)) => Ok((plan, lookup)),
             Err(PlanCacheError::Compile(error)) => Err(error),
@@ -1224,31 +1228,7 @@ impl RuntimeFactory {
                 snapshot
             }
         };
-        let live_efforts = snapshot
-            .providers()
-            .get(snapshot.model().provider())
-            .and_then(|provider| {
-                if provider
-                    .models()
-                    .get(snapshot.model().model())
-                    .is_some_and(|metadata| metadata.explicitly_configured())
-                {
-                    return None;
-                }
-                self.inner
-                    .discovery
-                    .cached(
-                        snapshot.model().provider(),
-                        provider,
-                        &self.inner.credentials,
-                    )
-                    .and_then(|models| {
-                        models
-                            .iter()
-                            .find(|model| model.id == snapshot.model().model())
-                            .and_then(|model| model.efforts.clone())
-                    })
-            });
+        let live_efforts = self.discovered_efforts(&snapshot, snapshot.model());
         let snapshot = with_claude_default_effort(snapshot, live_efforts.as_deref());
         preparation_phase(progress, qq_core::RuntimeLoadStage::CompilingProvider)?;
         let resolved_model = self.resolved_model_for_snapshot(&snapshot)?;
@@ -1348,7 +1328,9 @@ impl RuntimeFactory {
             .iter()
             .map(|report| report.source().label().to_owned())
             .collect();
-        let delegation = delegation_roster(&snapshot, snapshot.model());
+        let delegation = delegation_roster(&snapshot, snapshot.model(), |route| {
+            self.discovered_efforts(&snapshot, route)
+        });
         let audit = audit_policy(snapshot.audit());
         let shell = shell_policy(snapshot.policy(), snapshot.shell());
         let network = network_policy(snapshot.policy());
@@ -1402,6 +1384,27 @@ impl RuntimeFactory {
             configuration_sources,
             bindings,
         })
+    }
+
+    fn discovered_efforts(
+        &self,
+        snapshot: &ConfigSnapshot,
+        route: &qq_config::ModelRoute,
+    ) -> Option<Vec<qq_provider::ReasoningEffort>> {
+        let provider = snapshot.providers().get(route.provider())?;
+        if provider
+            .models()
+            .get(route.model())
+            .is_some_and(|metadata| metadata.explicitly_configured())
+        {
+            return None;
+        }
+        self.inner
+            .discovery
+            .cached(route.provider(), provider, &self.inner.credentials)?
+            .into_iter()
+            .find(|model| model.id == route.model())
+            .and_then(|model| model.efforts)
     }
 
     fn resolved_model_for_snapshot(
@@ -2466,6 +2469,7 @@ pub enum RuntimeHandlerError {
 fn delegation_roster(
     snapshot: &ConfigSnapshot,
     current: &qq_config::ModelRoute,
+    discovered_efforts: impl Fn(&qq_config::ModelRoute) -> Option<Vec<qq_provider::ReasoningEffort>>,
 ) -> qq_protocol::DelegationRoster {
     let metadata = |route: &qq_config::ModelRoute| {
         snapshot
@@ -2535,17 +2539,23 @@ fn delegation_roster(
                 if roster_entry.effort.is_none()
                     && let Some(derived) =
                         qq_protocol::child_reasoning_effort(&roster_entry, parent_effort)
-                    && let Some(metadata) = metadata
                 {
                     use qq_provider::ReasoningEffort;
-                    let ladder = metadata.reasoning_efforts();
+                    let live_efforts = discovered_efforts(entry.route());
+                    let ladder = live_efforts.as_deref().unwrap_or_else(|| {
+                        metadata.map_or(&[], qq_config::ModelMetadata::reasoning_efforts)
+                    });
                     let rank = |effort: ReasoningEffort| {
                         ReasoningEffort::ALL
                             .iter()
                             .position(|level| *level == effort)
                     };
-                    roster_entry.effort = if !metadata.reasoning() {
+                    roster_entry.effort = if live_efforts.as_ref().is_some_and(Vec::is_empty)
+                        || metadata.is_some_and(|metadata| !metadata.reasoning())
+                    {
                         Some(ReasoningEffort::Default)
+                    } else if live_efforts.is_none() && metadata.is_none() {
+                        None
                     } else if ladder.is_empty() || ladder.contains(&derived) {
                         Some(derived)
                     } else {

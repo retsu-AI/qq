@@ -832,6 +832,36 @@ fn claude_default_effort_respects_discovered_ladders() {
             expected,
             "{levels}"
         );
+        let parent_request = fixture.request(format!(
+            r#"(
+                version: 1, model: "gateway/claude-parent",
+                delegation: (roster: [(route: "gateway/claude-test", role: strong)], default_role: strong),
+                providers: {{ "gateway": Custom(connection: (base_url: "http://{address}/v1", api: OpenAiChatCompletions, auth: NoAuth)) }},
+            )"#
+        ));
+        let parent = factory.plan_for(&parent_request).unwrap();
+        let entry = &parent.descriptor().delegation.roster[0];
+        let child_effort =
+            qq_protocol::child_reasoning_effort(entry, parent.descriptor().reasoning_effort);
+        let fitted = match levels {
+            "[]" => ReasoningEffort::Default,
+            r#"[{"effort":"low"},{"effort":"high"}]"# => ReasoningEffort::Low,
+            _ => ReasoningEffort::Medium,
+        };
+        assert_eq!(child_effort, Some(fitted));
+        let child = parent_request.with_overrides(
+            RuntimeOverrides::new()
+                .with_model(entry.route.clone())
+                .with_reasoning_effort(child_effort.unwrap()),
+        );
+        assert_eq!(
+            factory
+                .plan_for(&child)
+                .unwrap()
+                .descriptor()
+                .reasoning_effort,
+            Some(fitted)
+        );
         let explicit = request
             .with_overrides(RuntimeOverrides::new().with_reasoning_effort(ReasoningEffort::Medium));
         assert_eq!(factory.plan_for(&explicit).is_ok(), expected.is_some());
