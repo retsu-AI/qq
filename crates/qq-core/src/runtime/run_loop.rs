@@ -6,6 +6,24 @@ use tracing::Instrument as _;
 
 static NEXT_DIAGNOSTIC_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+fn provider_error_outcome(error: &qq_provider::ProviderError) -> &'static str {
+    use qq_provider::ProviderError;
+    match error {
+        ProviderError::Configuration(_) | ProviderError::CredentialsUnavailable(_) => "rejected",
+        ProviderError::Api { status, .. } | ProviderError::RetryAfter { status, .. }
+            if matches!(status, 300..=499 | 503 | 529) =>
+        {
+            "rejected"
+        }
+        ProviderError::Api { .. }
+        | ProviderError::RetryAfter { .. }
+        | ProviderError::Transport(_) => "uncertain",
+        ProviderError::ResponseFailed { .. }
+        | ProviderError::ResponseIncomplete(_)
+        | ProviderError::Protocol(_) => "failed",
+    }
+}
+
 pub(crate) fn next_diagnostic_run() -> u64 {
     NEXT_DIAGNOSTIC_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
@@ -1375,7 +1393,14 @@ impl RunState {
                         yield TurnStep::Emit(RuntimeEvent::ActivityChanged { activity });
                         let mut provider_events = provider.stream(request);
 
-                        let mut provider_span = Some(tracing::info_span!(target: "qq::diagnostic", "provider"));
+                        let mut provider_span = Some(tracing::info_span!(
+                            target: "qq::diagnostic",
+                            "provider",
+                            attempt = u64::from(recovery.turn_retries) + 1,
+                            outcome = "abandoned",
+                            usage = tracing::field::Empty,
+                            input_basis = if compatible_input_tokens.is_some() { "measured" } else { "estimated" },
+                        ));
                     let mut attempt = AttemptScope {
                         rejected_before_work: false,
                         activity,
@@ -1415,7 +1440,21 @@ impl RunState {
                                 event = provider_events.next().instrument(provider_span.as_ref().expect("provider attempt is active").clone()) => StreamStep::Event(event),
                             };
                             if matches!(&event, StreamStep::Interrupted | StreamStep::Event(None | Some(Err(_) | Ok(ProviderEvent::Completed { .. } | ProviderEvent::Incomplete { .. })))) {
-                                provider_span.take();
+                                if let Some(span) = provider_span.take() {
+                                    let (outcome, usage) = match &event {
+                                        StreamStep::Interrupted => ("interrupted", None),
+                                        StreamStep::Event(None) => ("ended", None),
+                                        StreamStep::Event(Some(Err(error))) => (provider_error_outcome(error), None),
+                                        StreamStep::Event(Some(Ok(ProviderEvent::Completed { usage }))) => ("completed", Some(usage.is_some())),
+                                        StreamStep::Event(Some(Ok(ProviderEvent::Incomplete { usage, .. }))) => ("incomplete", Some(usage.is_some())),
+                                        StreamStep::Event(Some(Ok(_))) => unreachable!("terminal provider events only"),
+                                    };
+                                    span.record("outcome", outcome);
+                                    span.record("usage", match usage {
+                                        Some(true) => "authoritative",
+                                        _ => "missing",
+                                    });
+                                }
                             }
                             let event = match event {
                                 StreamStep::Interrupted => {
@@ -2010,17 +2049,21 @@ impl RunState {
                             }
                             let sleep = tokio::time::sleep(delay);
                             tokio::pin!(sleep);
+                            let retry_wait = tracing::info_span!(target: "qq::diagnostic", "retry_wait", attempt = u64::from(recovery.turn_retries), outcome = tracing::field::Empty);
                             tokio::select! {
                                 biased;
-                                () = cancelled.cancelled() => { yield TurnStep::Stop; return; },
+                                () = cancelled.cancelled() => { retry_wait.record("outcome", "cancelled"); drop(retry_wait); yield TurnStep::Stop; return; },
                                 () = runtime::RunDeadline::wait(deadline) => {
+                                    retry_wait.record("outcome", "budget_exhausted");
+                                    drop(retry_wait);
                                     yield TurnStep::Emit( RuntimeEvent::BudgetExhausted {
                                         exhaustion: deadline.expect("only a finite deadline wakes").exhaustion(),
                                     });
                                     yield TurnStep::Stop; return;
                                 }
-                                () = &mut sleep => {}
+                                () = &mut sleep => { retry_wait.record("outcome", "ok"); }
                             }
+                            drop(retry_wait);
                             yield TurnStep::NextTurn; return;
                         }
                         recovery.turn_retries = 0;
@@ -2663,7 +2706,7 @@ impl RunState {
                             let process_producer = Arc::clone(process_producer);
                             let network_policy = Arc::clone(network_policy);
 
-                            let tool_span = tracing::info_span!(target: "qq::diagnostic", "tool", call_ordinal = call.call_ordinal);
+                            let tool_span = tracing::info_span!(target: "qq::diagnostic", "tool", call_ordinal = call.call_ordinal, outcome = tracing::field::Empty);
                             async move {
                                 let mut child_spend: Option<SpawnAgentSpend> = None;
                                 let host = catalog.lookup(&call.name).map(|entry| entry.host);
@@ -2901,6 +2944,7 @@ impl RunState {
                                         .await
                                     }
                                 };
+                                tracing::Span::current().record("outcome", if result.is_error { "error" } else { "ok" });
                                 (call, result, child_spend)
                             }.instrument(tool_span)
                         };

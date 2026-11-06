@@ -198,16 +198,8 @@ impl Store {
         F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
     {
         let (reply, response) = oneshot::channel();
-        let span = tracing::info_span!(target: "qq::diagnostic", "store");
-        let job: worker::DatabaseJob = Box::new(move |connection| {
-            let result = span.in_scope(|| operation(connection));
-            worker::JobOutcome {
-                error: result.as_ref().err().cloned(),
-                settle: Box::new(move |commit| {
-                    let _ = span.in_scope(|| reply.send(commit.and(result)));
-                }),
-            }
-        });
+        let span = tracing::info_span!(target: "qq::diagnostic", "store", queue_us = tracing::field::Empty, outcome = tracing::field::Empty);
+        let job = observed_job(span, operation, reply);
         let acquire = self.admit_waiting(&self.inner.control_slots, &self.inner.side_waiters);
         let permit = match deadline {
             Some(deadline) => tokio::time::timeout_at(deadline, acquire)
@@ -240,7 +232,7 @@ impl Store {
         drop(admission);
         Ok(response)
     }
-    #[tracing::instrument(target = "qq::diagnostic", name = "store", skip_all)]
+    #[tracing::instrument(target = "qq::diagnostic", name = "store", skip_all, fields(queue_us = tracing::field::Empty, outcome = tracing::field::Empty))]
     async fn call_with<T, F>(
         &self,
         priority: Priority,
@@ -252,16 +244,7 @@ impl Store {
         F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
     {
         let (reply, response) = oneshot::channel();
-        let span = tracing::Span::current();
-        let job: worker::DatabaseJob = Box::new(move |connection| {
-            let result = span.in_scope(|| operation(connection));
-            worker::JobOutcome {
-                error: result.as_ref().err().cloned(),
-                settle: Box::new(move |commit| {
-                    let _ = span.in_scope(|| reply.send(commit.and(result)));
-                }),
-            }
-        });
+        let job = observed_job(tracing::Span::current(), operation, reply);
         self.enqueue(priority, joins, job).await?;
         response
             .await
@@ -1723,6 +1706,40 @@ impl std::ops::Deref for Unit<'_> {
             Self::Savepoint(savepoint) => savepoint,
         }
     }
+}
+
+fn observed_job<T, F>(
+    span: tracing::Span,
+    operation: F,
+    reply: oneshot::Sender<Result<T, SessionRuntimeError>>,
+) -> worker::DatabaseJob
+where
+    T: Send + 'static,
+    F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
+{
+    let queued = (!span.is_disabled()).then(std::time::Instant::now);
+    Box::new(move |connection| {
+        if let Some(queued) = queued {
+            span.record(
+                "queue_us",
+                u64::try_from(queued.elapsed().as_micros()).unwrap_or(u64::MAX),
+            );
+        }
+        let result = span.in_scope(|| operation(connection));
+        worker::JobOutcome {
+            error: result.as_ref().err().cloned(),
+            settle: Box::new(move |commit| {
+                span.record(
+                    "outcome",
+                    match (&commit, &result) {
+                        (Ok(()), Ok(_)) => "committed",
+                        _ => "failed",
+                    },
+                );
+                let _ = span.in_scope(|| reply.send(commit.and(result)));
+            }),
+        }
+    })
 }
 
 pub(super) fn begin_unit(connection: &mut Connection) -> Result<Unit<'_>, SessionRuntimeError> {

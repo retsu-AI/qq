@@ -202,7 +202,19 @@ pub(super) async fn schedule_runs(
                 let task_inner = Arc::clone(&inner);
                 let panic_claimed = claimed.panic_settlement_claim();
 
-                let run_span = tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = crate::runtime::next_diagnostic_run());
+                let run_span = tracing::info_span!(
+                    target: "qq::diagnostic",
+                    "run",
+                    run_ordinal = crate::runtime::next_diagnostic_run(),
+                    run_id = %claimed.identity.run_id,
+                    command_id = %claimed.identity.command_id,
+                    root_run_id = %claimed.root_run_id,
+                    depth = u64::from(claimed.depth),
+                    outcome = tracing::field::Empty,
+                );
+                let mut admission_span = Some(
+                    tracing::info_span!(target: "qq::diagnostic", parent: &run_span, "admission", outcome = tracing::field::Empty),
+                );
                 tokio::spawn(
                     async move {
                         let resources = RunResources::for_run(claimed.identity.run_id);
@@ -245,6 +257,16 @@ pub(super) async fn schedule_runs(
                             {
                                 probe::PROBE.passed(probe::Checkpoint::AdmissionWaiting(run_id));
                                 return Poll::Pending;
+                            }
+                            if let Some(span) = admission_span.take() {
+                                span.record(
+                                    "outcome",
+                                    if cancelled || expired {
+                                        "cancelled"
+                                    } else {
+                                        "ok"
+                                    },
+                                );
                             }
                             supervised.as_mut().poll(context)
                         }))

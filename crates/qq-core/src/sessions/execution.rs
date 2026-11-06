@@ -3168,10 +3168,23 @@ async fn finish_run_accounted(
     accounting: Option<RunAccounting>,
     mut teardown: TeardownComplete,
 ) {
+    let run_span = tracing::Span::current();
+    run_span.record(
+        "outcome",
+        match &outcome {
+            RunOutcome::Completed => "completed",
+            RunOutcome::Cancelled => "cancelled",
+            RunOutcome::Interrupted => "interrupted",
+            RunOutcome::Failed { .. } => "failed",
+            RunOutcome::BudgetExhausted { .. } => "budget_exhausted",
+            RunOutcome::Paused { .. } => "paused",
+        },
+    );
     if persist_finished_results(inner, claimed, &mut teardown)
         .await
         .is_err()
     {
+        run_span.record("outcome", "error");
         inner.failed.send_replace(true);
         return;
     }
@@ -3199,6 +3212,7 @@ async fn finish_run_accounted(
             clear_run_registration(inner, claimed.identity.run_id);
         }
         Err(_) => {
+            run_span.record("outcome", "error");
             inner.failed.send_replace(true);
         }
     }

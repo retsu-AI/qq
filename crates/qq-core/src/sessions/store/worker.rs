@@ -81,9 +81,11 @@ pub(super) fn start(
     let (closed_tx, closed) = watch::channel(false);
     #[cfg(test)]
     let clock = tokio::runtime::Handle::try_current().ok();
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
     let worker = thread::Builder::new()
         .name("qq-session-store".to_owned())
         .spawn(move || {
+            let _dispatch = tracing::dispatcher::set_default(&dispatch);
             #[cfg(test)]
             let _clock = clock.as_ref().map(tokio::runtime::Handle::enter);
             let ownership = acquire_ownership(&path, ownership_wait);

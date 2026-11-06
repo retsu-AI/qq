@@ -40,6 +40,7 @@ pub(crate) fn enabled(value: Option<&std::ffi::OsStr>) -> Result<bool, LogError>
 
 pub(crate) struct LogGuard {
     dispatch: Option<tracing::Dispatch>,
+    telemetry: std::sync::Arc<subscriber::Telemetry>,
 
     stop: SyncSender<Vec<u8>>,
     worker: thread::JoinHandle<io::Result<()>>,
@@ -65,10 +66,14 @@ impl LogGuard {
         let worker = thread::Builder::new()
             .name("qq-log".into())
             .spawn(move || write_records(file, receiver))?;
-        let dispatch =
-            tracing::Dispatch::new(subscriber::DiagnosticSubscriber::new(sender.clone()));
+        let telemetry = std::sync::Arc::new(subscriber::Telemetry::default());
+        let dispatch = tracing::Dispatch::new(subscriber::DiagnosticSubscriber::new(
+            sender.clone(),
+            std::sync::Arc::clone(&telemetry),
+        ));
         Ok(Self {
             dispatch: Some(dispatch),
+            telemetry,
             stop: sender,
             worker,
         })
@@ -85,7 +90,8 @@ impl LogGuard {
         if let Some(dispatch) = self.dispatch.take() {
             drop(dispatch);
         }
-        let sent = self.stop.send(Vec::new());
+        let summary = self.stop.send(self.telemetry.summary());
+        let sent = summary.and_then(|()| self.stop.send(Vec::new()));
         self.worker.join().map_err(|_| LogError::Worker)??;
         sent.map_err(|_| LogError::Worker)
     }
@@ -149,7 +155,7 @@ fn write_records(mut file: File, receiver: mpsc::Receiver<Vec<u8>>) -> io::Resul
         if record.is_empty() {
             break;
         }
-        if written + record.len() <= MAX_FILE {
+        if written + record.len() <= MAX_FILE || record.starts_with(b"{\"dropped_records\"") {
             file.write_all(&record)?;
             written += record.len();
         }
@@ -403,6 +409,285 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn stage_lifecycle_correlates_retry_cancellation_and_failed_persistence_without_content() {
+        use futures_util::StreamExt as _;
+        use qq_core::{
+            LoadedRuntime, Runtime, RuntimeLoadFuture, RuntimeLoadRequest, RuntimeLoader,
+            SessionRuntime, SessionRuntimeOptions,
+        };
+        use qq_protocol::{
+            ApprovalMode, CommandId, CommandOutcome, Correlation, InputPart, ModelSelection,
+            RunLimits, SessionCommand, SessionEvent, SubscribeRequest,
+        };
+        use qq_provider::{ModelRequest, Provider, ProviderError, ProviderEvent, ProviderStream};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct Scripted(Arc<AtomicUsize>);
+        impl Provider for Scripted {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                let usage = qq_provider::ProviderUsage {
+                    input_tokens: 7,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 3,
+                    reasoning_tokens: None,
+                };
+                let events = match self.0.fetch_add(1, Ordering::SeqCst) {
+                    0 => vec![Err(ProviderError::Transport(
+                        "SECRET_PROVIDER_ERROR".into(),
+                    ))],
+                    1 => vec![
+                        Ok(ProviderEvent::ToolCallStarted {
+                            id: "call_1".into(),
+                            name: "read_file".into(),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "call_1".into(),
+                            json: r#"{"path":"SECRET_ARGUMENT.txt"}"#.into(),
+                        }),
+                        Ok(ProviderEvent::ToolCallCompleted {
+                            id: "call_1".into(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: Some(usage) }),
+                    ],
+                    3 => return Box::pin(futures_util::stream::pending()),
+                    _ => vec![
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "SECRET_OUTPUT".into(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: Some(usage) }),
+                    ],
+                };
+                Box::pin(futures_util::stream::iter(events))
+            }
+        }
+        struct Loader(Arc<AtomicUsize>);
+        impl RuntimeLoader for Loader {
+            fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+                let calls = Arc::clone(&self.0);
+                Box::pin(async move {
+                    let runtime = Runtime::new(Scripted(calls), "test-model", 256)
+                        .unwrap()
+                        .with_turn_recovery(qq_core::TurnRecoveryPolicy::new(
+                            std::time::Duration::ZERO,
+                            std::time::Duration::ZERO,
+                        ));
+                    Ok(LoadedRuntime::from_runtime(
+                        runtime,
+                        request.profile,
+                        request.workspace.into(),
+                    )
+                    .await
+                    .unwrap())
+                })
+            }
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let workspace = home.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let directory = home.path().join("logs");
+        let logger = LogGuard::start(&directory).unwrap();
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut runs = Vec::new();
+        tracing::dispatcher::with_default(logger.dispatch.as_ref().unwrap(), || {
+            executor.block_on(async {
+                let runtime = SessionRuntime::open(
+                    SessionRuntimeOptions::new(workspace.join("sessions.sqlite3")),
+                    Arc::new(Loader(Arc::new(AtomicUsize::new(0)))),
+                )
+                .await
+                .unwrap();
+                let created = runtime
+                    .command(
+                        CommandId::generate().unwrap(),
+                        SessionCommand::ResolveWorkspace {
+                            path: workspace.display().to_string(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let CommandOutcome::WorkspaceResolved { workspace_id } = created.outcome else {
+                    panic!("workspace not resolved: {created:?}")
+                };
+                let created = runtime
+                    .command(
+                        CommandId::generate().unwrap(),
+                        SessionCommand::CreateSession {
+                            workspace_id,
+                            parent_id: None,
+                            model: ModelSelection {
+                                model: Some("test/model".to_owned()),
+                                ..ModelSelection::default()
+                            },
+                            approval_mode: ApprovalMode::ReadOnly,
+                            profile: Default::default(),
+                            reasoning_effort: None,
+                            correlation: Correlation::default(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+                    panic!("session not created")
+                };
+                let mut events = runtime
+                    .subscribe(SubscribeRequest {
+                        workspace_id,
+                        after: created.committed_through,
+                    })
+                    .unwrap();
+                for step in 0..3 {
+                    if step == 2 {
+                        rusqlite::Connection::open(workspace.join("sessions.sqlite3"))
+                            .unwrap()
+                            .execute_batch(
+                                "CREATE TRIGGER reject_output BEFORE INSERT ON message_chunks
+                                 BEGIN SELECT RAISE(ABORT, 'SECRET_DISK_FULL'); END;",
+                            )
+                            .unwrap();
+                    }
+                    let queued = runtime
+                        .command(
+                            CommandId::generate().unwrap(),
+                            SessionCommand::SubmitPrompt {
+                                session_id,
+                                input: vec![InputPart::text("SECRET_PROMPT")],
+                                limits: RunLimits::default(),
+                                correlation: Correlation::default(),
+                                output: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
+                        panic!("prompt not queued")
+                    };
+                    runs.push(run_id.to_string());
+                    loop {
+                        let event = events.next().await.unwrap().unwrap();
+                        if step == 1
+                            && event.run_id == Some(run_id)
+                            && matches!(event.event, SessionEvent::RunActivityChanged { .. })
+                        {
+                            runtime
+                                .command(
+                                    CommandId::generate().unwrap(),
+                                    SessionCommand::CancelRun { run_id },
+                                )
+                                .await
+                                .unwrap();
+                        }
+                        if event.run_id == Some(run_id)
+                            && matches!(event.event, SessionEvent::RunFinished { .. })
+                        {
+                            break;
+                        }
+                    }
+                }
+                drop(events);
+                runtime.shutdown().await.unwrap();
+            });
+        });
+        drop(executor);
+        logger.finish().unwrap();
+        let logs = std::fs::read_to_string(directory.join("qq-0.jsonl")).unwrap();
+        assert!(!logs.contains("SECRET_"), "{logs}");
+        let records: Vec<serde_json::Value> = logs
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let closed = |name: &str, field: &str, value: &str, run: &str| {
+            records.iter().any(|record| {
+                record["fields"]["message"] == "close"
+                    && record["span"]["name"] == name
+                    && record["span"][field] == value
+                    && record["spans"][0]["run_id"] == run
+            })
+        };
+        assert!(closed("admission", "outcome", "ok", &runs[0]), "{logs}");
+        assert!(
+            closed("provider", "outcome", "uncertain", &runs[0]),
+            "{logs}"
+        );
+        assert!(closed("provider", "usage", "missing", &runs[0]), "{logs}");
+        assert!(closed("retry_wait", "outcome", "ok", &runs[0]), "{logs}");
+        assert!(closed("tool", "outcome", "error", &runs[0]), "{logs}");
+        assert!(
+            closed("provider", "usage", "authoritative", &runs[0]),
+            "{logs}"
+        );
+        assert!(
+            closed("provider", "input_basis", "estimated", &runs[0]),
+            "{logs}"
+        );
+        assert!(closed("store", "outcome", "committed", &runs[0]), "{logs}");
+        assert!(closed("run", "outcome", "completed", &runs[0]), "{logs}");
+        assert!(closed("run", "outcome", "cancelled", &runs[1]), "{logs}");
+        assert!(
+            closed("provider", "outcome", "abandoned", &runs[1]),
+            "{logs}"
+        );
+        assert!(
+            closed("provider", "input_basis", "measured", &runs[0]),
+            "{logs}"
+        );
+        assert!(closed("store", "outcome", "failed", &runs[2]), "{logs}");
+        assert!(closed("run", "outcome", "failed", &runs[2]), "{logs}");
+        assert!(
+            records
+                .iter()
+                .any(|record| record["span"]["name"] == "publish")
+        );
+        let summary = records.last().unwrap();
+        assert_eq!(summary["fields"]["message"], "summary");
+        assert!(summary["stages"].as_array().unwrap().iter().any(|stage| {
+            stage["stage"] == "provider" && stage["outcome"] == "uncertain" && stage["count"] == 1
+        }));
+        let labels: std::collections::BTreeSet<_> = summary["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|stage| stage["outcome"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            labels
+                .iter()
+                .all(|label| label.len() < 20 && !label.contains('-'))
+        );
+    }
+
+    #[test]
+    fn saturated_sink_counts_dropped_records_without_blocking() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let telemetry = std::sync::Arc::new(subscriber::Telemetry::default());
+        let dispatch = tracing::Dispatch::new(subscriber::DiagnosticSubscriber::new(
+            sender,
+            std::sync::Arc::clone(&telemetry),
+        ));
+        tracing::dispatcher::with_default(&dispatch, || {
+            for _ in 0..10_000 {
+                let _span = tracing::info_span!(target: "qq::diagnostic", "tool", call_ordinal = 1_u64, outcome = "ok");
+            }
+        });
+        assert_eq!(receiver.try_iter().count(), 1);
+        let summary: serde_json::Value = serde_json::from_slice(&telemetry.summary()).unwrap();
+        assert_eq!(summary["dropped_records"], 19_999);
+        assert_eq!(summary["stages"][0]["stage"], "tool");
+        assert_eq!(summary["stages"][0]["outcome"], "ok");
+        assert_eq!(summary["stages"][0]["count"], 10_000);
+        assert_eq!(summary["stages"].as_array().unwrap().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn exclusive_slots_and_io_errors_are_explicit() {
         let home = tempfile::tempdir().unwrap();
         let directory = home.path().join("logs");
@@ -450,6 +735,7 @@ mod tests {
         }
         let logger = LogGuard {
             dispatch: None,
+            telemetry: Default::default(),
             stop,
             worker,
         };

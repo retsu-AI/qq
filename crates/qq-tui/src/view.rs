@@ -166,6 +166,7 @@ impl FrameRenderer {
     }
 
     pub fn draw(&mut self, app: &mut App, actual_size: (u16, u16)) -> io::Result<Vec<u8>> {
+        let _render = tracing::info_span!(target: "qq::diagnostic", "render").entered();
         let (width, height) = render_size(actual_size);
         let mut frame = self.frame(app, width, height);
         self.commit(app);
