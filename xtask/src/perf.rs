@@ -45,6 +45,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use thiserror::Error;
 mod credentials;
+mod cross;
 
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader},
@@ -80,6 +81,7 @@ enum PerfCommand {
     Baseline(BaselineArgs),
     /// Compare two compatible reports and fail on a regression.
     Check(CheckArgs),
+    CrossWorker(cross::WorkerArgs),
     /// Internal isolated concurrent-load worker.
     #[command(hide = true)]
     LoadWorker(LoadWorkerArgs),
@@ -437,6 +439,7 @@ pub async fn run(args: PerfArgs) -> Result<(), PerfError> {
         PerfCommand::Baseline(args) if args.release_worker => record_baseline(args).await,
         PerfCommand::Baseline(args) => launch_release_worker(args).await,
         PerfCommand::Check(args) => check_reports(args),
+        PerfCommand::CrossWorker(args) => cross::run(args).await,
         PerfCommand::LoadWorker(args) => run_load_worker(args).await,
         PerfCommand::R4Worker(args) => run_r4_worker(args).await,
         PerfCommand::FeedWorker(args) => run_feed_worker(args).await,

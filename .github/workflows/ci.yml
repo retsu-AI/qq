@@ -84,6 +84,7 @@ jobs:
         run: |
           python3 .github/scripts/test-record-turn-overhead.py
           python3 .github/scripts/test-turn-fixture.py
+          python3 -m unittest discover -s benchmarks/perf -p test_cross_harness.py
       - name: install.sh against a local fixture release
         run: bash tests/install_sh.sh
       - name: Static gates
