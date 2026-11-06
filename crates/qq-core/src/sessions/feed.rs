@@ -216,6 +216,9 @@ impl WorkspaceFeed {
         if events.is_empty() {
             return;
         }
+        let _publish =
+            tracing::info_span!(target: "qq::diagnostic", "publish", events = events.len() as u64)
+                .entered();
         let mut wake: Option<Arc<Notify>> = None;
         let mut wake_more: Vec<Arc<Notify>> = Vec::new();
         {

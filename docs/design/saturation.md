@@ -79,6 +79,10 @@ cargo nextest run -p qq-server -E 'test(/subscription|expired|retried_commands/)
 
 ## B08 handoff
 
+Implemented in [telemetry](telemetry.md): `admission`, `store` (`queue_us`,
+`committed`/`failed`) and `publish` spans cover waiting, executing, committed and
+published; delivery, replay and snapshot-required stages remain unmeasured.
+
 Keep these stages distinct when adding metrics: offered, waiting for admission,
 accepted/queued, executing/grouped, committed, published, delivered, replayed,
 and snapshot-required. Occupancy includes waiters separately from accepted jobs;

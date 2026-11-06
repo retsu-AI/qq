@@ -811,6 +811,7 @@ fn denial_capacity_fixture(
         )
         .unwrap();
     let claimed = ClaimedRun {
+        queued_at_ms: None,
         origin: None,
         identity: RunIdentity {
             workspace_id,

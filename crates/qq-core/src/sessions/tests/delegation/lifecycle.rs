@@ -403,6 +403,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
         new_session(&runtime, directory.path(), ApprovalMode::default()).await;
     let parent_run = RunId::generate().unwrap();
     let parent = ClaimedRun {
+        queued_at_ms: None,
         origin: None,
         identity: RunIdentity {
             workspace_id,

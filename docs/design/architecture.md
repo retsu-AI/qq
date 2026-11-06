@@ -71,8 +71,9 @@ leaves no metadata behind.
 ## Diagnostic tracing
 
 The binary optionally installs metadata-only `QQ_LOG=info` JSON tracing under
-its state directory (local-data fallback on platforms without one). Core emits `qq::diagnostic` run/turn/provider/tool/store
-spans without payload content; other targets are rejected. Async polling is
+its state directory (local-data fallback on platforms without one). Core emits `qq::diagnostic` run/admission/turn/provider/retry-wait/tool/store/publish
+spans (and the TUI a render span) without payload content, plus a per-stage
+summary line ([telemetry](telemetry.md)); other targets are rejected. Async polling is
 instrumented rather than holding entered guards across yields. A bounded lossy
 queue hands complete records to a dedicated file writer, drained off-executor
 on normal shutdown. Exclusive bounded files avoid cross-process deletion.
